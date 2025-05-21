@@ -1,3 +1,4 @@
+// Package agent provides ADK agents.
 package agent
 
 import (
@@ -9,6 +10,7 @@ import (
 	"google.golang.org/genai"
 )
 
+// Agent is implemented by ADK agents.
 type Agent interface {
 	Name() string
 	Description() string
@@ -18,6 +20,8 @@ type Agent interface {
 	Run(ctx context.Context, parentCtx *InvocationContext) iter.Seq2[*event.Event, error]
 	RunLive(ctx context.Context, parentCtxs iter.Seq[*InvocationContext]) iter.Seq2[*event.Event, error]
 }
+
+// InvocationContext is the invocation context.
 type InvocationContext struct {
 	// TODO(jbd): ArtifactService artifact.Service
 	// TODO(jbd): SessionService session.Service
@@ -39,6 +43,7 @@ const (
 	StreamingModeBidi StreamingMode = "bidi"
 )
 
+// RunConfig represents the runtime related configuration.
 type RunConfig struct {
 	SpeechConfig                   *genai.SpeechConfig
 	OutputAudioTranscriptionConfig *genai.AudioTranscriptionConfig
@@ -49,6 +54,7 @@ type RunConfig struct {
 	MaxLLMCalls                    int
 }
 
+// NewInvocationID creates a new flow invocation ID.
 func NewInvocationID() string {
 	return uuid.NewString()
 }

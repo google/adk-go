@@ -1,3 +1,4 @@
+// Package event provides ADK events.
 package event
 
 import (
@@ -6,6 +7,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// NewEvent creates a new event.
 func NewEvent(invocationID string) *Event {
 	return &Event{
 		ID:           uuid.NewString(),
@@ -14,6 +16,7 @@ func NewEvent(invocationID string) *Event {
 	}
 }
 
+// Event represents an ADK event.
 type Event struct {
 	// TODO: model.Response
 	ID                 string
@@ -25,8 +28,10 @@ type Event struct {
 	Branch             string
 }
 
+// Action is an event action.
 type Action struct {
 	// TODO(jbd): Implement.
 }
 
+// State represents event state.
 type State map[string]any
