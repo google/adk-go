@@ -1,38 +1,42 @@
-// Package agent provides ADK agents.
-package agent
+package adk
 
 import (
 	"context"
-	"iter"
 
-	"github.com/google/adk-go/event"
 	"github.com/google/uuid"
 	"google.golang.org/genai"
 )
 
-// Agent is implemented by ADK agents.
+// Agent is the agent type.
 type Agent interface {
 	Name() string
 	Description() string
-	ParentAgent() Agent
-	RootAgent() Agent
-	SubAgents() []Agent
-	Run(ctx context.Context, parentCtx *InvocationContext) iter.Seq2[*event.Event, error]
-	RunLive(ctx context.Context, parentCtxs iter.Seq[*InvocationContext]) iter.Seq2[*event.Event, error]
+
+	// Run runs the agent with the invocation context.
+	Run(ctx context.Context, parentCtx *InvocationContext) (EventStream, error)
+	// TODO: finalize the interface.
 }
 
-// InvocationContext is the invocation context.
+// InvocationContext is the agent invocation context.
 type InvocationContext struct {
-	// TODO(jbd): ArtifactService artifact.Service
-	// TODO(jbd): SessionService session.Service
-	// TODO(jbd): Session        *session.Session
 	InvocationID  string
 	Branch        string
 	Agent         Agent
 	EndInvocation bool
 	UserContent   *genai.Content
+	RunConfig     *AgentRunConfig
+
+	SessionService SessionService
+	Session        *Session
+
+	// TODO(jbd): ArtifactService
 	// TODO(jbd): TranscriptionCache
-	RunConfig *RunConfig
+}
+
+// Cancel cancels the invocation.
+func (ic *InvocationContext) Cancel(error) {
+	// TODO(hakim): this implements adk-python InvocationContext.end_invocation.
+	panic("unimplemented")
 }
 
 type StreamingMode string
@@ -43,8 +47,8 @@ const (
 	StreamingModeBidi StreamingMode = "bidi"
 )
 
-// RunConfig represents the runtime related configuration.
-type RunConfig struct {
+// AgentRunConfig represents the runtime related configuration.
+type AgentRunConfig struct {
 	SpeechConfig                   *genai.SpeechConfig
 	OutputAudioTranscriptionConfig *genai.AudioTranscriptionConfig
 	ResponseModalities             []string
