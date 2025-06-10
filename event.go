@@ -23,31 +23,31 @@ func NewEvent(invocationID string) *Event {
 // the actions taken by the agents like function calls, etc.
 type Event struct {
 	// The followings are set by the session.
-	ID                 string
-	Time               time.Time
+	ID   string
+	Time time.Time
 
 	// The invocation ID of the event.
-	InvocationID       string
+	InvocationID string
 
 	// Set of IDs of the long running function calls.
 	// Agent client will know from this field about which function call is long running.
 	// Only valid for function call event.
 	LongRunningToolIDs []string
 	// User or the name of the agent, indicating who appended the event to the session.
-	Author             string
+	Author string
 	// The branch of the event.
-	// 
+	//
 	// The format is like agent_1.gent_2.agent_3, where agent_1 is
 	// the parent of agent_2, and agent_2 is the parent of agent_3.
 	//
 	// Branch is used when multiple sub-agent shouldn't see their peer agents'
 	// conversation history.
-	Branch             string
+	Branch string
 
 	// The actions taken by the agent.
-	Actions            []*EventAction
+	Actions []*EventAction
 
-	LLMResponse        *LLMResponse
+	LLMResponse *LLMResponse
 }
 
 // EventAction is an event action.

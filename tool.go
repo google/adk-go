@@ -32,4 +32,4 @@ type Tool interface {
 	// TODO: interface vs concrete (golang.org/x/tools/internal/mcp.Tool)
 }
 
-// TODO: func Declaration(Tool) JSONSchema ?
+// TODO: func Declaration(Tool) JSONSchema?
