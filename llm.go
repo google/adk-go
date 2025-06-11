@@ -10,7 +10,7 @@ import (
 // Model is the LLM Model.
 type Model interface {
 	Name() string
-	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) (LLMResponseStream, error)
+	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) LLMResponseStream
 }
 
 // LLMRequest is the input to LLMModel's generate functions.
