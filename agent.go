@@ -17,26 +17,81 @@ type Agent interface {
 	// TODO: finalize the interface.
 }
 
-// InvocationContext is the agent invocation context.
+// An InvocationContext represents the data of a single invocation of an agent.
+//
+// An invocation:
+//  1. Starts with a user message and ends with a final response.
+//  2. Can contain one or multiple agent calls.
+//  3. Is handled by runner.Run().
+//
+// An invocation runs an agent until it does not request to transfer to another
+// agent.
+//
+// An agent call:
+//  1. Is handled by [Agent.Run].
+//  2. Ends when [Agent.Run] ends.
+//
+// An LLM agent call is an agent with a BaseLLMFlow.
+// An LLM agent call can contain one or multiple steps.
+//
+// An LLM agent runs steps in a loop until:
+//  1. A final response is generated.
+//  2. The agent transfers to another agent.
+//  3. The [InvocationContext.End] is called by any callbacks or tools.
+//
+// A step:
+//  1. Calls the LLM only once and yields its response.
+//  2. Calls the tools and yields their responses if requested.
+//
+// The summarization of the function response is considered another step, since
+// it is another llm call.
+// A step ends when it's done calling llm and tools, or if the end_invocation
+// is set to true at any time.
+//
+//	┌─────────────────────── invocation ──────────────────────────┐
+//	┌──────────── llm_agent_call_1 ────────────┐ ┌─ agent_call_2 ─┐
+//	┌──── step_1 ────────┐ ┌───── step_2 ──────┐
+//	[call_llm] [call_tool] [call_llm] [transfer]
 type InvocationContext struct {
-	InvocationID  string
+	// The id of this invocation context set by runner. Readonly.
+	InvocationID string
+
+	// The branch of the invocation context.
+	// The format is like agent_1.agent_2.agent_3, where agent_1 is the parent of
+	//  agent_2, and agent_2 is the parent of agent_3.
+	// Branch is used when multiple sub-agents shouldn't see their peer agents'
+	// conversation history.
 	Branch        string
+	// The current agent of this invocation context. Readonly.
 	Agent         Agent
-	EndInvocation bool
+	// The user content that started this invocation. Readonly.
 	UserContent   *genai.Content
+	// Configurations for live agents under this invocation.
 	RunConfig     *AgentRunConfig
 
-	SessionService SessionService
+	// The current session of this invocation context. Readonly.
 	Session        *Session
 
+	SessionService SessionService
 	// TODO(jbd): ArtifactService
 	// TODO(jbd): TranscriptionCache
+
+	cancel context.CancelCauseFunc
 }
 
-// Cancel cancels the invocation.
-func (ic *InvocationContext) Cancel(error) {
-	// TODO(hakim): this implements adk-python InvocationContext.end_invocation.
-	panic("unimplemented")
+// NewInvocationContext creates a new invocation context for the given agent
+// and returns context.Context that is bound to the invocation context.
+func NewInvocationContext(ctx context.Context, agent Agent) (context.Context, *InvocationContext) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	return ctx, &InvocationContext{
+		InvocationID: "e-"+uuid.NewString(),
+		cancel: cancel,
+	}
+}
+
+// End ends the invocation and cancels the context.Context bound to it.
+func (ic *InvocationContext) End(err error) {
+	ic.cancel(err)
 }
 
 type StreamingMode string
@@ -56,9 +111,4 @@ type AgentRunConfig struct {
 	SaveInputBlobsAsArtifacts      bool
 	SupportCFC                     bool
 	MaxLLMCalls                    int
-}
-
-// NewInvocationID creates a new flow invocation ID.
-func NewInvocationID() string {
-	return uuid.NewString()
 }
