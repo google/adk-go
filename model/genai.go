@@ -22,13 +22,16 @@ func NewGeminiModel(ctx context.Context, model string, cfg *genai.ClientConfig) 
 	}
 	return &GeminiModel{name: model, client: client}, nil
 }
+
 func (m *GeminiModel) Name() string {
 	return m.name
 }
 
-func (m *GeminiModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, stream bool) (adk.LLMResponseStream, error) {
+func (m *GeminiModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, stream bool) adk.LLMResponseStream {
 	if m.client == nil {
-		return nil, fmt.Errorf("uninitialized")
+		return func(yield func(*adk.LLMResponse, error) bool) {
+			yield(nil, fmt.Errorf("model uninitialized"))
+		}
 	}
 	if stream {
 		return func(yield func(*adk.LLMResponse, error) bool) {
@@ -54,7 +57,7 @@ func (m *GeminiModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, 
 					return
 				}
 			}
-		}, nil
+		}
 	} else {
 		return func(yield func(*adk.LLMResponse, error) bool) {
 			resp, err := m.client.Models.GenerateContent(ctx, m.name, req.Contents, req.GenerateConfig)
@@ -74,7 +77,7 @@ func (m *GeminiModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, 
 			}, nil) {
 				return
 			}
-		}, nil
+		}
 	}
 
 	// TODO(hakim): write test (deterministic)
