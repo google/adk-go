@@ -16,7 +16,9 @@ package adk
 
 import (
 	"context"
+	"encoding/json"
 	"iter"
+	"strings"
 
 	"google.golang.org/genai"
 )
@@ -31,9 +33,9 @@ type Model interface {
 // This allows passing in tools, output schema, and system instructions
 // to the model.
 type LLMRequest struct {
-	Model          Model
-	Contents       []*genai.Content
-	GenerateConfig *genai.GenerateContentConfig
+	Model          Model                        `json:"model,omitempty"`
+	Contents       []*genai.Content             `json:"contents,omitempty"`
+	GenerateConfig *genai.GenerateContentConfig `json:"generate_config,omitempty"`
 
 	// TODO: Can't we use genai's types?
 
@@ -42,11 +44,24 @@ type LLMRequest struct {
 }
 
 func (r *LLMRequest) AppendInstructions(instructions ...string) {
-	panic("unimplemented")
+	if len(instructions) == 0 {
+		return
+	}
+	inst := strings.Join(instructions, "\n\n")
+	if current := r.GenerateConfig.SystemInstruction; current != nil && len(current.Parts) > 0 && current.Parts[0].Text != "" {
+		r.GenerateConfig.SystemInstruction = genai.NewContentFromText(current.Parts[0].Text+"\n\n"+inst, "")
+	} else {
+		r.GenerateConfig.SystemInstruction = genai.NewContentFromText(inst, "")
+	}
 }
 
 func (r *LLMRequest) AppendTools(tools ...Tool) {
 	panic("unimplemented")
+}
+
+func (r *LLMRequest) String() string {
+	b, _ := json.MarshalIndent(r, "", " ")
+	return string(b)
 }
 
 // LLMResponseStream is the output of LLMModel's generate functions.
@@ -54,18 +69,22 @@ type LLMResponseStream iter.Seq2[*LLMResponse, error]
 
 // LLMResponse provides the first candidate response from the model if available.
 type LLMResponse struct {
-	Content           *genai.Content
-	GroundingMetadata *genai.GroundingMetadata
+	Content           *genai.Content           `json:"content,omitempty"`
+	GroundingMetadata *genai.GroundingMetadata `json:"grounding_metadata,omitempty"`
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
-	Partial bool
+	Partial bool `json:"partial,omitempty"`
 	// Indicates whether the response from the model is complete.
 	// Only used for streaming mode.
-	TurnComplete bool
+	TurnComplete bool `json:"turn_complete,omitempty"`
 	// Flag indicating that LLM was interrupted when generating the content.
 	// Usually it is due to user interruption during a bidi streaming.
-	Interrupted bool
-	// If
-	ErrorCode    int
-	ErrorMessage string
+	Interrupted  bool   `json:"interrupted,omitempty"`
+	ErrorCode    int    `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+func (r *LLMResponse) String() string {
+	b, _ := json.MarshalIndent(r, "", " ")
+	return string(b)
 }

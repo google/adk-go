@@ -28,7 +28,7 @@ type ToolContext struct {
 	FunctionCallID string
 
 	// The event actions of the current tool call.
-	EventActions []*EventAction
+	EventActions *EventActions
 }
 
 // Tool is the ADK tool interface.

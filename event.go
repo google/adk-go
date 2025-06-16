@@ -59,13 +59,56 @@ type Event struct {
 	Branch string
 
 	// The actions taken by the agent.
-	Actions []*EventAction
+	Actions *EventActions
 
 	LLMResponse *LLMResponse
+
+	// TODO:
+	//  Partial
 }
 
-// EventAction is an event action.
-type EventAction struct {
+// IsFinalResponse returns whether the LLMResponse in the event is the final response.
+func (ev *Event) IsFinalResponse() bool {
+	if ev.Actions == nil || ev.Actions.SkipSummarization || len(ev.LongRunningToolIDs) > 0 {
+		return true
+	}
+	return !hasFunctionCalls(ev.LLMResponse) && !hasFunctionResponses(ev.LLMResponse) && !ev.LLMResponse.Partial && !hasTrailingCodeExecutionResult(ev.LLMResponse)
+}
+
+func hasFunctionCalls(resp *LLMResponse) bool {
+	if resp == nil || resp.Content == nil {
+		return false
+	}
+	for _, part := range resp.Content.Parts {
+		if part.FunctionCall != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFunctionResponses(resp *LLMResponse) bool {
+	if resp == nil || resp.Content == nil {
+		return false
+	}
+	for _, part := range resp.Content.Parts {
+		if part.FunctionResponse != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTrailingCodeExecutionResult(resp *LLMResponse) bool {
+	if resp == nil || resp.Content == nil || len(resp.Content.Parts) == 0 {
+		return false
+	}
+	lastPart := resp.Content.Parts[len(resp.Content.Parts)-1]
+	return lastPart.CodeExecutionResult != nil
+}
+
+// EventActions represents the actions attached to an event.
+type EventActions struct {
 	// If true, it won't call model to summarize function response.
 	// Only valid for function response event.
 	SkipSummarization bool
