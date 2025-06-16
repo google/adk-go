@@ -47,6 +47,7 @@ func (m *GeminiModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, 
 			yield(nil, fmt.Errorf("model uninitialized"))
 		}
 	}
+	m.maybeAppendUserContent(ctx, req)
 	if stream {
 		return func(yield func(*adk.LLMResponse, error) bool) {
 			for resp, err := range m.client.Models.GenerateContentStream(ctx, m.name, req.Contents, req.GenerateConfig) {
@@ -95,4 +96,15 @@ func (m *GeminiModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, 
 	}
 
 	// TODO(hakim): write test (deterministic)
+}
+
+// maybeAppendUserContent appends a user content, so that model can continue to output.
+func (m *GeminiModel) maybeAppendUserContent(ctx context.Context, req *adk.LLMRequest) {
+	if len(req.Contents) == 0 {
+		req.Contents = append(req.Contents, genai.NewContentFromText("Handle the requests as specified in the System Instruction.", "user"))
+	}
+
+	if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != "user" {
+		req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
+	}
 }
