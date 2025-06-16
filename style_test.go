@@ -40,14 +40,20 @@ const copyrightHeader = `// Copyright 2025 Google LLC
 var fixError = flag.Bool("fix", false, "fix detected problems (e.g. add missing copyright headers)")
 
 func TestCopyrightHeader(t *testing.T) {
+	ignore := map[string]bool {
+		// Skip directories that are not relevant for copyright checks.
+		// The followings were copied from golang.org/x/tools.
+		"internal/jsonschema": true,
+		"internal/util": true,
+		// The following was copied from golang.org/x/oscar.
+		"internal/httprr": true,
+	}
 	_ = filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
-			// Skip directories that are not relevant for copyright checks.
-			// The followings were copied from golang.org/x/tools.
-			if path == "internal/jsonschema" || path == "internal/util" {
+			if ignore[path] {
 				return filepath.SkipDir
 			}
 			return nil
