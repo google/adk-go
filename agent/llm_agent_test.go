@@ -87,7 +87,7 @@ func TestLLMAgent(t *testing.T) {
 func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper) *model.GeminiModel {
 	apiKey := "fakekey"
 	if transport == nil { // use httprr
-		trace := strings.ReplaceAll(filepath.Join("testdata", t.Name()+".httprr"), "/", "_")
+		trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
 		recording := false
 		transport, recording = newGeminiTestClientConfig(t, trace)
 		if recording { // if we are recording httprr trace, don't use the fakkey.
