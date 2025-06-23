@@ -18,6 +18,8 @@ import "context"
 
 // ToolContext is the tool invocation context.
 type ToolContext struct {
+	// TODO: CallbackContext? In python ToolContext is a subclass of CallbackContext.
+
 	// The invocation context of the tool call.
 	InvocationContext *InvocationContext
 

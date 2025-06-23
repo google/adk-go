@@ -33,9 +33,11 @@ type Model interface {
 // This allows passing in tools, output schema, and system instructions
 // to the model.
 type LLMRequest struct {
-	Model          Model                        `json:"model,omitempty"`
-	Contents       []*genai.Content             `json:"contents,omitempty"`
-	GenerateConfig *genai.GenerateContentConfig `json:"generate_config,omitempty"`
+	Model          Model
+	Contents       []*genai.Content
+	GenerateConfig *genai.GenerateContentConfig
+
+	Tools map[string]Tool
 
 	// TODO: Can't we use genai's types?
 

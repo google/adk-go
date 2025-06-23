@@ -15,6 +15,7 @@
 package agent_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -26,10 +27,11 @@ import (
 	"github.com/google/adk-go/agent"
 	"github.com/google/adk-go/internal/httprr"
 	"github.com/google/adk-go/model"
+	"github.com/google/adk-go/tool"
 	"google.golang.org/genai"
 )
 
-//go:generate go test -httprecord=TestLLMAgent
+//go:generate go test -httprecord=Test
 
 func TestLLMAgent(t *testing.T) {
 	ctx := t.Context()
@@ -82,6 +84,38 @@ func TestLLMAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLLMAgentFunctionTool(t *testing.T) {
+	ctx := t.Context()
+	modelName := "gemini-2.0-flash"
+	model := newGeminiModel(t, modelName, nil)
+	a := &agent.LLMAgent{
+		AgentName:         "weather_agent",
+		AgentDescription:  "Agent to answer questions about the weather in a city.",
+		Model:             model,
+		Instruction:       "You can answer questions about the weather in a city.",
+		GlobalInstruction: "Answer as briefly as possible.",
+		Tools: []*adk.Tool{
+			tool.NewFunctionTool("get_weather", "retrieves the current weather report for a specified city",
+				func(_ context.Context, _ *adk.ToolContext, in GetWeatherIn) (GetWeatherOut, error) {
+					return GetWeatherOut{
+						Status:       "error",
+						ErrorMessage: fmt.Sprintf("Weaher information for %q is not available", in.City),
+					}, nil
+				}),
+		},
+	}
+	stream, err := a.Run(ctx, &adk.InvocationContext{
+		InvocationID: "12345",
+		Agent:        a,
+		UserContent:  genai.NewContentFromText("I'd like to know the weather in Paris.", "user"),
+	})
+	if err != nil {
+		t.Fatalf("failed to run agent: %v", err)
+	}
+	texts, err := collectTextParts(stream)
+	t.Errorf("%v, %v", texts, err)
 }
 
 func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper) *model.GeminiModel {
@@ -139,4 +173,14 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 // RoundTrip implements http.RoundTripper.
 func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
+}
+
+type GetWeatherIn struct {
+	City string
+}
+
+type GetWeatherOut struct {
+	Status       string
+	Report       string
+	ErrorMessage string
 }
