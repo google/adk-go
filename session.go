@@ -34,14 +34,7 @@ type Session struct {
 	AppName string
 	UserID  string
 
-	// backing storage (e.g. in-memory, vertex ai session service, ...)
-	store SessionService
-}
-
-// AppendEvent appends the event to the session.
-func (s *Session) AppendEvent(ctx context.Context, event *Event) error {
-	// This corresponds to python SessionService.append_event.
-	return s.store.AppendEvent(ctx, &SessionAppendEventRequest{Session: s, Event: event})
+	Events []*Event
 }
 
 // SessionCreateRequest is the request for SessionService's Create.
