@@ -1,0 +1,56 @@
+httprr trace v1
+501 1004
+POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 268
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Handle the requests as specified in the System Instruction."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Answer as precisely as possible.\n\nRoll the dice and report only the result."}],"role":"user"}}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+Content-Type: application/json; charset=UTF-8
+Date: Fri, 20 Jun 2025 22:20:16 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=402
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "3\n"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": -0.50234735012054443
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 26,
+    "candidatesTokenCount": 2,
+    "totalTokenCount": 28,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 26
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 2
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "n95VaK_qN9j0gLUPn439iAs"
+}

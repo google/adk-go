@@ -15,8 +15,6 @@
 package model
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -33,8 +31,9 @@ import (
 func TestNewGeminiModel(t *testing.T) {
 	ctx := t.Context()
 	modelName := "gemini-2.0-flash"
+	replayTrace := filepath.Join("testdata", t.Name()+".httprr")
+	cfg := newGeminiTestClientConfig(t, replayTrace)
 
-	cfg := newGeminiTestClientConfig(t, filepath.Join("testdata", t.Name()+".httprr"))
 	m, err := NewGeminiModel(ctx, modelName, cfg)
 	if err != nil {
 		t.Fatalf("NewGeminiModel(%q) failed: %v", modelName, err)
@@ -74,49 +73,16 @@ func TestNewGeminiModel(t *testing.T) {
 // newGeminiTestClientConfig returns the genai.ClientConfig configured for record and replay.
 func newGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig {
 	t.Helper()
-	rr, err := httprr.Open(rrfile, http.DefaultTransport)
+	rr, err := httprr.NewGeminiTransportForTesting(rrfile)
 	if err != nil {
-		t.Fatalf("httprr.Open(%q) failed: %v", rrfile, err)
-	}
-	rr.ScrubReq(Scrub)
-
-	// When operating in replay mode (!inRecordingMode), supply APIKey
-	// because google.golang.com/genai.NewClient expects API key to be set
-	// https://github.com/googleapis/go-genai/blob/f2244624b33ed6ecb5a14dddcad004bcc09b8e6b/client.go#L260-L262
-	inRecordingMode, err := httprr.Recording(rrfile)
-	if err != nil {
-		t.Fatalf("httprr.Recording(%q) failed: %v", rrfile, err)
+		t.Fatal(err)
 	}
 	apiKey := ""
-	if !inRecordingMode {
-		apiKey = "fakeAPIKey"
+	if recording, _ := httprr.Recording(rrfile); !recording {
+		apiKey = "fakekey"
 	}
-
 	return &genai.ClientConfig{
 		HTTPClient: &http.Client{Transport: rr},
 		APIKey:     apiKey,
 	}
-}
-
-func Scrub(req *http.Request) error {
-	delete(req.Header, "x-goog-api-key")    // genai does not canonicalize
-	req.Header.Del("X-Goog-Api-Key")        // in case it starts
-	delete(req.Header, "x-goog-api-client") // contains version numbers
-	req.Header.Del("X-Goog-Api-Client")
-	delete(req.Header, "user-agent") // contains google-genai-sdk and gl-go version numbers
-	req.Header.Del("User-Agent")
-
-	if ctype := req.Header.Get("Content-Type"); ctype == "application/json" || strings.HasPrefix(ctype, "application/json;") {
-		// Canonicalize JSON body.
-		// google.golang.org/protobuf/internal/encoding.json
-		// goes out of its way to randomize the JSON encodings
-		// of protobuf messages by adding or not adding spaces
-		// after commas. Derandomize by compacting the JSON.
-		b := req.Body.(*httprr.Body)
-		var buf bytes.Buffer
-		if err := json.Compact(&buf, b.Data); err == nil {
-			b.Data = buf.Bytes()
-		}
-	}
-	return nil
 }
