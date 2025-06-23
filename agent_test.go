@@ -32,6 +32,9 @@ func (m *testAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) (
 	return m.run(ctx, parentCtx)
 }
 
+func (m *testAgent) Parent() adk.Agent { return nil }
+func (m *testAgent) Subs() []adk.Agent { return nil }
+
 func TestNewInvocationContext_End(t *testing.T) {
 	ctx := t.Context()
 	waitForCancel := func(ctx context.Context, parentCtx *adk.InvocationContext) (adk.EventStream, error) {

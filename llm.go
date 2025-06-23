@@ -55,7 +55,7 @@ func (r *LLMRequest) AppendInstructions(instructions ...string) {
 	}
 }
 
-func (r *LLMRequest) AppendTools(tools ...Tool) {
+func (r *LLMRequest) AppendTools(tools ...*Tool) {
 	panic("unimplemented")
 }
 

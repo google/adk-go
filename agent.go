@@ -25,9 +25,13 @@ import (
 type Agent interface {
 	Name() string
 	Description() string
+	// Parent() Agent
+	// Subs() []Agent
 
 	// Run runs the agent with the invocation context.
 	Run(ctx context.Context, parentCtx *InvocationContext) (EventStream, error)
+	Parent() Agent
+	Subs() []Agent
 	// TODO: finalize the interface.
 }
 
@@ -75,16 +79,16 @@ type InvocationContext struct {
 	//  agent_2, and agent_2 is the parent of agent_3.
 	// Branch is used when multiple sub-agents shouldn't see their peer agents'
 	// conversation history.
-	Branch        string
+	Branch string
 	// The current agent of this invocation context. Readonly.
-	Agent         Agent
+	Agent Agent
 	// The user content that started this invocation. Readonly.
-	UserContent   *genai.Content
+	UserContent *genai.Content
 	// Configurations for live agents under this invocation.
-	RunConfig     *AgentRunConfig
+	RunConfig *AgentRunConfig
 
 	// The current session of this invocation context. Readonly.
-	Session        *Session
+	Session *Session
 
 	SessionService SessionService
 	// TODO(jbd): ArtifactService
@@ -98,8 +102,8 @@ type InvocationContext struct {
 func NewInvocationContext(ctx context.Context, agent Agent) (context.Context, *InvocationContext) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	return ctx, &InvocationContext{
-		InvocationID: "e-"+uuid.NewString(),
-		cancel: cancel,
+		InvocationID: "e-" + uuid.NewString(),
+		cancel:       cancel,
 	}
 }
 

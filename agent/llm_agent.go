@@ -52,8 +52,8 @@ type LLMAgent struct {
 	// such asfunction tools, RAGs, agent transfer, etc.
 	OutputSchema *genai.Schema
 
-	RootAgent adk.Agent
-	SubAgents []adk.Agent
+	ParentAgent adk.Agent
+	SubAgents   []adk.Agent
 
 	// OutputKey
 	// Planner
@@ -82,6 +82,9 @@ func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) (a
 		panic("not implemented")
 	}
 }
+
+func (a *LLMAgent) Parent() adk.Agent { return a.ParentAgent }
+func (a *LLMAgent) Subs() []adk.Agent { return a.SubAgents }
 
 var _ adk.Agent = (*LLMAgent)(nil)
 
@@ -277,9 +280,13 @@ func instructionsRequestProcessor(ctx context.Context, parentCtx *adk.Invocation
 	if !ok {
 		return fmt.Errorf("invalid agent type: %+T", parentCtx.Agent)
 	}
-	rootAgent := asLLMAgent(llmAgent.RootAgent)
-	if rootAgent == nil {
-		rootAgent = llmAgent
+
+	var rootAgent *LLMAgent
+	for {
+		rootAgent = asLLMAgent(llmAgent.ParentAgent)
+		if rootAgent == nil {
+			break
+		}
 	}
 
 	// Append global instructions if set.
