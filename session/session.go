@@ -17,144 +17,178 @@ package session
 import (
 	"context"
 	"fmt"
+	"iter"
 	"slices"
 	"sync"
 
 	"github.com/google/adk-go"
+	"rsc.io/omap"
+	"rsc.io/ordered"
 )
 
 // InMemorySessionService is an in-memory implementation of adk.SessionService.
 // It is primarily for testing and demonstration purposes.
 type InMemorySessionService struct {
-	mu sync.Mutex
-	// TODO: use ordered key instead of nested maps?
-	// appID -> userID -> sessionID -> Session
-	sessions map[string]map[string]map[string]*session
-	// TODO: user_state
-	// TODO: app_state
+	mu sync.RWMutex
+	// ordered(appName, userID, sessionID) -> session
+	sessions omap.Map[string, *session]
 }
 
-type session struct {
+type sessionKey struct {
 	AppName string
 	UserID  string
 	ID      string
+}
 
+func (sk sessionKey) Encode() string {
+	return string(ordered.Encode(sk.AppName, sk.UserID, sk.ID))
+}
+
+func (sk *sessionKey) Decode(key string) error {
+	return ordered.Decode([]byte(key), &sk.AppName, &sk.UserID, &sk.ID)
+}
+
+type session struct {
+	mu     sync.Mutex
 	events []*adk.Event
 }
 
 func (s *session) AppendEvent(ctx context.Context, event *adk.Event) {
+	s.mu.Lock()
 	s.events = append(s.events, event)
+	s.mu.Unlock()
+}
+
+func (s *session) Events() []*adk.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.events)
+}
+
+// scan returns an iterator over all key-value pairs
+// in the range begin ≤ key ≤ end.
+func (s *InMemorySessionService) scan(lo, hi string) iter.Seq2[sessionKey, *session] {
+	return func(yield func(key sessionKey, val *session) bool) {
+		s.mu.RLock()
+		locked := true
+		defer func() {
+			if locked {
+				s.mu.RUnlock()
+			}
+		}()
+		for k, val := range s.sessions.Scan(lo, hi) {
+			var key sessionKey
+			if err := key.Decode(k); err != nil {
+				println("decode error: %v", err)
+				continue
+			}
+
+			s.mu.RUnlock()
+			locked = false
+			fmt.Printf("KEY %+v", key)
+			if !yield(key, val) {
+				return
+			}
+			s.mu.RLock()
+			locked = true
+		}
+	}
+}
+
+// get looks up the session with reader lock.
+func (s *InMemorySessionService) get(appName, userID, sessionID string) (*session, bool) {
+	key := sessionKey{
+		AppName: appName,
+		UserID:  userID,
+		ID:      sessionID,
+	}.Encode()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sessions.Get(key)
 }
 
 // AppendEvent implements adk.SessionService.
 func (s *InMemorySessionService) AppendEvent(ctx context.Context, req *adk.SessionAppendEventRequest) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	session := s.getSession(req.Session.AppName, req.Session.UserID, req.Session.ID, false)
-	session.events = append(session.events, req.Event)
+	sess, ok := s.get(req.Session.AppName, req.Session.UserID, req.Session.ID)
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+	sess.AppendEvent(ctx, req.Event)
 	return nil
-}
-
-func (s *InMemorySessionService) getSession(appID, userID, sessionID string, create bool) *session {
-	byAppID, ok := s.sessions[appID]
-	if !ok {
-		if !create {
-			return nil
-		}
-		byAppID = make(map[string]map[string]*session)
-		s.sessions[appID] = byAppID
-	}
-	byUserID, ok := byAppID[userID]
-	if !ok {
-		if !create {
-			return nil
-		}
-		byUserID = make(map[string]*session)
-		byAppID[userID] = byUserID
-	}
-	bySessionID, ok := byUserID[sessionID]
-	if !ok {
-		if !create {
-			return nil
-		}
-		bySessionID = &session{
-			ID:      sessionID,
-			AppName: appID,
-			UserID:  userID,
-		}
-		byUserID[sessionID] = bySessionID
-	} else {
-		if create {
-			return nil
-		}
-	}
-	return bySessionID
 }
 
 // Create implements adk.SessionService.
 func (s *InMemorySessionService) Create(ctx context.Context, req *adk.SessionCreateRequest) (*adk.Session, error) {
+	// TODO: handle req.State.
+
+	key := sessionKey{
+		AppName: req.AppName,
+		UserID:  req.UserID,
+		ID:      req.SessionID,
+	}.Encode()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	session := s.getSession(req.AppName, req.UserID, req.SessionID, true)
-	if session == nil {
+	if _, ok := s.sessions.Get(key); ok {
 		return nil, fmt.Errorf("session already exists")
 	}
+	s.sessions.Set(key, &session{})
+
 	return &adk.Session{
-		AppName: session.AppName,
-		UserID:  session.UserID,
-		ID:      session.ID,
+		ID:      req.SessionID,
+		AppName: req.AppName,
+		UserID:  req.UserID,
+		// Events: nil
 	}, nil
 }
 
 // Delete implements adk.SessionService.
 func (s *InMemorySessionService) Delete(ctx context.Context, req *adk.SessionDeleteRequest) error {
 	// TODO: should we return err if session doesn't exist?
+	key := sessionKey{
+		AppName: req.AppName,
+		UserID:  req.UserID,
+		ID:      req.SessionID,
+	}.Encode()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	byAppID, ok := s.sessions[req.AppName]
-	if !ok {
-		return nil
-	}
-	byUserID, ok := byAppID[req.UserID]
-	if !ok {
-		return nil
-	}
-	delete(byUserID, req.SessionID)
-	if len(byUserID) == 0 {
-		delete(byAppID, req.UserID)
-	}
-	if len(byAppID) == 0 {
-		delete(s.sessions, req.AppName)
-	}
+	s.sessions.Delete(key)
 	return nil
 }
 
 // Get implements adk.SessionService.
 func (s *InMemorySessionService) Get(ctx context.Context, req *adk.SessionGetRequest) (*adk.Session, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	session := s.getSession(req.AppName, req.UserID, req.SessionID, false)
-	if session == nil {
+	sess, ok := s.get(req.AppName, req.UserID, req.SessionID)
+	if !ok {
 		return nil, fmt.Errorf("session not found")
 	}
 	return &adk.Session{
-		AppName: session.AppName,
-		UserID:  session.UserID,
-		ID:      session.ID,
-		Events:  slices.Clone(session.events),
+		AppName: req.AppName,
+		UserID:  req.UserID,
+		ID:      req.SessionID,
+		Events:  sess.Events(),
 	}, nil
 }
 
 // List implements adk.SessionService.
 func (s *InMemorySessionService) List(ctx context.Context, req *adk.SessionListRequest) ([]*adk.Session, error) {
-	panic("unimplemented")
-}
+	lo := sessionKey{AppName: req.AppName, UserID: req.UserID}.Encode()
+	hi := sessionKey{AppName: req.AppName, UserID: req.UserID + "\x00"}.Encode()
 
-// NewInMemorySessionService creates a new InMemorySessionService.
-func NewInMemorySessionService() *InMemorySessionService {
-	return &InMemorySessionService{
-		sessions: make(map[string]map[string]map[string]*session),
+	var ret []*adk.Session
+	for key, sess := range s.scan(lo, hi) {
+		if key.AppName != req.AppName && key.UserID != req.UserID {
+			break
+		}
+		ret = append(ret, &adk.Session{
+			AppName: key.AppName,
+			UserID:  key.UserID,
+			ID:      key.ID,
+			Events:  sess.Events(),
+		})
 	}
+	return ret, nil
 }
 
 var _ adk.SessionService = (*InMemorySessionService)(nil)

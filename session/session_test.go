@@ -16,105 +16,221 @@ package session
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/google/adk-go"
 	"github.com/google/go-cmp/cmp"
 )
 
-func TestInMemorySessionService(t *testing.T) {
+func TestInMemorySessionService_Basic(t *testing.T) {
 	ctx := context.Background()
-	service := NewInMemorySessionService()
+	service := &InMemorySessionService{}
 
-	appName := "test-app"
-	userID := "test-user"
-	sessionID := "test-session"
-
-	// Test Create
+	// Create a session
 	createReq := &adk.SessionCreateRequest{
-		AppName:   appName,
-		UserID:    userID,
-		SessionID: sessionID,
+		AppName:   "test-app",
+		UserID:    "test-user",
+		SessionID: "test-session",
 	}
-	session, err := service.Create(ctx, createReq)
+	sess, err := service.Create(ctx, createReq)
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}
-
-	wantSession := &adk.Session{
-		AppName: appName,
-		UserID:  userID,
-		ID:      sessionID,
-	}
-	if diff := cmp.Diff(wantSession, session); diff != "" {
-		t.Errorf("Create() mismatch (-want +got):\n%s", diff)
+	if sess.ID != "test-session" {
+		t.Errorf("Create() returned session with ID %q, want %q", sess.ID, "test-session")
 	}
 
-	// Test Create again with same ID
-	_, err = service.Create(ctx, createReq)
-	if err == nil {
-		t.Errorf("Create() with existing ID should have failed")
-	}
-
-	// Test Get
+	// Get the session
 	getReq := &adk.SessionGetRequest{
-		AppName:   appName,
-		UserID:    userID,
-		SessionID: sessionID,
+		AppName:   "test-app",
+		UserID:    "test-user",
+		SessionID: "test-session",
 	}
-	gotSession, err := service.Get(ctx, getReq)
+	gotSess, err := service.Get(ctx, getReq)
 	if err != nil {
 		t.Fatalf("Get() failed: %v", err)
 	}
-	if diff := cmp.Diff(wantSession, gotSession); diff != "" {
-		t.Errorf("Get() mismatch (-want +got):\n%s", diff)
+	if gotSess.ID != "test-session" {
+		t.Errorf("Get() returned session with ID %q, want %q", gotSess.ID, "test-session")
 	}
 
-	// Test Get non-existent
-	_, err = service.Get(ctx, &adk.SessionGetRequest{AppName: "dne", UserID: "dne", SessionID: "dne"})
+	// Try to create a session that already exists
+	_, err = service.Create(ctx, createReq)
 	if err == nil {
-		t.Errorf("Get() with non-existent session should have failed")
+		t.Errorf("Create() with existing session ID succeeded, want error")
 	}
 
-	// Test AppendEvent
-	event := adk.NewEvent("test-invocation")
-	appendReq := &adk.SessionAppendEventRequest{
-		Session: session,
-		Event:   event,
-	}
-	if err := service.AppendEvent(ctx, appendReq); err != nil {
-		t.Errorf("AppendEvent() failed: %v", err)
-	}
-
-	// Check events after AppendEvent.
-	gotSession, err = service.Get(ctx, getReq)
-	if err != nil {
-		t.Fatalf("Get() after AppendEvent failed: %v", err)
-	}
-	if len(gotSession.Events) != 1 {
-		t.Fatalf("Get() after AppendEvent: expected 1 event, got %d", len(gotSession.Events))
-	}
-	if diff := cmp.Diff(event, gotSession.Events[0]); diff != "" {
-		t.Errorf("Get() after AppendEvent mismatch (-want +got):\n%s", diff)
-	}
-
-	// Test Delete
+	// Delete the session
 	deleteReq := &adk.SessionDeleteRequest{
-		AppName:   appName,
-		UserID:    userID,
-		SessionID: sessionID,
+		AppName:   "test-app",
+		UserID:    "test-user",
+		SessionID: "test-session",
 	}
 	if err := service.Delete(ctx, deleteReq); err != nil {
 		t.Fatalf("Delete() failed: %v", err)
 	}
 
-	// Test Get after Delete
-	if _, err = service.Get(ctx, getReq); err == nil {
-		t.Errorf("Get() after Delete() should have failed")
+	// Try to get the deleted session
+	_, err = service.Get(ctx, getReq)
+	if err == nil {
+		t.Errorf("Get() after Delete() succeeded, want error")
 	}
 
-	// Test Delete non-existent
+	// Try to delete a non-existent session (should not error)
 	if err := service.Delete(ctx, deleteReq); err != nil {
 		t.Errorf("Delete() on non-existent session failed: %v", err)
+	}
+}
+
+func TestInMemorySessionService_AppendEvent(t *testing.T) {
+	ctx := context.Background()
+	service := &InMemorySessionService{}
+
+	// Create a session
+	createReq := &adk.SessionCreateRequest{
+		AppName:   "test-app",
+		UserID:    "test-user",
+		SessionID: "test-session",
+	}
+	sess, err := service.Create(ctx, createReq)
+	if err != nil {
+		t.Fatalf("Create() failed: %v", err)
+	}
+
+	// Append an event
+	event1 := &adk.Event{
+		ID:           "e-12345",
+		InvocationID: "inv-12345",
+		Author:       "user",
+		Branch:       "foo.bar",
+	}
+	if err := service.AppendEvent(ctx, &adk.SessionAppendEventRequest{
+		Session: sess,
+		Event:   event1,
+	}); err != nil {
+		t.Fatalf("AppendEvent() failed: %v", err)
+	}
+
+	// Get the session and check events
+	getReq := &adk.SessionGetRequest{
+		AppName:   "test-app",
+		UserID:    "test-user",
+		SessionID: "test-session",
+	}
+	gotSess, err := service.Get(ctx, getReq)
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	if diff := cmp.Diff(gotSess.Events, []*adk.Event{event1}); diff != "" {
+		t.Errorf("Get() returned events mismatch (-got +want):\n%s", diff)
+	}
+
+	// Append another event
+	event2 := &adk.Event{ID: "e-7890"}
+	if err := service.AppendEvent(ctx, &adk.SessionAppendEventRequest{
+		Session: sess,
+		Event:   event2,
+	}); err != nil {
+		t.Fatalf("AppendEvent() failed: %v", err)
+	}
+
+	// Get the session and check events.
+	gotSess, err = service.Get(ctx, getReq)
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	if diff := cmp.Diff(gotSess.Events, []*adk.Event{event1, event2}); diff != "" {
+		t.Errorf("Get() returned events mismatch (-got +want):\n%s", diff)
+	}
+
+	// Append to non-existent session
+	if err := service.AppendEvent(ctx, &adk.SessionAppendEventRequest{
+		Session: &adk.Session{ID: "non-existent"},
+		Event:   event1,
+	}); err == nil {
+		t.Errorf("AppendEvent() to non-existent session succeeded, want error")
+	}
+}
+
+func TestInMemorySessionService_List(t *testing.T) {
+	ctx := context.Background()
+	service := &InMemorySessionService{}
+
+	// Setup: create sessions for different users and apps
+	sessionsToCreate := []adk.SessionCreateRequest{
+		{AppName: "app1", UserID: "user1", SessionID: "s1"},
+		{AppName: "app1", UserID: "user1", SessionID: "s2"},
+		{AppName: "app1", UserID: "user2", SessionID: "s3"},
+		{AppName: "app2", UserID: "user1", SessionID: "s4"},
+	}
+	for _, req := range sessionsToCreate {
+		if _, err := service.Create(ctx, &req); err != nil {
+			t.Fatalf("Setup: Create() failed for %+v: %v", req, err)
+		}
+	}
+
+	// Test cases
+	testCases := []struct {
+		name           string
+		appName        string
+		userID         string
+		wantSessionIDs []string
+	}{
+		{
+			name:           "List for user1/app1",
+			appName:        "app1",
+			userID:         "user1",
+			wantSessionIDs: []string{"s1", "s2"},
+		},
+		{
+			name:           "List for user2/app1",
+			appName:        "app1",
+			userID:         "user2",
+			wantSessionIDs: []string{"s3"},
+		},
+		{
+			name:           "List for user1/app2",
+			appName:        "app2",
+			userID:         "user1",
+			wantSessionIDs: []string{"s4"},
+		},
+		{
+			name:           "List for non-existent user",
+			appName:        "app1",
+			userID:         "user3",
+			wantSessionIDs: nil,
+		},
+		{
+			name:           "List for non-existent app",
+			appName:        "app3",
+			userID:         "user1",
+			wantSessionIDs: nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			listReq := &adk.SessionListRequest{
+				AppName: tc.appName,
+				UserID:  tc.userID,
+			}
+			sessions, err := service.List(ctx, listReq)
+			if err != nil {
+				t.Fatalf("List() failed: %v", err)
+			}
+
+			var gotSessionIDs []string
+			if sessions != nil {
+				gotSessionIDs = make([]string, len(sessions))
+				for i, s := range sessions {
+					gotSessionIDs[i] = s.ID
+				}
+			}
+
+			if !reflect.DeepEqual(gotSessionIDs, tc.wantSessionIDs) {
+				t.Errorf("List() returned session IDs %v, want %v", gotSessionIDs, tc.wantSessionIDs)
+			}
+		})
 	}
 }

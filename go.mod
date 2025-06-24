@@ -6,6 +6,8 @@ require (
 	github.com/google/go-cmp v0.6.0
 	github.com/google/uuid v1.6.0
 	google.golang.org/genai v1.6.0
+	rsc.io/omap v1.2.0
+	rsc.io/ordered v1.1.1
 )
 
 require (
