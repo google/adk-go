@@ -77,9 +77,9 @@ func TestInMemorySessionService_Basic(t *testing.T) {
 		t.Errorf("Get() after Delete() succeeded, want error")
 	}
 
-	// Try to delete a non-existent session (should not error)
-	if err := service.Delete(ctx, deleteReq); err != nil {
-		t.Errorf("Delete() on non-existent session failed: %v", err)
+	// Try to delete a non-existent session (should error. See TODO in Delete)
+	if err := service.Delete(ctx, deleteReq); err == nil {
+		t.Error("Delete() on non-existent session succeeded, want error")
 	}
 }
 
@@ -142,6 +142,19 @@ func TestInMemorySessionService_AppendEvent(t *testing.T) {
 	}
 	if diff := cmp.Diff(gotSess.Events, []*adk.Event{event1, event2}); diff != "" {
 		t.Errorf("Get() returned events mismatch (-got +want):\n%s", diff)
+	}
+}
+
+func TestInMemorySessionService_AppendEvent_nonexistant(t *testing.T) {
+	ctx := context.Background()
+	service := &InMemorySessionService{}
+
+	// Append an event
+	event1 := &adk.Event{
+		ID:           "e-12345",
+		InvocationID: "inv-12345",
+		Author:       "user",
+		Branch:       "foo.bar",
 	}
 
 	// Append to non-existent session
@@ -228,8 +241,8 @@ func TestInMemorySessionService_List(t *testing.T) {
 				}
 			}
 
-			if !reflect.DeepEqual(gotSessionIDs, tc.wantSessionIDs) {
-				t.Errorf("List() returned session IDs %v, want %v", gotSessionIDs, tc.wantSessionIDs)
+			if got, want := gotSessionIDs, tc.wantSessionIDs; !reflect.DeepEqual(got, want) {
+				t.Errorf("List() = %v, want %v", got, want)
 			}
 		})
 	}

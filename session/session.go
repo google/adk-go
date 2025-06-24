@@ -67,6 +67,7 @@ func (s *session) Events() []*adk.Event {
 
 // scan returns an iterator over all key-value pairs
 // in the range begin ≤ key ≤ end.
+// TODO: add a concurrent tests.
 func (s *InMemorySessionService) scan(lo, hi string) iter.Seq2[sessionKey, *session] {
 	return func(yield func(key sessionKey, val *session) bool) {
 		s.mu.RLock()
@@ -85,7 +86,6 @@ func (s *InMemorySessionService) scan(lo, hi string) iter.Seq2[sessionKey, *sess
 
 			s.mu.RUnlock()
 			locked = false
-			fmt.Printf("KEY %+v", key)
 			if !yield(key, val) {
 				return
 			}
@@ -144,7 +144,8 @@ func (s *InMemorySessionService) Create(ctx context.Context, req *adk.SessionCre
 
 // Delete implements adk.SessionService.
 func (s *InMemorySessionService) Delete(ctx context.Context, req *adk.SessionDeleteRequest) error {
-	// TODO: should we return err if session doesn't exist?
+	// TODO: should we return err if session doesn't exist? This may be difficult or expensive
+	// for certain implementations.
 	key := sessionKey{
 		AppName: req.AppName,
 		UserID:  req.UserID,
@@ -153,6 +154,9 @@ func (s *InMemorySessionService) Delete(ctx context.Context, req *adk.SessionDel
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.sessions.Get(key); !ok {
+		return fmt.Errorf("session %v/%v/%v does not exist", req.AppName, req.UserID, req.SessionID)
+	}
 	s.sessions.Delete(key)
 	return nil
 }
@@ -161,7 +165,7 @@ func (s *InMemorySessionService) Delete(ctx context.Context, req *adk.SessionDel
 func (s *InMemorySessionService) Get(ctx context.Context, req *adk.SessionGetRequest) (*adk.Session, error) {
 	sess, ok := s.get(req.AppName, req.UserID, req.SessionID)
 	if !ok {
-		return nil, fmt.Errorf("session not found")
+		return nil, fmt.Errorf("session %v/%v/%v not found", req.AppName, req.UserID, req.SessionID)
 	}
 	return &adk.Session{
 		AppName: req.AppName,
