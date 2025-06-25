@@ -1,5 +1,0 @@
-{
-    "$id": "http://localhost:1234/real-id-ref-string.json",
-    "$defs": {"bar": {"type": "string"}},
-    "$ref": "#/$defs/bar"
-}
