@@ -36,12 +36,9 @@ func TestNewInvocationContext_End(t *testing.T) {
 	ctx := t.Context()
 	waitForCancel := func(ctx context.Context, parentCtx *adk.InvocationContext) (adk.EventStream, error) {
 		return func(yield func(*adk.Event, error) bool) {
-			select {
-			case <-ctx.Done():
-				// stuck here until the context is canceled.
-				yield(nil, ctx.Err())
-				return
-			}
+			<-ctx.Done()
+			// stuck here until the context is canceled.
+			yield(nil, ctx.Err())
 		}, nil
 	}
 	agent := &testAgent{run: waitForCancel}
