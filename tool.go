@@ -16,9 +16,6 @@ package adk
 
 import (
 	"context"
-	"fmt"
-
-	"github.com/modelcontextprotocol/go-sdk/jsonschema"
 )
 
 // ToolContext is the tool invocation context.
@@ -36,48 +33,18 @@ type ToolContext struct {
 	EventActions *EventActions
 }
 
-// TODO: Implement an MCP client as a tool to validate whether
-// a concrete type is sufficient for tool use.
+// Tool is the ADK tool interface.
+type Tool interface {
+	Name() string
+	Description() string
+	// ProcessRequest processes the outgoing LLM request for this tool.
+	// Use cases:
+	//  * Adding this tool schema to the LLM request.
+	//  * Preprocess the LLM request before it's sent out.
+	ProcessRequest(ctx context.Context, tc *ToolContext, req *LLMRequest) error
 
-// Tool is an ADK tool.
-type Tool struct {
-	Name        string
-	Description string
-	InputSchema *jsonschema.Schema
-	// TODO: OutputSchema
+	// Run runs the tool with the given argument and returns the result.
+	Run(ctx context.Context, tc *ToolContext, args map[string]any) (map[string]any, error)
 
-	rawHandler rawToolHandler
-}
-
-// Run executes the tool with the provided context and yields events.
-func (t *Tool) Run(ctx context.Context, tc *ToolContext, args map[string]any) (map[string]any, error) {
-	return t.rawHandler(ctx, tc, args)
-}
-
-// ToolHandler is the execution handler of a tool.
-type ToolHandler[In, Out any] func(ctx context.Context, input In) (output Out, err error)
-
-type rawToolHandler func(ctx context.Context, tc *ToolContext, args map[string]any) (map[string]any, error)
-
-// NewTool creates a new tool with a name, description, and the provided handler.
-// Input schema is automatically inferred from the input and output types.
-func NewTool[In, Out any](name string, description string, handler ToolHandler[In, Out]) *Tool {
-	// TODO(jbd): Add ToolOption as variadic arguments to NewTool.
-	ischema, err := jsonschema.For[In]()
-	if err != nil {
-		panic(fmt.Errorf("NewTool(%q): %w", name, err))
-	}
-	rawHandler := func(ctx context.Context, tc *ToolContext, args map[string]any) (map[string]any, error) {
-		panic("not yet implemented")
-		// TODO: Handle function call request from tc.InvocationContext.
-		// TODO: Unmarshal into input.
-		// TODO: Make a call to handler.
-		// TODO: Yield events with the output.
-	}
-	return &Tool{
-		Name:        name,
-		Description: description,
-		InputSchema: ischema,
-		rawHandler:  rawHandler,
-	}
+	// note for reviewers: this interface corresponds to adk-python's BaseTool (tools/base_tool.py)
 }

@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package adk_test
+package tool
 
 import (
 	"context"
-
-	"github.com/google/adk-go"
 )
 
-func ExampleNewTool() {
+func ExampleNewFunctionTool() {
 	type SumArgs struct {
 		A int `json:"a"` // an integer to sum
 		B int `json:"b"` // another integer to sum
@@ -29,9 +27,12 @@ func ExampleNewTool() {
 		Sum int `json:"sum"` // the sum of two integers
 	}
 
-	handler := func(ctx context.Context, input SumArgs) (SumResult, error) {
-		return SumResult{Sum: input.A + input.B}, nil
+	handler := func(ctx context.Context, input SumArgs) SumResult {
+		return SumResult{Sum: input.A + input.B}
 	}
-	tool := adk.NewTool("sum", "sums two integers", handler)
+	tool, err := NewFunctionTool("sum", "sums two integers", handler)
+	if err != nil {
+		panic(err)
+	}
 	_ = tool // use the tool
 }

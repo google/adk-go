@@ -14,13 +14,121 @@
 
 package tool
 
+import (
+	"context"
+	"fmt"
+
+	"github.com/google/adk-go"
+	"github.com/modelcontextprotocol/go-sdk/jsonschema"
+)
+
 // FunctionTool: borrow implementation from MCP go.
 // transfer_to_agent ??
-// LongRunningFunctionTool
+// MCP Tool
 // LoadArtifactsTool
 // ExitLoopTool
 // AgentTool
+// LongRunningFunctionTool
 
 // BuiltinCodeExecutionTool
 // GoogeSearchTool
 // MCPTool
+
+// FunctionTool wraps a Go function.
+type FunctionTool[TArgs, TResults any] struct {
+	// The name of the tool.
+	name string
+	// This can be used by clients to improve the LLM's understanding of available
+	// tools. It can be thought of like a "hint" to the model.
+	description string
+	// A JSON Schema object defining the expected parameters for the tool.
+	inputSchema *jsonschema.Resolved
+	// A JSON Schema object defining the result of the tool.
+	outputSchema *jsonschema.Resolved
+
+	// handler is the Go function.
+	handler Function[TArgs, TResults]
+}
+
+var _ adk.Tool = (*FunctionTool[any, any])(nil)
+
+// Description implements adk.Tool.
+func (f *FunctionTool[TArgs, TResults]) Description() string {
+	return f.description
+}
+
+// Name implements adk.Tool.
+func (f *FunctionTool[TArgs, TResults]) Name() string {
+	return f.name
+}
+
+// ProcessRequest implements adk.Tool.
+func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx context.Context, tc *adk.ToolContext, req *adk.LLMRequest) error {
+	// TODO: pack f. inputSchema into req.
+	panic("unimplemented")
+}
+
+// Run executes the tool with the provided context and yields events.
+func (f *FunctionTool[TArgs, TResults]) Run(ctx context.Context, tc *adk.ToolContext, args map[string]any) (map[string]any, error) {
+	// TODO: Handle function call request from tc.InvocationContext.
+	// TODO: Unmarshal into input.
+	// TODO: Make a call to f.handler.
+	// TODO: Yield events with the output.
+	panic("unimplemented")
+}
+
+// Funtion represents a Go function.
+type Function[TArgs, TResults any] func(context.Context, TArgs) TResults
+
+// ** NOTE FOR REVIEWERS **
+// Initially I started to borrow the design of the MCP ServerTool and
+// ToolHandlerFor/ToolHandler [1], but got diverged.
+//  * MCP ServerTool provides direct access to mcp.CallToolResult message
+//    but we expect Function in our case is a simple wrapper around a Go
+//    function, and does not need to worry about how the result is translated
+//    in genai.Content.
+//  * Function returns only TResults, not (TResults, error). If the user
+//    function can return an error, that needs to be included in the output
+//    json schema. And for function that never returns an error, I think it
+//    gets less uglier.
+//  * MCP ToolHandler expects mcp.ServerSession. adk.ToolContext may be close
+//    to it, but we don't need to expose this to user function
+//    (similar to ADK Python FunctionTool [2])
+// References
+//  [1] MCP SDK https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v0.0.0-20250625213837-ff0d746521c4/mcp#ToolHandler
+//  [2] ADK Python https://github.com/google/adk-python/blob/04de3e197d7a57935488eb7bfa647c7ab62cd9d9/src/google/adk/tools/function_tool.py#L110-L112
+
+func resolvedSchema[T any]() (*jsonschema.Resolved, error) {
+	schema, err := jsonschema.For[T]()
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		return nil, err
+	}
+	return resolved, nil
+}
+
+// NewFunctionTool creates a new tool with a name, description, and the provided handler.
+// Input schema is automatically inferred from the input and output types.
+func NewFunctionTool[TArgs, TResults any](
+	name string, description string, handler Function[TArgs, TResults]) (*FunctionTool[TArgs, TResults], error) {
+	// TODO(jbd): Add ToolOption as variadic arguments to NewFunctionTool.
+	ischema, err := resolvedSchema[TArgs]()
+	if err != nil {
+		return nil, fmt.Errorf("failed to infer input schema: %w", err)
+	}
+	oschema, err := resolvedSchema[TResults]()
+	if err != nil {
+		return nil, fmt.Errorf("failed to infer output schema: %w", err)
+	}
+
+	return &FunctionTool[TArgs, TResults]{
+		name:         name,
+		description:  description,
+		inputSchema:  ischema,
+		outputSchema: oschema,
+		handler:      handler,
+	}, nil
+}
