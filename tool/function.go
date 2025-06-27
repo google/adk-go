@@ -19,7 +19,9 @@ import (
 	"fmt"
 
 	"github.com/google/adk-go"
+	"github.com/google/adk-go/internal/typeutil"
 	"github.com/modelcontextprotocol/go-sdk/jsonschema"
+	"google.golang.org/genai"
 )
 
 // FunctionTool: borrow implementation from MCP go.
@@ -34,13 +36,49 @@ import (
 // GoogeSearchTool
 // MCPTool
 
+// FunctionToolCfg is the input to the NewFunctionTool function.
+type FunctionToolCfg struct {
+	// The name of this tool.
+	Name string
+	// A human-readable description of the tool.
+	Description string
+	// An optional JSON schema object defining the expected parameters for the tool.
+	// If it is nil, FunctionTool tries to infer the schema based on the handler type.
+	InputSchema *jsonschema.Schema
+	// An optional JSON schema object defining the structure of the tool's output.
+	// If it is nil, FunctionTool tries to infer the schema based on the handler type.
+	OutputSchema *jsonschema.Schema
+}
+
+// Funtion represents a Go function.
+type Function[TArgs, TResults any] func(context.Context, TArgs) TResults
+
+// NewFunctionTool creates a new tool with a name, description, and the provided handler.
+// Input schema is automatically inferred from the input and output types.
+func NewFunctionTool[TArgs, TResults any](cfg FunctionToolCfg, handler Function[TArgs, TResults]) (*FunctionTool[TArgs, TResults], error) {
+	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
+	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
+	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to infer input schema: %w", err)
+	}
+	oschema, err := resolvedSchema[TResults](cfg.OutputSchema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to infer output schema: %w", err)
+	}
+
+	return &FunctionTool[TArgs, TResults]{
+		cfg:          cfg,
+		inputSchema:  ischema,
+		outputSchema: oschema,
+		handler:      handler,
+	}, nil
+}
+
 // FunctionTool wraps a Go function.
 type FunctionTool[TArgs, TResults any] struct {
-	// The name of the tool.
-	name string
-	// This can be used by clients to improve the LLM's understanding of available
-	// tools. It can be thought of like a "hint" to the model.
-	description string
+	cfg FunctionToolCfg
+
 	// A JSON Schema object defining the expected parameters for the tool.
 	inputSchema *jsonschema.Resolved
 	// A JSON Schema object defining the result of the tool.
@@ -54,18 +92,33 @@ var _ adk.Tool = (*FunctionTool[any, any])(nil)
 
 // Description implements adk.Tool.
 func (f *FunctionTool[TArgs, TResults]) Description() string {
-	return f.description
+	return f.cfg.Description
 }
 
 // Name implements adk.Tool.
 func (f *FunctionTool[TArgs, TResults]) Name() string {
-	return f.name
+	return f.cfg.Name
 }
 
 // ProcessRequest implements adk.Tool.
 func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx context.Context, tc *adk.ToolContext, req *adk.LLMRequest) error {
-	// TODO: pack f. inputSchema into req.
-	panic("unimplemented")
+	decl := &genai.FunctionDeclaration{
+		Name:        f.Name(),
+		Description: f.Description(),
+	}
+	if f.inputSchema != nil {
+		decl.ParametersJsonSchema = f.inputSchema.Schema()
+	}
+	if f.outputSchema != nil {
+		decl.ResponseJsonSchema = f.outputSchema.Schema()
+	}
+	if req.GenerateConfig == nil {
+		req.GenerateConfig = &genai.GenerateContentConfig{}
+	}
+	req.GenerateConfig.Tools = append(req.GenerateConfig.Tools, &genai.Tool{
+		FunctionDeclarations: []*genai.FunctionDeclaration{decl},
+	})
+	return nil
 }
 
 // Run executes the tool with the provided context and yields events.
@@ -74,11 +127,13 @@ func (f *FunctionTool[TArgs, TResults]) Run(ctx context.Context, tc *adk.ToolCon
 	// TODO: Unmarshal into input.
 	// TODO: Make a call to f.handler.
 	// TODO: Yield events with the output.
-	panic("unimplemented")
+	input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](args, f.inputSchema)
+	if err != nil {
+		return nil, err
+	}
+	output := f.handler(ctx, input)
+	return typeutil.ConvertToWithJSONSchema[TResults, map[string]any](output, f.outputSchema)
 }
-
-// Funtion represents a Go function.
-type Function[TArgs, TResults any] func(context.Context, TArgs) TResults
 
 // ** NOTE FOR REVIEWERS **
 // Initially I started to borrow the design of the MCP ServerTool and
@@ -98,37 +153,14 @@ type Function[TArgs, TResults any] func(context.Context, TArgs) TResults
 //  [1] MCP SDK https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v0.0.0-20250625213837-ff0d746521c4/mcp#ToolHandler
 //  [2] ADK Python https://github.com/google/adk-python/blob/04de3e197d7a57935488eb7bfa647c7ab62cd9d9/src/google/adk/tools/function_tool.py#L110-L112
 
-func resolvedSchema[T any]() (*jsonschema.Resolved, error) {
+func resolvedSchema[T any](override *jsonschema.Schema) (*jsonschema.Resolved, error) {
+	// TODO: check if override schema is compatible with T.
+	if override != nil {
+		return override.Resolve(nil)
+	}
 	schema, err := jsonschema.For[T]()
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := schema.Resolve(nil)
-	if err != nil {
-		return nil, err
-	}
-	return resolved, nil
-}
-
-// NewFunctionTool creates a new tool with a name, description, and the provided handler.
-// Input schema is automatically inferred from the input and output types.
-func NewFunctionTool[TArgs, TResults any](
-	name string, description string, handler Function[TArgs, TResults]) (*FunctionTool[TArgs, TResults], error) {
-	// TODO(jbd): Add ToolOption as variadic arguments to NewFunctionTool.
-	ischema, err := resolvedSchema[TArgs]()
-	if err != nil {
-		return nil, fmt.Errorf("failed to infer input schema: %w", err)
-	}
-	oschema, err := resolvedSchema[TResults]()
-	if err != nil {
-		return nil, fmt.Errorf("failed to infer output schema: %w", err)
-	}
-
-	return &FunctionTool[TArgs, TResults]{
-		name:         name,
-		description:  description,
-		inputSchema:  ischema,
-		outputSchema: oschema,
-		handler:      handler,
-	}, nil
+	return schema.Resolve(nil)
 }

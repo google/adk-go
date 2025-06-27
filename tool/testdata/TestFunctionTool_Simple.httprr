@@ -1,0 +1,181 @@
+httprr trace v1
+811 1141
+POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 578
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Report the current weather of the capital city of U.K."}],"role":"user"}],"generationConfig":{},"tools":[{"functionDeclarations":[{"description":"Retrieves the current weather report for a specified city.","name":"get_weather_report","parametersJsonSchema":{"additionalProperties":{"not":{}},"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":{"not":{}},"properties":{"report":{"type":"string"},"status":{"type":"string"}},"required":["report","status"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+Content-Type: application/json; charset=UTF-8
+Date: Tue, 01 Jul 2025 01:49:23 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=547
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "get_weather_report",
+              "args": {
+                "city": "London"
+              }
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": -0.0001656591027442898
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 29,
+    "candidatesTokenCount": 7,
+    "totalTokenCount": 36,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 29
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 7
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "oj5jaM37OaizxfcPvo3h8QI"
+}
+789 1140
+POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 556
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"How is the weather of Paris now?"}],"role":"user"}],"generationConfig":{},"tools":[{"functionDeclarations":[{"description":"Retrieves the current weather report for a specified city.","name":"get_weather_report","parametersJsonSchema":{"additionalProperties":{"not":{}},"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":{"not":{}},"properties":{"report":{"type":"string"},"status":{"type":"string"}},"required":["report","status"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+Content-Type: application/json; charset=UTF-8
+Date: Tue, 01 Jul 2025 01:49:23 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=535
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "get_weather_report",
+              "args": {
+                "city": "Paris"
+              }
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": 2.4634563097996372e-06
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 24,
+    "candidatesTokenCount": 7,
+    "totalTokenCount": 31,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 24
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 7
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "oz5jaMyGHvLhmNAPpebBuQM"
+}
+802 1143
+POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 569
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Tell me about the current weather in New York"}],"role":"user"}],"generationConfig":{},"tools":[{"functionDeclarations":[{"description":"Retrieves the current weather report for a specified city.","name":"get_weather_report","parametersJsonSchema":{"additionalProperties":{"not":{}},"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":{"not":{}},"properties":{"report":{"type":"string"},"status":{"type":"string"}},"required":["report","status"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+Content-Type: application/json; charset=UTF-8
+Date: Tue, 01 Jul 2025 01:49:24 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=817
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "get_weather_report",
+              "args": {
+                "city": "New York"
+              }
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": 9.3482958618551493e-07
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 25,
+    "candidatesTokenCount": 8,
+    "totalTokenCount": 33,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 25
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 8
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "oz5jaOm-PL7Bld8P2ZeQgQ8"
+}
