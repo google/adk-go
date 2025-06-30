@@ -51,7 +51,7 @@ type Event struct {
 	Author string
 	// The branch of the event.
 	//
-	// The format is like agent_1.gent_2.agent_3, where agent_1 is
+	// The format is like agent_1.agent_2.agent_3, where agent_1 is
 	// the parent of agent_2, and agent_2 is the parent of agent_3.
 	//
 	// Branch is used when multiple sub-agent shouldn't see their peer agents'

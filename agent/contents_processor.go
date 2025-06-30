@@ -1,0 +1,154 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package agent
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/google/adk-go"
+	"google.golang.org/genai"
+)
+
+// contentRequestProcessor populates the LLMRequest's Contents based on
+// the InvocationContext that includes the previous events.
+func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+	// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
+	llmAgent := asLLMAgent(parentCtx.Agent)
+	if llmAgent == nil {
+		return fmt.Errorf("invalid agent type: %+T", parentCtx.Agent)
+	}
+	if llmAgent.IncludeContents == "" || llmAgent.IncludeContents == "none" {
+		return nil
+	}
+	contents := getContents(llmAgent.Name(), parentCtx.Branch, parentCtx.Session.Events)
+	req.Contents = append(req.Contents, contents...)
+	return nil
+}
+
+// getContents returns the contents for the LLM request by applying
+// filtering, rearrangement, and content processing to the given events.
+func getContents(agentName, branch string, events []*adk.Event) []*genai.Content {
+	branchPrefix := branch + "."
+
+	// parse the events, leaving the contents and the function calls and responses from the current agent.
+	var filtered []*adk.Event
+	for _, ev := range events {
+		content := content(ev)
+		// Skip events without content or generated neither by user nor
+		// by model.
+		// e.g. events purely for mutating session states.
+		if content == nil || content.Role == "" || len(content.Parts) == 0 {
+			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
+			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
+			continue
+		}
+		// Skip events that do not belong to the current branch.
+		// TODO: can we use a richier type for branch (e.g. []string) instead of using string prefix test?
+		if branch != "" && (ev.Branch != branch && !strings.HasPrefix(ev.Branch, branchPrefix)) {
+			continue
+		}
+		if isAuthEvent(ev) {
+			continue
+		}
+		if author := ev.Author; author != agentName && author != "user" {
+			filtered = append(filtered, convertForeignEvent(ev))
+		} else {
+			filtered = append(filtered, ev)
+		}
+	}
+
+	// TODO: Rearrange filtered events for proper function call/response pairing.
+	//  src/google/adk/flows/llm_flows/contents.py
+	// 	 - _rearrange_events_for_async_function_response
+	//   - _rearrange_events_for_async_function_responses_in_history
+
+	var contents []*genai.Content
+	for _, ev := range filtered {
+		content := clone(content(ev))
+		if content == nil {
+			continue
+		}
+		// TODO: apply adk/flows/llm_flows/functions.py remove_client_function_call_id.
+		contents = append(contents, content)
+	}
+	return contents
+}
+
+// convertForeignEvent converts an event authored by another agent as
+// a user-content event.
+// This is to provide another aget's output as context to the current agent,
+// so that the current agent can continue to respond, such as summarizing
+// previous agent's reply, etc.
+func convertForeignEvent(ev *adk.Event) *adk.Event {
+	content := content(ev)
+	if content == nil || len(content.Parts) == 0 {
+		return ev
+	}
+
+	converted := &genai.Content{
+		Role:  "user",
+		Parts: []*genai.Part{{Text: "For context:"}},
+	}
+	for _, p := range content.Parts {
+		switch {
+		case p.Text != "":
+			converted.Parts = append(converted.Parts, &genai.Part{
+				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text)})
+		case p.FunctionCall != nil:
+			converted.Parts = append(converted.Parts, &genai.Part{
+				Text: fmt.Sprintf("[%s] called tool %q with parameters: %v", ev.Author, p.FunctionCall.Name, p.FunctionCall.Args)})
+		case p.FunctionResponse != nil:
+			converted.Parts = append(converted.Parts, &genai.Part{
+				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, p.FunctionResponse.Response)})
+		default: // fallback to the original part for non-text and non-functionCall parts.
+			converted.Parts = append(converted.Parts, p)
+		}
+	}
+
+	return &adk.Event{ // made-up event. Don't go through adk.NewEvent.
+		Time:        ev.Time,
+		Author:      "user",
+		LLMResponse: &adk.LLMResponse{Content: converted},
+		Branch:      ev.Branch,
+	}
+}
+
+// requestEUCFunctionCallName is a special function to handle credential
+// request.
+const requestEUCFunctionCallName = "adk_request_credential"
+
+func isAuthEvent(ev *adk.Event) bool {
+	c := content(ev)
+	for _, p := range c.Parts {
+		if p.FunctionCall != nil && p.FunctionCall.Name == requestEUCFunctionCallName {
+			return true
+		}
+		if p.FunctionResponse != nil && p.FunctionResponse.Name == requestEUCFunctionCallName {
+			return true
+		}
+	}
+	return false
+}
+
+// content is a convenience function that returns the genai.Content
+// in the event.
+func content(ev *adk.Event) *genai.Content {
+	if ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+		return nil
+	}
+	return ev.LLMResponse.Content
+}
