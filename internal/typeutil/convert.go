@@ -26,6 +26,11 @@ import (
 // during the conversion.
 func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Resolved) (To, error) {
 	var zero To
+	if resolvedSchema != nil {
+		if err := resolvedSchema.Validate(v); err != nil {
+			return zero, err
+		}
+	}
 	rawArgs, err := json.Marshal(v)
 	if err != nil {
 		return zero, err
@@ -33,11 +38,6 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 	var typed To
 	if err := json.Unmarshal(rawArgs, &typed); err != nil {
 		return zero, err
-	}
-	if resolvedSchema != nil {
-		if err := resolvedSchema.Validate(typed); err != nil {
-			return zero, err
-		}
 	}
 	return typed, nil
 }

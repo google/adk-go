@@ -36,8 +36,8 @@ import (
 // GoogeSearchTool
 // MCPTool
 
-// FunctionToolCfg is the input to the NewFunctionTool function.
-type FunctionToolCfg struct {
+// FunctionToolConfig is the input to the NewFunctionTool function.
+type FunctionToolConfig struct {
 	// The name of this tool.
 	Name string
 	// A human-readable description of the tool.
@@ -55,7 +55,7 @@ type Function[TArgs, TResults any] func(context.Context, TArgs) TResults
 
 // NewFunctionTool creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
-func NewFunctionTool[TArgs, TResults any](cfg FunctionToolCfg, handler Function[TArgs, TResults]) (*FunctionTool[TArgs, TResults], error) {
+func NewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Function[TArgs, TResults]) (*FunctionTool[TArgs, TResults], error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
 	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
@@ -77,7 +77,7 @@ func NewFunctionTool[TArgs, TResults any](cfg FunctionToolCfg, handler Function[
 
 // FunctionTool wraps a Go function.
 type FunctionTool[TArgs, TResults any] struct {
-	cfg FunctionToolCfg
+	cfg FunctionToolConfig
 
 	// A JSON Schema object defining the expected parameters for the tool.
 	inputSchema *jsonschema.Resolved

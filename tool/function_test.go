@@ -45,7 +45,7 @@ func ExampleNewFunctionTool() {
 	handler := func(ctx context.Context, input SumArgs) SumResult {
 		return SumResult{Sum: input.A + input.B}
 	}
-	sumTool, err := tool.NewFunctionTool(tool.FunctionToolCfg{
+	sumTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
 		Name:        "sum",
 		Description: "sums two integers",
 	}, handler)
@@ -98,7 +98,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 	}
 
 	weatherReportTool, err := tool.NewFunctionTool(
-		tool.FunctionToolCfg{
+		tool.FunctionToolConfig{
 			Name:        "get_weather_report",
 			Description: "Retrieves the current weather report for a specified city.",
 		},
@@ -238,7 +238,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 	fruit.Description = "print the remaining quantity of the item."
 	fruit.Enum = []any{"mandarin", "kiwi"}
 
-	inventoryTool, err := tool.NewFunctionTool(tool.FunctionToolCfg{
+	inventoryTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
 		Name:        "print_quantity",
 		Description: "print the remaining quantity of the given fruit.",
 		InputSchema: ischema,
