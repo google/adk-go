@@ -75,16 +75,16 @@ type InvocationContext struct {
 	//  agent_2, and agent_2 is the parent of agent_3.
 	// Branch is used when multiple sub-agents shouldn't see their peer agents'
 	// conversation history.
-	Branch        string
+	Branch string
 	// The current agent of this invocation context. Readonly.
-	Agent         Agent
+	Agent Agent
 	// The user content that started this invocation. Readonly.
-	UserContent   *genai.Content
+	UserContent *genai.Content
 	// Configurations for live agents under this invocation.
-	RunConfig     *AgentRunConfig
+	RunConfig *AgentRunConfig
 
 	// The current session of this invocation context. Readonly.
-	Session        *Session
+	Session *Session
 
 	SessionService SessionService
 	// TODO(jbd): ArtifactService
@@ -98,8 +98,8 @@ type InvocationContext struct {
 func NewInvocationContext(ctx context.Context, agent Agent) (context.Context, *InvocationContext) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	return ctx, &InvocationContext{
-		InvocationID: "e-"+uuid.NewString(),
-		cancel: cancel,
+		InvocationID: "e-" + uuid.NewString(),
+		cancel:       cancel,
 	}
 }
 
@@ -118,11 +118,31 @@ const (
 
 // AgentRunConfig represents the runtime related configuration.
 type AgentRunConfig struct {
-	SpeechConfig                   *genai.SpeechConfig
+	// Speech configuration for the live agent.
+	SpeechConfig *genai.SpeechConfig
+	// Output transcription for live agents with audio response.
 	OutputAudioTranscriptionConfig *genai.AudioTranscriptionConfig
-	ResponseModalities             []string
-	StreamingMode                  StreamingMode
-	SaveInputBlobsAsArtifacts      bool
-	SupportCFC                     bool
-	MaxLLMCalls                    int
+	// The output modalities. If not set, it's default to AUDIO.
+	ResponseModalities []string
+	// Streaming mode, None or StreamingMode.SSE or StreamingMode.BIDI.
+	StreamingMode StreamingMode
+	// Whether or not to save the input blobs as artifacts
+	SaveInputBlobsAsArtifacts bool
+
+	// Whether to support CFC (Compositional Function Calling). Only applicable for
+	// StreamingModeSSE. If it's true. the LIVE API will be invoked since only LIVE
+	// API supports CFC.
+	//
+	// .. warning::
+	//      This feature is **experimental** and its API or behavior may change
+	//     in future releases.
+	SupportCFC bool
+
+	// A limit on the total number of llm calls for a given run.
+	//
+	// Valid Values:
+	//  - More than 0 and less than sys.maxsize: The bound on the number of llm
+	//    calls is enforced, if the value is set in this range.
+	//  - Less than or equal to 0: This allows for unbounded number of llm calls.
+	MaxLLMCalls int
 }
