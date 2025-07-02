@@ -128,24 +128,29 @@ type baseFlow struct {
 
 func (f *baseFlow) Run(ctx context.Context, parentCtx *adk.InvocationContext) adk.EventStream {
 	return func(yield func(*adk.Event, error) bool) {
-		var lastEvent *adk.Event
-		for ev, err := range f.runOneStep(ctx, parentCtx) {
-			if err != nil {
-				yield(nil, err)
+		for {
+			var lastEvent *adk.Event
+			for ev, err := range f.runOneStep(ctx, parentCtx) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				// forward the event first.
+				if !yield(ev, nil) {
+					return
+				}
+				lastEvent = ev
+			}
+			if lastEvent == nil || lastEvent.IsFinalResponse() {
 				return
 			}
-			// forward the event first.
-			yield(ev, nil)
-			lastEvent = ev
+			if lastEvent.LLMResponse.Partial {
+				// We may have reached max token limit during streaming mode.
+				// TODO: handle Partial response in model level. CL 781377328
+				yield(nil, fmt.Errorf("TODO: last event is not final"))
+				return
+			}
 		}
-		if lastEvent == nil || lastEvent.IsFinalResponse() {
-			return
-		}
-		// TODO: if the last event is not final, should we run f.runOneStep again
-		// as one in BaseLlmFlow.run_async? What does that mean?
-		yield(nil, fmt.Errorf("TODO: last event is not final"))
-
-		// TODO: handle Partial response event - LLM max output limit may be reached.
 	}
 }
 
@@ -170,7 +175,7 @@ func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationCont
 				return
 			}
 			// Skip the model response event if there is no content and no error code.
-			// This is needed for the code xecutor to trigger another loop according to
+			// This is needed for the code executor to trigger another loop according to
 			// adk-python src/google/adk/flos/llm_flows/base_llm_flow.py BaseLlmFlow._postprocess_sync.
 			if resp.Content == nil && resp.ErrorCode == 0 && !resp.Interrupted {
 				continue
@@ -181,7 +186,9 @@ func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationCont
 			ev.Branch = parentCtx.Branch
 			ev.LLMResponse = resp
 
-			yield(ev, nil)
+			if !yield(ev, nil) {
+				return
+			}
 
 			// TODO: populate ev.LongRunningToolIDs (see BaseLlmFlow._finalize_model_response_event)
 			// TODO: handle function calls (postprocessFunctionCalls)
@@ -212,7 +219,7 @@ func (f *baseFlow) callLLM(ctx context.Context, parentCtx *adk.InvocationContext
 		// TODO: Set _ADK_AGENT_NAME_LABEL_KEY in req.GenerateConfig.Labels
 		// to help with slicing the billing reports on a per-agent basis.
 
-		// TODO: RunLive mode when invocation_context.run_config.support_ctc is true.
+		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 
 		for resp, err := range f.Model.GenerateContent(ctx, req, parentCtx.RunConfig != nil && parentCtx.RunConfig.StreamingMode == adk.StreamingModeSSE) {
 			if err != nil {
