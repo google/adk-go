@@ -30,7 +30,7 @@ func basicRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext
 
 	llmAgent := asLLMAgent(parentCtx.Agent)
 	if llmAgent == nil {
-		return fmt.Errorf("invalid agent type: %+T", parentCtx.Agent)
+		return nil // do nothing.
 	}
 	req.Model = llmAgent.Model
 	req.GenerateConfig = clone(llmAgent.GenerateContentConfig)

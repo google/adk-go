@@ -484,3 +484,33 @@ func TestConvertForeignEvent(t *testing.T) {
 		})
 	}
 }
+
+func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
+	type customAgent struct {
+		adk.Agent
+	}
+	agent := &customAgent{}
+	events := []*adk.Event{
+		{
+			Author: "user",
+			LLMResponse: &adk.LLMResponse{
+				Content: genai.NewContentFromText("Hello", "user"),
+			},
+		},
+	}
+	invCtx := &adk.InvocationContext{
+		InvocationID: "12345",
+		Agent:        agent,
+		Session:      &adk.Session{Events: events},
+	}
+
+	req := &adk.LLMRequest{}
+	if err := contentsRequestProcessor(t.Context(), invCtx, req); err != nil {
+		t.Fatalf("contentRequestProcessor failed: %v", err)
+	}
+	got := req
+	want := &adk.LLMRequest{}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("LLMRequest after contentRequestProcessor mismatch (-want +got):\n%s", diff)
+	}
+}

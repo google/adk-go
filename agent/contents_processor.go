@@ -30,7 +30,8 @@ func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationCont
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
 	llmAgent := asLLMAgent(parentCtx.Agent)
 	if llmAgent == nil {
-		return fmt.Errorf("invalid agent type: %+T", parentCtx.Agent)
+		// Do nothing.
+		return nil // In python, no error is yielded.
 	}
 	fn := buildContentsDefault // "" or "default".
 	if llmAgent.IncludeContents == "none" {

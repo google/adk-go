@@ -16,7 +16,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/google/adk-go"
 )
@@ -27,7 +26,7 @@ func instructionsRequestProcessor(ctx context.Context, parentCtx *adk.Invocation
 
 	llmAgent := asLLMAgent(parentCtx.Agent)
 	if llmAgent == nil {
-		return fmt.Errorf("invalid agent type: %+T", parentCtx.Agent)
+		return nil // do nothing.
 	}
 	rootAgent := asLLMAgent(llmAgent.RootAgent)
 	if rootAgent == nil {
