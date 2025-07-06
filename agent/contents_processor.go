@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -31,17 +32,26 @@ func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationCont
 	if llmAgent == nil {
 		return fmt.Errorf("invalid agent type: %+T", parentCtx.Agent)
 	}
-	if llmAgent.IncludeContents == "" || llmAgent.IncludeContents == "none" {
-		return nil
+	fn := buildContentsDefault // "" or "default".
+	if llmAgent.IncludeContents == "none" {
+		// Include current turn context only (no conversation history)
+		fn = buildContentsCurrentTurnContextOnly
 	}
-	contents := getContents(llmAgent.Name(), parentCtx.Branch, parentCtx.Session.Events)
+	var events []*adk.Event
+	if parentCtx.Session != nil {
+		events = parentCtx.Session.Events
+	}
+	contents, err := fn(llmAgent.Name(), parentCtx.Branch, events)
+	if err != nil {
+		return err
+	}
 	req.Contents = append(req.Contents, contents...)
 	return nil
 }
 
-// getContents returns the contents for the LLM request by applying
+// buildContentsDefault returns the contents for the LLM request by applying
 // filtering, rearrangement, and content processing to the given events.
-func getContents(agentName, branch string, events []*adk.Event) []*genai.Content {
+func buildContentsDefault(agentName, branch string, events []*adk.Event) ([]*genai.Content, error) {
 	branchPrefix := branch + "."
 
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
@@ -64,7 +74,7 @@ func getContents(agentName, branch string, events []*adk.Event) []*genai.Content
 		if isAuthEvent(ev) {
 			continue
 		}
-		if author := ev.Author; author != agentName && author != "user" {
+		if isOtherAgentReply(agentName, ev) {
 			filtered = append(filtered, convertForeignEvent(ev))
 		} else {
 			filtered = append(filtered, ev)
@@ -85,7 +95,34 @@ func getContents(agentName, branch string, events []*adk.Event) []*genai.Content
 		// TODO: apply adk/flows/llm_flows/functions.py remove_client_function_call_id.
 		contents = append(contents, content)
 	}
-	return contents
+	return contents, nil
+}
+
+// buildContentsCurrentTurnContextOnly returns contents for the current turn only (no conversation history).
+//
+// When include_contents='none', we want to include:
+//   - The current user input
+//   - Tool calls and responses from the current turn
+//
+// But exclude conversation history from previous turns.
+//
+//	In multi-agent scenarios, the "current turn" for an agent starts from an
+//	actual user or from another agent.
+func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*adk.Event) ([]*genai.Content, error) {
+	// Find the latest event that starts the current turn and process from there
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event.Author == "user" || isOtherAgentReply(agentName, event) {
+			return buildContentsDefault(agentName, branch, events[i:])
+		}
+	}
+	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
+	// but that may be a bug.
+	return buildContentsDefault(agentName, branch, events)
+}
+
+func isOtherAgentReply(currentAgentName string, ev *adk.Event) bool {
+	return ev.Author != currentAgentName && ev.Author != "user"
 }
 
 // convertForeignEvent converts an event authored by another agent as
@@ -110,10 +147,10 @@ func convertForeignEvent(ev *adk.Event) *adk.Event {
 				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text)})
 		case p.FunctionCall != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] called tool %q with parameters: %v", ev.Author, p.FunctionCall.Name, p.FunctionCall.Args)})
+				Text: fmt.Sprintf("[%s] called tool %q with parameters: %s", ev.Author, p.FunctionCall.Name, stringify(p.FunctionCall.Args))})
 		case p.FunctionResponse != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, p.FunctionResponse.Response)})
+				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response))})
 		default: // fallback to the original part for non-text and non-functionCall parts.
 			converted.Parts = append(converted.Parts, p)
 		}
@@ -125,6 +162,11 @@ func convertForeignEvent(ev *adk.Event) *adk.Event {
 		LLMResponse: &adk.LLMResponse{Content: converted},
 		Branch:      ev.Branch,
 	}
+}
+
+func stringify(v any) string {
+	s, _ := json.Marshal(v)
+	return string(s)
 }
 
 // requestEUCFunctionCallName is a special function to handle credential
@@ -147,7 +189,7 @@ func isAuthEvent(ev *adk.Event) bool {
 // content is a convenience function that returns the genai.Content
 // in the event.
 func content(ev *adk.Event) *genai.Content {
-	if ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+	if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
 		return nil
 	}
 	return ev.LLMResponse.Content
