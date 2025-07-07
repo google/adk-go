@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/google/adk-go"
+	"github.com/google/adk-go/internal/itype"
 	"github.com/google/adk-go/internal/typeutil"
 	"github.com/modelcontextprotocol/go-sdk/jsonschema"
 	"google.golang.org/genai"
@@ -89,6 +90,7 @@ type FunctionTool[TArgs, TResults any] struct {
 }
 
 var _ adk.Tool = (*FunctionTool[any, any])(nil)
+var _ itype.FunctionTool = (*FunctionTool[any, any])(nil)
 
 // Description implements adk.Tool.
 func (f *FunctionTool[TArgs, TResults]) Description() string {
@@ -102,6 +104,11 @@ func (f *FunctionTool[TArgs, TResults]) Name() string {
 
 // ProcessRequest implements adk.Tool.
 func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx context.Context, tc *adk.ToolContext, req *adk.LLMRequest) error {
+	return req.AppendTools(f)
+}
+
+// FunctionDeclaration implements interfaces.FunctionTool.
+func (f *FunctionTool[TArgs, TResults]) FunctionDeclaration() *genai.FunctionDeclaration {
 	decl := &genai.FunctionDeclaration{
 		Name:        f.Name(),
 		Description: f.Description(),
@@ -112,13 +119,7 @@ func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx context.Context, tc *
 	if f.outputSchema != nil {
 		decl.ResponseJsonSchema = f.outputSchema.Schema()
 	}
-	if req.GenerateConfig == nil {
-		req.GenerateConfig = &genai.GenerateContentConfig{}
-	}
-	req.GenerateConfig.Tools = append(req.GenerateConfig.Tools, &genai.Tool{
-		FunctionDeclarations: []*genai.FunctionDeclaration{decl},
-	})
-	return nil
+	return decl
 }
 
 // Run executes the tool with the provided context and yields events.

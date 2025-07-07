@@ -17,9 +17,11 @@ package adk
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"strings"
 
+	"github.com/google/adk-go/internal/itype"
 	"google.golang.org/genai"
 )
 
@@ -36,6 +38,9 @@ type LLMRequest struct {
 	Model          Model                        `json:"model,omitempty"`
 	Contents       []*genai.Content             `json:"contents,omitempty"`
 	GenerateConfig *genai.GenerateContentConfig `json:"generate_config,omitempty"`
+
+	// Dictionary of tools appended to the request with AppendTools.
+	Tools map[string]Tool
 
 	// TODO: Can't we use genai's types?
 
@@ -55,8 +60,36 @@ func (r *LLMRequest) AppendInstructions(instructions ...string) {
 	}
 }
 
-func (r *LLMRequest) AppendTools(tools ...Tool) {
-	panic("unimplemented")
+// AppendTools appends the tools to the request.
+// Appending duplicate tools or nameless tools is an error.
+func (r *LLMRequest) AppendTools(tools ...Tool) error {
+	if r.Tools == nil {
+		r.Tools = make(map[string]Tool)
+	}
+
+	for i, tool := range tools {
+		if tool == nil || tool.Name() == "" {
+			return fmt.Errorf("tools[%d] tool without name: %v", i, tool)
+		}
+		name := tool.Name()
+		if _, ok := r.Tools[name]; ok {
+			return fmt.Errorf("tools[%d] duplicate tool: %q", i, name)
+		}
+		r.Tools[name] = tool
+
+		// If the tool is a function tool, add its declaration to GenerateConfig.Tools.
+		if fnTool, ok := tool.(itype.FunctionTool); ok {
+			if r.GenerateConfig == nil {
+				r.GenerateConfig = &genai.GenerateContentConfig{}
+			}
+			if decl := fnTool.FunctionDeclaration(); decl != nil {
+				r.GenerateConfig.Tools = append(r.GenerateConfig.Tools, &genai.Tool{
+					FunctionDeclarations: []*genai.FunctionDeclaration{decl},
+				})
+			}
+		}
+	}
+	return nil
 }
 
 func (r *LLMRequest) String() string {
