@@ -105,11 +105,11 @@ func TestInMemorySessionService_AppendEvent(t *testing.T) {
 		Author:       "user",
 		Branch:       "foo.bar",
 	}
-	if err := service.AppendEvent(ctx, &adk.SessionAppendEventRequest{
-		Session: sess,
-		Event:   event1,
-	}); err != nil {
+	if err := service.AppendEvent(ctx, sess, event1); err != nil {
 		t.Fatalf("AppendEvent() failed: %v", err)
+	}
+	if diff := cmp.Diff([]*adk.Event{event1}, sess.Events); diff != "" {
+		t.Errorf("AppendEvent() did not update the session object's Events (-want +got):\n%s", diff)
 	}
 
 	// Get the session and check events
@@ -122,17 +122,17 @@ func TestInMemorySessionService_AppendEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() failed: %v", err)
 	}
-	if diff := cmp.Diff(gotSess.Events, []*adk.Event{event1}); diff != "" {
-		t.Errorf("Get() returned events mismatch (-got +want):\n%s", diff)
+	if diff := cmp.Diff([]*adk.Event{event1}, gotSess.Events); diff != "" {
+		t.Errorf("Get() returned events mismatch (-want +got):\n%s", diff)
 	}
 
 	// Append another event
 	event2 := &adk.Event{ID: "e-7890"}
-	if err := service.AppendEvent(ctx, &adk.SessionAppendEventRequest{
-		Session: sess,
-		Event:   event2,
-	}); err != nil {
+	if err := service.AppendEvent(ctx, sess, event2); err != nil {
 		t.Fatalf("AppendEvent() failed: %v", err)
+	}
+	if diff := cmp.Diff([]*adk.Event{event1, event2}, sess.Events); diff != "" {
+		t.Errorf("AppendEvent() did not update the session object's Events (-want +got):\n%s", diff)
 	}
 
 	// Get the session and check events.
@@ -158,11 +158,20 @@ func TestInMemorySessionService_AppendEvent_nonexistant(t *testing.T) {
 	}
 
 	// Append to non-existent session
-	if err := service.AppendEvent(ctx, &adk.SessionAppendEventRequest{
-		Session: &adk.Session{ID: "non-existent"},
-		Event:   event1,
-	}); err == nil {
+	sess := &adk.Session{
+		ID:      "non-existent",
+		AppName: "foo",
+		UserID:  "bar",
+	}
+	if err := service.AppendEvent(ctx, sess, event1); err == nil {
 		t.Errorf("AppendEvent() to non-existent session succeeded, want error")
+	}
+	if sess.ID != "non-existent" || sess.AppName != "foo" || sess.UserID != "bar" || len(sess.Events) != 0 {
+		t.Errorf("AppendEvent(non-existent session) unexpectedly modified the session object: %v", sess)
+	}
+	got, err := service.List(ctx, &adk.SessionListRequest{AppName: "foo", UserID: "bar"})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("List() = (%v, %v), want ([], nil)", got, err)
 	}
 }
 

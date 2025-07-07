@@ -108,12 +108,15 @@ func (s *InMemorySessionService) get(appName, userID, sessionID string) (*sessio
 }
 
 // AppendEvent implements adk.SessionService.
-func (s *InMemorySessionService) AppendEvent(ctx context.Context, req *adk.SessionAppendEventRequest) error {
-	sess, ok := s.get(req.Session.AppName, req.Session.UserID, req.Session.ID)
+func (s *InMemorySessionService) AppendEvent(ctx context.Context, session *adk.Session, event *adk.Event) error {
+	// TODO: no-op if event is partial.
+	// TODO: process event actions and state delta.
+	sess, ok := s.get(session.AppName, session.UserID, session.ID)
 	if !ok {
 		return fmt.Errorf("session not found")
 	}
-	sess.AppendEvent(ctx, req.Event)
+	sess.AppendEvent(ctx, event)
+	session.Events = append(session.Events, event)
 	return nil
 }
 

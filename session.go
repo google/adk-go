@@ -21,11 +21,24 @@ import (
 
 // SessionService abstracts the session storage.
 type SessionService interface {
+	// Create creates and returns a new session.
+	// If the session already exists, it returns an error.
 	Create(ctx context.Context, req *SessionCreateRequest) (*Session, error)
+	// Get returns the requested session.
+	// It returns an error if the requested session does not exist.
 	Get(ctx context.Context, req *SessionGetRequest) (*Session, error)
+	// List lists the requested sessions.
+	// It returns an empty list if no session matches.
 	List(ctx context.Context, req *SessionListRequest) ([]*Session, error)
+	// Delete deletes the requested session.
+	// It reports an error if the requested session does not exist.
 	Delete(ctx context.Context, req *SessionDeleteRequest) error
-	AppendEvent(ctx context.Context, req *SessionAppendEventRequest) error
+
+	// AppendEvent appends the event to the session object.
+	// The change is reflected both in the session storage and
+	// the provided Session object's Events field.
+	// If the event is marked as partial, it is a no-op.
+	AppendEvent(ctx context.Context, session *Session, ev *Event) error
 }
 
 // Session represents a series of interaction between a user and agents.
@@ -68,11 +81,4 @@ type SessionListRequest struct {
 type SessionDeleteRequest struct {
 	// Identifies a unique session object. Required.
 	AppName, UserID, SessionID string
-}
-
-// SessionAppendEventRequest is the request for SesssionService's AppendEvent.
-type SessionAppendEventRequest struct {
-	// Required.
-	Session *Session // TODO: why not just AppName/UserID/SessionID?
-	Event   *Event
 }
