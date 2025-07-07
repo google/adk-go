@@ -99,6 +99,7 @@ func NewInvocationContext(ctx context.Context, agent Agent) (context.Context, *I
 	ctx, cancel := context.WithCancelCause(ctx)
 	return ctx, &InvocationContext{
 		InvocationID: "e-" + uuid.NewString(),
+		Agent:        agent,
 		cancel:       cancel,
 	}
 }

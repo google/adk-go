@@ -124,9 +124,7 @@ func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx context.Context, tc *
 // Run executes the tool with the provided context and yields events.
 func (f *FunctionTool[TArgs, TResults]) Run(ctx context.Context, tc *adk.ToolContext, args map[string]any) (map[string]any, error) {
 	// TODO: Handle function call request from tc.InvocationContext.
-	// TODO: Unmarshal into input.
-	// TODO: Make a call to f.handler.
-	// TODO: Yield events with the output.
+	// TODO: Handle panic -> convert to error.
 	input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](args, f.inputSchema)
 	if err != nil {
 		return nil, err

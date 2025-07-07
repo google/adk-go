@@ -69,7 +69,11 @@ type Event struct {
 
 // IsFinalResponse returns whether the LLMResponse in the event is the final response.
 func (ev *Event) IsFinalResponse() bool {
-	if ev.Actions == nil || ev.Actions.SkipSummarization || len(ev.LongRunningToolIDs) > 0 {
+	if (ev.Actions != nil && ev.Actions.SkipSummarization) || len(ev.LongRunningToolIDs) > 0 {
+		return true
+	}
+	// TODO: when will we see event without LLMResponse?
+	if ev.LLMResponse == nil {
 		return true
 	}
 	return !hasFunctionCalls(ev.LLMResponse) && !hasFunctionResponses(ev.LLMResponse) && !ev.LLMResponse.Partial && !hasTrailingCodeExecutionResult(ev.LLMResponse)
