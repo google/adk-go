@@ -49,7 +49,7 @@ type LLMAgent struct {
 	// The output schema when agent replies.
 	//
 	// NOTE: when this is set, agent can only reply and cannot use any tools,
-	// such asfunction tools, RAGs, agent transfer, etc.
+	// such as function tools, RAGs, agent transfer, etc.
 	OutputSchema *genai.Schema
 
 	RootAgent adk.Agent
@@ -186,7 +186,16 @@ func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationCont
 				return
 			}
 
-			// TODO: handle function calls (postprocessFunctionCalls)
+			// Handle function calls.
+			fnCalls := functionCalls(resp.Content)
+			if len(fnCalls) == 0 {
+				continue
+			}
+			for ev, err := range f.postprocessHandleFunctionCalls(ctx, parentCtx, req, resp) {
+				if !yield(ev, err) || err != nil {
+					return
+				}
+			}
 		}
 	}
 }
@@ -208,9 +217,23 @@ func (f *baseFlow) finalizeModelResponseEvent(parentCtx *adk.InvocationContext, 
 }
 
 func (f *baseFlow) preprocess(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+	llmAgent := asLLMAgent(parentCtx.Agent)
+	if llmAgent == nil {
+		return nil
+	}
 	// apply request processor functions to the request in the configured order.
 	for _, processor := range f.RequestProcessors {
 		if err := processor(ctx, parentCtx, req); err != nil {
+			return err
+		}
+	}
+	// run processors for tools.
+	for _, t := range llmAgent.Tools {
+		toolCtx := &adk.ToolContext{
+			InvocationContext: parentCtx, // TODO: how to prevent mutation on this?
+			EventActions:      &adk.EventActions{},
+		}
+		if err := t.ProcessRequest(ctx, toolCtx, req); err != nil {
 			return err
 		}
 	}
@@ -253,4 +276,130 @@ func (f *baseFlow) postprocess(ctx context.Context, parentCtx *adk.InvocationCon
 		}
 	}
 	return nil
+}
+
+func (f *baseFlow) postprocessHandleFunctionCalls(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) adk.EventStream {
+	return func(yield func(*adk.Event, error) bool) {
+		ev, err := handleFunctionCalls(ctx, parentCtx, req.Tools, resp)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		// TODO: generate and yield an auth event if needed.
+
+		if !yield(ev, nil) {
+			return
+		}
+
+		// TODO: handle ev.Actions such as TransferToAgent set by transfer_to_agent tool.
+	}
+}
+
+// handleFunctionCalls calls the functions and returns the function response event.
+//
+// TODO: accept filters to include/exclude function calls.
+func handleFunctionCalls(ctx context.Context, parentCtx *adk.InvocationContext, toolsDict map[string]adk.Tool, resp *adk.LLMResponse) (*adk.Event, error) {
+	var fnResponseEvents []*adk.Event
+
+	fnCalls := functionCalls(resp.Content)
+	for _, fnCall := range fnCalls {
+		tool, ok := toolsDict[fnCall.Name]
+		if !ok {
+			return nil, fmt.Errorf("unknown tool: %q", fnCall.Name)
+		}
+		toolCtx := &adk.ToolContext{
+			InvocationContext: parentCtx,
+			FunctionCallID:    fnCall.ID,
+		}
+		// TODO: agent.canonical_before_tool_callbacks
+		result, err := tool.Run(ctx, toolCtx, fnCall.Args)
+		// genai.FunctionResponse expects to use "output" key to specify function output
+		// and "error" key to specify error details (if any). If "output" and "error" keys
+		// are not specified, then whole "response" is treated as function output.
+		// TODO(hakim): revisit the tool's function signature to handle error from user function better.
+		if err != nil {
+			result = map[string]any{"error": fmt.Errorf("tool %q failed: %w", tool.Name(), err)}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("tool %q failed to run: %w", tool.Name(), err)
+			// TODO: should we include the fn.Args in the error? That may have sensitive info.
+		}
+		// TODO: agent.canonical_after_tool_callbacks
+		// TODO: handle long-running tool.
+		ev := adk.NewEvent(parentCtx.InvocationID)
+		ev.LLMResponse = &adk.LLMResponse{
+			Content: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{
+					{
+						FunctionResponse: &genai.FunctionResponse{
+							ID:       fnCall.ID,
+							Name:     fnCall.Name,
+							Response: result,
+						},
+					},
+				},
+			},
+		}
+		ev.Author = parentCtx.Agent.Name()
+		ev.Branch = parentCtx.Branch
+		ev.Actions = toolCtx.EventActions
+		fnResponseEvents = append(fnResponseEvents, ev)
+	}
+	return mergeParallelFunctionResponseEvents(fnResponseEvents)
+}
+
+func mergeParallelFunctionResponseEvents(events []*adk.Event) (*adk.Event, error) {
+	switch len(events) {
+	case 0:
+		return nil, nil
+	case 1:
+		return events[0], nil
+	}
+	var parts []*genai.Part
+	var actions *adk.EventActions
+	for _, ev := range events {
+		if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+			continue
+		}
+		parts = append(parts, ev.LLMResponse.Content.Parts...)
+		actions = mergeEventActions(actions, ev.Actions)
+	}
+	// reuse events[0]
+	ev := events[0]
+	ev.LLMResponse = &adk.LLMResponse{
+		Content: &genai.Content{
+			Role:  "user",
+			Parts: parts,
+		},
+	}
+	ev.Actions = actions
+	return ev, nil
+}
+
+func mergeEventActions(base, other *adk.EventActions) *adk.EventActions {
+	// flows/llm_flows/functions.py merge_parallel_function_response_events
+	//
+	// TODO: merge_parallel_function_response_events creates a "last one wins" scenario
+	// except parts and requested_auth_configs. Check with the ADK team about
+	// the intention.
+	if other == nil {
+		return base
+	}
+	if base == nil {
+		return other
+	}
+	if other.SkipSummarization {
+		base.SkipSummarization = true
+	}
+	if other.TransferToAgent != "" {
+		base.TransferToAgent = other.TransferToAgent
+	}
+	if other.Escalate {
+		base.Escalate = true
+	}
+	if other.StateDelta != nil {
+		base.StateDelta = other.StateDelta
+	}
+	return base
 }

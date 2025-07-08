@@ -1,0 +1,117 @@
+httprr trace v1
+835 1141
+POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 602
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"what is the sum of 1 + 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"computes the sum of two numbers","name":"sum","parametersJsonSchema":{"additionalProperties":{"not":{}},"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":{"not":{}},"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 07 Jul 2025 13:39:56 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=592
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "sum",
+              "args": {
+                "b": 2,
+                "a": 1
+              }
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": -3.4829718060791491e-07
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 28,
+    "candidatesTokenCount": 5,
+    "totalTokenCount": 33,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 28
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 5
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "K85raLC0NbKm1dkPoOiKsQM"
+}
+998 1007
+POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 765
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"what is the sum of 1 + 2?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":1,"b":2},"name":"sum"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"sum","response":{"sum":3}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"computes the sum of two numbers","name":"sum","parametersJsonSchema":{"additionalProperties":{"not":{}},"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":{"not":{}},"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 07 Jul 2025 13:39:56 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=417
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "3\n"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": -8.2294456660747528e-05
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 36,
+    "candidatesTokenCount": 2,
+    "totalTokenCount": 38,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 36
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 2
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "LM5raOKMI52vgLUPiKvesAc"
+}
