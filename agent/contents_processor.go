@@ -93,7 +93,7 @@ func buildContentsDefault(agentName, branch string, events []*adk.Event) ([]*gen
 		if content == nil {
 			continue
 		}
-		// TODO: apply adk/flows/llm_flows/functions.py remove_client_function_call_id.
+		removeClientFunctionCallID(content)
 		contents = append(contents, content)
 	}
 	return contents, nil
@@ -185,13 +185,4 @@ func isAuthEvent(ev *adk.Event) bool {
 		}
 	}
 	return false
-}
-
-// content is a convenience function that returns the genai.Content
-// in the event.
-func content(ev *adk.Event) *genai.Content {
-	if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
-		return nil
-	}
-	return ev.LLMResponse.Content
 }

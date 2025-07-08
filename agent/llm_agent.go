@@ -176,24 +176,35 @@ func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationCont
 			}
 			// Skip the model response event if there is no content and no error code.
 			// This is needed for the code executor to trigger another loop according to
-			// adk-python src/google/adk/flos/llm_flows/base_llm_flow.py BaseLlmFlow._postprocess_sync.
+			// adk-python src/google/adk/flows/llm_flows/base_llm_flow.py BaseLlmFlow._postprocess_async.
 			if resp.Content == nil && resp.ErrorCode == 0 && !resp.Interrupted {
 				continue
 			}
-			// Build the event.
-			ev := adk.NewEvent(parentCtx.InvocationID)
-			ev.Author = parentCtx.Agent.Name()
-			ev.Branch = parentCtx.Branch
-			ev.LLMResponse = resp
-
-			if !yield(ev, nil) {
+			// Build the event and yield.
+			modelResponseEvent := f.finalizeModelResponseEvent(parentCtx, resp)
+			if !yield(modelResponseEvent, nil) {
 				return
 			}
 
-			// TODO: populate ev.LongRunningToolIDs (see BaseLlmFlow._finalize_model_response_event)
 			// TODO: handle function calls (postprocessFunctionCalls)
 		}
 	}
+}
+
+func (f *baseFlow) finalizeModelResponseEvent(parentCtx *adk.InvocationContext, resp *adk.LLMResponse) *adk.Event {
+	// FunctionCall & FunctionResponse matching algorithm assumes non-empty function call IDs
+	// but function call ID is optional in genai API and some models do not use the field.
+	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
+	populateClientFunctionCallID(resp.Content)
+
+	ev := adk.NewEvent(parentCtx.InvocationID)
+	ev.Author = parentCtx.Agent.Name()
+	ev.Branch = parentCtx.Branch
+	ev.LLMResponse = resp
+
+	// TODO: populate ev.LongRunningToolIDs (see BaseLlmFlow._finalize_model_response_event)
+
+	return ev
 }
 
 func (f *baseFlow) preprocess(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
