@@ -52,8 +52,8 @@ type LLMAgent struct {
 	// such as function tools, RAGs, agent transfer, etc.
 	OutputSchema *genai.Schema
 
-	RootAgent adk.Agent
-	SubAgents []adk.Agent
+	ParentAgent adk.Agent
+	SubAgents   []adk.Agent
 
 	// OutputKey
 	// Planner
@@ -66,41 +66,37 @@ type LLMAgent struct {
 	// AfterToolCallback
 }
 
+// AddSubAgents adds the agents to the subagent list.
+func (a *LLMAgent) AddSubAgents(agents ...adk.Agent) {
+	for _, subagent := range agents {
+		a.SubAgents = append(a.SubAgents, subagent)
+		if s := asLLMAgent(subagent); s != nil {
+			s.ParentAgent = a
+		}
+	}
+}
+
 func (a *LLMAgent) Name() string        { return a.AgentName }
 func (a *LLMAgent) Description() string { return a.AgentDescription }
 func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) (adk.EventStream, error) {
 	// TODO: Select model (LlmAgent.canonical_model)
-	// TODO: Autoflow Run.
 
-	if a.DisallowTransferToParent && a.DisallowTransferToPeers && len(a.SubAgents) == 0 {
-		flow, err := newSingleFlow(parentCtx)
-		if err != nil {
-			return nil, err
-		}
-		return flow.Run(ctx, parentCtx), nil
-	} else {
-		panic("not implemented")
+	flow := &baseFlow{
+		Model:              a.Model,
+		RequestProcessors:  defaultRequestProcessors,
+		ResponseProcessors: defaultResponseProcessors,
 	}
+	return flow.Run(ctx, parentCtx), nil
+}
+
+func (a *LLMAgent) useAutoFlow() bool {
+	return len(a.SubAgents) != 0 || !a.DisallowTransferToParent || !a.DisallowTransferToPeers
 }
 
 var _ adk.Agent = (*LLMAgent)(nil)
 
-// TODO: Do we want to abstract "Flow" too?
-
-func newSingleFlow(parentCtx *adk.InvocationContext) (*baseFlow, error) {
-	llmAgent, ok := parentCtx.Agent.(*LLMAgent)
-	if !ok {
-		return nil, fmt.Errorf("invalid agent type: %+T", parentCtx.Agent)
-	}
-	return &baseFlow{
-		Model:              llmAgent.Model,
-		RequestProcessors:  singleFlowRequestProcessors,
-		ResponseProcessors: singleFlowResponseProcessors,
-	}, nil
-}
-
 var (
-	singleFlowRequestProcessors = []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error{
+	defaultRequestProcessors = []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error{
 		basicRequestProcessor,
 		authPreprocesssor,
 		instructionsRequestProcessor,
@@ -112,8 +108,9 @@ var (
 		// Code execution should be after contentsRequestProcessor as it mutates the contents
 		// to optimize data files.
 		codeExecutionRequestProcessor,
+		agentTransferRequestProcessor,
 	}
-	singleFlowResponseProcessors = []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error{
+	defaultResponseProcessors = []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error{
 		nlPlanningResponseProcessor,
 		codeExecutionResponseProcessor,
 	}

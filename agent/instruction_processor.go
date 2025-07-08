@@ -28,7 +28,7 @@ func instructionsRequestProcessor(ctx context.Context, parentCtx *adk.Invocation
 	if llmAgent == nil {
 		return nil // do nothing.
 	}
-	rootAgent := asLLMAgent(llmAgent.RootAgent)
+	rootAgent := asLLMAgent(rootAgent(llmAgent))
 	if rootAgent == nil {
 		rootAgent = llmAgent
 	}

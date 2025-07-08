@@ -53,6 +53,10 @@ func (r *LLMRequest) AppendInstructions(instructions ...string) {
 		return
 	}
 	inst := strings.Join(instructions, "\n\n")
+
+	if r.GenerateConfig == nil {
+		r.GenerateConfig = &genai.GenerateContentConfig{}
+	}
 	if current := r.GenerateConfig.SystemInstruction; current != nil && len(current.Parts) > 0 && current.Parts[0].Text != "" {
 		r.GenerateConfig.SystemInstruction = genai.NewContentFromText(current.Parts[0].Text+"\n\n"+inst, "")
 	} else {

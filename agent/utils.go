@@ -54,7 +54,9 @@ func removeClientFunctionCallID(c *genai.Content) {
 
 //
 // Belows are useful utilities that help working with genai.Content
-// included in adk.Event. Move them to a separate file or an internal utility package.
+// included in adk.Event.
+// TODO: Move them to a separate internal utility package.
+// TODO: Use generics.
 
 // functionCalls extracts all FunctionCall parts from the content.
 func functionCalls(c *genai.Content) (ret []*genai.FunctionCall) {
@@ -82,6 +84,30 @@ func functionResponses(c *genai.Content) (ret []*genai.FunctionResponse) {
 	return ret
 }
 
+// textParts extracts all Text parts from the content.
+func textParts(c *genai.Content) (ret []string) {
+	if c == nil {
+		return nil
+	}
+	for _, p := range c.Parts {
+		if p.Text != "" {
+			ret = append(ret, p.Text)
+		}
+	}
+	return ret
+}
+
+// functionDecls extracts all Function declarations from the GenerateContentConfig.
+func functionDecls(c *genai.GenerateContentConfig) (ret []*genai.FunctionDeclaration) {
+	if c == nil {
+		return nil
+	}
+	for _, t := range c.Tools {
+		ret = append(ret, t.FunctionDeclarations...)
+	}
+	return ret
+}
+
 // content is a convenience function that returns the genai.Content
 // in the event.
 func content(ev *adk.Event) *genai.Content {
@@ -89,4 +115,24 @@ func content(ev *adk.Event) *genai.Content {
 		return nil
 	}
 	return ev.LLMResponse.Content
+}
+
+func rootAgent(agent adk.Agent) adk.Agent {
+	findParent := func(agent adk.Agent) adk.Agent {
+		a := asLLMAgent(agent)
+		if a == nil {
+			return nil
+		}
+		if p := asLLMAgent(a.ParentAgent); p == nil {
+			return nil
+		}
+		return a
+	}
+	current := agent
+	parent := findParent(current)
+	for parent != nil {
+		current = parent
+		parent = findParent(current)
+	}
+	return parent
 }
