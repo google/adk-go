@@ -16,11 +16,11 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/google/adk-go"
+	"github.com/google/adk-go/internal/typeutil"
 	"google.golang.org/genai"
 )
 
@@ -89,7 +89,7 @@ func buildContentsDefault(agentName, branch string, events []*adk.Event) ([]*gen
 
 	var contents []*genai.Content
 	for _, ev := range filtered {
-		content := clone(content(ev))
+		content := typeutil.Clone(content(ev))
 		if content == nil {
 			continue
 		}
@@ -148,10 +148,10 @@ func convertForeignEvent(ev *adk.Event) *adk.Event {
 				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text)})
 		case p.FunctionCall != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] called tool %q with parameters: %s", ev.Author, p.FunctionCall.Name, stringify(p.FunctionCall.Args))})
+				Text: fmt.Sprintf("[%s] called tool %q with parameters: %s", ev.Author, p.FunctionCall.Name, typeutil.JSONString(p.FunctionCall.Args))})
 		case p.FunctionResponse != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response))})
+				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, typeutil.JSONString(p.FunctionResponse.Response))})
 		default: // fallback to the original part for non-text and non-functionCall parts.
 			converted.Parts = append(converted.Parts, p)
 		}
@@ -163,11 +163,6 @@ func convertForeignEvent(ev *adk.Event) *adk.Event {
 		LLMResponse: &adk.LLMResponse{Content: converted},
 		Branch:      ev.Branch,
 	}
-}
-
-func stringify(v any) string {
-	s, _ := json.Marshal(v)
-	return string(s)
 }
 
 // requestEUCFunctionCallName is a special function to handle credential

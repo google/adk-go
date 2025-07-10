@@ -17,6 +17,7 @@ package typeutil
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonschema"
 )
@@ -40,4 +41,13 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 		return zero, err
 	}
 	return typed, nil
+}
+
+// JSONString returns a JSON string of the type.
+func JSONString(v any) string {
+	s, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("<error: %v>", err)
+	}
+	return string(s)
 }

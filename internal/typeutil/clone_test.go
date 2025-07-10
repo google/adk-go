@@ -12,14 +12,49 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent
+package typeutil
 
 import (
 	"reflect"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
 )
 
 func TestClone(t *testing.T) {
+	// test cloneable
+	t.Run("genaiContent", func(t *testing.T) {
+		orig := []*genai.Content{genai.NewContentFromText("foo", "user")}
+		got := Clone(orig)
+		if diff := cmp.Diff(orig, got); diff != "" {
+			t.Errorf("Clone() mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(orig, got); diff != "" {
+			t.Errorf("Clone() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("genaiGenerateContentConfig", func(t *testing.T) {
+		orig := &genai.GenerateContentConfig{
+			SystemInstruction: &genai.Content{},
+			ResponseSchema:    &genai.Schema{},
+			Tools: []*genai.Tool{
+				{
+					FunctionDeclarations: []*genai.FunctionDeclaration{{
+						Name: "tool",
+					}},
+				},
+			},
+		}
+		got := Clone(orig)
+		if diff := cmp.Diff(orig, got); diff != "" {
+			t.Errorf("Clone() mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestCloneInternal(t *testing.T) {
 	type testStruct struct {
 		S  string
 		I  int
@@ -27,6 +62,8 @@ func TestClone(t *testing.T) {
 		M  map[string]string
 		P  *int
 		N  *testStruct
+		X  any
+		A  [3]string
 	}
 
 	testData := func() *testStruct {
@@ -39,6 +76,8 @@ func TestClone(t *testing.T) {
 			N: &testStruct{
 				S: "nested",
 			},
+			X: 1,
+			A: [3]string{"a", "b"},
 		}
 	}
 
@@ -74,6 +113,11 @@ func TestClone(t *testing.T) {
 		original := testData()
 		cloned := clone(original)
 		check(t, original, cloned)
+	})
+	t.Run("pointerOfPointer", func(t *testing.T) {
+		original := testData()
+		cloned := clone(&original)
+		check(t, original, *cloned)
 	})
 	t.Run("value", func(t *testing.T) {
 		original := testData()
