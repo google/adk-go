@@ -65,7 +65,7 @@ func clone[M any](src M) M {
 	newVal := reflect.New(val.Type()).Elem()
 
 	// Recursively copy the base value.
-	deepCopy(val, newVal)
+	deepCopy(newVal, val)
 
 	// Re-wrap the copied value with the original number of pointers.
 	finalVal := newVal
@@ -82,7 +82,7 @@ func clone[M any](src M) M {
 }
 
 // deepCopy copies src to dst using reflect.
-func deepCopy(src, dst reflect.Value) {
+func deepCopy(dst, src reflect.Value) {
 	switch src.Kind() {
 	case reflect.Struct:
 		t := src.Type()
@@ -92,7 +92,7 @@ func deepCopy(src, dst reflect.Value) {
 			}
 			// Create a copy of the field and set it on the destination struct
 			fieldCopy := reflect.New(src.Field(i).Type()).Elem()
-			deepCopy(src.Field(i), fieldCopy)
+			deepCopy(fieldCopy, src.Field(i))
 			dst.Field(i).Set(fieldCopy)
 		}
 	case reflect.Slice:
@@ -103,7 +103,7 @@ func deepCopy(src, dst reflect.Value) {
 		for i := range src.Len() {
 			// Create a copy of each element and set it in the new slice
 			elemCopy := reflect.New(src.Index(i).Type()).Elem()
-			deepCopy(src.Index(i), elemCopy)
+			deepCopy(elemCopy, src.Index(i))
 			dst.Index(i).Set(elemCopy)
 		}
 	case reflect.Array:
@@ -111,7 +111,7 @@ func deepCopy(src, dst reflect.Value) {
 		// We just need to iterate and copy each element.
 		for i := range src.Len() {
 			elemCopy := reflect.New(src.Index(i).Type()).Elem()
-			deepCopy(src.Index(i), elemCopy)
+			deepCopy(elemCopy, src.Index(i))
 			dst.Index(i).Set(elemCopy)
 		}
 	case reflect.Map:
@@ -122,10 +122,10 @@ func deepCopy(src, dst reflect.Value) {
 		for _, key := range src.MapKeys() {
 			// Create copies of the key and value and set them in the new map
 			keyCopy := reflect.New(key.Type()).Elem()
-			deepCopy(key, keyCopy)
+			deepCopy(keyCopy, key)
 			m := src.MapIndex(key)
 			valCopy := reflect.New(m.Type()).Elem()
-			deepCopy(m, valCopy)
+			deepCopy(valCopy, m)
 			dst.SetMapIndex(keyCopy, valCopy)
 		}
 	case reflect.Interface:
@@ -134,7 +134,7 @@ func deepCopy(src, dst reflect.Value) {
 		}
 		elem := src.Elem()
 		newVal := reflect.New(elem.Type()).Elem()
-		deepCopy(elem, newVal)
+		deepCopy(newVal, elem)
 		dst.Set(newVal)
 	case reflect.Ptr:
 		if src.IsNil() {
@@ -142,7 +142,7 @@ func deepCopy(src, dst reflect.Value) {
 		}
 		// Create a new pointer and deep copy the underlying value
 		newPtr := reflect.New(src.Elem().Type())
-		deepCopy(src.Elem(), newPtr.Elem())
+		deepCopy(newPtr.Elem(), src.Elem())
 		dst.Set(newPtr)
 	case reflect.Chan, reflect.Func:
 		panic(fmt.Sprintf("unsupported type: %v", src.Type()))
