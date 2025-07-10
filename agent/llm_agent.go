@@ -76,11 +76,24 @@ func (a *LLMAgent) AddSubAgents(agents ...adk.Agent) {
 	}
 }
 
+func (a *LLMAgent) newInvocationContext(ctx context.Context, p *adk.InvocationContext) (context.Context, *adk.InvocationContext) {
+	ctx, c := adk.NewInvocationContext(ctx, a)
+	if p != nil {
+		// copy everything but Agent and internal state.
+		c.InvocationID = p.InvocationID
+		c.Branch = p.Branch // TODO: why don't we update branch?
+		c.UserContent = p.UserContent
+		c.RunConfig = p.RunConfig
+		c.Session = p.Session
+	}
+	return ctx, c
+}
+
 func (a *LLMAgent) Name() string        { return a.AgentName }
 func (a *LLMAgent) Description() string { return a.AgentDescription }
 func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) (adk.EventStream, error) {
 	// TODO: Select model (LlmAgent.canonical_model)
-
+	ctx, parentCtx = a.newInvocationContext(ctx, parentCtx)
 	flow := &baseFlow{
 		Model:              a.Model,
 		RequestProcessors:  defaultRequestProcessors,
@@ -182,8 +195,42 @@ func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationCont
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
-			for ev, err := range f.postprocessHandleFunctionCalls(ctx, parentCtx, req, resp) {
-				if !yield(ev, err) || err != nil {
+			// TODO: generate and yield an auth event if needed.
+
+			// Handle function calls.
+			ev, err := handleFunctionCalls(ctx, parentCtx, req.Tools, resp)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if ev == nil {
+				// nothing to yield/process.
+				return
+			}
+			if !yield(ev, nil) {
+				return
+			}
+
+			// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
+			// We are followng python's execution flow which is
+			//   BaseLlmFlow._postprocess_async
+			//    -> _postprocess_handle_function_calls_async
+			// TODO(hakim): figure out why this isn't handled by the runner.
+			if ev.Actions == nil || ev.Actions.TransferToAgent == "" {
+				return
+			}
+			nextAgent := f.agentToRun(parentCtx, ev.Actions.TransferToAgent)
+			if nextAgent == nil {
+				yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
+				return
+			}
+			stream, err := nextAgent.Run(ctx, parentCtx)
+			if err != nil {
+				yield(nil, fmt.Errorf("failed to run agent %q: %w", nextAgent.Name(), err))
+				return
+			}
+			for ev, err := range stream {
+				if !yield(ev, err) || err != nil { // forward
 					return
 				}
 			}
@@ -270,25 +317,17 @@ func (f *baseFlow) postprocess(ctx context.Context, parentCtx *adk.InvocationCon
 	return nil
 }
 
-func (f *baseFlow) postprocessHandleFunctionCalls(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) adk.EventStream {
-	return func(yield func(*adk.Event, error) bool) {
-		ev, err := handleFunctionCalls(ctx, parentCtx, req.Tools, resp)
-		if err != nil {
-			yield(nil, err)
-			return
+func (f *baseFlow) agentToRun(parentCtx *adk.InvocationContext, agentName string) adk.Agent {
+	// NOTE: in python, BaseLlmFlow._get_gent_to_run searches the entire agent
+	// tree from the root_agent when processing _postprocess_handle_function_calls_async.
+	// I think that is strange. In our version, we check the agents included in transferTarget.
+	agents := transferTarget(asLLMAgent(parentCtx.Agent))
+	for _, agent := range agents {
+		if agent.Name() == agentName {
+			return agent
 		}
-		if ev == nil {
-			// nothing to yield.
-			return
-		}
-		// TODO: generate and yield an auth event if needed.
-
-		if !yield(ev, nil) {
-			return
-		}
-
-		// TODO: handle ev.Actions such as TransferToAgent set by transfer_to_agent tool.
 	}
+	return nil
 }
 
 // handleFunctionCalls calls the functions and returns the function response event.

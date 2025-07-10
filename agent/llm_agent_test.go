@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -29,14 +30,15 @@ import (
 	"github.com/google/adk-go/model"
 	"github.com/google/adk-go/session"
 	"github.com/google/adk-go/tool"
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 )
+
+const modelName = "gemini-2.0-flash"
 
 //go:generate go test -httprecord=Test
 
 func TestLLMAgent(t *testing.T) {
-	ctx := t.Context()
-	modelName := "gemini-2.0-flash"
 	errNoNetwork := errors.New("no network")
 
 	for _, tc := range []struct {
@@ -68,10 +70,8 @@ func TestLLMAgent(t *testing.T) {
 				DisallowTransferToParent: true,
 				DisallowTransferToPeers:  true,
 			}
-			stream, err := a.Run(ctx, &adk.InvocationContext{
-				InvocationID: "12345",
-				Agent:        a,
-			})
+			ctx, invCtx := adk.NewInvocationContext(t.Context(), a)
+			stream, err := a.Run(ctx, invCtx)
 			// TODO: do we want to make a.Run return just adk.EventStream?
 			if err != nil {
 				t.Fatalf("failed to run agent: %v", err)
@@ -88,7 +88,6 @@ func TestLLMAgent(t *testing.T) {
 }
 
 func TestFunctionTool(t *testing.T) {
-	modelName := "gemini-2.0-flash"
 	model := newGeminiModel(t, modelName, nil)
 
 	type Args struct {
@@ -132,20 +131,205 @@ func TestFunctionTool(t *testing.T) {
 	}
 }
 
+func TestAgentTransfer(t *testing.T) {
+	// Helpers to create genai.Content conveniently.
+	transferCall := func(agentName string) *genai.Content {
+		return genai.NewContentFromFunctionCall(
+			"transfer_to_agent",
+			map[string]any{"agent_name": agentName},
+			"model",
+		)
+	}
+	transferResponse := func() *genai.Content {
+		return genai.NewContentFromFunctionResponse(
+			"transfer_to_agent", map[string]any{}, "user")
+	}
+	text := func(text string) *genai.Content {
+		return genai.NewContentFromText(
+			text,
+			"model",
+		)
+	}
+	// returns a model that returns the prepopulated resp one by one.
+	testModel := func(resp ...*genai.Content) adk.Model {
+		return &mockModel{responses: resp}
+	}
+	// creates an LLM model with the name and the model.
+	llmAgent := func(name string, model adk.Model) *agent.LLMAgent {
+		return &agent.LLMAgent{
+			AgentName: name,
+			Model:     model,
+		}
+	}
+	type content struct {
+		Author string
+		Parts  []*genai.Part
+	}
+	// contents returns (Author, Parts) stream extracted from the event stream.
+	contents := func(stream adk.EventStream) ([]content, error) {
+		var ret []content
+		for ev, err := range stream {
+			if err != nil {
+				return nil, err
+			}
+			if ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+				return nil, fmt.Errorf("unexpected event: %v", ev)
+			}
+			for _, p := range ev.LLMResponse.Content.Parts {
+				if p.FunctionCall != nil {
+					p.FunctionCall.ID = ""
+				}
+				if p.FunctionResponse != nil {
+					p.FunctionResponse.ID = ""
+				}
+			}
+			ret = append(ret, content{Author: ev.Author, Parts: ev.LLMResponse.Content.Parts})
+		}
+		return ret, nil
+	}
+
+	check := func(t *testing.T, rootAgent adk.Agent, wants [][]content) {
+		runner := newTestAgentRunner(t, rootAgent)
+		for i := range len(wants) {
+			got, err := contents(runner.Run(t, "session_id", fmt.Sprintf("round %d", i)))
+			if err != nil {
+				t.Fatalf("[round $d]: stream ended with an error: %v", err)
+			}
+			if diff := cmp.Diff(wants[i], got); diff != "" {
+				t.Errorf("[round %d] events diff (-want, +got) = %v", i, diff)
+			}
+		}
+	}
+
+	t.Run("auto_to_auto", func(t *testing.T) {
+		// root_agent -- sub_agent_1
+		model := testModel(
+			transferCall("sub_agent_1"),
+			text("response1"),
+			text("response2"))
+
+		subAgent1 := llmAgent("sub_agent_1", model)
+
+		rootAgent := llmAgent("root_agent", model)
+		rootAgent.AddSubAgents(subAgent1)
+
+		check(t, rootAgent, [][]content{
+			0: {
+				{"root_agent", transferCall("sub_agent_1").Parts},
+				{"root_agent", transferResponse().Parts},
+				{"sub_agent_1", text("response1").Parts},
+			},
+			1: { // rootAgent should still be the current agent.
+				{"sub_agent_1", text("response2").Parts},
+			},
+		})
+	})
+
+	t.Run("auto_to_single", func(t *testing.T) {
+		// root_agent -- sub_agent_1 (single)
+		model := testModel(
+			transferCall("sub_agent_1"),
+			text("response1"),
+			text("response2"))
+
+		subAgent1 := llmAgent("sub_agent_1", model)
+		subAgent1.DisallowTransferToParent = true
+		subAgent1.DisallowTransferToPeers = true
+
+		rootAgent := llmAgent("root_agent", model)
+		rootAgent.AddSubAgents(subAgent1)
+
+		check(t, rootAgent, [][]content{
+			0: {
+				{"root_agent", transferCall("sub_agent_1").Parts},
+				{"root_agent", transferResponse().Parts},
+				{"sub_agent_1", text("response1").Parts},
+			},
+			1: { // rootAgent should still be the current agent.
+				{"root_agent", text("response2").Parts},
+			},
+		})
+	})
+
+	t.Run("auto_to_auto_to_single", func(t *testing.T) {
+		// root_agent -- sub_agent_1 -- sub_agent_1_1
+		model := testModel(
+			transferCall("sub_agent_1"),
+			transferCall("sub_agent_1_1"),
+			text("response1"),
+			text("response2"))
+
+		subAgent1_1 := llmAgent("sub_agent_1_1", model)
+		subAgent1_1.DisallowTransferToParent = true
+		subAgent1_1.DisallowTransferToPeers = true
+
+		subAgent1 := llmAgent("sub_agent_1", model)
+		subAgent1.AddSubAgents(subAgent1_1)
+
+		rootAgent := llmAgent("root_agent", model)
+		rootAgent.AddSubAgents(subAgent1)
+
+		check(t, rootAgent, [][]content{
+			0: {
+				{"root_agent", transferCall("sub_agent_1").Parts},
+				{"root_agent", transferResponse().Parts},
+				{"sub_agent_1", transferCall("sub_agent_1_1").Parts},
+				{"sub_agent_1", transferResponse().Parts},
+				{"sub_agent_1_1", text("response1").Parts},
+			},
+			1: {
+				// sub_agent_1 should still be the current agent.
+				// sub_agent_1_1 is single, so it should not be the current agent.
+				// Otherwise, the conversation will be tied to sub_agent_1_1 forever.
+				{"sub_agent_1", text("response2").Parts},
+			},
+		})
+	})
+
+	// TODO: cover cases similar to adk-python's
+	// tests/unittests/flows/llm_flows/test_agent_transfer.py
+	//   - test_auto_to_sequential
+	//   - test_auto_to_sequential_to_auto
+	//   - test_auto_to_loop
+}
+
+// TODO(hakim): move testAgentRunner to an internal test utility package.
+// See adk-python's tests/unittests/testing_utils.py.
 type testAgentRunner struct {
 	agent          adk.Agent
 	sessionService adk.SessionService
+	lastSession    *adk.Session
+}
+
+func (r *testAgentRunner) session(t *testing.T, sessionID string) (*adk.Session, error) {
+	ctx := t.Context()
+	if last := r.lastSession; last != nil && last.ID == sessionID {
+		session, err := r.sessionService.Get(ctx, &adk.SessionGetRequest{
+			AppName:   "test_app",
+			UserID:    "test_user",
+			SessionID: sessionID,
+		})
+		r.lastSession = session
+		return session, err
+	}
+	session, err := r.sessionService.Create(ctx, &adk.SessionCreateRequest{
+		AppName:   "test_app",
+		UserID:    "test_user",
+		SessionID: sessionID,
+	})
+	r.lastSession = session
+	return session, err
 }
 
 func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) adk.EventStream {
 	t.Helper()
 	ctx := t.Context()
-	session, _ := r.sessionService.Create(ctx, &adk.SessionCreateRequest{
-		AppName:   "test",
-		UserID:    "user",
-		SessionID: sessionID,
-	})
+	session, err := r.session(t, sessionID)
+	if err != nil {
+		t.Fatalf("failed to get/create session: %v", err)
+	}
 
+	// TODO: replace this with the real runner.
 	return func(yield func(*adk.Event, error) bool) {
 		ctx, inv := adk.NewInvocationContext(ctx, r.agent)
 		inv.SessionService = r.sessionService
@@ -159,7 +343,8 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) adk.Ev
 		}
 		r.sessionService.AppendEvent(ctx, session, userMessageEvent)
 
-		stream, err := r.agent.Run(ctx, inv)
+		agentToRun := r.findAgentToRun(session, r.agent)
+		stream, err := agentToRun.Run(ctx, inv)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -177,7 +362,93 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) adk.Ev
 	}
 }
 
-func newTestAgentRunner(t *testing.T, agent adk.Agent) *testAgentRunner {
+func (r *testAgentRunner) findAgentToRun(s *adk.Session, rootAgent adk.Agent) adk.Agent {
+	// runner.py Runner's _find_agent_to_run.
+
+	// TODO: findMatchingFunctionCall.
+
+	for _, ev := range slices.Backward(s.Events) {
+		if ev.Author == rootAgent.Name() {
+			// Found root agent.
+			return rootAgent
+		}
+		matching := findSubAgent(rootAgent, ev.Author)
+		if matching == nil {
+			// event from an unknown agent.
+			// TODO: log.
+			continue
+		}
+		if r.isTransferableAcrossAgentTree(matching) {
+			return matching
+		}
+	}
+	return rootAgent
+}
+
+// isTransferableAcrossAgentTree returns whether the agent
+// to run can transfer to any other agent in the agent tree.
+// This typicall means all agentToRun's parents through root agent
+// can transfer to their parent agents.
+func (r *testAgentRunner) isTransferableAcrossAgentTree(agentToRun adk.Agent) bool {
+	for {
+		if agentToRun == nil {
+			return true
+		}
+		agent, ok := agentToRun.(*agent.LLMAgent)
+		if !ok {
+			return false // only LLMAgent can provide agent transfer capability.
+		}
+		if agent.DisallowTransferToParent {
+			return false
+		}
+		agentToRun = agent.ParentAgent
+	}
+}
+
+func findAgent(agent adk.Agent, name string) adk.Agent {
+	if agent.Name() == name {
+		return agent
+	}
+	return findSubAgent(agent, name)
+}
+
+func findSubAgent(a adk.Agent, name string) adk.Agent {
+	llmAgent, ok := a.(*agent.LLMAgent)
+	if !ok {
+		return nil
+	}
+
+	for _, sub := range llmAgent.SubAgents {
+		return findAgent(sub, name)
+	}
+	return nil
+}
+
+type mockModel struct {
+	responses []*genai.Content
+}
+
+// GenerateContent implements adk.Model.
+func (m *mockModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, stream bool) adk.LLMResponseStream {
+	return func(yield func(*adk.LLMResponse, error) bool) {
+		if len(m.responses) > 0 {
+			resp := &adk.LLMResponse{Content: m.responses[0]}
+			m.responses = m.responses[1:]
+			yield(resp, nil)
+			return
+		}
+		yield(nil, fmt.Errorf("no more data"))
+	}
+}
+
+// Name implements adk.Model.
+func (m *mockModel) Name() string {
+	return "mock"
+}
+
+var _ adk.Model = (*mockModel)(nil)
+
+func newTestAgentRunner(_ *testing.T, agent adk.Agent) *testAgentRunner {
 	return &testAgentRunner{
 		agent:          agent,
 		sessionService: &session.InMemorySessionService{},

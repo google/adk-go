@@ -47,18 +47,16 @@ import (
 //
 // Peer-agent transfers are only enabled when all the following conditions are met:
 //
-//  - The parent agent also uses AutoFlow.
+//  - The parent agent is also an LLMAgent.
 //  - This agent has DisallowTransferToPeers set to false (default).
 //
-// Depending on the target agent's flow type, the transfer may be automatically
-// reversed. The conditions are as follows:
+// Depending on the target agent type, the transfer may be automatically
+// reversed. See python's Runner._find_agent_to_run method for which
+// agent will remain active to handle the next user message.
+// (src/google/adk/runners.py)
 //
-//  - If the flow type of the transferee agent is also AutoFlow, the transferee agent will
-//    remain the active agent and respond to the user's next message directly.
-//  - If the flow type of the transferee agent is not AutoFlow, the active agent will
-//    be reverted to the previous agent.
-//
-// TODO(hakim): implement.
+// TODO: implement it in the runners package and update this doc.
+
 
 func agentTransferRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
 	agent := asLLMAgent(parentCtx.Agent)
