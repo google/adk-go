@@ -106,10 +106,14 @@ func (t *transferToAgentTool) FunctionDeclaration() *genai.FunctionDeclaration {
 		Name:        t.Name(),
 		Description: t.Description(),
 		Parameters: &genai.Schema{
-			Description: "the agent name to transfer to",
-			Title:       "agent_name",
-			Type:        "string",
-			// TODO: set allowed values for agent_name.
+			Type: "object",
+			Properties: map[string]*genai.Schema{
+				"agent_name": {
+					Type:        "string",
+					Description: "the agent name to transfer to",
+				},
+			},
+			Required: []string{"agent_name"},
 		},
 	}
 }
@@ -146,24 +150,27 @@ func transferTarget(current *LLMAgent) []adk.Agent {
 	if !current.DisallowTransferToPeers {
 		parent := asLLMAgent(current.ParentAgent)
 		if parent != nil && parent.useAutoFlow() {
-			targets = append(targets, parent.SubAgents...)
+			for _, peer := range parent.SubAgents {
+				if peer.Name() != current.Name() {
+					targets = append(targets, peer)
+				}
+			}
 		}
 	}
 	return targets
 }
 
+var transferToAgentPromptTmpl = template.Must(
+	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
+
 func instructionsForTransferToAgent(agent *LLMAgent, targets []adk.Agent, transferTool adk.Tool) (string, error) {
-	tmpl, err := template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate)
-	if err != nil {
-		return "", err
-	}
 	parent := agent.ParentAgent
 	if agent.DisallowTransferToParent {
 		parent = nil
 	}
 
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, struct {
+	if err := transferToAgentPromptTmpl.Execute(&buf, struct {
 		AgentName string
 		Parent    adk.Agent
 		Targets   []adk.Agent

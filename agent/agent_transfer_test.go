@@ -120,7 +120,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 
 	t.Run("SoloAgent", func(t *testing.T) {
 		agent := &LLMAgent{AgentName: "Current"}
-		check(t, agent, "", nil, nil)
+		check(t, agent, "", nil, []string{"Current"})
 	})
 	t.Run("NotLLMAgent", func(t *testing.T) {
 		check(t, mockAgent("mockAgent"), "", nil, nil)
@@ -129,19 +129,19 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		agent := &LLMAgent{AgentName: "Current"}
 		parentAgent := &LLMAgent{AgentName: "Parent"}
 		parentAgent.AddSubAgents(agent)
-		check(t, agent, "Parent", nil, nil)
+		check(t, agent, "Parent", nil, []string{"Current"})
 	})
 	t.Run("LLMAgentParentAndPeer", func(t *testing.T) {
 		agent := &LLMAgent{AgentName: "Current"}
 		peer := &LLMAgent{AgentName: "Peer"}
 		parentAgent := &LLMAgent{AgentName: "Parent"}
 		parentAgent.AddSubAgents(agent, peer)
-		check(t, agent, "Parent", []string{"Peer"}, nil)
+		check(t, agent, "Parent", []string{"Peer"}, []string{"Current"})
 	})
 	t.Run("LLMAgentSubagents", func(t *testing.T) {
 		agent := &LLMAgent{AgentName: "Current"}
 		agent.AddSubAgents(mockAgent("Sub1"), &LLMAgent{AgentName: "Sub2"})
-		check(t, agent, "", []string{"Sub1", "Sub2"}, nil)
+		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
 	})
 
 	t.Run("AgentWithParentAndPeersAndSubagents", func(t *testing.T) {
@@ -150,13 +150,13 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		peer := mockAgent("Peer")
 		parentAgent := &LLMAgent{AgentName: "Parent"}
 		parentAgent.AddSubAgents(agent, peer)
-		check(t, agent, "Parent", []string{"Peer", "Sub1", "Sub2"}, nil)
+		check(t, agent, "Parent", []string{"Peer", "Sub1", "Sub2"}, []string{"Current"})
 	})
 
 	t.Run("NonLLMAgentSubagents", func(t *testing.T) {
 		agent := &LLMAgent{AgentName: "Current"}
 		agent.AddSubAgents(mockAgent("Sub1"), mockAgent("Sub2"))
-		check(t, agent, "", []string{"Sub1", "Sub2"}, nil)
+		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
 	})
 
 	t.Run("AgentWithDisallowTransferToParent", func(t *testing.T) {
@@ -166,7 +166,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		parentAgent.AddSubAgents(agent)
 
 		agent.DisallowTransferToParent = true
-		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Parent"})
+		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Parent", "Current"})
 	})
 
 	t.Run("AgentWithDisallowTransferToPeers", func(t *testing.T) {
@@ -177,7 +177,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		parentAgent.AddSubAgents(agent, peer)
 
 		agent.DisallowTransferToPeers = true
-		check(t, agent, "Parent", []string{"Sub1", "Sub2"}, []string{"Peer"})
+		check(t, agent, "Parent", []string{"Sub1", "Sub2"}, []string{"Peer", "Current"})
 	})
 
 	t.Run("AgentWithDisallowTransferToParentAndPeers", func(t *testing.T) {
@@ -189,7 +189,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 
 		agent.DisallowTransferToPeers = true
 		agent.DisallowTransferToParent = true
-		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Parent", "Peer"})
+		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Parent", "Peer", "Current"})
 	})
 
 	t.Run("AgentWithDisallowTransfer", func(t *testing.T) {
@@ -200,7 +200,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 
 		agent.DisallowTransferToPeers = true
 		agent.DisallowTransferToParent = true
-		check(t, agent, "", nil, []string{"Parent", "Peer"})
+		check(t, agent, "", nil, []string{"Parent", "Peer", "Current"})
 	})
 }
 
