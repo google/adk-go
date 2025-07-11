@@ -307,6 +307,7 @@ func handleFunctionCalls(ctx context.Context, parentCtx *adk.InvocationContext, 
 		toolCtx := &adk.ToolContext{
 			InvocationContext: parentCtx,
 			FunctionCallID:    fnCall.ID,
+			EventActions:      &adk.EventActions{},
 		}
 		// TODO: agent.canonical_before_tool_callbacks
 		result, err := tool.Run(ctx, toolCtx, fnCall.Args)

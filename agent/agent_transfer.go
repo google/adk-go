@@ -25,39 +25,40 @@ import (
 	"google.golang.org/genai"
 )
 
-// * Single-flow
+// From src/google/adk/flows/llm_flows/auto_flow.py
 //
-// SingleFlow is the LLM flows that handles tools calls.
+// * SingleFlow
 //
-//  A single flow only consider an agent itself and tools.
-//  No sub-agents are allowed for single flow, I.e.,
+// SingleFlow is the LLM flow that handles tool calls.
+//
+//  A single flow only considers the agent itself and its tools.
+//  No sub-agents are allowed for a single flow, i.e.,
 //      DisallowTransferToParent == true &&
 //      DisallowTransferToPeers == true &&
 //      len(SubAgents) == 0
 //
-// * Auto-flow
+// * AutoFlow
 //
-// Agent transfer is allowed in the following direction:
+// Agent transfers are allowed in the following directions:
 //
-//  1. from parent to sub-agent;
+//  1. From parent to sub-agent.
+//  2. From sub-agent to parent.
+//  3. From sub-agent to its peer agent.
 //
-//  2. from sub-agent to parent;
+// Peer-agent transfers are only enabled when all the following conditions are met:
 //
-//  3. from sub-agent to its peer agents;
+//  - The parent agent also uses AutoFlow.
+//  - This agent has DisallowTransferToPeers set to false (default).
 //
-//     For peer-agent transfers, it's only enabled when all below conditions are met:
+// Depending on the target agent's flow type, the transfer may be automatically
+// reversed. The conditions are as follows:
 //
-//     - The parent agent is also of AutoFlow;
-//     - `disallow_transfer_to_peer` option of this agent is False (default).
+//  - If the flow type of the transferee agent is also AutoFlow, the transferee agent will
+//    remain the active agent and respond to the user's next message directly.
+//  - If the flow type of the transferee agent is not AutoFlow, the active agent will
+//    be reverted to the previous agent.
 //
-// Depending on the target agent flow type, the transfer may be automatically
-// reversed. The condition is as below:
-//
-//   - If the flow type of the tranferee agent is also auto, transfee agent will
-//     remain as the active agent. The transfee agent will respond to the user's
-//     next message directly.
-//   - If the flow type of the transfere agent is not auto, the active agent will
-//     be reversed back to previous agent.
+// TODO(hakim): implement.
 
 func agentTransferRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
 	agent := asLLMAgent(parentCtx.Agent)
@@ -121,11 +122,11 @@ func (t *transferToAgentTool) ProcessRequest(ctx context.Context, tc *adk.ToolCo
 // Run implements adk.Tool.
 func (t *transferToAgentTool) Run(ctx context.Context, tc *adk.ToolContext, args map[string]any) (map[string]any, error) {
 	if args == nil {
-		return nil, fmt.Errorf("invalid arguments: %v", args)
+		return nil, fmt.Errorf("missing argument")
 	}
 	agent, ok := args["agent_name"].(string)
 	if !ok || agent == "" {
-		return nil, fmt.Errorf("invalid agent name: %v", args)
+		return nil, fmt.Errorf("empty agent_name: %v", args)
 	}
 	tc.EventActions.TransferToAgent = agent
 	return map[string]any{}, nil

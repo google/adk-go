@@ -117,22 +117,26 @@ func content(ev *adk.Event) *genai.Content {
 	return ev.LLMResponse.Content
 }
 
+// rootAgent returns the root of the agent tree.
 func rootAgent(agent adk.Agent) adk.Agent {
 	findParent := func(agent adk.Agent) adk.Agent {
+		// this test is because ParentAgent/SubAgents are implemented only in LLMAgent.
+		// TODO: Parent/SubAgents should be part of Agent interface. Then, this is not needed.
 		a := asLLMAgent(agent)
 		if a == nil {
 			return nil
 		}
-		if p := asLLMAgent(a.ParentAgent); p == nil {
-			return nil
+		if p := asLLMAgent(a.ParentAgent); p != nil {
+			return p
 		}
-		return a
+		return nil
 	}
 	current := agent
-	parent := findParent(current)
-	for parent != nil {
+	for {
+		parent := findParent(current)
+		if parent == nil {
+			return current
+		}
 		current = parent
-		parent = findParent(current)
 	}
-	return parent
 }
