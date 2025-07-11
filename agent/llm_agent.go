@@ -185,12 +185,6 @@ func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationCont
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
-
-			// Handle function calls.
-			fnCalls := functionCalls(resp.Content)
-			if len(fnCalls) == 0 {
-				continue
-			}
 			for ev, err := range f.postprocessHandleFunctionCalls(ctx, parentCtx, req, resp) {
 				if !yield(ev, err) || err != nil {
 					return
@@ -228,6 +222,7 @@ func (f *baseFlow) preprocess(ctx context.Context, parentCtx *adk.InvocationCont
 		}
 	}
 	// run processors for tools.
+	// TODO: check need/feasibility of running this concurrently.
 	for _, t := range llmAgent.Tools {
 		toolCtx := &adk.ToolContext{
 			InvocationContext: parentCtx, // TODO: how to prevent mutation on this?
@@ -285,6 +280,10 @@ func (f *baseFlow) postprocessHandleFunctionCalls(ctx context.Context, parentCtx
 			yield(nil, err)
 			return
 		}
+		if ev == nil {
+			// nothing to yield.
+			return
+		}
 		// TODO: generate and yield an auth event if needed.
 
 		if !yield(ev, nil) {
@@ -298,6 +297,7 @@ func (f *baseFlow) postprocessHandleFunctionCalls(ctx context.Context, parentCtx
 // handleFunctionCalls calls the functions and returns the function response event.
 //
 // TODO: accept filters to include/exclude function calls.
+// TODO: check feasibility of running tool.Run concurrently.
 func handleFunctionCalls(ctx context.Context, parentCtx *adk.InvocationContext, toolsDict map[string]adk.Tool, resp *adk.LLMResponse) (*adk.Event, error) {
 	var fnResponseEvents []*adk.Event
 
@@ -319,10 +319,6 @@ func handleFunctionCalls(ctx context.Context, parentCtx *adk.InvocationContext, 
 		// TODO(hakim): revisit the tool's function signature to handle error from user function better.
 		if err != nil {
 			result = map[string]any{"error": fmt.Errorf("tool %q failed: %w", tool.Name(), err)}
-		}
-		if err != nil {
-			return nil, fmt.Errorf("tool %q failed to run: %w", tool.Name(), err)
-			// TODO: should we include the fn.Args in the error? That may have sensitive info.
 		}
 		// TODO: agent.canonical_after_tool_callbacks
 		// TODO: handle long-running tool.
