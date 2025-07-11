@@ -66,7 +66,7 @@ func functionCalls(c *genai.Content) (ret []*genai.FunctionCall) {
 			ret = append(ret, p.FunctionCall)
 		}
 	}
-	return
+	return ret
 }
 
 // functionResponses extracts all FunctionResponse parts from the content.
@@ -85,7 +85,7 @@ func functionResponses(c *genai.Content) (ret []*genai.FunctionResponse) {
 // content is a convenience function that returns the genai.Content
 // in the event.
 func content(ev *adk.Event) *genai.Content {
-	if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+	if ev == nil || ev.LLMResponse == nil {
 		return nil
 	}
 	return ev.LLMResponse.Content
