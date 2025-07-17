@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"iter"
 
 	"github.com/google/adk-go"
@@ -23,79 +24,117 @@ import (
 
 // Option configures the Base agent.
 type Option interface {
-	apply2Base(*AgentBase)
+	apply2Base(*BaseAgent) error
 }
 
-type optionFunc func(*AgentBase)
+type optionFunc func(*BaseAgent) error
 
-func (o optionFunc) apply2Base(b *AgentBase) { o(b) }
+func (o optionFunc) apply2Base(b *BaseAgent) error { return o(b) }
 
 // WithName sets the agent name.
 func WithName(name string) Option {
-	return optionFunc(func(b *AgentBase) { b.name = name })
+	return optionFunc(func(b *BaseAgent) error {
+		b.name = name
+		return nil
+	})
 }
 
 // WithDescription sets the agent description.
 func WithDescription(desc string) Option {
-	return optionFunc(func(b *AgentBase) { b.description = desc })
+	return optionFunc(func(b *BaseAgent) error {
+		b.description = desc
+		return nil
+	})
 }
 
-// AgentBase is the base agent implementation that offers
+func WithSubAgents(agents ...adk.Agent) Option {
+	return optionFunc(func(b *BaseAgent) error {
+		return b.AddSubAgents(agents...)
+	})
+}
+
+// BaseAgent is the base agent implementation that offers
 // shared, default agent behavior. All agents should extend this
-// base agent and configure the [AgentBase.Self] from the constructor
-// [NewAgentBase].
+// base agent by embedding.
 
 // For example,
 //
 //		type MyCustomAgent struct {
-//		   *AgentBase
+//		   *BaseAgent
 //		   ....
 //		}
 //
 //		func NewMyCustomAgent(name string, opts ...agent.Option) *MyCustomAgent {
-//		   a := &MyCustomAgent{AgentBase: agent.NewAgentBase(name, opts...)}
-//		   a.Self = a  // This allows methods implemented in AgentBase can access *MyCustomAgent.
+//		   agent := &MyCustomAgent{}
+//		   agent.BaseAgent = agent.NewBaseAgent(name, agent, opts...)}
+//		   agent.Self = a  // This allows methods implemented in BaseAgent can access *MyCustomAgent.
 //	        ...
-//		   return a
+//		   return agent
 //		}
-type AgentBase struct {
+type BaseAgent struct {
 	name        string
 	description string
 	parentAgent adk.Agent
 	subAgents   []adk.Agent
 
-	Self adk.Agent
+	self adk.Agent
 }
 
-func NewAgentBase(name string, opts ...Option) *AgentBase {
-	b := &AgentBase{name: name}
+// NewBaseAgent returns a BaseAgent that can be the base of the implementation agent.
+func NewBaseAgent(name string, implementation adk.Agent, opts ...Option) *BaseAgent {
+	if implementation == nil {
+		panic("implementation is nil")
+	}
+	b := &BaseAgent{name: name, self: implementation}
 	for _, opt := range opts {
-		opt.apply2Base(b)
+		if err := opt.apply2Base(b); err != nil {
+			panic(err) // TODO: what do we do with error.
+		}
 	}
 	return b
 }
 
-var _ adk.Agent = (*AgentBase)(nil)
+var _ adk.Agent = (*BaseAgent)(nil)
 
-func (a *AgentBase) Name() string           { return a.name }
-func (a *AgentBase) Description() string    { return a.description }
-func (a *AgentBase) Parent() adk.Agent      { return a.parentAgent }
-func (a *AgentBase) SubAgents() []adk.Agent { return a.subAgents }
-func (a *AgentBase) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
+func (a *BaseAgent) Name() string           { return a.name }
+func (a *BaseAgent) Description() string    { return a.description }
+func (a *BaseAgent) Parent() adk.Agent      { return a.parentAgent }
+func (a *BaseAgent) SubAgents() []adk.Agent { return a.subAgents }
+func (a *BaseAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
 	panic("unimplemented")
 }
 
-func (a *AgentBase) _base_() *AgentBase { return a }
+// TODO: Should we export it as Base() and include it in the interface?
+// That will allows custom agents to wrap its BaseAgent instead of embedding.
+func (a *BaseAgent) _base_() *BaseAgent { return a }
+
+func (a *BaseAgent) findSubAgent(name string) (adk.Agent, bool) {
+	for _, s := range a.subAgents {
+		if s.Name() == name {
+			return a, true
+		}
+	}
+	return nil, false
+}
 
 // AddSubAgents adds the agents to the subagent list.
-func (a *AgentBase) AddSubAgents(agents ...adk.Agent) {
+func (a *BaseAgent) AddSubAgents(agents ...adk.Agent) error {
 	for _, subagent := range agents {
+		// O(n^2) search, but n is small enough.
+		if _, found := a.findSubAgent(subagent.Name()); found {
+			return fmt.Errorf("cannot register multiple agents with the same name: %q", subagent.Name())
+		}
+
 		a.subAgents = append(a.subAgents, subagent)
 
-		if s, ok := subagent.(interface{ _base_() *AgentBase }); ok {
+		if s, ok := subagent.(interface{ _base_() *BaseAgent }); ok {
 			if base := s._base_(); base != nil {
-				base.parentAgent = a.Self
+				if base.parentAgent != nil {
+					return fmt.Errorf("Agent(%q) is already a subagent of Agent(%q)", base.Name(), base.parentAgent.Name())
+				}
+				base.parentAgent = a.self
 			}
 		}
 	}
+	return nil
 }

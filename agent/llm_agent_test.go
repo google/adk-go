@@ -59,9 +59,8 @@ func TestLLMAgent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := newGeminiModel(t, modelName, tc.transport)
-			a := agent.NewLLMAgent("hello_world_agent",
+			a := agent.NewLLMAgent("hello_world_agent", model,
 				agent.WithDescription("hello world agent"))
-			a.Model = model
 			a.Instruction = "Roll the dice and report only the result."
 			a.GlobalInstruction = "Answer as precisely as possible."
 			a.DisallowTransferToParent = true
@@ -112,8 +111,7 @@ func TestFunctionTool(t *testing.T) {
 		Name:        "sum",
 		Description: "computes the sum of two numbers",
 	}, handler)
-	agent := agent.NewLLMAgent("agent", agent.WithDescription("math agent"))
-	agent.Model = model
+	agent := agent.NewLLMAgent("agent", model, agent.WithDescription("math agent"))
 	agent.Instruction = "output ONLY the result computed by the provided function"
 	agent.Tools = []adk.Tool{rand}
 	// TODO(hakim): set to false when autoflow is implemented.
@@ -156,9 +154,7 @@ func TestAgentTransfer(t *testing.T) {
 	}
 	// creates an LLM model with the name and the model.
 	llmAgent := func(name string, model adk.Model) *agent.LLMAgent {
-		a := agent.NewLLMAgent(name)
-		a.Model = model
-		return a
+		return agent.NewLLMAgent(name, model)
 	}
 	type content struct {
 		Author string

@@ -206,11 +206,8 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name+"/include_contents="+tc.includeContents, func(t *testing.T) {
-			agent := &LLMAgent{
-				AgentBase:       NewAgentBase(agentName),
-				Model:           model,
-				IncludeContents: tc.includeContents,
-			}
+			agent := NewLLMAgent(agentName, model)
+			agent.IncludeContents = tc.includeContents
 			invCtx := &adk.InvocationContext{
 				InvocationID: "12345",
 				Agent:        agent,
@@ -357,10 +354,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			agent := &LLMAgent{
-				AgentBase: NewAgentBase(agentName),
-				Model:     model,
-			}
+			agent := NewLLMAgent("testAgent", model)
 			invCtx := &adk.InvocationContext{
 				InvocationID: "12345",
 				Agent:        agent,

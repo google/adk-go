@@ -24,9 +24,9 @@ import (
 )
 
 // NewLLMAgent returns a new LLMAgent configured with the provided options.
-func NewLLMAgent(name string, opts ...Option) *LLMAgent {
-	llmAgent := &LLMAgent{AgentBase: NewAgentBase(name, opts...)}
-	llmAgent.Self = llmAgent
+func NewLLMAgent(name string, model adk.Model, opts ...Option) *LLMAgent {
+	llmAgent := &LLMAgent{Model: model}
+	llmAgent.BaseAgent = NewBaseAgent(name, llmAgent, opts...)
 
 	// apply LLM Agent specific options.
 	for _, opt := range opts {
@@ -39,23 +39,17 @@ func NewLLMAgent(name string, opts ...Option) *LLMAgent {
 
 type llmAgentOption interface {
 	Option
-	apply2LLMAgent(*LLMAgent)
+	apply2LLMAgent(*LLMAgent) error
 }
 
-type llmAgentOptionFunc func(*LLMAgent)
+type llmAgentOptionFunc func(*LLMAgent) error
 
-func (o llmAgentOptionFunc) apply2LLMAgent(a *LLMAgent) { o(a) }
-func (o llmAgentOptionFunc) apply2Base(a *AgentBase)    { /* do nothing */ }
-
-func WithModel(m adk.Model) Option {
-	return llmAgentOptionFunc(func(a *LLMAgent) {
-		a.Model = m
-	})
-}
+func (o llmAgentOptionFunc) apply2LLMAgent(a *LLMAgent) error { return o(a) }
+func (o llmAgentOptionFunc) apply2Base(a *BaseAgent) error    { return nil /* do nothing */ }
 
 // LLMAgent is an LLM-based Agent.
 type LLMAgent struct {
-	*AgentBase
+	*BaseAgent
 
 	Model adk.Model
 
@@ -74,7 +68,7 @@ type LLMAgent struct {
 	IncludeContents string
 
 	// The input schema when agent is used as a tool.
-	IntpuSchema *genai.Schema
+	IntputSchema *genai.Schema
 
 	// The output schema when agent replies.
 	//
