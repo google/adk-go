@@ -20,16 +20,16 @@ import (
 	"iter"
 
 	"github.com/google/adk-go"
+	"github.com/google/adk-go/agent/base"
 	"google.golang.org/genai"
 )
 
-// LLMAgent is an LLM-based Agent.
-type LLMAgent struct {
-	AgentName        string
-	AgentDescription string
+type LLMAgentConfig struct {
+	Name        string
+	Description string
+	SubAgents   []*adk.Agent
 
-	Model adk.Model
-
+	Model                 adk.Model
 	Instruction           string
 	GlobalInstruction     string
 	Tools                 []adk.Tool
@@ -45,16 +45,13 @@ type LLMAgent struct {
 	IncludeContents string
 
 	// The input schema when agent is used as a tool.
-	IntpuSchema *genai.Schema
+	IntputSchema *genai.Schema
 
 	// The output schema when agent replies.
 	//
 	// NOTE: when this is set, agent can only reply and cannot use any tools,
 	// such as function tools, RAGs, agent transfer, etc.
 	OutputSchema *genai.Schema
-
-	ParentAgent adk.Agent
-	SubAgents   []adk.Agent
 
 	// OutputKey
 	// Planner
@@ -67,50 +64,61 @@ type LLMAgent struct {
 	// AfterToolCallback
 }
 
-// AddSubAgents adds the agents to the subagent list.
-func (a *LLMAgent) AddSubAgents(agents ...adk.Agent) {
-	for _, subagent := range agents {
-		a.SubAgents = append(a.SubAgents, subagent)
-		if s := asLLMAgent(subagent); s != nil {
-			s.ParentAgent = a
-		}
+// NewLLMAgent returns a new LLMAgent configured with the provided options.
+func NewLLMAgent(cfg LLMAgentConfig) (*adk.Agent, error) {
+	if cfg.Name == "" {
+		return nil, fmt.Errorf("LLMAgent requires name")
 	}
+	if cfg.Model == nil {
+		return nil, fmt.Errorf("LLMAgent requires model") // TODO: consider default to gemini?
+	}
+
+	baseConfig := base.Config{
+		Name:        cfg.Name,
+		Description: cfg.Description,
+	}
+	for _, s := range cfg.SubAgents {
+		baseConfig.SubAgents = append(baseConfig.SubAgents, any(s))
+	}
+	agent, err := base.NewAgent(baseConfig)
+	if err != nil {
+		return nil, err
+	}
+	llmAgentImpl := &LLMAgent{
+		Model:          cfg.Model,
+		LLMAgentConfig: cfg,
+		agent:          agent,
+	}
+	agent.SetImpl(llmAgentImpl)
+	return agent, nil
 }
 
-func (a *LLMAgent) newInvocationContext(ctx context.Context, p *adk.InvocationContext) (context.Context, *adk.InvocationContext) {
-	ctx, c := adk.NewInvocationContext(ctx, a)
-	if p != nil {
-		// copy everything but Agent and internal state.
-		c.InvocationID = p.InvocationID
-		c.Branch = p.Branch // TODO: why don't we update branch?
-		c.UserContent = p.UserContent
-		c.RunConfig = p.RunConfig
-		c.Session = p.Session
-	}
-	return ctx, c
+// LLMAgent is an LLM-based Agent.
+type LLMAgent struct {
+	Model adk.Model
+
+	LLMAgentConfig
+	agent *adk.Agent
 }
 
-func (a *LLMAgent) Name() string        { return a.AgentName }
-func (a *LLMAgent) Description() string { return a.AgentDescription }
+func (a *LLMAgent) Parent() *adk.Agent { return a.agent.Parent() }
 func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
 	// TODO: Select model (LlmAgent.canonical_model)
-	ctx, parentCtx = a.newInvocationContext(ctx, parentCtx)
 	flow := &baseFlow{
 		Model:              a.Model,
+		Agent:              a.agent,
 		RequestProcessors:  defaultRequestProcessors,
 		ResponseProcessors: defaultResponseProcessors,
 	}
-	return flow.Run(ctx, parentCtx)
+	return flow.runFlow(ctx, parentCtx)
 }
 
 func (a *LLMAgent) useAutoFlow() bool {
-	return len(a.SubAgents) != 0 || !a.DisallowTransferToParent || !a.DisallowTransferToPeers
+	return len(a.agent.SubAgents()) != 0 || !a.DisallowTransferToParent || !a.DisallowTransferToPeers
 }
 
-var _ adk.Agent = (*LLMAgent)(nil)
-
 var (
-	defaultRequestProcessors = []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error{
+	defaultRequestProcessors = []func(ctx context.Context, parentCtx *adk.InvocationContext, current *adk.Agent, req *adk.LLMRequest) error{
 		basicRequestProcessor,
 		authPreprocesssor,
 		instructionsRequestProcessor,
@@ -124,7 +132,7 @@ var (
 		codeExecutionRequestProcessor,
 		agentTransferRequestProcessor,
 	}
-	defaultResponseProcessors = []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error{
+	defaultResponseProcessors = []func(ctx context.Context, parentCtx *adk.InvocationContext, current *adk.Agent, req *adk.LLMRequest, resp *adk.LLMResponse) error{
 		nlPlanningResponseProcessor,
 		codeExecutionResponseProcessor,
 	}
@@ -132,12 +140,13 @@ var (
 
 type baseFlow struct {
 	Model adk.Model
+	Agent *adk.Agent
 
-	RequestProcessors  []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error
-	ResponseProcessors []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error
+	RequestProcessors  []func(ctx context.Context, parentCtx *adk.InvocationContext, current *adk.Agent, req *adk.LLMRequest) error
+	ResponseProcessors []func(ctx context.Context, parentCtx *adk.InvocationContext, current *adk.Agent, req *adk.LLMRequest, resp *adk.LLMResponse) error
 }
 
-func (f *baseFlow) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
+func (f *baseFlow) runFlow(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
 	return func(yield func(*adk.Event, error) bool) {
 		for {
 			var lastEvent *adk.Event
@@ -251,13 +260,13 @@ func (f *baseFlow) finalizeModelResponseEvent(parentCtx *adk.InvocationContext, 
 }
 
 func (f *baseFlow) preprocess(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
-	llmAgent := asLLMAgent(parentCtx.Agent)
+	llmAgent := asLLMAgent(f.Agent)
 	if llmAgent == nil {
 		return nil
 	}
 	// apply request processor functions to the request in the configured order.
 	for _, processor := range f.RequestProcessors {
-		if err := processor(ctx, parentCtx, req); err != nil {
+		if err := processor(ctx, parentCtx, f.Agent, req); err != nil {
 			return err
 		}
 	}
@@ -306,18 +315,18 @@ func (f *baseFlow) callLLM(ctx context.Context, parentCtx *adk.InvocationContext
 func (f *baseFlow) postprocess(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error {
 	// apply response processor functions to the response in the configured order.
 	for _, processor := range f.ResponseProcessors {
-		if err := processor(ctx, parentCtx, req, resp); err != nil {
+		if err := processor(ctx, parentCtx, f.Agent, req, resp); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (f *baseFlow) agentToRun(parentCtx *adk.InvocationContext, agentName string) adk.Agent {
+func (f *baseFlow) agentToRun(parentCtx *adk.InvocationContext, agentName string) *adk.Agent {
 	// NOTE: in python, BaseLlmFlow._get_gent_to_run searches the entire agent
 	// tree from the root_agent when processing _postprocess_handle_function_calls_async.
 	// I think that is strange. In our version, we check the agents included in transferTarget.
-	agents := transferTarget(asLLMAgent(parentCtx.Agent))
+	agents := transferTarget(asLLMAgent(f.Agent))
 	for _, agent := range agents {
 		if agent.Name() == agentName {
 			return agent

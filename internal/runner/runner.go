@@ -25,7 +25,7 @@ import (
 
 type Runner struct {
 	AppName        string
-	Agent          adk.Agent
+	Agent          *adk.Agent
 	SessionService adk.SessionService
 }
 

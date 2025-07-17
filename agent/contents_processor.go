@@ -26,9 +26,9 @@ import (
 
 // contentRequestProcessor populates the LLMRequest's Contents based on
 // the InvocationContext that includes the previous events.
-func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, agent *adk.Agent, req *adk.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
-	llmAgent := asLLMAgent(parentCtx.Agent)
+	llmAgent := asLLMAgent(agent)
 	if llmAgent == nil {
 		// Do nothing.
 		return nil // In python, no error is yielded.
@@ -42,7 +42,7 @@ func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationCont
 	if parentCtx.Session != nil {
 		events = parentCtx.Session.Events
 	}
-	contents, err := fn(llmAgent.Name(), parentCtx.Branch, events)
+	contents, err := fn(agent.Name(), parentCtx.Branch, events)
 	if err != nil {
 		return err
 	}

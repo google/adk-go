@@ -39,6 +39,8 @@ const modelName = "gemini-2.0-flash"
 
 //go:generate go test -httprecord=Test
 
+type cfg = agent.LLMAgentConfig
+
 func TestLLMAgent(t *testing.T) {
 	errNoNetwork := errors.New("no network")
 
@@ -59,18 +61,18 @@ func TestLLMAgent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := newGeminiModel(t, modelName, tc.transport)
-			a := &agent.LLMAgent{
-				AgentName:         "hello_world_agent",
-				AgentDescription:  "hello world agent",
-				Model:             model,
-				Instruction:       "Roll the dice and report only the result.",
-				GlobalInstruction: "Answer as precisely as possible.",
-
-				// TODO: set tools, planner.
-
+			a, err := agent.NewLLMAgent(cfg{
+				Name:                     "hello_world_agent",
+				Model:                    model,
+				Instruction:              "Roll the dice and report only the result.",
+				GlobalInstruction:        "Answer as precisely as possible.",
 				DisallowTransferToParent: true,
 				DisallowTransferToPeers:  true,
+			})
+			if err != nil {
+				t.Fatalf("NewLLMAgent failed: %v", err)
 			}
+			// TODO: set tools, planner.
 			ctx, invCtx := adk.NewInvocationContext(t.Context(), a)
 			stream := a.Run(ctx, invCtx)
 			texts, err := collectTextParts(stream)
@@ -106,18 +108,21 @@ func TestFunctionTool(t *testing.T) {
 		Name:        "sum",
 		Description: "computes the sum of two numbers",
 	}, handler)
-	agent := &agent.LLMAgent{
-		AgentName:        "agent",
-		AgentDescription: "math agent",
-		Model:            model,
-		Instruction:      "output ONLY the result computed by the provided function",
-		Tools:            []adk.Tool{rand},
+	a, err := agent.NewLLMAgent(cfg{
+		Name:        "agent",
+		Model:       model,
+		Description: "math agent",
+		Instruction: "output ONLY the result computed by the provided function",
+		Tools:       []adk.Tool{rand},
 		// TODO(hakim): set to false when autoflow is implemented.
 		DisallowTransferToParent: true,
 		DisallowTransferToPeers:  true,
+	})
+	if err != nil {
+		t.Fatalf("NewLLMAgent failed: %v", err)
 	}
 
-	runner := newTestAgentRunner(t, agent)
+	runner := newTestAgentRunner(t, a)
 	stream := runner.Run(t, "session1", prompt)
 	ans, err := collectTextParts(stream)
 	if err != nil || len(ans) == 0 {
@@ -152,12 +157,17 @@ func TestAgentTransfer(t *testing.T) {
 		return &mockModel{responses: resp}
 	}
 	// creates an LLM model with the name and the model.
-	llmAgent := func(name string, model adk.Model) *agent.LLMAgent {
-		return &agent.LLMAgent{
-			AgentName: name,
-			Model:     model,
+	llmAgentFn := func(t *testing.T) func(cfg cfg) *adk.Agent {
+		return func(cfg cfg) *adk.Agent {
+			t.Helper()
+			a, err := agent.NewLLMAgent(cfg)
+			if err != nil {
+				t.Fatalf("NewLLMAgent failed: %v", err)
+			}
+			return a
 		}
 	}
+
 	type content struct {
 		Author string
 		Parts  []*genai.Part
@@ -185,7 +195,7 @@ func TestAgentTransfer(t *testing.T) {
 		return ret, nil
 	}
 
-	check := func(t *testing.T, rootAgent adk.Agent, wants [][]content) {
+	check := func(t *testing.T, rootAgent *adk.Agent, wants [][]content) {
 		runner := newTestAgentRunner(t, rootAgent)
 		for i := range len(wants) {
 			got, err := contents(runner.Run(t, "session_id", fmt.Sprintf("round %d", i)))
@@ -204,11 +214,11 @@ func TestAgentTransfer(t *testing.T) {
 			transferCall("sub_agent_1"),
 			text("response1"),
 			text("response2"))
+		llmAgent := llmAgentFn(t)
 
-		subAgent1 := llmAgent("sub_agent_1", model)
+		subAgent1 := llmAgent(cfg{Name: "sub_agent_1", Model: model})
 
-		rootAgent := llmAgent("root_agent", model)
-		rootAgent.AddSubAgents(subAgent1)
+		rootAgent := llmAgent(cfg{Name: "root_agent", Model: model, SubAgents: []*adk.Agent{subAgent1}})
 
 		check(t, rootAgent, [][]content{
 			0: {
@@ -228,14 +238,20 @@ func TestAgentTransfer(t *testing.T) {
 			transferCall("sub_agent_1"),
 			text("response1"),
 			text("response2"))
+		llmAgent := llmAgentFn(t)
 
-		subAgent1 := llmAgent("sub_agent_1", model)
-		subAgent1.DisallowTransferToParent = true
-		subAgent1.DisallowTransferToPeers = true
+		subAgent1 := llmAgent(cfg{
+			Name:                     "sub_agent_1",
+			Model:                    model,
+			DisallowTransferToParent: true,
+			DisallowTransferToPeers:  true,
+		})
 
-		rootAgent := llmAgent("root_agent", model)
-		rootAgent.AddSubAgents(subAgent1)
-
+		rootAgent := llmAgent(cfg{
+			Name:      "root_agent",
+			Model:     model,
+			SubAgents: []*adk.Agent{subAgent1},
+		})
 		check(t, rootAgent, [][]content{
 			0: {
 				{"root_agent", transferCall("sub_agent_1").Parts},
@@ -255,17 +271,24 @@ func TestAgentTransfer(t *testing.T) {
 			transferCall("sub_agent_1_1"),
 			text("response1"),
 			text("response2"))
+		llmAgent := llmAgentFn(t)
 
-		subAgent1_1 := llmAgent("sub_agent_1_1", model)
-		subAgent1_1.DisallowTransferToParent = true
-		subAgent1_1.DisallowTransferToPeers = true
-
-		subAgent1 := llmAgent("sub_agent_1", model)
-		subAgent1.AddSubAgents(subAgent1_1)
-
-		rootAgent := llmAgent("root_agent", model)
-		rootAgent.AddSubAgents(subAgent1)
-
+		subAgent1_1 := llmAgent(cfg{
+			Name:                     "sub_agent_1_1",
+			Model:                    model,
+			DisallowTransferToParent: true,
+			DisallowTransferToPeers:  true,
+		})
+		subAgent1 := llmAgent(cfg{
+			Name:      "sub_agent_1",
+			Model:     model,
+			SubAgents: []*adk.Agent{subAgent1_1},
+		})
+		rootAgent := llmAgent(cfg{
+			Name:      "root_agent",
+			Model:     model,
+			SubAgents: []*adk.Agent{subAgent1},
+		})
 		check(t, rootAgent, [][]content{
 			0: {
 				{"root_agent", transferCall("sub_agent_1").Parts},
@@ -293,7 +316,7 @@ func TestAgentTransfer(t *testing.T) {
 // TODO(hakim): move testAgentRunner to an internal test utility package.
 // See adk-python's tests/unittests/testing_utils.py.
 type testAgentRunner struct {
-	agent          adk.Agent
+	agent          *adk.Agent
 	sessionService adk.SessionService
 	lastSession    *adk.Session
 }
@@ -355,7 +378,7 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 	}
 }
 
-func (r *testAgentRunner) findAgentToRun(s *adk.Session, rootAgent adk.Agent) adk.Agent {
+func (r *testAgentRunner) findAgentToRun(s *adk.Session, rootAgent *adk.Agent) *adk.Agent {
 	// runner.py Runner's _find_agent_to_run.
 
 	// TODO: findMatchingFunctionCall.
@@ -382,36 +405,31 @@ func (r *testAgentRunner) findAgentToRun(s *adk.Session, rootAgent adk.Agent) ad
 // to run can transfer to any other agent in the agent tree.
 // This typicall means all agentToRun's parents through root agent
 // can transfer to their parent agents.
-func (r *testAgentRunner) isTransferableAcrossAgentTree(agentToRun adk.Agent) bool {
+func (r *testAgentRunner) isTransferableAcrossAgentTree(agentToRun *adk.Agent) bool {
 	for {
 		if agentToRun == nil {
 			return true
 		}
-		agent, ok := agentToRun.(*agent.LLMAgent)
+		agent, ok := agentToRun.Impl().(*agent.LLMAgent)
 		if !ok {
 			return false // only LLMAgent can provide agent transfer capability.
 		}
 		if agent.DisallowTransferToParent {
 			return false
 		}
-		agentToRun = agent.ParentAgent
+		agentToRun = agent.Parent()
 	}
 }
 
-func findAgent(agent adk.Agent, name string) adk.Agent {
+func findAgent(agent *adk.Agent, name string) *adk.Agent {
 	if agent.Name() == name {
 		return agent
 	}
 	return findSubAgent(agent, name)
 }
 
-func findSubAgent(a adk.Agent, name string) adk.Agent {
-	llmAgent, ok := a.(*agent.LLMAgent)
-	if !ok {
-		return nil
-	}
-
-	for _, sub := range llmAgent.SubAgents {
+func findSubAgent(a *adk.Agent, name string) *adk.Agent {
+	for _, sub := range a.SubAgents() {
 		return findAgent(sub, name)
 	}
 	return nil
@@ -441,7 +459,7 @@ func (m *mockModel) Name() string {
 
 var _ adk.Model = (*mockModel)(nil)
 
-func newTestAgentRunner(_ *testing.T, agent adk.Agent) *testAgentRunner {
+func newTestAgentRunner(_ *testing.T, agent *adk.Agent) *testAgentRunner {
 	return &testAgentRunner{
 		agent:          agent,
 		sessionService: &session.InMemorySessionService{},

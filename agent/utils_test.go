@@ -21,16 +21,17 @@ import (
 )
 
 func TestRootAgent(t *testing.T) {
-	root := &LLMAgent{AgentName: "root"}
-	a := &LLMAgent{AgentName: "a"}
-	b := &LLMAgent{AgentName: "b"}
-	nonLLM := mockAgent("mock")
+	model := struct {
+		adk.Model
+	}{}
 
-	root.AddSubAgents(a)
-	a.AddSubAgents(b)
-	b.AddSubAgents(nonLLM)
+	type cfg = LLMAgentConfig
+	nonLLM := newMockAgent("mock")
+	b := must(NewLLMAgent(cfg{Name: "b", Model: model, SubAgents: []*adk.Agent{nonLLM}}))
+	a := must(NewLLMAgent(cfg{Name: "a", Model: model, SubAgents: []*adk.Agent{b}}))
+	root := must(NewLLMAgent(cfg{Name: "root", Model: model, SubAgents: []*adk.Agent{a}}))
 
-	agentName := func(a adk.Agent) string {
+	agentName := func(a *adk.Agent) string {
 		if a == nil {
 			return "nil"
 		}
@@ -38,13 +39,13 @@ func TestRootAgent(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		agent adk.Agent
-		want  adk.Agent
+		agent *adk.Agent
+		want  *adk.Agent
 	}{
 		{root, root},
 		{a, root},
 		{b, root},
-		{nonLLM, nonLLM}, // TODO: nonLLM agent should be able to have root.
+		{nonLLM, root}, // TODO: nonLLM agent should be able to have root.
 		{nil, nil},
 	} {
 		t.Run("agent="+agentName(tc.agent), func(t *testing.T) {

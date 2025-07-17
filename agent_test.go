@@ -21,14 +21,13 @@ import (
 	"testing"
 
 	"github.com/google/adk-go"
+	"github.com/google/adk-go/agent/base"
 )
 
 type testAgent struct {
 	run func(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error]
 }
 
-func (m *testAgent) Name() string        { return "TestAgent" }
-func (m *testAgent) Description() string { return "" }
 func (m *testAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
 	return m.run(ctx, parentCtx)
 }
@@ -42,7 +41,8 @@ func TestNewInvocationContext_End(t *testing.T) {
 			yield(nil, ctx.Err())
 		}
 	}
-	agent := &testAgent{run: waitForCancel}
+	agent, _ := base.NewAgent(base.Config{Name: "TestAgent"})
+	agent.SetImpl(&testAgent{run: waitForCancel})
 
 	ctx, ic := adk.NewInvocationContext(ctx, agent)
 	// schedule cancellation to happen after the agent starts running.

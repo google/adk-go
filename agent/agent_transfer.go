@@ -57,17 +57,16 @@ import (
 //
 // TODO: implement it in the runners package and update this doc.
 
-
-func agentTransferRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
-	agent := asLLMAgent(parentCtx.Agent)
-	if agent == nil {
+func agentTransferRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, agent *adk.Agent, req *adk.LLMRequest) error {
+	llmAgent := asLLMAgent(agent)
+	if llmAgent == nil {
 		return nil // TODO: support agent types other than LLMAgent, that have parent/subagents?
 	}
-	if !agent.useAutoFlow() {
+	if !llmAgent.useAutoFlow() {
 		return nil
 	}
 
-	targets := transferTarget(agent)
+	targets := transferTarget(llmAgent)
 	if len(targets) == 0 {
 		return nil
 	}
@@ -75,7 +74,7 @@ func agentTransferRequestProcessor(ctx context.Context, parentCtx *adk.Invocatio
 	// TODO(hyangah): why do we set this up in request processor
 	// instead of registering this as a normal function tool of the Agent?
 	transferToAgentTool := &transferToAgentTool{}
-	si, err := instructionsForTransferToAgent(agent, targets, transferToAgentTool)
+	si, err := instructionsForTransferToAgent(llmAgent, targets, transferToAgentTool)
 	if err != nil {
 		return err
 	}
@@ -136,20 +135,20 @@ func (t *transferToAgentTool) Run(ctx context.Context, tc *adk.ToolContext, args
 
 var _ adk.Tool = (*transferToAgentTool)(nil)
 
-func transferTarget(current *LLMAgent) []adk.Agent {
+func transferTarget(current *LLMAgent) []*adk.Agent {
 	targets := slices.Clone(current.SubAgents)
 
-	if !current.DisallowTransferToParent && current.ParentAgent != nil {
-		targets = append(targets, current.ParentAgent)
+	if !current.DisallowTransferToParent && current.Parent() != nil {
+		targets = append(targets, current.Parent())
 	}
 	// For peer-agent transfers, it's only enabled when all below conditions are met:
 	// - the parent agent is also of AutoFlow.
 	// - DisallowTransferToPeers is false.
 	if !current.DisallowTransferToPeers {
-		parent := asLLMAgent(current.ParentAgent)
+		parent := asLLMAgent(current.Parent())
 		if parent != nil && parent.useAutoFlow() {
 			for _, peer := range parent.SubAgents {
-				if peer.Name() != current.Name() {
+				if peer.Name() != current.Name {
 					targets = append(targets, peer)
 				}
 			}
@@ -161,8 +160,8 @@ func transferTarget(current *LLMAgent) []adk.Agent {
 var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
-func instructionsForTransferToAgent(agent *LLMAgent, targets []adk.Agent, transferTool adk.Tool) (string, error) {
-	parent := agent.ParentAgent
+func instructionsForTransferToAgent(agent *LLMAgent, targets []*adk.Agent, transferTool adk.Tool) (string, error) {
+	parent := agent.Parent()
 	if agent.DisallowTransferToParent {
 		parent = nil
 	}
@@ -170,11 +169,11 @@ func instructionsForTransferToAgent(agent *LLMAgent, targets []adk.Agent, transf
 	var buf bytes.Buffer
 	if err := transferToAgentPromptTmpl.Execute(&buf, struct {
 		AgentName string
-		Parent    adk.Agent
-		Targets   []adk.Agent
+		Parent    *adk.Agent
+		Targets   []*adk.Agent
 		ToolName  string
 	}{
-		AgentName: agent.Name(),
+		AgentName: agent.Name,
 		Parent:    parent,
 		Targets:   targets,
 		ToolName:  transferTool.Name(),

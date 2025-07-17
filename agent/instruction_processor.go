@@ -21,14 +21,13 @@ import (
 )
 
 // instructionsRequestProcessor configures req's instructions and global instructions for LLM flow.
-func instructionsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+func instructionsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, agent *adk.Agent, req *adk.LLMRequest) error {
 	// reference: adk-python src/google/adk/flows/llm_flows/instructions.py
-
-	llmAgent := asLLMAgent(parentCtx.Agent)
+	llmAgent := asLLMAgent(agent)
 	if llmAgent == nil {
 		return nil // do nothing.
 	}
-	rootAgent := asLLMAgent(rootAgent(llmAgent))
+	rootAgent := asLLMAgent(rootAgent(agent))
 	if rootAgent == nil {
 		rootAgent = llmAgent
 	}

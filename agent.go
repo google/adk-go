@@ -16,20 +16,42 @@ package adk
 
 import (
 	"context"
+	"fmt"
 	"iter"
 
+	"github.com/google/adk-go/internal/itype"
 	"github.com/google/uuid"
 	"google.golang.org/genai"
 )
 
-// Agent is the agent type.
-type Agent interface {
-	Name() string
-	Description() string
+// Agent is the Agent type ADK framework interacts with.
+// Use the constructor functions provided in the agent package.
+// For example, the following creates a trivial LLM agent.
+//
+/*
+	import "github.com/google/adk-go/agent"
 
-	// Run runs the agent with the invocation context.
-	Run(ctx context.Context, parentCtx *InvocationContext) iter.Seq2[*Event, error]
-	// TODO: finalize the interface.
+	a, err := agent.NewLLMAgent(agent.LLMAgentConfig{
+		Name: "my agent",
+		Model: model,
+		Instruction: "answer to user's question nicely",
+	})
+*/
+// To develope a custom agent, see the documentation in
+// github.com/google/adk-go/agent/base.
+type Agent struct {
+	name        string
+	description string
+	parentAgent *Agent
+	subAgents   []*Agent
+
+	impl AgentImpl
+}
+
+// AgentImpl implements custom agent's logic.
+type AgentImpl interface {
+	Run(context.Context, *InvocationContext) iter.Seq2[*Event, error]
+	// TODO: RunLive
 }
 
 // An InvocationContext represents the data of a single invocation of an agent.
@@ -78,7 +100,7 @@ type InvocationContext struct {
 	// conversation history.
 	Branch string
 	// The current agent of this invocation context. Readonly.
-	Agent Agent
+	Agent *Agent
 	// The user content that started this invocation. Readonly.
 	UserContent *genai.Content
 	// Configurations for live agents under this invocation.
@@ -96,7 +118,7 @@ type InvocationContext struct {
 
 // NewInvocationContext creates a new invocation context for the given agent
 // and returns context.Context that is bound to the invocation context.
-func NewInvocationContext(ctx context.Context, agent Agent) (context.Context, *InvocationContext) {
+func NewInvocationContext(ctx context.Context, agent *Agent) (context.Context, *InvocationContext) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	return ctx, &InvocationContext{
 		InvocationID: "e-" + uuid.NewString(),
@@ -147,4 +169,80 @@ type AgentRunConfig struct {
 	//    calls is enforced, if the value is set in this range.
 	//  - Less than or equal to 0: This allows for unbounded number of llm calls.
 	MaxLLMCalls int
+}
+
+// Agent's constructor function is defined in a different package.
+// That complicates initializing unexported fields.
+// The following registers the initialization function that
+// can be called from the agent/base package.
+// Note: this package imports itype, which means itype cannot
+// rely on the types defined in this package. RegisterConfigureAgent
+// thus returns the constructed *Agent object as 'any'.
+
+func init() {
+	itype.RegisterNewAgent(func(cfg itype.AgentConfig) (any, error) { return newAgent(cfg) })
+}
+
+func newAgent(cfg itype.AgentConfig) (*Agent, error) {
+	a := &Agent{name: cfg.Name, description: cfg.Description}
+	subAgents := make([]*Agent, 0, len(cfg.SubAgents))
+	for _, s := range cfg.SubAgents {
+		subagent, ok := s.(*Agent)
+		if !ok || subagent == nil {
+			return a, fmt.Errorf("subagent %v is not *adk.Agent", s)
+		}
+		subAgents = append(subAgents, subagent)
+	}
+	return a, a.addSubAgents(subAgents...)
+}
+
+func (a *Agent) Name() string           { return a.name }
+func (a *Agent) Description() string    { return a.description }
+func (a *Agent) Parent() *Agent         { return a.parentAgent }
+func (a *Agent) SubAgents() []*Agent    { return a.subAgents }
+func (a *Agent) SetImpl(impl AgentImpl) { a.impl = impl }
+func (a *Agent) Impl() AgentImpl        { return a.impl }
+func (a *Agent) Run(ctx context.Context, parentCtx *InvocationContext) iter.Seq2[*Event, error] {
+	ctx, parentCtx = newInvocationContext(ctx, a, parentCtx)
+	// TODO: telemetry
+	return a.impl.Run(ctx, parentCtx)
+}
+
+func newInvocationContext(ctx context.Context, a *Agent, p *InvocationContext) (context.Context, *InvocationContext) {
+	ctx, c := NewInvocationContext(ctx, a)
+	if p != nil {
+		// copy everything but Agent and internal state.
+		c.InvocationID = p.InvocationID
+		c.Branch = p.Branch // TODO: why don't we update branch?
+		c.UserContent = p.UserContent
+		c.RunConfig = p.RunConfig
+		c.Session = p.Session
+	}
+	return ctx, c
+}
+
+// addSubAgents adds the agents to the subagent list.
+func (a *Agent) addSubAgents(agents ...*Agent) error {
+	names := map[string]bool{}
+	for _, subagent := range a.subAgents {
+		names[subagent.Name()] = true
+	}
+	// run sanity check (no duplicate name, no multiple parents)
+	for _, subagent := range agents {
+		name := subagent.Name()
+		if names[name] {
+			return fmt.Errorf("multiple subagents with the same name (%q) are not allowed", name)
+		}
+		if parent := subagent.Parent(); parent != nil {
+			return fmt.Errorf("agent %q already has parent %q", name, parent.Name())
+		}
+		names[name] = true
+	}
+
+	// mutate.
+	for _, subagent := range agents {
+		a.subAgents = append(a.subAgents, subagent)
+		subagent.parentAgent = a
+	}
+	return nil
 }
