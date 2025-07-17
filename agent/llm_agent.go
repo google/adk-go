@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"iter"
 
 	"github.com/google/adk-go"
 	"google.golang.org/genai"
@@ -91,7 +92,7 @@ func (a *LLMAgent) newInvocationContext(ctx context.Context, p *adk.InvocationCo
 
 func (a *LLMAgent) Name() string        { return a.AgentName }
 func (a *LLMAgent) Description() string { return a.AgentDescription }
-func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) (adk.EventStream, error) {
+func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
 	// TODO: Select model (LlmAgent.canonical_model)
 	ctx, parentCtx = a.newInvocationContext(ctx, parentCtx)
 	flow := &baseFlow{
@@ -99,7 +100,7 @@ func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) (a
 		RequestProcessors:  defaultRequestProcessors,
 		ResponseProcessors: defaultResponseProcessors,
 	}
-	return flow.Run(ctx, parentCtx), nil
+	return flow.Run(ctx, parentCtx)
 }
 
 func (a *LLMAgent) useAutoFlow() bool {
@@ -136,7 +137,7 @@ type baseFlow struct {
 	ResponseProcessors []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error
 }
 
-func (f *baseFlow) Run(ctx context.Context, parentCtx *adk.InvocationContext) adk.EventStream {
+func (f *baseFlow) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
 	return func(yield func(*adk.Event, error) bool) {
 		for {
 			var lastEvent *adk.Event
@@ -164,7 +165,7 @@ func (f *baseFlow) Run(ctx context.Context, parentCtx *adk.InvocationContext) ad
 	}
 }
 
-func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationContext) adk.EventStream {
+func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
 	return func(yield func(*adk.Event, error) bool) {
 		req := &adk.LLMRequest{Model: f.Model}
 
@@ -224,12 +225,7 @@ func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationCont
 				yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
 				return
 			}
-			stream, err := nextAgent.Run(ctx, parentCtx)
-			if err != nil {
-				yield(nil, fmt.Errorf("failed to run agent %q: %w", nextAgent.Name(), err))
-				return
-			}
-			for ev, err := range stream {
+			for ev, err := range nextAgent.Run(ctx, parentCtx) {
 				if !yield(ev, err) || err != nil { // forward
 					return
 				}

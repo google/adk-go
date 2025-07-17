@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"iter"
 	"slices"
 	"strings"
 	"testing"
@@ -31,8 +32,8 @@ var _ adk.Agent = mockAgent("")
 
 func (a mockAgent) Name() string        { return string(a) }
 func (a mockAgent) Description() string { return "" }
-func (a mockAgent) Run(ctx context.Context, invCtx *adk.InvocationContext) (adk.EventStream, error) {
-	return func(yield func(*adk.Event, error) bool) {}, nil
+func (a mockAgent) Run(ctx context.Context, invCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
+	return func(yield func(*adk.Event, error) bool) {}
 }
 
 func TestAgentTransferRequestProcessor(t *testing.T) {

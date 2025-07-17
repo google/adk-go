@@ -16,6 +16,7 @@ package runner
 
 import (
 	"context"
+	"iter"
 
 	"github.com/google/adk-go"
 
@@ -29,7 +30,7 @@ type Runner struct {
 }
 
 // Run runs the agent.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *adk.AgentRunConfig) (adk.EventStream, error) {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *adk.AgentRunConfig) (iter.Seq2[*adk.Event, error], error) {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	//

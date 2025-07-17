@@ -16,6 +16,7 @@ package adk
 
 import (
 	"context"
+	"iter"
 
 	"github.com/google/uuid"
 	"google.golang.org/genai"
@@ -27,7 +28,7 @@ type Agent interface {
 	Description() string
 
 	// Run runs the agent with the invocation context.
-	Run(ctx context.Context, parentCtx *InvocationContext) (EventStream, error)
+	Run(ctx context.Context, parentCtx *InvocationContext) iter.Seq2[*Event, error]
 	// TODO: finalize the interface.
 }
 

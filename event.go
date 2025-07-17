@@ -15,13 +15,10 @@
 package adk
 
 import (
-	"iter"
 	"time"
 
 	"github.com/google/uuid"
 )
-
-type EventStream = iter.Seq2[*Event, error]
 
 // NewEvent creates a new event.
 func NewEvent(invocationID string) *Event {

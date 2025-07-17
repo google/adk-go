@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"net/http"
 	"path/filepath"
 	"slices"
@@ -71,11 +72,7 @@ func TestLLMAgent(t *testing.T) {
 				DisallowTransferToPeers:  true,
 			}
 			ctx, invCtx := adk.NewInvocationContext(t.Context(), a)
-			stream, err := a.Run(ctx, invCtx)
-			// TODO: do we want to make a.Run return just adk.EventStream?
-			if err != nil {
-				t.Fatalf("failed to run agent: %v", err)
-			}
+			stream := a.Run(ctx, invCtx)
 			texts, err := collectTextParts(stream)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 				t.Fatalf("stream = (%q, %v), want (_, %v)", texts, err, tc.wantErr)
@@ -166,7 +163,7 @@ func TestAgentTransfer(t *testing.T) {
 		Parts  []*genai.Part
 	}
 	// contents returns (Author, Parts) stream extracted from the event stream.
-	contents := func(stream adk.EventStream) ([]content, error) {
+	contents := func(stream iter.Seq2[*adk.Event, error]) ([]content, error) {
 		var ret []content
 		for ev, err := range stream {
 			if err != nil {
@@ -321,7 +318,7 @@ func (r *testAgentRunner) session(t *testing.T, sessionID string) (*adk.Session,
 	return session, err
 }
 
-func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) adk.EventStream {
+func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.Seq2[*adk.Event, error] {
 	t.Helper()
 	ctx := t.Context()
 	session, err := r.session(t, sessionID)
@@ -344,11 +341,7 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) adk.Ev
 		r.sessionService.AppendEvent(ctx, session, userMessageEvent)
 
 		agentToRun := r.findAgentToRun(session, r.agent)
-		stream, err := agentToRun.Run(ctx, inv)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for ev, err := range stream {
+		for ev, err := range agentToRun.Run(ctx, inv) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -477,7 +470,7 @@ func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper)
 
 // collectTextParts collects all text parts from the llm response until encountering an error.
 // It returns all collected text parts and the last error.
-func collectTextParts(stream adk.EventStream) ([]string, error) {
+func collectTextParts(stream iter.Seq2[*adk.Event, error]) ([]string, error) {
 	var texts []string
 	for ev, err := range stream {
 		if err != nil {
