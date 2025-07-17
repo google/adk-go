@@ -21,9 +21,9 @@ import (
 )
 
 func TestRootAgent(t *testing.T) {
-	root := &LLMAgent{AgentName: "root"}
-	a := &LLMAgent{AgentName: "a"}
-	b := &LLMAgent{AgentName: "b"}
+	root := NewLLMAgent("root")
+	a := NewLLMAgent("a")
+	b := NewLLMAgent("b")
 	nonLLM := mockAgent("mock")
 
 	root.AddSubAgents(a)
