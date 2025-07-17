@@ -140,3 +140,10 @@ func rootAgent(agent adk.Agent) adk.Agent {
 		current = parent
 	}
 }
+
+func must[T adk.Agent](a T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return a
+}

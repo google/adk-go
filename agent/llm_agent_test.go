@@ -59,8 +59,11 @@ func TestLLMAgent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := newGeminiModel(t, modelName, tc.transport)
-			a := agent.NewLLMAgent("hello_world_agent", model,
+			a, err := agent.NewLLMAgent("hello_world_agent", model,
 				agent.WithDescription("hello world agent"))
+			if err != nil {
+				t.Fatalf("NewLLMAgent failed: %v", err)
+			}
 			a.Instruction = "Roll the dice and report only the result."
 			a.GlobalInstruction = "Answer as precisely as possible."
 			a.DisallowTransferToParent = true
@@ -111,7 +114,10 @@ func TestFunctionTool(t *testing.T) {
 		Name:        "sum",
 		Description: "computes the sum of two numbers",
 	}, handler)
-	agent := agent.NewLLMAgent("agent", model, agent.WithDescription("math agent"))
+	agent, err := agent.NewLLMAgent("agent", model, agent.WithDescription("math agent"))
+	if err != nil {
+		t.Fatalf("NewLLMAgent failed: %v", err)
+	}
 	agent.Instruction = "output ONLY the result computed by the provided function"
 	agent.Tools = []adk.Tool{rand}
 	// TODO(hakim): set to false when autoflow is implemented.
@@ -153,9 +159,16 @@ func TestAgentTransfer(t *testing.T) {
 		return &mockModel{responses: resp}
 	}
 	// creates an LLM model with the name and the model.
-	llmAgent := func(name string, model adk.Model) *agent.LLMAgent {
-		return agent.NewLLMAgent(name, model)
+	llmAgentFn := func(t *testing.T) func(name string, model adk.Model) *agent.LLMAgent {
+		return func(name string, model adk.Model) *agent.LLMAgent {
+			a, err := agent.NewLLMAgent(name, model)
+			if err != nil {
+				t.Fatalf("NewLLMAgent failed: %v", err)
+			}
+			return a
+		}
 	}
+
 	type content struct {
 		Author string
 		Parts  []*genai.Part
@@ -202,6 +215,7 @@ func TestAgentTransfer(t *testing.T) {
 			transferCall("sub_agent_1"),
 			text("response1"),
 			text("response2"))
+		llmAgent := llmAgentFn(t)
 
 		subAgent1 := llmAgent("sub_agent_1", model)
 
@@ -226,6 +240,7 @@ func TestAgentTransfer(t *testing.T) {
 			transferCall("sub_agent_1"),
 			text("response1"),
 			text("response2"))
+		llmAgent := llmAgentFn(t)
 
 		subAgent1 := llmAgent("sub_agent_1", model)
 		subAgent1.DisallowTransferToParent = true
@@ -253,6 +268,7 @@ func TestAgentTransfer(t *testing.T) {
 			transferCall("sub_agent_1_1"),
 			text("response1"),
 			text("response2"))
+		llmAgent := llmAgentFn(t)
 
 		subAgent1_1 := llmAgent("sub_agent_1_1", model)
 		subAgent1_1.DisallowTransferToParent = true

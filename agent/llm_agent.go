@@ -24,17 +24,23 @@ import (
 )
 
 // NewLLMAgent returns a new LLMAgent configured with the provided options.
-func NewLLMAgent(name string, model adk.Model, opts ...Option) *LLMAgent {
+func NewLLMAgent(name string, model adk.Model, opts ...Option) (*LLMAgent, error) {
 	llmAgent := &LLMAgent{Model: model}
-	llmAgent.BaseAgent = NewBaseAgent(name, llmAgent, opts...)
+	var err error
+	llmAgent.BaseAgent, err = NewBaseAgent(name, llmAgent, opts...)
+	if err != nil {
+		return nil, err
+	}
 
 	// apply LLM Agent specific options.
 	for _, opt := range opts {
 		if o, ok := opt.(llmAgentOption); ok {
-			o.apply2LLMAgent(llmAgent)
+			if err := o.apply2LLMAgent(llmAgent); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return llmAgent
+	return llmAgent, nil
 }
 
 type llmAgentOption interface {

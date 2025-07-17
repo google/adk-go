@@ -58,19 +58,22 @@ func WithSubAgents(agents ...adk.Agent) Option {
 // base agent by embedding.
 
 // For example,
-//
-//		type MyCustomAgent struct {
-//		   *BaseAgent
-//		   ....
-//		}
-//
-//		func NewMyCustomAgent(name string, opts ...agent.Option) *MyCustomAgent {
-//		   agent := &MyCustomAgent{}
-//		   agent.BaseAgent = agent.NewBaseAgent(name, agent, opts...)}
-//		   agent.Self = a  // This allows methods implemented in BaseAgent can access *MyCustomAgent.
-//	        ...
-//		   return agent
-//		}
+/*
+	type MyCustomAgent struct {
+	   *BaseAgent
+	   ....
+	}
+
+	func NewMyCustomAgent(name string, opts ...agent.Option) (*MyCustomAgent, error) {
+	   agent := &MyCustomAgent{}
+	   base, err := agent.NewBaseAgent(name, agent, opts...)}
+	   if err != nil { return nil, err }
+	   agent.BaseAgent = base
+	   agent.Self = a  // This allows methods implemented in BaseAgent can access *MyCustomAgent.
+	    ...
+	   return agent, nil
+	}
+*/
 type BaseAgent struct {
 	name        string
 	description string
@@ -81,17 +84,17 @@ type BaseAgent struct {
 }
 
 // NewBaseAgent returns a BaseAgent that can be the base of the implementation agent.
-func NewBaseAgent(name string, implementation adk.Agent, opts ...Option) *BaseAgent {
+func NewBaseAgent(name string, implementation adk.Agent, opts ...Option) (*BaseAgent, error) {
 	if implementation == nil {
 		panic("implementation is nil")
 	}
 	b := &BaseAgent{name: name, self: implementation}
 	for _, opt := range opts {
 		if err := opt.apply2Base(b); err != nil {
-			panic(err) // TODO: what do we do with error.
+			return nil, err
 		}
 	}
-	return b
+	return b, nil
 }
 
 var _ adk.Agent = (*BaseAgent)(nil)
