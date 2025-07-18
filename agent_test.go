@@ -24,6 +24,7 @@ import (
 )
 
 type testAgent struct {
+	adk.Agent
 	run func(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error]
 }
 

@@ -15,9 +15,7 @@
 package agent
 
 import (
-	"context"
 	"fmt"
-	"iter"
 
 	"github.com/google/adk-go"
 )
@@ -69,7 +67,6 @@ func WithSubAgents(agents ...adk.Agent) Option {
 	   base, err := agent.NewBaseAgent(name, agent, opts...)}
 	   if err != nil { return nil, err }
 	   agent.BaseAgent = base
-	   agent.Self = a  // This allows methods implemented in BaseAgent can access *MyCustomAgent.
 	    ...
 	   return agent, nil
 	}
@@ -86,7 +83,7 @@ type BaseAgent struct {
 // NewBaseAgent returns a BaseAgent that can be the base of the implementation agent.
 func NewBaseAgent(name string, implementation adk.Agent, opts ...Option) (*BaseAgent, error) {
 	if implementation == nil {
-		panic("implementation is nil")
+		return nil, fmt.Errorf("implementation is nil")
 	}
 	b := &BaseAgent{name: name, self: implementation}
 	for _, opt := range opts {
@@ -97,47 +94,47 @@ func NewBaseAgent(name string, implementation adk.Agent, opts ...Option) (*BaseA
 	return b, nil
 }
 
-var _ adk.Agent = (*BaseAgent)(nil)
-
 func (a *BaseAgent) Name() string           { return a.name }
 func (a *BaseAgent) Description() string    { return a.description }
 func (a *BaseAgent) Parent() adk.Agent      { return a.parentAgent }
 func (a *BaseAgent) SubAgents() []adk.Agent { return a.subAgents }
-func (a *BaseAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
-	panic("unimplemented")
-}
 
 // TODO: Should we export it as Base() and include it in the interface?
 // That will allows custom agents to wrap its BaseAgent instead of embedding.
 func (a *BaseAgent) _base_() *BaseAgent { return a }
 
-func (a *BaseAgent) findSubAgent(name string) (adk.Agent, bool) {
-	for _, s := range a.subAgents {
-		if s.Name() == name {
-			return a, true
-		}
+func asBaseAgent(a adk.Agent) *BaseAgent {
+	if b, ok := a.(interface{ _base_() *BaseAgent }); ok {
+		return b._base_()
 	}
-	return nil, false
+	return nil
 }
 
 // AddSubAgents adds the agents to the subagent list.
 func (a *BaseAgent) AddSubAgents(agents ...adk.Agent) error {
+	names := map[string]bool{}
+	for _, subagent := range a.subAgents {
+		names[subagent.Name()] = true
+	}
+	// run sanity check (no duplicate name, no multiple parents)
 	for _, subagent := range agents {
-		// O(n^2) search, but n is small enough.
-		if _, found := a.findSubAgent(subagent.Name()); found {
-			return fmt.Errorf("cannot register multiple agents with the same name: %q", subagent.Name())
+		name := subagent.Name()
+		if names[name] {
+			return fmt.Errorf("multiple subagents with the same name (%q) are not allowed", name)
 		}
+		if parent := subagent.Parent(); parent != nil {
+			return fmt.Errorf("agent %q already has parent %q", name, parent.Name())
+		}
+		names[name] = true
+	}
 
+	// mutate.
+	for _, subagent := range agents {
 		a.subAgents = append(a.subAgents, subagent)
-
-		if s, ok := subagent.(interface{ _base_() *BaseAgent }); ok {
-			if base := s._base_(); base != nil {
-				if base.parentAgent != nil {
-					return fmt.Errorf("Agent(%q) is already a subagent of Agent(%q)", base.Name(), base.parentAgent.Name())
-				}
-				base.parentAgent = a.self
-			}
+		if base := asBaseAgent(subagent); base != nil {
+			base.parentAgent = a.self
 		}
+		// TODO: error if subagent is not a base agent?
 	}
 	return nil
 }

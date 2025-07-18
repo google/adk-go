@@ -26,12 +26,16 @@ import (
 	"google.golang.org/genai"
 )
 
-type mockAgent string
+type mockAgent struct {
+	*BaseAgent
+}
 
-var _ adk.Agent = mockAgent("")
+func newMockAgent(name string) *mockAgent {
+	m := &mockAgent{}
+	m.BaseAgent, _ = NewBaseAgent(name, m)
+	return m
+}
 
-func (a mockAgent) Name() string        { return string(a) }
-func (a mockAgent) Description() string { return "" }
 func (a mockAgent) Run(ctx context.Context, invCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
 	return func(yield func(*adk.Event, error) bool) {}
 }
@@ -125,7 +129,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		check(t, agent, "", nil, []string{"Current"})
 	})
 	t.Run("NotLLMAgent", func(t *testing.T) {
-		check(t, mockAgent("mockAgent"), "", nil, nil)
+		check(t, newMockAgent("mockAgent"), "", nil, nil)
 	})
 	t.Run("LLMAgentParent", func(t *testing.T) {
 		agent := must(NewLLMAgent("Current", model))
@@ -142,14 +146,14 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	})
 	t.Run("LLMAgentSubagents", func(t *testing.T) {
 		agent := must(NewLLMAgent("Current", model))
-		agent.AddSubAgents(mockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
+		agent.AddSubAgents(newMockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
 		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
 	})
 
 	t.Run("AgentWithParentAndPeersAndSubagents", func(t *testing.T) {
 		agent := must(NewLLMAgent("Current", model))
-		agent.AddSubAgents(mockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
-		peer := mockAgent("Peer")
+		agent.AddSubAgents(newMockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
+		peer := newMockAgent("Peer")
 		parentAgent := must(NewLLMAgent("Parent", model))
 		parentAgent.AddSubAgents(agent, peer)
 		check(t, agent, "Parent", []string{"Peer", "Sub1", "Sub2"}, []string{"Current"})
@@ -157,7 +161,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 
 	t.Run("NonLLMAgentSubagents", func(t *testing.T) {
 		agent := must(NewLLMAgent("Current", model))
-		agent.AddSubAgents(mockAgent("Sub1"), mockAgent("Sub2"))
+		agent.AddSubAgents(newMockAgent("Sub1"), newMockAgent("Sub2"))
 		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
 	})
 
@@ -174,7 +178,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("AgentWithDisallowTransferToPeers", func(t *testing.T) {
 		agent := must(NewLLMAgent("Current", model))
 		peer := must(NewLLMAgent("Peer", model))
-		agent.AddSubAgents(mockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
+		agent.AddSubAgents(newMockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
 		parentAgent := must(NewLLMAgent("Parent", model))
 		parentAgent.AddSubAgents(agent, peer)
 
@@ -185,7 +189,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("AgentWithDisallowTransferToParentAndPeers", func(t *testing.T) {
 		agent := must(NewLLMAgent("Current", model))
 		peer := must(NewLLMAgent("Peer", model))
-		agent.AddSubAgents(mockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
+		agent.AddSubAgents(newMockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
 		parentAgent := must(NewLLMAgent("Parent", model))
 		parentAgent.AddSubAgents(peer, agent)
 
