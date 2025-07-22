@@ -23,10 +23,39 @@ import (
 	"google.golang.org/genai"
 )
 
+// NewLLMAgent returns a new LLMAgent configured with the provided options.
+func NewLLMAgent(name string, model adk.Model, opts ...Option) (*LLMAgent, error) {
+	llmAgent := &LLMAgent{Model: model}
+	var err error
+	llmAgent.BaseAgent, err = NewBaseAgent(name, llmAgent, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	// apply LLM Agent specific options.
+	for _, opt := range opts {
+		if o, ok := opt.(llmAgentOption); ok {
+			if err := o.apply2LLMAgent(llmAgent); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return llmAgent, nil
+}
+
+type llmAgentOption interface {
+	Option
+	apply2LLMAgent(*LLMAgent) error
+}
+
+type llmAgentOptionFunc func(*LLMAgent) error
+
+func (o llmAgentOptionFunc) apply2LLMAgent(a *LLMAgent) error { return o(a) }
+func (o llmAgentOptionFunc) apply2Base(a *BaseAgent) error    { return nil /* do nothing */ }
+
 // LLMAgent is an LLM-based Agent.
 type LLMAgent struct {
-	AgentName        string
-	AgentDescription string
+	*BaseAgent
 
 	Model adk.Model
 
@@ -45,16 +74,13 @@ type LLMAgent struct {
 	IncludeContents string
 
 	// The input schema when agent is used as a tool.
-	IntpuSchema *genai.Schema
+	IntputSchema *genai.Schema
 
 	// The output schema when agent replies.
 	//
 	// NOTE: when this is set, agent can only reply and cannot use any tools,
 	// such as function tools, RAGs, agent transfer, etc.
 	OutputSchema *genai.Schema
-
-	ParentAgent adk.Agent
-	SubAgents   []adk.Agent
 
 	// OutputKey
 	// Planner
@@ -65,16 +91,6 @@ type LLMAgent struct {
 	// AfterModelCallback
 	// BeforeToolCallback
 	// AfterToolCallback
-}
-
-// AddSubAgents adds the agents to the subagent list.
-func (a *LLMAgent) AddSubAgents(agents ...adk.Agent) {
-	for _, subagent := range agents {
-		a.SubAgents = append(a.SubAgents, subagent)
-		if s := asLLMAgent(subagent); s != nil {
-			s.ParentAgent = a
-		}
-	}
 }
 
 func (a *LLMAgent) newInvocationContext(ctx context.Context, p *adk.InvocationContext) (context.Context, *adk.InvocationContext) {
@@ -90,8 +106,6 @@ func (a *LLMAgent) newInvocationContext(ctx context.Context, p *adk.InvocationCo
 	return ctx, c
 }
 
-func (a *LLMAgent) Name() string        { return a.AgentName }
-func (a *LLMAgent) Description() string { return a.AgentDescription }
 func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
 	// TODO: Select model (LlmAgent.canonical_model)
 	ctx, parentCtx = a.newInvocationContext(ctx, parentCtx)
@@ -104,7 +118,7 @@ func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) it
 }
 
 func (a *LLMAgent) useAutoFlow() bool {
-	return len(a.SubAgents) != 0 || !a.DisallowTransferToParent || !a.DisallowTransferToPeers
+	return len(a.subAgents) != 0 || !a.DisallowTransferToParent || !a.DisallowTransferToPeers
 }
 
 var _ adk.Agent = (*LLMAgent)(nil)

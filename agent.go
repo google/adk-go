@@ -26,6 +26,8 @@ import (
 type Agent interface {
 	Name() string
 	Description() string
+	Parent() Agent
+	SubAgents() []Agent
 
 	// Run runs the agent with the invocation context.
 	Run(ctx context.Context, parentCtx *InvocationContext) iter.Seq2[*Event, error]

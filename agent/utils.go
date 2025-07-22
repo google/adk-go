@@ -126,7 +126,7 @@ func rootAgent(agent adk.Agent) adk.Agent {
 		if a == nil {
 			return nil
 		}
-		if p := asLLMAgent(a.ParentAgent); p != nil {
+		if p := asLLMAgent(a.parentAgent); p != nil {
 			return p
 		}
 		return nil
@@ -139,4 +139,11 @@ func rootAgent(agent adk.Agent) adk.Agent {
 		}
 		current = parent
 	}
+}
+
+func must[T adk.Agent](a T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return a
 }

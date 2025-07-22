@@ -59,18 +59,26 @@ func TestLLMAgent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := newGeminiModel(t, modelName, tc.transport)
-			a := &agent.LLMAgent{
-				AgentName:         "hello_world_agent",
-				AgentDescription:  "hello world agent",
-				Model:             model,
-				Instruction:       "Roll the dice and report only the result.",
-				GlobalInstruction: "Answer as precisely as possible.",
-
-				// TODO: set tools, planner.
-
-				DisallowTransferToParent: true,
-				DisallowTransferToPeers:  true,
+			a, err := agent.NewLLMAgent("hello_world_agent", model,
+				agent.WithDescription("hello world agent"))
+			if err != nil {
+				t.Fatalf("NewLLMAgent failed: %v", err)
 			}
+			a.Instruction = "Roll the dice and report only the result."
+			a.GlobalInstruction = "Answer as precisely as possible."
+			a.DisallowTransferToParent = true
+			a.DisallowTransferToPeers = true
+			/* TODO: alternative
+			   a := agent.NewLLMAgent("hello_world_agent",
+			        agent.WithDescription("hello world agent"),
+					agent.WithModel(m),
+					agent.WithInstruction("Roll the dice and report only the result.")
+					agent.WithGlobalInstruction("Answer as precisely as possible."),
+					agent.WithDisallowTransferToParent(true),
+					agent.WithDisallowTransferToPeers(true),
+				}
+			*/
+			// TODO: set tools, planner.
 			ctx, invCtx := adk.NewInvocationContext(t.Context(), a)
 			stream := a.Run(ctx, invCtx)
 			texts, err := collectTextParts(stream)
@@ -106,16 +114,15 @@ func TestFunctionTool(t *testing.T) {
 		Name:        "sum",
 		Description: "computes the sum of two numbers",
 	}, handler)
-	agent := &agent.LLMAgent{
-		AgentName:        "agent",
-		AgentDescription: "math agent",
-		Model:            model,
-		Instruction:      "output ONLY the result computed by the provided function",
-		Tools:            []adk.Tool{rand},
-		// TODO(hakim): set to false when autoflow is implemented.
-		DisallowTransferToParent: true,
-		DisallowTransferToPeers:  true,
+	agent, err := agent.NewLLMAgent("agent", model, agent.WithDescription("math agent"))
+	if err != nil {
+		t.Fatalf("NewLLMAgent failed: %v", err)
 	}
+	agent.Instruction = "output ONLY the result computed by the provided function"
+	agent.Tools = []adk.Tool{rand}
+	// TODO(hakim): set to false when autoflow is implemented.
+	agent.DisallowTransferToParent = true
+	agent.DisallowTransferToPeers = true
 
 	runner := newTestAgentRunner(t, agent)
 	stream := runner.Run(t, "session1", prompt)
@@ -152,12 +159,16 @@ func TestAgentTransfer(t *testing.T) {
 		return &mockModel{responses: resp}
 	}
 	// creates an LLM model with the name and the model.
-	llmAgent := func(name string, model adk.Model) *agent.LLMAgent {
-		return &agent.LLMAgent{
-			AgentName: name,
-			Model:     model,
+	llmAgentFn := func(t *testing.T) func(name string, model adk.Model) *agent.LLMAgent {
+		return func(name string, model adk.Model) *agent.LLMAgent {
+			a, err := agent.NewLLMAgent(name, model)
+			if err != nil {
+				t.Fatalf("NewLLMAgent failed: %v", err)
+			}
+			return a
 		}
 	}
+
 	type content struct {
 		Author string
 		Parts  []*genai.Part
@@ -204,6 +215,7 @@ func TestAgentTransfer(t *testing.T) {
 			transferCall("sub_agent_1"),
 			text("response1"),
 			text("response2"))
+		llmAgent := llmAgentFn(t)
 
 		subAgent1 := llmAgent("sub_agent_1", model)
 
@@ -228,6 +240,7 @@ func TestAgentTransfer(t *testing.T) {
 			transferCall("sub_agent_1"),
 			text("response1"),
 			text("response2"))
+		llmAgent := llmAgentFn(t)
 
 		subAgent1 := llmAgent("sub_agent_1", model)
 		subAgent1.DisallowTransferToParent = true
@@ -255,6 +268,7 @@ func TestAgentTransfer(t *testing.T) {
 			transferCall("sub_agent_1_1"),
 			text("response1"),
 			text("response2"))
+		llmAgent := llmAgentFn(t)
 
 		subAgent1_1 := llmAgent("sub_agent_1_1", model)
 		subAgent1_1.DisallowTransferToParent = true
@@ -394,7 +408,7 @@ func (r *testAgentRunner) isTransferableAcrossAgentTree(agentToRun adk.Agent) bo
 		if agent.DisallowTransferToParent {
 			return false
 		}
-		agentToRun = agent.ParentAgent
+		agentToRun = agent.Parent()
 	}
 }
 
@@ -411,7 +425,7 @@ func findSubAgent(a adk.Agent, name string) adk.Agent {
 		return nil
 	}
 
-	for _, sub := range llmAgent.SubAgents {
+	for _, sub := range llmAgent.SubAgents() {
 		return findAgent(sub, name)
 	}
 	return nil

@@ -21,10 +21,14 @@ import (
 )
 
 func TestRootAgent(t *testing.T) {
-	root := &LLMAgent{AgentName: "root"}
-	a := &LLMAgent{AgentName: "a"}
-	b := &LLMAgent{AgentName: "b"}
-	nonLLM := mockAgent("mock")
+	model := struct {
+		adk.Model
+	}{}
+
+	root := must(NewLLMAgent("root", model))
+	a := must(NewLLMAgent("a", model))
+	b := must(NewLLMAgent("b", model))
+	nonLLM := newMockAgent("mock")
 
 	root.AddSubAgents(a)
 	a.AddSubAgents(b)
