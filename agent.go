@@ -98,12 +98,14 @@ type InvocationContext struct {
 
 // NewInvocationContext creates a new invocation context for the given agent
 // and returns context.Context that is bound to the invocation context.
-func NewInvocationContext(ctx context.Context, agent Agent) (context.Context, *InvocationContext) {
+func NewInvocationContext(ctx context.Context, agent Agent, sessionService SessionService, session *Session) (context.Context, *InvocationContext) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	return ctx, &InvocationContext{
-		InvocationID: "e-" + uuid.NewString(),
-		Agent:        agent,
-		cancel:       cancel,
+		InvocationID:   "e-" + uuid.NewString(),
+		Agent:          agent,
+		cancel:         cancel,
+		SessionService: sessionService,
+		Session:        session,
 	}
 }
 
