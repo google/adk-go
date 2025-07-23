@@ -16,6 +16,7 @@ package adk
 
 import (
 	"context"
+	"fmt"
 	"iter"
 
 	"github.com/google/uuid"
@@ -24,14 +25,13 @@ import (
 
 // Agent is the agent type.
 type Agent interface {
-	Name() string
-	Description() string
-	Parent() Agent
-	SubAgents() []Agent
+	// Spec is the Agent's spec.
+	Spec() *AgentSpec
 
 	// Run runs the agent with the invocation context.
-	Run(ctx context.Context, parentCtx *InvocationContext) iter.Seq2[*Event, error]
-	// TODO: finalize the interface.
+	Run(ctx context.Context, invocationCtx *InvocationContext) iter.Seq2[*Event, error]
+
+	// TODO: RunLive.
 }
 
 // An InvocationContext represents the data of a single invocation of an agent.
@@ -45,7 +45,7 @@ type Agent interface {
 // agent.
 //
 // An agent call:
-//  1. Is handled by [Agent.Run].
+//  1. Is handled by [Agent.Run] through [Agent.Spec]'s Run.
 //  2. Ends when [Agent.Run] ends.
 //
 // An LLM agent call is an agent with a BaseLLMFlow.
@@ -149,4 +149,76 @@ type AgentRunConfig struct {
 	//    calls is enforced, if the value is set in this range.
 	//  - Less than or equal to 0: This allows for unbounded number of llm calls.
 	MaxLLMCalls int
+}
+
+// AgentSpec defines the common properties all ADK agents must holds.
+// [Agent.Spec] must return its AgentSpec, that is bound to it.
+/*
+	type MyAgent struct {
+		agentSpec *adk.AgentSpec
+		...
+	}
+	var _ adk.Agent = (*MyAgent)(nil)
+
+	func NewMyAgent(name string) *MyAgent {
+		spec := &adk.AgentSpec{Name: name}
+		a := &MyAgent{agentSpec: spec}
+		_ = spec.Init(a) // spec must be initialized before the agent is used.
+		return a
+	}
+*/
+type AgentSpec struct {
+	Name        string
+	Description string
+	SubAgents   []Agent
+
+	// TODO:
+	//  BeforeAgentCallback
+	//  AfterAgentCallback
+
+	// the followings are set by Init.
+	parentAgent Agent
+	self        Agent
+}
+
+// Init initializes the AgentSpec by binding the AgentSpec and its containing [Agent].
+// It also validates the subagents and update their parents to point to the agent.
+// All subagents must be fully initialized before the agent is being used and
+// its parent agent's AgentSpec is initialized.
+func (s *AgentSpec) Init(self Agent) error {
+	if self == nil {
+		return fmt.Errorf("Agent is undefined")
+	}
+	if s.self != nil {
+		return fmt.Errorf("AgentSpec %q is already initialized with another agent", s.Name)
+	}
+	s.self = self
+	return s.validateSubAgents()
+}
+
+// validateSubAgents validates [AgentSpec.SubAgents]
+// and updates the subagents' parents.
+func (s *AgentSpec) validateSubAgents() error {
+	names := map[string]bool{}
+	// run sanity check (no duplicate name, no multiple parents)
+	for i, subagent := range s.SubAgents {
+		subagentSpec := subagent.Spec()
+		if subagentSpec == nil || subagentSpec.Name == "" {
+			return fmt.Errorf("%d-th Agent does not have a valid Spec", i)
+		}
+		name := subagentSpec.Name
+		if names[name] {
+			return fmt.Errorf("multiple subagents with the same name (%q) are not allowed", name)
+		}
+		if parent := subagentSpec.Parent(); parent != nil {
+			return fmt.Errorf("agent %q already has parent %q", name, parent.Spec().Name)
+		}
+		subagentSpec.parentAgent = s.self
+		names[name] = true
+	}
+	return nil
+}
+
+func (s *AgentSpec) Parent() Agent {
+	return s.parentAgent
 }

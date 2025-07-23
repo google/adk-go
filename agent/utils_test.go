@@ -25,20 +25,16 @@ func TestRootAgent(t *testing.T) {
 		adk.Model
 	}{}
 
-	root := must(NewLLMAgent("root", model))
-	a := must(NewLLMAgent("a", model))
-	b := must(NewLLMAgent("b", model))
 	nonLLM := newMockAgent("mock")
-
-	root.AddSubAgents(a)
-	a.AddSubAgents(b)
-	b.AddSubAgents(nonLLM)
+	b := must(NewLLMAgent("b", model, WithSubAgents(nonLLM)))
+	a := must(NewLLMAgent("a", model, WithSubAgents(b)))
+	root := must(NewLLMAgent("root", model, WithSubAgents(a)))
 
 	agentName := func(a adk.Agent) string {
 		if a == nil {
 			return "nil"
 		}
-		return a.Name()
+		return a.Spec().Name
 	}
 
 	for _, tc := range []struct {

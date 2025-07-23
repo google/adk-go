@@ -42,7 +42,7 @@ func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationCont
 	if parentCtx.Session != nil {
 		events = parentCtx.Session.Events
 	}
-	contents, err := fn(llmAgent.Name(), parentCtx.Branch, events)
+	contents, err := fn(llmAgent.Spec().Name, parentCtx.Branch, events)
 	if err != nil {
 		return err
 	}

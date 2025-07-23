@@ -136,19 +136,19 @@ func (t *transferToAgentTool) Run(ctx context.Context, tc *adk.ToolContext, args
 var _ adk.Tool = (*transferToAgentTool)(nil)
 
 func transferTarget(current *LLMAgent) []adk.Agent {
-	targets := slices.Clone(current.subAgents)
+	targets := slices.Clone(current.Spec().SubAgents)
 
-	if !current.DisallowTransferToParent && current.parentAgent != nil {
-		targets = append(targets, current.parentAgent)
+	if !current.DisallowTransferToParent && current.Spec().Parent() != nil {
+		targets = append(targets, current.Spec().Parent())
 	}
 	// For peer-agent transfers, it's only enabled when all below conditions are met:
 	// - the parent agent is also of AutoFlow.
 	// - DisallowTransferToPeers is false.
 	if !current.DisallowTransferToPeers {
-		parent := asLLMAgent(current.parentAgent)
+		parent := asLLMAgent(current.Spec().Parent())
 		if parent != nil && parent.useAutoFlow() {
-			for _, peer := range parent.subAgents {
-				if peer.Name() != current.Name() {
+			for _, peer := range parent.Spec().SubAgents {
+				if peer.Spec().Name != current.Spec().Name {
 					targets = append(targets, peer)
 				}
 			}
@@ -161,7 +161,7 @@ var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
 func instructionsForTransferToAgent(agent *LLMAgent, targets []adk.Agent, transferTool adk.Tool) (string, error) {
-	parent := agent.parentAgent
+	parent := agent.Spec().Parent()
 	if agent.DisallowTransferToParent {
 		parent = nil
 	}
@@ -173,7 +173,7 @@ func instructionsForTransferToAgent(agent *LLMAgent, targets []adk.Agent, transf
 		Targets   []adk.Agent
 		ToolName  string
 	}{
-		AgentName: agent.Name(),
+		AgentName: agent.Spec().Name,
 		Parent:    parent,
 		Targets:   targets,
 		ToolName:  transferTool.Name(),

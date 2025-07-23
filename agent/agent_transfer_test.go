@@ -27,12 +27,17 @@ import (
 )
 
 type mockAgent struct {
-	*BaseAgent
+	*adk.AgentSpec
+	adk.Agent
 }
 
+func (m *mockAgent) Spec() *adk.AgentSpec { return m.AgentSpec }
+
 func newMockAgent(name string) *mockAgent {
-	m := &mockAgent{}
-	m.BaseAgent, _ = NewBaseAgent(name, m)
+	m := &mockAgent{
+		AgentSpec: &adk.AgentSpec{Name: name},
+	}
+	m.AgentSpec.Init(m)
 	return m
 }
 
@@ -52,7 +57,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	check := func(t *testing.T, agent adk.Agent, wantParent string, wantAgents []string, unwantAgents []string) {
 		invCtx := &adk.InvocationContext{Agent: agent}
 		req := &adk.LLMRequest{}
-		name := agent.Name()
+		name := agent.Spec().Name
 		_ = name
 
 		if err := agentTransferRequestProcessor(ctx, invCtx, req); err != nil {
@@ -86,7 +91,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		}) {
 			t.Errorf("instruction does not include parent agent, got: %s", strings.Join(instructions, "\n"))
 		}
-		if slices.Contains(instructions, agent.Name()) {
+		if slices.Contains(instructions, agent.Spec().Name) {
 			t.Errorf("instruction should not suggest transfer to current agent, got: %s", strings.Join(instructions, "\n"))
 		}
 		if len(wantAgents) > 0 && !slices.ContainsFunc(instructions, func(s string) bool {
@@ -133,65 +138,69 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	})
 	t.Run("LLMAgentParent", func(t *testing.T) {
 		agent := must(NewLLMAgent("Current", model))
-		parentAgent := must(NewLLMAgent("Parent", model))
-		parentAgent.AddSubAgents(agent)
+		_ = must(NewLLMAgent("Parent", model, WithSubAgents(agent)))
 		check(t, agent, "Parent", nil, []string{"Current"})
 	})
 	t.Run("LLMAgentParentAndPeer", func(t *testing.T) {
 		agent := must(NewLLMAgent("Current", model))
 		peer := must(NewLLMAgent("Peer", model))
-		parentAgent := must(NewLLMAgent("Parent", model))
-		parentAgent.AddSubAgents(agent, peer)
+		_ = must(NewLLMAgent("Parent", model, WithSubAgents(agent, peer)))
 		check(t, agent, "Parent", []string{"Peer"}, []string{"Current"})
 	})
 	t.Run("LLMAgentSubagents", func(t *testing.T) {
-		agent := must(NewLLMAgent("Current", model))
-		agent.AddSubAgents(newMockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
+		agent := must(NewLLMAgent("Current", model,
+			WithSubAgents(
+				newMockAgent("Sub1"),
+				must(NewLLMAgent("Sub2", model)))))
 		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
 	})
 
 	t.Run("AgentWithParentAndPeersAndSubagents", func(t *testing.T) {
-		agent := must(NewLLMAgent("Current", model))
-		agent.AddSubAgents(newMockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
+		agent := must(NewLLMAgent("Current", model,
+			WithSubAgents(
+				newMockAgent("Sub1"),
+				must(NewLLMAgent("Sub2", model)))))
 		peer := newMockAgent("Peer")
-		parentAgent := must(NewLLMAgent("Parent", model))
-		parentAgent.AddSubAgents(agent, peer)
+		_ = must(NewLLMAgent("Parent", model, WithSubAgents(agent, peer)))
 		check(t, agent, "Parent", []string{"Peer", "Sub1", "Sub2"}, []string{"Current"})
 	})
 
 	t.Run("NonLLMAgentSubagents", func(t *testing.T) {
-		agent := must(NewLLMAgent("Current", model))
-		agent.AddSubAgents(newMockAgent("Sub1"), newMockAgent("Sub2"))
+		agent := must(NewLLMAgent("Current", model,
+			WithSubAgents(
+				newMockAgent("Sub1"),
+				newMockAgent("Sub2"))))
 		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
 	})
 
 	t.Run("AgentWithDisallowTransferToParent", func(t *testing.T) {
-		agent := must(NewLLMAgent("Current", model))
-		agent.AddSubAgents(must(NewLLMAgent("Sub1", model)), must(NewLLMAgent("Sub2", model)))
-		parentAgent := must(NewLLMAgent("Parent", model))
-		parentAgent.AddSubAgents(agent)
+		agent := must(NewLLMAgent("Current", model,
+			WithSubAgents(
+				must(NewLLMAgent("Sub1", model)), must(NewLLMAgent("Sub2", model)))))
+		_ = must(NewLLMAgent("Parent", model,
+			WithSubAgents(agent)))
 
 		agent.DisallowTransferToParent = true
 		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Parent", "Current"})
 	})
 
 	t.Run("AgentWithDisallowTransferToPeers", func(t *testing.T) {
-		agent := must(NewLLMAgent("Current", model))
+		agent := must(NewLLMAgent("Current", model,
+			WithSubAgents(
+				newMockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))))
 		peer := must(NewLLMAgent("Peer", model))
-		agent.AddSubAgents(newMockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
-		parentAgent := must(NewLLMAgent("Parent", model))
-		parentAgent.AddSubAgents(agent, peer)
+		_ = must(NewLLMAgent("Parent", model, WithSubAgents(agent, peer)))
 
 		agent.DisallowTransferToPeers = true
 		check(t, agent, "Parent", []string{"Sub1", "Sub2"}, []string{"Peer", "Current"})
 	})
 
 	t.Run("AgentWithDisallowTransferToParentAndPeers", func(t *testing.T) {
-		agent := must(NewLLMAgent("Current", model))
+		agent := must(NewLLMAgent("Current", model,
+			WithSubAgents(
+				newMockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))))
 		peer := must(NewLLMAgent("Peer", model))
-		agent.AddSubAgents(newMockAgent("Sub1"), must(NewLLMAgent("Sub2", model)))
-		parentAgent := must(NewLLMAgent("Parent", model))
-		parentAgent.AddSubAgents(peer, agent)
+		_ = must(NewLLMAgent("Parent", model, WithSubAgents(peer, agent)))
 
 		agent.DisallowTransferToPeers = true
 		agent.DisallowTransferToParent = true
@@ -201,8 +210,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("AgentWithDisallowTransfer", func(t *testing.T) {
 		agent := must(NewLLMAgent("Current", model))
 		peer := must(NewLLMAgent("Peer", model))
-		parentAgent := must(NewLLMAgent("Parent", model))
-		parentAgent.AddSubAgents(peer, agent)
+		_ = must(NewLLMAgent("Parent", model, WithSubAgents(peer, agent)))
 
 		agent.DisallowTransferToPeers = true
 		agent.DisallowTransferToParent = true

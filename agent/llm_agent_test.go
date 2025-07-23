@@ -159,9 +159,9 @@ func TestAgentTransfer(t *testing.T) {
 		return &mockModel{responses: resp}
 	}
 	// creates an LLM model with the name and the model.
-	llmAgentFn := func(t *testing.T) func(name string, model adk.Model) *agent.LLMAgent {
-		return func(name string, model adk.Model) *agent.LLMAgent {
-			a, err := agent.NewLLMAgent(name, model)
+	llmAgentFn := func(t *testing.T) func(name string, model adk.Model, opts ...agent.AgentOption) *agent.LLMAgent {
+		return func(name string, model adk.Model, opts ...agent.AgentOption) *agent.LLMAgent {
+			a, err := agent.NewLLMAgent(name, model, opts...)
 			if err != nil {
 				t.Fatalf("NewLLMAgent failed: %v", err)
 			}
@@ -219,8 +219,7 @@ func TestAgentTransfer(t *testing.T) {
 
 		subAgent1 := llmAgent("sub_agent_1", model)
 
-		rootAgent := llmAgent("root_agent", model)
-		rootAgent.AddSubAgents(subAgent1)
+		rootAgent := llmAgent("root_agent", model, agent.WithSubAgents(subAgent1))
 
 		check(t, rootAgent, [][]content{
 			0: {
@@ -246,8 +245,7 @@ func TestAgentTransfer(t *testing.T) {
 		subAgent1.DisallowTransferToParent = true
 		subAgent1.DisallowTransferToPeers = true
 
-		rootAgent := llmAgent("root_agent", model)
-		rootAgent.AddSubAgents(subAgent1)
+		rootAgent := llmAgent("root_agent", model, agent.WithSubAgents(subAgent1))
 
 		check(t, rootAgent, [][]content{
 			0: {
@@ -274,11 +272,9 @@ func TestAgentTransfer(t *testing.T) {
 		subAgent1_1.DisallowTransferToParent = true
 		subAgent1_1.DisallowTransferToPeers = true
 
-		subAgent1 := llmAgent("sub_agent_1", model)
-		subAgent1.AddSubAgents(subAgent1_1)
+		subAgent1 := llmAgent("sub_agent_1", model, agent.WithSubAgents(subAgent1_1))
 
-		rootAgent := llmAgent("root_agent", model)
-		rootAgent.AddSubAgents(subAgent1)
+		rootAgent := llmAgent("root_agent", model, agent.WithSubAgents(subAgent1))
 
 		check(t, rootAgent, [][]content{
 			0: {
@@ -375,7 +371,7 @@ func (r *testAgentRunner) findAgentToRun(s *adk.Session, rootAgent adk.Agent) ad
 	// TODO: findMatchingFunctionCall.
 
 	for _, ev := range slices.Backward(s.Events) {
-		if ev.Author == rootAgent.Name() {
+		if ev.Author == rootAgent.Spec().Name {
 			// Found root agent.
 			return rootAgent
 		}
@@ -408,12 +404,12 @@ func (r *testAgentRunner) isTransferableAcrossAgentTree(agentToRun adk.Agent) bo
 		if agent.DisallowTransferToParent {
 			return false
 		}
-		agentToRun = agent.Parent()
+		agentToRun = agent.Spec().Parent()
 	}
 }
 
 func findAgent(agent adk.Agent, name string) adk.Agent {
-	if agent.Name() == name {
+	if agent.Spec().Name == name {
 		return agent
 	}
 	return findSubAgent(agent, name)
@@ -425,7 +421,7 @@ func findSubAgent(a adk.Agent, name string) adk.Agent {
 		return nil
 	}
 
-	for _, sub := range llmAgent.SubAgents() {
+	for _, sub := range llmAgent.Spec().SubAgents {
 		return findAgent(sub, name)
 	}
 	return nil

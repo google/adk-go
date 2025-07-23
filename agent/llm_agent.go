@@ -23,39 +23,149 @@ import (
 	"google.golang.org/genai"
 )
 
-// NewLLMAgent returns a new LLMAgent configured with the provided options.
-func NewLLMAgent(name string, model adk.Model, opts ...Option) (*LLMAgent, error) {
-	llmAgent := &LLMAgent{Model: model}
-	var err error
-	llmAgent.BaseAgent, err = NewBaseAgent(name, llmAgent, opts...)
-	if err != nil {
-		return nil, err
-	}
+// AgentOption configures the AgentSpec.
+type AgentOption interface {
+	apply2AgentSpec(adk.Agent) error
+}
 
-	// apply LLM Agent specific options.
-	for _, opt := range opts {
-		if o, ok := opt.(llmAgentOption); ok {
-			if err := o.apply2LLMAgent(llmAgent); err != nil {
-				return nil, err
-			}
+// LLMAgentOption is an AgentOption that configures an LLMAgent.
+// Passing this option to other types of Agent is an error.
+type LLMAgentOption interface {
+	AgentOption
+	apply2LLMAgent(adk.Agent) error
+}
+
+type optionFunc func(*adk.AgentSpec) error
+
+func (o optionFunc) apply2AgentSpec(a adk.Agent) error {
+	s := a.Spec()
+	if s == nil {
+		return fmt.Errorf("agent's spec is not configured")
+	}
+	return o(s)
+}
+
+func WithDescription(desc string) AgentOption {
+	return optionFunc(func(s *adk.AgentSpec) error {
+		s.Description = desc
+		return nil
+	})
+}
+
+func WithSubAgents(agents ...adk.Agent) AgentOption {
+	return optionFunc(func(s *adk.AgentSpec) error {
+		s.SubAgents = agents
+		return nil
+	})
+}
+
+type llmOptionFunc func(*LLMAgent) error
+
+func (o llmOptionFunc) apply2LLMAgent(a adk.Agent) error {
+	llmAgent, ok := a.(*LLMAgent)
+	if !ok {
+		return fmt.Errorf("cannot apply to non-LLMAgent")
+	}
+	return o(llmAgent)
+}
+
+func (o llmOptionFunc) apply2AgentSpec(a adk.Agent) error {
+	if _, ok := a.(*LLMAgent); !ok {
+		return fmt.Errorf("option cannot apply to non-LLMAgent")
+	}
+	return nil
+}
+
+func WithInstruction(inst string) LLMAgentOption {
+	return llmOptionFunc(func(a *LLMAgent) error {
+		a.Instruction = inst
+		return nil
+	})
+}
+
+func WithGlobalInstruction(inst string) LLMAgentOption {
+	return llmOptionFunc(func(a *LLMAgent) error {
+		a.GlobalInstruction = inst
+		return nil
+	})
+}
+
+func WithTools(tools ...adk.Tool) LLMAgentOption {
+	return llmOptionFunc(func(a *LLMAgent) error {
+		a.Tools = tools
+		// TODO: check if tools names don't conflict or include reserved names.
+		return nil
+	})
+}
+
+func WithDisallowTransferToParent() LLMAgentOption {
+	return llmOptionFunc(func(a *LLMAgent) error {
+		a.DisallowTransferToParent = true
+		return nil
+	})
+}
+
+func WithDisallowTransferToPeers() LLMAgentOption {
+	return llmOptionFunc(func(a *LLMAgent) error {
+		a.DisallowTransferToPeers = true
+		return nil
+	})
+}
+
+func WithIncludeContents(v string) LLMAgentOption {
+	return llmOptionFunc(func(a *LLMAgent) error {
+		a.IncludeContents = v
+		return nil
+	})
+}
+
+func WithInputSchema(s *genai.Schema) LLMAgentOption {
+	return llmOptionFunc(func(a *LLMAgent) error {
+		a.InputSchema = s
+		return nil
+	})
+}
+
+func WithOutputSchema(s *genai.Schema) LLMAgentOption {
+	return llmOptionFunc(func(a *LLMAgent) error {
+		a.OutputSchema = s
+		return nil
+	})
+}
+
+// NewLLMAgent returns a new LLMAgent configured with the provided options.
+func NewLLMAgent(name string, model adk.Model, opts ...AgentOption) (*LLMAgent, error) {
+	agentSpec := &adk.AgentSpec{Name: name}
+	a := &LLMAgent{Model: model, agentSpec: agentSpec}
+
+	// apply Options that are not llmOptions to initialize agentSpec.
+	for _, o := range opts {
+		if _, ok := o.(LLMAgentOption); ok {
+			continue
+		}
+		if err := o.apply2AgentSpec(a); err != nil {
+			return nil, err
 		}
 	}
-	return llmAgent, nil
+	// fully initialize agentSpec.
+	agentSpec.Init(a)
+
+	// apply Options that are llmOptions.
+	for _, o := range opts {
+		llmOption, ok := o.(llmOptionFunc)
+		if !ok {
+			continue
+		}
+		if err := llmOption.apply2LLMAgent(a); err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
 }
-
-type llmAgentOption interface {
-	Option
-	apply2LLMAgent(*LLMAgent) error
-}
-
-type llmAgentOptionFunc func(*LLMAgent) error
-
-func (o llmAgentOptionFunc) apply2LLMAgent(a *LLMAgent) error { return o(a) }
-func (o llmAgentOptionFunc) apply2Base(a *BaseAgent) error    { return nil /* do nothing */ }
 
 // LLMAgent is an LLM-based Agent.
 type LLMAgent struct {
-	*BaseAgent
+	agentSpec *adk.AgentSpec
 
 	Model adk.Model
 
@@ -93,6 +203,18 @@ type LLMAgent struct {
 	// AfterToolCallback
 }
 
+func (a *LLMAgent) Spec() *adk.AgentSpec {
+	return a.agentSpec
+}
+
+func (a *LLMAgent) Name() string {
+	return a.agentSpec.Name
+}
+
+func (a *LLMAgent) Description() string {
+	return a.agentSpec.Description
+}
+
 func (a *LLMAgent) newInvocationContext(ctx context.Context, p *adk.InvocationContext) (context.Context, *adk.InvocationContext) {
 	ctx, c := adk.NewInvocationContext(ctx, a)
 	if p != nil {
@@ -118,7 +240,7 @@ func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) it
 }
 
 func (a *LLMAgent) useAutoFlow() bool {
-	return len(a.subAgents) != 0 || !a.DisallowTransferToParent || !a.DisallowTransferToPeers
+	return len(a.Spec().SubAgents) != 0 || !a.DisallowTransferToParent || !a.DisallowTransferToPeers
 }
 
 var _ adk.Agent = (*LLMAgent)(nil)
@@ -255,7 +377,7 @@ func (f *baseFlow) finalizeModelResponseEvent(parentCtx *adk.InvocationContext, 
 	populateClientFunctionCallID(resp.Content)
 
 	ev := adk.NewEvent(parentCtx.InvocationID)
-	ev.Author = parentCtx.Agent.Name()
+	ev.Author = parentCtx.Agent.Spec().Name
 	ev.Branch = parentCtx.Branch
 	ev.LLMResponse = resp
 
@@ -333,7 +455,7 @@ func (f *baseFlow) agentToRun(parentCtx *adk.InvocationContext, agentName string
 	// I think that is strange. In our version, we check the agents included in transferTarget.
 	agents := transferTarget(asLLMAgent(parentCtx.Agent))
 	for _, agent := range agents {
-		if agent.Name() == agentName {
+		if agent.Spec().Name == agentName {
 			return agent
 		}
 	}
@@ -384,7 +506,7 @@ func handleFunctionCalls(ctx context.Context, parentCtx *adk.InvocationContext, 
 				},
 			},
 		}
-		ev.Author = parentCtx.Agent.Name()
+		ev.Author = parentCtx.Agent.Spec().Name
 		ev.Branch = parentCtx.Branch
 		ev.Actions = toolCtx.EventActions
 		fnResponseEvents = append(fnResponseEvents, ev)

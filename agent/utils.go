@@ -126,7 +126,7 @@ func rootAgent(agent adk.Agent) adk.Agent {
 		if a == nil {
 			return nil
 		}
-		if p := asLLMAgent(a.parentAgent); p != nil {
+		if p := asLLMAgent(a.Spec().Parent()); p != nil {
 			return p
 		}
 		return nil
