@@ -74,7 +74,7 @@ type LLMAgent struct {
 	IncludeContents string
 
 	// The input schema when agent is used as a tool.
-	IntputSchema *genai.Schema
+	InputSchema *genai.Schema
 
 	// The output schema when agent replies.
 	//
