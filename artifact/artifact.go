@@ -142,20 +142,26 @@ func (s *InMemoryArtifactService) Save(ctx context.Context, appName, userID, ses
 	return nextVersion, nil
 }
 
-func (s *InMemoryArtifactService) Delete(ctx context.Context, appName, userID, sessionID, fileName string) error {
+func (s *InMemoryArtifactService) Delete(ctx context.Context, appName, userID, sessionID, fileName string, opts *adk.ArtifactDeleteOption) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if opts != nil && opts.Version != 0 {
+		if _, ok := s.get(appName, userID, sessionID, fileName, opts.Version); !ok {
+			return fmt.Errorf("artifact not found: %w", os.ErrNotExist)
+		}
+		s.delete(appName, userID, sessionID, fileName, opts.Version)
+		return nil
+	}
+
+	// pick the latest version
+	if _, _, ok := s.find(appName, userID, sessionID, fileName); !ok {
+		return fmt.Errorf("artifact not found: %w", os.ErrNotExist)
+	}
+
 	lo := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: math.MaxInt64}.Encode()
 	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName}.Encode()
-	n := 0
-	for key := range s.scan(lo, hi) {
-		s.delete(key.AppName, key.UserID, key.SessionID, key.FileName, key.Version)
-		n++
-	}
-	if n == 0 {
-		return fmt.Errorf("artifact %v not exists: %w", fileName, os.ErrNotExist)
-	}
+	s.artifacts.DeleteRange(lo, hi)
 	return nil
 }
 

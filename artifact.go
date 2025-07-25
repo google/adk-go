@@ -20,7 +20,13 @@ import (
 	"google.golang.org/genai"
 )
 
+// ArtifactLoadOption is the option for [ArtifactService.Load].
 type ArtifactLoadOption struct {
+	Version int64
+}
+
+// ArtifactDeleteOption is the option for [ArtifactService.Delete].
+type ArtifactDeleteOption struct {
 	Version int64
 }
 
@@ -33,7 +39,7 @@ type ArtifactService interface {
 	// The artifact is a file indentified by the appName, userID, sessionID and fileName.
 	Load(ctx context.Context, appName, userID, sessionID, fileName string, opts *ArtifactLoadOption) (*genai.Part, error)
 	// Delete deletes an artifact.
-	Delete(ctx context.Context, appName, userID, sessionID, fileName string) error
+	Delete(ctx context.Context, appName, userID, sessionID, fileName string, opts *ArtifactDeleteOption) error
 	// List lists all the artifact filenames within a session.
 	List(ctx context.Context, appName, userID, sessionID string) ([]string, error)
 	// Versions lists all versions of an artifact.
