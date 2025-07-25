@@ -17,10 +17,10 @@ package artifact
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"iter"
 	"maps"
 	"math"
-	"os"
 	"slices"
 	"sync"
 
@@ -156,14 +156,14 @@ func (s *InMemoryArtifactService) Load(ctx context.Context, appName, userID, ses
 	if opts != nil && opts.Version > 0 {
 		artifact, ok := s.get(appName, userID, sessionID, fileName, opts.Version)
 		if !ok {
-			return nil, fmt.Errorf("artifact not found: %w", os.ErrNotExist)
+			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 		}
 		return artifact, nil
 	}
 	// pick the latest version
 	_, artifact, ok := s.find(appName, userID, sessionID, fileName)
 	if !ok {
-		return nil, fmt.Errorf("artifact not found: %w", os.ErrNotExist)
+		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
 	return artifact, nil
 }
@@ -190,17 +190,17 @@ func (s *InMemoryArtifactService) Versions(ctx context.Context, appName string, 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	versions := map[int64]bool{}
+	var versions []int64
 	lo := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: math.MaxInt64}.Encode()
 	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName}.Encode()
 	// TODO(hyangah): extend omap to search key only and skip value decoding.
 	for key := range s.scan(lo, hi) {
-		versions[key.Version] = true
+		versions = append(versions, key.Version)
 	}
 	if len(versions) == 0 {
-		return nil, fmt.Errorf("artifact not found: %w", os.ErrNotExist)
+		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
-	return slices.Collect(maps.Keys(versions)), nil
+	return versions, nil
 }
 
 var _ adk.ArtifactService = (*InMemoryArtifactService)(nil)

@@ -16,7 +16,7 @@ package artifact
 
 import (
 	"errors"
-	"os"
+	"io/fs"
 	"slices"
 	"testing"
 
@@ -135,8 +135,8 @@ func TestInMemoryArtifactService(t *testing.T) {
 
 	t.Run("LoadAfterDelete", func(t *testing.T) {
 		got, err := srv.Load(ctx, appName, userID, sessionID, "file1", nil)
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("Load('file1') = (%v, %v), want error(%v)", got, err, os.ErrNotExist)
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("Load('file1') = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
 		}
 	})
 
@@ -154,8 +154,8 @@ func TestInMemoryArtifactService(t *testing.T) {
 
 	t.Run("VersionsAfterDelete", func(t *testing.T) {
 		got, err := srv.Versions(ctx, appName, userID, sessionID, "file1")
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("Versions('file1') = (%v, %v), want error(%v)", got, err, os.ErrNotExist)
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("Versions('file1') = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
 		}
 	})
 }
@@ -165,8 +165,8 @@ func TestInMemoryArtifactService_Empty(t *testing.T) {
 	srv := &InMemoryArtifactService{}
 	t.Run("Load", func(t *testing.T) {
 		got, err := srv.Load(ctx, "app", "user", "session", "file", nil)
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("List() = (%v, %v), want error(%v)", got, err, os.ErrNotExist)
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("List() = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
 		}
 	})
 	t.Run("List", func(t *testing.T) {
@@ -183,8 +183,8 @@ func TestInMemoryArtifactService_Empty(t *testing.T) {
 	})
 	t.Run("Versions", func(t *testing.T) {
 		got, err := srv.Versions(ctx, "app", "user", "session", "file1")
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("Versions() = (%v, %v), want error(%v)", got, err, os.ErrNotExist)
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("Versions() = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
 		}
 	})
 }
