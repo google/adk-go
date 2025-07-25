@@ -33,7 +33,7 @@ import (
 // InMemorySessionService is an in-memory implementation of adk.SessionService.
 // It is primarily for testing and demonstration purposes.
 type InMemoryArtifactService struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 	// ordered(appName, userID, sessionID) -> session
 	artifacts omap.Map[string, *genai.Part]
 }
@@ -81,20 +81,11 @@ func (s *InMemoryArtifactService) scan(lo, hi string) iter.Seq2[artifactKey, *ge
 func (s *InMemoryArtifactService) find(appName, userID, sessionID, fileName string) (int64, *genai.Part, bool) {
 	lo := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: math.MaxInt64}.Encode()
 	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: 0}.Encode()
-	var latestKey *artifactKey
-	var latestVal *genai.Part
 	for key, val := range s.scan(lo, hi) {
-		if key.FileName != fileName {
-			break // no matching key.
-		}
-		latestKey = &key // first key is the latest one.
-		latestVal = val
-		break
+		// first key is the latest one.
+		return key.Version, val, true
 	}
-	if latestKey == nil {
-		return 0, nil, false
-	}
-	return latestKey.Version, latestVal, true
+	return 0, nil, false
 }
 
 func (s *InMemoryArtifactService) get(appName, userID, sessionID, fileName string, version int64) (*genai.Part, bool) {
@@ -147,18 +138,11 @@ func (s *InMemoryArtifactService) Delete(ctx context.Context, appName, userID, s
 	defer s.mu.Unlock()
 
 	if opts != nil && opts.Version != 0 {
-		if _, ok := s.get(appName, userID, sessionID, fileName, opts.Version); !ok {
-			return fmt.Errorf("artifact not found: %w", os.ErrNotExist)
-		}
 		s.delete(appName, userID, sessionID, fileName, opts.Version)
 		return nil
 	}
 
 	// pick the latest version
-	if _, _, ok := s.find(appName, userID, sessionID, fileName); !ok {
-		return fmt.Errorf("artifact not found: %w", os.ErrNotExist)
-	}
-
 	lo := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: math.MaxInt64}.Encode()
 	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName}.Encode()
 	s.artifacts.DeleteRange(lo, hi)
@@ -166,8 +150,8 @@ func (s *InMemoryArtifactService) Delete(ctx context.Context, appName, userID, s
 }
 
 func (s *InMemoryArtifactService) Load(ctx context.Context, appName, userID, sessionID, fileName string, opts *adk.ArtifactLoadOption) (*genai.Part, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	if opts != nil && opts.Version > 0 {
 		artifact, ok := s.get(appName, userID, sessionID, fileName, opts.Version)
@@ -185,8 +169,8 @@ func (s *InMemoryArtifactService) Load(ctx context.Context, appName, userID, ses
 }
 
 func (s *InMemoryArtifactService) List(ctx context.Context, appName, userID, sessionID string) ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	files := map[string]bool{}
 	lo := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID}.Encode()
@@ -203,8 +187,8 @@ func (s *InMemoryArtifactService) List(ctx context.Context, appName, userID, ses
 
 // Versions implements adk.ArtifactService.
 func (s *InMemoryArtifactService) Versions(ctx context.Context, appName string, userID string, sessionID string, fileName string) ([]int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	versions := map[int64]bool{}
 	lo := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: math.MaxInt64}.Encode()

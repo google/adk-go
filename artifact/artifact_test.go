@@ -177,8 +177,8 @@ func TestInMemoryArtifactService_Empty(t *testing.T) {
 	})
 	t.Run("Delete", func(t *testing.T) {
 		err := srv.Delete(ctx, "app", "user", "session", "file1", nil)
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("Delete() = %v, want error(%v)", err, os.ErrNotExist)
+		if err != nil {
+			t.Fatalf("Delete() failed: %v", err)
 		}
 	})
 	t.Run("Versions", func(t *testing.T) {

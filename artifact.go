@@ -38,7 +38,7 @@ type ArtifactService interface {
 	// Load loads an artifact from the storage.
 	// The artifact is a file indentified by the appName, userID, sessionID and fileName.
 	Load(ctx context.Context, appName, userID, sessionID, fileName string, opts *ArtifactLoadOption) (*genai.Part, error)
-	// Delete deletes an artifact.
+	// Delete deletes an artifact. Deleting a non-existing entry is not an error.
 	Delete(ctx context.Context, appName, userID, sessionID, fileName string, opts *ArtifactDeleteOption) error
 	// List lists all the artifact filenames within a session.
 	List(ctx context.Context, appName, userID, sessionID string) ([]string, error)
