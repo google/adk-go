@@ -27,33 +27,22 @@ import (
 // with the agent's LLM generation configs.
 func basicRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
 	// reference: adk-python src/google/adk/flows/llm_flows/basic.py
-
-	llmAgent := asLLMAgent(parentCtx.Agent)
-	if llmAgent == nil {
+	spec := parentCtx.Agent.Spec()
+	if spec.LLMAgent == nil {
 		return nil // do nothing.
 	}
-	req.Model = llmAgent.Model
-	req.GenerateConfig = clone(llmAgent.GenerateContentConfig)
+
+	req.Model = spec.LLMAgent.Model
+	req.GenerateConfig = clone(spec.LLMAgent.GenerateContentConfig)
 	if req.GenerateConfig == nil {
 		req.GenerateConfig = &genai.GenerateContentConfig{}
 	}
-	if llmAgent.OutputSchema != nil {
-		req.GenerateConfig.ResponseSchema = llmAgent.OutputSchema
+	if spec.LLMAgent.OutputSchema != nil {
+		req.GenerateConfig.ResponseSchema = spec.LLMAgent.OutputSchema
 		req.GenerateConfig.ResponseMIMEType = "application/json"
 	}
 	// TODO: missing features
 	//  populate LLMRequest LiveConnectConfig setting
-	return nil
-}
-
-// asLLMAgent returns LLMAgent if agent is LLMAgent. Otherwise, nil.
-func asLLMAgent(agent adk.Agent) *LLMAgent {
-	if agent == nil {
-		return nil
-	}
-	if llmAgent, ok := agent.(*LLMAgent); ok {
-		return llmAgent
-	}
 	return nil
 }
 

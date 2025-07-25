@@ -15,6 +15,8 @@
 package agent
 
 import (
+	"context"
+	"iter"
 	"testing"
 	"time"
 
@@ -206,8 +208,13 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name+"/include_contents="+tc.includeContents, func(t *testing.T) {
-			agent := must(NewLLMAgent(agentName, model))
-			agent.IncludeContents = tc.includeContents
+			agent := must(NewLLMAgent(&adk.AgentSpec{
+				Name: agentName,
+				LLMAgent: &adk.LLMAgentSpec{
+					Model:           model,
+					IncludeContents: tc.includeContents,
+				},
+			}))
 			invCtx := &adk.InvocationContext{
 				InvocationID: "12345",
 				Agent:        agent,
@@ -354,7 +361,12 @@ func TestContentsRequestProcessor(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			agent := must(NewLLMAgent("testAgent", model))
+			agent := must(NewLLMAgent(&adk.AgentSpec{
+				Name: agentName,
+				LLMAgent: &adk.LLMAgentSpec{
+					Model: model,
+				},
+			}))
 			invCtx := &adk.InvocationContext{
 				InvocationID: "12345",
 				Agent:        agent,
@@ -479,10 +491,29 @@ func TestConvertForeignEvent(t *testing.T) {
 	}
 }
 
-func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
-	type customAgent struct {
-		adk.Agent
+type customAgent struct {
+}
+
+func (c *customAgent) Spec() *adk.AgentSpec {
+	return &adk.AgentSpec{
+		Name:        "customAgent",
+		Description: "A custom agent for testing.",
 	}
+}
+
+func (c *customAgent) Run(ctx context.Context, ictx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
+	return func(yield func(*adk.Event, error) bool) {
+		yield(&adk.Event{
+			Time:   time.Now(),
+			Author: "customAgent",
+			LLMResponse: &adk.LLMResponse{
+				Content: genai.NewContentFromText("Custom agent response", "model"),
+			},
+		}, nil)
+	}
+}
+
+func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 	agent := &customAgent{}
 	events := []*adk.Event{
 		{

@@ -24,25 +24,25 @@ import (
 func instructionsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
 	// reference: adk-python src/google/adk/flows/llm_flows/instructions.py
 
-	llmAgent := asLLMAgent(parentCtx.Agent)
-	if llmAgent == nil {
+	agent := parentCtx.Agent
+	if agent.Spec().LLMAgent == nil {
 		return nil // do nothing.
 	}
-	rootAgent := asLLMAgent(rootAgent(llmAgent))
-	if rootAgent == nil {
-		rootAgent = llmAgent
+	rootAgent := rootAgent(agent)
+	if rootAgent.Spec().LLMAgent == nil {
+		rootAgent = agent
 	}
 
 	// Append global instructions if set.
-	if rootAgent != nil && rootAgent.GlobalInstruction != "" {
+	if rootAgent != nil && rootAgent.Spec().LLMAgent.GlobalInstruction != "" {
 		// TODO: apply instructions_utils.inject_session_state
-		req.AppendInstructions(rootAgent.GlobalInstruction)
+		req.AppendInstructions(rootAgent.Spec().LLMAgent.GlobalInstruction)
 	}
 
 	// Append agent's instruction
-	if llmAgent.Instruction != "" {
+	if rootAgent.Spec().LLMAgent.Instruction != "" {
 		// TODO: apply instructions_utils.inject_session_state
-		req.AppendInstructions(llmAgent.Instruction)
+		req.AppendInstructions(rootAgent.Spec().LLMAgent.Instruction)
 	}
 
 	return nil

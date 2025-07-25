@@ -21,12 +21,12 @@ import (
 	"strings"
 
 	"github.com/google/adk-go"
-	"github.com/google/adk-go/agent"
 
 	"google.golang.org/genai"
 )
 
 func NewRunner(appName string, rootAgent adk.Agent, sessionService adk.SessionService) *Runner {
+	// TODO: potentially validate the whole agent tree here.
 	return &Runner{
 		AppName:        appName,
 		RootAgent:      rootAgent,
@@ -89,17 +89,17 @@ func (r *Runner) newInvocationContext(ctx context.Context, session *adk.Session,
 }
 
 func (r *Runner) setupCFC(rootAgent adk.Agent) error {
-	llmAgent, ok := r.RootAgent.(*agent.LLMAgent)
-	if !ok {
-		return fmt.Errorf("cannot setup cfc for non-LLMAgent")
+	spec := rootAgent.Spec()
+	if spec.LLMAgent == nil {
+		return fmt.Errorf("root agent %s has no LLMAgent spec", spec.Name)
 	}
 
-	if llmAgent.Model == nil {
+	if spec.LLMAgent.Model == nil {
 		return fmt.Errorf("LLMAgent has no model")
 	}
 
-	if !strings.HasPrefix(llmAgent.Model.Name(), "gemini-2") {
-		return fmt.Errorf("CFC is not supported for model: %v", llmAgent.Model.Name())
+	if !strings.HasPrefix(spec.LLMAgent.Model.Name(), "gemini-2") {
+		return fmt.Errorf("CFC is not supported for model: %v", spec.LLMAgent.Model.Name())
 	}
 
 	// TODO: handle CFC setup for LLMAgent, e.g. setting code_executor

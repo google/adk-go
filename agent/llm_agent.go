@@ -23,196 +23,26 @@ import (
 	"google.golang.org/genai"
 )
 
-// AgentOption configures the AgentSpec.
-type AgentOption interface {
-	apply2AgentSpec(adk.Agent) error
-}
-
-// LLMAgentOption is an AgentOption that configures an LLMAgent.
-// Passing this option to other types of Agent is an error.
-type LLMAgentOption interface {
-	AgentOption
-	apply2LLMAgent(adk.Agent) error
-}
-
-type optionFunc func(*adk.AgentSpec) error
-
-func (o optionFunc) apply2AgentSpec(a adk.Agent) error {
-	s := a.Spec()
-	if s == nil {
-		return fmt.Errorf("agent's spec is not configured")
-	}
-	return o(s)
-}
-
-func WithDescription(desc string) AgentOption {
-	return optionFunc(func(s *adk.AgentSpec) error {
-		s.Description = desc
-		return nil
-	})
-}
-
-func WithSubAgents(agents ...adk.Agent) AgentOption {
-	return optionFunc(func(s *adk.AgentSpec) error {
-		s.SubAgents = agents
-		return nil
-	})
-}
-
-type llmOptionFunc func(*LLMAgent) error
-
-func (o llmOptionFunc) apply2LLMAgent(a adk.Agent) error {
-	llmAgent, ok := a.(*LLMAgent)
-	if !ok {
-		return fmt.Errorf("cannot apply to non-LLMAgent")
-	}
-	return o(llmAgent)
-}
-
-func (o llmOptionFunc) apply2AgentSpec(a adk.Agent) error {
-	if _, ok := a.(*LLMAgent); !ok {
-		return fmt.Errorf("option cannot apply to non-LLMAgent")
-	}
-	return nil
-}
-
-func WithInstruction(inst string) LLMAgentOption {
-	return llmOptionFunc(func(a *LLMAgent) error {
-		a.Instruction = inst
-		return nil
-	})
-}
-
-func WithGlobalInstruction(inst string) LLMAgentOption {
-	return llmOptionFunc(func(a *LLMAgent) error {
-		a.GlobalInstruction = inst
-		return nil
-	})
-}
-
-func WithTools(tools ...adk.Tool) LLMAgentOption {
-	return llmOptionFunc(func(a *LLMAgent) error {
-		a.Tools = tools
-		// TODO: check if tools names don't conflict or include reserved names.
-		return nil
-	})
-}
-
-func WithDisallowTransferToParent() LLMAgentOption {
-	return llmOptionFunc(func(a *LLMAgent) error {
-		a.DisallowTransferToParent = true
-		return nil
-	})
-}
-
-func WithDisallowTransferToPeers() LLMAgentOption {
-	return llmOptionFunc(func(a *LLMAgent) error {
-		a.DisallowTransferToPeers = true
-		return nil
-	})
-}
-
-func WithIncludeContents(v string) LLMAgentOption {
-	return llmOptionFunc(func(a *LLMAgent) error {
-		a.IncludeContents = v
-		return nil
-	})
-}
-
-func WithInputSchema(s *genai.Schema) LLMAgentOption {
-	return llmOptionFunc(func(a *LLMAgent) error {
-		a.InputSchema = s
-		return nil
-	})
-}
-
-func WithOutputSchema(s *genai.Schema) LLMAgentOption {
-	return llmOptionFunc(func(a *LLMAgent) error {
-		a.OutputSchema = s
-		return nil
-	})
-}
-
 // NewLLMAgent returns a new LLMAgent configured with the provided options.
-func NewLLMAgent(name string, model adk.Model, opts ...AgentOption) (*LLMAgent, error) {
-	agentSpec := &adk.AgentSpec{Name: name}
-	a := &LLMAgent{Model: model, agentSpec: agentSpec}
-
-	// apply Options that are not llmOptions to initialize agentSpec.
-	for _, o := range opts {
-		if _, ok := o.(LLMAgentOption); ok {
-			continue
-		}
-		if err := o.apply2AgentSpec(a); err != nil {
-			return nil, err
-		}
+func NewLLMAgent(spec *adk.AgentSpec) (*LLMAgent, error) {
+	agent := &LLMAgent{
+		agentSpec: spec,
 	}
-	// fully initialize agentSpec.
-	agentSpec.Init(a)
 
-	// apply Options that are llmOptions.
-	for _, o := range opts {
-		llmOption, ok := o.(llmOptionFunc)
-		if !ok {
-			continue
-		}
-		if err := llmOption.apply2LLMAgent(a); err != nil {
-			return nil, err
-		}
+	if err := validateSubAgents(agent); err != nil {
+		return nil, fmt.Errorf("failed to validate subagents: %w", err)
 	}
-	return a, nil
+
+	return agent, nil
 }
 
 // LLMAgent is an LLM-based Agent.
 type LLMAgent struct {
 	agentSpec *adk.AgentSpec
-
-	Model adk.Model
-
-	Instruction           string
-	GlobalInstruction     string
-	Tools                 []adk.Tool
-	GenerateContentConfig *genai.GenerateContentConfig
-
-	// LLM-based agent transfer configs.
-	DisallowTransferToParent bool
-	DisallowTransferToPeers  bool
-
-	// Whether to include contents in the model request.
-	// When set to 'none', the model request will not include any contents, such as
-	// user messages, tool requests, etc.
-	IncludeContents string
-
-	// The input schema when agent is used as a tool.
-	InputSchema *genai.Schema
-
-	// The output schema when agent replies.
-	//
-	// NOTE: when this is set, agent can only reply and cannot use any tools,
-	// such as function tools, RAGs, agent transfer, etc.
-	OutputSchema *genai.Schema
-
-	// OutputKey
-	// Planner
-	// CodeExecutor
-	// Examples
-
-	// BeforeModelCallback
-	// AfterModelCallback
-	// BeforeToolCallback
-	// AfterToolCallback
 }
 
 func (a *LLMAgent) Spec() *adk.AgentSpec {
 	return a.agentSpec
-}
-
-func (a *LLMAgent) Name() string {
-	return a.agentSpec.Name
-}
-
-func (a *LLMAgent) Description() string {
-	return a.agentSpec.Description
 }
 
 func (a *LLMAgent) newInvocationContext(ctx context.Context, p *adk.InvocationContext) (context.Context, *adk.InvocationContext) {
@@ -233,15 +63,15 @@ func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) it
 	// TODO: Select model (LlmAgent.canonical_model)
 	ctx, parentCtx = a.newInvocationContext(ctx, parentCtx)
 	flow := &baseFlow{
-		Model:              a.Model,
+		Model:              a.Spec().LLMAgent.Model,
 		RequestProcessors:  defaultRequestProcessors,
 		ResponseProcessors: defaultResponseProcessors,
 	}
 	return flow.Run(ctx, parentCtx)
 }
 
-func (a *LLMAgent) useAutoFlow() bool {
-	return len(a.Spec().SubAgents) != 0 || !a.DisallowTransferToParent || !a.DisallowTransferToPeers
+func useAutoFlow(spec *adk.AgentSpec) bool {
+	return len(spec.SubAgents) != 0 || !spec.LLMAgent.DisallowTransferToParent || !spec.LLMAgent.DisallowTransferToPeers
 }
 
 var _ adk.Agent = (*LLMAgent)(nil)
@@ -388,8 +218,8 @@ func (f *baseFlow) finalizeModelResponseEvent(parentCtx *adk.InvocationContext, 
 }
 
 func (f *baseFlow) preprocess(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
-	llmAgent := asLLMAgent(parentCtx.Agent)
-	if llmAgent == nil {
+	llmAgentSpec := parentCtx.Agent.Spec().LLMAgent
+	if llmAgentSpec == nil {
 		return nil
 	}
 	// apply request processor functions to the request in the configured order.
@@ -400,7 +230,7 @@ func (f *baseFlow) preprocess(ctx context.Context, parentCtx *adk.InvocationCont
 	}
 	// run processors for tools.
 	// TODO: check need/feasibility of running this concurrently.
-	for _, t := range llmAgent.Tools {
+	for _, t := range llmAgentSpec.Tools {
 		toolCtx := &adk.ToolContext{
 			InvocationContext: parentCtx, // TODO: how to prevent mutation on this?
 			EventActions:      &adk.EventActions{},
@@ -454,7 +284,7 @@ func (f *baseFlow) agentToRun(parentCtx *adk.InvocationContext, agentName string
 	// NOTE: in python, BaseLlmFlow._get_gent_to_run searches the entire agent
 	// tree from the root_agent when processing _postprocess_handle_function_calls_async.
 	// I think that is strange. In our version, we check the agents included in transferTarget.
-	agents := transferTarget(asLLMAgent(parentCtx.Agent))
+	agents := transferTarget(parentCtx.Agent)
 	for _, agent := range agents {
 		if agent.Spec().Name == agentName {
 			return agent

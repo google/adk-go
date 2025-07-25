@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/google/adk-go"
@@ -119,25 +120,11 @@ func content(ev *adk.Event) *genai.Content {
 
 // rootAgent returns the root of the agent tree.
 func rootAgent(agent adk.Agent) adk.Agent {
-	findParent := func(agent adk.Agent) adk.Agent {
-		// this test is because ParentAgent/SubAgents are implemented only in LLMAgent.
-		// TODO: Parent/SubAgents should be part of Agent interface. Then, this is not needed.
-		a := asLLMAgent(agent)
-		if a == nil {
-			return nil
-		}
-		if p := asLLMAgent(a.Spec().Parent()); p != nil {
-			return p
-		}
-		return nil
-	}
-	current := agent
 	for {
-		parent := findParent(current)
-		if parent == nil {
-			return current
+		if agent == nil || agent.Spec() == nil || agent.Spec().Parent == nil {
+			return agent
 		}
-		current = parent
+		agent = agent.Spec().Parent
 	}
 }
 
@@ -146,4 +133,26 @@ func must[T adk.Agent](a T, err error) T {
 		panic(err)
 	}
 	return a
+}
+
+// validateSubAgents validates [AgentSpec.SubAgents] and updates the subagents' parents.
+func validateSubAgents(agent adk.Agent) error {
+	names := map[string]bool{}
+	// run sanity check (no duplicate name, no multiple parents)
+	for i, subagent := range agent.Spec().SubAgents {
+		subagentSpec := subagent.Spec()
+		if subagentSpec == nil || subagentSpec.Name == "" {
+			return fmt.Errorf("%d-th Agent does not have a valid Spec", i)
+		}
+		name := subagentSpec.Name
+		if names[name] {
+			return fmt.Errorf("multiple subagents with the same name (%q) are not allowed", name)
+		}
+		if parent := subagentSpec.Parent; parent != nil {
+			return fmt.Errorf("agent %q already has parent %q", name, parent.Spec().Name)
+		}
+		subagentSpec.Parent = agent
+		names[name] = true
+	}
+	return nil
 }
