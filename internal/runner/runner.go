@@ -19,35 +19,71 @@ import (
 	"iter"
 
 	"github.com/google/adk-go"
-
-	"google.golang.org/genai"
 )
 
-type Runner struct {
-	AppName        string
-	Agent          adk.Agent
-	SessionService adk.SessionService
+// RunAgent is called by adk internally wrapping extra logic on top of agent's Run.
+func RunAgent(ctx context.Context, ictx *adk.InvocationContext, agent adk.Agent) iter.Seq2[*adk.Event, error] {
+	callbackContext := &adk.CallbackContext{
+		InvocationContext: ictx,
+	}
+
+	return func(yield func(*adk.Event, error) bool) {
+		if event := runBeforeAgentCallbacks(ctx, callbackContext, agent); event != nil {
+			yield(event, nil)
+			return
+		}
+
+		for event, err := range agent.Run(ctx, ictx) {
+			event = runAfterAgentCallbacks(ctx, callbackContext, event, agent)
+
+			if !yield(event, err) {
+				return
+			}
+		}
+	}
 }
 
-// Run runs the agent.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *adk.AgentRunConfig) (iter.Seq2[*adk.Event, error], error) {
-	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
-	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
-	//
-	// For example, support_cfc requires Agent to be LLMAgent.
-	// Note that checking that directly in this package results in circular dependency.
-	// Options to consider:
-	//     - Move Runner to a separate package (runner imports adk, agent. agent imports adk).
-	//     - Require Agent.Validate method.
-	//     - Wait until Agent.Run is called.
-	/*
-		// TODO: setup tracer.
-		session, err := r.SessionService.Create(r.AppName, userID, nil)
-		if err != nil {
-			return nil, err
+// runBeforeAgentCallbacks checks if any beforeAgentCallback returns non-nil content
+// then it skips agent run and returns callback result.
+func runBeforeAgentCallbacks(ctx context.Context, callbackContext *adk.CallbackContext, agent adk.Agent) *adk.Event {
+	for _, callback := range agent.Spec().BeforeAgentCallbacks {
+		content := callback(ctx, callbackContext)
+		if content == nil {
+			continue
 		}
-		invocationCtx := r.newInvocationContext(ctx, session, msg, cfg)
-		...
-	*/
-	panic("unimplemened")
+
+		event := adk.NewEvent(callbackContext.InvocationContext.InvocationID)
+		event.LLMResponse = &adk.LLMResponse{
+			Content: content,
+		}
+		event.Author = agent.Spec().Name
+		event.Branch = callbackContext.InvocationContext.Branch
+		event.Actions = callbackContext.EventActions
+
+		// TODO: set ictx.end_invocation
+
+		return event
+	}
+
+	return nil
+}
+
+// runAfterAgentCallbacks checks if any afterAgentCallback returns non-nil content
+// then it replaces the event content with a value from the callback.
+func runAfterAgentCallbacks(ctx context.Context, callbackContext *adk.CallbackContext, event *adk.Event, agent adk.Agent) *adk.Event {
+	if event == nil {
+		return event
+	}
+
+	for _, callback := range agent.Spec().AfterAgentCallbacks {
+		newContent := callback(ctx, callbackContext, event.LLMResponse.Content)
+		if newContent == nil {
+			continue
+		}
+
+		event.LLMResponse.Content = newContent
+		return event
+	}
+
+	return event
 }

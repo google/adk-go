@@ -98,7 +98,7 @@ type InvocationContext struct {
 
 // NewInvocationContext creates a new invocation context for the given agent
 // and returns context.Context that is bound to the invocation context.
-func NewInvocationContext(ctx context.Context, agent Agent, sessionService SessionService, session *Session) (context.Context, *InvocationContext) {
+func NewInvocationContext(ctx context.Context, agent Agent, sessionService SessionService, session *Session, runCfg *AgentRunConfig) (context.Context, *InvocationContext) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	return ctx, &InvocationContext{
 		InvocationID:   "e-" + uuid.NewString(),
@@ -106,6 +106,7 @@ func NewInvocationContext(ctx context.Context, agent Agent, sessionService Sessi
 		cancel:         cancel,
 		SessionService: sessionService,
 		Session:        session,
+		RunConfig:      runCfg,
 	}
 }
 
@@ -174,9 +175,8 @@ type AgentSpec struct {
 	Description string
 	SubAgents   []Agent
 
-	// TODO:
-	//  BeforeAgentCallback
-	//  AfterAgentCallback
+	BeforeAgentCallbacks []BeforeAgentCallback
+	AfterAgentCallbacks  []AfterAgentCallback
 
 	// the followings are set by Init.
 	parentAgent Agent

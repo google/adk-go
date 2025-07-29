@@ -23,7 +23,7 @@ import (
 
 	"github.com/google/adk-go"
 	"github.com/google/adk-go/agent"
-
+	internalRunner "github.com/google/adk-go/internal/runner"
 	"google.golang.org/genai"
 )
 
@@ -42,7 +42,7 @@ type Runner struct {
 }
 
 // Run runs the agent.
-func (r *Runner) RunAsync(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *adk.AgentRunConfig) iter.Seq2[*adk.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *adk.AgentRunConfig) iter.Seq2[*adk.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
@@ -74,7 +74,7 @@ func (r *Runner) RunAsync(ctx context.Context, userID, sessionID string, msg *ge
 			return
 		}
 
-		for event, err := range agentToRun.Run(ctx, ictx) {
+		for event, err := range internalRunner.RunAgent(ctx, ictx, agentToRun) {
 			if !yield(event, err) {
 				return
 			}
@@ -82,14 +82,14 @@ func (r *Runner) RunAsync(ctx context.Context, userID, sessionID string, msg *ge
 	}
 }
 
-func (r *Runner) newInvocationContext(ctx context.Context, session *adk.Session, agent adk.Agent, cfg *adk.AgentRunConfig, msg *genai.Content) (context.Context, *adk.InvocationContext, error) {
-	if cfg != nil && cfg.SupportCFC {
+func (r *Runner) newInvocationContext(ctx context.Context, session *adk.Session, agent adk.Agent, runConfig *adk.AgentRunConfig, msg *genai.Content) (context.Context, *adk.InvocationContext, error) {
+	if runConfig != nil && runConfig.SupportCFC {
 		if err := r.setupCFC(agent); err != nil {
 			return nil, nil, fmt.Errorf("failed to setup CFC: %w", err)
 		}
 	}
 
-	ctx, ictx := adk.NewInvocationContext(ctx, agent, r.SessionService, session)
+	ctx, ictx := adk.NewInvocationContext(ctx, agent, r.SessionService, session, runConfig)
 	return ctx, ictx, nil
 }
 

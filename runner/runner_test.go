@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/adk-go"
 	"github.com/google/adk-go/agent"
+	"google.golang.org/genai"
 )
 
 func TestRunner_findAgentToRun(t *testing.T) {
@@ -202,10 +203,22 @@ func must[T adk.Agent](a T, err error) T {
 	return a
 }
 
-type customAgent struct{}
+type customAgent struct {
+	spec *adk.AgentSpec
 
-func (*customAgent) Spec() *adk.AgentSpec { return nil }
+	callCounter int
+}
 
-func (*customAgent) Run(context.Context, *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
-	return nil
+func (a *customAgent) Spec() *adk.AgentSpec { return a.spec }
+
+func (a *customAgent) Run(context.Context, *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
+	return func(yield func(*adk.Event, error) bool) {
+		a.callCounter++
+
+		yield(&adk.Event{
+			LLMResponse: &adk.LLMResponse{
+				Content: genai.NewContentFromText("hello", genai.RoleModel),
+			},
+		}, nil)
+	}
 }

@@ -59,6 +59,20 @@ func WithSubAgents(agents ...adk.Agent) AgentOption {
 	})
 }
 
+func WithBeforeAgentCallbacks(callbacks ...adk.BeforeAgentCallback) AgentOption {
+	return optionFunc(func(s *adk.AgentSpec) error {
+		s.BeforeAgentCallbacks = callbacks
+		return nil
+	})
+}
+
+func WithAfterAgentCallbacks(callbacks ...adk.AfterAgentCallback) AgentOption {
+	return optionFunc(func(s *adk.AgentSpec) error {
+		s.AfterAgentCallbacks = callbacks
+		return nil
+	})
+}
+
 type llmOptionFunc func(*LLMAgent) error
 
 func (o llmOptionFunc) apply2LLMAgent(a adk.Agent) error {
@@ -216,7 +230,7 @@ func (a *LLMAgent) Description() string {
 }
 
 func (a *LLMAgent) newInvocationContext(ctx context.Context, p *adk.InvocationContext) (context.Context, *adk.InvocationContext) {
-	ctx, c := adk.NewInvocationContext(ctx, a, nil, nil)
+	ctx, c := adk.NewInvocationContext(ctx, a, nil, nil, nil)
 	if p != nil {
 		// copy everything but Agent and internal state.
 		c.InvocationID = p.InvocationID
@@ -343,7 +357,7 @@ func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationCont
 			}
 			if ev == nil {
 				// nothing to yield/process.
-				return
+				continue
 			}
 			if !yield(ev, nil) {
 				return
