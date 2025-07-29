@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"log"
 	"strings"
 
 	"github.com/google/adk-go"
@@ -56,7 +57,13 @@ func (r *Runner) RunAsync(ctx context.Context, userID, sessionID string, msg *ge
 			return
 		}
 
-		ctx, ictx, err := r.newInvocationContext(ctx, session, cfg, msg)
+		agentToRun, err := r.findAgentToRun(session)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
+		ctx, ictx, err := r.newInvocationContext(ctx, session, agentToRun, cfg, msg)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -67,9 +74,7 @@ func (r *Runner) RunAsync(ctx context.Context, userID, sessionID string, msg *ge
 			return
 		}
 
-		// TODO: run _find_agent_to_run(session, root_agent). For now just run root.
-
-		for event, err := range r.RootAgent.Run(ctx, ictx) {
+		for event, err := range agentToRun.Run(ctx, ictx) {
 			if !yield(event, err) {
 				return
 			}
@@ -77,19 +82,19 @@ func (r *Runner) RunAsync(ctx context.Context, userID, sessionID string, msg *ge
 	}
 }
 
-func (r *Runner) newInvocationContext(ctx context.Context, session *adk.Session, cfg *adk.AgentRunConfig, msg *genai.Content) (context.Context, *adk.InvocationContext, error) {
+func (r *Runner) newInvocationContext(ctx context.Context, session *adk.Session, agent adk.Agent, cfg *adk.AgentRunConfig, msg *genai.Content) (context.Context, *adk.InvocationContext, error) {
 	if cfg != nil && cfg.SupportCFC {
-		if err := r.setupCFC(r.RootAgent); err != nil {
+		if err := r.setupCFC(agent); err != nil {
 			return nil, nil, fmt.Errorf("failed to setup CFC: %w", err)
 		}
 	}
 
-	ctx, ictx := adk.NewInvocationContext(ctx, r.RootAgent, r.SessionService, session)
+	ctx, ictx := adk.NewInvocationContext(ctx, agent, r.SessionService, session)
 	return ctx, ictx, nil
 }
 
-func (r *Runner) setupCFC(rootAgent adk.Agent) error {
-	llmAgent, ok := r.RootAgent.(*agent.LLMAgent)
+func (r *Runner) setupCFC(curAgent adk.Agent) error {
+	llmAgent, ok := curAgent.(*agent.LLMAgent)
 	if !ok {
 		return fmt.Errorf("cannot setup cfc for non-LLMAgent")
 	}
@@ -116,6 +121,62 @@ func (r *Runner) appendMessageToSession(ctx context.Context, ictx *adk.Invocatio
 
 	if err := r.SessionService.AppendEvent(ctx, session, event); err != nil {
 		return fmt.Errorf("failed to append event to sessionService: %w", err)
+	}
+	return nil
+}
+
+// findAgentToRun returns the agent that should handle the next request based on
+// session history.
+func (r *Runner) findAgentToRun(session *adk.Session) (adk.Agent, error) {
+	for i := len(session.Events) - 1; i >= 0; i-- {
+		event := session.Events[i]
+
+		if event.Author == "user" {
+			continue
+		}
+
+		subAgent := findAgent(r.RootAgent, event.Author)
+		// Agent not found, continue looking for the other event.
+		if subAgent == nil {
+			log.Printf("Event from an unknown agent: %s, event id: %s", event.Author, event.ID)
+			continue
+		}
+
+		if isTransferrableAcrossAgentTree(subAgent) {
+			return subAgent, nil
+		}
+	}
+
+	// Falls back to root agent if no suitable agents are found in the session.
+	return r.RootAgent, nil
+}
+
+// checks if the agent and its parent chain allow transfer up the tree.
+func isTransferrableAcrossAgentTree(agentToRun adk.Agent) bool {
+	for curAgent := agentToRun; curAgent != nil; curAgent = curAgent.Spec().Parent() {
+		// TODO: properly verify if agent is or embeds LLMAgent
+		llmAgent, ok := agentToRun.(*agent.LLMAgent)
+		if !ok {
+			return false
+		}
+
+		if llmAgent.DisallowTransferToParent {
+			return false
+		}
+	}
+
+	return true
+}
+
+func findAgent(curAgent adk.Agent, targetName string) adk.Agent {
+	if curAgent == nil || curAgent.Spec() == nil || curAgent.Spec().Name == targetName {
+		return curAgent
+	}
+
+	for _, subAgent := range curAgent.Spec().SubAgents {
+		if agent := findAgent(subAgent, targetName); agent != nil {
+			return agent
+		}
 	}
 	return nil
 }
