@@ -58,12 +58,15 @@ import (
 // TODO: implement it in the runners package and update this doc.
 
 func agentTransferRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
-	spec := parentCtx.Agent.Spec()
-	if spec.LLMAgent == nil || !useAutoFlow(spec) {
+	agent := asLLMAgent(parentCtx.Agent)
+	if agent == nil {
 		return nil // TODO: support agent types other than LLMAgent, that have parent/subagents?
 	}
+	if !agent.useAutoFlow() {
+		return nil
+	}
 
-	targets := transferTarget(parentCtx.Agent)
+	targets := transferTarget(agent)
 	if len(targets) == 0 {
 		return nil
 	}
@@ -71,7 +74,7 @@ func agentTransferRequestProcessor(ctx context.Context, parentCtx *adk.Invocatio
 	// TODO(hyangah): why do we set this up in request processor
 	// instead of registering this as a normal function tool of the Agent?
 	transferToAgentTool := &transferToAgentTool{}
-	si, err := instructionsForTransferToAgent(parentCtx.Agent, targets, transferToAgentTool)
+	si, err := instructionsForTransferToAgent(agent, targets, transferToAgentTool)
 	if err != nil {
 		return err
 	}
@@ -132,40 +135,34 @@ func (t *transferToAgentTool) Run(ctx context.Context, tc *adk.ToolContext, args
 
 var _ adk.Tool = (*transferToAgentTool)(nil)
 
-func transferTarget(current adk.Agent) []adk.Agent {
-	spec := current.Spec()
+func transferTarget(current *LLMAgent) []adk.Agent {
+	targets := slices.Clone(current.Spec().SubAgents)
 
-	targets := slices.Clone(spec.SubAgents)
-
-	if !spec.LLMAgent.DisallowTransferToParent && spec.Parent != nil {
-		targets = append(targets, spec.Parent)
+	if !current.DisallowTransferToParent && current.Spec().Parent() != nil {
+		targets = append(targets, current.Spec().Parent())
 	}
 	// For peer-agent transfers, it's only enabled when all below conditions are met:
 	// - the parent agent is also of AutoFlow.
 	// - DisallowTransferToPeers is false.
-	if spec.LLMAgent.DisallowTransferToPeers {
-		return targets
-	}
-
-	if spec.Parent == nil || !useAutoFlow(spec.Parent.Spec()) {
-		return targets
-	}
-
-	for _, peer := range spec.Parent.Spec().SubAgents {
-		if peer.Spec().Name != current.Spec().Name {
-			targets = append(targets, peer)
+	if !current.DisallowTransferToPeers {
+		parent := asLLMAgent(current.Spec().Parent())
+		if parent != nil && parent.useAutoFlow() {
+			for _, peer := range parent.Spec().SubAgents {
+				if peer.Spec().Name != current.Spec().Name {
+					targets = append(targets, peer)
+				}
+			}
 		}
 	}
-
 	return targets
 }
 
 var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
-func instructionsForTransferToAgent(agent adk.Agent, targets []adk.Agent, transferTool adk.Tool) (string, error) {
-	parent := agent.Spec().Parent
-	if agent.Spec().LLMAgent.DisallowTransferToParent {
+func instructionsForTransferToAgent(agent *LLMAgent, targets []adk.Agent, transferTool adk.Tool) (string, error) {
+	parent := agent.Spec().Parent()
+	if agent.DisallowTransferToParent {
 		parent = nil
 	}
 
@@ -191,8 +188,8 @@ func instructionsForTransferToAgent(agent adk.Agent, targets []adk.Agent, transf
 
 const agentTransferInstructionTemplate = `You have a list of other agents to transfer to:
 {{range .Targets}}
-Agent name: {{.Spec.Name}}
-Agent description: {{.Spec.Description}}
+Agent name: {{.Name}}
+Agent description: {{.Description}}
 {{end}}
 If you are the best to answer the question according to your description, you
 can answer it.
@@ -201,7 +198,7 @@ description, call '{{.ToolName}}' function to transfer the
 question to that agent. When transfering, do not generate any text other than
 the function call.
 {{if .Parent}}
-Your parent agent is {{.Parent.Spec.Name}}. If neither the other agents nor
+Your parent agent is {{.Parent.Name}}. If neither the other agents nor
 you are best for answering the question according to the descriptions, transfer
 to your parent agent. If you don't have parent agent, try answer by yourself.
 {{end}}

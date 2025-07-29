@@ -28,13 +28,13 @@ import (
 // the InvocationContext that includes the previous events.
 func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
-	agentSpec := parentCtx.Agent.Spec()
-	if agentSpec.LLMAgent == nil {
+	llmAgent := asLLMAgent(parentCtx.Agent)
+	if llmAgent == nil {
 		// Do nothing.
 		return nil // In python, no error is yielded.
 	}
 	fn := buildContentsDefault // "" or "default".
-	if agentSpec.LLMAgent.IncludeContents == "none" {
+	if llmAgent.IncludeContents == "none" {
 		// Include current turn context only (no conversation history)
 		fn = buildContentsCurrentTurnContextOnly
 	}
@@ -42,7 +42,7 @@ func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationCont
 	if parentCtx.Session != nil {
 		events = parentCtx.Session.Events
 	}
-	contents, err := fn(agentSpec.Name, parentCtx.Branch, events)
+	contents, err := fn(llmAgent.Spec().Name, parentCtx.Branch, events)
 	if err != nil {
 		return err
 	}

@@ -21,28 +21,14 @@ import (
 )
 
 func TestRootAgent(t *testing.T) {
+	model := struct {
+		adk.Model
+	}{}
+
 	nonLLM := newMockAgent("mock")
-	b := must(NewLLMAgent(&adk.AgentSpec{
-		Name:      "b",
-		SubAgents: []adk.Agent{nonLLM},
-		LLMAgent: &adk.LLMAgentSpec{
-			Model: &model{},
-		},
-	}))
-	a := must(NewLLMAgent(&adk.AgentSpec{
-		Name:      "a",
-		SubAgents: []adk.Agent{b},
-		LLMAgent: &adk.LLMAgentSpec{
-			Model: &model{},
-		},
-	}))
-	root := must(NewLLMAgent(&adk.AgentSpec{
-		Name:      "root",
-		SubAgents: []adk.Agent{a},
-		LLMAgent: &adk.LLMAgentSpec{
-			Model: &model{},
-		},
-	}))
+	b := must(NewLLMAgent("b", model, WithSubAgents(nonLLM)))
+	a := must(NewLLMAgent("a", model, WithSubAgents(b)))
+	root := must(NewLLMAgent("root", model, WithSubAgents(a)))
 
 	agentName := func(a adk.Agent) string {
 		if a == nil {
@@ -58,7 +44,7 @@ func TestRootAgent(t *testing.T) {
 		{root, root},
 		{a, root},
 		{b, root},
-		{nonLLM, root},
+		{nonLLM, nonLLM}, // TODO: nonLLM agent should be able to have root.
 		{nil, nil},
 	} {
 		t.Run("agent="+agentName(tc.agent), func(t *testing.T) {

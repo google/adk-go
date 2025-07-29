@@ -59,20 +59,15 @@ func TestLLMAgent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := newGeminiModel(t, modelName, tc.transport)
-			a, err := agent.NewLLMAgent(&adk.AgentSpec{
-				Name:        "hello_world_agent",
-				Description: "hello world agent",
-				LLMAgent: &adk.LLMAgentSpec{
-					Model:                    model,
-					Instruction:              "Roll the dice and report only the result.",
-					GlobalInstruction:        "Answer as precisely as possible.",
-					DisallowTransferToParent: true,
-					DisallowTransferToPeers:  true,
-				},
-			})
+			a, err := agent.NewLLMAgent("hello_world_agent", model,
+				agent.WithDescription("hello world agent"))
 			if err != nil {
 				t.Fatalf("NewLLMAgent failed: %v", err)
 			}
+			a.Instruction = "Roll the dice and report only the result."
+			a.GlobalInstruction = "Answer as precisely as possible."
+			a.DisallowTransferToParent = true
+			a.DisallowTransferToPeers = true
 			/* TODO: alternative
 			   a := agent.NewLLMAgent("hello_world_agent",
 			        agent.WithDescription("hello world agent"),
@@ -119,21 +114,15 @@ func TestFunctionTool(t *testing.T) {
 		Name:        "sum",
 		Description: "computes the sum of two numbers",
 	}, handler)
-	agent, err := agent.NewLLMAgent(&adk.AgentSpec{
-		Name:        "agent",
-		Description: "math agent",
-		LLMAgent: &adk.LLMAgentSpec{
-			Model:       model,
-			Instruction: "output ONLY the result computed by the provided function",
-			Tools:       []adk.Tool{rand},
-			// TODO(hakim): set to false when autoflow is implemented.
-			DisallowTransferToParent: true,
-			DisallowTransferToPeers:  true,
-		},
-	})
+	agent, err := agent.NewLLMAgent("agent", model, agent.WithDescription("math agent"))
 	if err != nil {
 		t.Fatalf("NewLLMAgent failed: %v", err)
 	}
+	agent.Instruction = "output ONLY the result computed by the provided function"
+	agent.Tools = []adk.Tool{rand}
+	// TODO(hakim): set to false when autoflow is implemented.
+	agent.DisallowTransferToParent = true
+	agent.DisallowTransferToPeers = true
 
 	runner := newTestAgentRunner(t, agent)
 	stream := runner.Run(t, "session1", prompt)
@@ -170,9 +159,9 @@ func TestAgentTransfer(t *testing.T) {
 		return &mockModel{responses: resp}
 	}
 	// creates an LLM model with the name and the model.
-	llmAgentFn := func(t *testing.T) func(spec *adk.AgentSpec) *agent.LLMAgent {
-		return func(spec *adk.AgentSpec) *agent.LLMAgent {
-			a, err := agent.NewLLMAgent(spec)
+	llmAgentFn := func(t *testing.T) func(name string, model adk.Model, opts ...agent.AgentOption) *agent.LLMAgent {
+		return func(name string, model adk.Model, opts ...agent.AgentOption) *agent.LLMAgent {
+			a, err := agent.NewLLMAgent(name, model, opts...)
 			if err != nil {
 				t.Fatalf("NewLLMAgent failed: %v", err)
 			}
@@ -228,20 +217,9 @@ func TestAgentTransfer(t *testing.T) {
 			text("response2"))
 		llmAgent := llmAgentFn(t)
 
-		subAgent1 := llmAgent(&adk.AgentSpec{
-			Name: "sub_agent_1",
-			LLMAgent: &adk.LLMAgentSpec{
-				Model: model,
-			},
-		})
+		subAgent1 := llmAgent("sub_agent_1", model)
 
-		rootAgent := llmAgent(&adk.AgentSpec{
-			Name:      "root_agent",
-			SubAgents: []adk.Agent{subAgent1},
-			LLMAgent: &adk.LLMAgentSpec{
-				Model: model,
-			},
-		})
+		rootAgent := llmAgent("root_agent", model, agent.WithSubAgents(subAgent1))
 
 		check(t, rootAgent, [][]content{
 			0: {
@@ -263,22 +241,11 @@ func TestAgentTransfer(t *testing.T) {
 			text("response2"))
 		llmAgent := llmAgentFn(t)
 
-		subAgent1 := llmAgent(&adk.AgentSpec{
-			Name: "sub_agent_1",
-			LLMAgent: &adk.LLMAgentSpec{
-				Model:                    model,
-				DisallowTransferToParent: true,
-				DisallowTransferToPeers:  true,
-			},
-		})
+		subAgent1 := llmAgent("sub_agent_1", model)
+		subAgent1.DisallowTransferToParent = true
+		subAgent1.DisallowTransferToPeers = true
 
-		rootAgent := llmAgent(&adk.AgentSpec{
-			Name:      "root_agent",
-			SubAgents: []adk.Agent{subAgent1},
-			LLMAgent: &adk.LLMAgentSpec{
-				Model: model,
-			},
-		})
+		rootAgent := llmAgent("root_agent", model, agent.WithSubAgents(subAgent1))
 
 		check(t, rootAgent, [][]content{
 			0: {
@@ -301,30 +268,13 @@ func TestAgentTransfer(t *testing.T) {
 			text("response2"))
 		llmAgent := llmAgentFn(t)
 
-		subAgent1_1 := llmAgent(&adk.AgentSpec{
-			Name: "sub_agent_1_1",
-			LLMAgent: &adk.LLMAgentSpec{
-				Model:                    model,
-				DisallowTransferToParent: true,
-				DisallowTransferToPeers:  true,
-			},
-		})
+		subAgent1_1 := llmAgent("sub_agent_1_1", model)
+		subAgent1_1.DisallowTransferToParent = true
+		subAgent1_1.DisallowTransferToPeers = true
 
-		subAgent1 := llmAgent(&adk.AgentSpec{
-			Name:      "sub_agent_1",
-			SubAgents: []adk.Agent{subAgent1_1},
-			LLMAgent: &adk.LLMAgentSpec{
-				Model: model,
-			},
-		})
+		subAgent1 := llmAgent("sub_agent_1", model, agent.WithSubAgents(subAgent1_1))
 
-		rootAgent := llmAgent(&adk.AgentSpec{
-			Name:      "root_agent",
-			SubAgents: []adk.Agent{subAgent1},
-			LLMAgent: &adk.LLMAgentSpec{
-				Model: model,
-			},
-		})
+		rootAgent := llmAgent("root_agent", model, agent.WithSubAgents(subAgent1))
 
 		check(t, rootAgent, [][]content{
 			0: {
@@ -447,13 +397,14 @@ func (r *testAgentRunner) isTransferableAcrossAgentTree(agentToRun adk.Agent) bo
 		if agentToRun == nil {
 			return true
 		}
-		if agentToRun.Spec().LLMAgent == nil {
+		agent, ok := agentToRun.(*agent.LLMAgent)
+		if !ok {
 			return false // only LLMAgent can provide agent transfer capability.
 		}
-		if agentToRun.Spec().LLMAgent.DisallowTransferToParent {
+		if agent.DisallowTransferToParent {
 			return false
 		}
-		agentToRun = agentToRun.Spec().Parent
+		agentToRun = agent.Spec().Parent()
 	}
 }
 
