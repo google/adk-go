@@ -79,7 +79,7 @@ func TestLLMAgent(t *testing.T) {
 				}
 			*/
 			// TODO: set tools, planner.
-			ctx, invCtx := adk.NewInvocationContext(t.Context(), a, nil, nil, nil)
+			ctx, invCtx := adk.NewInvocationContext(t.Context(), a, nil, nil, nil, nil)
 			stream := a.Run(ctx, invCtx)
 			texts, err := collectTextParts(stream)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
@@ -338,7 +338,7 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 
 	// TODO: replace this with the real runner.
 	return func(yield func(*adk.Event, error) bool) {
-		ctx, inv := adk.NewInvocationContext(ctx, r.agent, nil, nil, nil)
+		ctx, inv := adk.NewInvocationContext(ctx, r.agent, nil, nil, nil, nil)
 		inv.SessionService = r.sessionService
 		inv.Session = session
 		defer inv.End(nil)

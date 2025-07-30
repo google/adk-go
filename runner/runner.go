@@ -89,7 +89,7 @@ func (r *Runner) newInvocationContext(ctx context.Context, session *adk.Session,
 		}
 	}
 
-	ctx, ictx := adk.NewInvocationContext(ctx, agent, r.SessionService, session, runConfig)
+	ctx, ictx := adk.NewInvocationContext(ctx, agent, r.SessionService, session, runConfig, msg)
 	return ctx, ictx, nil
 }
 

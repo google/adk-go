@@ -230,7 +230,7 @@ func (a *LLMAgent) Description() string {
 }
 
 func (a *LLMAgent) newInvocationContext(ctx context.Context, p *adk.InvocationContext) (context.Context, *adk.InvocationContext) {
-	ctx, c := adk.NewInvocationContext(ctx, a, nil, nil, nil)
+	ctx, c := adk.NewInvocationContext(ctx, a, nil, nil, nil, nil)
 	if p != nil {
 		// copy everything but Agent and internal state.
 		c.InvocationID = p.InvocationID

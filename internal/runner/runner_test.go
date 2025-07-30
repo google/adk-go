@@ -102,7 +102,7 @@ func TestRunAgent(t *testing.T) {
 			agent.spec.BeforeAgentCallbacks = tt.beforeAgentCallbacks
 			agent.spec.AfterAgentCallbacks = tt.afterAgentCallbacks
 
-			ctx, ictx := adk.NewInvocationContext(ctx, agent, nil, nil, nil)
+			ctx, ictx := adk.NewInvocationContext(ctx, agent, nil, nil, nil, nil)
 
 			var gotEvents []*adk.Event
 			for event, err := range RunAgent(ctx, ictx, agent) {
