@@ -52,7 +52,7 @@ func TestLLMAgent(t *testing.T) {
 			transport: nil, // httprr + http.DefaultTransport
 		},
 		{
-			name:      "broken_backed",
+			name:      "broken_backend",
 			transport: roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, errNoNetwork }),
 			wantErr:   errNoNetwork,
 		},
@@ -87,6 +87,206 @@ func TestLLMAgent(t *testing.T) {
 			}
 			if tc.wantErr == nil && (err != nil || len(texts) != 1) {
 				t.Fatalf("stream = (%q, %v), want exactly one text response", texts, err)
+			}
+		})
+	}
+}
+
+func TestModelCallbacks(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name                 string
+		llmResponses         []llmResponse
+		beforeModelCallbacks []agent.BeforeModelCallback
+		afterModelCallbacks  []agent.AfterModelCallback
+		wantTexts            []string
+		wantErr              error
+	}{
+		{
+			name: "before model callback doesn't modify anything",
+			beforeModelCallbacks: []agent.BeforeModelCallback{
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
+					return nil, nil
+				},
+			},
+			llmResponses: []llmResponse{
+				{
+					resp: &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
+					},
+				},
+			},
+			wantTexts: []string{
+				"hello from model",
+			},
+		},
+		{
+			name: "before model callback returns an error",
+			beforeModelCallbacks: []agent.BeforeModelCallback{
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
+					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
+				},
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
+					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrHijacked)
+				},
+			},
+			llmResponses: []llmResponse{
+				{
+					resp: &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
+					},
+				},
+			},
+			wantErr: http.ErrNoCookie,
+		},
+		{
+			name: "before model callback returns new LLMResponse",
+			beforeModelCallbacks: []agent.BeforeModelCallback{
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
+					return &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
+					}, nil
+				},
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
+					return &adk.LLMResponse{
+						Content: genai.NewContentFromText("unexpected text", genai.RoleModel),
+					}, nil
+				},
+			},
+			llmResponses: []llmResponse{
+				{
+					resp: &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
+					},
+				},
+			},
+			wantTexts: []string{
+				"hello from before_model_callback",
+			},
+		},
+		{
+			name: "before model callback returns both new LLMResponse and error",
+			beforeModelCallbacks: []agent.BeforeModelCallback{
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
+					return &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
+					}, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
+				},
+			},
+			llmResponses: []llmResponse{
+				{
+					resp: &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
+					},
+				},
+			},
+			wantErr: http.ErrNoCookie,
+		},
+		{
+			name: "after model callback doesn't modify anything",
+			afterModelCallbacks: []agent.AfterModelCallback{
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
+					return nil, nil
+				},
+			},
+			llmResponses: []llmResponse{
+				{
+					resp: &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
+					},
+				},
+			},
+			wantTexts: []string{
+				"hello from model",
+			},
+		},
+		{
+			name: "after model callback returns new LLMResponse",
+			afterModelCallbacks: []agent.AfterModelCallback{
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
+					return &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
+					}, nil
+				},
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
+					return &adk.LLMResponse{
+						Content: genai.NewContentFromText("unexpected text", genai.RoleModel),
+					}, nil
+				},
+			},
+			llmResponses: []llmResponse{
+				{
+					resp: &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
+					},
+				},
+			},
+			wantTexts: []string{
+				"hello from after_model_callback",
+			},
+		},
+		{
+			name: "after model callback returns error",
+			afterModelCallbacks: []agent.AfterModelCallback{
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
+					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrNoCookie)
+				},
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
+					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrHijacked)
+				},
+			},
+			llmResponses: []llmResponse{
+				{
+					resp: &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
+					},
+				},
+			},
+			wantErr: http.ErrNoCookie,
+		},
+		{
+			name: "after model callback returns both new LLMResponse and error",
+			afterModelCallbacks: []agent.AfterModelCallback{
+				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
+					return &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
+					}, fmt.Errorf("error from after_model_callback: %w", http.ErrNoCookie)
+				},
+			},
+			llmResponses: []llmResponse{
+				{
+					resp: &adk.LLMResponse{
+						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
+					},
+				},
+			},
+			wantErr: http.ErrNoCookie,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &fakeModel{
+				records: tc.llmResponses,
+			}
+			a, err := agent.NewLLMAgent("hello_world_agent", model,
+				agent.WithBeforeModelCallbacks(tc.beforeModelCallbacks...),
+				agent.WithAfterModelCallbacks(tc.afterModelCallbacks...),
+			)
+			if err != nil {
+				t.Fatalf("NewLLMAgent failed: %v", err)
+			}
+			ctx, invCtx := adk.NewInvocationContext(t.Context(), a, nil, nil, nil, nil)
+			stream := a.Run(ctx, invCtx)
+			texts, err := collectTextParts(stream)
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("stream = (%q, %v), want (_, %v)", texts, err, tc.wantErr)
+			}
+			if (err != nil) != (tc.wantErr != nil) {
+				t.Fatalf("unexpected result from agent, got error: %v, want error: %v", err, tc.wantErr)
+			}
+
+			if diff := cmp.Diff(tc.wantTexts, texts); diff != "" {
+				t.Fatalf("unexpected result from agent, want: %v, got: %v, diff: %v", tc.wantTexts, texts, diff)
 			}
 		})
 	}
@@ -513,4 +713,25 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 // RoundTrip implements http.RoundTripper.
 func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
+}
+
+type llmResponse struct {
+	resp *adk.LLMResponse
+	err  error
+}
+
+type fakeModel struct {
+	records []llmResponse
+}
+
+func (m *fakeModel) Name() string { return "fakeModel" }
+
+func (m *fakeModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, stream bool) adk.LLMResponseStream {
+	return func(yield func(*adk.LLMResponse, error) bool) {
+		for _, r := range m.records {
+			if !yield(r.resp, r.err) {
+				return
+			}
+		}
+	}
 }

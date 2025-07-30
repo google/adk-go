@@ -147,6 +147,20 @@ func WithOutputSchema(s *genai.Schema) LLMAgentOption {
 	})
 }
 
+func WithBeforeModelCallbacks(callbacks ...BeforeModelCallback) LLMAgentOption {
+	return llmOptionFunc(func(a *LLMAgent) error {
+		a.BeforeModelCallbacks = callbacks
+		return nil
+	})
+}
+
+func WithAfterModelCallbacks(callbacks ...AfterModelCallback) LLMAgentOption {
+	return llmOptionFunc(func(a *LLMAgent) error {
+		a.AfterModelCallbacks = callbacks
+		return nil
+	})
+}
+
 // NewLLMAgent returns a new LLMAgent configured with the provided options.
 func NewLLMAgent(name string, model adk.Model, opts ...AgentOption) (*LLMAgent, error) {
 	agentSpec := &adk.AgentSpec{Name: name}
@@ -206,16 +220,41 @@ type LLMAgent struct {
 	// such as function tools, RAGs, agent transfer, etc.
 	OutputSchema *genai.Schema
 
+	// BeforeModelCallbacks are executed sequentially right before a request is
+	// sent to the model.
+	//
+	// The first callback that returns non-nil LLMResponse/error makes
+	// LLMAgent **skip** the actual model call and yields the callback result
+	// instead.
+	//
+	// This provides an opportunity to inspect, log, or modify the `LLMRequest`
+	// object. It can also be used to implement caching by returning a cached
+	// `LLMResponse`, which would skip the actual model call.
+	BeforeModelCallbacks []BeforeModelCallback
+
+	// AfterModelCallbacks are executed sequentially right after a response is
+	// received from the model.
+	//
+	// The first callback that returns non-nil LLMResponse/error **replaces**
+	// the actual model response/error and stops execution of the remaining
+	// callbacks.
+	//
+	// This is the ideal place to log model responses, collect metrics on token
+	// usage, or perform post-processing on the raw `LLMResponse`.
+	AfterModelCallbacks []AfterModelCallback
+
 	// OutputKey
 	// Planner
 	// CodeExecutor
 	// Examples
 
-	// BeforeModelCallback
-	// AfterModelCallback
 	// BeforeToolCallback
 	// AfterToolCallback
 }
+
+type BeforeModelCallback func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error)
+
+type AfterModelCallback func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error)
 
 func (a *LLMAgent) Spec() *adk.AgentSpec {
 	return a.agentSpec
@@ -247,9 +286,11 @@ func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) it
 	// TODO: Select model (LlmAgent.canonical_model)
 	ctx, parentCtx = a.newInvocationContext(ctx, parentCtx)
 	flow := &baseFlow{
-		Model:              a.Model,
-		RequestProcessors:  defaultRequestProcessors,
-		ResponseProcessors: defaultResponseProcessors,
+		Model:                a.Model,
+		RequestProcessors:    defaultRequestProcessors,
+		ResponseProcessors:   defaultResponseProcessors,
+		BeforeModelCallbacks: a.BeforeModelCallbacks,
+		AfterModelCallbacks:  a.AfterModelCallbacks,
 	}
 	return flow.Run(ctx, parentCtx)
 }
@@ -286,6 +327,9 @@ type baseFlow struct {
 
 	RequestProcessors  []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error
 	ResponseProcessors []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error
+
+	BeforeModelCallbacks []BeforeModelCallback
+	AfterModelCallbacks  []AfterModelCallback
 }
 
 func (f *baseFlow) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
@@ -428,13 +472,16 @@ func (f *baseFlow) preprocess(ctx context.Context, parentCtx *adk.InvocationCont
 
 func (f *baseFlow) callLLM(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) adk.LLMResponseStream {
 	return func(yield func(*adk.LLMResponse, error) bool) {
+		for _, callback := range f.BeforeModelCallbacks {
+			callbackResponse, callbackErr := callback(ctx, &adk.CallbackContext{
+				InvocationContext: parentCtx,
+			}, req)
 
-		// TODO: run BeforeModelCallback if exists.
-		//   if f.BeforeModelCallback != nil {
-		//      resp, err := f.BeforeModelCallback(...)
-		//      yield(resp, err)
-		//      return
-		//   }
+			if callbackResponse != nil || callbackErr != nil {
+				yield(callbackResponse, callbackErr)
+				return
+			}
+		}
 
 		// TODO: Set _ADK_AGENT_NAME_LABEL_KEY in req.GenerateConfig.Labels
 		// to help with slicing the billing reports on a per-agent basis.
@@ -442,16 +489,45 @@ func (f *baseFlow) callLLM(ctx context.Context, parentCtx *adk.InvocationContext
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 
 		for resp, err := range f.Model.GenerateContent(ctx, req, parentCtx.RunConfig != nil && parentCtx.RunConfig.StreamingMode == adk.StreamingModeSSE) {
+			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, parentCtx, resp, err)
+			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
+			if callbackErr != nil {
+				yield(nil, callbackErr)
+				return
+			}
+
+			if callbackResp != nil {
+				if !yield(callbackResp, nil) {
+					return
+				}
+				continue
+			}
+
+			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
 			if err != nil {
 				yield(nil, err)
 				return
 			}
-			// TODO: run AfterModelCallback if exists.
-			if !yield(resp, err) {
+
+			if !yield(resp, nil) {
 				return
 			}
 		}
 	}
+}
+
+func (f *baseFlow) runAfterModelCallbacks(ctx context.Context, parentCtx *adk.InvocationContext, llmResp *adk.LLMResponse, llmErr error) (*adk.LLMResponse, error) {
+	for _, callback := range f.AfterModelCallbacks {
+		callbackResponse, callbackErr := callback(ctx, &adk.CallbackContext{
+			InvocationContext: parentCtx,
+		}, llmResp, llmErr)
+
+		if callbackResponse != nil || callbackErr != nil {
+			return callbackResponse, callbackErr
+		}
+	}
+
+	return nil, nil
 }
 
 func (f *baseFlow) postprocess(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error {
