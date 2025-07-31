@@ -160,6 +160,7 @@ func must[T types.Agent](a T, err error) T {
 	return a
 }
 
+// TODO: create test util allowing to create custom agents, agent trees for test etc.
 type customAgent struct {
 	spec *types.AgentSpec
 
