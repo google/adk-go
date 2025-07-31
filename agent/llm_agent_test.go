@@ -21,15 +21,18 @@ import (
 	"iter"
 	"net/http"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
+	"github.com/google/adk-go"
+	"github.com/google/adk-go/agent"
+	"github.com/google/adk-go/internal/httprr"
+	"github.com/google/adk-go/model"
+	"github.com/google/adk-go/tool"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/types"
 	"google.golang.org/genai"
@@ -506,9 +509,12 @@ type testAgentRunner struct {
 	agent          types.Agent
 	sessionService types.SessionService
 	lastSession    *types.Session
+	appName        string
+	// TODO: move runner definition to the adk package and it's a part of public api, but the logic to the internal runner
+	runner *runner.Runner
 }
 
-func (r *testAgentRunner) session(t *testing.T, sessionID string) (*types.Session, error) {
+func (r *testAgentRunner) session(t *testing.T, appName, userID, sessionID string) (*types.Session, error) {
 	ctx := t.Context()
 	if last := r.lastSession; last != nil && last.ID == sessionID {
 		session, err := r.sessionService.Get(ctx, &types.SessionGetRequest{
@@ -531,100 +537,26 @@ func (r *testAgentRunner) session(t *testing.T, sessionID string) (*types.Sessio
 func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.Seq2[*types.Event, error] {
 	t.Helper()
 	ctx := t.Context()
-	session, err := r.session(t, sessionID)
+
+	userID := "test_user"
+
+	session, err := r.session(t, r.appName, userID, sessionID)
 	if err != nil {
 		t.Fatalf("failed to get/create session: %v", err)
 	}
 
-	// TODO: replace this with the real runner.
-	return func(yield func(*types.Event, error) bool) {
-		ctx, inv := types.NewInvocationContext(ctx, r.agent, nil, nil, nil, nil)
-		inv.SessionService = r.sessionService
-		inv.Session = session
-		defer inv.End(nil)
-
-		userMessageEvent := types.NewEvent(inv.InvocationID)
-		userMessageEvent.Author = "user"
-		userMessageEvent.LLMResponse = &types.LLMResponse{
-			Content: genai.NewContentFromText(newMessage, "user"),
-		}
-		r.sessionService.AppendEvent(ctx, session, userMessageEvent)
-
-		agentToRun := r.findAgentToRun(session, r.agent)
-		for ev, err := range agentToRun.Run(ctx, inv) {
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if err := r.sessionService.AppendEvent(ctx, session, ev); err != nil {
-				t.Fatalf("failed to record event %v: %v", ev, err)
-			}
-			if !yield(ev, err) {
-				return
-			}
-		}
-	}
+	return r.runner.Run(ctx, userID, session.ID, genai.NewContentFromText(newMessage, genai.RoleUser), &adk.AgentRunConfig{})
 }
 
-func (r *testAgentRunner) findAgentToRun(s *types.Session, rootAgent types.Agent) types.Agent {
-	// runner.py Runner's _find_agent_to_run.
-
-	// TODO: findMatchingFunctionCall.
-
-	for _, ev := range slices.Backward(s.Events) {
-		if ev.Author == rootAgent.Spec().Name {
-			// Found root agent.
-			return rootAgent
-		}
-		matching := findSubAgent(rootAgent, ev.Author)
-		if matching == nil {
-			// event from an unknown agent.
-			// TODO: log.
-			continue
-		}
-		if r.isTransferableAcrossAgentTree(matching) {
-			return matching
-		}
+func newTestAgentRunner(_ *testing.T, agent types.Agent) *testAgentRunner {
+	appName := "test_app"
+	sessionService := &session.InMemorySessionService{}
+	return &testAgentRunner{
+		agent:          agent,
+		sessionService: sessionService,
+		appName:        appName,
+		runner:         runner.NewRunner(appName, agent, sessionService),
 	}
-	return rootAgent
-}
-
-// isTransferableAcrossAgentTree returns whether the agent
-// to run can transfer to any other agent in the agent tree.
-// This typicall means all agentToRun's parents through root agent
-// can transfer to their parent agents.
-func (r *testAgentRunner) isTransferableAcrossAgentTree(agentToRun types.Agent) bool {
-	for {
-		if agentToRun == nil {
-			return true
-		}
-		agent, ok := agentToRun.(*agent.LLMAgent)
-		if !ok {
-			return false // only LLMAgent can provide agent transfer capability.
-		}
-		if agent.DisallowTransferToParent {
-			return false
-		}
-		agentToRun = agent.Spec().Parent()
-	}
-}
-
-func findAgent(agent types.Agent, name string) types.Agent {
-	if agent.Spec().Name == name {
-		return agent
-	}
-	return findSubAgent(agent, name)
-}
-
-func findSubAgent(a types.Agent, name string) types.Agent {
-	llmAgent, ok := a.(*agent.LLMAgent)
-	if !ok {
-		return nil
-	}
-
-	for _, sub := range llmAgent.Spec().SubAgents {
-		return findAgent(sub, name)
-	}
-	return nil
 }
 
 type mockModel struct {
@@ -650,13 +582,6 @@ func (m *mockModel) Name() string {
 }
 
 var _ types.Model = (*mockModel)(nil)
-
-func newTestAgentRunner(_ *testing.T, agent types.Agent) *testAgentRunner {
-	return &testAgentRunner{
-		agent:          agent,
-		sessionService: &session.InMemorySessionService{},
-	}
-}
 
 func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper) *model.GeminiModel {
 	apiKey := "fakeKey"
