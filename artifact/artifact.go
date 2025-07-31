@@ -121,7 +121,13 @@ func (s *InMemoryArtifactService) delete(appName, userID, sessionID, fileName st
 	s.artifacts.Delete(key)
 }
 
-func (s *InMemoryArtifactService) Save(ctx context.Context, appName, userID, sessionID, fileName string, artifact *genai.Part) (int64, error) {
+func (s *InMemoryArtifactService) Save(ctx context.Context, req *adk.ArtifactSaveRequest) (*adk.ArtifactSaveResponse, error) {
+	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
+	artifact := req.Part
+
+	if appName == "" || userID == "" || sessionID == "" || fileName == "" || artifact == nil {
+		return nil, fmt.Errorf("invalid request: missing required fields")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -130,15 +136,20 @@ func (s *InMemoryArtifactService) Save(ctx context.Context, appName, userID, ses
 		nextVersion = internalVer + 1
 	}
 	s.set(appName, userID, sessionID, fileName, nextVersion, artifact)
-	return nextVersion, nil
+	return &adk.ArtifactSaveResponse{Version: nextVersion}, nil
 }
 
-func (s *InMemoryArtifactService) Delete(ctx context.Context, appName, userID, sessionID, fileName string, opts *adk.ArtifactDeleteOption) error {
+func (s *InMemoryArtifactService) Delete(ctx context.Context, req *adk.ArtifactDeleteRequest) error {
+	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
+	version := req.Version
+	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
+		return fmt.Errorf("invalid request: missing required fields")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if opts != nil && opts.Version != 0 {
-		s.delete(appName, userID, sessionID, fileName, opts.Version)
+	if version != 0 {
+		s.delete(appName, userID, sessionID, fileName, version)
 		return nil
 	}
 
@@ -149,26 +160,36 @@ func (s *InMemoryArtifactService) Delete(ctx context.Context, appName, userID, s
 	return nil
 }
 
-func (s *InMemoryArtifactService) Load(ctx context.Context, appName, userID, sessionID, fileName string, opts *adk.ArtifactLoadOption) (*genai.Part, error) {
+func (s *InMemoryArtifactService) Load(ctx context.Context, req *adk.ArtifactLoadRequest) (*adk.ArtifactLoadResponse, error) {
+	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
+	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
+		return nil, fmt.Errorf("invalid request: missing required fields")
+	}
+	version := req.Version
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if opts != nil && opts.Version > 0 {
-		artifact, ok := s.get(appName, userID, sessionID, fileName, opts.Version)
+	if version > 0 {
+		artifact, ok := s.get(appName, userID, sessionID, fileName, version)
 		if !ok {
 			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 		}
-		return artifact, nil
+		return &adk.ArtifactLoadResponse{Part: artifact}, nil
 	}
 	// pick the latest version
 	_, artifact, ok := s.find(appName, userID, sessionID, fileName)
 	if !ok {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
-	return artifact, nil
+	return &adk.ArtifactLoadResponse{Part: artifact}, nil
 }
 
-func (s *InMemoryArtifactService) List(ctx context.Context, appName, userID, sessionID string) ([]string, error) {
+func (s *InMemoryArtifactService) List(ctx context.Context, req *adk.ArtifactListRequest) (*adk.ArtifactListResponse, error) {
+	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
+	if appName == "" || userID == "" || sessionID == "" {
+		return nil, fmt.Errorf("invalid request: missing required fields")
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -182,11 +203,15 @@ func (s *InMemoryArtifactService) List(ctx context.Context, appName, userID, ses
 		}
 		files[key.FileName] = true
 	}
-	return slices.Collect(maps.Keys(files)), nil
+	return &adk.ArtifactListResponse{FileNames: slices.Collect(maps.Keys(files))}, nil
 }
 
 // Versions implements adk.ArtifactService.
-func (s *InMemoryArtifactService) Versions(ctx context.Context, appName string, userID string, sessionID string, fileName string) ([]int64, error) {
+func (s *InMemoryArtifactService) Versions(ctx context.Context, req *adk.ArtifactVersionsRequest) (*adk.ArtifactVersionsResponse, error) {
+	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
+	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
+		return nil, fmt.Errorf("invalid request: missing required fields")
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -200,7 +225,7 @@ func (s *InMemoryArtifactService) Versions(ctx context.Context, appName string, 
 	if len(versions) == 0 {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
-	return versions, nil
+	return &adk.ArtifactVersionsResponse{Versions: versions}, nil
 }
 
 var _ adk.ArtifactService = (*InMemoryArtifactService)(nil)

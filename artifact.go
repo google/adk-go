@@ -20,28 +20,79 @@ import (
 	"google.golang.org/genai"
 )
 
-// ArtifactLoadOption is the option for [ArtifactService.Load].
-type ArtifactLoadOption struct {
+// ArtifactSaveRequest is the parameter for [ArtifactService.Save].
+type ArtifactSaveRequest struct {
+	AppName, UserID, SessionID, FileName string
+	// Part is the artifact to store.
+	Part *genai.Part
+
+	// Belows are optional fields.
+
+	// If set, the artifact will be saved with this version.
+	// If unset, a new version will be created.
 	Version int64
 }
 
-// ArtifactDeleteOption is the option for [ArtifactService.Delete].
-type ArtifactDeleteOption struct {
+// ArtifactSaveResponse is the return type of [ArtifactService.Save].
+type ArtifactSaveResponse struct {
 	Version int64
 }
 
+// ArtifactLoadRequest is the parameter for [ArtifactService.Load].
+type ArtifactLoadRequest struct {
+	AppName, UserID, SessionID, FileName string
+
+	// Belows are optional fields.
+	Version int64
+}
+
+// ArtifactLoadResponse is the return type of [ArtifactService.Load].
+type ArtifactLoadResponse struct {
+	// Part is the artifact stored.
+	Part *genai.Part
+}
+
+// ArtifactDeleteRequest is the parameter for [ArtifactService.Delete].
+type ArtifactDeleteRequest struct {
+	AppName, UserID, SessionID, FileName string
+
+	// Belows are optional fields.
+	Version int64
+}
+
+// ArtifactListRequest is the parameter for [ArtifactService.List].
+type ArtifactListRequest struct {
+	AppName, UserID, SessionID string
+}
+
+// ArtifactListResponse is the return type of [ArtifactService.List].
+type ArtifactListResponse struct {
+	FileNames []string
+}
+
+// ArtifactVersionsRequest is the parameter for [ArtifactService.Versions].
+type ArtifactVersionsRequest struct {
+	AppName, UserID, SessionID, FileName string
+}
+
+// ArtifactVersionsResponse is the parameter for [ArtifactService.Versions].
+type ArtifactVersionsResponse struct {
+	Versions []int64
+}
+
+// ArtifactService is the artifact storage service.
 type ArtifactService interface {
 	// Save saves an artifact to the artifact service storage.
 	// The artifact is a file identified by the app name, user ID, session ID, and fileName.
 	// After saving the artifact, a revision ID is returned to identify the artifact version.
-	Save(ctx context.Context, appName, userID, sessionID, fileName string, artifact *genai.Part) (int64, error)
+	Save(ctx context.Context, req *ArtifactSaveRequest) (*ArtifactSaveResponse, error)
 	// Load loads an artifact from the storage.
 	// The artifact is a file indentified by the appName, userID, sessionID and fileName.
-	Load(ctx context.Context, appName, userID, sessionID, fileName string, opts *ArtifactLoadOption) (*genai.Part, error)
+	Load(ctx context.Context, req *ArtifactLoadRequest) (*ArtifactLoadResponse, error)
 	// Delete deletes an artifact. Deleting a non-existing entry is not an error.
-	Delete(ctx context.Context, appName, userID, sessionID, fileName string, opts *ArtifactDeleteOption) error
+	Delete(ctx context.Context, req *ArtifactDeleteRequest) error
 	// List lists all the artifact filenames within a session.
-	List(ctx context.Context, appName, userID, sessionID string) ([]string, error)
+	List(ctx context.Context, req *ArtifactListRequest) (*ArtifactListResponse, error)
 	// Versions lists all versions of an artifact.
-	Versions(ctx context.Context, appName, userID, sessionID, fileName string) ([]int64, error)
+	Versions(ctx context.Context, req *ArtifactVersionsRequest) (*ArtifactVersionsResponse, error)
 }
