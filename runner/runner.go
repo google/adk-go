@@ -75,6 +75,17 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 
 		for event, err := range internalRunner.RunAgent(ctx, ictx, agentToRun) {
+			// only commit non-partial event to a session service
+			if !(event.LLMResponse != nil && event.LLMResponse.Partial) {
+
+				// TODO: update session state & delta
+
+				if err := r.SessionService.AppendEvent(ctx, session, event); err != nil {
+					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+					return
+				}
+			}
+
 			if !yield(event, err) {
 				return
 			}
@@ -131,6 +142,8 @@ func (r *Runner) findAgentToRun(session *types.Session) (types.Agent, error) {
 	for i := len(session.Events) - 1; i >= 0; i-- {
 		event := session.Events[i]
 
+		// TODO: findMatchingFunctionCall.
+
 		if event.Author == "user" {
 			continue
 		}
@@ -142,7 +155,7 @@ func (r *Runner) findAgentToRun(session *types.Session) (types.Agent, error) {
 			continue
 		}
 
-		if isTransferrableAcrossAgentTree(subAgent) {
+		if isTransferableAcrossAgentTree(subAgent) {
 			return subAgent, nil
 		}
 	}
@@ -152,7 +165,7 @@ func (r *Runner) findAgentToRun(session *types.Session) (types.Agent, error) {
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.
-func isTransferrableAcrossAgentTree(agentToRun types.Agent) bool {
+func isTransferableAcrossAgentTree(agentToRun types.Agent) bool {
 	for curAgent := agentToRun; curAgent != nil; curAgent = curAgent.Spec().Parent() {
 		// TODO: properly verify if agent is or embeds LLMAgent
 		llmAgent, ok := agentToRun.(*agent.LLMAgent)
