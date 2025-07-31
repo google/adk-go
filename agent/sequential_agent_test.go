@@ -90,13 +90,13 @@ func TestNewSequentialAgent(t *testing.T) {
 			}
 
 			if len(tt.wantEvents) != len(gotEvents) {
-				t.Fatalf("Unexpected event length, want: %v, got: %v", len(tt.wantEvents), len(gotEvents))
+				t.Fatalf("Unexpected event length, got: %v, want: %v", len(gotEvents), len(tt.wantEvents))
 			}
 
 			for i, gotEvent := range gotEvents {
 				tt.wantEvents[i].Time = gotEvent.Time
 				if diff := cmp.Diff(tt.wantEvents[i], gotEvent); diff != "" {
-					t.Errorf("MakeGatewayInfo() mismatch (-want +got):\n%s", diff)
+					t.Errorf("event[i] mismatch (-want +got):\n%s", diff)
 				}
 			}
 		})

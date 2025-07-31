@@ -29,12 +29,10 @@ type SequentialAgent struct {
 
 // NewSequentialAgent creates a new SequentialAgent.
 func NewSequentialAgent(name string, opts ...AgentOption) (*SequentialAgent, error) {
-	a, err := NewLoopAgent(name, 0, opts...)
+	a, err := NewLoopAgent(name, 1, opts...)
 	if err != nil {
 		return nil, err
 	}
-
-	a.maxIterations = 1
 
 	return &SequentialAgent{
 		loopAgent: a,
