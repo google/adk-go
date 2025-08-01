@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"google.golang.org/adk"
 	"google.golang.org/adk/internal/httprr"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -42,7 +42,7 @@ func TestNewGeminiModel(t *testing.T) {
 		t.Errorf("model Name = %q, want %q", got, want)
 	}
 
-	readResponse := func(s adk.LLMResponseStream) (string, error) {
+	readResponse := func(s types.LLMResponseStream) (string, error) {
 		var answer string
 		for resp, err := range s {
 			if err != nil {
@@ -58,7 +58,7 @@ func TestNewGeminiModel(t *testing.T) {
 
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
-			s := m.GenerateContent(ctx, &adk.LLMRequest{
+			s := m.GenerateContent(ctx, &types.LLMRequest{
 				Model:    m, // TODO: strange. What happens if this doesn't match m?
 				Contents: genai.Text("What is the capital of France?"),
 			}, stream)

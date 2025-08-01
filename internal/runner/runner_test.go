@@ -21,8 +21,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"google.golang.org/adk"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -33,22 +33,22 @@ func TestRunAgent(t *testing.T) {
 
 	tests := []struct {
 		name                 string
-		ictx                 *adk.InvocationContext
-		beforeAgentCallbacks []adk.BeforeAgentCallback
-		afterAgentCallbacks  []adk.AfterAgentCallback
+		ictx                 *types.InvocationContext
+		beforeAgentCallbacks []types.BeforeAgentCallback
+		afterAgentCallbacks  []types.AfterAgentCallback
 		wantLLMCalls         int
-		wantEvents           []*adk.Event
+		wantEvents           []*types.Event
 	}{
 		{
 			name: "before agent callback runs, no llm calls",
-			beforeAgentCallbacks: []adk.BeforeAgentCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext) *genai.Content {
+			beforeAgentCallbacks: []types.BeforeAgentCallback{
+				func(ctx context.Context, callbackCtx *types.CallbackContext) *genai.Content {
 					return genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel)
 				},
 			},
-			wantEvents: []*adk.Event{
+			wantEvents: []*types.Event{
 				{
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel),
 					},
 				},
@@ -56,20 +56,20 @@ func TestRunAgent(t *testing.T) {
 		},
 		{
 			name: "no callback effect if callbacks return nil",
-			beforeAgentCallbacks: []adk.BeforeAgentCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext) *genai.Content {
+			beforeAgentCallbacks: []types.BeforeAgentCallback{
+				func(ctx context.Context, callbackCtx *types.CallbackContext) *genai.Content {
 					return nil
 				},
 			},
-			afterAgentCallbacks: []adk.AfterAgentCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, content *genai.Content) *genai.Content {
+			afterAgentCallbacks: []types.AfterAgentCallback{
+				func(ctx context.Context, callbackCtx *types.CallbackContext, content *genai.Content) *genai.Content {
 					return nil
 				},
 			},
 			wantLLMCalls: 1,
-			wantEvents: []*adk.Event{
+			wantEvents: []*types.Event{
 				{
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: genai.NewContentFromText("hello", genai.RoleModel),
 					},
 				},
@@ -77,15 +77,15 @@ func TestRunAgent(t *testing.T) {
 		},
 		{
 			name: "after agent callback replaces event content",
-			afterAgentCallbacks: []adk.AfterAgentCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, content *genai.Content) *genai.Content {
+			afterAgentCallbacks: []types.AfterAgentCallback{
+				func(ctx context.Context, callbackCtx *types.CallbackContext, content *genai.Content) *genai.Content {
 					return genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel)
 				},
 			},
 			wantLLMCalls: 1,
-			wantEvents: []*adk.Event{
+			wantEvents: []*types.Event{
 				{
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel),
 					},
 				},
@@ -96,15 +96,15 @@ func TestRunAgent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 
 			agent := &customAgent{
-				spec: &adk.AgentSpec{},
+				spec: &types.AgentSpec{},
 			}
 
 			agent.spec.BeforeAgentCallbacks = tt.beforeAgentCallbacks
 			agent.spec.AfterAgentCallbacks = tt.afterAgentCallbacks
 
-			ctx, ictx := adk.NewInvocationContext(ctx, agent, nil, nil, nil, nil)
+			ctx, ictx := types.NewInvocationContext(ctx, agent, nil, nil, nil, nil)
 
-			var gotEvents []*adk.Event
+			var gotEvents []*types.Event
 			for event, err := range RunAgent(ctx, ictx, agent) {
 				if err != nil {
 					t.Fatalf("unexpected error from the agent: %v", err)
@@ -122,7 +122,7 @@ func TestRunAgent(t *testing.T) {
 			}
 
 			for i, gotEvent := range gotEvents {
-				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(adk.Event{}, "ID", "Time", "InvocationID")); diff != "" {
+				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(types.Event{}, "ID", "Time", "InvocationID")); diff != "" {
 					t.Errorf("diff in the events: got event[%d]: %v, want: %v, diff: %v", i, gotEvent, tt.wantEvents[i], diff)
 				}
 			}
@@ -150,10 +150,10 @@ func agentTree(t *testing.T) agentTreeStruct {
 }
 
 type agentTreeStruct struct {
-	root, noTransferAgent, allowsTransferAgent adk.Agent
+	root, noTransferAgent, allowsTransferAgent types.Agent
 }
 
-func must[T adk.Agent](a T, err error) T {
+func must[T types.Agent](a T, err error) T {
 	if err != nil {
 		panic(err)
 	}
@@ -161,19 +161,19 @@ func must[T adk.Agent](a T, err error) T {
 }
 
 type customAgent struct {
-	spec *adk.AgentSpec
+	spec *types.AgentSpec
 
 	callCounter int
 }
 
-func (a *customAgent) Spec() *adk.AgentSpec { return a.spec }
+func (a *customAgent) Spec() *types.AgentSpec { return a.spec }
 
-func (a *customAgent) Run(context.Context, *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
-	return func(yield func(*adk.Event, error) bool) {
+func (a *customAgent) Run(context.Context, *types.InvocationContext) iter.Seq2[*types.Event, error] {
+	return func(yield func(*types.Event, error) bool) {
 		a.callCounter++
 
-		yield(&adk.Event{
-			LLMResponse: &adk.LLMResponse{
+		yield(&types.Event{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromText("hello", genai.RoleModel),
 			},
 		}, nil)

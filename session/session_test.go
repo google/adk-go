@@ -20,7 +20,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 )
 
 func TestInMemorySessionService_Basic(t *testing.T) {
@@ -28,7 +28,7 @@ func TestInMemorySessionService_Basic(t *testing.T) {
 	service := &InMemorySessionService{}
 
 	// Create a session
-	createReq := &adk.SessionCreateRequest{
+	createReq := &types.SessionCreateRequest{
 		AppName:   "test-app",
 		UserID:    "test-user",
 		SessionID: "test-session",
@@ -42,7 +42,7 @@ func TestInMemorySessionService_Basic(t *testing.T) {
 	}
 
 	// Get the session
-	getReq := &adk.SessionGetRequest{
+	getReq := &types.SessionGetRequest{
 		AppName:   "test-app",
 		UserID:    "test-user",
 		SessionID: "test-session",
@@ -62,7 +62,7 @@ func TestInMemorySessionService_Basic(t *testing.T) {
 	}
 
 	// Delete the session
-	deleteReq := &adk.SessionDeleteRequest{
+	deleteReq := &types.SessionDeleteRequest{
 		AppName:   "test-app",
 		UserID:    "test-user",
 		SessionID: "test-session",
@@ -88,7 +88,7 @@ func TestInMemorySessionService_AppendEvent(t *testing.T) {
 	service := &InMemorySessionService{}
 
 	// Create a session
-	createReq := &adk.SessionCreateRequest{
+	createReq := &types.SessionCreateRequest{
 		AppName:   "test-app",
 		UserID:    "test-user",
 		SessionID: "test-session",
@@ -99,7 +99,7 @@ func TestInMemorySessionService_AppendEvent(t *testing.T) {
 	}
 
 	// Append an event
-	event1 := &adk.Event{
+	event1 := &types.Event{
 		ID:           "e-12345",
 		InvocationID: "inv-12345",
 		Author:       "user",
@@ -108,12 +108,12 @@ func TestInMemorySessionService_AppendEvent(t *testing.T) {
 	if err := service.AppendEvent(ctx, sess, event1); err != nil {
 		t.Fatalf("AppendEvent() failed: %v", err)
 	}
-	if diff := cmp.Diff([]*adk.Event{event1}, sess.Events); diff != "" {
+	if diff := cmp.Diff([]*types.Event{event1}, sess.Events); diff != "" {
 		t.Errorf("AppendEvent() did not update the session object's Events (-want +got):\n%s", diff)
 	}
 
 	// Get the session and check events
-	getReq := &adk.SessionGetRequest{
+	getReq := &types.SessionGetRequest{
 		AppName:   "test-app",
 		UserID:    "test-user",
 		SessionID: "test-session",
@@ -122,16 +122,16 @@ func TestInMemorySessionService_AppendEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() failed: %v", err)
 	}
-	if diff := cmp.Diff([]*adk.Event{event1}, gotSess.Events); diff != "" {
+	if diff := cmp.Diff([]*types.Event{event1}, gotSess.Events); diff != "" {
 		t.Errorf("Get() returned events mismatch (-want +got):\n%s", diff)
 	}
 
 	// Append another event
-	event2 := &adk.Event{ID: "e-7890"}
+	event2 := &types.Event{ID: "e-7890"}
 	if err := service.AppendEvent(ctx, sess, event2); err != nil {
 		t.Fatalf("AppendEvent() failed: %v", err)
 	}
-	if diff := cmp.Diff([]*adk.Event{event1, event2}, sess.Events); diff != "" {
+	if diff := cmp.Diff([]*types.Event{event1, event2}, sess.Events); diff != "" {
 		t.Errorf("AppendEvent() did not update the session object's Events (-want +got):\n%s", diff)
 	}
 
@@ -140,7 +140,7 @@ func TestInMemorySessionService_AppendEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() failed: %v", err)
 	}
-	if diff := cmp.Diff(gotSess.Events, []*adk.Event{event1, event2}); diff != "" {
+	if diff := cmp.Diff(gotSess.Events, []*types.Event{event1, event2}); diff != "" {
 		t.Errorf("Get() returned events mismatch (-got +want):\n%s", diff)
 	}
 }
@@ -150,7 +150,7 @@ func TestInMemorySessionService_AppendEvent_nonexistant(t *testing.T) {
 	service := &InMemorySessionService{}
 
 	// Append an event
-	event1 := &adk.Event{
+	event1 := &types.Event{
 		ID:           "e-12345",
 		InvocationID: "inv-12345",
 		Author:       "user",
@@ -158,7 +158,7 @@ func TestInMemorySessionService_AppendEvent_nonexistant(t *testing.T) {
 	}
 
 	// Append to non-existent session
-	sess := &adk.Session{
+	sess := &types.Session{
 		ID:      "non-existent",
 		AppName: "foo",
 		UserID:  "bar",
@@ -169,7 +169,7 @@ func TestInMemorySessionService_AppendEvent_nonexistant(t *testing.T) {
 	if sess.ID != "non-existent" || sess.AppName != "foo" || sess.UserID != "bar" || len(sess.Events) != 0 {
 		t.Errorf("AppendEvent(non-existent session) unexpectedly modified the session object: %v", sess)
 	}
-	got, err := service.List(ctx, &adk.SessionListRequest{AppName: "foo", UserID: "bar"})
+	got, err := service.List(ctx, &types.SessionListRequest{AppName: "foo", UserID: "bar"})
 	if err != nil || len(got) != 0 {
 		t.Fatalf("List() = (%v, %v), want ([], nil)", got, err)
 	}
@@ -180,7 +180,7 @@ func TestInMemorySessionService_List(t *testing.T) {
 	service := &InMemorySessionService{}
 
 	// Setup: create sessions for different users and apps
-	sessionsToCreate := []adk.SessionCreateRequest{
+	sessionsToCreate := []types.SessionCreateRequest{
 		{AppName: "app1", UserID: "user1", SessionID: "s1"},
 		{AppName: "app1", UserID: "user1", SessionID: "s2"},
 		{AppName: "app1", UserID: "user2", SessionID: "s3"},
@@ -233,7 +233,7 @@ func TestInMemorySessionService_List(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			listReq := &adk.SessionListRequest{
+			listReq := &types.SessionListRequest{
 				AppName: tc.appName,
 				UserID:  tc.userID,
 			}

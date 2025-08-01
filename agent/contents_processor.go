@@ -20,13 +20,13 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
 // contentRequestProcessor populates the LLMRequest's Contents based on
 // the InvocationContext that includes the previous events.
-func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+func contentsRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
 	llmAgent := asLLMAgent(parentCtx.Agent)
 	if llmAgent == nil {
@@ -38,7 +38,7 @@ func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationCont
 		// Include current turn context only (no conversation history)
 		fn = buildContentsCurrentTurnContextOnly
 	}
-	var events []*adk.Event
+	var events []*types.Event
 	if parentCtx.Session != nil {
 		events = parentCtx.Session.Events
 	}
@@ -52,11 +52,11 @@ func contentsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationCont
 
 // buildContentsDefault returns the contents for the LLM request by applying
 // filtering, rearrangement, and content processing to the given events.
-func buildContentsDefault(agentName, branch string, events []*adk.Event) ([]*genai.Content, error) {
+func buildContentsDefault(agentName, branch string, events []*types.Event) ([]*genai.Content, error) {
 	branchPrefix := branch + "."
 
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
-	var filtered []*adk.Event
+	var filtered []*types.Event
 	for _, ev := range events {
 		content := content(ev)
 		// Skip events without content or generated neither by user nor
@@ -109,7 +109,7 @@ func buildContentsDefault(agentName, branch string, events []*adk.Event) ([]*gen
 //
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
-func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*adk.Event) ([]*genai.Content, error) {
+func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*types.Event) ([]*genai.Content, error) {
 	// Find the latest event that starts the current turn and process from there
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
@@ -122,7 +122,7 @@ func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*adk
 	return buildContentsDefault(agentName, branch, events)
 }
 
-func isOtherAgentReply(currentAgentName string, ev *adk.Event) bool {
+func isOtherAgentReply(currentAgentName string, ev *types.Event) bool {
 	return ev.Author != currentAgentName && ev.Author != "user"
 }
 
@@ -131,7 +131,7 @@ func isOtherAgentReply(currentAgentName string, ev *adk.Event) bool {
 // This is to provide another aget's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // previous agent's reply, etc.
-func convertForeignEvent(ev *adk.Event) *adk.Event {
+func convertForeignEvent(ev *types.Event) *types.Event {
 	content := content(ev)
 	if content == nil || len(content.Parts) == 0 {
 		return ev
@@ -157,10 +157,10 @@ func convertForeignEvent(ev *adk.Event) *adk.Event {
 		}
 	}
 
-	return &adk.Event{ // made-up event. Don't go through adk.NewEvent.
+	return &types.Event{ // made-up event. Don't go through types.NewEvent.
 		Time:        ev.Time,
 		Author:      "user",
-		LLMResponse: &adk.LLMResponse{Content: converted},
+		LLMResponse: &types.LLMResponse{Content: converted},
 		Branch:      ev.Branch,
 	}
 }
@@ -174,7 +174,7 @@ func stringify(v any) string {
 // request.
 const requestEUCFunctionCallName = "adk_request_credential"
 
-func isAuthEvent(ev *adk.Event) bool {
+func isAuthEvent(ev *types.Event) bool {
 	c := content(ev)
 	for _, p := range c.Parts {
 		if p.FunctionCall != nil && p.FunctionCall.Name == requestEUCFunctionCallName {

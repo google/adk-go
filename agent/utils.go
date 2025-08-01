@@ -18,7 +18,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -54,7 +54,7 @@ func removeClientFunctionCallID(c *genai.Content) {
 
 //
 // Belows are useful utilities that help working with genai.Content
-// included in adk.Event.
+// included in types.Event.
 // TODO: Move them to a separate internal utility package.
 // TODO: Use generics.
 
@@ -110,7 +110,7 @@ func functionDecls(c *genai.GenerateContentConfig) (ret []*genai.FunctionDeclara
 
 // content is a convenience function that returns the genai.Content
 // in the event.
-func content(ev *adk.Event) *genai.Content {
+func content(ev *types.Event) *genai.Content {
 	if ev == nil || ev.LLMResponse == nil {
 		return nil
 	}
@@ -118,8 +118,8 @@ func content(ev *adk.Event) *genai.Content {
 }
 
 // rootAgent returns the root of the agent tree.
-func rootAgent(agent adk.Agent) adk.Agent {
-	findParent := func(agent adk.Agent) adk.Agent {
+func rootAgent(agent types.Agent) types.Agent {
+	findParent := func(agent types.Agent) types.Agent {
 		// this test is because ParentAgent/SubAgents are implemented only in LLMAgent.
 		// TODO: Parent/SubAgents should be part of Agent interface. Then, this is not needed.
 		a := asLLMAgent(agent)
@@ -141,7 +141,7 @@ func rootAgent(agent adk.Agent) adk.Agent {
 	}
 }
 
-func must[T adk.Agent](a T, err error) T {
+func must[T types.Agent](a T, err error) T {
 	if err != nil {
 		panic(err)
 	}

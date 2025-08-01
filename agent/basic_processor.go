@@ -19,13 +19,13 @@ import (
 	"fmt"
 	"reflect"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
 // basicRequestProcessor populates the LLMRequest
 // with the agent's LLM generation configs.
-func basicRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+func basicRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
 	// reference: adk-python src/google/adk/flows/llm_flows/basic.py
 
 	llmAgent := asLLMAgent(parentCtx.Agent)
@@ -47,7 +47,7 @@ func basicRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext
 }
 
 // asLLMAgent returns LLMAgent if agent is LLMAgent. Otherwise, nil.
-func asLLMAgent(agent adk.Agent) *LLMAgent {
+func asLLMAgent(agent types.Agent) *LLMAgent {
 	if agent == nil {
 		return nil
 	}

@@ -19,25 +19,25 @@ import (
 	"fmt"
 	"iter"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
 // AgentOption configures the AgentSpec.
 type AgentOption interface {
-	apply2AgentSpec(adk.Agent) error
+	apply2AgentSpec(types.Agent) error
 }
 
 // LLMAgentOption is an AgentOption that configures an LLMAgent.
 // Passing this option to other types of Agent is an error.
 type LLMAgentOption interface {
 	AgentOption
-	apply2LLMAgent(adk.Agent) error
+	apply2LLMAgent(types.Agent) error
 }
 
-type optionFunc func(*adk.AgentSpec) error
+type optionFunc func(*types.AgentSpec) error
 
-func (o optionFunc) apply2AgentSpec(a adk.Agent) error {
+func (o optionFunc) apply2AgentSpec(a types.Agent) error {
 	s := a.Spec()
 	if s == nil {
 		return fmt.Errorf("agent's spec is not configured")
@@ -46,28 +46,28 @@ func (o optionFunc) apply2AgentSpec(a adk.Agent) error {
 }
 
 func WithDescription(desc string) AgentOption {
-	return optionFunc(func(s *adk.AgentSpec) error {
+	return optionFunc(func(s *types.AgentSpec) error {
 		s.Description = desc
 		return nil
 	})
 }
 
-func WithSubAgents(agents ...adk.Agent) AgentOption {
-	return optionFunc(func(s *adk.AgentSpec) error {
+func WithSubAgents(agents ...types.Agent) AgentOption {
+	return optionFunc(func(s *types.AgentSpec) error {
 		s.SubAgents = agents
 		return nil
 	})
 }
 
-func WithBeforeAgentCallbacks(callbacks ...adk.BeforeAgentCallback) AgentOption {
-	return optionFunc(func(s *adk.AgentSpec) error {
+func WithBeforeAgentCallbacks(callbacks ...types.BeforeAgentCallback) AgentOption {
+	return optionFunc(func(s *types.AgentSpec) error {
 		s.BeforeAgentCallbacks = callbacks
 		return nil
 	})
 }
 
-func WithAfterAgentCallbacks(callbacks ...adk.AfterAgentCallback) AgentOption {
-	return optionFunc(func(s *adk.AgentSpec) error {
+func WithAfterAgentCallbacks(callbacks ...types.AfterAgentCallback) AgentOption {
+	return optionFunc(func(s *types.AgentSpec) error {
 		s.AfterAgentCallbacks = callbacks
 		return nil
 	})
@@ -75,7 +75,7 @@ func WithAfterAgentCallbacks(callbacks ...adk.AfterAgentCallback) AgentOption {
 
 type llmOptionFunc func(*LLMAgent) error
 
-func (o llmOptionFunc) apply2LLMAgent(a adk.Agent) error {
+func (o llmOptionFunc) apply2LLMAgent(a types.Agent) error {
 	llmAgent, ok := a.(*LLMAgent)
 	if !ok {
 		return fmt.Errorf("cannot apply to non-LLMAgent")
@@ -83,7 +83,7 @@ func (o llmOptionFunc) apply2LLMAgent(a adk.Agent) error {
 	return o(llmAgent)
 }
 
-func (o llmOptionFunc) apply2AgentSpec(a adk.Agent) error {
+func (o llmOptionFunc) apply2AgentSpec(a types.Agent) error {
 	if _, ok := a.(*LLMAgent); !ok {
 		return fmt.Errorf("option cannot apply to non-LLMAgent")
 	}
@@ -104,7 +104,7 @@ func WithGlobalInstruction(inst string) LLMAgentOption {
 	})
 }
 
-func WithTools(tools ...adk.Tool) LLMAgentOption {
+func WithTools(tools ...types.Tool) LLMAgentOption {
 	return llmOptionFunc(func(a *LLMAgent) error {
 		a.Tools = tools
 		// TODO: check if tools names don't conflict or include reserved names.
@@ -162,8 +162,8 @@ func WithAfterModelCallbacks(callbacks ...AfterModelCallback) LLMAgentOption {
 }
 
 // NewLLMAgent returns a new LLMAgent configured with the provided options.
-func NewLLMAgent(name string, model adk.Model, opts ...AgentOption) (*LLMAgent, error) {
-	agentSpec := &adk.AgentSpec{Name: name}
+func NewLLMAgent(name string, model types.Model, opts ...AgentOption) (*LLMAgent, error) {
+	agentSpec := &types.AgentSpec{Name: name}
 	a := &LLMAgent{Model: model, agentSpec: agentSpec}
 
 	// apply Options that are not llmOptions to initialize agentSpec.
@@ -193,13 +193,13 @@ func NewLLMAgent(name string, model adk.Model, opts ...AgentOption) (*LLMAgent, 
 
 // LLMAgent is an LLM-based Agent.
 type LLMAgent struct {
-	agentSpec *adk.AgentSpec
+	agentSpec *types.AgentSpec
 
-	Model adk.Model
+	Model types.Model
 
 	Instruction           string
 	GlobalInstruction     string
-	Tools                 []adk.Tool
+	Tools                 []types.Tool
 	GenerateContentConfig *genai.GenerateContentConfig
 
 	// LLM-based agent transfer configs.
@@ -252,11 +252,11 @@ type LLMAgent struct {
 	// AfterToolCallback
 }
 
-type BeforeModelCallback func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error)
+type BeforeModelCallback func(ctx context.Context, callbackCtx *types.CallbackContext, llmRequest *types.LLMRequest) (*types.LLMResponse, error)
 
-type AfterModelCallback func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error)
+type AfterModelCallback func(ctx context.Context, callbackCtx *types.CallbackContext, llmResponse *types.LLMResponse, llmResponseError error) (*types.LLMResponse, error)
 
-func (a *LLMAgent) Spec() *adk.AgentSpec {
+func (a *LLMAgent) Spec() *types.AgentSpec {
 	return a.agentSpec
 }
 
@@ -268,8 +268,8 @@ func (a *LLMAgent) Description() string {
 	return a.agentSpec.Description
 }
 
-func (a *LLMAgent) newInvocationContext(ctx context.Context, p *adk.InvocationContext) (context.Context, *adk.InvocationContext) {
-	ctx, c := adk.NewInvocationContext(ctx, a, nil, nil, nil, nil)
+func (a *LLMAgent) newInvocationContext(ctx context.Context, p *types.InvocationContext) (context.Context, *types.InvocationContext) {
+	ctx, c := types.NewInvocationContext(ctx, a, nil, nil, nil, nil)
 	if p != nil {
 		// copy everything but Agent and internal state.
 		c.InvocationID = p.InvocationID
@@ -282,7 +282,7 @@ func (a *LLMAgent) newInvocationContext(ctx context.Context, p *adk.InvocationCo
 	return ctx, c
 }
 
-func (a *LLMAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
+func (a *LLMAgent) Run(ctx context.Context, parentCtx *types.InvocationContext) iter.Seq2[*types.Event, error] {
 	// TODO: Select model (LlmAgent.canonical_model)
 	ctx, parentCtx = a.newInvocationContext(ctx, parentCtx)
 	flow := &baseFlow{
@@ -299,10 +299,10 @@ func (a *LLMAgent) useAutoFlow() bool {
 	return len(a.Spec().SubAgents) != 0 || !a.DisallowTransferToParent || !a.DisallowTransferToPeers
 }
 
-var _ adk.Agent = (*LLMAgent)(nil)
+var _ types.Agent = (*LLMAgent)(nil)
 
 var (
-	defaultRequestProcessors = []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error{
+	defaultRequestProcessors = []func(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error{
 		basicRequestProcessor,
 		authPreprocesssor,
 		instructionsRequestProcessor,
@@ -316,26 +316,26 @@ var (
 		codeExecutionRequestProcessor,
 		agentTransferRequestProcessor,
 	}
-	defaultResponseProcessors = []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error{
+	defaultResponseProcessors = []func(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest, resp *types.LLMResponse) error{
 		nlPlanningResponseProcessor,
 		codeExecutionResponseProcessor,
 	}
 )
 
 type baseFlow struct {
-	Model adk.Model
+	Model types.Model
 
-	RequestProcessors  []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error
-	ResponseProcessors []func(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error
+	RequestProcessors  []func(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error
+	ResponseProcessors []func(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest, resp *types.LLMResponse) error
 
 	BeforeModelCallbacks []BeforeModelCallback
 	AfterModelCallbacks  []AfterModelCallback
 }
 
-func (f *baseFlow) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
-	return func(yield func(*adk.Event, error) bool) {
+func (f *baseFlow) Run(ctx context.Context, parentCtx *types.InvocationContext) iter.Seq2[*types.Event, error] {
+	return func(yield func(*types.Event, error) bool) {
 		for {
-			var lastEvent *adk.Event
+			var lastEvent *types.Event
 			for ev, err := range f.runOneStep(ctx, parentCtx) {
 				if err != nil {
 					yield(nil, err)
@@ -360,9 +360,9 @@ func (f *baseFlow) Run(ctx context.Context, parentCtx *adk.InvocationContext) it
 	}
 }
 
-func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
-	return func(yield func(*adk.Event, error) bool) {
-		req := &adk.LLMRequest{Model: f.Model}
+func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *types.InvocationContext) iter.Seq2[*types.Event, error] {
+	return func(yield func(*types.Event, error) bool) {
+		req := &types.LLMRequest{Model: f.Model}
 
 		// Preprocess before calling the LLM.
 		if err := f.preprocess(ctx, parentCtx, req); err != nil {
@@ -429,13 +429,13 @@ func (f *baseFlow) runOneStep(ctx context.Context, parentCtx *adk.InvocationCont
 	}
 }
 
-func (f *baseFlow) finalizeModelResponseEvent(parentCtx *adk.InvocationContext, resp *adk.LLMResponse) *adk.Event {
+func (f *baseFlow) finalizeModelResponseEvent(parentCtx *types.InvocationContext, resp *types.LLMResponse) *types.Event {
 	// FunctionCall & FunctionResponse matching algorithm assumes non-empty function call IDs
 	// but function call ID is optional in genai API and some models do not use the field.
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
 	populateClientFunctionCallID(resp.Content)
 
-	ev := adk.NewEvent(parentCtx.InvocationID)
+	ev := types.NewEvent(parentCtx.InvocationID)
 	ev.Author = parentCtx.Agent.Spec().Name
 	ev.Branch = parentCtx.Branch
 	ev.LLMResponse = resp
@@ -445,7 +445,7 @@ func (f *baseFlow) finalizeModelResponseEvent(parentCtx *adk.InvocationContext, 
 	return ev
 }
 
-func (f *baseFlow) preprocess(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+func (f *baseFlow) preprocess(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
 	llmAgent := asLLMAgent(parentCtx.Agent)
 	if llmAgent == nil {
 		return nil
@@ -459,9 +459,9 @@ func (f *baseFlow) preprocess(ctx context.Context, parentCtx *adk.InvocationCont
 	// run processors for tools.
 	// TODO: check need/feasibility of running this concurrently.
 	for _, t := range llmAgent.Tools {
-		toolCtx := &adk.ToolContext{
+		toolCtx := &types.ToolContext{
 			InvocationContext: parentCtx, // TODO: how to prevent mutation on this?
-			EventActions:      &adk.EventActions{},
+			EventActions:      &types.EventActions{},
 		}
 		if err := t.ProcessRequest(ctx, toolCtx, req); err != nil {
 			return err
@@ -470,10 +470,10 @@ func (f *baseFlow) preprocess(ctx context.Context, parentCtx *adk.InvocationCont
 	return nil
 }
 
-func (f *baseFlow) callLLM(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) adk.LLMResponseStream {
-	return func(yield func(*adk.LLMResponse, error) bool) {
+func (f *baseFlow) callLLM(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) types.LLMResponseStream {
+	return func(yield func(*types.LLMResponse, error) bool) {
 		for _, callback := range f.BeforeModelCallbacks {
-			callbackResponse, callbackErr := callback(ctx, &adk.CallbackContext{
+			callbackResponse, callbackErr := callback(ctx, &types.CallbackContext{
 				InvocationContext: parentCtx,
 			}, req)
 
@@ -488,7 +488,7 @@ func (f *baseFlow) callLLM(ctx context.Context, parentCtx *adk.InvocationContext
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 
-		for resp, err := range f.Model.GenerateContent(ctx, req, parentCtx.RunConfig != nil && parentCtx.RunConfig.StreamingMode == adk.StreamingModeSSE) {
+		for resp, err := range f.Model.GenerateContent(ctx, req, parentCtx.RunConfig != nil && parentCtx.RunConfig.StreamingMode == types.StreamingModeSSE) {
 			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, parentCtx, resp, err)
 			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
 			if callbackErr != nil {
@@ -516,9 +516,9 @@ func (f *baseFlow) callLLM(ctx context.Context, parentCtx *adk.InvocationContext
 	}
 }
 
-func (f *baseFlow) runAfterModelCallbacks(ctx context.Context, parentCtx *adk.InvocationContext, llmResp *adk.LLMResponse, llmErr error) (*adk.LLMResponse, error) {
+func (f *baseFlow) runAfterModelCallbacks(ctx context.Context, parentCtx *types.InvocationContext, llmResp *types.LLMResponse, llmErr error) (*types.LLMResponse, error) {
 	for _, callback := range f.AfterModelCallbacks {
-		callbackResponse, callbackErr := callback(ctx, &adk.CallbackContext{
+		callbackResponse, callbackErr := callback(ctx, &types.CallbackContext{
 			InvocationContext: parentCtx,
 		}, llmResp, llmErr)
 
@@ -530,7 +530,7 @@ func (f *baseFlow) runAfterModelCallbacks(ctx context.Context, parentCtx *adk.In
 	return nil, nil
 }
 
-func (f *baseFlow) postprocess(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error {
+func (f *baseFlow) postprocess(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest, resp *types.LLMResponse) error {
 	// apply response processor functions to the response in the configured order.
 	for _, processor := range f.ResponseProcessors {
 		if err := processor(ctx, parentCtx, req, resp); err != nil {
@@ -540,7 +540,7 @@ func (f *baseFlow) postprocess(ctx context.Context, parentCtx *adk.InvocationCon
 	return nil
 }
 
-func (f *baseFlow) agentToRun(parentCtx *adk.InvocationContext, agentName string) adk.Agent {
+func (f *baseFlow) agentToRun(parentCtx *types.InvocationContext, agentName string) types.Agent {
 	// NOTE: in python, BaseLlmFlow._get_gent_to_run searches the entire agent
 	// tree from the root_agent when processing _postprocess_handle_function_calls_async.
 	// I think that is strange. In our version, we check the agents included in transferTarget.
@@ -557,8 +557,8 @@ func (f *baseFlow) agentToRun(parentCtx *adk.InvocationContext, agentName string
 //
 // TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
-func handleFunctionCalls(ctx context.Context, parentCtx *adk.InvocationContext, toolsDict map[string]adk.Tool, resp *adk.LLMResponse) (*adk.Event, error) {
-	var fnResponseEvents []*adk.Event
+func handleFunctionCalls(ctx context.Context, parentCtx *types.InvocationContext, toolsDict map[string]types.Tool, resp *types.LLMResponse) (*types.Event, error) {
+	var fnResponseEvents []*types.Event
 
 	fnCalls := functionCalls(resp.Content)
 	for _, fnCall := range fnCalls {
@@ -566,10 +566,10 @@ func handleFunctionCalls(ctx context.Context, parentCtx *adk.InvocationContext, 
 		if !ok {
 			return nil, fmt.Errorf("unknown tool: %q", fnCall.Name)
 		}
-		toolCtx := &adk.ToolContext{
+		toolCtx := &types.ToolContext{
 			InvocationContext: parentCtx,
 			FunctionCallID:    fnCall.ID,
-			EventActions:      &adk.EventActions{},
+			EventActions:      &types.EventActions{},
 		}
 		// TODO: agent.canonical_before_tool_callbacks
 		result, err := tool.Run(ctx, toolCtx, fnCall.Args)
@@ -582,8 +582,8 @@ func handleFunctionCalls(ctx context.Context, parentCtx *adk.InvocationContext, 
 		}
 		// TODO: agent.canonical_after_tool_callbacks
 		// TODO: handle long-running tool.
-		ev := adk.NewEvent(parentCtx.InvocationID)
-		ev.LLMResponse = &adk.LLMResponse{
+		ev := types.NewEvent(parentCtx.InvocationID)
+		ev.LLMResponse = &types.LLMResponse{
 			Content: &genai.Content{
 				Role: "user",
 				Parts: []*genai.Part{
@@ -605,7 +605,7 @@ func handleFunctionCalls(ctx context.Context, parentCtx *adk.InvocationContext, 
 	return mergeParallelFunctionResponseEvents(fnResponseEvents)
 }
 
-func mergeParallelFunctionResponseEvents(events []*adk.Event) (*adk.Event, error) {
+func mergeParallelFunctionResponseEvents(events []*types.Event) (*types.Event, error) {
 	switch len(events) {
 	case 0:
 		return nil, nil
@@ -613,7 +613,7 @@ func mergeParallelFunctionResponseEvents(events []*adk.Event) (*adk.Event, error
 		return events[0], nil
 	}
 	var parts []*genai.Part
-	var actions *adk.EventActions
+	var actions *types.EventActions
 	for _, ev := range events {
 		if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
 			continue
@@ -623,7 +623,7 @@ func mergeParallelFunctionResponseEvents(events []*adk.Event) (*adk.Event, error
 	}
 	// reuse events[0]
 	ev := events[0]
-	ev.LLMResponse = &adk.LLMResponse{
+	ev.LLMResponse = &types.LLMResponse{
 		Content: &genai.Content{
 			Role:  "user",
 			Parts: parts,
@@ -633,7 +633,7 @@ func mergeParallelFunctionResponseEvents(events []*adk.Event) (*adk.Event, error
 	return ev, nil
 }
 
-func mergeEventActions(base, other *adk.EventActions) *adk.EventActions {
+func mergeEventActions(base, other *types.EventActions) *types.EventActions {
 	// flows/llm_flows/functions.py merge_parallel_function_response_events
 	//
 	// TODO: merge_parallel_function_response_events creates a "last one wins" scenario

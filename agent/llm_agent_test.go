@@ -26,12 +26,12 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -79,7 +79,7 @@ func TestLLMAgent(t *testing.T) {
 				}
 			*/
 			// TODO: set tools, planner.
-			ctx, invCtx := adk.NewInvocationContext(t.Context(), a, nil, nil, nil, nil)
+			ctx, invCtx := types.NewInvocationContext(t.Context(), a, nil, nil, nil, nil)
 			stream := a.Run(ctx, invCtx)
 			texts, err := collectTextParts(stream)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
@@ -106,13 +106,13 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback doesn't modify anything",
 			beforeModelCallbacks: []agent.BeforeModelCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmRequest *types.LLMRequest) (*types.LLMResponse, error) {
 					return nil, nil
 				},
 			},
 			llmResponses: []llmResponse{
 				{
-					resp: &adk.LLMResponse{
+					resp: &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
 					},
 				},
@@ -124,16 +124,16 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns an error",
 			beforeModelCallbacks: []agent.BeforeModelCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmRequest *types.LLMRequest) (*types.LLMResponse, error) {
 					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
 				},
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmRequest *types.LLMRequest) (*types.LLMResponse, error) {
 					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrHijacked)
 				},
 			},
 			llmResponses: []llmResponse{
 				{
-					resp: &adk.LLMResponse{
+					resp: &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
 					},
 				},
@@ -143,20 +143,20 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns new LLMResponse",
 			beforeModelCallbacks: []agent.BeforeModelCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
-					return &adk.LLMResponse{
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmRequest *types.LLMRequest) (*types.LLMResponse, error) {
+					return &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
 					}, nil
 				},
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
-					return &adk.LLMResponse{
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmRequest *types.LLMRequest) (*types.LLMResponse, error) {
+					return &types.LLMResponse{
 						Content: genai.NewContentFromText("unexpected text", genai.RoleModel),
 					}, nil
 				},
 			},
 			llmResponses: []llmResponse{
 				{
-					resp: &adk.LLMResponse{
+					resp: &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
 					},
 				},
@@ -168,15 +168,15 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns both new LLMResponse and error",
 			beforeModelCallbacks: []agent.BeforeModelCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmRequest *adk.LLMRequest) (*adk.LLMResponse, error) {
-					return &adk.LLMResponse{
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmRequest *types.LLMRequest) (*types.LLMResponse, error) {
+					return &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
 					}, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
 				},
 			},
 			llmResponses: []llmResponse{
 				{
-					resp: &adk.LLMResponse{
+					resp: &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
 					},
 				},
@@ -186,13 +186,13 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback doesn't modify anything",
 			afterModelCallbacks: []agent.AfterModelCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmResponse *types.LLMResponse, llmResponseError error) (*types.LLMResponse, error) {
 					return nil, nil
 				},
 			},
 			llmResponses: []llmResponse{
 				{
-					resp: &adk.LLMResponse{
+					resp: &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
 					},
 				},
@@ -204,20 +204,20 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns new LLMResponse",
 			afterModelCallbacks: []agent.AfterModelCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
-					return &adk.LLMResponse{
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmResponse *types.LLMResponse, llmResponseError error) (*types.LLMResponse, error) {
+					return &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
 					}, nil
 				},
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
-					return &adk.LLMResponse{
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmResponse *types.LLMResponse, llmResponseError error) (*types.LLMResponse, error) {
+					return &types.LLMResponse{
 						Content: genai.NewContentFromText("unexpected text", genai.RoleModel),
 					}, nil
 				},
 			},
 			llmResponses: []llmResponse{
 				{
-					resp: &adk.LLMResponse{
+					resp: &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
 					},
 				},
@@ -229,16 +229,16 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns error",
 			afterModelCallbacks: []agent.AfterModelCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmResponse *types.LLMResponse, llmResponseError error) (*types.LLMResponse, error) {
 					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrNoCookie)
 				},
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmResponse *types.LLMResponse, llmResponseError error) (*types.LLMResponse, error) {
 					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrHijacked)
 				},
 			},
 			llmResponses: []llmResponse{
 				{
-					resp: &adk.LLMResponse{
+					resp: &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
 					},
 				},
@@ -248,15 +248,15 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns both new LLMResponse and error",
 			afterModelCallbacks: []agent.AfterModelCallback{
-				func(ctx context.Context, callbackCtx *adk.CallbackContext, llmResponse *adk.LLMResponse, llmResponseError error) (*adk.LLMResponse, error) {
-					return &adk.LLMResponse{
+				func(ctx context.Context, callbackCtx *types.CallbackContext, llmResponse *types.LLMResponse, llmResponseError error) (*types.LLMResponse, error) {
+					return &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
 					}, fmt.Errorf("error from after_model_callback: %w", http.ErrNoCookie)
 				},
 			},
 			llmResponses: []llmResponse{
 				{
-					resp: &adk.LLMResponse{
+					resp: &types.LLMResponse{
 						Content: genai.NewContentFromText("hello from model", genai.RoleModel),
 					},
 				},
@@ -275,7 +275,7 @@ func TestModelCallbacks(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewLLMAgent failed: %v", err)
 			}
-			ctx, invCtx := adk.NewInvocationContext(t.Context(), a, nil, nil, nil, nil)
+			ctx, invCtx := types.NewInvocationContext(t.Context(), a, nil, nil, nil, nil)
 			stream := a.Run(ctx, invCtx)
 			texts, err := collectTextParts(stream)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
@@ -319,7 +319,7 @@ func TestFunctionTool(t *testing.T) {
 		t.Fatalf("NewLLMAgent failed: %v", err)
 	}
 	agent.Instruction = "output ONLY the result computed by the provided function"
-	agent.Tools = []adk.Tool{rand}
+	agent.Tools = []types.Tool{rand}
 	// TODO(hakim): set to false when autoflow is implemented.
 	agent.DisallowTransferToParent = true
 	agent.DisallowTransferToPeers = true
@@ -355,12 +355,12 @@ func TestAgentTransfer(t *testing.T) {
 		)
 	}
 	// returns a model that returns the prepopulated resp one by one.
-	testModel := func(resp ...*genai.Content) adk.Model {
+	testModel := func(resp ...*genai.Content) types.Model {
 		return &mockModel{responses: resp}
 	}
 	// creates an LLM model with the name and the model.
-	llmAgentFn := func(t *testing.T) func(name string, model adk.Model, opts ...agent.AgentOption) *agent.LLMAgent {
-		return func(name string, model adk.Model, opts ...agent.AgentOption) *agent.LLMAgent {
+	llmAgentFn := func(t *testing.T) func(name string, model types.Model, opts ...agent.AgentOption) *agent.LLMAgent {
+		return func(name string, model types.Model, opts ...agent.AgentOption) *agent.LLMAgent {
 			a, err := agent.NewLLMAgent(name, model, opts...)
 			if err != nil {
 				t.Fatalf("NewLLMAgent failed: %v", err)
@@ -374,7 +374,7 @@ func TestAgentTransfer(t *testing.T) {
 		Parts  []*genai.Part
 	}
 	// contents returns (Author, Parts) stream extracted from the event stream.
-	contents := func(stream iter.Seq2[*adk.Event, error]) ([]content, error) {
+	contents := func(stream iter.Seq2[*types.Event, error]) ([]content, error) {
 		var ret []content
 		for ev, err := range stream {
 			if err != nil {
@@ -396,7 +396,7 @@ func TestAgentTransfer(t *testing.T) {
 		return ret, nil
 	}
 
-	check := func(t *testing.T, rootAgent adk.Agent, wants [][]content) {
+	check := func(t *testing.T, rootAgent types.Agent, wants [][]content) {
 		runner := newTestAgentRunner(t, rootAgent)
 		for i := range len(wants) {
 			got, err := contents(runner.Run(t, "session_id", fmt.Sprintf("round %d", i)))
@@ -503,15 +503,15 @@ func TestAgentTransfer(t *testing.T) {
 // TODO(hakim): move testAgentRunner to an internal test utility package.
 // See adk-python's tests/unittests/testing_utils.py.
 type testAgentRunner struct {
-	agent          adk.Agent
-	sessionService adk.SessionService
-	lastSession    *adk.Session
+	agent          types.Agent
+	sessionService types.SessionService
+	lastSession    *types.Session
 }
 
-func (r *testAgentRunner) session(t *testing.T, sessionID string) (*adk.Session, error) {
+func (r *testAgentRunner) session(t *testing.T, sessionID string) (*types.Session, error) {
 	ctx := t.Context()
 	if last := r.lastSession; last != nil && last.ID == sessionID {
-		session, err := r.sessionService.Get(ctx, &adk.SessionGetRequest{
+		session, err := r.sessionService.Get(ctx, &types.SessionGetRequest{
 			AppName:   "test_app",
 			UserID:    "test_user",
 			SessionID: sessionID,
@@ -519,7 +519,7 @@ func (r *testAgentRunner) session(t *testing.T, sessionID string) (*adk.Session,
 		r.lastSession = session
 		return session, err
 	}
-	session, err := r.sessionService.Create(ctx, &adk.SessionCreateRequest{
+	session, err := r.sessionService.Create(ctx, &types.SessionCreateRequest{
 		AppName:   "test_app",
 		UserID:    "test_user",
 		SessionID: sessionID,
@@ -528,7 +528,7 @@ func (r *testAgentRunner) session(t *testing.T, sessionID string) (*adk.Session,
 	return session, err
 }
 
-func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.Seq2[*adk.Event, error] {
+func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.Seq2[*types.Event, error] {
 	t.Helper()
 	ctx := t.Context()
 	session, err := r.session(t, sessionID)
@@ -537,15 +537,15 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 	}
 
 	// TODO: replace this with the real runner.
-	return func(yield func(*adk.Event, error) bool) {
-		ctx, inv := adk.NewInvocationContext(ctx, r.agent, nil, nil, nil, nil)
+	return func(yield func(*types.Event, error) bool) {
+		ctx, inv := types.NewInvocationContext(ctx, r.agent, nil, nil, nil, nil)
 		inv.SessionService = r.sessionService
 		inv.Session = session
 		defer inv.End(nil)
 
-		userMessageEvent := adk.NewEvent(inv.InvocationID)
+		userMessageEvent := types.NewEvent(inv.InvocationID)
 		userMessageEvent.Author = "user"
-		userMessageEvent.LLMResponse = &adk.LLMResponse{
+		userMessageEvent.LLMResponse = &types.LLMResponse{
 			Content: genai.NewContentFromText(newMessage, "user"),
 		}
 		r.sessionService.AppendEvent(ctx, session, userMessageEvent)
@@ -565,7 +565,7 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 	}
 }
 
-func (r *testAgentRunner) findAgentToRun(s *adk.Session, rootAgent adk.Agent) adk.Agent {
+func (r *testAgentRunner) findAgentToRun(s *types.Session, rootAgent types.Agent) types.Agent {
 	// runner.py Runner's _find_agent_to_run.
 
 	// TODO: findMatchingFunctionCall.
@@ -592,7 +592,7 @@ func (r *testAgentRunner) findAgentToRun(s *adk.Session, rootAgent adk.Agent) ad
 // to run can transfer to any other agent in the agent tree.
 // This typicall means all agentToRun's parents through root agent
 // can transfer to their parent agents.
-func (r *testAgentRunner) isTransferableAcrossAgentTree(agentToRun adk.Agent) bool {
+func (r *testAgentRunner) isTransferableAcrossAgentTree(agentToRun types.Agent) bool {
 	for {
 		if agentToRun == nil {
 			return true
@@ -608,14 +608,14 @@ func (r *testAgentRunner) isTransferableAcrossAgentTree(agentToRun adk.Agent) bo
 	}
 }
 
-func findAgent(agent adk.Agent, name string) adk.Agent {
+func findAgent(agent types.Agent, name string) types.Agent {
 	if agent.Spec().Name == name {
 		return agent
 	}
 	return findSubAgent(agent, name)
 }
 
-func findSubAgent(a adk.Agent, name string) adk.Agent {
+func findSubAgent(a types.Agent, name string) types.Agent {
 	llmAgent, ok := a.(*agent.LLMAgent)
 	if !ok {
 		return nil
@@ -631,11 +631,11 @@ type mockModel struct {
 	responses []*genai.Content
 }
 
-// GenerateContent implements adk.Model.
-func (m *mockModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, stream bool) adk.LLMResponseStream {
-	return func(yield func(*adk.LLMResponse, error) bool) {
+// GenerateContent implements types.Model.
+func (m *mockModel) GenerateContent(ctx context.Context, req *types.LLMRequest, stream bool) types.LLMResponseStream {
+	return func(yield func(*types.LLMResponse, error) bool) {
 		if len(m.responses) > 0 {
-			resp := &adk.LLMResponse{Content: m.responses[0]}
+			resp := &types.LLMResponse{Content: m.responses[0]}
 			m.responses = m.responses[1:]
 			yield(resp, nil)
 			return
@@ -644,14 +644,14 @@ func (m *mockModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, st
 	}
 }
 
-// Name implements adk.Model.
+// Name implements types.Model.
 func (m *mockModel) Name() string {
 	return "mock"
 }
 
-var _ adk.Model = (*mockModel)(nil)
+var _ types.Model = (*mockModel)(nil)
 
-func newTestAgentRunner(_ *testing.T, agent adk.Agent) *testAgentRunner {
+func newTestAgentRunner(_ *testing.T, agent types.Agent) *testAgentRunner {
 	return &testAgentRunner{
 		agent:          agent,
 		sessionService: &session.InMemorySessionService{},
@@ -680,7 +680,7 @@ func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper)
 
 // collectTextParts collects all text parts from the llm response until encountering an error.
 // It returns all collected text parts and the last error.
-func collectTextParts(stream iter.Seq2[*adk.Event, error]) ([]string, error) {
+func collectTextParts(stream iter.Seq2[*types.Event, error]) ([]string, error) {
 	var texts []string
 	for ev, err := range stream {
 		if err != nil {
@@ -716,7 +716,7 @@ func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 type llmResponse struct {
-	resp *adk.LLMResponse
+	resp *types.LLMResponse
 	err  error
 }
 
@@ -726,8 +726,8 @@ type fakeModel struct {
 
 func (m *fakeModel) Name() string { return "fakeModel" }
 
-func (m *fakeModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, stream bool) adk.LLMResponseStream {
-	return func(yield func(*adk.LLMResponse, error) bool) {
+func (m *fakeModel) GenerateContent(ctx context.Context, req *types.LLMRequest, stream bool) types.LLMResponseStream {
+	return func(yield func(*types.LLMResponse, error) bool) {
 		for _, r := range m.records {
 			if !yield(r.resp, r.err) {
 				return

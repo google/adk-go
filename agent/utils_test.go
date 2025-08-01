@@ -17,12 +17,12 @@ package agent
 import (
 	"testing"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 )
 
 func TestRootAgent(t *testing.T) {
 	model := struct {
-		adk.Model
+		types.Model
 	}{}
 
 	nonLLM := newMockAgent("mock")
@@ -30,7 +30,7 @@ func TestRootAgent(t *testing.T) {
 	a := must(NewLLMAgent("a", model, WithSubAgents(b)))
 	root := must(NewLLMAgent("root", model, WithSubAgents(a)))
 
-	agentName := func(a adk.Agent) string {
+	agentName := func(a types.Agent) string {
 		if a == nil {
 			return "nil"
 		}
@@ -38,8 +38,8 @@ func TestRootAgent(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		agent adk.Agent
-		want  adk.Agent
+		agent types.Agent
+		want  types.Agent
 	}{
 		{root, root},
 		{a, root},

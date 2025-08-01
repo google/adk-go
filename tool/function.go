@@ -19,9 +19,9 @@ import (
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonschema"
-	"google.golang.org/adk"
 	"google.golang.org/adk/internal/itype"
 	"google.golang.org/adk/internal/typeutil"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -89,21 +89,21 @@ type FunctionTool[TArgs, TResults any] struct {
 	handler Function[TArgs, TResults]
 }
 
-var _ adk.Tool = (*FunctionTool[any, any])(nil)
+var _ types.Tool = (*FunctionTool[any, any])(nil)
 var _ itype.FunctionTool = (*FunctionTool[any, any])(nil)
 
-// Description implements adk.Tool.
+// Description implements types.Tool.
 func (f *FunctionTool[TArgs, TResults]) Description() string {
 	return f.cfg.Description
 }
 
-// Name implements adk.Tool.
+// Name implements types.Tool.
 func (f *FunctionTool[TArgs, TResults]) Name() string {
 	return f.cfg.Name
 }
 
-// ProcessRequest implements adk.Tool.
-func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx context.Context, tc *adk.ToolContext, req *adk.LLMRequest) error {
+// ProcessRequest implements types.Tool.
+func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx context.Context, tc *types.ToolContext, req *types.LLMRequest) error {
 	return req.AppendTools(f)
 }
 
@@ -123,7 +123,7 @@ func (f *FunctionTool[TArgs, TResults]) FunctionDeclaration() *genai.FunctionDec
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *FunctionTool[TArgs, TResults]) Run(ctx context.Context, tc *adk.ToolContext, args map[string]any) (map[string]any, error) {
+func (f *FunctionTool[TArgs, TResults]) Run(ctx context.Context, tc *types.ToolContext, args map[string]any) (map[string]any, error) {
 	// TODO: Handle function call request from tc.InvocationContext.
 	// TODO: Handle panic -> convert to error.
 	input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](args, f.inputSchema)
@@ -145,7 +145,7 @@ func (f *FunctionTool[TArgs, TResults]) Run(ctx context.Context, tc *adk.ToolCon
 //    function can return an error, that needs to be included in the output
 //    json schema. And for function that never returns an error, I think it
 //    gets less uglier.
-//  * MCP ToolHandler expects mcp.ServerSession. adk.ToolContext may be close
+//  * MCP ToolHandler expects mcp.ServerSession. types.ToolContext may be close
 //    to it, but we don't need to expose this to user function
 //    (similar to ADK Python FunctionTool [2])
 // References

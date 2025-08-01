@@ -21,12 +21,12 @@ import (
 	"slices"
 	"sync"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 	"rsc.io/omap"
 	"rsc.io/ordered"
 )
 
-// InMemorySessionService is an in-memory implementation of adk.SessionService.
+// InMemorySessionService is an in-memory implementation of types.SessionService.
 // It is primarily for testing and demonstration purposes.
 type InMemorySessionService struct {
 	mu sync.RWMutex
@@ -50,16 +50,16 @@ func (sk *sessionKey) Decode(key string) error {
 
 type session struct {
 	mu     sync.Mutex
-	events []*adk.Event
+	events []*types.Event
 }
 
-func (s *session) AppendEvent(ctx context.Context, event *adk.Event) {
+func (s *session) AppendEvent(ctx context.Context, event *types.Event) {
 	s.mu.Lock()
 	s.events = append(s.events, event)
 	s.mu.Unlock()
 }
 
-func (s *session) Events() []*adk.Event {
+func (s *session) Events() []*types.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.events)
@@ -107,8 +107,8 @@ func (s *InMemorySessionService) get(appName, userID, sessionID string) (*sessio
 	return s.sessions.Get(key)
 }
 
-// AppendEvent implements adk.SessionService.
-func (s *InMemorySessionService) AppendEvent(ctx context.Context, session *adk.Session, event *adk.Event) error {
+// AppendEvent implements types.SessionService.
+func (s *InMemorySessionService) AppendEvent(ctx context.Context, session *types.Session, event *types.Event) error {
 	// TODO: no-op if event is partial.
 	// TODO: process event actions and state delta.
 	sess, ok := s.get(session.AppName, session.UserID, session.ID)
@@ -120,8 +120,8 @@ func (s *InMemorySessionService) AppendEvent(ctx context.Context, session *adk.S
 	return nil
 }
 
-// Create implements adk.SessionService.
-func (s *InMemorySessionService) Create(ctx context.Context, req *adk.SessionCreateRequest) (*adk.Session, error) {
+// Create implements types.SessionService.
+func (s *InMemorySessionService) Create(ctx context.Context, req *types.SessionCreateRequest) (*types.Session, error) {
 	// TODO: handle req.State.
 
 	key := sessionKey{
@@ -137,7 +137,7 @@ func (s *InMemorySessionService) Create(ctx context.Context, req *adk.SessionCre
 	}
 	s.sessions.Set(key, &session{})
 
-	return &adk.Session{
+	return &types.Session{
 		ID:      req.SessionID,
 		AppName: req.AppName,
 		UserID:  req.UserID,
@@ -145,8 +145,8 @@ func (s *InMemorySessionService) Create(ctx context.Context, req *adk.SessionCre
 	}, nil
 }
 
-// Delete implements adk.SessionService.
-func (s *InMemorySessionService) Delete(ctx context.Context, req *adk.SessionDeleteRequest) error {
+// Delete implements types.SessionService.
+func (s *InMemorySessionService) Delete(ctx context.Context, req *types.SessionDeleteRequest) error {
 	// TODO: should we return err if session doesn't exist? This may be difficult or expensive
 	// for certain implementations.
 	key := sessionKey{
@@ -164,13 +164,13 @@ func (s *InMemorySessionService) Delete(ctx context.Context, req *adk.SessionDel
 	return nil
 }
 
-// Get implements adk.SessionService.
-func (s *InMemorySessionService) Get(ctx context.Context, req *adk.SessionGetRequest) (*adk.Session, error) {
+// Get implements types.SessionService.
+func (s *InMemorySessionService) Get(ctx context.Context, req *types.SessionGetRequest) (*types.Session, error) {
 	sess, ok := s.get(req.AppName, req.UserID, req.SessionID)
 	if !ok {
 		return nil, fmt.Errorf("session %v/%v/%v not found", req.AppName, req.UserID, req.SessionID)
 	}
-	return &adk.Session{
+	return &types.Session{
 		AppName: req.AppName,
 		UserID:  req.UserID,
 		ID:      req.SessionID,
@@ -178,17 +178,17 @@ func (s *InMemorySessionService) Get(ctx context.Context, req *adk.SessionGetReq
 	}, nil
 }
 
-// List implements adk.SessionService.
-func (s *InMemorySessionService) List(ctx context.Context, req *adk.SessionListRequest) ([]*adk.Session, error) {
+// List implements types.SessionService.
+func (s *InMemorySessionService) List(ctx context.Context, req *types.SessionListRequest) ([]*types.Session, error) {
 	lo := sessionKey{AppName: req.AppName, UserID: req.UserID}.Encode()
 	hi := sessionKey{AppName: req.AppName, UserID: req.UserID + "\x00"}.Encode()
 
-	var ret []*adk.Session
+	var ret []*types.Session
 	for key, sess := range s.scan(lo, hi) {
 		if key.AppName != req.AppName && key.UserID != req.UserID {
 			break
 		}
-		ret = append(ret, &adk.Session{
+		ret = append(ret, &types.Session{
 			AppName: key.AppName,
 			UserID:  key.UserID,
 			ID:      key.ID,
@@ -198,4 +198,4 @@ func (s *InMemorySessionService) List(ctx context.Context, req *adk.SessionListR
 	return ret, nil
 }
 
-var _ adk.SessionService = (*InMemorySessionService)(nil)
+var _ types.SessionService = (*InMemorySessionService)(nil)

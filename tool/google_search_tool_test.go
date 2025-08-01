@@ -19,9 +19,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -104,7 +104,7 @@ func TestGoogleSearchTool_ProcessRequest(t *testing.T) {
 			if err != nil {
 				t.Fatalf("model.NewGeminiModel(%q) failed: %v", modelName, err)
 			}
-			req := &adk.LLMRequest{
+			req := &types.LLMRequest{
 				Model: m,
 			}
 
@@ -114,7 +114,7 @@ func TestGoogleSearchTool_ProcessRequest(t *testing.T) {
 				}
 			}
 
-			if err := gsTool.ProcessRequest(t.Context(), &adk.ToolContext{}, req); err != nil {
+			if err := gsTool.ProcessRequest(t.Context(), &types.ToolContext{}, req); err != nil {
 				if tc.wantErr != "" {
 					if !strings.Contains(err.Error(), tc.wantErr) {
 						t.Fatalf("ProcessRequest error: got %v, want %v", err, tc.wantErr)
@@ -142,7 +142,7 @@ func TestGoogleSearchTool_Run(t *testing.T) {
 	ctx := t.Context()
 	gsTool := tool.NewGoogleSearchTool()
 
-	_, err := gsTool.Run(ctx, &adk.ToolContext{}, nil)
+	_, err := gsTool.Run(ctx, &types.ToolContext{}, nil)
 
 	if err == nil {
 		t.Fatal("Run expected error, but got nil")

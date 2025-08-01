@@ -21,13 +21,13 @@ import (
 	"log"
 	"strings"
 
-	"google.golang.org/adk"
 	"google.golang.org/adk/agent"
 	internalRunner "google.golang.org/adk/internal/runner"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
-func NewRunner(appName string, rootAgent adk.Agent, sessionService adk.SessionService) *Runner {
+func NewRunner(appName string, rootAgent types.Agent, sessionService types.SessionService) *Runner {
 	return &Runner{
 		AppName:        appName,
 		RootAgent:      rootAgent,
@@ -37,17 +37,17 @@ func NewRunner(appName string, rootAgent adk.Agent, sessionService adk.SessionSe
 
 type Runner struct {
 	AppName        string
-	RootAgent      adk.Agent
-	SessionService adk.SessionService
+	RootAgent      types.Agent
+	SessionService types.SessionService
 }
 
 // Run runs the agent.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *adk.AgentRunConfig) iter.Seq2[*adk.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *types.AgentRunConfig) iter.Seq2[*types.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
-	return func(yield func(*adk.Event, error) bool) {
-		session, err := r.SessionService.Get(ctx, &adk.SessionGetRequest{
+	return func(yield func(*types.Event, error) bool) {
+		session, err := r.SessionService.Get(ctx, &types.SessionGetRequest{
 			AppName:   r.AppName,
 			UserID:    userID,
 			SessionID: sessionID,
@@ -82,18 +82,18 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	}
 }
 
-func (r *Runner) newInvocationContext(ctx context.Context, session *adk.Session, agent adk.Agent, runConfig *adk.AgentRunConfig, msg *genai.Content) (context.Context, *adk.InvocationContext, error) {
+func (r *Runner) newInvocationContext(ctx context.Context, session *types.Session, agent types.Agent, runConfig *types.AgentRunConfig, msg *genai.Content) (context.Context, *types.InvocationContext, error) {
 	if runConfig != nil && runConfig.SupportCFC {
 		if err := r.setupCFC(agent); err != nil {
 			return nil, nil, fmt.Errorf("failed to setup CFC: %w", err)
 		}
 	}
 
-	ctx, ictx := adk.NewInvocationContext(ctx, agent, r.SessionService, session, runConfig, msg)
+	ctx, ictx := types.NewInvocationContext(ctx, agent, r.SessionService, session, runConfig, msg)
 	return ctx, ictx, nil
 }
 
-func (r *Runner) setupCFC(curAgent adk.Agent) error {
+func (r *Runner) setupCFC(curAgent types.Agent) error {
 	llmAgent, ok := curAgent.(*agent.LLMAgent)
 	if !ok {
 		return fmt.Errorf("cannot setup cfc for non-LLMAgent")
@@ -111,11 +111,11 @@ func (r *Runner) setupCFC(curAgent adk.Agent) error {
 	return nil
 }
 
-func (r *Runner) appendMessageToSession(ctx context.Context, ictx *adk.InvocationContext, session *adk.Session, msg *genai.Content) error {
-	event := adk.NewEvent(ictx.InvocationID)
+func (r *Runner) appendMessageToSession(ctx context.Context, ictx *types.InvocationContext, session *types.Session, msg *genai.Content) error {
+	event := types.NewEvent(ictx.InvocationID)
 
 	event.Author = "user"
-	event.LLMResponse = &adk.LLMResponse{
+	event.LLMResponse = &types.LLMResponse{
 		Content: msg,
 	}
 
@@ -127,7 +127,7 @@ func (r *Runner) appendMessageToSession(ctx context.Context, ictx *adk.Invocatio
 
 // findAgentToRun returns the agent that should handle the next request based on
 // session history.
-func (r *Runner) findAgentToRun(session *adk.Session) (adk.Agent, error) {
+func (r *Runner) findAgentToRun(session *types.Session) (types.Agent, error) {
 	for i := len(session.Events) - 1; i >= 0; i-- {
 		event := session.Events[i]
 
@@ -152,7 +152,7 @@ func (r *Runner) findAgentToRun(session *adk.Session) (adk.Agent, error) {
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.
-func isTransferrableAcrossAgentTree(agentToRun adk.Agent) bool {
+func isTransferrableAcrossAgentTree(agentToRun types.Agent) bool {
 	for curAgent := agentToRun; curAgent != nil; curAgent = curAgent.Spec().Parent() {
 		// TODO: properly verify if agent is or embeds LLMAgent
 		llmAgent, ok := agentToRun.(*agent.LLMAgent)
@@ -168,7 +168,7 @@ func isTransferrableAcrossAgentTree(agentToRun adk.Agent) bool {
 	return true
 }
 
-func findAgent(curAgent adk.Agent, targetName string) adk.Agent {
+func findAgent(curAgent types.Agent, targetName string) types.Agent {
 	if curAgent == nil || curAgent.Spec() == nil || curAgent.Spec().Name == targetName {
 		return curAgent
 	}

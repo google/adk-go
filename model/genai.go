@@ -18,11 +18,11 @@ import (
 	"context"
 	"fmt"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
-var _ adk.Model = (*GeminiModel)(nil)
+var _ types.Model = (*GeminiModel)(nil)
 
 type GeminiModel struct {
 	client *genai.Client
@@ -41,15 +41,15 @@ func (m *GeminiModel) Name() string {
 	return m.name
 }
 
-func (m *GeminiModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, stream bool) adk.LLMResponseStream {
+func (m *GeminiModel) GenerateContent(ctx context.Context, req *types.LLMRequest, stream bool) types.LLMResponseStream {
 	if m.client == nil {
-		return func(yield func(*adk.LLMResponse, error) bool) {
+		return func(yield func(*types.LLMResponse, error) bool) {
 			yield(nil, fmt.Errorf("model uninitialized"))
 		}
 	}
 	m.maybeAppendUserContent(ctx, req)
 	if stream {
-		return func(yield func(*adk.LLMResponse, error) bool) {
+		return func(yield func(*types.LLMResponse, error) bool) {
 			for resp, err := range m.client.Models.GenerateContentStream(ctx, m.name, req.Contents, req.GenerateConfig) {
 				if err != nil {
 					yield(nil, err)
@@ -62,7 +62,7 @@ func (m *GeminiModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, 
 				}
 				candidate := resp.Candidates[0]
 				complete := candidate.FinishReason != ""
-				if !yield(&adk.LLMResponse{
+				if !yield(&types.LLMResponse{
 					Content:           candidate.Content,
 					GroundingMetadata: candidate.GroundingMetadata,
 					Partial:           !complete,
@@ -74,7 +74,7 @@ func (m *GeminiModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, 
 			}
 		}
 	} else {
-		return func(yield func(*adk.LLMResponse, error) bool) {
+		return func(yield func(*types.LLMResponse, error) bool) {
 			resp, err := m.client.Models.GenerateContent(ctx, m.name, req.Contents, req.GenerateConfig)
 			if err != nil {
 				yield(nil, err)
@@ -86,7 +86,7 @@ func (m *GeminiModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, 
 				return
 			}
 			candidate := resp.Candidates[0]
-			if !yield(&adk.LLMResponse{
+			if !yield(&types.LLMResponse{
 				Content:           candidate.Content,
 				GroundingMetadata: candidate.GroundingMetadata,
 			}, nil) {
@@ -99,7 +99,7 @@ func (m *GeminiModel) GenerateContent(ctx context.Context, req *adk.LLMRequest, 
 }
 
 // maybeAppendUserContent appends a user content, so that model can continue to output.
-func (m *GeminiModel) maybeAppendUserContent(ctx context.Context, req *adk.LLMRequest) {
+func (m *GeminiModel) maybeAppendUserContent(ctx context.Context, req *types.LLMRequest) {
 	if len(req.Contents) == 0 {
 		req.Contents = append(req.Contents, genai.NewContentFromText("Handle the requests as specified in the System Instruction.", "user"))
 	}

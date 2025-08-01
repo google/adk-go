@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package adk
+package types
 
 import (
 	"context"
@@ -159,13 +159,13 @@ type AgentRunConfig struct {
 // [Agent.Spec] must return its AgentSpec, that is bound to it.
 /*
 	type MyAgent struct {
-		agentSpec *adk.AgentSpec
+		agentSpec *types.AgentSpec
 		...
 	}
-	var _ adk.Agent = (*MyAgent)(nil)
+	var _ types.Agent = (*MyAgent)(nil)
 
 	func NewMyAgent(name string) *MyAgent {
-		spec := &adk.AgentSpec{Name: name}
+		spec := &types.AgentSpec{Name: name}
 		a := &MyAgent{agentSpec: spec}
 		_ = spec.Init(a) // spec must be initialized before the agent is used.
 		return a

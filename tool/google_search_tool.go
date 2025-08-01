@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -30,7 +30,7 @@ type GoogleSearchTool struct {
 }
 
 // Assert that GoogleSearchTool implements adk.Tool
-var _ adk.Tool = (*GoogleSearchTool)(nil)
+var _ types.Tool = (*GoogleSearchTool)(nil)
 
 // NewGoogleSearchTool creates a new GoogleSearchTool.
 func NewGoogleSearchTool() *GoogleSearchTool {
@@ -51,7 +51,7 @@ func (t *GoogleSearchTool) Description() string {
 }
 
 // ProcessRequest modifies the LLM request to include the google search tool configuration.
-func (t *GoogleSearchTool) ProcessRequest(ctx context.Context, tc *adk.ToolContext, req *adk.LLMRequest) error {
+func (t *GoogleSearchTool) ProcessRequest(ctx context.Context, tc *types.ToolContext, req *types.LLMRequest) error {
 	if req == nil {
 		return fmt.Errorf("llm request is nil")
 	}
@@ -82,6 +82,6 @@ func (t *GoogleSearchTool) ProcessRequest(ctx context.Context, tc *adk.ToolConte
 }
 
 // Run is not implemented for this tool, as it's an internal model tool.
-func (t *GoogleSearchTool) Run(ctx context.Context, tc *adk.ToolContext, args map[string]any) (map[string]any, error) {
+func (t *GoogleSearchTool) Run(ctx context.Context, tc *types.ToolContext, args map[string]any) (map[string]any, error) {
 	return nil, fmt.Errorf("google search tool runs internally on the model, it can not be run directly")
 }

@@ -25,11 +25,11 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/modelcontextprotocol/go-sdk/jsonschema"
-	"google.golang.org/adk"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -133,8 +133,8 @@ func TestFunctionTool_Simple(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// TODO: replace with testing using LLMAgent, instead of directly calling the model.
-			var req adk.LLMRequest
-			if err := weatherReportTool.ProcessRequest(ctx, &adk.ToolContext{}, &req); err != nil {
+			var req types.LLMRequest
+			if err := weatherReportTool.ProcessRequest(ctx, &types.ToolContext{}, &req); err != nil {
 				t.Fatalf("weatherReportTool.ProcessRequest failed: %v", err)
 			}
 			if req.GenerateConfig == nil || len(req.GenerateConfig.Tools) != 1 {
@@ -149,7 +149,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 				t.Fatalf("unexpected function call %v", resp)
 			}
 			// Call the function.
-			callResult, err := weatherReportTool.Run(ctx, &adk.ToolContext{}, resp.Args)
+			callResult, err := weatherReportTool.Run(ctx, &types.ToolContext{}, resp.Args)
 			if err != nil {
 				t.Fatalf("weatherReportTool.Run failed: %v", err)
 			}
@@ -182,9 +182,9 @@ func newGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig 
 	}
 }
 
-func readFirstResponse[T any](s adk.LLMResponseStream) (T, error) {
+func readFirstResponse[T any](s types.LLMResponseStream) (T, error) {
 	var zero T
-	do := func(s adk.LLMResponseStream) (any, error) {
+	do := func(s types.LLMResponseStream) (any, error) {
 		for resp, err := range s {
 			if err != nil {
 				return zero, err
@@ -254,8 +254,8 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 	}
 
 	t.Run("ProcessRequest", func(t *testing.T) {
-		var req adk.LLMRequest
-		if err := inventoryTool.ProcessRequest(t.Context(), &adk.ToolContext{}, &req); err != nil {
+		var req types.LLMRequest
+		if err := inventoryTool.ProcessRequest(t.Context(), &types.ToolContext{}, &req); err != nil {
 			t.Fatalf("inventoryTool.ProcessRequest failed: %v", err)
 		}
 		decl := toolDeclaration(req.GenerateConfig)
@@ -305,7 +305,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		}
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				ret, err := inventoryTool.Run(t.Context(), &adk.ToolContext{}, tc.in)
+				ret, err := inventoryTool.Run(t.Context(), &types.ToolContext{}, tc.in)
 				// ret is expected to be nil always.
 				if tc.wantErr && err == nil {
 					t.Errorf("inventoryTool.Run = (%v, %v), want error", ret, err)

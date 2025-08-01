@@ -19,8 +19,8 @@ import (
 	"iter"
 	"testing"
 
-	"google.golang.org/adk"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -31,15 +31,15 @@ func TestRunner_findAgentToRun(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		rootAgent adk.Agent
-		session   *adk.Session
-		wantAgent adk.Agent
+		rootAgent types.Agent
+		session   *types.Session
+		wantAgent types.Agent
 		wantErr   bool
 	}{
 		{
 			name: "last event from agent allowing transfer",
-			session: &adk.Session{
-				Events: []*adk.Event{
+			session: &types.Session{
+				Events: []*types.Event{
 					{
 						Author: "allows_transfer_agent",
 					},
@@ -53,8 +53,8 @@ func TestRunner_findAgentToRun(t *testing.T) {
 		},
 		{
 			name: "last event from agent not allowing transfer",
-			session: &adk.Session{
-				Events: []*adk.Event{
+			session: &types.Session{
+				Events: []*types.Event{
 					{
 						Author: "no_transfer_agent",
 					},
@@ -68,8 +68,8 @@ func TestRunner_findAgentToRun(t *testing.T) {
 		},
 		{
 			name: "no events from agents, call root",
-			session: &adk.Session{
-				Events: []*adk.Event{
+			session: &types.Session{
+				Events: []*types.Event{
 					{
 						Author: "user",
 					},
@@ -104,9 +104,9 @@ func Test_findAgent(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		root      adk.Agent
+		root      types.Agent
 		target    string
-		wantAgent adk.Agent
+		wantAgent types.Agent
 	}{
 		{
 			name:      "ok",
@@ -145,7 +145,7 @@ func Test_findAgent(t *testing.T) {
 func Test_isTransferrableAcrossAgentTree(t *testing.T) {
 	tests := []struct {
 		name  string
-		agent adk.Agent
+		agent types.Agent
 		want  bool
 	}{
 		{
@@ -193,10 +193,10 @@ func agentTree(t *testing.T) agentTreeStruct {
 }
 
 type agentTreeStruct struct {
-	root, noTransferAgent, allowsTransferAgent adk.Agent
+	root, noTransferAgent, allowsTransferAgent types.Agent
 }
 
-func must[T adk.Agent](a T, err error) T {
+func must[T types.Agent](a T, err error) T {
 	if err != nil {
 		panic(err)
 	}
@@ -204,19 +204,19 @@ func must[T adk.Agent](a T, err error) T {
 }
 
 type customAgent struct {
-	spec *adk.AgentSpec
+	spec *types.AgentSpec
 
 	callCounter int
 }
 
-func (a *customAgent) Spec() *adk.AgentSpec { return a.spec }
+func (a *customAgent) Spec() *types.AgentSpec { return a.spec }
 
-func (a *customAgent) Run(context.Context, *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
-	return func(yield func(*adk.Event, error) bool) {
+func (a *customAgent) Run(context.Context, *types.InvocationContext) iter.Seq2[*types.Event, error] {
+	return func(yield func(*types.Event, error) bool) {
 		a.callCounter++
 
-		yield(&adk.Event{
-			LLMResponse: &adk.LLMResponse{
+		yield(&types.Event{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromText("hello", genai.RoleModel),
 			},
 		}, nil)

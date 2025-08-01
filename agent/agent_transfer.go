@@ -21,7 +21,7 @@ import (
 	"slices"
 	"text/template"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -57,7 +57,7 @@ import (
 //
 // TODO: implement it in the runners package and update this doc.
 
-func agentTransferRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+func agentTransferRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
 	agent := asLLMAgent(parentCtx.Agent)
 	if agent == nil {
 		return nil // TODO: support agent types other than LLMAgent, that have parent/subagents?
@@ -79,7 +79,7 @@ func agentTransferRequestProcessor(ctx context.Context, parentCtx *adk.Invocatio
 		return err
 	}
 	req.AppendInstructions(si)
-	tc := &adk.ToolContext{
+	tc := &types.ToolContext{
 		InvocationContext: parentCtx,
 	}
 	return transferToAgentTool.ProcessRequest(ctx, tc, req)
@@ -87,13 +87,13 @@ func agentTransferRequestProcessor(ctx context.Context, parentCtx *adk.Invocatio
 
 type transferToAgentTool struct{}
 
-// Description implements adk.Tool.
+// Description implements types.Tool.
 func (t *transferToAgentTool) Description() string {
 	return `Transfer the question to another agent.
 This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
 }
 
-// Name implements adk.Tool.
+// Name implements types.Tool.
 func (t *transferToAgentTool) Name() string {
 	return "transfer_to_agent"
 }
@@ -115,13 +115,13 @@ func (t *transferToAgentTool) FunctionDeclaration() *genai.FunctionDeclaration {
 	}
 }
 
-// ProcessRequest implements adk.Tool.
-func (t *transferToAgentTool) ProcessRequest(ctx context.Context, tc *adk.ToolContext, req *adk.LLMRequest) error {
+// ProcessRequest implements types.Tool.
+func (t *transferToAgentTool) ProcessRequest(ctx context.Context, tc *types.ToolContext, req *types.LLMRequest) error {
 	return req.AppendTools(t)
 }
 
-// Run implements adk.Tool.
-func (t *transferToAgentTool) Run(ctx context.Context, tc *adk.ToolContext, args map[string]any) (map[string]any, error) {
+// Run implements types.Tool.
+func (t *transferToAgentTool) Run(ctx context.Context, tc *types.ToolContext, args map[string]any) (map[string]any, error) {
 	if args == nil {
 		return nil, fmt.Errorf("missing argument")
 	}
@@ -133,9 +133,9 @@ func (t *transferToAgentTool) Run(ctx context.Context, tc *adk.ToolContext, args
 	return map[string]any{}, nil
 }
 
-var _ adk.Tool = (*transferToAgentTool)(nil)
+var _ types.Tool = (*transferToAgentTool)(nil)
 
-func transferTarget(current *LLMAgent) []adk.Agent {
+func transferTarget(current *LLMAgent) []types.Agent {
 	targets := slices.Clone(current.Spec().SubAgents)
 
 	if !current.DisallowTransferToParent && current.Spec().Parent() != nil {
@@ -160,7 +160,7 @@ func transferTarget(current *LLMAgent) []adk.Agent {
 var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
-func instructionsForTransferToAgent(agent *LLMAgent, targets []adk.Agent, transferTool adk.Tool) (string, error) {
+func instructionsForTransferToAgent(agent *LLMAgent, targets []types.Agent, transferTool types.Tool) (string, error) {
 	parent := agent.Spec().Parent()
 	if agent.DisallowTransferToParent {
 		parent = nil
@@ -169,8 +169,8 @@ func instructionsForTransferToAgent(agent *LLMAgent, targets []adk.Agent, transf
 	var buf bytes.Buffer
 	if err := transferToAgentPromptTmpl.Execute(&buf, struct {
 		AgentName string
-		Parent    adk.Agent
-		Targets   []adk.Agent
+		Parent    types.Agent
+		Targets   []types.Agent
 		ToolName  string
 	}{
 		AgentName: agent.Spec().Name,

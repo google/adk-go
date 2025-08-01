@@ -17,35 +17,35 @@ package agent
 import (
 	"context"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 )
 
-func identityRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+func identityRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/identity.py)
 	return nil
 }
 
-func nlPlanningRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+func nlPlanningRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_nl_plnning.py)
 	return nil
 }
 
-func codeExecutionRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+func codeExecutionRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_code_execution.py)
 	return nil
 }
 
-func authPreprocesssor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+func authPreprocesssor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/auth/auth_preprocessor.py)
 	return nil
 }
 
-func nlPlanningResponseProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error {
+func nlPlanningResponseProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest, resp *types.LLMResponse) error {
 	// TODO: implement (adk-python src/google/adk/_nl_planning.py)
 	return nil
 }
 
-func codeExecutionResponseProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest, resp *adk.LLMResponse) error {
+func codeExecutionResponseProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest, resp *types.LLMResponse) error {
 	// TODO: implement (adk-python src/google/adk_code_execution.py)
 	return nil
 }

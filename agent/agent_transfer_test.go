@@ -22,41 +22,41 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
 type mockAgent struct {
-	*adk.AgentSpec
-	adk.Agent
+	*types.AgentSpec
+	types.Agent
 }
 
-func (m *mockAgent) Spec() *adk.AgentSpec { return m.AgentSpec }
+func (m *mockAgent) Spec() *types.AgentSpec { return m.AgentSpec }
 
 func newMockAgent(name string) *mockAgent {
 	m := &mockAgent{
-		AgentSpec: &adk.AgentSpec{Name: name},
+		AgentSpec: &types.AgentSpec{Name: name},
 	}
 	m.AgentSpec.Init(m)
 	return m
 }
 
-func (a mockAgent) Run(ctx context.Context, invCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
-	return func(yield func(*adk.Event, error) bool) {}
+func (a mockAgent) Run(ctx context.Context, invCtx *types.InvocationContext) iter.Seq2[*types.Event, error] {
+	return func(yield func(*types.Event, error) bool) {}
 }
 
 func TestAgentTransferRequestProcessor(t *testing.T) {
 	ctx := context.Background()
 	tool := &transferToAgentTool{}
-	model := &struct{ adk.Model }{}
+	model := &struct{ types.Model }{}
 
 	if tool.Name() == "" || tool.Description() == "" || tool.FunctionDeclaration() == nil {
 		t.Fatalf("unexpected transferToAgentTool: name=%q, desc=%q, decl=%v", tool.Name(), tool.Description(), tool)
 	}
 
-	check := func(t *testing.T, agent adk.Agent, wantParent string, wantAgents []string, unwantAgents []string) {
-		invCtx := &adk.InvocationContext{Agent: agent}
-		req := &adk.LLMRequest{}
+	check := func(t *testing.T, agent types.Agent, wantParent string, wantAgents []string, unwantAgents []string) {
+		invCtx := &types.InvocationContext{Agent: agent}
+		req := &types.LLMRequest{}
 		name := agent.Spec().Name
 		_ = name
 
@@ -66,7 +66,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 
 		// We don't expect transfer. Check agentTransferRequestProcessor was no-op.
 		if wantParent == "" && len(wantAgents) == 0 {
-			if diff := cmp.Diff(&adk.LLMRequest{}, req); diff != "" {
+			if diff := cmp.Diff(&types.LLMRequest{}, req); diff != "" {
 				t.Errorf("req was changed unexpectedly (-want, +got): %v", diff)
 			}
 			return
@@ -221,9 +221,9 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 func TestTransferToAgentToolRun(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		tool := &transferToAgentTool{}
-		tc := &adk.ToolContext{
-			InvocationContext: &adk.InvocationContext{},
-			EventActions:      &adk.EventActions{},
+		tc := &types.ToolContext{
+			InvocationContext: &types.InvocationContext{},
+			EventActions:      &types.EventActions{},
 		}
 		wantAgentName := "TestAgent"
 		args := map[string]any{"agent_name": wantAgentName}
@@ -250,9 +250,9 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				tool := &transferToAgentTool{}
-				toolCtx := &adk.ToolContext{
-					InvocationContext: &adk.InvocationContext{},
-					EventActions:      &adk.EventActions{},
+				toolCtx := &types.ToolContext{
+					InvocationContext: &types.InvocationContext{},
+					EventActions:      &types.EventActions{},
 				}
 
 				ctx := t.Context()

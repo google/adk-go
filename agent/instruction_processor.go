@@ -17,11 +17,11 @@ package agent
 import (
 	"context"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 )
 
 // instructionsRequestProcessor configures req's instructions and global instructions for LLM flow.
-func instructionsRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {
+func instructionsRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
 	// reference: adk-python src/google/adk/flows/llm_flows/instructions.py
 
 	llmAgent := asLLMAgent(parentCtx.Agent)

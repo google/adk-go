@@ -19,12 +19,12 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
 type model struct {
-	adk.Model
+	types.Model
 }
 
 // Test behavior around Agent's IncludeContents.
@@ -32,63 +32,63 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	const agentName = "testAgent"
 	model := &model{}
 
-	emptyEvent := []*adk.Event{}
-	helloAndGoodBye := []*adk.Event{
+	emptyEvent := []*types.Event{}
+	helloAndGoodBye := []*types.Event{
 		{
 			Author: "user", // Not in the current turn in multi-agent scenario. See buildContentsCurrentTurnContextOnly.
-			LLMResponse: &adk.LLMResponse{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromText("hello", "user"),
 			},
 		},
 		{
 			Author: "user",
-			LLMResponse: &adk.LLMResponse{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromText("good bye", "user"),
 			},
 		},
 	}
-	agentTransfer := []*adk.Event{
+	agentTransfer := []*types.Event{
 		{
 			Author: "anotherAgent", // History.
-			LLMResponse: &adk.LLMResponse{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromFunctionCall("func1", nil, "model"),
 			},
 		},
 		{
 			Author: "anotherAgent",
-			LLMResponse: &adk.LLMResponse{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromFunctionResponse("func1", nil, "user"),
 			},
 		},
 		{
 			Author: "anotherAgent", // Beginning of the current turn started by another agent.
-			LLMResponse: &adk.LLMResponse{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromText("transfer to testAgent", "model"),
 			},
 		},
 		{
 			Author: agentName, // See python flows/llm_flows/base_llm_flow.py BaseLlmFlow._run_one_step_async.
-			LLMResponse: &adk.LLMResponse{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromFunctionCall("func1", nil, "model"),
 			},
 		},
 	}
-	robot := []*adk.Event{
+	robot := []*types.Event{
 		{
 			Author: agentName,
-			LLMResponse: &adk.LLMResponse{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromText("do func1", "user"),
 			},
 		},
 		{
 			Author: agentName,
-			LLMResponse: &adk.LLMResponse{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromFunctionCall("func1", nil, "model"),
 			},
 		},
 		{
 			Author: agentName,
-			LLMResponse: &adk.LLMResponse{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromFunctionResponse("func1", nil, "user"),
 			},
 		},
@@ -98,7 +98,7 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	testCases := []struct {
 		name            string
 		includeContents string
-		events          []*adk.Event
+		events          []*types.Event
 		want            []*genai.Content
 	}{
 		{
@@ -208,13 +208,13 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 		t.Run(tc.name+"/include_contents="+tc.includeContents, func(t *testing.T) {
 			agent := must(NewLLMAgent(agentName, model))
 			agent.IncludeContents = tc.includeContents
-			invCtx := &adk.InvocationContext{
+			invCtx := &types.InvocationContext{
 				InvocationID: "12345",
 				Agent:        agent,
-				Session:      &adk.Session{Events: tc.events},
+				Session:      &types.Session{Events: tc.events},
 			}
 
-			req := &adk.LLMRequest{Model: model}
+			req := &types.LLMRequest{Model: model}
 			if err := contentsRequestProcessor(t.Context(), invCtx, req); err != nil {
 				t.Fatalf("contentsRequestProcessor failed: %v", err)
 			}
@@ -234,7 +234,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 	testCases := []struct {
 		name   string
 		branch string
-		events []*adk.Event
+		events []*types.Event
 		want   []*genai.Content
 	}{
 		{
@@ -244,21 +244,21 @@ func TestContentsRequestProcessor(t *testing.T) {
 		},
 		{
 			name:   "EmptyEvents",
-			events: []*adk.Event{},
+			events: []*types.Event{},
 			want:   nil,
 		},
 		{
 			name: "UserAndAgentEvents",
-			events: []*adk.Event{
+			events: []*types.Event{
 				{
 					Author: "user",
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: genai.NewContentFromText("Hello", "user"),
 					},
 				},
 				{
 					Author: "testAgent",
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: genai.NewContentFromText("Hi there", "model"),
 					},
 				},
@@ -270,10 +270,10 @@ func TestContentsRequestProcessor(t *testing.T) {
 		},
 		{
 			name: "anotherAgentEvent",
-			events: []*adk.Event{
+			events: []*types.Event{
 				{
 					Author: "anotherAgent",
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: genai.NewContentFromText("Foreign message", "model"),
 					},
 				},
@@ -291,32 +291,32 @@ func TestContentsRequestProcessor(t *testing.T) {
 		{
 			name:   "FilterByBranch",
 			branch: "branch1",
-			events: []*adk.Event{
+			events: []*types.Event{
 				{
 					Author: "user",
 					Branch: "branch1",
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: genai.NewContentFromText("In branch 1", "user"),
 					},
 				},
 				{
 					Author: "user",
 					Branch: "branch1.task1",
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: genai.NewContentFromText("In branch 1 and task 1", "user"),
 					},
 				},
 				{
 					Author: "user",
 					Branch: "branch12",
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: genai.NewContentFromText("In branch 12", "user"),
 					},
 				},
 				{
 					Author: "user",
 					Branch: "branch2",
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: genai.NewContentFromText("In branch 2", "user"),
 					},
 				},
@@ -328,10 +328,10 @@ func TestContentsRequestProcessor(t *testing.T) {
 		},
 		{
 			name: "AuthEvent",
-			events: []*adk.Event{
+			events: []*types.Event{
 				{
 					Author: agentName,
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: &genai.Content{
 							Role: "model",
 							Parts: []*genai.Part{
@@ -345,7 +345,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 		},
 		{
 			name: "EventWithoutContent",
-			events: []*adk.Event{
+			events: []*types.Event{
 				{Author: "user"},
 			},
 			want: nil,
@@ -355,14 +355,14 @@ func TestContentsRequestProcessor(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			agent := must(NewLLMAgent("testAgent", model))
-			invCtx := &adk.InvocationContext{
+			invCtx := &types.InvocationContext{
 				InvocationID: "12345",
 				Agent:        agent,
 				Branch:       tc.branch,
-				Session:      &adk.Session{Events: tc.events},
+				Session:      &types.Session{Events: tc.events},
 			}
 
-			req := &adk.LLMRequest{Model: model}
+			req := &types.LLMRequest{Model: model}
 			if err := contentsRequestProcessor(t.Context(), invCtx, req); err != nil {
 				t.Fatalf("contentRequestProcessor failed: %v", err)
 			}
@@ -379,23 +379,23 @@ func TestConvertForeignEvent(t *testing.T) {
 	now := time.Now()
 	testCases := []struct {
 		name  string
-		event *adk.Event
-		want  *adk.Event
+		event *types.Event
+		want  *types.Event
 	}{
 		{
 			name: "Text",
-			event: &adk.Event{
+			event: &types.Event{
 				Time:   now,
 				Author: "foreign",
-				LLMResponse: &adk.LLMResponse{
+				LLMResponse: &types.LLMResponse{
 					Content: genai.NewContentFromText("hello", "model"),
 				},
 				Branch: "b",
 			},
-			want: &adk.Event{
+			want: &types.Event{
 				Time:   now,
 				Author: "user",
-				LLMResponse: &adk.LLMResponse{
+				LLMResponse: &types.LLMResponse{
 					Content: &genai.Content{
 						Role: "user",
 						Parts: []*genai.Part{
@@ -409,10 +409,10 @@ func TestConvertForeignEvent(t *testing.T) {
 		},
 		{
 			name: "FunctionCall",
-			event: &adk.Event{
+			event: &types.Event{
 				Time:   now,
 				Author: "foreign",
-				LLMResponse: &adk.LLMResponse{
+				LLMResponse: &types.LLMResponse{
 					Content: &genai.Content{
 						Role: "model",
 						Parts: []*genai.Part{
@@ -422,10 +422,10 @@ func TestConvertForeignEvent(t *testing.T) {
 				},
 				Branch: "b",
 			},
-			want: &adk.Event{
+			want: &types.Event{
 				Time:   now,
 				Author: "user",
-				LLMResponse: &adk.LLMResponse{
+				LLMResponse: &types.LLMResponse{
 					Content: &genai.Content{
 						Role: "user",
 						Parts: []*genai.Part{
@@ -439,10 +439,10 @@ func TestConvertForeignEvent(t *testing.T) {
 		},
 		{
 			name: "FunctionResponse",
-			event: &adk.Event{
+			event: &types.Event{
 				Time:   now,
 				Author: "foreign",
-				LLMResponse: &adk.LLMResponse{
+				LLMResponse: &types.LLMResponse{
 					Content: &genai.Content{
 						Role: "model",
 						Parts: []*genai.Part{
@@ -452,10 +452,10 @@ func TestConvertForeignEvent(t *testing.T) {
 				},
 				Branch: "b",
 			},
-			want: &adk.Event{
+			want: &types.Event{
 				Time:   now,
 				Author: "user",
-				LLMResponse: &adk.LLMResponse{
+				LLMResponse: &types.LLMResponse{
 					Content: &genai.Content{
 						Role: "user",
 						Parts: []*genai.Part{
@@ -481,29 +481,29 @@ func TestConvertForeignEvent(t *testing.T) {
 
 func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 	type customAgent struct {
-		adk.Agent
+		types.Agent
 	}
 	agent := &customAgent{}
-	events := []*adk.Event{
+	events := []*types.Event{
 		{
 			Author: "user",
-			LLMResponse: &adk.LLMResponse{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromText("Hello", "user"),
 			},
 		},
 	}
-	invCtx := &adk.InvocationContext{
+	invCtx := &types.InvocationContext{
 		InvocationID: "12345",
 		Agent:        agent,
-		Session:      &adk.Session{Events: events},
+		Session:      &types.Session{Events: events},
 	}
 
-	req := &adk.LLMRequest{}
+	req := &types.LLMRequest{}
 	if err := contentsRequestProcessor(t.Context(), invCtx, req); err != nil {
 		t.Fatalf("contentRequestProcessor failed: %v", err)
 	}
 	got := req
-	want := &adk.LLMRequest{}
+	want := &types.LLMRequest{}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("LLMRequest after contentRequestProcessor mismatch (-want +got):\n%s", diff)
 	}

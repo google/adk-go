@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package adk_test
+package types_test
 
 import (
 	"context"
@@ -20,24 +20,24 @@ import (
 	"iter"
 	"testing"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 )
 
 type testAgent struct {
-	adk.Agent
-	run func(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error]
+	types.Agent
+	run func(ctx context.Context, parentCtx *types.InvocationContext) iter.Seq2[*types.Event, error]
 }
 
 func (m *testAgent) Name() string        { return "TestAgent" }
 func (m *testAgent) Description() string { return "" }
-func (m *testAgent) Run(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
+func (m *testAgent) Run(ctx context.Context, parentCtx *types.InvocationContext) iter.Seq2[*types.Event, error] {
 	return m.run(ctx, parentCtx)
 }
 
 func TestNewInvocationContext_End(t *testing.T) {
 	ctx := t.Context()
-	waitForCancel := func(ctx context.Context, parentCtx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
-		return func(yield func(*adk.Event, error) bool) {
+	waitForCancel := func(ctx context.Context, parentCtx *types.InvocationContext) iter.Seq2[*types.Event, error] {
+		return func(yield func(*types.Event, error) bool) {
 			<-ctx.Done()
 			// stuck here until the context is canceled.
 			yield(nil, ctx.Err())
@@ -45,7 +45,7 @@ func TestNewInvocationContext_End(t *testing.T) {
 	}
 	agent := &testAgent{run: waitForCancel}
 
-	ctx, ic := adk.NewInvocationContext(ctx, agent, nil, nil, nil, nil)
+	ctx, ic := types.NewInvocationContext(ctx, agent, nil, nil, nil, nil)
 	// schedule cancellation to happen after the agent starts running.
 	go func() { ic.End(errors.New("end")) }()
 

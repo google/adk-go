@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package adk
+package internal
 
 import (
 	"flag"
@@ -40,11 +40,14 @@ const copyrightHeader = `// Copyright 2025 Google LLC
 var fixError = flag.Bool("fix", false, "fix detected problems (e.g. add missing copyright headers)")
 
 func TestCopyrightHeader(t *testing.T) {
-	ignore := map[string]bool {
+	// Start test from the parent directory, root of the module.
+	t.Chdir("..")
+
+	ignore := map[string]bool{
 		// Skip directories that are not relevant for copyright checks.
 		// The followings were copied from golang.org/x/tools.
 		"internal/jsonschema": true,
-		"internal/util": true,
+		"internal/util":       true,
 		// The following was copied from golang.org/x/oscar.
 		"internal/httprr": true,
 	}

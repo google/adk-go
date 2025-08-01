@@ -18,16 +18,16 @@ import (
 	"context"
 	"iter"
 
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 )
 
 // RunAgent is called by adk internally wrapping extra logic on top of agent's Run.
-func RunAgent(ctx context.Context, ictx *adk.InvocationContext, agent adk.Agent) iter.Seq2[*adk.Event, error] {
-	callbackContext := &adk.CallbackContext{
+func RunAgent(ctx context.Context, ictx *types.InvocationContext, agent types.Agent) iter.Seq2[*types.Event, error] {
+	callbackContext := &types.CallbackContext{
 		InvocationContext: ictx,
 	}
 
-	return func(yield func(*adk.Event, error) bool) {
+	return func(yield func(*types.Event, error) bool) {
 		if event := runBeforeAgentCallbacks(ctx, callbackContext, agent); event != nil {
 			yield(event, nil)
 			return
@@ -45,15 +45,15 @@ func RunAgent(ctx context.Context, ictx *adk.InvocationContext, agent adk.Agent)
 
 // runBeforeAgentCallbacks checks if any beforeAgentCallback returns non-nil content
 // then it skips agent run and returns callback result.
-func runBeforeAgentCallbacks(ctx context.Context, callbackContext *adk.CallbackContext, agent adk.Agent) *adk.Event {
+func runBeforeAgentCallbacks(ctx context.Context, callbackContext *types.CallbackContext, agent types.Agent) *types.Event {
 	for _, callback := range agent.Spec().BeforeAgentCallbacks {
 		content := callback(ctx, callbackContext)
 		if content == nil {
 			continue
 		}
 
-		event := adk.NewEvent(callbackContext.InvocationContext.InvocationID)
-		event.LLMResponse = &adk.LLMResponse{
+		event := types.NewEvent(callbackContext.InvocationContext.InvocationID)
+		event.LLMResponse = &types.LLMResponse{
 			Content: content,
 		}
 		event.Author = agent.Spec().Name
@@ -70,7 +70,7 @@ func runBeforeAgentCallbacks(ctx context.Context, callbackContext *adk.CallbackC
 
 // runAfterAgentCallbacks checks if any afterAgentCallback returns non-nil content
 // then it replaces the event content with a value from the callback.
-func runAfterAgentCallbacks(ctx context.Context, callbackContext *adk.CallbackContext, event *adk.Event, agent adk.Agent) *adk.Event {
+func runAfterAgentCallbacks(ctx context.Context, callbackContext *types.CallbackContext, event *types.Event, agent types.Agent) *types.Event {
 	if event == nil {
 		return event
 	}

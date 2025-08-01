@@ -12,5 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package adk provides Agent Development Kit (ADK).
-package adk
+// Package types provides core types used in Agent Development Kit (ADK).
+package types

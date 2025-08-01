@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -65,7 +65,7 @@ func TestInMemoryArtifactService(t *testing.T) {
 	t.Log("Save file1 and file2")
 	for i, data := range testData {
 		wantVersion := data.version
-		got, err := srv.Save(ctx, &adk.ArtifactSaveRequest{
+		got, err := srv.Save(ctx, &types.ArtifactSaveRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: data.fileName,
 			Part: data.artifact,
 		})
@@ -86,7 +86,7 @@ func TestInMemoryArtifactService(t *testing.T) {
 			{"ver=1", 1, genai.NewPartFromText("file v1")},
 			{"ver=2", 2, genai.NewPartFromText("file v2")},
 		} {
-			got, err := srv.Load(ctx, &adk.ArtifactLoadRequest{
+			got, err := srv.Load(ctx, &types.ArtifactLoadRequest{
 				AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
 				Version: tc.version,
 			})
@@ -97,7 +97,7 @@ func TestInMemoryArtifactService(t *testing.T) {
 	})
 
 	t.Run("List", func(t *testing.T) {
-		resp, err := srv.List(ctx, &adk.ArtifactListRequest{
+		resp, err := srv.List(ctx, &types.ArtifactListRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID,
 		})
 		if err != nil {
@@ -112,7 +112,7 @@ func TestInMemoryArtifactService(t *testing.T) {
 	})
 
 	t.Run("Versions", func(t *testing.T) {
-		resp, err := srv.Versions(ctx, &adk.ArtifactVersionsRequest{
+		resp, err := srv.Versions(ctx, &types.ArtifactVersionsRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 		})
 		if err != nil {
@@ -127,7 +127,7 @@ func TestInMemoryArtifactService(t *testing.T) {
 	})
 
 	t.Log("Delete file1 version 3")
-	if err := srv.Delete(ctx, &adk.ArtifactDeleteRequest{
+	if err := srv.Delete(ctx, &types.ArtifactDeleteRequest{
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 		Version: 3,
 	}); err != nil {
@@ -135,7 +135,7 @@ func TestInMemoryArtifactService(t *testing.T) {
 	}
 
 	t.Run("LoadAfterDeleteVersion3", func(t *testing.T) {
-		resp, err := srv.Load(ctx, &adk.ArtifactLoadRequest{
+		resp, err := srv.Load(ctx, &types.ArtifactLoadRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 		})
 		if err != nil {
@@ -148,14 +148,14 @@ func TestInMemoryArtifactService(t *testing.T) {
 		}
 	})
 
-	if err := srv.Delete(ctx, &adk.ArtifactDeleteRequest{
+	if err := srv.Delete(ctx, &types.ArtifactDeleteRequest{
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 	}); err != nil {
 		t.Fatalf("Delete(file1) failed: %v", err)
 	}
 
 	t.Run("LoadAfterDelete", func(t *testing.T) {
-		got, err := srv.Load(ctx, &adk.ArtifactLoadRequest{
+		got, err := srv.Load(ctx, &types.ArtifactLoadRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 		})
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -164,7 +164,7 @@ func TestInMemoryArtifactService(t *testing.T) {
 	})
 
 	t.Run("ListAfterDelete", func(t *testing.T) {
-		resp, err := srv.List(ctx, &adk.ArtifactListRequest{
+		resp, err := srv.List(ctx, &types.ArtifactListRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID,
 		})
 		if err != nil {
@@ -179,7 +179,7 @@ func TestInMemoryArtifactService(t *testing.T) {
 	})
 
 	t.Run("VersionsAfterDelete", func(t *testing.T) {
-		got, err := srv.Versions(ctx, &adk.ArtifactVersionsRequest{
+		got, err := srv.Versions(ctx, &types.ArtifactVersionsRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 		})
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -192,28 +192,28 @@ func TestInMemoryArtifactService_Empty(t *testing.T) {
 	ctx := t.Context()
 	srv := &InMemoryArtifactService{}
 	t.Run("Load", func(t *testing.T) {
-		got, err := srv.Load(ctx, &adk.ArtifactLoadRequest{
+		got, err := srv.Load(ctx, &types.ArtifactLoadRequest{
 			AppName: "app", UserID: "user", SessionID: "session", FileName: "file"})
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("List() = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
 		}
 	})
 	t.Run("List", func(t *testing.T) {
-		_, err := srv.List(ctx, &adk.ArtifactListRequest{
+		_, err := srv.List(ctx, &types.ArtifactListRequest{
 			AppName: "app", UserID: "user", SessionID: "session"})
 		if err != nil {
 			t.Fatalf("List() failed: %v", err)
 		}
 	})
 	t.Run("Delete", func(t *testing.T) {
-		err := srv.Delete(ctx, &adk.ArtifactDeleteRequest{
+		err := srv.Delete(ctx, &types.ArtifactDeleteRequest{
 			AppName: "app", UserID: "user", SessionID: "sesion", FileName: "file1"})
 		if err != nil {
 			t.Fatalf("Delete() failed: %v", err)
 		}
 	})
 	t.Run("Versions", func(t *testing.T) {
-		got, err := srv.Versions(ctx, &adk.ArtifactVersionsRequest{
+		got, err := srv.Versions(ctx, &types.ArtifactVersionsRequest{
 			AppName: "app", UserID: "user", SessionID: "session", FileName: "file1"})
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("Versions() = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
