@@ -24,15 +24,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/adk-go"
-	"github.com/google/adk-go/agent"
-	"github.com/google/adk-go/internal/httprr"
-	"github.com/google/adk-go/model"
-	"github.com/google/adk-go/tool"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/runner"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/types"
 	"google.golang.org/genai"
@@ -545,7 +542,7 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 		t.Fatalf("failed to get/create session: %v", err)
 	}
 
-	return r.runner.Run(ctx, userID, session.ID, genai.NewContentFromText(newMessage, genai.RoleUser), &adk.AgentRunConfig{})
+	return r.runner.Run(ctx, userID, session.ID, genai.NewContentFromText(newMessage, genai.RoleUser), &types.AgentRunConfig{})
 }
 
 func newTestAgentRunner(_ *testing.T, agent types.Agent) *testAgentRunner {
