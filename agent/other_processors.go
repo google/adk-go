@@ -17,7 +17,7 @@ package agent
 import (
 	"context"
 
-	"github.com/google/adk-go"
+	"google.golang.org/adk"
 )
 
 func identityRequestProcessor(ctx context.Context, parentCtx *adk.InvocationContext, req *adk.LLMRequest) error {

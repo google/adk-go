@@ -21,7 +21,7 @@ import (
 	"iter"
 	"strings"
 
-	"github.com/google/adk-go/internal/itype"
+	"google.golang.org/adk/internal/itype"
 	"google.golang.org/genai"
 )
 

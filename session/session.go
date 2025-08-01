@@ -21,7 +21,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/google/adk-go"
+	"google.golang.org/adk"
 	"rsc.io/omap"
 	"rsc.io/ordered"
 )

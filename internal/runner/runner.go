@@ -18,7 +18,7 @@ import (
 	"context"
 	"iter"
 
-	"github.com/google/adk-go"
+	"google.golang.org/adk"
 )
 
 // RunAgent is called by adk internally wrapping extra logic on top of agent's Run.

@@ -21,9 +21,9 @@ import (
 	"log"
 	"strings"
 
-	"github.com/google/adk-go"
-	"github.com/google/adk-go/agent"
-	internalRunner "github.com/google/adk-go/internal/runner"
+	"google.golang.org/adk"
+	"google.golang.org/adk/agent"
+	internalRunner "google.golang.org/adk/internal/runner"
 	"google.golang.org/genai"
 )
 

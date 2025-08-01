@@ -17,7 +17,7 @@ package agent
 import (
 	"context"
 
-	"github.com/google/adk-go"
+	"google.golang.org/adk"
 )
 
 // instructionsRequestProcessor configures req's instructions and global instructions for LLM flow.

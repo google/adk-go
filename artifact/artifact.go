@@ -24,7 +24,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/google/adk-go"
+	"google.golang.org/adk"
 	"google.golang.org/genai"
 	"rsc.io/omap"
 	"rsc.io/ordered"
