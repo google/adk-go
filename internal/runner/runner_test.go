@@ -19,10 +19,10 @@ import (
 	"iter"
 	"testing"
 
-	"github.com/google/adk-go"
-	"github.com/google/adk-go/agent"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/adk"
+	"google.golang.org/adk/agent"
 	"google.golang.org/genai"
 )
 

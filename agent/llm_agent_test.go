@@ -25,13 +25,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/adk-go"
-	"github.com/google/adk-go/agent"
-	"github.com/google/adk-go/internal/httprr"
-	"github.com/google/adk-go/model"
-	"github.com/google/adk-go/session"
-	"github.com/google/adk-go/tool"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/httprr"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 

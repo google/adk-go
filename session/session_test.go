@@ -19,8 +19,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/google/adk-go"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk"
 )
 
 func TestInMemorySessionService_Basic(t *testing.T) {

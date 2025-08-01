@@ -20,8 +20,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/google/adk-go"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk"
 	"google.golang.org/genai"
 )
 

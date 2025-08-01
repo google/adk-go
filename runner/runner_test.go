@@ -19,8 +19,8 @@ import (
 	"iter"
 	"testing"
 
-	"github.com/google/adk-go"
-	"github.com/google/adk-go/agent"
+	"google.golang.org/adk"
+	"google.golang.org/adk/agent"
 	"google.golang.org/genai"
 )
 

@@ -21,9 +21,9 @@ import (
 	"log"
 	"os"
 
-	"github.com/google/adk-go"
-	"github.com/google/adk-go/runner"
-	"github.com/google/adk-go/session"
+	"google.golang.org/adk"
+	"google.golang.org/adk/runner"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 

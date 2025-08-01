@@ -18,10 +18,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/google/adk-go"
-	"github.com/google/adk-go/internal/itype"
-	"github.com/google/adk-go/internal/typeutil"
 	"github.com/modelcontextprotocol/go-sdk/jsonschema"
+	"google.golang.org/adk"
+	"google.golang.org/adk/internal/itype"
+	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/genai"
 )
 

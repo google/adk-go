@@ -20,7 +20,7 @@ import (
 	"iter"
 	"testing"
 
-	"github.com/google/adk-go"
+	"google.golang.org/adk"
 )
 
 type testAgent struct {

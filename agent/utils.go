@@ -17,8 +17,8 @@ package agent
 import (
 	"strings"
 
-	"github.com/google/adk-go"
 	"github.com/google/uuid"
+	"google.golang.org/adk"
 	"google.golang.org/genai"
 )
 

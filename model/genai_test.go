@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/adk-go"
-	"github.com/google/adk-go/internal/httprr"
+	"google.golang.org/adk"
+	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/genai"
 )
 

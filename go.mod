@@ -1,4 +1,4 @@
-module github.com/google/adk-go
+module google.golang.org/adk
 
 go 1.24.3
 

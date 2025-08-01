@@ -18,9 +18,9 @@ import (
 	"context"
 	"os"
 
-	"github.com/google/adk-go/agent"
-	"github.com/google/adk-go/examples"
-	"github.com/google/adk-go/model"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/examples"
+	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 

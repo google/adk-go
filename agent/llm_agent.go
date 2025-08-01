@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"iter"
 
-	"github.com/google/adk-go"
+	"google.golang.org/adk"
 	"google.golang.org/genai"
 )
 

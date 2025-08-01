@@ -17,7 +17,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/google/adk-go"
+	"google.golang.org/adk"
 )
 
 func TestRootAgent(t *testing.T) {
