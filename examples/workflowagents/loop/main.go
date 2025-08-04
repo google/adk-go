@@ -18,24 +18,24 @@ import (
 	"context"
 	"iter"
 
-	"github.com/google/adk-go"
-	"github.com/google/adk-go/agent"
-	"github.com/google/adk-go/examples"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/examples"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
 type MyAgent struct {
-	agentSpec *adk.AgentSpec
+	agentSpec *types.AgentSpec
 }
 
-func (a *MyAgent) Spec() *adk.AgentSpec {
+func (a *MyAgent) Spec() *types.AgentSpec {
 	return a.agentSpec
 }
 
-func (a *MyAgent) Run(ctx context.Context, ictx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
-	return func(yield func(*adk.Event, error) bool) {
-		yield(&adk.Event{
-			LLMResponse: &adk.LLMResponse{
+func (a *MyAgent) Run(ctx context.Context, ictx *types.InvocationContext) iter.Seq2[*types.Event, error] {
+	return func(yield func(*types.Event, error) bool) {
+		yield(&types.Event{
+			LLMResponse: &types.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -48,7 +48,7 @@ func (a *MyAgent) Run(ctx context.Context, ictx *adk.InvocationContext) iter.Seq
 	}
 }
 
-var _ adk.Agent = (*MyAgent)(nil)
+var _ types.Agent = (*MyAgent)(nil)
 
 func NewMyAgent() *MyAgent {
 	return &MyAgent{}
@@ -58,7 +58,7 @@ func main() {
 	ctx := context.Background()
 
 	myAgent := NewMyAgent()
-	myAgent.agentSpec = &adk.AgentSpec{
+	myAgent.agentSpec = &types.AgentSpec{
 		Name:        "my_custom_agent",
 		Description: "A custom agent that responds with a greeting.",
 	}

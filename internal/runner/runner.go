@@ -93,7 +93,7 @@ func runAfterAgentCallbacks(ctx context.Context, callbackContext *types.Callback
 	return event
 }
 
-func getAuthorForEvent(ictx *adk.InvocationContext, event *adk.Event) string {
+func getAuthorForEvent(ictx *types.InvocationContext, event *types.Event) string {
 	if event.LLMResponse != nil && event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
 		return genai.RoleUser
 	}

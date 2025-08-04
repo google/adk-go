@@ -15,7 +15,7 @@
 package agent
 
 import (
-	"github.com/google/adk-go"
+	"google.golang.org/adk/types"
 )
 
 // SequentialAgent executes its sub-agents in the order they are listed.
@@ -41,4 +41,4 @@ func NewSequentialAgent(name string, opts ...AgentOption) (*SequentialAgent, err
 
 type loopAgent = LoopAgent
 
-var _ adk.Agent = (*SequentialAgent)(nil)
+var _ types.Agent = (*SequentialAgent)(nil)

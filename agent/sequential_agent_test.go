@@ -17,34 +17,34 @@ package agent_test
 import (
 	"testing"
 
-	"github.com/google/adk-go"
-	"github.com/google/adk-go/agent"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
 func TestNewSequentialAgent(t *testing.T) {
 	type args struct {
 		maxIterations uint
-		subAgents     []adk.Agent
+		subAgents     []types.Agent
 	}
 
 	tests := []struct {
 		name       string
 		args       args
-		wantEvents []*adk.Event
+		wantEvents []*types.Event
 		wantErr    bool
 	}{
 		{
 			name: "ok",
 			args: args{
 				maxIterations: 0,
-				subAgents:     []adk.Agent{newCustomAgent(0), newCustomAgent(1)},
+				subAgents:     []types.Agent{newCustomAgent(0), newCustomAgent(1)},
 			},
-			wantEvents: []*adk.Event{
+			wantEvents: []*types.Event{
 				{
 					Author: "custom_agent_0",
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 0"),
@@ -55,7 +55,7 @@ func TestNewSequentialAgent(t *testing.T) {
 				},
 				{
 					Author: "custom_agent_1",
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 1"),
@@ -75,7 +75,7 @@ func TestNewSequentialAgent(t *testing.T) {
 				return
 			}
 
-			var gotEvents []*adk.Event
+			var gotEvents []*types.Event
 
 			for event, err := range newTestAgentRunner(t, agent).Run(t, "session_id", "user input") {
 				if err != nil {

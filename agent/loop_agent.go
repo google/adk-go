@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"iter"
 
-	"github.com/google/adk-go"
+	"google.golang.org/adk/types"
 )
 
 // LoopAgent repeatedly runs a sequence of agents for a specified number of
@@ -28,7 +28,7 @@ import (
 // Use the LoopAgent when your workflow involves repetition or iterative
 // refinement, such as like revising code.
 type LoopAgent struct {
-	agentSpec *adk.AgentSpec
+	agentSpec *types.AgentSpec
 
 	maxIterations uint
 }
@@ -36,7 +36,7 @@ type LoopAgent struct {
 // NewLoopAgent creates a LoopAgent.
 // If maxIterations == 0, it runs indefinitely or until any subagent escalates.
 func NewLoopAgent(name string, maxIterations uint, opts ...AgentOption) (*LoopAgent, error) {
-	agentSpec := &adk.AgentSpec{Name: name}
+	agentSpec := &types.AgentSpec{Name: name}
 
 	a := &LoopAgent{
 		maxIterations: maxIterations,
@@ -59,14 +59,14 @@ func NewLoopAgent(name string, maxIterations uint, opts ...AgentOption) (*LoopAg
 	return a, nil
 }
 
-func (a *LoopAgent) Spec() *adk.AgentSpec {
+func (a *LoopAgent) Spec() *types.AgentSpec {
 	return a.agentSpec
 }
 
-func (a *LoopAgent) Run(ctx context.Context, ictx *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
+func (a *LoopAgent) Run(ctx context.Context, ictx *types.InvocationContext) iter.Seq2[*types.Event, error] {
 	count := a.maxIterations
 
-	return func(yield func(*adk.Event, error) bool) {
+	return func(yield func(*types.Event, error) bool) {
 		for {
 			for _, subAgent := range ictx.Agent.Spec().SubAgents {
 				for event, err := range subAgent.Run(ctx, ictx) {
@@ -90,4 +90,4 @@ func (a *LoopAgent) Run(ctx context.Context, ictx *adk.InvocationContext) iter.S
 	}
 }
 
-var _ adk.Agent = (*LoopAgent)(nil)
+var _ types.Agent = (*LoopAgent)(nil)

@@ -20,34 +20,35 @@ import (
 	"iter"
 	"testing"
 
-	"github.com/google/adk-go"
-	"github.com/google/adk-go/agent"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/types"
+
 	"google.golang.org/genai"
 )
 
 func TestNewLoopAgent(t *testing.T) {
 	type args struct {
 		maxIterations uint
-		subAgents     []adk.Agent
+		subAgents     []types.Agent
 	}
 
 	tests := []struct {
 		name       string
 		args       args
-		wantEvents []*adk.Event
+		wantEvents []*types.Event
 		wantErr    bool
 	}{
 		{
 			name: "infinite loop",
 			args: args{
 				maxIterations: 0,
-				subAgents:     []adk.Agent{newCustomAgent(0)},
+				subAgents:     []types.Agent{newCustomAgent(0)},
 			},
-			wantEvents: []*adk.Event{
+			wantEvents: []*types.Event{
 				{
 					Author: "custom_agent_0",
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 0"),
@@ -62,12 +63,12 @@ func TestNewLoopAgent(t *testing.T) {
 			name: "loop agent with max iterations",
 			args: args{
 				maxIterations: 1,
-				subAgents:     []adk.Agent{newCustomAgent(0)},
+				subAgents:     []types.Agent{newCustomAgent(0)},
 			},
-			wantEvents: []*adk.Event{
+			wantEvents: []*types.Event{
 				{
 					Author: "custom_agent_0",
-					LLMResponse: &adk.LLMResponse{
+					LLMResponse: &types.LLMResponse{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 0"),
@@ -87,7 +88,7 @@ func TestNewLoopAgent(t *testing.T) {
 				return
 			}
 
-			var gotEvents []*adk.Event
+			var gotEvents []*types.Event
 
 			for event, err := range newTestAgentRunner(t, agent).Run(t, "session_id", "user input") {
 				if err != nil {
@@ -118,7 +119,7 @@ func TestNewLoopAgent(t *testing.T) {
 func newCustomAgent(id int) *customAgent {
 	return &customAgent{
 		id: id,
-		spec: &adk.AgentSpec{
+		spec: &types.AgentSpec{
 			Name: fmt.Sprintf("custom_agent_%v", id),
 		},
 	}
@@ -127,19 +128,19 @@ func newCustomAgent(id int) *customAgent {
 // TODO: create test util allowing to create custom agents, agent trees for
 type customAgent struct {
 	id          int
-	spec        *adk.AgentSpec
+	spec        *types.AgentSpec
 	callCounter int
 }
 
-func (a *customAgent) Spec() *adk.AgentSpec { return a.spec }
+func (a *customAgent) Spec() *types.AgentSpec { return a.spec }
 
-func (a *customAgent) Run(context.Context, *adk.InvocationContext) iter.Seq2[*adk.Event, error] {
-	return func(yield func(*adk.Event, error) bool) {
+func (a *customAgent) Run(context.Context, *types.InvocationContext) iter.Seq2[*types.Event, error] {
+	return func(yield func(*types.Event, error) bool) {
 		a.callCounter++
 
-		yield(&adk.Event{
+		yield(&types.Event{
 			Author: a.spec.Name,
-			LLMResponse: &adk.LLMResponse{
+			LLMResponse: &types.LLMResponse{
 				Content: genai.NewContentFromText(fmt.Sprintf("hello %v", a.id), genai.RoleModel),
 			},
 		}, nil)
