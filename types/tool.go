@@ -16,6 +16,8 @@ package types
 
 import (
 	"context"
+	"errors"
+	"fmt"
 )
 
 // ToolContext is the tool invocation context.
@@ -31,6 +33,31 @@ type ToolContext struct {
 
 	// The event actions of the current tool call.
 	EventActions *EventActions
+}
+
+// ListArtifacts lists the filenames of the artifacts attached to the current session.
+func (tc *ToolContext) ListArtifacts() ([]string, error) {
+	if tc.InvocationContext == nil {
+		return nil, errors.New("invocation context is not initialized")
+	}
+
+	if tc.InvocationContext.ArtifactService == nil {
+		return nil, errors.New("artifact service is not initialized")
+	}
+
+	artifacts, err := tc.InvocationContext.ArtifactService.List(
+		context.Background(),
+		&ArtifactListRequest{
+			AppName:   tc.InvocationContext.Session.AppName,
+			UserID:    tc.InvocationContext.Session.UserID,
+			SessionID: tc.InvocationContext.Session.ID,
+		})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to list artifacts: %w", err)
+	}
+
+	return artifacts.FileNames, nil
 }
 
 // Tool is the ADK tool interface.
