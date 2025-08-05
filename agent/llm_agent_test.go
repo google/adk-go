@@ -79,7 +79,7 @@ func TestLLMAgent(t *testing.T) {
 				}
 			*/
 			// TODO: set tools, planner.
-			ctx, invCtx := types.NewInvocationContext(t.Context(), a, nil, nil, nil, nil)
+			ctx, invCtx := types.NewInvocationContext(t.Context(), a, nil, nil, nil, nil, nil)
 			stream := a.Run(ctx, invCtx)
 			texts, err := collectTextParts(stream)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
@@ -275,7 +275,7 @@ func TestModelCallbacks(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewLLMAgent failed: %v", err)
 			}
-			ctx, invCtx := types.NewInvocationContext(t.Context(), a, nil, nil, nil, nil)
+			ctx, invCtx := types.NewInvocationContext(t.Context(), a, nil, nil, nil, nil, nil)
 			stream := a.Run(ctx, invCtx)
 			texts, err := collectTextParts(stream)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {

@@ -45,7 +45,7 @@ func TestNewInvocationContext_End(t *testing.T) {
 	}
 	agent := &testAgent{run: waitForCancel}
 
-	ctx, ic := types.NewInvocationContext(ctx, agent, nil, nil, nil, nil)
+	ctx, ic := types.NewInvocationContext(ctx, agent, nil, nil, nil, nil, nil)
 	// schedule cancellation to happen after the agent starts running.
 	go func() { ic.End(errors.New("end")) }()
 

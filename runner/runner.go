@@ -100,7 +100,7 @@ func (r *Runner) newInvocationContext(ctx context.Context, session *types.Sessio
 		}
 	}
 
-	ctx, ictx := types.NewInvocationContext(ctx, agent, r.SessionService, session, runConfig, msg)
+	ctx, ictx := types.NewInvocationContext(ctx, agent, r.SessionService, nil, session, runConfig, msg)
 	return ctx, ictx, nil
 }
 

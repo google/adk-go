@@ -89,8 +89,8 @@ type InvocationContext struct {
 	// The current session of this invocation context. Readonly.
 	Session *Session
 
-	SessionService SessionService
-	// TODO(jbd): ArtifactService
+	SessionService  SessionService
+	ArtifactService ArtifactService
 	// TODO(jbd): TranscriptionCache
 
 	cancel context.CancelCauseFunc
@@ -98,16 +98,17 @@ type InvocationContext struct {
 
 // NewInvocationContext creates a new invocation context for the given agent
 // and returns context.Context that is bound to the invocation context.
-func NewInvocationContext(ctx context.Context, agent Agent, sessionService SessionService, session *Session, runCfg *AgentRunConfig, userContent *genai.Content) (context.Context, *InvocationContext) {
+func NewInvocationContext(ctx context.Context, agent Agent, sessionService SessionService, artifactService ArtifactService, session *Session, runCfg *AgentRunConfig, userContent *genai.Content) (context.Context, *InvocationContext) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	return ctx, &InvocationContext{
-		InvocationID:   "e-" + uuid.NewString(),
-		Agent:          agent,
-		cancel:         cancel,
-		SessionService: sessionService,
-		Session:        session,
-		RunConfig:      runCfg,
-		UserContent:    userContent,
+		InvocationID:    "e-" + uuid.NewString(),
+		Agent:           agent,
+		cancel:          cancel,
+		SessionService:  sessionService,
+		ArtifactService: artifactService,
+		Session:         session,
+		RunConfig:       runCfg,
+		UserContent:     userContent,
 	}
 }
 
