@@ -20,11 +20,75 @@ import (
 	"iter"
 	"slices"
 	"sync"
+	"time"
 
+	"google.golang.org/adk/llm"
 	"google.golang.org/adk/types"
 	"rsc.io/omap"
 	"rsc.io/ordered"
 )
+
+type Session interface {
+	ID() ID
+	State() State
+	Events() Events
+	Updated() time.Time
+}
+
+type ID struct {
+	AppName   string
+	UserID    string
+	SessionID string
+}
+
+type State interface {
+	Get(string) any
+	Set(string, any)
+	All() iter.Seq2[string, any]
+}
+
+// TODO: It is provided for use by SessionService, and perhaps it should move there.
+type ReadOnlyState interface {
+	Get(string) any
+	All() iter.Seq2[string, any]
+}
+
+type Events interface {
+	All() iter.Seq[*Event]
+	Len() int
+	At(i int) *Event
+}
+
+// TODO: Clarify what fields should be set when Event is created/processed.
+// TODO: Verify if we can hide Event completely; how Agents work with events.
+// TODO: Potentially expose as user-visible event or layer.
+type Event struct {
+	// Set by storage
+	ID   string
+	Time time.Time
+
+	// Set by agent.Context implementation.
+	InvocationID string
+	Branch       string
+	Author       string
+
+	Partial            bool
+	Actions            Actions
+	LongRunningToolIDs []string
+	LLMResponse        *llm.Response
+}
+
+func (e *Event) Clone() *Event
+
+type Actions struct {
+	// Set by agent.Context implementation.
+	StateDelta map[string]any
+
+	// Set by clients?
+	SkipSummarization bool
+	TransferToAgent   string
+	Escalate          bool
+}
 
 // InMemorySessionService is an in-memory implementation of types.SessionService.
 // It is primarily for testing and demonstration purposes.
