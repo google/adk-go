@@ -131,6 +131,8 @@ func TestRunAgent(t *testing.T) {
 }
 
 // creates agentTree for tests and returns references to the agents
+//
+//nolint:unused
 func agentTree(t *testing.T) agentTreeStruct {
 	t.Helper()
 
@@ -149,10 +151,12 @@ func agentTree(t *testing.T) agentTreeStruct {
 	}
 }
 
+//nolint:unused
 type agentTreeStruct struct {
 	root, noTransferAgent, allowsTransferAgent types.Agent
 }
 
+//nolint:unused
 func must[T types.Agent](a T, err error) T {
 	if err != nil {
 		panic(err)

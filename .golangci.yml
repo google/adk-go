@@ -9,6 +9,7 @@ linters:
     - goheader
   
   settings:
+    
     goheader:
       values:
         const:
@@ -27,10 +28,26 @@ linters:
         WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
         See the License for the specific language governing permissions and
         limitations under the License.
+    
+    staticcheck:
+      checks:
+        # The default config:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016 
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        # Changes to the default config:
+        - -QF1001 # Exclude "Apply De Morgan's law"
+        - -QF1008 # Exclude "Omit embedded fields from selector expression"
   
   exclusions:
     rules:
       - path: 'internal/httprr/.*'
         linters:
           - goheader
+          - errcheck
+          - staticcheck
 

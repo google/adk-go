@@ -25,7 +25,7 @@ func TestRootAgent(t *testing.T) {
 		types.Model
 	}{}
 
-	nonLLM := newMockAgent("mock")
+	nonLLM := newMockAgent(t, "mock")
 	b := must(NewLLMAgent("b", model, WithSubAgents(nonLLM)))
 	a := must(NewLLMAgent("a", model, WithSubAgents(b)))
 	root := must(NewLLMAgent("root", model, WithSubAgents(a)))

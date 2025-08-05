@@ -176,7 +176,9 @@ func NewLLMAgent(name string, model types.Model, opts ...AgentOption) (*LLMAgent
 		}
 	}
 	// fully initialize agentSpec.
-	agentSpec.Init(a)
+	if err := agentSpec.Init(a); err != nil {
+		return nil, err
+	}
 
 	// apply Options that are llmOptions.
 	for _, o := range opts {

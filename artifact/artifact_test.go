@@ -34,7 +34,7 @@ func TestArtifactKey(t *testing.T) {
 		Version:   123,
 	}
 	var key2 artifactKey
-	key2.Decode(key.Encode())
+	_ = key2.Decode(key.Encode())
 	if diff := cmp.Diff(key, key2); diff != "" {
 		t.Errorf("key mismatch (-want +got):\n%s", diff)
 	}
