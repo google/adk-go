@@ -26,11 +26,13 @@ type Agent interface {
 	Name() string
 	Description() string
 	// TODO: verify if the interface would have "Run(Context) error" and agent will call agent.Context.Report(Event)
-	Run(Context) iter.Seq2[session.Event, error]
+	Run(Context) iter.Seq2[*session.Event, error]
 	Parent() Agent
 	SubAgents() []Agent
 	// TODO: verify if we should add unexported methods to ensure only this package can implement this interface.
 	// TODO: maybe opact struct?
+
+	setParent(parent Agent)
 }
 
 type Builder struct {
@@ -40,12 +42,12 @@ type Builder struct {
 
 	BeforeAgent []Callback
 	// TODO: verify if the interface would have "Run(Context) error" and agent will call agent.Context.Report(Event)
-	Run        func(Context) iter.Seq2[session.Event, error]
+	Run        func(Context) iter.Seq2[*session.Event, error]
 	AfterAgent []Callback
 }
 
 func (b Builder) Agent() Agent {
-	return &agent{
+	a := &agent{
 		name:        b.Name,
 		description: b.Description,
 		subAgents:   b.SubAgents,
@@ -53,6 +55,12 @@ func (b Builder) Agent() Agent {
 		run:         b.Run,
 		afterAgent:  b.AfterAgent,
 	}
+
+	for _, sub := range b.SubAgents {
+		sub.setParent(a)
+	}
+
+	return a
 }
 
 type Context interface {
@@ -66,7 +74,7 @@ type Context interface {
 	Session() session.Session
 	Artifacts() Artifacts
 
-	Report(session.Event)
+	Report(*session.Event)
 
 	End()
 	Ended() bool
@@ -87,7 +95,7 @@ type agent struct {
 	parent Agent
 
 	beforeAgent []Callback
-	run         func(Context) iter.Seq2[session.Event, error]
+	run         func(Context) iter.Seq2[*session.Event, error]
 	afterAgent  []Callback
 }
 
@@ -107,14 +115,12 @@ func (a *agent) SubAgents() []Agent {
 	return a.subAgents
 }
 
-func (a *agent) Run(ctx Context) iter.Seq2[session.Event, error] {
-	return func(yield func(session.Event, error) bool) {
-		for event, err := range a.run(ctx) {
-			if !yield(event, err) {
-				return
-			}
-		}
-	}
+func (a *agent) Run(ctx Context) iter.Seq2[*session.Event, error] {
+	return a.run(ctx)
+}
+
+func (a *agent) setParent(parent Agent) {
+	a.parent = parent
 }
 
 var _ Agent = (*agent)(nil)

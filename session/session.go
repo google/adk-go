@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/types"
 	"rsc.io/omap"
@@ -78,7 +79,16 @@ type Event struct {
 	LLMResponse        *llm.Response
 }
 
-func (e *Event) Clone() *Event
+// NewEvent creates a new event.
+func NewEvent(invocationID string) *Event {
+	return &Event{
+		ID:           uuid.NewString(),
+		InvocationID: invocationID,
+		Time:         time.Now(),
+	}
+}
+
+func (e *Event) Clone() *Event { return nil }
 
 type Actions struct {
 	// Set by agent.Context implementation.

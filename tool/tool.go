@@ -35,4 +35,4 @@ type Context interface {
 // TODO: implement
 type Set struct{}
 
-func NewSet(t ...Tool) Set
+func NewSet(t ...Tool) Set { return Set{} }
