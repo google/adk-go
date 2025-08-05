@@ -73,6 +73,7 @@ type Artifacts interface {
 	Save(name string, data genai.Part) error
 	Load(name string) (genai.Part, error)
 	LoadVersion(name string, version int) (genai.Part, error)
+	List() ([]string, error)
 }
 
 type BeforeAgentCallback func(Context) (*genai.Content, error)
