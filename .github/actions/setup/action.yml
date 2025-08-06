@@ -19,6 +19,8 @@ runs:
     - name: Load Go cache
       uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
       with:
-        path: ~/.cache/go-build
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
         key: ${{ runner.os }}-go-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
         restore-keys: ${{ runner.os }}-go-build-
