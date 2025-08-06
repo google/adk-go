@@ -29,6 +29,10 @@ type Service interface {
 	AppendEvent(context.Context, StoredSession, *session.Event) error
 }
 
+func Mem() Service {
+	return newInMemoryService()
+}
+
 type StoredSession interface {
 	ID() session.ID
 	State() session.ReadOnlyState
