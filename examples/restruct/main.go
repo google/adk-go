@@ -38,12 +38,17 @@ func main() {
 		panic(err)
 	}
 
-	runAgent(llmagent.Builder{
+	agent, err := llmagent.New(llmagent.Config{
 		Name:        "weather_time_agent",
 		Model:       model,
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
-	}.Agent())
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	runAgent(agent)
 }
 
 func runAgent(agent agent.Agent) {

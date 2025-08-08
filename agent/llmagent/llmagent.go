@@ -18,13 +18,34 @@ import (
 	"iter"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
-type Builder struct {
+func New(cfg Config) (agent.Agent, error) {
+	a := &llmAgent{
+		model:       cfg.Model,
+		instruction: cfg.Instruction,
+
+		State: llminternal.State{
+			DisallowTransferToParent: cfg.DisallowTransferToParent,
+		},
+	}
+
+	return agent.New(agent.Config{
+		Name:        cfg.Name,
+		Description: cfg.Description,
+		SubAgents:   cfg.SubAgents,
+		BeforeAgent: cfg.BeforeAgent,
+		Run:         a.Run,
+		AfterAgent:  cfg.AfterAgent,
+	})
+}
+
+type Config struct {
 	Name        string
 	Description string
 	SubAgents   []agent.Agent
@@ -55,25 +76,10 @@ type BeforeModelCallback func(ctx agent.Context, llmRequest *llm.Request) (*llm.
 
 type AfterModelCallback func(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error)
 
-func (b Builder) Agent() agent.Agent {
-	llmAgent := &llmAgent{
-		model:       b.Model,
-		instruction: b.Instruction,
-	}
-
-	a := agent.Builder{
-		Name:        b.Name,
-		Description: b.Description,
-		SubAgents:   b.SubAgents,
-		BeforeAgent: b.BeforeAgent,
-		AfterAgent:  b.AfterAgent,
-		Run:         llmAgent.Run,
-	}.Agent()
-
-	return a
-}
-
 type llmAgent struct {
+	agent.Agent
+	llminternal.State
+
 	model       llm.Model
 	instruction string
 }

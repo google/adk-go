@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"iter"
 
 	"google.golang.org/adk/session"
@@ -32,10 +33,33 @@ type Agent interface {
 	// TODO: verify if we should add unexported methods to ensure only this package can implement this interface.
 	// TODO: maybe opact struct?
 
-	setParent(parent Agent)
+	internal() *agent
 }
 
-type Builder struct {
+func New(cfg Config) (Agent, error) {
+	a := &agent{
+		name:        cfg.Name,
+		description: cfg.Description,
+		subAgents:   cfg.SubAgents,
+		beforeAgent: cfg.BeforeAgent,
+		run:         cfg.Run,
+		afterAgent:  cfg.AfterAgent,
+	}
+
+	for _, subAgent := range cfg.SubAgents {
+		sa := subAgent.internal()
+
+		if sa.parent != nil {
+			return nil, fmt.Errorf("subAgent %v already has a parent %v", subAgent.Name(), sa.parent.Name())
+		}
+
+		sa.parent = a
+	}
+
+	return a, nil
+}
+
+type Config struct {
 	Name        string
 	Description string
 	SubAgents   []Agent
@@ -44,23 +68,6 @@ type Builder struct {
 	// TODO: verify if the interface would have "Run(Context) error" and agent will call agent.Context.Report(Event)
 	Run        func(Context) iter.Seq2[*session.Event, error]
 	AfterAgent []Callback
-}
-
-func (b Builder) Agent() Agent {
-	a := &agent{
-		name:        b.Name,
-		description: b.Description,
-		subAgents:   b.SubAgents,
-		beforeAgent: b.BeforeAgent,
-		run:         b.Run,
-		afterAgent:  b.AfterAgent,
-	}
-
-	for _, sub := range b.SubAgents {
-		sub.setParent(a)
-	}
-
-	return a
 }
 
 type Context interface {
@@ -119,8 +126,8 @@ func (a *agent) Run(ctx Context) iter.Seq2[*session.Event, error] {
 	return a.run(ctx)
 }
 
-func (a *agent) setParent(parent Agent) {
-	a.parent = parent
+func (a *agent) internal() *agent {
+	return a
 }
 
 var _ Agent = (*agent)(nil)
