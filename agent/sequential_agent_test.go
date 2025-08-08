@@ -19,6 +19,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
@@ -32,7 +34,7 @@ func TestNewSequentialAgent(t *testing.T) {
 	tests := []struct {
 		name       string
 		args       args
-		wantEvents []*types.Event
+		wantEvents []*session.Event
 		wantErr    bool
 	}{
 		{
@@ -41,10 +43,10 @@ func TestNewSequentialAgent(t *testing.T) {
 				maxIterations: 0,
 				subAgents:     []types.Agent{newCustomAgent(0), newCustomAgent(1)},
 			},
-			wantEvents: []*types.Event{
+			wantEvents: []*session.Event{
 				{
 					Author: "custom_agent_0",
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 0"),
@@ -55,7 +57,7 @@ func TestNewSequentialAgent(t *testing.T) {
 				},
 				{
 					Author: "custom_agent_1",
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 1"),
@@ -75,7 +77,7 @@ func TestNewSequentialAgent(t *testing.T) {
 				return
 			}
 
-			var gotEvents []*types.Event
+			var gotEvents []*session.Event
 
 			for event, err := range newTestAgentRunner(t, agent).Run(t, "session_id", "user input") {
 				if err != nil {

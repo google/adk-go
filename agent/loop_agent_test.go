@@ -22,6 +22,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/types"
 
 	"google.golang.org/genai"
@@ -36,7 +38,7 @@ func TestNewLoopAgent(t *testing.T) {
 	tests := []struct {
 		name       string
 		args       args
-		wantEvents []*types.Event
+		wantEvents []*session.Event
 		wantErr    bool
 	}{
 		{
@@ -45,10 +47,10 @@ func TestNewLoopAgent(t *testing.T) {
 				maxIterations: 0,
 				subAgents:     []types.Agent{newCustomAgent(0)},
 			},
-			wantEvents: []*types.Event{
+			wantEvents: []*session.Event{
 				{
 					Author: "custom_agent_0",
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 0"),
@@ -65,10 +67,10 @@ func TestNewLoopAgent(t *testing.T) {
 				maxIterations: 1,
 				subAgents:     []types.Agent{newCustomAgent(0)},
 			},
-			wantEvents: []*types.Event{
+			wantEvents: []*session.Event{
 				{
 					Author: "custom_agent_0",
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 0"),
@@ -88,7 +90,7 @@ func TestNewLoopAgent(t *testing.T) {
 				return
 			}
 
-			var gotEvents []*types.Event
+			var gotEvents []*session.Event
 
 			for event, err := range newTestAgentRunner(t, agent).Run(t, "session_id", "user input") {
 				if err != nil {

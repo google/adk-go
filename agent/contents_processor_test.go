@@ -15,10 +15,14 @@
 package agent
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
@@ -29,66 +33,67 @@ type model struct {
 
 // Test behavior around Agent's IncludeContents.
 func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
+	ctx := context.Background()
 	const agentName = "testAgent"
 	model := &model{}
 
-	emptyEvent := []*types.Event{}
-	helloAndGoodBye := []*types.Event{
+	emptyEvent := []*session.Event{}
+	helloAndGoodBye := []*session.Event{
 		{
 			Author: "user", // Not in the current turn in multi-agent scenario. See buildContentsCurrentTurnContextOnly.
-			LLMResponse: &types.LLMResponse{
+			LLMResponse: &llm.Response{
 				Content: genai.NewContentFromText("hello", "user"),
 			},
 		},
 		{
 			Author: "user",
-			LLMResponse: &types.LLMResponse{
+			LLMResponse: &llm.Response{
 				Content: genai.NewContentFromText("good bye", "user"),
 			},
 		},
 	}
-	agentTransfer := []*types.Event{
+	agentTransfer := []*session.Event{
 		{
 			Author: "anotherAgent", // History.
-			LLMResponse: &types.LLMResponse{
+			LLMResponse: &llm.Response{
 				Content: genai.NewContentFromFunctionCall("func1", nil, "model"),
 			},
 		},
 		{
 			Author: "anotherAgent",
-			LLMResponse: &types.LLMResponse{
+			LLMResponse: &llm.Response{
 				Content: genai.NewContentFromFunctionResponse("func1", nil, "user"),
 			},
 		},
 		{
 			Author: "anotherAgent", // Beginning of the current turn started by another agent.
-			LLMResponse: &types.LLMResponse{
+			LLMResponse: &llm.Response{
 				Content: genai.NewContentFromText("transfer to testAgent", "model"),
 			},
 		},
 		{
 			Author: agentName, // See python flows/llm_flows/base_llm_flow.py BaseLlmFlow._run_one_step_async.
-			LLMResponse: &types.LLMResponse{
+			LLMResponse: &llm.Response{
 				Content: genai.NewContentFromFunctionCall("func1", nil, "model"),
 			},
 		},
 	}
-	robot := []*types.Event{
+	robot := []*session.Event{
 		{
 			Author: agentName,
-			LLMResponse: &types.LLMResponse{
+			LLMResponse: &llm.Response{
 				Content: genai.NewContentFromText("do func1", "user"),
 			},
 		},
 		{
 			Author: agentName,
-			LLMResponse: &types.LLMResponse{
+			LLMResponse: &llm.Response{
 				Content: genai.NewContentFromFunctionCall("func1", nil, "model"),
 			},
 		},
 		{
 			Author: agentName,
-			LLMResponse: &types.LLMResponse{
+			LLMResponse: &llm.Response{
 				Content: genai.NewContentFromFunctionResponse("func1", nil, "user"),
 			},
 		},
@@ -98,7 +103,7 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	testCases := []struct {
 		name            string
 		includeContents string
-		events          []*types.Event
+		events          []*session.Event
 		want            []*genai.Content
 	}{
 		{
@@ -211,7 +216,11 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 			invCtx := &types.InvocationContext{
 				InvocationID: "12345",
 				Agent:        agent,
-				Session:      &types.Session{Events: tc.events},
+				Session: createSession(t, ctx, session.ID{
+					AppName:   "appName",
+					UserID:    "userID",
+					SessionID: "sessionID",
+				}, tc.events),
 			}
 
 			req := &types.LLMRequest{Model: model}
@@ -227,6 +236,8 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 }
 
 func TestContentsRequestProcessor(t *testing.T) {
+	ctx := context.Background()
+
 	const agentName = "testAgent"
 	model := &model{}
 
@@ -234,7 +245,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 	testCases := []struct {
 		name   string
 		branch string
-		events []*types.Event
+		events []*session.Event
 		want   []*genai.Content
 	}{
 		{
@@ -244,21 +255,21 @@ func TestContentsRequestProcessor(t *testing.T) {
 		},
 		{
 			name:   "EmptyEvents",
-			events: []*types.Event{},
+			events: []*session.Event{},
 			want:   nil,
 		},
 		{
 			name: "UserAndAgentEvents",
-			events: []*types.Event{
+			events: []*session.Event{
 				{
 					Author: "user",
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: genai.NewContentFromText("Hello", "user"),
 					},
 				},
 				{
 					Author: "testAgent",
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: genai.NewContentFromText("Hi there", "model"),
 					},
 				},
@@ -270,10 +281,10 @@ func TestContentsRequestProcessor(t *testing.T) {
 		},
 		{
 			name: "anotherAgentEvent",
-			events: []*types.Event{
+			events: []*session.Event{
 				{
 					Author: "anotherAgent",
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: genai.NewContentFromText("Foreign message", "model"),
 					},
 				},
@@ -291,32 +302,32 @@ func TestContentsRequestProcessor(t *testing.T) {
 		{
 			name:   "FilterByBranch",
 			branch: "branch1",
-			events: []*types.Event{
+			events: []*session.Event{
 				{
 					Author: "user",
 					Branch: "branch1",
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: genai.NewContentFromText("In branch 1", "user"),
 					},
 				},
 				{
 					Author: "user",
 					Branch: "branch1.task1",
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: genai.NewContentFromText("In branch 1 and task 1", "user"),
 					},
 				},
 				{
 					Author: "user",
 					Branch: "branch12",
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: genai.NewContentFromText("In branch 12", "user"),
 					},
 				},
 				{
 					Author: "user",
 					Branch: "branch2",
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: genai.NewContentFromText("In branch 2", "user"),
 					},
 				},
@@ -328,10 +339,10 @@ func TestContentsRequestProcessor(t *testing.T) {
 		},
 		{
 			name: "AuthEvent",
-			events: []*types.Event{
+			events: []*session.Event{
 				{
 					Author: agentName,
-					LLMResponse: &types.LLMResponse{
+					LLMResponse: &llm.Response{
 						Content: &genai.Content{
 							Role: "model",
 							Parts: []*genai.Part{
@@ -345,7 +356,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 		},
 		{
 			name: "EventWithoutContent",
-			events: []*types.Event{
+			events: []*session.Event{
 				{Author: "user"},
 			},
 			want: nil,
@@ -359,7 +370,11 @@ func TestContentsRequestProcessor(t *testing.T) {
 				InvocationID: "12345",
 				Agent:        agent,
 				Branch:       tc.branch,
-				Session:      &types.Session{Events: tc.events},
+				Session: createSession(t, ctx, session.ID{
+					AppName:   "appName",
+					UserID:    "userID",
+					SessionID: "sessionID",
+				}, tc.events),
 			}
 
 			req := &types.LLMRequest{Model: model}
@@ -480,14 +495,16 @@ func TestConvertForeignEvent(t *testing.T) {
 }
 
 func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
+	ctx := context.Background()
+
 	type customAgent struct {
 		types.Agent
 	}
 	agent := &customAgent{}
-	events := []*types.Event{
+	events := []*session.Event{
 		{
 			Author: "user",
-			LLMResponse: &types.LLMResponse{
+			LLMResponse: &llm.Response{
 				Content: genai.NewContentFromText("Hello", "user"),
 			},
 		},
@@ -495,7 +512,11 @@ func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 	invCtx := &types.InvocationContext{
 		InvocationID: "12345",
 		Agent:        agent,
-		Session:      &types.Session{Events: events},
+		Session: createSession(t, ctx, session.ID{
+			AppName:   "appName",
+			UserID:    "userID",
+			SessionID: "sessionID",
+		}, events),
 	}
 
 	req := &types.LLMRequest{}
@@ -507,4 +528,27 @@ func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("LLMRequest after contentRequestProcessor mismatch (-want +got):\n%s", diff)
 	}
+}
+
+func createSession(t *testing.T, ctx context.Context, id session.ID, events []*session.Event) sessionservice.StoredSession {
+	t.Helper()
+
+	service := sessionservice.Mem()
+
+	storedSession, err := service.Create(ctx, &sessionservice.CreateRequest{
+		AppName:   id.AppName,
+		UserID:    id.UserID,
+		SessionID: id.SessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, event := range events {
+		if err := service.AppendEvent(ctx, storedSession, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	return storedSession
 }

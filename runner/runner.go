@@ -23,11 +23,14 @@ import (
 
 	"google.golang.org/adk/agent"
 	internalRunner "google.golang.org/adk/internal/runner"
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
-func NewRunner(appName string, rootAgent types.Agent, sessionService types.SessionService) *Runner {
+func NewRunner(appName string, rootAgent types.Agent, sessionService sessionservice.Service) *Runner {
 	return &Runner{
 		AppName:        appName,
 		RootAgent:      rootAgent,
@@ -38,19 +41,21 @@ func NewRunner(appName string, rootAgent types.Agent, sessionService types.Sessi
 type Runner struct {
 	AppName        string
 	RootAgent      types.Agent
-	SessionService types.SessionService
+	SessionService sessionservice.Service
 }
 
 // Run runs the agent.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *types.AgentRunConfig) iter.Seq2[*types.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *types.AgentRunConfig) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
-	return func(yield func(*types.Event, error) bool) {
-		session, err := r.SessionService.Get(ctx, &types.SessionGetRequest{
-			AppName:   r.AppName,
-			UserID:    userID,
-			SessionID: sessionID,
+	return func(yield func(*session.Event, error) bool) {
+		session, err := r.SessionService.Get(ctx, &sessionservice.GetRequest{
+			ID: session.ID{
+				AppName:   r.AppName,
+				UserID:    userID,
+				SessionID: sessionID,
+			},
 		})
 		if err != nil {
 			yield(nil, err)
@@ -75,25 +80,27 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 
 		for event, err := range internalRunner.RunAgent(ctx, ictx, agentToRun) {
+			convertedEvent := event.AsSessionEvent()
+
 			// only commit non-partial event to a session service
 			if !(event.LLMResponse != nil && event.LLMResponse.Partial) {
 
 				// TODO: update session state & delta
 
-				if err := r.SessionService.AppendEvent(ctx, session, event); err != nil {
+				if err := r.SessionService.AppendEvent(ctx, session, convertedEvent); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return
 				}
 			}
 
-			if !yield(event, err) {
+			if !yield(convertedEvent, err) {
 				return
 			}
 		}
 	}
 }
 
-func (r *Runner) newInvocationContext(ctx context.Context, session *types.Session, agent types.Agent, runConfig *types.AgentRunConfig, msg *genai.Content) (context.Context, *types.InvocationContext, error) {
+func (r *Runner) newInvocationContext(ctx context.Context, session sessionservice.StoredSession, agent types.Agent, runConfig *types.AgentRunConfig, msg *genai.Content) (context.Context, *types.InvocationContext, error) {
 	if runConfig != nil && runConfig.SupportCFC {
 		if err := r.setupCFC(agent); err != nil {
 			return nil, nil, fmt.Errorf("failed to setup CFC: %w", err)
@@ -122,15 +129,15 @@ func (r *Runner) setupCFC(curAgent types.Agent) error {
 	return nil
 }
 
-func (r *Runner) appendMessageToSession(ctx context.Context, ictx *types.InvocationContext, session *types.Session, msg *genai.Content) error {
-	event := types.NewEvent(ictx.InvocationID)
+func (r *Runner) appendMessageToSession(ctx context.Context, ictx *types.InvocationContext, storedSession sessionservice.StoredSession, msg *genai.Content) error {
+	event := session.NewEvent(ictx.InvocationID)
 
 	event.Author = "user"
-	event.LLMResponse = &types.LLMResponse{
+	event.LLMResponse = &llm.Response{
 		Content: msg,
 	}
 
-	if err := r.SessionService.AppendEvent(ctx, session, event); err != nil {
+	if err := r.SessionService.AppendEvent(ctx, storedSession, event); err != nil {
 		return fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
 	return nil
@@ -138,9 +145,10 @@ func (r *Runner) appendMessageToSession(ctx context.Context, ictx *types.Invocat
 
 // findAgentToRun returns the agent that should handle the next request based on
 // session history.
-func (r *Runner) findAgentToRun(session *types.Session) (types.Agent, error) {
-	for i := len(session.Events) - 1; i >= 0; i-- {
-		event := session.Events[i]
+func (r *Runner) findAgentToRun(session sessionservice.StoredSession) (types.Agent, error) {
+	events := session.Events()
+	for i := events.Len() - 1; i >= 0; i-- {
+		event := events.At(i)
 
 		// TODO: findMatchingFunctionCall.
 

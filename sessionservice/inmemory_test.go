@@ -70,6 +70,8 @@ func Test_inMemoryService_Create(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			ctx := context.Background()
 
 			s := tt.inMemoryService
@@ -156,6 +158,8 @@ func Test_inMemoryService_Get(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			ctx := context.Background()
 
 			s := tt.inMemoryService
@@ -217,9 +221,20 @@ func Test_inMemoryService_List(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:            "empty list for non-existent user",
+			inMemoryService: serviceWithData(t),
+			req: &ListRequest{
+				AppName: "app1",
+				UserID:  "custom_user",
+			},
+			wantStoredSessions: nil,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			ctx := context.Background()
 
 			s := tt.inMemoryService
@@ -273,6 +288,8 @@ func Test_inMemoryService_Delete(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			ctx := context.Background()
 
 			s := tt.inMemoryService
@@ -318,9 +335,37 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:            "append event when session not found",
+			inMemoryService: serviceWithData(t),
+			session: &storedSession{
+				id: session.ID{
+					AppName:   "app1",
+					UserID:    "user1",
+					SessionID: "custom_session",
+				},
+			},
+			event: &session.Event{
+				ID: "new_event",
+			},
+			wantStoredSession: &storedSession{
+				id: session.ID{
+					AppName:   "app1",
+					UserID:    "user1",
+					SessionID: "custom_session",
+				},
+				events: []*session.Event{
+					{
+						ID: "new_event",
+					},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			ctx := context.Background()
 
 			s := tt.inMemoryService
@@ -337,12 +382,8 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 			got, err := s.Get(ctx, &GetRequest{
 				ID: tt.session.ID(),
 			})
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("inMemoryService.Get() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
 			if err != nil {
+				t.Fatalf("inMemoryService.Get() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -351,7 +392,6 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 				cmpopts.IgnoreFields(storedSession{}, "mu")); diff != "" {
 				t.Errorf("Create session mismatch: (-want +got):\n%s", diff)
 			}
-
 		})
 	}
 }
@@ -370,6 +410,16 @@ func serviceWithData(t *testing.T) *inMemoryService {
 			},
 			state: map[string]any{
 				"k1": "v1",
+			},
+		},
+		{
+			id: session.ID{
+				AppName:   "app1",
+				UserID:    "user2",
+				SessionID: "session1",
+			},
+			state: map[string]any{
+				"k1": "v2",
 			},
 		},
 		{

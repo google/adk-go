@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
@@ -27,54 +29,56 @@ import (
 func TestRunner_findAgentToRun(t *testing.T) {
 	t.Parallel()
 
+	ctx := context.Background()
+
+	sessionID := session.ID{
+		AppName:   "test",
+		UserID:    "userID",
+		SessionID: "sessionID",
+	}
+
 	agentTree := agentTree(t)
 
 	tests := []struct {
 		name      string
 		rootAgent types.Agent
-		session   *types.Session
+		session   sessionservice.StoredSession
 		wantAgent types.Agent
 		wantErr   bool
 	}{
 		{
 			name: "last event from agent allowing transfer",
-			session: &types.Session{
-				Events: []*types.Event{
-					{
-						Author: "allows_transfer_agent",
-					},
-					{
-						Author: "user",
-					},
+			session: createSession(t, ctx, sessionID, []*session.Event{
+				{
+					Author: "allows_transfer_agent",
 				},
-			},
+				{
+					Author: "user",
+				},
+			}),
 			rootAgent: agentTree.root,
 			wantAgent: agentTree.allowsTransferAgent,
 		},
 		{
 			name: "last event from agent not allowing transfer",
-			session: &types.Session{
-				Events: []*types.Event{
-					{
-						Author: "no_transfer_agent",
-					},
-					{
-						Author: "user",
-					},
+			session: createSession(t, ctx, sessionID, []*session.Event{
+				{
+					Author: "no_transfer_agent",
 				},
-			},
+				{
+					Author: "user",
+				},
+			}),
 			rootAgent: agentTree.root,
 			wantAgent: agentTree.root,
 		},
 		{
 			name: "no events from agents, call root",
-			session: &types.Session{
-				Events: []*types.Event{
-					{
-						Author: "user",
-					},
+			session: createSession(t, ctx, sessionID, []*session.Event{
+				{
+					Author: "user",
 				},
-			},
+			}),
 			rootAgent: agentTree.root,
 			wantAgent: agentTree.root,
 		},
@@ -221,4 +225,27 @@ func (a *customAgent) Run(context.Context, *types.InvocationContext) iter.Seq2[*
 			},
 		}, nil)
 	}
+}
+
+func createSession(t *testing.T, ctx context.Context, id session.ID, events []*session.Event) sessionservice.StoredSession {
+	t.Helper()
+
+	service := sessionservice.Mem()
+
+	storedSession, err := service.Create(ctx, &sessionservice.CreateRequest{
+		AppName:   id.AppName,
+		UserID:    id.UserID,
+		SessionID: id.SessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, event := range events {
+		if err := service.AppendEvent(ctx, storedSession, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	return storedSession
 }

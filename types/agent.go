@@ -20,6 +20,7 @@ import (
 	"iter"
 
 	"github.com/google/uuid"
+	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
 )
 
@@ -87,9 +88,9 @@ type InvocationContext struct {
 	RunConfig *AgentRunConfig
 
 	// The current session of this invocation context. Readonly.
-	Session *Session
+	Session sessionservice.StoredSession
 
-	SessionService SessionService
+	SessionService sessionservice.Service
 	// TODO(jbd): ArtifactService
 	// TODO(jbd): TranscriptionCache
 
@@ -98,7 +99,7 @@ type InvocationContext struct {
 
 // NewInvocationContext creates a new invocation context for the given agent
 // and returns context.Context that is bound to the invocation context.
-func NewInvocationContext(ctx context.Context, agent Agent, sessionService SessionService, session *Session, runCfg *AgentRunConfig, userContent *genai.Content) (context.Context, *InvocationContext) {
+func NewInvocationContext(ctx context.Context, agent Agent, sessionService sessionservice.Service, session sessionservice.StoredSession, runCfg *AgentRunConfig, userContent *genai.Content) (context.Context, *InvocationContext) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	return ctx, &InvocationContext{
 		InvocationID:   "e-" + uuid.NewString(),

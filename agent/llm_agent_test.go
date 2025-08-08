@@ -30,6 +30,7 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/types"
 	"google.golang.org/genai"
@@ -326,7 +327,25 @@ func TestFunctionTool(t *testing.T) {
 
 	runner := newTestAgentRunner(t, agent)
 	stream := runner.Run(t, "session1", prompt)
-	ans, err := collectTextParts(stream)
+
+	// TODO: clean when types.Event is removed
+	transformEventsFunc := func(it iter.Seq2[*session.Event, error]) iter.Seq2[*types.Event, error] {
+		return func(yield func(*types.Event, error) bool) {
+			for event, err := range it {
+				if err != nil {
+					if !yield(nil, err) {
+						return
+					}
+				}
+
+				if !yield(types.NewEventFromSessionEvent(event), nil) {
+					return
+				}
+			}
+		}
+	}
+
+	ans, err := collectTextParts(transformEventsFunc(stream))
 	if err != nil || len(ans) == 0 {
 		t.Fatalf("agent returned (%v, %v), want result", ans, err)
 	}
@@ -374,7 +393,7 @@ func TestAgentTransfer(t *testing.T) {
 		Parts  []*genai.Part
 	}
 	// contents returns (Author, Parts) stream extracted from the event stream.
-	contents := func(stream iter.Seq2[*types.Event, error]) ([]content, error) {
+	contents := func(stream iter.Seq2[*session.Event, error]) ([]content, error) {
 		var ret []content
 		for ev, err := range stream {
 			if err != nil {
@@ -504,25 +523,27 @@ func TestAgentTransfer(t *testing.T) {
 // See adk-python's tests/unittests/testing_utils.py.
 type testAgentRunner struct {
 	agent          types.Agent
-	sessionService types.SessionService
-	lastSession    *types.Session
+	sessionService sessionservice.Service
+	lastSession    sessionservice.StoredSession
 	appName        string
 	// TODO: move runner definition to the adk package and it's a part of public api, but the logic to the internal runner
 	runner *runner.Runner
 }
 
-func (r *testAgentRunner) session(t *testing.T, appName, userID, sessionID string) (*types.Session, error) {
+func (r *testAgentRunner) session(t *testing.T, appName, userID, sessionID string) (sessionservice.StoredSession, error) {
 	ctx := t.Context()
-	if last := r.lastSession; last != nil && last.ID == sessionID {
-		session, err := r.sessionService.Get(ctx, &types.SessionGetRequest{
-			AppName:   "test_app",
-			UserID:    "test_user",
-			SessionID: sessionID,
+	if last := r.lastSession; last != nil && last.ID().SessionID == sessionID {
+		session, err := r.sessionService.Get(ctx, &sessionservice.GetRequest{
+			ID: session.ID{
+				AppName:   "test_app",
+				UserID:    "test_user",
+				SessionID: sessionID,
+			},
 		})
 		r.lastSession = session
 		return session, err
 	}
-	session, err := r.sessionService.Create(ctx, &types.SessionCreateRequest{
+	session, err := r.sessionService.Create(ctx, &sessionservice.CreateRequest{
 		AppName:   "test_app",
 		UserID:    "test_user",
 		SessionID: sessionID,
@@ -531,7 +552,7 @@ func (r *testAgentRunner) session(t *testing.T, appName, userID, sessionID strin
 	return session, err
 }
 
-func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.Seq2[*types.Event, error] {
+func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.Seq2[*session.Event, error] {
 	t.Helper()
 	ctx := t.Context()
 
@@ -542,12 +563,12 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 		t.Fatalf("failed to get/create session: %v", err)
 	}
 
-	return r.runner.Run(ctx, userID, session.ID, genai.NewContentFromText(newMessage, genai.RoleUser), &types.AgentRunConfig{})
+	return r.runner.Run(ctx, userID, session.ID().SessionID, genai.NewContentFromText(newMessage, genai.RoleUser), &types.AgentRunConfig{})
 }
 
 func newTestAgentRunner(_ *testing.T, agent types.Agent) *testAgentRunner {
 	appName := "test_app"
-	sessionService := &session.InMemorySessionService{}
+	sessionService := sessionservice.Mem()
 	return &testAgentRunner{
 		agent:          agent,
 		sessionService: sessionService,
