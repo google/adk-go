@@ -66,14 +66,18 @@ func main() {
 		Name:        "my_custom_agent",
 		Description: "A custom agent that responds with a greeting.",
 	}
-	myAgent.agentSpec.Init(myAgent)
+	if err := myAgent.agentSpec.Init(myAgent); err != nil {
+		panic(err)
+	}
 
 	myAgent2 := NewMyAgent(2)
 	myAgent2.agentSpec = &types.AgentSpec{
 		Name:        "my_custom_agent_2",
 		Description: "A custom agent that responds with a greeting.",
 	}
-	myAgent2.agentSpec.Init(myAgent2)
+	if err := myAgent2.agentSpec.Init(myAgent); err != nil {
+		panic(err)
+	}
 
 	loopAgent, err := agent.NewSequentialAgent("sequential_agent",
 		agent.WithDescription("A sequential agent that runs sub-agents"),

@@ -62,7 +62,9 @@ func main() {
 		Name:        "my_custom_agent",
 		Description: "A custom agent that responds with a greeting.",
 	}
-	myAgent.agentSpec.Init(myAgent)
+	if err := myAgent.agentSpec.Init(myAgent); err != nil {
+		panic(err)
+	}
 
 	loopAgent, err := agent.NewLoopAgent("loop_agent", 3,
 		agent.WithDescription("A loop agent that runs sub-agents"),
