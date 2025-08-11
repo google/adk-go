@@ -24,10 +24,7 @@ jobs:
       uses: ./.github/actions/setup
 
     - name: Tidy
-      run: |
-        go mod tidy
-        git diff --exit-code go.mod
-        git diff --exit-code go.sum
+      run: go mod tidy -diff
       
     - name: Build
       run:  go build -mod=readonly -v -trimpath ./...
