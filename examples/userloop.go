@@ -22,7 +22,7 @@ import (
 	"os"
 
 	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
@@ -30,9 +30,9 @@ import (
 func Run(ctx context.Context, rootAgent types.Agent) {
 	userID, appName := "test_user", "test_app"
 
-	sessionService := &session.InMemorySessionService{}
+	sessionService := sessionservice.Mem()
 
-	session, err := sessionService.Create(ctx, &types.SessionCreateRequest{
+	session, err := sessionService.Create(ctx, &sessionservice.CreateRequest{
 		AppName: appName,
 		UserID:  userID,
 	})
@@ -59,7 +59,7 @@ func Run(ctx context.Context, rootAgent types.Agent) {
 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
 		fmt.Print("\nAgent -> ")
-		for event, err := range runner.Run(ctx, userID, session.ID, userMsg, &types.AgentRunConfig{
+		for event, err := range runner.Run(ctx, userID, session.ID().SessionID, userMsg, &types.AgentRunConfig{
 			StreamingMode: types.StreamingModeSSE,
 		}) {
 			if err != nil {

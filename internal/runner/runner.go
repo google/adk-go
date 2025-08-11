@@ -19,6 +19,7 @@ import (
 	"iter"
 
 	"google.golang.org/adk/types"
+	"google.golang.org/genai"
 )
 
 // RunAgent is called by adk internally wrapping extra logic on top of agent's Run.
@@ -34,6 +35,10 @@ func RunAgent(ctx context.Context, ictx *types.InvocationContext, agent types.Ag
 		}
 
 		for event, err := range agent.Run(ctx, ictx) {
+			if event.Author == "" {
+				event.Author = getAuthorForEvent(ictx, event)
+			}
+
 			event = runAfterAgentCallbacks(ctx, callbackContext, event, agent)
 
 			if !yield(event, err) {
@@ -86,4 +91,12 @@ func runAfterAgentCallbacks(ctx context.Context, callbackContext *types.Callback
 	}
 
 	return event
+}
+
+func getAuthorForEvent(ictx *types.InvocationContext, event *types.Event) string {
+	if event.LLMResponse != nil && event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
+		return genai.RoleUser
+	}
+
+	return ictx.Agent.Spec().Name
 }

@@ -40,7 +40,9 @@ func contentsRequestProcessor(ctx context.Context, parentCtx *types.InvocationCo
 	}
 	var events []*types.Event
 	if parentCtx.Session != nil {
-		events = parentCtx.Session.Events
+		for e := range parentCtx.Session.Events().All() {
+			events = append(events, types.NewEventFromSessionEvent(e))
+		}
 	}
 	contents, err := fn(llmAgent.Spec().Name, parentCtx.Branch, events)
 	if err != nil {
