@@ -16,14 +16,12 @@ package runner
 
 import (
 	"context"
-	"iter"
 	"testing"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
-	"google.golang.org/adk/types"
-	"google.golang.org/genai"
 )
 
 func TestRunner_findAgentToRun(t *testing.T) {
@@ -41,9 +39,9 @@ func TestRunner_findAgentToRun(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		rootAgent types.Agent
+		rootAgent agent.Agent
 		session   sessionservice.StoredSession
-		wantAgent types.Agent
+		wantAgent agent.Agent
 		wantErr   bool
 	}{
 		{
@@ -95,7 +93,7 @@ func TestRunner_findAgentToRun(t *testing.T) {
 				return
 			}
 			if tt.wantAgent != gotAgent {
-				t.Errorf("Runner.findAgentToRun() = %+v, want %+v", gotAgent.Spec(), tt.wantAgent.Spec())
+				t.Errorf("Runner.findAgentToRun() = %+v, want %+v", gotAgent.Name(), tt.wantAgent.Name())
 			}
 		})
 	}
@@ -104,24 +102,26 @@ func TestRunner_findAgentToRun(t *testing.T) {
 func Test_findAgent(t *testing.T) {
 	agentTree := agentTree(t)
 
-	oneAgent := must(agent.NewLLMAgent("test", nil))
+	oneAgent := must(llmagent.New(llmagent.Config{
+		Name: "test",
+	}))
 
 	tests := []struct {
 		name      string
-		root      types.Agent
+		root      agent.Agent
 		target    string
-		wantAgent types.Agent
+		wantAgent agent.Agent
 	}{
 		{
 			name:      "ok",
 			root:      agentTree.root,
-			target:    agentTree.allowsTransferAgent.Spec().Name,
+			target:    agentTree.allowsTransferAgent.Name(),
 			wantAgent: agentTree.allowsTransferAgent,
 		},
 		{
 			name:      "finds in one node tree",
 			root:      oneAgent,
-			target:    oneAgent.Spec().Name,
+			target:    oneAgent.Name(),
 			wantAgent: oneAgent,
 		},
 		{
@@ -140,7 +140,7 @@ func Test_findAgent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if gotAgent := findAgent(tt.root, tt.target); gotAgent != tt.wantAgent {
-				t.Errorf("Runner.findAgent() = %+v, want %+v", gotAgent.Spec(), tt.wantAgent.Spec())
+				t.Errorf("Runner.findAgent() = %+v, want %+v", gotAgent.Name(), tt.wantAgent.Name())
 			}
 		})
 	}
@@ -149,23 +149,30 @@ func Test_findAgent(t *testing.T) {
 func Test_isTransferrableAcrossAgentTree(t *testing.T) {
 	tests := []struct {
 		name  string
-		agent types.Agent
+		agent agent.Agent
 		want  bool
 	}{
 		{
-			name:  "disallow for agent with DisallowTransferToParent",
-			agent: must(agent.NewLLMAgent("test", nil, agent.WithDisallowTransferToParent())),
-			want:  false,
+			name: "disallow for agent with DisallowTransferToParent",
+			agent: must(llmagent.New(llmagent.Config{
+				Name:                     "test",
+				DisallowTransferToParent: true,
+			})),
+			want: false,
 		},
 		{
-			name:  "disallow for non-LLM agent",
-			agent: &customAgent{},
-			want:  false,
+			name: "disallow for non-LLM agent",
+			agent: must(agent.New(agent.Config{
+				Name: "test",
+			})),
+			want: false,
 		},
 		{
-			name:  "allow for the default LLM agent",
-			agent: must(agent.NewLLMAgent("test", nil)),
-			want:  true,
+			name: "allow for the default LLM agent",
+			agent: must(llmagent.New(llmagent.Config{
+				Name: "test",
+			})),
+			want: true,
 		},
 	}
 	for _, tt := range tests {
@@ -181,13 +188,17 @@ func Test_isTransferrableAcrossAgentTree(t *testing.T) {
 func agentTree(t *testing.T) agentTreeStruct {
 	t.Helper()
 
-	sub1 := must(agent.NewLLMAgent("no_transfer_agent", nil, agent.WithDisallowTransferToParent()))
-	sub2 := must(agent.NewLLMAgent("allows_transfer_agent", nil))
-
-	parent, err := agent.NewLLMAgent("root", nil, agent.WithSubAgents(sub1, sub2))
-	if err != nil {
-		t.Fatal(err)
-	}
+	sub1 := must(llmagent.New(llmagent.Config{
+		Name:                     "no_transfer_agent",
+		DisallowTransferToParent: true,
+	}))
+	sub2 := must(llmagent.New(llmagent.Config{
+		Name: "allows_transfer_agent",
+	}))
+	parent := must(llmagent.New(llmagent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{sub1, sub2},
+	}))
 
 	return agentTreeStruct{
 		root:                parent,
@@ -197,34 +208,14 @@ func agentTree(t *testing.T) agentTreeStruct {
 }
 
 type agentTreeStruct struct {
-	root, noTransferAgent, allowsTransferAgent types.Agent
+	root, noTransferAgent, allowsTransferAgent agent.Agent
 }
 
-func must[T types.Agent](a T, err error) T {
+func must[T agent.Agent](a T, err error) T {
 	if err != nil {
 		panic(err)
 	}
 	return a
-}
-
-type customAgent struct {
-	spec *types.AgentSpec
-
-	callCounter int
-}
-
-func (a *customAgent) Spec() *types.AgentSpec { return a.spec }
-
-func (a *customAgent) Run(context.Context, *types.InvocationContext) iter.Seq2[*types.Event, error] {
-	return func(yield func(*types.Event, error) bool) {
-		a.callCounter++
-
-		yield(&types.Event{
-			LLMResponse: &types.LLMResponse{
-				Content: genai.NewContentFromText("hello", genai.RoleModel),
-			},
-		}, nil)
-	}
 }
 
 func createSession(t *testing.T, ctx context.Context, id session.ID, events []*session.Event) sessionservice.StoredSession {

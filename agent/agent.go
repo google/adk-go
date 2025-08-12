@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 
+	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -36,7 +37,7 @@ type Agent interface {
 	internal() *agent
 }
 
-func New(cfg Config) (Agent, error) {
+func New(cfg Config) (*agent, error) {
 	a := &agent{
 		name:        cfg.Name,
 		description: cfg.Description,
@@ -66,7 +67,8 @@ type Config struct {
 
 	BeforeAgent []Callback
 	// TODO: verify if the interface would have "Run(Context) error" and agent will call agent.Context.Report(Event)
-	Run        func(Context) iter.Seq2[*session.Event, error]
+	Run func(Context) iter.Seq2[*session.Event, error]
+	// TODO: after agent callback should take: ctx, actual_resp, actual_err. So the callback can inspect and decide what to return.
 	AfterAgent []Callback
 }
 
@@ -76,7 +78,7 @@ type Context interface {
 	UserContent() *genai.Content
 	InvocationID() string
 	Branch() string
-	AgentName() string
+	Agent() Agent
 
 	Session() session.Session
 	Artifacts() Artifacts
@@ -123,7 +125,26 @@ func (a *agent) SubAgents() []Agent {
 }
 
 func (a *agent) Run(ctx Context) iter.Seq2[*session.Event, error] {
-	return a.run(ctx)
+	return func(yield func(*session.Event, error) bool) {
+		ctx := NewContext(ctx, a, ctx.UserContent())
+
+		event, err := runBeforeAgentCallbacks(ctx)
+		if event != nil || err != nil {
+			yield(event, err)
+			return
+		}
+
+		for event, err := range a.run(ctx) {
+			if event != nil && event.Author == "" {
+				event.Author = getAuthorForEvent(ctx, event)
+			}
+
+			event, err := runAfterAgentCallbacks(ctx, event, err)
+			if !yield(event, err) {
+				return
+			}
+		}
+	}
 }
 
 func (a *agent) internal() *agent {
@@ -131,3 +152,62 @@ func (a *agent) internal() *agent {
 }
 
 var _ Agent = (*agent)(nil)
+
+func getAuthorForEvent(ctx Context, event *session.Event) string {
+	if event.LLMResponse != nil && event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
+		return genai.RoleUser
+	}
+
+	return ctx.Agent().Name()
+}
+
+// runBeforeAgentCallbacks checks if any beforeAgentCallback returns non-nil content
+// then it skips agent run and returns callback result.
+func runBeforeAgentCallbacks(ctx Context) (*session.Event, error) {
+	agent := ctx.Agent()
+	for _, callback := range ctx.Agent().internal().beforeAgent {
+		content, err := callback(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to run before agent callback: %w", err)
+		}
+		if content == nil {
+			continue
+		}
+
+		event := session.NewEvent(ctx.InvocationID())
+		event.LLMResponse = &llm.Response{
+			Content: content,
+		}
+		event.Author = agent.Name()
+		event.Branch = ctx.Branch()
+		// TODO: how to set it. Should it be a part of Context?
+		// event.Actions = callbackContext.EventActions
+
+		// TODO: set ictx.end_invocation
+
+		return event, nil
+	}
+
+	return nil, nil
+}
+
+// runAfterAgentCallbacks checks if any afterAgentCallback returns non-nil content
+// then it replaces the event content with a value from the callback.
+func runAfterAgentCallbacks(ctx Context, agentEvent *session.Event, agentError error) (*session.Event, error) {
+	agent := ctx.Agent()
+	for _, callback := range agent.internal().afterAgent {
+		// TODO: after agent callback should take: ctx, actual_resp, actual_err. So the callback can inspect and decide what to return.
+		newContent, err := callback(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to run after agent callback: %w", err)
+		}
+		if newContent == nil {
+			continue
+		}
+
+		agentEvent.LLMResponse.Content = newContent
+		return agentEvent, nil
+	}
+
+	return agentEvent, agentError
+}

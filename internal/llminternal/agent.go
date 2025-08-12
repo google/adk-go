@@ -14,11 +14,16 @@
 
 package llminternal
 
+import "google.golang.org/adk/llm"
+
+// holds LLMAgent internal state
 type Agent interface {
 	internal() *State
 }
 
 type State struct {
+	Model llm.Model
+
 	DisallowTransferToParent bool
 }
 

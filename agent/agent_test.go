@@ -1,0 +1,156 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package agent
+
+import (
+	"context"
+	"iter"
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/types"
+	"google.golang.org/genai"
+)
+
+func TestAgentCallbacks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	tests := []struct {
+		name                 string
+		ictx                 *types.InvocationContext
+		beforeAgentCallbacks []Callback
+		afterAgentCallbacks  []Callback
+		wantLLMCalls         int
+		wantEvents           []*session.Event
+	}{
+		{
+			name: "before agent callback runs, no llm calls",
+			beforeAgentCallbacks: []Callback{
+				func(ctx Context) (*genai.Content, error) {
+					return genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel), nil
+				},
+			},
+			wantEvents: []*session.Event{
+				{
+					Author: "test",
+					LLMResponse: &llm.Response{
+						Content: genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel),
+					},
+				},
+			},
+		},
+		{
+			name: "no callback effect if callbacks return nil",
+			beforeAgentCallbacks: []Callback{
+				func(ctx Context) (*genai.Content, error) {
+					return nil, nil
+				},
+			},
+			afterAgentCallbacks: []Callback{
+				func(Context) (*genai.Content, error) {
+					return nil, nil
+				},
+			},
+			wantLLMCalls: 1,
+			wantEvents: []*session.Event{
+				{
+					Author: "test",
+					LLMResponse: &llm.Response{
+						Content: genai.NewContentFromText("hello", genai.RoleModel),
+					},
+				},
+			},
+		},
+		{
+			name: "after agent callback replaces event content",
+			afterAgentCallbacks: []Callback{
+				func(Context) (*genai.Content, error) {
+					return genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel), nil
+				},
+			},
+			wantLLMCalls: 1,
+			wantEvents: []*session.Event{
+				{
+					Author: "test",
+					LLMResponse: &llm.Response{
+						Content: genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel),
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			custom := &customAgent{}
+
+			testAgent, err := New(Config{
+				Name:        "test",
+				BeforeAgent: tt.beforeAgentCallbacks,
+				Run:         custom.Run,
+				AfterAgent:  tt.afterAgentCallbacks,
+			})
+			if err != nil {
+				t.Fatalf("failed to create agent: %v", err)
+			}
+
+			ctx := NewContext(ctx, testAgent, genai.NewContentFromText("", genai.RoleUser))
+			var gotEvents []*session.Event
+			for event, err := range testAgent.Run(ctx) {
+				if err != nil {
+					t.Fatalf("unexpected error from the agent: %v", err)
+				}
+
+				gotEvents = append(gotEvents, event)
+			}
+
+			if tt.wantLLMCalls != custom.callCounter {
+				t.Errorf("unexpected want_llm_calls, got: %v, want: %v", custom.callCounter, tt.wantLLMCalls)
+			}
+
+			if len(tt.wantEvents) != len(gotEvents) {
+				t.Errorf("unexpected event lengths, got: %v, want: %v", len(gotEvents), len(tt.wantEvents))
+			}
+
+			for i, gotEvent := range gotEvents {
+				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Time", "InvocationID")); diff != "" {
+					t.Errorf("diff in the events: got event[%d]: %v, want: %v, diff: %v", i, gotEvent, tt.wantEvents[i], diff)
+				}
+			}
+		})
+	}
+}
+
+// TODO: create test util allowing to create custom agents, agent trees for test etc.
+type customAgent struct {
+	callCounter int
+}
+
+func (a *customAgent) Run(Context) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		a.callCounter++
+
+		yield(&session.Event{
+			LLMResponse: &llm.Response{
+				Content: genai.NewContentFromText("hello", genai.RoleModel),
+			},
+		}, nil)
+	}
+}

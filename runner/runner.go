@@ -22,7 +22,7 @@ import (
 	"strings"
 
 	"google.golang.org/adk/agent"
-	internalRunner "google.golang.org/adk/internal/runner"
+	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
@@ -30,7 +30,7 @@ import (
 	"google.golang.org/genai"
 )
 
-func NewRunner(appName string, rootAgent types.Agent, sessionService sessionservice.Service) *Runner {
+func New(appName string, rootAgent agent.Agent, sessionService sessionservice.Service) *Runner {
 	return &Runner{
 		AppName:        appName,
 		RootAgent:      rootAgent,
@@ -40,7 +40,7 @@ func NewRunner(appName string, rootAgent types.Agent, sessionService sessionserv
 
 type Runner struct {
 	AppName        string
-	RootAgent      types.Agent
+	RootAgent      agent.Agent
 	SessionService sessionservice.Service
 }
 
@@ -68,69 +68,68 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
-		ctx, ictx, err := r.newInvocationContext(ctx, session, agentToRun, cfg, msg)
-		if err != nil {
+		if cfg != nil && cfg.SupportCFC {
+			if err := r.setupCFC(agentToRun); err != nil {
+				yield(nil, fmt.Errorf("failed to setup CFC: %w", err))
+				return
+			}
+		}
+
+		ctx := agent.NewContext(ctx, agentToRun, msg)
+
+		if err := r.appendMessageToSession(ctx, session, msg); err != nil {
 			yield(nil, err)
 			return
 		}
 
-		if err := r.appendMessageToSession(ctx, ictx, session, msg); err != nil {
-			yield(nil, err)
-			return
-		}
-
-		for event, err := range internalRunner.RunAgent(ctx, ictx, agentToRun) {
-			convertedEvent := event.AsSessionEvent()
+		for event, err := range agentToRun.Run(ctx) {
+			if err != nil {
+				if !yield(event, err) {
+					return
+				}
+				continue
+			}
 
 			// only commit non-partial event to a session service
 			if !(event.LLMResponse != nil && event.LLMResponse.Partial) {
 
 				// TODO: update session state & delta
 
-				if err := r.SessionService.AppendEvent(ctx, session, convertedEvent); err != nil {
+				if err := r.SessionService.AppendEvent(ctx, session, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return
 				}
 			}
 
-			if !yield(convertedEvent, err) {
+			if !yield(event, nil) {
 				return
 			}
 		}
 	}
 }
 
-func (r *Runner) newInvocationContext(ctx context.Context, session sessionservice.StoredSession, agent types.Agent, runConfig *types.AgentRunConfig, msg *genai.Content) (context.Context, *types.InvocationContext, error) {
-	if runConfig != nil && runConfig.SupportCFC {
-		if err := r.setupCFC(agent); err != nil {
-			return nil, nil, fmt.Errorf("failed to setup CFC: %w", err)
-		}
-	}
-
-	ctx, ictx := types.NewInvocationContext(ctx, agent, r.SessionService, session, runConfig, msg)
-	return ctx, ictx, nil
-}
-
-func (r *Runner) setupCFC(curAgent types.Agent) error {
-	llmAgent, ok := curAgent.(*agent.LLMAgent)
+func (r *Runner) setupCFC(curAgent agent.Agent) error {
+	llmAgent, ok := curAgent.(llminternal.Agent)
 	if !ok {
-		return fmt.Errorf("cannot setup cfc for non-LLMAgent")
+		return fmt.Errorf("agent %v is not an LLMAgent", curAgent.Name())
 	}
 
-	if llmAgent.Model == nil {
+	model := llminternal.Reveal(llmAgent).Model
+
+	if model == nil {
 		return fmt.Errorf("LLMAgent has no model")
 	}
 
-	if !strings.HasPrefix(llmAgent.Model.Name(), "gemini-2") {
-		return fmt.Errorf("CFC is not supported for model: %v", llmAgent.Model.Name())
+	if !strings.HasPrefix(model.Name(), "gemini-2") {
+		return fmt.Errorf("CFC is not supported for model: %v", model.Name())
 	}
 
 	// TODO: handle CFC setup for LLMAgent, e.g. setting code_executor
 	return nil
 }
 
-func (r *Runner) appendMessageToSession(ctx context.Context, ictx *types.InvocationContext, storedSession sessionservice.StoredSession, msg *genai.Content) error {
-	event := session.NewEvent(ictx.InvocationID)
+func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession sessionservice.StoredSession, msg *genai.Content) error {
+	event := session.NewEvent(ctx.InvocationID())
 
 	event.Author = "user"
 	event.LLMResponse = &llm.Response{
@@ -145,7 +144,7 @@ func (r *Runner) appendMessageToSession(ctx context.Context, ictx *types.Invocat
 
 // findAgentToRun returns the agent that should handle the next request based on
 // session history.
-func (r *Runner) findAgentToRun(session sessionservice.StoredSession) (types.Agent, error) {
+func (r *Runner) findAgentToRun(session sessionservice.StoredSession) (agent.Agent, error) {
 	events := session.Events()
 	for i := events.Len() - 1; i >= 0; i-- {
 		event := events.At(i)
@@ -173,15 +172,14 @@ func (r *Runner) findAgentToRun(session sessionservice.StoredSession) (types.Age
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.
-func isTransferableAcrossAgentTree(agentToRun types.Agent) bool {
-	for curAgent := agentToRun; curAgent != nil; curAgent = curAgent.Spec().Parent() {
-		// TODO: properly verify if agent is or embeds LLMAgent
-		llmAgent, ok := agentToRun.(*agent.LLMAgent)
+func isTransferableAcrossAgentTree(agentToRun agent.Agent) bool {
+	for curAgent := agentToRun; curAgent != nil; curAgent = curAgent.Parent() {
+		llmAgent, ok := agentToRun.(llminternal.Agent)
 		if !ok {
 			return false
 		}
 
-		if llmAgent.DisallowTransferToParent {
+		if llminternal.Reveal(llmAgent).DisallowTransferToParent {
 			return false
 		}
 	}
@@ -189,12 +187,12 @@ func isTransferableAcrossAgentTree(agentToRun types.Agent) bool {
 	return true
 }
 
-func findAgent(curAgent types.Agent, targetName string) types.Agent {
-	if curAgent == nil || curAgent.Spec() == nil || curAgent.Spec().Name == targetName {
+func findAgent(curAgent agent.Agent, targetName string) agent.Agent {
+	if curAgent == nil || curAgent.Name() == targetName {
 		return curAgent
 	}
 
-	for _, subAgent := range curAgent.Spec().SubAgents {
+	for _, subAgent := range curAgent.SubAgents() {
 		if agent := findAgent(subAgent, targetName); agent != nil {
 			return agent
 		}
