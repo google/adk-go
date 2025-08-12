@@ -47,6 +47,11 @@ func New(cfg Config) (Agent, error) {
 		afterAgent:  cfg.AfterAgent,
 	}
 
+	a.self = a
+	if cfg.Self != nil {
+		a.self = cfg.Self
+	}
+
 	for _, subAgent := range cfg.SubAgents {
 		sa := subAgent.internal()
 
@@ -54,7 +59,7 @@ func New(cfg Config) (Agent, error) {
 			return nil, fmt.Errorf("subAgent %v already has a parent %v", subAgent.Name(), sa.parent.Name())
 		}
 
-		sa.parent = a
+		sa.parent = a.self
 	}
 
 	return a, nil
@@ -70,6 +75,9 @@ type Config struct {
 	Run func(Context) iter.Seq2[*session.Event, error]
 	// TODO: after agent callback should take: ctx, actual_resp, actual_err. So the callback can inspect and decide what to return.
 	AfterAgent []Callback
+
+	// TODO: this is the field for internal usage
+	Self Agent
 }
 
 type Context interface {
@@ -102,6 +110,7 @@ type agent struct {
 	subAgents         []Agent
 
 	parent Agent
+	self   Agent
 
 	beforeAgent []Callback
 	run         func(Context) iter.Seq2[*session.Event, error]
@@ -126,7 +135,8 @@ func (a *agent) SubAgents() []Agent {
 
 func (a *agent) Run(ctx Context) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		ctx := NewContext(ctx, a, ctx.UserContent())
+		// TODO: verify&update the setup here. Should we branch etc.
+		ctx := NewContext(ctx, a.self, ctx.UserContent(), ctx.Session(), ctx.Branch())
 
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {

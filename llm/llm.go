@@ -30,6 +30,10 @@ type Model interface {
 type Request struct {
 	Contents       []*genai.Content
 	GenerateConfig *genai.GenerateContentConfig
+
+	// TODO: this field should be removed
+	// any is of the Tool type. Used temporarily to migrate code and avoid cycle dependency.
+	Tools map[string]any
 }
 
 type Response struct {

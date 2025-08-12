@@ -14,7 +14,11 @@
 
 package llminternal
 
-import "google.golang.org/adk/llm"
+import (
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
+)
 
 // holds LLMAgent internal state
 type Agent interface {
@@ -24,7 +28,19 @@ type Agent interface {
 type State struct {
 	Model llm.Model
 
+	Tools []tool.Tool
+
+	IncludeContents string
+
+	GenerateContentConfig *genai.GenerateContentConfig
+
+	Instruction       string
+	GlobalInstruction string
+
 	DisallowTransferToParent bool
+	DisallowTransferToPeers  bool
+
+	OutputSchema *genai.Schema
 }
 
 func (s *State) internal() *State { return s }

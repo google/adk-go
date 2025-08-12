@@ -12,39 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent
+package llminternal
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
-	"google.golang.org/adk/types"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
-// contentRequestProcessor populates the LLMRequest's Contents based on
+// ContentRequestProcessor populates the LLMRequest's Contents based on
 // the InvocationContext that includes the previous events.
-func contentsRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
+func ContentsRequestProcessor(ctx agent.Context, req *llm.Request) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
-	llmAgent := asLLMAgent(parentCtx.Agent)
+	llmAgent := asLLMAgent(ctx.Agent())
 	if llmAgent == nil {
 		// Do nothing.
 		return nil // In python, no error is yielded.
 	}
 	fn := buildContentsDefault // "" or "default".
-	if llmAgent.IncludeContents == "none" {
+	if llmAgent.internal().IncludeContents == "none" {
 		// Include current turn context only (no conversation history)
 		fn = buildContentsCurrentTurnContextOnly
 	}
-	var events []*types.Event
-	if parentCtx.Session != nil {
-		for e := range parentCtx.Session.Events().All() {
-			events = append(events, types.NewEventFromSessionEvent(e))
+	var events []*session.Event
+	if ctx.Session() != nil {
+		for e := range ctx.Session().Events().All() {
+			events = append(events, e)
 		}
 	}
-	contents, err := fn(llmAgent.Spec().Name, parentCtx.Branch, events)
+	contents, err := fn(ctx.Agent().Name(), ctx.Branch(), events)
 	if err != nil {
 		return err
 	}
@@ -54,13 +56,13 @@ func contentsRequestProcessor(ctx context.Context, parentCtx *types.InvocationCo
 
 // buildContentsDefault returns the contents for the LLM request by applying
 // filtering, rearrangement, and content processing to the given events.
-func buildContentsDefault(agentName, branch string, events []*types.Event) ([]*genai.Content, error) {
+func buildContentsDefault(agentName, branch string, events []*session.Event) ([]*genai.Content, error) {
 	branchPrefix := branch + "."
 
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
-	var filtered []*types.Event
+	var filtered []*session.Event
 	for _, ev := range events {
-		content := content(ev)
+		content := utils.Content(ev)
 		// Skip events without content or generated neither by user nor
 		// by model.
 		// e.g. events purely for mutating session states.
@@ -78,7 +80,7 @@ func buildContentsDefault(agentName, branch string, events []*types.Event) ([]*g
 			continue
 		}
 		if isOtherAgentReply(agentName, ev) {
-			filtered = append(filtered, convertForeignEvent(ev))
+			filtered = append(filtered, ConvertForeignEvent(ev))
 		} else {
 			filtered = append(filtered, ev)
 		}
@@ -91,11 +93,11 @@ func buildContentsDefault(agentName, branch string, events []*types.Event) ([]*g
 
 	var contents []*genai.Content
 	for _, ev := range filtered {
-		content := clone(content(ev))
+		content := clone(utils.Content(ev))
 		if content == nil {
 			continue
 		}
-		removeClientFunctionCallID(content)
+		utils.RemoveClientFunctionCallID(content)
 		contents = append(contents, content)
 	}
 	return contents, nil
@@ -111,7 +113,7 @@ func buildContentsDefault(agentName, branch string, events []*types.Event) ([]*g
 //
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
-func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*types.Event) ([]*genai.Content, error) {
+func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*session.Event) ([]*genai.Content, error) {
 	// Find the latest event that starts the current turn and process from there
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
@@ -124,17 +126,17 @@ func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*typ
 	return buildContentsDefault(agentName, branch, events)
 }
 
-func isOtherAgentReply(currentAgentName string, ev *types.Event) bool {
+func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 	return ev.Author != currentAgentName && ev.Author != "user"
 }
 
-// convertForeignEvent converts an event authored by another agent as
+// ConvertForeignEvent converts an event authored by another agent as
 // a user-content event.
 // This is to provide another aget's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // previous agent's reply, etc.
-func convertForeignEvent(ev *types.Event) *types.Event {
-	content := content(ev)
+func ConvertForeignEvent(ev *session.Event) *session.Event {
+	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
 		return ev
 	}
@@ -159,10 +161,10 @@ func convertForeignEvent(ev *types.Event) *types.Event {
 		}
 	}
 
-	return &types.Event{ // made-up event. Don't go through types.NewEvent.
+	return &session.Event{ // made-up event. Don't go through types.NewEvent.
 		Time:        ev.Time,
 		Author:      "user",
-		LLMResponse: &types.LLMResponse{Content: converted},
+		LLMResponse: &llm.Response{Content: converted},
 		Branch:      ev.Branch,
 	}
 }
@@ -176,8 +178,8 @@ func stringify(v any) string {
 // request.
 const requestEUCFunctionCallName = "adk_request_credential"
 
-func isAuthEvent(ev *types.Event) bool {
-	c := content(ev)
+func isAuthEvent(ev *session.Event) bool {
+	c := utils.Content(ev)
 	for _, p := range c.Parts {
 		if p.FunctionCall != nil && p.FunctionCall.Name == requestEUCFunctionCallName {
 			return true

@@ -12,43 +12,60 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent
+package utils_test
 
 import (
 	"testing"
 
-	"google.golang.org/adk/types"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/llm"
 )
 
 func TestRootAgent(t *testing.T) {
 	model := struct {
-		types.Model
+		llm.Model
 	}{}
 
-	nonLLM := newMockAgent(t, "mock")
-	b := must(NewLLMAgent("b", model, WithSubAgents(nonLLM)))
-	a := must(NewLLMAgent("a", model, WithSubAgents(b)))
-	root := must(NewLLMAgent("root", model, WithSubAgents(a)))
+	nonLLM := utils.Must(agent.New(agent.Config{
+		Name: "mock",
+	}))
+	b := utils.Must(llmagent.New(llmagent.Config{
+		Name:      "b",
+		Model:     model,
+		SubAgents: []agent.Agent{nonLLM},
+	}))
+	a := utils.Must(llmagent.New(llmagent.Config{
+		Name:      "a",
+		Model:     model,
+		SubAgents: []agent.Agent{b},
+	}))
+	root := utils.Must(llmagent.New(llmagent.Config{
+		Name:      "root",
+		Model:     model,
+		SubAgents: []agent.Agent{a},
+	}))
 
-	agentName := func(a types.Agent) string {
+	agentName := func(a agent.Agent) string {
 		if a == nil {
 			return "nil"
 		}
-		return a.Spec().Name
+		return a.Name()
 	}
 
 	for _, tc := range []struct {
-		agent types.Agent
-		want  types.Agent
+		agent agent.Agent
+		want  agent.Agent
 	}{
 		{root, root},
 		{a, root},
 		{b, root},
-		{nonLLM, nonLLM}, // TODO: nonLLM agent should be able to have root.
+		{nonLLM, root},
 		{nil, nil},
 	} {
 		t.Run("agent="+agentName(tc.agent), func(t *testing.T) {
-			gotRoot := rootAgent(tc.agent)
+			gotRoot := utils.RootAgent(tc.agent)
 			if got, want := agentName(gotRoot), agentName(tc.want); got != want {
 				t.Errorf("rootAgent(%q) = %q, want %q", agentName(tc.agent), got, want)
 			}

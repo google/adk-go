@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent_test
+package llmagent_test
 
 import (
 	"context"
@@ -43,7 +43,6 @@ const modelName = "gemini-2.0-flash"
 //go:generate go test -httprecord=Test
 
 func TestLLMAgent(t *testing.T) {
-	t.Skip("migrating code")
 	errNoNetwork := errors.New("no network")
 
 	for _, tc := range []struct {
@@ -90,7 +89,6 @@ func TestLLMAgent(t *testing.T) {
 }
 
 func TestModelCallbacks(t *testing.T) {
-	t.Skip("migrating code")
 	t.Parallel()
 
 	for _, tc := range []struct {
@@ -261,8 +259,6 @@ func TestModelCallbacks(t *testing.T) {
 }
 
 func TestFunctionTool(t *testing.T) {
-	t.SkipNow()
-
 	model := newGeminiModel(t, modelName, nil)
 
 	type Args struct {
@@ -280,7 +276,7 @@ func TestFunctionTool(t *testing.T) {
 		}
 		return Result{Sum: input.A + input.B}
 	}
-	_, _ = tool.NewFunctionTool(tool.FunctionToolConfig{
+	rand, _ := tool.NewFunctionTool(tool.FunctionToolConfig{
 		Name:        "sum",
 		Description: "computes the sum of two numbers",
 	}, handler)
@@ -293,7 +289,7 @@ func TestFunctionTool(t *testing.T) {
 		// TODO(hakim): set to false when autoflow is implemented.
 		DisallowTransferToParent: true,
 		DisallowTransferToPeers:  true,
-		//Tools: []types.Tool{rand}, TODO: set tools
+		Tools:                    []tool.Tool{rand},
 	})
 	if err != nil {
 		t.Fatalf("failed to create LLM Agent: %v", err)
@@ -312,7 +308,6 @@ func TestFunctionTool(t *testing.T) {
 }
 
 func TestAgentTransfer(t *testing.T) {
-	t.Skip("migrating code")
 	// Helpers to create genai.Content conveniently.
 	transferCall := func(agentName string) *genai.Content {
 		return genai.NewContentFromFunctionCall(
@@ -554,7 +549,12 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 		t.Fatalf("failed to get/create session: %v", err)
 	}
 
-	return r.runner.Run(ctx, userID, session.ID().SessionID, genai.NewContentFromText(newMessage, genai.RoleUser), &types.AgentRunConfig{})
+	var content *genai.Content
+	if newMessage != "" {
+		content = genai.NewContentFromText(newMessage, genai.RoleUser)
+	}
+
+	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &types.AgentRunConfig{})
 }
 
 func newTestAgentRunner(_ *testing.T, agent agent.Agent) *testAgentRunner {
@@ -601,7 +601,7 @@ func (m *mockModel) GenerateStream(ctx context.Context, req *llm.Request) iter.S
 	}
 }
 
-// Name implements types.Model.
+// Name implements llm.Model.
 func (m *mockModel) Name() string {
 	return "mock"
 }

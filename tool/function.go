@@ -21,7 +21,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonschema"
 	"google.golang.org/adk/internal/itype"
 	"google.golang.org/adk/internal/typeutil"
-	"google.golang.org/adk/types"
+	"google.golang.org/adk/llm"
 	"google.golang.org/genai"
 )
 
@@ -89,7 +89,7 @@ type FunctionTool[TArgs, TResults any] struct {
 	handler Function[TArgs, TResults]
 }
 
-var _ types.Tool = (*FunctionTool[any, any])(nil)
+var _ Tool = (*FunctionTool[any, any])(nil)
 var _ itype.FunctionTool = (*FunctionTool[any, any])(nil)
 
 // Description implements types.Tool.
@@ -103,12 +103,12 @@ func (f *FunctionTool[TArgs, TResults]) Name() string {
 }
 
 // ProcessRequest implements types.Tool.
-func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx context.Context, tc *types.ToolContext, req *types.LLMRequest) error {
-	return req.AppendTools(f)
+func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *llm.Request) error {
+	return appendTools(req, f)
 }
 
 // FunctionDeclaration implements interfaces.FunctionTool.
-func (f *FunctionTool[TArgs, TResults]) FunctionDeclaration() *genai.FunctionDeclaration {
+func (f *FunctionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration {
 	decl := &genai.FunctionDeclaration{
 		Name:        f.Name(),
 		Description: f.Description(),
@@ -123,15 +123,20 @@ func (f *FunctionTool[TArgs, TResults]) FunctionDeclaration() *genai.FunctionDec
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *FunctionTool[TArgs, TResults]) Run(ctx context.Context, tc *types.ToolContext, args map[string]any) (map[string]any, error) {
+func (f *FunctionTool[TArgs, TResults]) Run(ctx Context, args any) (any, error) {
 	// TODO: Handle function call request from tc.InvocationContext.
 	// TODO: Handle panic -> convert to error.
-	input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](args, f.inputSchema)
+	m, ok := args.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected args type, got: %T", args)
+	}
+	input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
 	if err != nil {
 		return nil, err
 	}
 	output := f.handler(ctx, input)
-	return typeutil.ConvertToWithJSONSchema[TResults, map[string]any](output, f.outputSchema)
+	resp, err := typeutil.ConvertToWithJSONSchema[TResults, map[string]any](output, f.outputSchema)
+	return resp, err
 }
 
 // ** NOTE FOR REVIEWERS **
@@ -162,4 +167,37 @@ func resolvedSchema[T any](override *jsonschema.Schema) (*jsonschema.Resolved, e
 		return nil, err
 	}
 	return schema.Resolve(nil)
+}
+
+// TODO: remove copy in agent_transfer.go
+// AppendTools appends the tools to the request.
+// Appending duplicate tools or nameless tools is an error.
+func appendTools(r *llm.Request, tools ...Tool) error {
+	if r.Tools == nil {
+		r.Tools = make(map[string]any)
+	}
+
+	for i, tool := range tools {
+		if tool == nil || tool.Name() == "" {
+			return fmt.Errorf("tools[%d] tool without name: %v", i, tool)
+		}
+		name := tool.Name()
+		if _, ok := r.Tools[name]; ok {
+			return fmt.Errorf("tools[%d] duplicate tool: %q", i, name)
+		}
+		r.Tools[name] = tool
+
+		// If the tool is a function tool, add its declaration to GenerateConfig.Tools.
+		if fnTool, ok := tool.(itype.FunctionTool); ok {
+			if r.GenerateConfig == nil {
+				r.GenerateConfig = &genai.GenerateContentConfig{}
+			}
+			if decl := fnTool.Declaration(); decl != nil {
+				r.GenerateConfig.Tools = append(r.GenerateConfig.Tools, &genai.Tool{
+					FunctionDeclarations: []*genai.FunctionDeclaration{decl},
+				})
+			}
+		}
+	}
+	return nil
 }

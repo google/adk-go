@@ -12,48 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent
+package llminternal
 
 import (
-	"context"
 	"fmt"
 	"reflect"
 
-	"google.golang.org/adk/types"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/llm"
 	"google.golang.org/genai"
 )
 
 // basicRequestProcessor populates the LLMRequest
 // with the agent's LLM generation configs.
-func basicRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
+func basicRequestProcessor(ctx agent.Context, req *llm.Request) error {
 	// reference: adk-python src/google/adk/flows/llm_flows/basic.py
 
-	llmAgent := asLLMAgent(parentCtx.Agent)
+	llmAgent := asLLMAgent(ctx.Agent())
 	if llmAgent == nil {
 		return nil // do nothing.
 	}
-	req.Model = llmAgent.Model
-	req.GenerateConfig = clone(llmAgent.GenerateContentConfig)
+	req.GenerateConfig = clone(llmAgent.internal().GenerateContentConfig)
 	if req.GenerateConfig == nil {
 		req.GenerateConfig = &genai.GenerateContentConfig{}
 	}
-	if llmAgent.OutputSchema != nil {
-		req.GenerateConfig.ResponseSchema = llmAgent.OutputSchema
+	if llmAgent.internal().OutputSchema != nil {
+		req.GenerateConfig.ResponseSchema = llmAgent.internal().OutputSchema
 		req.GenerateConfig.ResponseMIMEType = "application/json"
 	}
 	// TODO: missing features
 	//  populate LLMRequest LiveConnectConfig setting
-	return nil
-}
-
-// asLLMAgent returns LLMAgent if agent is LLMAgent. Otherwise, nil.
-func asLLMAgent(agent types.Agent) *LLMAgent {
-	if agent == nil {
-		return nil
-	}
-	if llmAgent, ok := agent.(*LLMAgent); ok {
-		return llmAgent
-	}
 	return nil
 }
 

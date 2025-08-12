@@ -16,6 +16,9 @@ package types
 
 import (
 	"context"
+
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/session"
 )
 
 // ToolContext is the tool invocation context.
@@ -30,7 +33,7 @@ type ToolContext struct {
 	FunctionCallID string
 
 	// The event actions of the current tool call.
-	EventActions *EventActions
+	EventActions *session.Actions
 }
 
 // Tool is the ADK tool interface.
@@ -41,7 +44,7 @@ type Tool interface {
 	// Use cases:
 	//  * Adding this tool schema to the LLM request.
 	//  * Preprocess the LLM request before it's sent out.
-	ProcessRequest(ctx context.Context, tc *ToolContext, req *LLMRequest) error
+	ProcessRequest(ctx context.Context, tc *ToolContext, req *llm.Request) error
 
 	// Run runs the tool with the given argument and returns the result.
 	Run(ctx context.Context, tc *ToolContext, args map[string]any) (map[string]any, error)

@@ -86,7 +86,7 @@ func (r *LLMRequest) AppendTools(tools ...Tool) error {
 			if r.GenerateConfig == nil {
 				r.GenerateConfig = &genai.GenerateContentConfig{}
 			}
-			if decl := fnTool.FunctionDeclaration(); decl != nil {
+			if decl := fnTool.Declaration(); decl != nil {
 				r.GenerateConfig.Tools = append(r.GenerateConfig.Tools, &genai.Tool{
 					FunctionDeclarations: []*genai.FunctionDeclaration{decl},
 				})

@@ -15,11 +15,10 @@
 package tool
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
-	"google.golang.org/adk/types"
+	"google.golang.org/adk/llm"
 	"google.golang.org/genai"
 )
 
@@ -27,16 +26,19 @@ import (
 type GoogleSearchTool struct {
 	name        string
 	description string
+	// TODO: temporary the model is the input for the tool
+	model llm.Model
 }
 
 // Assert that GoogleSearchTool implements adk.Tool
-var _ types.Tool = (*GoogleSearchTool)(nil)
+var _ Tool = (*GoogleSearchTool)(nil)
 
 // NewGoogleSearchTool creates a new GoogleSearchTool.
-func NewGoogleSearchTool() *GoogleSearchTool {
+func NewGoogleSearchTool(model llm.Model) *GoogleSearchTool {
 	return &GoogleSearchTool{
 		name:        "google_search",
 		description: "google_search",
+		model:       model,
 	}
 }
 
@@ -50,8 +52,12 @@ func (t *GoogleSearchTool) Description() string {
 	return t.description
 }
 
+func (t *GoogleSearchTool) Declaration() *genai.FunctionDeclaration {
+	return nil
+}
+
 // ProcessRequest modifies the LLM request to include the google search tool configuration.
-func (t *GoogleSearchTool) ProcessRequest(ctx context.Context, tc *types.ToolContext, req *types.LLMRequest) error {
+func (t *GoogleSearchTool) ProcessRequest(ctx Context, req *llm.Request) error {
 	if req == nil {
 		return fmt.Errorf("llm request is nil")
 	}
@@ -62,19 +68,19 @@ func (t *GoogleSearchTool) ProcessRequest(ctx context.Context, tc *types.ToolCon
 
 	var tool *genai.Tool
 
-	if strings.HasPrefix(req.Model.Name(), "gemini-1") {
+	if strings.HasPrefix(t.model.Name(), "gemini-1") {
 		if len(req.GenerateConfig.Tools) > 0 {
 			return fmt.Errorf("google search tool cannot be used with other tools in Gemini 1.x")
 		}
 		tool = &genai.Tool{
 			GoogleSearchRetrieval: &genai.GoogleSearchRetrieval{},
 		}
-	} else if strings.HasPrefix(req.Model.Name(), "gemini-2") {
+	} else if strings.HasPrefix(t.model.Name(), "gemini-2") {
 		tool = &genai.Tool{
 			GoogleSearch: &genai.GoogleSearch{},
 		}
 	} else {
-		return fmt.Errorf("google search tool is not supported for model %s", req.Model)
+		return fmt.Errorf("google search tool is not supported for model %s", t.model)
 	}
 
 	req.GenerateConfig.Tools = append(req.GenerateConfig.Tools, tool)
@@ -82,6 +88,6 @@ func (t *GoogleSearchTool) ProcessRequest(ctx context.Context, tc *types.ToolCon
 }
 
 // Run is not implemented for this tool, as it's an internal model tool.
-func (t *GoogleSearchTool) Run(ctx context.Context, tc *types.ToolContext, args map[string]any) (map[string]any, error) {
+func (t *GoogleSearchTool) Run(ctx Context, args any) (any, error) {
 	return nil, fmt.Errorf("google search tool runs internally on the model, it can not be run directly")
 }

@@ -18,5 +18,5 @@ package itype
 import "google.golang.org/genai"
 
 type FunctionTool interface {
-	FunctionDeclaration() *genai.FunctionDeclaration
+	Declaration() *genai.FunctionDeclaration
 }

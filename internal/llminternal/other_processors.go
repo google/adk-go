@@ -12,40 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent
+package llminternal
 
 import (
-	"context"
-
-	"google.golang.org/adk/types"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/llm"
 )
 
-func identityRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
+func identityRequestProcessor(ctx agent.Context, req *llm.Request) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/identity.py)
 	return nil
 }
 
-func nlPlanningRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
+func nlPlanningRequestProcessor(ctx agent.Context, req *llm.Request) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_nl_plnning.py)
 	return nil
 }
 
-func codeExecutionRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
+func codeExecutionRequestProcessor(ctx agent.Context, req *llm.Request) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_code_execution.py)
 	return nil
 }
 
-func authPreprocesssor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
+func authPreprocesssor(ctx agent.Context, req *llm.Request) error {
 	// TODO: implement (adk-python src/google/adk/auth/auth_preprocessor.py)
 	return nil
 }
 
-func nlPlanningResponseProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest, resp *types.LLMResponse) error {
+func nlPlanningResponseProcessor(ctx agent.Context, req *llm.Request, resp *llm.Response) error {
 	// TODO: implement (adk-python src/google/adk/_nl_planning.py)
 	return nil
 }
 
-func codeExecutionResponseProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest, resp *types.LLMResponse) error {
+func codeExecutionResponseProcessor(ctx agent.Context, req *llm.Request, resp *llm.Response) error {
 	// TODO: implement (adk-python src/google/adk_code_execution.py)
 	return nil
 }

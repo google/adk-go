@@ -75,7 +75,10 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		ctx := agent.NewContext(ctx, agentToRun, msg)
+		ctx := agent.NewContext(ctx, agentToRun, msg, &mutableSession{
+			service:       r.SessionService,
+			storedSession: session,
+		}, "")
 
 		if err := r.appendMessageToSession(ctx, session, msg); err != nil {
 			yield(nil, err)
@@ -129,6 +132,9 @@ func (r *Runner) setupCFC(curAgent agent.Agent) error {
 }
 
 func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession sessionservice.StoredSession, msg *genai.Content) error {
+	if msg == nil {
+		return nil
+	}
 	event := session.NewEvent(ctx.InvocationID())
 
 	event.Author = "user"

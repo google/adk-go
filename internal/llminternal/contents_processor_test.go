@@ -12,28 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent
+package llminternal_test
 
 import (
-	"context"
+	"iter"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
-	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
 type model struct {
-	types.Model
+	llm.Model
 }
 
 // Test behavior around Agent's IncludeContents.
 func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
-	ctx := context.Background()
 	const agentName = "testAgent"
 	model := &model{}
 
@@ -211,20 +213,18 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name+"/include_contents="+tc.includeContents, func(t *testing.T) {
-			agent := must(NewLLMAgent(agentName, model))
-			agent.IncludeContents = tc.includeContents
-			invCtx := &types.InvocationContext{
-				InvocationID: "12345",
-				Agent:        agent,
-				Session: createSession(t, ctx, session.ID{
-					AppName:   "appName",
-					UserID:    "userID",
-					SessionID: "sessionID",
-				}, tc.events),
-			}
+			testAgent := utils.Must(llmagent.New(llmagent.Config{
+				Name:            agentName,
+				Model:           model,
+				IncludeContents: tc.includeContents,
+			}))
 
-			req := &types.LLMRequest{Model: model}
-			if err := contentsRequestProcessor(t.Context(), invCtx, req); err != nil {
+			ctx := agent.NewContext(t.Context(), testAgent, nil, &fakeSession{
+				events: tc.events,
+			}, "")
+
+			req := &llm.Request{}
+			if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
 				t.Fatalf("contentsRequestProcessor failed: %v", err)
 			}
 			got := req.Contents
@@ -236,8 +236,6 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 }
 
 func TestContentsRequestProcessor(t *testing.T) {
-	ctx := context.Background()
-
 	const agentName = "testAgent"
 	model := &model{}
 
@@ -365,20 +363,17 @@ func TestContentsRequestProcessor(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			agent := must(NewLLMAgent("testAgent", model))
-			invCtx := &types.InvocationContext{
-				InvocationID: "12345",
-				Agent:        agent,
-				Branch:       tc.branch,
-				Session: createSession(t, ctx, session.ID{
-					AppName:   "appName",
-					UserID:    "userID",
-					SessionID: "sessionID",
-				}, tc.events),
-			}
+			testAgent := utils.Must(llmagent.New(llmagent.Config{
+				Name:  "testAgent",
+				Model: model,
+			}))
 
-			req := &types.LLMRequest{Model: model}
-			if err := contentsRequestProcessor(t.Context(), invCtx, req); err != nil {
+			ctx := agent.NewContext(t.Context(), testAgent, nil, &fakeSession{
+				events: tc.events,
+			}, tc.branch)
+
+			req := &llm.Request{}
+			if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
 				t.Fatalf("contentRequestProcessor failed: %v", err)
 			}
 			got := req.Contents
@@ -394,23 +389,23 @@ func TestConvertForeignEvent(t *testing.T) {
 	now := time.Now()
 	testCases := []struct {
 		name  string
-		event *types.Event
-		want  *types.Event
+		event *session.Event
+		want  *session.Event
 	}{
 		{
 			name: "Text",
-			event: &types.Event{
+			event: &session.Event{
 				Time:   now,
 				Author: "foreign",
-				LLMResponse: &types.LLMResponse{
+				LLMResponse: &llm.Response{
 					Content: genai.NewContentFromText("hello", "model"),
 				},
 				Branch: "b",
 			},
-			want: &types.Event{
+			want: &session.Event{
 				Time:   now,
 				Author: "user",
-				LLMResponse: &types.LLMResponse{
+				LLMResponse: &llm.Response{
 					Content: &genai.Content{
 						Role: "user",
 						Parts: []*genai.Part{
@@ -424,10 +419,10 @@ func TestConvertForeignEvent(t *testing.T) {
 		},
 		{
 			name: "FunctionCall",
-			event: &types.Event{
+			event: &session.Event{
 				Time:   now,
 				Author: "foreign",
-				LLMResponse: &types.LLMResponse{
+				LLMResponse: &llm.Response{
 					Content: &genai.Content{
 						Role: "model",
 						Parts: []*genai.Part{
@@ -437,10 +432,10 @@ func TestConvertForeignEvent(t *testing.T) {
 				},
 				Branch: "b",
 			},
-			want: &types.Event{
+			want: &session.Event{
 				Time:   now,
 				Author: "user",
-				LLMResponse: &types.LLMResponse{
+				LLMResponse: &llm.Response{
 					Content: &genai.Content{
 						Role: "user",
 						Parts: []*genai.Part{
@@ -454,10 +449,10 @@ func TestConvertForeignEvent(t *testing.T) {
 		},
 		{
 			name: "FunctionResponse",
-			event: &types.Event{
+			event: &session.Event{
 				Time:   now,
 				Author: "foreign",
-				LLMResponse: &types.LLMResponse{
+				LLMResponse: &llm.Response{
 					Content: &genai.Content{
 						Role: "model",
 						Parts: []*genai.Part{
@@ -467,10 +462,10 @@ func TestConvertForeignEvent(t *testing.T) {
 				},
 				Branch: "b",
 			},
-			want: &types.Event{
+			want: &session.Event{
 				Time:   now,
 				Author: "user",
-				LLMResponse: &types.LLMResponse{
+				LLMResponse: &llm.Response{
 					Content: &genai.Content{
 						Role: "user",
 						Parts: []*genai.Part{
@@ -486,7 +481,7 @@ func TestConvertForeignEvent(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := convertForeignEvent(tc.event)
+			got := llminternal.ConvertForeignEvent(tc.event)
 			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(genai.FunctionCall{}, genai.FunctionResponse{})); diff != "" {
 				t.Errorf("convertForeignEvent() mismatch (-want +got):\n%s", diff)
 			}
@@ -495,60 +490,54 @@ func TestConvertForeignEvent(t *testing.T) {
 }
 
 func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
-	ctx := context.Background()
+	testAgent := utils.Must(agent.New(agent.Config{
+		Name: "test_agent",
+	}))
 
-	type customAgent struct {
-		types.Agent
-	}
-	agent := &customAgent{}
-	events := []*session.Event{
-		{
-			Author: "user",
-			LLMResponse: &llm.Response{
-				Content: genai.NewContentFromText("Hello", "user"),
-			},
-		},
-	}
-	invCtx := &types.InvocationContext{
-		InvocationID: "12345",
-		Agent:        agent,
-		Session: createSession(t, ctx, session.ID{
-			AppName:   "appName",
-			UserID:    "userID",
-			SessionID: "sessionID",
-		}, events),
-	}
+	ctx := agent.NewContext(t.Context(), testAgent, nil, nil, "")
 
-	req := &types.LLMRequest{}
-	if err := contentsRequestProcessor(t.Context(), invCtx, req); err != nil {
+	req := &llm.Request{}
+	if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
 		t.Fatalf("contentRequestProcessor failed: %v", err)
 	}
 	got := req
-	want := &types.LLMRequest{}
+	want := &llm.Request{}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("LLMRequest after contentRequestProcessor mismatch (-want +got):\n%s", diff)
 	}
 }
 
-func createSession(t *testing.T, ctx context.Context, id session.ID, events []*session.Event) sessionservice.StoredSession {
-	t.Helper()
-
-	service := sessionservice.Mem()
-
-	storedSession, err := service.Create(ctx, &sessionservice.CreateRequest{
-		AppName:   id.AppName,
-		UserID:    id.UserID,
-		SessionID: id.SessionID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, event := range events {
-		if err := service.AppendEvent(ctx, storedSession, event); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	return storedSession
+type fakeSession struct {
+	events []*session.Event
 }
+
+func (s *fakeSession) State() session.State {
+	return nil
+}
+
+func (s *fakeSession) Events() session.Events {
+	return s
+}
+
+func (s *fakeSession) ID() session.ID {
+	return session.ID{}
+}
+
+func (s *fakeSession) Updated() time.Time {
+	return time.Time{}
+}
+
+func (s *fakeSession) All() iter.Seq[*session.Event] {
+	return slices.Values(s.events)
+}
+
+func (s *fakeSession) Len() int {
+	return len(s.events)
+}
+
+func (s *fakeSession) At(i int) *session.Event {
+	return s.events[i]
+}
+
+var _ session.Session = (*fakeSession)(nil)
+var _ session.Events = (*fakeSession)(nil)

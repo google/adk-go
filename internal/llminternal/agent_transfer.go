@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent
+package llminternal
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"slices"
 	"text/template"
 
-	"google.golang.org/adk/types"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/itype"
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -57,12 +59,10 @@ import (
 //
 // TODO: implement it in the runners package and update this doc.
 
-func agentTransferRequestProcessor(ctx context.Context, parentCtx *types.InvocationContext, req *types.LLMRequest) error {
-	agent := asLLMAgent(parentCtx.Agent)
-	if agent == nil {
-		return nil // TODO: support agent types other than LLMAgent, that have parent/subagents?
-	}
-	if !agent.useAutoFlow() {
+func AgentTransferRequestProcessor(ctx agent.Context, req *llm.Request) error {
+	// TODO: support agent types other than LLMAgent, that have parent/subagents?
+	agent := ctx.Agent()
+	if !shouldUseAutoFlow(agent) {
 		return nil
 	}
 
@@ -73,32 +73,29 @@ func agentTransferRequestProcessor(ctx context.Context, parentCtx *types.Invocat
 
 	// TODO(hyangah): why do we set this up in request processor
 	// instead of registering this as a normal function tool of the Agent?
-	transferToAgentTool := &transferToAgentTool{}
+	transferToAgentTool := &TransferToAgentTool{}
 	si, err := instructionsForTransferToAgent(agent, targets, transferToAgentTool)
 	if err != nil {
 		return err
 	}
-	req.AppendInstructions(si)
-	tc := &types.ToolContext{
-		InvocationContext: parentCtx,
-	}
-	return transferToAgentTool.ProcessRequest(ctx, tc, req)
+	appendInstructions(req, si)
+	return appendTools(req, transferToAgentTool)
 }
 
-type transferToAgentTool struct{}
+type TransferToAgentTool struct{}
 
-// Description implements types.Tool.
-func (t *transferToAgentTool) Description() string {
+// Description implements tool.Tool.
+func (t *TransferToAgentTool) Description() string {
 	return `Transfer the question to another agent.
 This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
 }
 
-// Name implements types.Tool.
-func (t *transferToAgentTool) Name() string {
+// Name implements tool.Tool.
+func (t *TransferToAgentTool) Name() string {
 	return "transfer_to_agent"
 }
 
-func (t *transferToAgentTool) FunctionDeclaration() *genai.FunctionDeclaration {
+func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        t.Name(),
 		Description: t.Description(),
@@ -116,39 +113,45 @@ func (t *transferToAgentTool) FunctionDeclaration() *genai.FunctionDeclaration {
 }
 
 // ProcessRequest implements types.Tool.
-func (t *transferToAgentTool) ProcessRequest(ctx context.Context, tc *types.ToolContext, req *types.LLMRequest) error {
-	return req.AppendTools(t)
+func (t *TransferToAgentTool) ProcessRequest(ctx tool.Context, req *llm.Request) error {
+	return appendTools(req, t)
 }
 
 // Run implements types.Tool.
-func (t *transferToAgentTool) Run(ctx context.Context, tc *types.ToolContext, args map[string]any) (map[string]any, error) {
+func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (any, error) {
 	if args == nil {
 		return nil, fmt.Errorf("missing argument")
 	}
-	agent, ok := args["agent_name"].(string)
+	m, ok := args.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected args type: %T", args)
+	}
+	agent, ok := m["agent_name"].(string)
 	if !ok || agent == "" {
 		return nil, fmt.Errorf("empty agent_name: %v", args)
 	}
-	tc.EventActions.TransferToAgent = agent
+	ctx.EventActions().TransferToAgent = agent
 	return map[string]any{}, nil
 }
 
-var _ types.Tool = (*transferToAgentTool)(nil)
+var _ tool.Tool = (*TransferToAgentTool)(nil)
 
-func transferTarget(current *LLMAgent) []types.Agent {
-	targets := slices.Clone(current.Spec().SubAgents)
+func transferTarget(agent agent.Agent) []agent.Agent {
+	targets := slices.Clone(agent.SubAgents())
 
-	if !current.DisallowTransferToParent && current.Spec().Parent() != nil {
-		targets = append(targets, current.Spec().Parent())
+	llmAgent := asLLMAgent(agent)
+
+	if !llmAgent.internal().DisallowTransferToParent && agent.Parent() != nil {
+		targets = append(targets, agent.Parent())
 	}
 	// For peer-agent transfers, it's only enabled when all below conditions are met:
 	// - the parent agent is also of AutoFlow.
 	// - DisallowTransferToPeers is false.
-	if !current.DisallowTransferToPeers {
-		parent := asLLMAgent(current.Spec().Parent())
-		if parent != nil && parent.useAutoFlow() {
-			for _, peer := range parent.Spec().SubAgents {
-				if peer.Spec().Name != current.Spec().Name {
+	if !llmAgent.internal().DisallowTransferToPeers {
+		parent := asLLMAgent(agent.Parent())
+		if parent != nil && shouldUseAutoFlow(agent.Parent()) {
+			for _, peer := range agent.Parent().SubAgents() {
+				if peer.Name() != agent.Name() {
 					targets = append(targets, peer)
 				}
 			}
@@ -157,23 +160,73 @@ func transferTarget(current *LLMAgent) []types.Agent {
 	return targets
 }
 
+func asLLMAgent(agent agent.Agent) Agent {
+	if agent == nil {
+		return nil
+	}
+	if llmAgent, ok := agent.(Agent); ok {
+		return llmAgent
+	}
+	return nil
+}
+
+func shouldUseAutoFlow(agent agent.Agent) bool {
+	a := asLLMAgent(agent)
+	if a == nil {
+		return false
+	}
+	return len(agent.SubAgents()) != 0 || !a.internal().DisallowTransferToParent || !a.internal().DisallowTransferToPeers
+}
+
+// AppendTools appends the tools to the request.
+// Appending duplicate tools or nameless tools is an error.
+func appendTools(r *llm.Request, tools ...tool.Tool) error {
+	if r.Tools == nil {
+		r.Tools = make(map[string]any)
+	}
+
+	for i, tool := range tools {
+		if tool == nil || tool.Name() == "" {
+			return fmt.Errorf("tools[%d] tool without name: %v", i, tool)
+		}
+		name := tool.Name()
+		if _, ok := r.Tools[name]; ok {
+			return fmt.Errorf("tools[%d] duplicate tool: %q", i, name)
+		}
+		r.Tools[name] = tool
+
+		// If the tool is a function tool, add its declaration to GenerateConfig.Tools.
+		if fnTool, ok := tool.(itype.FunctionTool); ok {
+			if r.GenerateConfig == nil {
+				r.GenerateConfig = &genai.GenerateContentConfig{}
+			}
+			if decl := fnTool.Declaration(); decl != nil {
+				r.GenerateConfig.Tools = append(r.GenerateConfig.Tools, &genai.Tool{
+					FunctionDeclarations: []*genai.FunctionDeclaration{decl},
+				})
+			}
+		}
+	}
+	return nil
+}
+
 var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
-func instructionsForTransferToAgent(agent *LLMAgent, targets []types.Agent, transferTool types.Tool) (string, error) {
-	parent := agent.Spec().Parent()
-	if agent.DisallowTransferToParent {
+func instructionsForTransferToAgent(curAgent agent.Agent, targets []agent.Agent, transferTool tool.Tool) (string, error) {
+	parent := curAgent.Parent()
+	if asLLMAgent(curAgent).internal().DisallowTransferToParent {
 		parent = nil
 	}
 
 	var buf bytes.Buffer
 	if err := transferToAgentPromptTmpl.Execute(&buf, struct {
 		AgentName string
-		Parent    types.Agent
-		Targets   []types.Agent
+		Parent    agent.Agent
+		Targets   []agent.Agent
 		ToolName  string
 	}{
-		AgentName: agent.Spec().Name,
+		AgentName: curAgent.Name(),
 		Parent:    parent,
 		Targets:   targets,
 		ToolName:  transferTool.Name(),

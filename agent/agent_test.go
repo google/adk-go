@@ -110,7 +110,7 @@ func TestAgentCallbacks(t *testing.T) {
 				t.Fatalf("failed to create agent: %v", err)
 			}
 
-			ctx := NewContext(ctx, testAgent, genai.NewContentFromText("", genai.RoleUser))
+			ctx := NewContext(ctx, testAgent, genai.NewContentFromText("", genai.RoleUser), nil, "")
 			var gotEvents []*session.Event
 			for event, err := range testAgent.Run(ctx) {
 				if err != nil {

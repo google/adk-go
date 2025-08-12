@@ -19,15 +19,14 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/llm/gemini"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
 func TestGoogleSearchTool_ProcessRequest(t *testing.T) {
 	ctx := t.Context()
-	gsTool := tool.NewGoogleSearchTool()
 
 	testCases := []struct {
 		name          string
@@ -97,16 +96,13 @@ func TestGoogleSearchTool_ProcessRequest(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			modelName := tc.modelName
-			m, err := model.NewGeminiModel(ctx, modelName, &genai.ClientConfig{
+			m, err := gemini.NewModel(ctx, tc.modelName, &genai.ClientConfig{
 				APIKey: "fakeApiKey",
 			})
 			if err != nil {
-				t.Fatalf("model.NewGeminiModel(%q) failed: %v", modelName, err)
+				t.Fatalf("model.NewGeminiModel(%q) failed: %v", tc.modelName, err)
 			}
-			req := &types.LLMRequest{
-				Model: m,
-			}
+			req := &llm.Request{}
 
 			if tc.existingTools != nil {
 				req.GenerateConfig = &genai.GenerateContentConfig{
@@ -114,7 +110,9 @@ func TestGoogleSearchTool_ProcessRequest(t *testing.T) {
 				}
 			}
 
-			if err := gsTool.ProcessRequest(t.Context(), &types.ToolContext{}, req); err != nil {
+			gsTool := tool.NewGoogleSearchTool(m)
+
+			if err := gsTool.ProcessRequest(nil, req); err != nil {
 				if tc.wantErr != "" {
 					if !strings.Contains(err.Error(), tc.wantErr) {
 						t.Fatalf("ProcessRequest error: got %v, want %v", err, tc.wantErr)
@@ -139,10 +137,9 @@ func TestGoogleSearchTool_ProcessRequest(t *testing.T) {
 }
 
 func TestGoogleSearchTool_Run(t *testing.T) {
-	ctx := t.Context()
-	gsTool := tool.NewGoogleSearchTool()
+	gsTool := tool.NewGoogleSearchTool(nil)
 
-	_, err := gsTool.Run(ctx, &types.ToolContext{}, nil)
+	_, err := gsTool.Run(nil, nil)
 
 	if err == nil {
 		t.Fatal("Run expected error, but got nil")
