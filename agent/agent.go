@@ -37,7 +37,7 @@ type Agent interface {
 	internal() *agent
 }
 
-func New(cfg Config) (*agent, error) {
+func New(cfg Config) (Agent, error) {
 	a := &agent{
 		name:        cfg.Name,
 		description: cfg.Description,

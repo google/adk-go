@@ -15,7 +15,6 @@
 package loopagent_test
 
 import (
-	"context"
 	"fmt"
 	"iter"
 	"testing"
@@ -89,7 +88,7 @@ func TestNewLoopAgent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ctx := context.Background()
+			ctx := t.Context()
 
 			agent, err := loopagent.New(loopagent.Config{
 				MaxIterations: tt.args.maxIterations,

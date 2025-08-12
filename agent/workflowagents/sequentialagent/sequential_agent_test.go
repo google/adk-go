@@ -15,7 +15,6 @@
 package sequentialagent_test
 
 import (
-	"context"
 	"fmt"
 	"iter"
 	"testing"
@@ -79,7 +78,7 @@ func TestNewSequentialAgent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ctx := context.Background()
+			ctx := t.Context()
 
 			agent, err := sequentialagent.New(sequentialagent.Config{
 				AgentConfig: agent.Config{

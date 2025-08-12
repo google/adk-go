@@ -26,7 +26,7 @@ import (
 	"google.golang.org/genai"
 )
 
-func New(cfg Config) (*llmAgent, error) {
+func New(cfg Config) (agent.Agent, error) {
 	a := &llmAgent{
 		model:       cfg.Model,
 		instruction: cfg.Instruction,
