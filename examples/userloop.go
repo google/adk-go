@@ -21,13 +21,14 @@ import (
 	"log"
 	"os"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
-func Run(ctx context.Context, rootAgent types.Agent) {
+func Run(ctx context.Context, rootAgent agent.Agent) {
 	userID, appName := "test_user", "test_app"
 
 	sessionService := sessionservice.Mem()

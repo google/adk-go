@@ -18,30 +18,32 @@ import (
 	"context"
 	"os"
 
-	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/examples"
-	"google.golang.org/adk/model"
+	"google.golang.org/adk/llm/gemini"
 	"google.golang.org/genai"
 )
 
 func main() {
 	ctx := context.Background()
 
-	m, err := model.NewGeminiModel(ctx, "gemini-2.0-flash", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-2.0-flash", &genai.ClientConfig{
 		APIKey: os.Getenv("GEMINI_API_KEY"),
 	})
 	if err != nil {
 		panic(err)
 	}
 
-	llmAgent, err := agent.NewLLMAgent("weather_time_agent",
-		m,
-		agent.WithDescription("Agent to answer questions about the time and weather in a city."),
-		agent.WithInstruction("I can answer your questions about the time and weather in a city."))
+	agent, err := llmagent.New(llmagent.Config{
+		Name:        "weather_time_agent",
+		Model:       model,
+		Description: "Agent to answer questions about the time and weather in a city.",
+		Instruction: "I can answer your questions about the time and weather in a city.",
+	})
 	// TODO: add tools.
 	if err != nil {
 		panic(err)
 	}
 
-	examples.Run(ctx, llmAgent)
+	examples.Run(ctx, agent)
 }

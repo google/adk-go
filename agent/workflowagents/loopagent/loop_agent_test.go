@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent_test
+package loopagent_test
 
 import (
 	"context"
@@ -22,8 +22,11 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/workflowagents/loopagent"
 	"google.golang.org/adk/llm"
+	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/types"
 
 	"google.golang.org/genai"
@@ -32,7 +35,7 @@ import (
 func TestNewLoopAgent(t *testing.T) {
 	type args struct {
 		maxIterations uint
-		subAgents     []types.Agent
+		subAgents     []agent.Agent
 	}
 
 	tests := []struct {
@@ -45,7 +48,7 @@ func TestNewLoopAgent(t *testing.T) {
 			name: "infinite loop",
 			args: args{
 				maxIterations: 0,
-				subAgents:     []types.Agent{newCustomAgent(0)},
+				subAgents:     []agent.Agent{newCustomAgent(t, 0)},
 			},
 			wantEvents: []*session.Event{
 				{
@@ -65,7 +68,7 @@ func TestNewLoopAgent(t *testing.T) {
 			name: "loop agent with max iterations",
 			args: args{
 				maxIterations: 1,
-				subAgents:     []types.Agent{newCustomAgent(0)},
+				subAgents:     []agent.Agent{newCustomAgent(t, 0)},
 			},
 			wantEvents: []*session.Event{
 				{
@@ -84,7 +87,17 @@ func TestNewLoopAgent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			agent, err := agent.NewLoopAgent("test_agent", tt.args.maxIterations, agent.WithSubAgents(tt.args.subAgents...))
+			t.Parallel()
+
+			ctx := context.Background()
+
+			agent, err := loopagent.New(loopagent.Config{
+				MaxIterations: tt.args.maxIterations,
+				AgentConfig: agent.Config{
+					Name:      "test_agent",
+					SubAgents: tt.args.subAgents,
+				},
+			})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewLoopAgent() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -92,7 +105,20 @@ func TestNewLoopAgent(t *testing.T) {
 
 			var gotEvents []*session.Event
 
-			for event, err := range newTestAgentRunner(t, agent).Run(t, "session_id", "user input") {
+			sessionService := sessionservice.Mem()
+
+			runner := runner.New("test_app", agent, sessionService)
+
+			_, err = sessionService.Create(ctx, &sessionservice.CreateRequest{
+				AppName:   "test_app",
+				UserID:    "user_id",
+				SessionID: "session_id",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for event, err := range runner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), &types.AgentRunConfig{}) {
 				if err != nil {
 					t.Errorf("got unexpected error: %v", err)
 				}
@@ -118,31 +144,36 @@ func TestNewLoopAgent(t *testing.T) {
 	}
 }
 
-func newCustomAgent(id int) *customAgent {
-	return &customAgent{
+func newCustomAgent(t *testing.T, id int) agent.Agent {
+	t.Helper()
+
+	customAgent := &customAgent{
 		id: id,
-		spec: &types.AgentSpec{
-			Name: fmt.Sprintf("custom_agent_%v", id),
-		},
 	}
+
+	a, err := agent.New(agent.Config{
+		Name: fmt.Sprintf("custom_agent_%v", id),
+		Run:  customAgent.Run,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return a
 }
 
 // TODO: create test util allowing to create custom agents, agent trees for
 type customAgent struct {
 	id          int
-	spec        *types.AgentSpec
 	callCounter int
 }
 
-func (a *customAgent) Spec() *types.AgentSpec { return a.spec }
-
-func (a *customAgent) Run(context.Context, *types.InvocationContext) iter.Seq2[*types.Event, error] {
-	return func(yield func(*types.Event, error) bool) {
+func (a *customAgent) Run(agent.Context) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
 		a.callCounter++
 
-		yield(&types.Event{
-			Author: a.spec.Name,
-			LLMResponse: &types.LLMResponse{
+		yield(&session.Event{
+			LLMResponse: &llm.Response{
 				Content: genai.NewContentFromText(fmt.Sprintf("hello %v", a.id), genai.RoleModel),
 			},
 		}, nil)

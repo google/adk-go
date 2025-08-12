@@ -20,24 +20,21 @@ import (
 	"iter"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/examples"
-	"google.golang.org/adk/types"
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
-type MyAgent struct {
-	id        int
-	agentSpec *types.AgentSpec
+type myAgent struct {
+	id int
 }
 
-func (a *MyAgent) Spec() *types.AgentSpec {
-	return a.agentSpec
-}
-
-func (a *MyAgent) Run(ctx context.Context, ictx *types.InvocationContext) iter.Seq2[*types.Event, error] {
-	return func(yield func(*types.Event, error) bool) {
-		yield(&types.Event{
-			LLMResponse: &types.LLMResponse{
+func (a myAgent) Run(ctx agent.Context) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		yield(&session.Event{
+			LLMResponse: &llm.Response{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -50,38 +47,34 @@ func (a *MyAgent) Run(ctx context.Context, ictx *types.InvocationContext) iter.S
 	}
 }
 
-var _ types.Agent = (*MyAgent)(nil)
-
-func NewMyAgent(id int) *MyAgent {
-	return &MyAgent{
-		id: id,
-	}
-}
-
 func main() {
 	ctx := context.Background()
 
-	myAgent := NewMyAgent(1)
-	myAgent.agentSpec = &types.AgentSpec{
-		Name:        "my_custom_agent",
+	myAgent1, err := agent.New(agent.Config{
+		Name:        "my_custom_agent_1",
 		Description: "A custom agent that responds with a greeting.",
-	}
-	if err := myAgent.agentSpec.Init(myAgent); err != nil {
+		Run:         myAgent{id: 1}.Run,
+	})
+	if err != nil {
 		panic(err)
 	}
 
-	myAgent2 := NewMyAgent(2)
-	myAgent2.agentSpec = &types.AgentSpec{
+	myAgent2, err := agent.New(agent.Config{
 		Name:        "my_custom_agent_2",
 		Description: "A custom agent that responds with a greeting.",
-	}
-	if err := myAgent2.agentSpec.Init(myAgent); err != nil {
+		Run:         myAgent{id: 2}.Run,
+	})
+	if err != nil {
 		panic(err)
 	}
 
-	loopAgent, err := agent.NewSequentialAgent("sequential_agent",
-		agent.WithDescription("A sequential agent that runs sub-agents"),
-		agent.WithSubAgents(myAgent, myAgent2))
+	loopAgent, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:        "sequential_agent",
+			Description: "A sequential agent that runs sub-agents",
+			SubAgents:   []agent.Agent{myAgent1, myAgent2},
+		},
+	})
 	if err != nil {
 		panic(err)
 	}

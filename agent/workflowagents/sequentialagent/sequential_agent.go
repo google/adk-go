@@ -12,33 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent
+package sequentialagent
 
 import (
-	"google.golang.org/adk/types"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/workflowagents/loopagent"
 )
 
-// SequentialAgent executes its sub-agents in the order they are listed.
+// New creates a SequentialAgent.
+//
+// SequentialAgent executes its sub-agents once, in the order they are listed.
 //
 // Use the SequentialAgent when you want the execution to occur in a fixed,
 // strict order.
-type SequentialAgent struct {
-	// sequential agent is a LoopAgent with maxIterations = 1
-	*loopAgent
+func New(cfg Config) (agent.Agent, error) {
+	return loopagent.New(loopagent.Config{
+		AgentConfig:   cfg.AgentConfig,
+		MaxIterations: 1,
+	})
 }
 
-// NewSequentialAgent creates a new SequentialAgent.
-func NewSequentialAgent(name string, opts ...AgentOption) (*SequentialAgent, error) {
-	a, err := NewLoopAgent(name, 1, opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	return &SequentialAgent{
-		loopAgent: a,
-	}, nil
+type Config struct {
+	// Basic agent setup.
+	AgentConfig agent.Config
 }
-
-type loopAgent = LoopAgent
-
-var _ types.Agent = (*SequentialAgent)(nil)

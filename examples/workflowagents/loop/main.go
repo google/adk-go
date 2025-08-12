@@ -19,23 +19,17 @@ import (
 	"iter"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/workflowagents/loopagent"
 	"google.golang.org/adk/examples"
-	"google.golang.org/adk/types"
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
-type MyAgent struct {
-	agentSpec *types.AgentSpec
-}
-
-func (a *MyAgent) Spec() *types.AgentSpec {
-	return a.agentSpec
-}
-
-func (a *MyAgent) Run(ctx context.Context, ictx *types.InvocationContext) iter.Seq2[*types.Event, error] {
-	return func(yield func(*types.Event, error) bool) {
-		yield(&types.Event{
-			LLMResponse: &types.LLMResponse{
+func CustomAgentRun(ctx agent.Context) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		yield(&session.Event{
+			LLMResponse: &llm.Response{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -48,27 +42,26 @@ func (a *MyAgent) Run(ctx context.Context, ictx *types.InvocationContext) iter.S
 	}
 }
 
-var _ types.Agent = (*MyAgent)(nil)
-
-func NewMyAgent() *MyAgent {
-	return &MyAgent{}
-}
-
 func main() {
 	ctx := context.Background()
 
-	myAgent := NewMyAgent()
-	myAgent.agentSpec = &types.AgentSpec{
+	customAgent, err := agent.New(agent.Config{
 		Name:        "my_custom_agent",
 		Description: "A custom agent that responds with a greeting.",
-	}
-	if err := myAgent.agentSpec.Init(myAgent); err != nil {
+		Run:         CustomAgentRun,
+	})
+	if err != nil {
 		panic(err)
 	}
 
-	loopAgent, err := agent.NewLoopAgent("loop_agent", 3,
-		agent.WithDescription("A loop agent that runs sub-agents"),
-		agent.WithSubAgents(myAgent))
+	loopAgent, err := loopagent.New(loopagent.Config{
+		MaxIterations: 3,
+		AgentConfig: agent.Config{
+			Name:        "loop_agent",
+			Description: "A loop agent that runs sub-agents",
+			SubAgents:   []agent.Agent{customAgent},
+		},
+	})
 	if err != nil {
 		panic(err)
 	}
