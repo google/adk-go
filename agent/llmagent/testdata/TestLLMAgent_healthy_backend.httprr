@@ -1,17 +1,16 @@
 httprr trace v1
-501 1004
-POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+500 947
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
 Content-Length: 268
 Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"Handle the requests as specified in the System Instruction."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Answer as precisely as possible.\n\nRoll the dice and report only the result."}],"role":"user"}}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Sun, 22 Jun 2025 17:10:04 GMT
+Date: Mon, 18 Aug 2025 11:19:53 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=357
+Server-Timing: gfet4t7; dur=402
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -31,7 +30,7 @@ X-Xss-Protection: 0
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": -0.50234735012054443
+      "avgLogprobs": -0.50080591440200806
     }
   ],
   "usageMetadata": {
@@ -52,5 +51,5 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "7DhYaNXJAv_bgLUPvdfCsQU"
+  "responseId": "WQyjaLX3BpewkdUPnIf6qAc"
 }

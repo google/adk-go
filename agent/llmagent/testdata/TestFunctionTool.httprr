@@ -1,17 +1,16 @@
 httprr trace v1
-835 1141
-POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+834 1082
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
 Content-Length: 602
 Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"what is the sum of 1 + 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"computes the sum of two numbers","name":"sum","parametersJsonSchema":{"additionalProperties":{"not":{}},"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":{"not":{}},"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 07 Jul 2025 13:39:56 GMT
+Date: Mon, 18 Aug 2025 11:19:53 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=592
+Server-Timing: gfet4t7; dur=435
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -28,8 +27,8 @@ X-Xss-Protection: 0
             "functionCall": {
               "name": "sum",
               "args": {
-                "b": 2,
-                "a": 1
+                "a": 1,
+                "b": 2
               }
             }
           }
@@ -37,7 +36,7 @@ X-Xss-Protection: 0
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": -3.4829718060791491e-07
+      "avgLogprobs": -4.03114827349782e-06
     }
   ],
   "usageMetadata": {
@@ -58,21 +57,20 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "K85raLC0NbKm1dkPoOiKsQM"
+  "responseId": "WQyjaNWVIJXonsEP68HFyAQ"
 }
-998 1007
-POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+997 950
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
 Content-Length: 765
 Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"what is the sum of 1 + 2?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":1,"b":2},"name":"sum"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"sum","response":{"sum":3}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"computes the sum of two numbers","name":"sum","parametersJsonSchema":{"additionalProperties":{"not":{}},"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":{"not":{}},"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 07 Jul 2025 13:39:56 GMT
+Date: Mon, 18 Aug 2025 11:19:54 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=417
+Server-Timing: gfet4t7; dur=397
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -92,7 +90,7 @@ X-Xss-Protection: 0
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": -8.2294456660747528e-05
+      "avgLogprobs": -0.00032072281464934349
     }
   ],
   "usageMetadata": {
@@ -113,5 +111,5 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "LM5raOKMI52vgLUPiKvesAc"
+  "responseId": "WQyjaPjzOei4kdUP29P4oAc"
 }

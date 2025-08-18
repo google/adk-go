@@ -5,7 +5,7 @@ go 1.24.3
 require (
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
-	google.golang.org/genai v1.13.0
+	google.golang.org/genai v1.20.0
 	rsc.io/omap v1.2.0
 	rsc.io/ordered v1.1.1
 )

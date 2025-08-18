@@ -1,17 +1,16 @@
 httprr trace v1
-811 1141
-POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+810 1085
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
 Content-Length: 578
 Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"Report the current weather of the capital city of U.K."}],"role":"user"}],"generationConfig":{},"tools":[{"functionDeclarations":[{"description":"Retrieves the current weather report for a specified city.","name":"get_weather_report","parametersJsonSchema":{"additionalProperties":{"not":{}},"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":{"not":{}},"properties":{"report":{"type":"string"},"status":{"type":"string"}},"required":["report","status"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Tue, 01 Jul 2025 01:49:23 GMT
+Date: Mon, 18 Aug 2025 11:19:57 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=547
+Server-Timing: gfet4t7; dur=440
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -36,7 +35,7 @@ X-Xss-Protection: 0
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": -0.0001656591027442898
+      "avgLogprobs": -0.00042905209452978203
     }
   ],
   "usageMetadata": {
@@ -57,21 +56,20 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "oj5jaM37OaizxfcPvo3h8QI"
+  "responseId": "XAyjaNy_MdKqkdUP1bGNqQc"
 }
-789 1140
-POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+788 1083
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
 Content-Length: 556
 Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"How is the weather of Paris now?"}],"role":"user"}],"generationConfig":{},"tools":[{"functionDeclarations":[{"description":"Retrieves the current weather report for a specified city.","name":"get_weather_report","parametersJsonSchema":{"additionalProperties":{"not":{}},"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":{"not":{}},"properties":{"report":{"type":"string"},"status":{"type":"string"}},"required":["report","status"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Tue, 01 Jul 2025 01:49:23 GMT
+Date: Mon, 18 Aug 2025 11:19:57 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=535
+Server-Timing: gfet4t7; dur=649
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -96,7 +94,7 @@ X-Xss-Protection: 0
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": 2.4634563097996372e-06
+      "avgLogprobs": 3.4654814433971685e-06
     }
   ],
   "usageMetadata": {
@@ -117,21 +115,20 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "oz5jaMyGHvLhmNAPpebBuQM"
+  "responseId": "XQyjaMrMD_KbkdUP_ITnqQc"
 }
-802 1143
-POST https://generativelanguage.googleapis.com//v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+801 1086
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
 Content-Length: 569
 Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"Tell me about the current weather in New York"}],"role":"user"}],"generationConfig":{},"tools":[{"functionDeclarations":[{"description":"Retrieves the current weather report for a specified city.","name":"get_weather_report","parametersJsonSchema":{"additionalProperties":{"not":{}},"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":{"not":{}},"properties":{"report":{"type":"string"},"status":{"type":"string"}},"required":["report","status"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Tue, 01 Jul 2025 01:49:24 GMT
+Date: Mon, 18 Aug 2025 11:19:58 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=817
+Server-Timing: gfet4t7; dur=490
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -156,7 +153,7 @@ X-Xss-Protection: 0
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": 9.3482958618551493e-07
+      "avgLogprobs": 1.7310030671069399e-06
     }
   ],
   "usageMetadata": {
@@ -177,5 +174,5 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "oz5jaOm-PL7Bld8P2ZeQgQ8"
+  "responseId": "XQyjaPSENrvxnsEPtbymsAU"
 }
