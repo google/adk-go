@@ -36,7 +36,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	model := &struct{ llm.Model }{}
 
 	if curTool.Name() == "" || curTool.Description() == "" || curTool.Declaration() == nil {
-		t.Fatalf("unexpected transferToAgentTool: name=%q, desc=%q, decl=%v", curTool.Name(), curTool.Description(), curTool)
+		t.Fatalf("unexpected TransferToAgentTool: name=%q, desc=%q, decl=%v", curTool.Name(), curTool.Description(), curTool)
 	}
 
 	check := func(t *testing.T, curAgent agent.Agent, wantParent string, wantAgents []string, unwantAgents []string) {
@@ -45,10 +45,10 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		ctx := agent.NewContext(t.Context(), curAgent, nil, nil, "")
 
 		if err := llminternal.AgentTransferRequestProcessor(ctx, req); err != nil {
-			t.Fatalf("agentTransferRequestProcessor() = %v, want success", err)
+			t.Fatalf("AgentTransferRequestProcessor() = %v, want success", err)
 		}
 
-		// We don't expect transfer. Check agentTransferRequestProcessor was no-op.
+		// We don't expect transfer. Check AgentTransferRequestProcessor was no-op.
 		if wantParent == "" && len(wantAgents) == 0 {
 			if diff := cmp.Diff(&llm.Request{}, req); diff != "" {
 				t.Errorf("req was changed unexpectedly (-want, +got): %v", diff)
@@ -118,7 +118,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		if !slices.ContainsFunc(functions, func(f *genai.FunctionDeclaration) bool {
 			return f.Name == wantToolName && strings.Contains(f.Description, wantToolDescription) && f.ParametersJsonSchema == nil
 		}) {
-			t.Errorf("agentTransferRequestProcessor() did not append the function declaration, got: %v", stringify(functions))
+			t.Errorf("AgentTransferRequestProcessor() did not append the function declaration, got: %v", stringify(functions))
 		}
 	}
 

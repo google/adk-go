@@ -171,11 +171,9 @@ func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
 }
 
 func (f *Flow) preprocess(ctx agent.Context, req *llm.Request) error {
-	agent := ctx.Agent()
-
-	llmAgent, ok := agent.(Agent)
+	llmAgent, ok := ctx.Agent().(Agent)
 	if !ok {
-		return fmt.Errorf("agent %v is not an LLMAgent", agent.Name())
+		return fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name())
 	}
 
 	// apply request processor functions to the request in the configured order.
@@ -270,10 +268,10 @@ func (f *Flow) postprocess(ctx agent.Context, req *llm.Request, resp *llm.Respon
 }
 
 func (f *Flow) agentToRun(ctx agent.Context, agentName string) agent.Agent {
-	// NOTE: in python, BaseLlmFlow._get_gent_to_run searches the entire agent
+	// NOTE: in python, BaseLlmFlow._get_agent_to_run searches the entire agent
 	// tree from the root_agent when processing _postprocess_handle_function_calls_async.
 	// I think that is strange. In our version, we check the agents included in transferTarget.
-	agents := transferTarget(ctx.Agent())
+	agents := transferTargets(ctx.Agent())
 	for _, agent := range agents {
 		if agent.Name() == agentName {
 			return agent

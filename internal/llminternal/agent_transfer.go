@@ -66,7 +66,7 @@ func AgentTransferRequestProcessor(ctx agent.Context, req *llm.Request) error {
 		return nil
 	}
 
-	targets := transferTarget(agent)
+	targets := transferTargets(agent)
 	if len(targets) == 0 {
 		return nil
 	}
@@ -136,7 +136,7 @@ func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (any, error) {
 
 var _ tool.Tool = (*TransferToAgentTool)(nil)
 
-func transferTarget(agent agent.Agent) []agent.Agent {
+func transferTargets(agent agent.Agent) []agent.Agent {
 	targets := slices.Clone(agent.SubAgents())
 
 	llmAgent := asLLMAgent(agent)
@@ -201,6 +201,7 @@ func appendTools(r *llm.Request, tools ...tool.Tool) error {
 				r.GenerateConfig = &genai.GenerateContentConfig{}
 			}
 			if decl := fnTool.Declaration(); decl != nil {
+				// TODO: verify for duplicates.
 				r.GenerateConfig.Tools = append(r.GenerateConfig.Tools, &genai.Tool{
 					FunctionDeclarations: []*genai.FunctionDeclaration{decl},
 				})
