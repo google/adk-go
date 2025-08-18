@@ -106,7 +106,10 @@ func TestNewLoopAgent(t *testing.T) {
 
 			sessionService := sessionservice.Mem()
 
-			runner := runner.New("test_app", agent, sessionService)
+			runner, err := runner.New("test_app", agent, sessionService)
+			if err != nil {
+				t.Fatal(err)
+			}
 
 			_, err = sessionService.Create(ctx, &sessionservice.CreateRequest{
 				AppName:   "test_app",

@@ -19,6 +19,7 @@ import (
 	"iter"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
@@ -271,7 +272,8 @@ func (f *Flow) agentToRun(ctx agent.Context, agentName string) agent.Agent {
 	// NOTE: in python, BaseLlmFlow._get_agent_to_run searches the entire agent
 	// tree from the root_agent when processing _postprocess_handle_function_calls_async.
 	// I think that is strange. In our version, we check the agents included in transferTarget.
-	agents := transferTargets(ctx.Agent())
+	parents := parentmap.FromContext(ctx)
+	agents := transferTargets(ctx.Agent(), parents[ctx.Agent().Name()])
 	for _, agent := range agents {
 		if agent.Name() == agentName {
 			return agent

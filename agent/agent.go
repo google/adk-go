@@ -29,7 +29,6 @@ type Agent interface {
 	Description() string
 	// TODO: verify if the interface would have "Run(Context) error" and agent will call agent.Context.Report(Event)
 	Run(Context) iter.Seq2[*session.Event, error]
-	Parent() Agent
 	SubAgents() []Agent
 	// TODO: verify if we should add unexported methods to ensure only this package can implement this interface.
 	// TODO: maybe opact struct?
@@ -38,31 +37,14 @@ type Agent interface {
 }
 
 func New(cfg Config) (Agent, error) {
-	a := &agent{
+	return &agent{
 		name:        cfg.Name,
 		description: cfg.Description,
 		subAgents:   cfg.SubAgents,
 		beforeAgent: cfg.BeforeAgent,
 		run:         cfg.Run,
 		afterAgent:  cfg.AfterAgent,
-	}
-
-	a.self = a
-	if cfg.Self != nil {
-		a.self = cfg.Self
-	}
-
-	for _, subAgent := range cfg.SubAgents {
-		sa := subAgent.internal()
-
-		if sa.parent != nil {
-			return nil, fmt.Errorf("subAgent %v already has a parent %v", subAgent.Name(), sa.parent.Name())
-		}
-
-		sa.parent = a.self
-	}
-
-	return a, nil
+	}, nil
 }
 
 type Config struct {
@@ -75,9 +57,6 @@ type Config struct {
 	Run func(Context) iter.Seq2[*session.Event, error]
 	// TODO: after agent callback should take: ctx, actual_resp, actual_err. So the callback can inspect and decide what to return.
 	AfterAgent []Callback
-
-	// TODO: this is the field for internal usage
-	Self Agent
 }
 
 type Context interface {
@@ -109,9 +88,6 @@ type agent struct {
 	name, description string
 	subAgents         []Agent
 
-	parent Agent
-	self   Agent
-
 	beforeAgent []Callback
 	run         func(Context) iter.Seq2[*session.Event, error]
 	afterAgent  []Callback
@@ -125,10 +101,6 @@ func (a *agent) Description() string {
 	return a.description
 }
 
-func (a *agent) Parent() Agent {
-	return a.parent
-}
-
 func (a *agent) SubAgents() []Agent {
 	return a.subAgents
 }
@@ -136,7 +108,7 @@ func (a *agent) SubAgents() []Agent {
 func (a *agent) Run(ctx Context) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: verify&update the setup here. Should we branch etc.
-		ctx := NewContext(ctx, a.self, ctx.UserContent(), ctx.Session(), ctx.Branch())
+		ctx := NewContext(ctx, a, ctx.UserContent(), ctx.Session(), ctx.Branch())
 
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {

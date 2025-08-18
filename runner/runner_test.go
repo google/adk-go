@@ -177,7 +177,11 @@ func Test_isTransferrableAcrossAgentTree(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isTransferableAcrossAgentTree(tt.agent); got != tt.want {
+			runner, err := New("testApp", tt.agent, sessionservice.Mem())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := runner.isTransferableAcrossAgentTree(tt.agent); got != tt.want {
 				t.Errorf("isTransferrableAcrossAgentTree() = %v, want %v", got, tt.want)
 			}
 		})

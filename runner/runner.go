@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
@@ -30,18 +31,26 @@ import (
 	"google.golang.org/genai"
 )
 
-func New(appName string, rootAgent agent.Agent, sessionService sessionservice.Service) *Runner {
+func New(appName string, rootAgent agent.Agent, sessionService sessionservice.Service) (*Runner, error) {
+	parents, err := parentmap.New(rootAgent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create agent tree: %w", err)
+	}
+
 	return &Runner{
 		AppName:        appName,
 		RootAgent:      rootAgent,
 		SessionService: sessionService,
-	}
+		parents:        parents,
+	}, nil
 }
 
 type Runner struct {
 	AppName        string
 	RootAgent      agent.Agent
 	SessionService sessionservice.Service
+
+	parents parentmap.Map
 }
 
 // Run runs the agent.
@@ -74,6 +83,8 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				return
 			}
 		}
+
+		ctx = parentmap.ToContext(ctx, r.parents)
 
 		ctx := agent.NewContext(ctx, agentToRun, msg, &mutableSession{
 			service:       r.SessionService,
@@ -168,7 +179,7 @@ func (r *Runner) findAgentToRun(session sessionservice.StoredSession) (agent.Age
 			continue
 		}
 
-		if isTransferableAcrossAgentTree(subAgent) {
+		if r.isTransferableAcrossAgentTree(subAgent) {
 			return subAgent, nil
 		}
 	}
@@ -178,8 +189,8 @@ func (r *Runner) findAgentToRun(session sessionservice.StoredSession) (agent.Age
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.
-func isTransferableAcrossAgentTree(agentToRun agent.Agent) bool {
-	for curAgent := agentToRun; curAgent != nil; curAgent = curAgent.Parent() {
+func (r *Runner) isTransferableAcrossAgentTree(agentToRun agent.Agent) bool {
+	for curAgent := agentToRun; curAgent != nil; curAgent = r.parents[curAgent.Name()] {
 		llmAgent, ok := agentToRun.(llminternal.Agent)
 		if !ok {
 			return false

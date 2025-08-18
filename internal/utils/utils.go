@@ -65,20 +65,6 @@ func Content(ev *session.Event) *genai.Content {
 	return ev.LLMResponse.Content
 }
 
-// RootAgent returns the root of the agent tree.
-func RootAgent(cur agent.Agent) agent.Agent {
-	if cur == nil {
-		return nil
-	}
-	for {
-		parent := cur.Parent()
-		if parent == nil {
-			return cur
-		}
-		cur = parent
-	}
-}
-
 // Belows are useful utilities that help working with genai.Content
 // included in types.Event.
 // TODO: Use generics.

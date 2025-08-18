@@ -557,14 +557,20 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &types.AgentRunConfig{})
 }
 
-func newTestAgentRunner(_ *testing.T, agent agent.Agent) *testAgentRunner {
+func newTestAgentRunner(t *testing.T, agent agent.Agent) *testAgentRunner {
 	appName := "test_app"
 	sessionService := sessionservice.Mem()
+
+	runner, err := runner.New(appName, agent, sessionService)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	return &testAgentRunner{
 		agent:          agent,
 		sessionService: sessionService,
 		appName:        appName,
-		runner:         runner.New(appName, agent, sessionService),
+		runner:         runner,
 	}
 }
 

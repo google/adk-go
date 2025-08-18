@@ -21,6 +21,7 @@ import (
 	"text/template"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/itype"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/tool"
@@ -66,7 +67,9 @@ func AgentTransferRequestProcessor(ctx agent.Context, req *llm.Request) error {
 		return nil
 	}
 
-	targets := transferTargets(agent)
+	parents := parentmap.FromContext(ctx)
+
+	targets := transferTargets(agent, parents[agent.Name()])
 	if len(targets) == 0 {
 		return nil
 	}
@@ -74,7 +77,7 @@ func AgentTransferRequestProcessor(ctx agent.Context, req *llm.Request) error {
 	// TODO(hyangah): why do we set this up in request processor
 	// instead of registering this as a normal function tool of the Agent?
 	transferToAgentTool := &TransferToAgentTool{}
-	si, err := instructionsForTransferToAgent(agent, targets, transferToAgentTool)
+	si, err := instructionsForTransferToAgent(agent, parents[agent.Name()], targets, transferToAgentTool)
 	if err != nil {
 		return err
 	}
@@ -136,21 +139,21 @@ func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (any, error) {
 
 var _ tool.Tool = (*TransferToAgentTool)(nil)
 
-func transferTargets(agent agent.Agent) []agent.Agent {
+func transferTargets(agent, parent agent.Agent) []agent.Agent {
 	targets := slices.Clone(agent.SubAgents())
 
 	llmAgent := asLLMAgent(agent)
 
-	if !llmAgent.internal().DisallowTransferToParent && agent.Parent() != nil {
-		targets = append(targets, agent.Parent())
+	if !llmAgent.internal().DisallowTransferToParent && parent != nil {
+		targets = append(targets, parent)
 	}
 	// For peer-agent transfers, it's only enabled when all below conditions are met:
 	// - the parent agent is also of AutoFlow.
 	// - DisallowTransferToPeers is false.
 	if !llmAgent.internal().DisallowTransferToPeers {
-		parent := asLLMAgent(agent.Parent())
-		if parent != nil && shouldUseAutoFlow(agent.Parent()) {
-			for _, peer := range agent.Parent().SubAgents() {
+		llmParent := asLLMAgent(parent)
+		if llmParent != nil && shouldUseAutoFlow(parent) {
+			for _, peer := range parent.SubAgents() {
 				if peer.Name() != agent.Name() {
 					targets = append(targets, peer)
 				}
@@ -214,8 +217,7 @@ func appendTools(r *llm.Request, tools ...tool.Tool) error {
 var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
-func instructionsForTransferToAgent(curAgent agent.Agent, targets []agent.Agent, transferTool tool.Tool) (string, error) {
-	parent := curAgent.Parent()
+func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent, transferTool tool.Tool) (string, error) {
 	if asLLMAgent(curAgent).internal().DisallowTransferToParent {
 		parent = nil
 	}

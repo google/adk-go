@@ -23,6 +23,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/llm"
@@ -39,10 +40,15 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		t.Fatalf("unexpected TransferToAgentTool: name=%q, desc=%q, decl=%v", curTool.Name(), curTool.Description(), curTool)
 	}
 
-	check := func(t *testing.T, curAgent agent.Agent, wantParent string, wantAgents []string, unwantAgents []string) {
+	check := func(t *testing.T, curAgent, root agent.Agent, wantParent string, wantAgents []string, unwantAgents []string) {
 		req := &llm.Request{}
 
-		ctx := agent.NewContext(t.Context(), curAgent, nil, nil, "")
+		parents, err := parentmap.New(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ctx := agent.NewContext(parentmap.ToContext(t.Context(), parents), curAgent, nil, nil, "")
 
 		if err := llminternal.AgentTransferRequestProcessor(ctx, req); err != nil {
 			t.Fatalf("AgentTransferRequestProcessor() = %v, want success", err)
@@ -127,24 +133,25 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			Name:  "Current",
 			Model: model,
 		}))
-		check(t, agent, "", nil, []string{"Current"})
+		check(t, agent, agent, "", nil, []string{"Current"})
 	})
 	t.Run("NotLLMAgent", func(t *testing.T) {
-		check(t, utils.Must(agent.New(agent.Config{
+		a := utils.Must(agent.New(agent.Config{
 			Name: "mockAgent",
-		})), "", nil, nil)
+		}))
+		check(t, a, a, "", nil, nil)
 	})
 	t.Run("LLMAgentParent", func(t *testing.T) {
 		testAgent := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Current",
 			Model: model,
 		}))
-		_ = utils.Must(llmagent.New(llmagent.Config{
+		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:      "Parent",
 			Model:     model,
 			SubAgents: []agent.Agent{testAgent},
 		}))
-		check(t, testAgent, "Parent", nil, []string{"Current"})
+		check(t, testAgent, root, "Parent", nil, []string{"Current"})
 	})
 	t.Run("LLMAgentParentAndPeer", func(t *testing.T) {
 		curAgent := utils.Must(llmagent.New(llmagent.Config{
@@ -155,12 +162,12 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			Name:  "Peer",
 			Model: model,
 		}))
-		_ = utils.Must(llmagent.New(llmagent.Config{
+		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:      "Parent",
 			Model:     model,
 			SubAgents: []agent.Agent{curAgent, peer},
 		}))
-		check(t, curAgent, "Parent", []string{"Peer"}, []string{"Current"})
+		check(t, curAgent, root, "Parent", []string{"Peer"}, []string{"Current"})
 	})
 	t.Run("LLMAgentSubagents", func(t *testing.T) {
 		agent := utils.Must(llmagent.New(llmagent.Config{
@@ -176,7 +183,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 				})),
 			},
 		}))
-		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
+		check(t, agent, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
 	})
 
 	t.Run("AgentWithParentAndPeersAndSubagents", func(t *testing.T) {
@@ -196,12 +203,12 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		peer := utils.Must(agent.New(agent.Config{
 			Name: "Peer",
 		}))
-		_ = utils.Must(llmagent.New(llmagent.Config{
+		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:      "Parent",
 			Model:     model,
 			SubAgents: []agent.Agent{curAgent, peer},
 		}))
-		check(t, curAgent, "Parent", []string{"Peer", "Sub1", "Sub2"}, []string{"Current"})
+		check(t, curAgent, root, "Parent", []string{"Peer", "Sub1", "Sub2"}, []string{"Current"})
 	})
 
 	t.Run("NonLLMAgentSubagents", func(t *testing.T) {
@@ -217,7 +224,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 				})),
 			},
 		}))
-		check(t, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
+		check(t, agent, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
 	})
 
 	t.Run("AgentWithDisallowTransferToParent", func(t *testing.T) {
@@ -236,7 +243,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 				})),
 			},
 		}))
-		_ = utils.Must(llmagent.New(llmagent.Config{
+		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Parent",
 			Model: model,
 			SubAgents: []agent.Agent{
@@ -244,7 +251,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			},
 		}))
 
-		check(t, curAgent, "", []string{"Sub1", "Sub2"}, []string{"Parent", "Current"})
+		check(t, curAgent, root, "", []string{"Sub1", "Sub2"}, []string{"Parent", "Current"})
 	})
 
 	t.Run("AgentWithDisallowTransferToPeers", func(t *testing.T) {
@@ -265,14 +272,14 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			Name:  "Peer",
 			Model: model,
 		}))
-		_ = utils.Must(llmagent.New(llmagent.Config{
+		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Parent",
 			Model: model,
 			SubAgents: []agent.Agent{
 				curAgent, peer,
 			},
 		}))
-		check(t, curAgent, "Parent", []string{"Sub1", "Sub2"}, []string{"Peer", "Current"})
+		check(t, curAgent, root, "Parent", []string{"Sub1", "Sub2"}, []string{"Peer", "Current"})
 	})
 
 	t.Run("AgentWithDisallowTransferToParentAndPeers", func(t *testing.T) {
@@ -295,13 +302,13 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			Name:  "Peer",
 			Model: model,
 		}))
-		_ = utils.Must(llmagent.New(llmagent.Config{
+		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:      "Parent",
 			Model:     model,
 			SubAgents: []agent.Agent{peer, curAgent},
 		}))
 
-		check(t, curAgent, "", []string{"Sub1", "Sub2"}, []string{"Parent", "Peer", "Current"})
+		check(t, curAgent, root, "", []string{"Sub1", "Sub2"}, []string{"Parent", "Peer", "Current"})
 	})
 
 	t.Run("AgentWithDisallowTransfer", func(t *testing.T) {
@@ -315,13 +322,13 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			Name:  "Peer",
 			Model: model,
 		}))
-		_ = utils.Must(llmagent.New(llmagent.Config{
+		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:      "Parent",
 			Model:     model,
 			SubAgents: []agent.Agent{curAgent, peer},
 		}))
 
-		check(t, curAgent, "", nil, []string{"Parent", "Peer", "Current"})
+		check(t, curAgent, root, "", nil, []string{"Parent", "Peer", "Current"})
 	})
 }
 
