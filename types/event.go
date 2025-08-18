@@ -16,24 +16,8 @@ package types
 
 import (
 	"time"
-
-	"github.com/google/uuid"
-	"google.golang.org/adk/llm"
-	"google.golang.org/adk/session"
 )
 
-// NewEvent creates a new event.
-func NewEvent(invocationID string) *Event {
-	return &Event{
-		ID:           uuid.NewString(),
-		InvocationID: invocationID,
-		Time:         time.Now(),
-	}
-}
-
-// Event represents an even in a conversation between agents and users.
-// It is used to sore the content of the conversation, as well as
-// the actions taken by the agents like function calls, etc.
 type Event struct {
 	// The followings are set by the session.
 	ID   string
@@ -60,129 +44,8 @@ type Event struct {
 	// The actions taken by the agent.
 	Actions *EventActions
 
-	LLMResponse *LLMResponse
-
 	// TODO:
 	//  Partial
-}
-
-// TODO: this is a temporary method. Remove when types.Event is cleaned up.
-func (e *Event) AsSessionEvent() *session.Event {
-	if e == nil {
-		return nil
-	}
-
-	res := &session.Event{
-		ID:                 e.ID,
-		Time:               e.Time,
-		InvocationID:       e.InvocationID,
-		LongRunningToolIDs: e.LongRunningToolIDs,
-		Author:             e.Author,
-		Branch:             e.Branch,
-	}
-
-	if e.Actions != nil {
-		res.Actions = session.Actions{
-			StateDelta:        e.Actions.StateDelta,
-			SkipSummarization: e.Actions.SkipSummarization,
-			TransferToAgent:   e.Actions.TransferToAgent,
-			Escalate:          e.Actions.Escalate,
-		}
-	}
-
-	if e.LLMResponse != nil {
-		res.LLMResponse = &llm.Response{
-			Content:           e.LLMResponse.Content,
-			GroundingMetadata: e.LLMResponse.GroundingMetadata,
-			Partial:           e.LLMResponse.Partial,
-			TurnComplete:      e.LLMResponse.TurnComplete,
-			Interrupted:       e.LLMResponse.Interrupted,
-			ErrorCode:         e.LLMResponse.ErrorCode,
-			ErrorMessage:      e.LLMResponse.ErrorMessage,
-		}
-	}
-
-	return res
-}
-
-// TODO: this is a temporary method. Remove when types.Event is cleaned up.
-func NewEventFromSessionEvent(e *session.Event) *Event {
-	if e == nil {
-		return nil
-	}
-
-	res := &Event{
-		ID:                 e.ID,
-		Time:               e.Time,
-		InvocationID:       e.InvocationID,
-		LongRunningToolIDs: e.LongRunningToolIDs,
-		Author:             e.Author,
-		Branch:             e.Branch,
-		Actions: &EventActions{
-			StateDelta:        e.Actions.StateDelta,
-			SkipSummarization: e.Actions.SkipSummarization,
-			TransferToAgent:   e.Actions.TransferToAgent,
-			Escalate:          e.Actions.Escalate,
-		},
-	}
-
-	if e.LLMResponse != nil {
-		res.LLMResponse = &LLMResponse{
-			Content:           e.LLMResponse.Content,
-			GroundingMetadata: e.LLMResponse.GroundingMetadata,
-			Partial:           e.LLMResponse.Partial,
-			TurnComplete:      e.LLMResponse.TurnComplete,
-			Interrupted:       e.LLMResponse.Interrupted,
-			ErrorCode:         e.LLMResponse.ErrorCode,
-			ErrorMessage:      e.LLMResponse.ErrorMessage,
-		}
-	}
-
-	return res
-}
-
-// IsFinalResponse returns whether the LLMResponse in the event is the final response.
-func (ev *Event) IsFinalResponse() bool {
-	if (ev.Actions != nil && ev.Actions.SkipSummarization) || len(ev.LongRunningToolIDs) > 0 {
-		return true
-	}
-	// TODO: when will we see event without LLMResponse?
-	if ev.LLMResponse == nil {
-		return true
-	}
-	return !hasFunctionCalls(ev.LLMResponse) && !hasFunctionResponses(ev.LLMResponse) && !ev.LLMResponse.Partial && !hasTrailingCodeExecutionResult(ev.LLMResponse)
-}
-
-func hasFunctionCalls(resp *LLMResponse) bool {
-	if resp == nil || resp.Content == nil {
-		return false
-	}
-	for _, part := range resp.Content.Parts {
-		if part.FunctionCall != nil {
-			return true
-		}
-	}
-	return false
-}
-
-func hasFunctionResponses(resp *LLMResponse) bool {
-	if resp == nil || resp.Content == nil {
-		return false
-	}
-	for _, part := range resp.Content.Parts {
-		if part.FunctionResponse != nil {
-			return true
-		}
-	}
-	return false
-}
-
-func hasTrailingCodeExecutionResult(resp *LLMResponse) bool {
-	if resp == nil || resp.Content == nil || len(resp.Content.Parts) == 0 {
-		return false
-	}
-	lastPart := resp.Content.Parts[len(resp.Content.Parts)-1]
-	return lastPart.CodeExecutionResult != nil
 }
 
 // EventActions represents the actions attached to an event.

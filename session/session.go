@@ -56,6 +56,10 @@ type Events interface {
 // TODO: Clarify what fields should be set when Event is created/processed.
 // TODO: Verify if we can hide Event completely; how Agents work with events.
 // TODO: Potentially expose as user-visible event or layer.
+//
+// Event represents an even in a conversation between agents and users.
+// It is used to store the content of the conversation, as well as
+// the actions taken by the agents like function calls, etc.
 type Event struct {
 	// Set by storage
 	ID   string
@@ -63,11 +67,22 @@ type Event struct {
 
 	// Set by agent.Context implementation.
 	InvocationID string
-	Branch       string
-	Author       string
+	// The branch of the event.
+	//
+	// The format is like agent_1.agent_2.agent_3, where agent_1 is
+	// the parent of agent_2, and agent_2 is the parent of agent_3.
+	//
+	// Branch is used when multiple sub-agent shouldn't see their peer agents'
+	// conversation history.
+	Branch string
+	Author string
 
-	Partial            bool
-	Actions            Actions
+	Partial bool
+	// The actions taken by the agent.
+	Actions Actions
+	// Set of IDs of the long running function calls.
+	// Agent client will know from this field about which function call is long running.
+	// Only valid for function call event.
 	LongRunningToolIDs []string
 	LLMResponse        *llm.Response
 }
@@ -83,12 +98,18 @@ func NewEvent(invocationID string) *Event {
 
 func (e *Event) Clone() *Event { return nil }
 
+// Actions represents the actions attached to an event.
 type Actions struct {
 	// Set by agent.Context implementation.
 	StateDelta map[string]any
 
-	// Set by clients?
+	// TODO: Set by clients?
+	//
+	// If true, it won't call model to summarize function response.
+	// Only valid for function response event.
 	SkipSummarization bool
-	TransferToAgent   string
-	Escalate          bool
+	// If set, the event transfers to the specified agent.
+	TransferToAgent string
+	// The agent is escalating to a higher level agent.
+	Escalate bool
 }

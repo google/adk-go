@@ -21,12 +21,14 @@ import (
 	"google.golang.org/genai"
 )
 
+// Model represents LLM.
 type Model interface {
 	Name() string
 	Generate(ctx context.Context, req *Request) (*Response, error)
 	GenerateStream(ctx context.Context, req *Request) iter.Seq2[*Response, error]
 }
 
+// Request is the raw LLM request.
 type Request struct {
 	Contents       []*genai.Content
 	GenerateConfig *genai.GenerateContentConfig
@@ -36,12 +38,20 @@ type Request struct {
 	Tools map[string]any
 }
 
+// Response is the raw LLM response.
+// It provides the first candidate response from the model if available.
 type Response struct {
 	Content           *genai.Content
 	GroundingMetadata *genai.GroundingMetadata
-	Partial           bool
-	TurnComplete      bool
-	Interrupted       bool
-	ErrorCode         int
-	ErrorMessage      string
+	// Partial indicates whether the content is part of a unfinished content stream.
+	// Only used for streaming mode and when the content is plain text.
+	Partial bool
+	// Indicates whether the response from the model is complete.
+	// Only used for streaming mode.
+	TurnComplete bool
+	// Flag indicating that LLM was interrupted when generating the content.
+	// Usually it is due to user interruption during a bidi streaming.
+	Interrupted  bool
+	ErrorCode    int
+	ErrorMessage string
 }
