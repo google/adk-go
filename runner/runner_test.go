@@ -27,8 +27,6 @@ import (
 func TestRunner_findAgentToRun(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
-
 	sessionID := session.ID{
 		AppName:   "test",
 		UserID:    "userID",
@@ -46,7 +44,7 @@ func TestRunner_findAgentToRun(t *testing.T) {
 	}{
 		{
 			name: "last event from agent allowing transfer",
-			session: createSession(t, ctx, sessionID, []*session.Event{
+			session: createSession(t, t.Context(), sessionID, []*session.Event{
 				{
 					Author: "allows_transfer_agent",
 				},
@@ -59,7 +57,7 @@ func TestRunner_findAgentToRun(t *testing.T) {
 		},
 		{
 			name: "last event from agent not allowing transfer",
-			session: createSession(t, ctx, sessionID, []*session.Event{
+			session: createSession(t, t.Context(), sessionID, []*session.Event{
 				{
 					Author: "no_transfer_agent",
 				},
@@ -72,7 +70,7 @@ func TestRunner_findAgentToRun(t *testing.T) {
 		},
 		{
 			name: "no events from agents, call root",
-			session: createSession(t, ctx, sessionID, []*session.Event{
+			session: createSession(t, t.Context(), sessionID, []*session.Event{
 				{
 					Author: "user",
 				},

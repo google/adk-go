@@ -15,7 +15,6 @@
 package sessionservice
 
 import (
-	"context"
 	"maps"
 	"testing"
 
@@ -34,7 +33,7 @@ func Test_inMemoryService_Create(t *testing.T) {
 	}{
 		{
 			name:            "full key",
-			inMemoryService: newInMemoryService(),
+			inMemoryService: &inMemoryService{},
 			req: &CreateRequest{
 				AppName:   "testApp",
 				UserID:    "testUserID",
@@ -46,7 +45,7 @@ func Test_inMemoryService_Create(t *testing.T) {
 		},
 		{
 			name:            "generated session id",
-			inMemoryService: newInMemoryService(),
+			inMemoryService: &inMemoryService{},
 			req: &CreateRequest{
 				AppName: "testApp",
 				UserID:  "testUserID",
@@ -72,11 +71,9 @@ func Test_inMemoryService_Create(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ctx := context.Background()
-
 			s := tt.inMemoryService
 
-			got, err := s.Create(ctx, tt.req)
+			got, err := s.Create(t.Context(), tt.req)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("inMemoryService.Create() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -160,11 +157,9 @@ func Test_inMemoryService_Get(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ctx := context.Background()
-
 			s := tt.inMemoryService
 
-			got, err := s.Get(ctx, tt.req)
+			got, err := s.Get(t.Context(), tt.req)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("inMemoryService.Get() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -235,10 +230,8 @@ func Test_inMemoryService_List(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ctx := context.Background()
-
 			s := tt.inMemoryService
-			got, err := s.List(ctx, tt.req)
+			got, err := s.List(t.Context(), tt.req)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("inMemoryService.List() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -274,7 +267,7 @@ func Test_inMemoryService_Delete(t *testing.T) {
 			},
 		},
 		{
-			name:            "error when not found",
+			name:            "no error when not found",
 			inMemoryService: serviceWithData(t),
 			req: &DeleteRequest{
 				ID: session.ID{
@@ -283,17 +276,14 @@ func Test_inMemoryService_Delete(t *testing.T) {
 					SessionID: "session1",
 				},
 			},
-			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ctx := context.Background()
-
 			s := tt.inMemoryService
-			if err := s.Delete(ctx, tt.req); (err != nil) != tt.wantErr {
+			if err := s.Delete(t.Context(), tt.req); (err != nil) != tt.wantErr {
 				t.Errorf("inMemoryService.Delete() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
@@ -366,7 +356,7 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			ctx := context.Background()
+			ctx := t.Context()
 
 			s := tt.inMemoryService
 
@@ -399,7 +389,7 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 func serviceWithData(t *testing.T) *inMemoryService {
 	t.Helper()
 
-	service := newInMemoryService()
+	service := &inMemoryService{}
 
 	for _, storedSession := range []*storedSession{
 		{
@@ -448,3 +438,5 @@ func serviceWithData(t *testing.T) *inMemoryService {
 
 	return service
 }
+
+// TODO: test concurrency

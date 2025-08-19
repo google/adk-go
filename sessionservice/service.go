@@ -30,7 +30,7 @@ type Service interface {
 }
 
 func Mem() Service {
-	return newInMemoryService()
+	return &inMemoryService{}
 }
 
 type StoredSession interface {

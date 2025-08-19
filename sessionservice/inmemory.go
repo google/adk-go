@@ -16,7 +16,6 @@ package sessionservice
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"sync"
@@ -28,19 +27,18 @@ import (
 	"rsc.io/ordered"
 )
 
-// inMemoryService is an in-memory implementation of types.SessionService.
-// It is primarily for testing and demonstration purposes.
+// inMemoryService is an in-memory implementation of sessionService.Service.
 // Thread-safe.
 type inMemoryService struct {
 	mu       sync.RWMutex
 	sessions omap.Map[string, *storedSession] // session.ID) -> storedSession
 }
 
-func newInMemoryService() *inMemoryService {
-	return &inMemoryService{}
-}
-
 func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (StoredSession, error) {
+	if req.AppName == "" || req.UserID == "" {
+		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
+	}
+
 	sessionID := req.SessionID
 	if sessionID == "" {
 		sessionID = uuid.NewString()
@@ -69,6 +67,11 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (Store
 }
 
 func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (StoredSession, error) {
+	appName, userID, sessionID := req.ID.AppName, req.ID.UserID, req.ID.SessionID
+	if appName == "" || userID == "" || sessionID == "" {
+		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -81,8 +84,12 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (StoredSessi
 	return res, nil
 }
 
-// List returns an iterator over current snapshot.
+// List returns a list of sessions.
 func (s *inMemoryService) List(ctx context.Context, req *ListRequest) ([]StoredSession, error) {
+	if req.AppName == "" || req.UserID == "" {
+		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -106,25 +113,29 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) ([]StoredS
 }
 
 func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {
+	appName, userID, sessionID := req.ID.AppName, req.ID.UserID, req.ID.SessionID
+	if appName == "" || userID == "" || sessionID == "" {
+		return fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	_, ok := s.sessions.Get(sessionKey(req.ID).Encode())
-	if !ok {
-		return fmt.Errorf("session %+v not found", req.ID)
-	}
 
 	s.sessions.Delete(sessionKey(req.ID).Encode())
 	return nil
 }
 
 func (s *inMemoryService) AppendEvent(ctx context.Context, session StoredSession, event *session.Event) error {
+	if session == nil || event == nil {
+		return fmt.Errorf("session or event are nil")
+	}
+
 	// TODO: no-op if event is partial.
 	// TODO: process event actions and state delta.
 
 	storedSession, ok := session.(*storedSession)
 	if !ok {
-		return errors.New("unexpected session type")
+		return fmt.Errorf("unexpected session type %T", session)
 	}
 
 	s.mu.Lock()
@@ -148,13 +159,13 @@ func (sk *sessionKey) Decode(key string) error {
 }
 
 type storedSession struct {
-	id        session.ID
+	id session.ID
+
+	// guards all mutable fields
+	mu        sync.RWMutex
 	events    []*session.Event
 	state     map[string]any
 	updatedAt time.Time
-
-	// guards all mutable fields
-	mu sync.RWMutex
 }
 
 func (s *storedSession) ID() session.ID {
@@ -169,10 +180,7 @@ func (s *storedSession) State() session.ReadOnlyState {
 }
 
 func (s *storedSession) Events() session.Events {
-	return &events{
-		mu:     &s.mu,
-		events: s.events,
-	}
+	return events(s.events)
 }
 
 func (s *storedSession) Updated() time.Time {
@@ -190,40 +198,25 @@ func (s *storedSession) appendEvent(event *session.Event) {
 	s.updatedAt = event.Time
 }
 
-type events struct {
-	mu     *sync.RWMutex
-	events []*session.Event
-}
+type events []*session.Event
 
-func (e *events) All() iter.Seq[*session.Event] {
+func (e events) All() iter.Seq[*session.Event] {
 	return func(yield func(*session.Event) bool) {
-		e.mu.RLock()
-
-		for _, event := range e.events {
-			e.mu.RUnlock()
+		for _, event := range e {
 			if !yield(event) {
 				return
 			}
-			e.mu.RLock()
 		}
-
-		e.mu.RUnlock()
 	}
 }
 
-func (e *events) Len() int {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	return len(e.events)
+func (e events) Len() int {
+	return len(e)
 }
 
-func (e *events) At(i int) *session.Event {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	if i >= 0 && i < len(e.events) {
-		return e.events[i]
+func (e events) At(i int) *session.Event {
+	if i >= 0 && i < len(e) {
+		return e[i]
 	}
 	return nil
 }
