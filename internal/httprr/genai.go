@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	httprr "google.golang.org/adk/internal/httprr/rr"
 )
 
 // NewGeminiTransportForTesting returns the genai.ClientConfig configured for record and replay.
 func NewGeminiTransportForTesting(rrfile string) (http.RoundTripper, error) {
-	rr, err := Open(rrfile, http.DefaultTransport)
+	rr, err := httprr.Open(rrfile, http.DefaultTransport)
 	if err != nil {
 		return nil, fmt.Errorf("httprr.Open(%q) failed: %w", rrfile, err)
 	}
@@ -32,7 +34,7 @@ func scrubGeminiRequest(req *http.Request) error {
 		// goes out of its way to randomize the JSON encodings
 		// of protobuf messages by adding or not adding spaces
 		// after commas. Derandomize by compacting the JSON.
-		b := req.Body.(*Body)
+		b := req.Body.(*httprr.Body)
 		var buf bytes.Buffer
 		if err := json.Compact(&buf, b.Data); err == nil {
 			b.Data = buf.Bytes()
