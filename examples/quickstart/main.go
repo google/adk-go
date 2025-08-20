@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"os"
 
 	"google.golang.org/adk/agent/llmagent"
@@ -31,7 +32,7 @@ func main() {
 		APIKey: os.Getenv("GEMINI_API_KEY"),
 	})
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to create model: %v", err)
 	}
 
 	agent, err := llmagent.New(llmagent.Config{
@@ -42,7 +43,7 @@ func main() {
 	})
 	// TODO: add tools.
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to create agent: %v", err)
 	}
 
 	examples.Run(ctx, agent)

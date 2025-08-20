@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"log"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
@@ -56,7 +57,7 @@ func main() {
 		Run:         myAgent{id: 1}.Run,
 	})
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to create agent: %v", err)
 	}
 
 	myAgent2, err := agent.New(agent.Config{
@@ -65,7 +66,7 @@ func main() {
 		Run:         myAgent{id: 2}.Run,
 	})
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to create agent: %v", err)
 	}
 
 	loopAgent, err := sequentialagent.New(sequentialagent.Config{
@@ -76,7 +77,7 @@ func main() {
 		},
 	})
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to create agent: %v", err)
 	}
 
 	examples.Run(ctx, loopAgent)

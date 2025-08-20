@@ -38,7 +38,7 @@ func Run(ctx context.Context, rootAgent agent.Agent) {
 		UserID:  userID,
 	})
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to create the session service: %v", err)
 	}
 
 	runner := runner.Runner{

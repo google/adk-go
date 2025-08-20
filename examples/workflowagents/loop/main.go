@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"iter"
+	"log"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
@@ -51,7 +52,7 @@ func main() {
 		Run:         CustomAgentRun,
 	})
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to create agent: %v", err)
 	}
 
 	loopAgent, err := loopagent.New(loopagent.Config{
@@ -63,7 +64,7 @@ func main() {
 		},
 	})
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to create agent: %v", err)
 	}
 
 	examples.Run(ctx, loopAgent)
