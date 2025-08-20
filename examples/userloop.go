@@ -40,7 +40,7 @@ func Run(ctx context.Context, rootAgent agent.Agent) {
 		log.Fatalf("Failed to create the session service: %v", err)
 	}
 
-	agentRunner := runner.Runner{
+	r := runner.Runner{
 		AppName:        appName,
 		RootAgent:      rootAgent,
 		SessionService: sessionService,
@@ -59,7 +59,7 @@ func Run(ctx context.Context, rootAgent agent.Agent) {
 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
 		fmt.Print("\nAgent -> ")
-		for event, err := range agentRunner.Run(ctx, userID, session.ID().SessionID, userMsg, &runner.AgentRunConfig{
+		for event, err := range r.Run(ctx, userID, session.ID().SessionID, userMsg, &runner.RunConfig{
 			StreamingMode: runner.StreamingModeSSE,
 		}) {
 			if err != nil {

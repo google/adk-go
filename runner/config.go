@@ -24,8 +24,8 @@ const (
 	StreamingModeBidi StreamingMode = "bidi"
 )
 
-// AgentRunConfig controls runtime behavior of agents.
-type AgentRunConfig struct {
+// RunConfig controls runtime behavior.
+type RunConfig struct {
 	// Speech configuration for the live agent.
 	SpeechConfig *genai.SpeechConfig
 	// Output transcription for live agents with audio response.

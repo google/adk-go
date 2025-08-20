@@ -553,7 +553,7 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 		content = genai.NewContentFromText(newMessage, genai.RoleUser)
 	}
 
-	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &runner.AgentRunConfig{})
+	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &runner.RunConfig{})
 }
 
 func newTestAgentRunner(t *testing.T, agent agent.Agent) *testAgentRunner {
