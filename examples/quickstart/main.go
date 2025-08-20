@@ -22,6 +22,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/examples"
 	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -40,8 +41,10 @@ func main() {
 		Model:       model,
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
+		Tools: []tool.Tool{
+			tool.NewGoogleSearchTool(model),
+		},
 	})
-	// TODO: add tools.
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}

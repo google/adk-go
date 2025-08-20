@@ -34,7 +34,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -554,7 +553,7 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 		content = genai.NewContentFromText(newMessage, genai.RoleUser)
 	}
 
-	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &types.AgentRunConfig{})
+	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &runner.AgentRunConfig{})
 }
 
 func newTestAgentRunner(t *testing.T, agent agent.Agent) *testAgentRunner {

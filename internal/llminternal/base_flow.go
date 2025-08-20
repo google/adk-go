@@ -15,11 +15,13 @@
 package llminternal
 
 import (
+	"context"
 	"fmt"
 	"iter"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
+	"google.golang.org/adk/internal/agent/runconfig"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
@@ -211,14 +213,17 @@ func (f *Flow) callLLM(ctx agent.Context, req *llm.Request) iter.Seq2[*llm.Respo
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 
-		// TODO: for now it's Generate only. We need to propagate RunConfig here (old code: parentCtx.RunConfig != nil && parentCtx.RunConfig.StreamingMode == types.StreamingModeSSE)
-		gen := func() iter.Seq2[*llm.Response, error] {
+		gen := func(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
 			return func(yield func(*llm.Response, error) bool) {
 				resp, err := f.Model.Generate(ctx, req)
 				yield(resp, err)
 			}
 		}
-		for resp, err := range gen() {
+		if runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE {
+			gen = f.Model.GenerateStream
+		}
+
+		for resp, err := range gen(ctx, req) {
 			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp, err)
 			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
 			if callbackErr != nil {

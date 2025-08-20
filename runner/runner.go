@@ -23,11 +23,11 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
+	"google.golang.org/adk/internal/agent/runconfig"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
-	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -54,7 +54,7 @@ type Runner struct {
 }
 
 // Run runs the agent.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *types.AgentRunConfig) iter.Seq2[*session.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *AgentRunConfig) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
@@ -85,6 +85,9 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 
 		ctx = parentmap.ToContext(ctx, r.parents)
+		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
+			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
+		})
 
 		ctx := agent.NewContext(ctx, agentToRun, msg, &mutableSession{
 			service:       r.SessionService,

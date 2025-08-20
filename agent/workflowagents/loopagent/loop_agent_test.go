@@ -26,7 +26,6 @@ import (
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
-	"google.golang.org/adk/types"
 
 	"google.golang.org/genai"
 )
@@ -106,7 +105,7 @@ func TestNewLoopAgent(t *testing.T) {
 
 			sessionService := sessionservice.Mem()
 
-			runner, err := runner.New("test_app", agent, sessionService)
+			agentRunner, err := runner.New("test_app", agent, sessionService)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -120,7 +119,7 @@ func TestNewLoopAgent(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			for event, err := range runner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), &types.AgentRunConfig{}) {
+			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), &runner.AgentRunConfig{}) {
 				if err != nil {
 					t.Errorf("got unexpected error: %v", err)
 				}

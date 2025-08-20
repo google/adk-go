@@ -24,7 +24,6 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/sessionservice"
-	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -41,7 +40,7 @@ func Run(ctx context.Context, rootAgent agent.Agent) {
 		log.Fatalf("Failed to create the session service: %v", err)
 	}
 
-	runner := runner.Runner{
+	agentRunner := runner.Runner{
 		AppName:        appName,
 		RootAgent:      rootAgent,
 		SessionService: sessionService,
@@ -60,8 +59,8 @@ func Run(ctx context.Context, rootAgent agent.Agent) {
 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
 		fmt.Print("\nAgent -> ")
-		for event, err := range runner.Run(ctx, userID, session.ID().SessionID, userMsg, &types.AgentRunConfig{
-			StreamingMode: types.StreamingModeSSE,
+		for event, err := range agentRunner.Run(ctx, userID, session.ID().SessionID, userMsg, &runner.AgentRunConfig{
+			StreamingMode: runner.StreamingModeSSE,
 		}) {
 			if err != nil {
 				fmt.Printf("\nAGENT_ERROR: %v\n", err)
