@@ -27,7 +27,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.0-flash", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
 		APIKey: os.Getenv("GEMINI_API_KEY"),
 	})
 	if err != nil {
