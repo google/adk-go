@@ -16,12 +16,16 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
+	"strings"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/examples"
 	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -35,16 +39,87 @@ func main() {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
+	weatherAgent, err := llmagent.New(llmagent.Config{
+		Name:        "weather_agent",
+		Model:       model,
+		Description: "Agent to answer questions about the current weather.",
+		Instruction: `
+		I can answer your questions about the weather in a city.`,
+		Tools: []tool.Tool{
+			tool.MustNewFunctionTool(
+				tool.FunctionToolConfig{
+					Name:        "get_weather_report",
+					Description: "Retrieves the current weather report for a specified city.",
+				},
+				weatherReport,
+			),
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create weather agent: %v", err)
+	}
+
+	timeAgent, err := llmagent.New(llmagent.Config{
+		Name:        "time_agent",
+		Model:       model,
+		Description: "Agent to answer questions about the current time.",
+		Instruction: "I can answer your questions about the current time.",
+		Tools: []tool.Tool{
+			tool.MustNewGenaiTool(&genai.Tool{
+				GoogleSearch: &genai.GoogleSearch{},
+			}),
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create time agent: %v", err)
+	}
+
 	agent, err := llmagent.New(llmagent.Config{
-		Name:        "weather_time_agent",
+		Name:        "dispatcher_agent",
 		Model:       model,
 		Description: "Agent to answer questions about the time and weather in a city.",
-		Instruction: "I can answer your questions about the time and weather in a city.",
+		Instruction: `
+			Delegate weather requests to weather_agent and time requests to time_agent.
+			If weather_agent or time_agent don't have required information, notify the user.
+			For any other queries reply with: "I cannot answer."
+		`,
+		SubAgents: []agent.Agent{
+			weatherAgent, timeAgent,
+		},
 	})
-	// TODO: add tools.
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
 	examples.Run(ctx, agent)
+}
+
+type Args struct {
+	City string `json:"city"`
+}
+type Result struct {
+	Report string `json:"report"`
+	Status string `json:"status"`
+}
+
+var resultSet = map[string]Result{
+	"london": {
+		Status: "success",
+		Report: "The weather in London was cloudy with a temperature of 18 degrees Celsius.",
+	},
+	"paris": {
+		Status: "success",
+		Report: "The weather in Paris was sunny with a temperature of 25 derees Celsius.",
+	},
+}
+
+func weatherReport(ctx context.Context, input Args) Result {
+	city := strings.ToLower(input.City)
+	if ret, ok := resultSet[city]; ok {
+		return ret
+	}
+	return Result{
+		Status: "error",
+		Report: fmt.Sprintf("Weather information for %q is not available.", city),
+	}
 }

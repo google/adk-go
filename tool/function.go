@@ -56,7 +56,7 @@ type Function[TArgs, TResults any] func(context.Context, TArgs) TResults
 
 // NewFunctionTool creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
-func NewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Function[TArgs, TResults]) (*FunctionTool[TArgs, TResults], error) {
+func NewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Function[TArgs, TResults]) (FunctionTool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
 	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
@@ -68,7 +68,7 @@ func NewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Functi
 		return nil, fmt.Errorf("failed to infer output schema: %w", err)
 	}
 
-	return &FunctionTool[TArgs, TResults]{
+	return &functionTool[TArgs, TResults]{
 		cfg:          cfg,
 		inputSchema:  ischema,
 		outputSchema: oschema,
@@ -76,8 +76,16 @@ func NewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Functi
 	}, nil
 }
 
+func MustNewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Function[TArgs, TResults]) FunctionTool {
+	res, err := NewFunctionTool(cfg, handler)
+	if err != nil {
+		panic(err)
+	}
+	return res
+}
+
 // FunctionTool wraps a Go function.
-type FunctionTool[TArgs, TResults any] struct {
+type functionTool[TArgs, TResults any] struct {
 	cfg FunctionToolConfig
 
 	// A JSON Schema object defining the expected parameters for the tool.
@@ -89,26 +97,26 @@ type FunctionTool[TArgs, TResults any] struct {
 	handler Function[TArgs, TResults]
 }
 
-var _ Tool = (*FunctionTool[any, any])(nil)
-var _ itype.FunctionTool = (*FunctionTool[any, any])(nil)
+var _ Tool = (*functionTool[any, any])(nil)
+var _ itype.FunctionTool = (*functionTool[any, any])(nil)
 
 // Description implements types.Tool.
-func (f *FunctionTool[TArgs, TResults]) Description() string {
+func (f *functionTool[TArgs, TResults]) Description() string {
 	return f.cfg.Description
 }
 
 // Name implements types.Tool.
-func (f *FunctionTool[TArgs, TResults]) Name() string {
+func (f *functionTool[TArgs, TResults]) Name() string {
 	return f.cfg.Name
 }
 
 // ProcessRequest implements types.Tool.
-func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *llm.Request) error {
+func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *llm.Request) error {
 	return appendTools(req, f)
 }
 
 // FunctionDeclaration implements interfaces.FunctionTool.
-func (f *FunctionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration {
+func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration {
 	decl := &genai.FunctionDeclaration{
 		Name:        f.Name(),
 		Description: f.Description(),
@@ -123,7 +131,7 @@ func (f *FunctionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *FunctionTool[TArgs, TResults]) Run(ctx Context, args any) (any, error) {
+func (f *functionTool[TArgs, TResults]) Run(ctx Context, args any) (any, error) {
 	// TODO: Handle function call request from tc.InvocationContext.
 	// TODO: Handle panic -> convert to error.
 	m, ok := args.(map[string]any)

@@ -25,11 +25,18 @@ import (
 type Tool interface {
 	Name() string
 	Description() string
+	ProcessRequest(ctx Context, req *llm.Request) error
+}
+
+type FunctionTool interface {
+	Tool
 	Declaration() *genai.FunctionDeclaration
 	Run(ctx Context, args any) (result any, err error)
+}
 
-	// TODO: remove
-	ProcessRequest(ctx Context, req *llm.Request) error
+type GenaiTool interface {
+	Tool
+	Value() *genai.Tool
 }
 
 type Context interface {

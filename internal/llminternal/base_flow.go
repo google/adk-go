@@ -311,10 +311,14 @@ func handleFunctionCalls(ctx agent.Context, toolsDict map[string]tool.Tool, resp
 		if !ok {
 			return nil, fmt.Errorf("unknown tool: %q", fnCall.Name)
 		}
+		functionTool, ok := curTool.(tool.FunctionTool)
+		if !ok {
+			return nil, fmt.Errorf("%q is not a function tool", fnCall.Name)
+		}
 		toolCtx := tool.NewContext(ctx, fnCall.ID, &session.Actions{})
 		//toolCtx := tool.
 		// TODO: agent.canonical_before_tool_callbacks
-		result, err := curTool.Run(toolCtx, fnCall.Args)
+		result, err := functionTool.Run(toolCtx, fnCall.Args)
 		// genai.FunctionResponse expects to use "output" key to specify function output
 		// and "error" key to specify error details (if any). If "output" and "error" keys
 		// are not specified, then whole "response" is treated as function output.

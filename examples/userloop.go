@@ -41,10 +41,9 @@ func Run(ctx context.Context, rootAgent agent.Agent) {
 		log.Fatalf("Failed to create the session service: %v", err)
 	}
 
-	runner := runner.Runner{
-		AppName:        appName,
-		RootAgent:      rootAgent,
-		SessionService: sessionService,
+	runner, err := runner.New(appName, rootAgent, sessionService)
+	if err != nil {
+		log.Fatalf("Failed to create runner: %v", err)
 	}
 
 	reader := bufio.NewReader(os.Stdin)
