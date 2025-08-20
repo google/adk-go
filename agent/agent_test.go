@@ -22,7 +22,6 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 )
 
@@ -33,7 +32,6 @@ func TestAgentCallbacks(t *testing.T) {
 
 	tests := []struct {
 		name                 string
-		ictx                 *types.InvocationContext
 		beforeAgentCallbacks []Callback
 		afterAgentCallbacks  []Callback
 		wantLLMCalls         int

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package artifact
+package artifactservice
 
 import (
 	"context"
@@ -24,18 +24,21 @@ import (
 	"slices"
 	"sync"
 
-	"google.golang.org/adk/types"
 	"google.golang.org/genai"
 	"rsc.io/omap"
 	"rsc.io/ordered"
 )
 
-// InMemorySessionService is an in-memory implementation of types.SessionService.
+// inMemoryService is an in-memory implementation of the Service.
 // It is primarily for testing and demonstration purposes.
-type InMemoryArtifactService struct {
+type inMemoryService struct {
 	mu sync.RWMutex
 	// ordered(appName, userID, sessionID) -> session
 	artifacts omap.Map[string, *genai.Part]
+}
+
+func Mem() Service {
+	return &inMemoryService{}
 }
 
 type artifactKey struct {
@@ -63,7 +66,7 @@ func (ak *artifactKey) Decode(key string) error {
 // scan returns an iterator over all key-value pairs
 // in the range begin ≤ key ≤ end.
 // TODO: add a concurrent tests.
-func (s *InMemoryArtifactService) scan(lo, hi string) iter.Seq2[artifactKey, *genai.Part] {
+func (s *inMemoryService) scan(lo, hi string) iter.Seq2[artifactKey, *genai.Part] {
 	return func(yield func(key artifactKey, val *genai.Part) bool) {
 		for k, val := range s.artifacts.Scan(lo, hi) {
 			var key artifactKey
@@ -78,7 +81,7 @@ func (s *InMemoryArtifactService) scan(lo, hi string) iter.Seq2[artifactKey, *ge
 	}
 }
 
-func (s *InMemoryArtifactService) find(appName, userID, sessionID, fileName string) (int64, *genai.Part, bool) {
+func (s *inMemoryService) find(appName, userID, sessionID, fileName string) (int64, *genai.Part, bool) {
 	lo := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: math.MaxInt64}.Encode()
 	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: 0}.Encode()
 	for key, val := range s.scan(lo, hi) {
@@ -88,7 +91,7 @@ func (s *InMemoryArtifactService) find(appName, userID, sessionID, fileName stri
 	return 0, nil, false
 }
 
-func (s *InMemoryArtifactService) get(appName, userID, sessionID, fileName string, version int64) (*genai.Part, bool) {
+func (s *inMemoryService) get(appName, userID, sessionID, fileName string, version int64) (*genai.Part, bool) {
 	key := artifactKey{
 		AppName:   appName,
 		UserID:    userID,
@@ -99,7 +102,7 @@ func (s *InMemoryArtifactService) get(appName, userID, sessionID, fileName strin
 	return s.artifacts.Get(key)
 }
 
-func (s *InMemoryArtifactService) set(appName, userID, sessionID, fileName string, version int64, artifact *genai.Part) {
+func (s *inMemoryService) set(appName, userID, sessionID, fileName string, version int64, artifact *genai.Part) {
 	key := artifactKey{
 		AppName:   appName,
 		UserID:    userID,
@@ -110,7 +113,7 @@ func (s *InMemoryArtifactService) set(appName, userID, sessionID, fileName strin
 	s.artifacts.Set(key, artifact)
 }
 
-func (s *InMemoryArtifactService) delete(appName, userID, sessionID, fileName string, version int64) {
+func (s *inMemoryService) delete(appName, userID, sessionID, fileName string, version int64) {
 	key := artifactKey{
 		AppName:   appName,
 		UserID:    userID,
@@ -121,7 +124,7 @@ func (s *InMemoryArtifactService) delete(appName, userID, sessionID, fileName st
 	s.artifacts.Delete(key)
 }
 
-func (s *InMemoryArtifactService) Save(ctx context.Context, req *types.ArtifactSaveRequest) (*types.ArtifactSaveResponse, error) {
+func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error) {
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	artifact := req.Part
 
@@ -136,10 +139,10 @@ func (s *InMemoryArtifactService) Save(ctx context.Context, req *types.ArtifactS
 		nextVersion = internalVer + 1
 	}
 	s.set(appName, userID, sessionID, fileName, nextVersion, artifact)
-	return &types.ArtifactSaveResponse{Version: nextVersion}, nil
+	return &SaveResponse{Version: nextVersion}, nil
 }
 
-func (s *InMemoryArtifactService) Delete(ctx context.Context, req *types.ArtifactDeleteRequest) error {
+func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
 	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
@@ -160,7 +163,7 @@ func (s *InMemoryArtifactService) Delete(ctx context.Context, req *types.Artifac
 	return nil
 }
 
-func (s *InMemoryArtifactService) Load(ctx context.Context, req *types.ArtifactLoadRequest) (*types.ArtifactLoadResponse, error) {
+func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResponse, error) {
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
 		return nil, fmt.Errorf("invalid request: missing required fields")
@@ -175,17 +178,17 @@ func (s *InMemoryArtifactService) Load(ctx context.Context, req *types.ArtifactL
 		if !ok {
 			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 		}
-		return &types.ArtifactLoadResponse{Part: artifact}, nil
+		return &LoadResponse{Part: artifact}, nil
 	}
 	// pick the latest version
 	_, artifact, ok := s.find(appName, userID, sessionID, fileName)
 	if !ok {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
-	return &types.ArtifactLoadResponse{Part: artifact}, nil
+	return &LoadResponse{Part: artifact}, nil
 }
 
-func (s *InMemoryArtifactService) List(ctx context.Context, req *types.ArtifactListRequest) (*types.ArtifactListResponse, error) {
+func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
 	if appName == "" || userID == "" || sessionID == "" {
 		return nil, fmt.Errorf("invalid request: missing required fields")
@@ -203,11 +206,11 @@ func (s *InMemoryArtifactService) List(ctx context.Context, req *types.ArtifactL
 		}
 		files[key.FileName] = true
 	}
-	return &types.ArtifactListResponse{FileNames: slices.Collect(maps.Keys(files))}, nil
+	return &ListResponse{FileNames: slices.Collect(maps.Keys(files))}, nil
 }
 
 // Versions implements types.ArtifactService.
-func (s *InMemoryArtifactService) Versions(ctx context.Context, req *types.ArtifactVersionsRequest) (*types.ArtifactVersionsResponse, error) {
+func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error) {
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
 		return nil, fmt.Errorf("invalid request: missing required fields")
@@ -225,7 +228,7 @@ func (s *InMemoryArtifactService) Versions(ctx context.Context, req *types.Artif
 	if len(versions) == 0 {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
-	return &types.ArtifactVersionsResponse{Versions: versions}, nil
+	return &VersionsResponse{Versions: versions}, nil
 }
 
-var _ types.ArtifactService = (*InMemoryArtifactService)(nil)
+var _ Service = (*inMemoryService)(nil)
