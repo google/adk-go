@@ -27,8 +27,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	httpgenai "google.golang.org/adk/internal/httprr"
-	httprr "google.golang.org/adk/internal/httprr/rr"
+	"google.golang.org/adk/internal/httprr"
+	"google.golang.org/adk/internal/testutil"
 
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/llm/gemini"
@@ -658,7 +658,7 @@ func collectTextParts(stream iter.Seq2[*session.Event, error]) ([]string, error)
 
 func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, bool) {
 	t.Helper()
-	rr, err := httpgenai.NewGeminiTransportForTesting(rrfile)
+	rr, err := testutil.NewGeminiTransportForTesting(rrfile)
 	if err != nil {
 		t.Fatal(err)
 	}

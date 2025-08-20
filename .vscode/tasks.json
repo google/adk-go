@@ -1,0 +1,49 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "tricorder",
+            "type": "shell",
+            "args": [
+                "analyze",
+                "/google/src/cloud/kdroste/adk_doc/google3/experimental/users/kdroste/tmp/agent"
+            ],
+            // "command": "echo \"agent/agent_context.go:37:\n [Golint:comments] comment on exported function NewContext should be of the form \"NewContext ...\"\"\n",
+            "command": "tricaorder",
+            "problemMatcher": [
+                {
+                    "owner": "content-linter",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "pattern": [
+                        {
+                            "regexp": "^(.+):(.+):\\s*$",
+                            "file": 1,
+                            "line": 2,
+                        },
+                        {
+                            "regexp": "^\\s+(.+)$",
+                            "message": 1,
+                            "loop": true,
+                        },
+                    ]
+                }
+            ],
+            //  "problemMatcher": ["$tsc", "$eslint-compact", "$eslint-stylish", "$go", "$gulp-tsc", "$jshint", "$jshint-stylish" 
+            // ],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": true,
+                "revealProblems": "always",
+                "clear": false
+            }
+        }
+    ]
+}

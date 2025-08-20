@@ -23,8 +23,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	httpgenai "google.golang.org/adk/internal/httprr"
-	httprr "google.golang.org/adk/internal/httprr/rr"
+	"google.golang.org/adk/internal/httprr"
+	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/llm"
 	"google.golang.org/genai"
 )
@@ -118,7 +118,7 @@ func TestModel_GenerateStream(t *testing.T) {
 // newGeminiTestClientConfig returns the genai.ClientConfig configured for record and replay.
 func newGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig {
 	t.Helper()
-	rr, err := httpgenai.NewGeminiTransportForTesting(rrfile)
+	rr, err := testutil.NewGeminiTransportForTesting(rrfile)
 	if err != nil {
 		t.Fatal(err)
 	}
