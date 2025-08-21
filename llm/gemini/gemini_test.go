@@ -118,7 +118,7 @@ func TestModel_GenerateStream(t *testing.T) {
 // newGeminiTestClientConfig returns the genai.ClientConfig configured for record and replay.
 func newGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig {
 	t.Helper()
-	rr, err := testutil.NewGeminiTransportForTesting(rrfile)
+	rr, err := testutil.NewGeminiTransport(rrfile)
 	if err != nil {
 		t.Fatal(err)
 	}

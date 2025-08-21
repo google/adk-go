@@ -658,7 +658,7 @@ func collectTextParts(stream iter.Seq2[*session.Event, error]) ([]string, error)
 
 func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, bool) {
 	t.Helper()
-	rr, err := testutil.NewGeminiTransportForTesting(rrfile)
+	rr, err := testutil.NewGeminiTransport(rrfile)
 	if err != nil {
 		t.Fatal(err)
 	}

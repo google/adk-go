@@ -24,8 +24,8 @@ import (
 	"google.golang.org/adk/internal/httprr"
 )
 
-// NewGeminiTransportForTesting returns the genai.ClientConfig configured for record and replay.
-func NewGeminiTransportForTesting(rrfile string) (http.RoundTripper, error) {
+// NewGeminiTransport returns the genai.ClientConfig configured for record and replay.
+func NewGeminiTransport(rrfile string) (http.RoundTripper, error) {
 	rr, err := httprr.Open(rrfile, http.DefaultTransport)
 	if err != nil {
 		return nil, fmt.Errorf("httprr.Open(%q) failed: %w", rrfile, err)
