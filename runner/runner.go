@@ -38,17 +38,17 @@ func New(appName string, rootAgent agent.Agent, sessionService sessionservice.Se
 	}
 
 	return &Runner{
-		AppName:        appName,
-		RootAgent:      rootAgent,
-		SessionService: sessionService,
+		appName:        appName,
+		rootAgent:      rootAgent,
+		sessionService: sessionService,
 		parents:        parents,
 	}, nil
 }
 
 type Runner struct {
-	AppName        string
-	RootAgent      agent.Agent
-	SessionService sessionservice.Service
+	appName        string
+	rootAgent      agent.Agent
+	sessionService sessionservice.Service
 
 	parents parentmap.Map
 }
@@ -59,9 +59,9 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
 	return func(yield func(*session.Event, error) bool) {
-		session, err := r.SessionService.Get(ctx, &sessionservice.GetRequest{
+		session, err := r.sessionService.Get(ctx, &sessionservice.GetRequest{
 			ID: session.ID{
-				AppName:   r.AppName,
+				AppName:   r.appName,
 				UserID:    userID,
 				SessionID: sessionID,
 			},
@@ -90,7 +90,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		})
 
 		ctx := agent.NewContext(ctx, agentToRun, msg, &mutableSession{
-			service:       r.SessionService,
+			service:       r.sessionService,
 			storedSession: session,
 		}, "")
 
@@ -112,7 +112,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 				// TODO: update session state & delta
 
-				if err := r.SessionService.AppendEvent(ctx, session, event); err != nil {
+				if err := r.sessionService.AppendEvent(ctx, session, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return
 				}
@@ -156,7 +156,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		Content: msg,
 	}
 
-	if err := r.SessionService.AppendEvent(ctx, storedSession, event); err != nil {
+	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 		return fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
 	return nil
@@ -175,7 +175,7 @@ func (r *Runner) findAgentToRun(session sessionservice.StoredSession) (agent.Age
 			continue
 		}
 
-		subAgent := findAgent(r.RootAgent, event.Author)
+		subAgent := findAgent(r.rootAgent, event.Author)
 		// Agent not found, continue looking for the other event.
 		if subAgent == nil {
 			log.Printf("Event from an unknown agent: %s, event id: %s", event.Author, event.ID)
@@ -188,7 +188,7 @@ func (r *Runner) findAgentToRun(session sessionservice.StoredSession) (agent.Age
 	}
 
 	// Falls back to root agent if no suitable agents are found in the session.
-	return r.RootAgent, nil
+	return r.rootAgent, nil
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.

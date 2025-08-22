@@ -83,7 +83,7 @@ func TestRunner_findAgentToRun(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &Runner{
-				RootAgent: tt.rootAgent,
+				rootAgent: tt.rootAgent,
 			}
 			gotAgent, err := r.findAgentToRun(tt.session)
 			if (err != nil) != tt.wantErr {
