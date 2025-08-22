@@ -1,0 +1,93 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"context"
+	"fmt"
+	"iter"
+	"log"
+	"math/rand/v2"
+	"time"
+
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/examples"
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/session"
+	"google.golang.org/genai"
+)
+
+func main() {
+	ctx := context.Background()
+
+	subAgent1, err := agent.New(agent.Config{
+		Name:        "my_custom_agent_1",
+		Description: "A custom agent that responds with a greeting.",
+		Run:         myAgent{id: 1}.Run,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	subAgent2, err := agent.New(agent.Config{
+		Name:        "my_custom_agent_2",
+		Description: "A custom agent that responds with a greeting.",
+		Run:         myAgent{id: 2}.Run,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:        "parallel_agent",
+			Description: "A parallel agent that runs sub-agents",
+			SubAgents:   []agent.Agent{subAgent1, subAgent2},
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	examples.Run(ctx, parallelAgent)
+}
+
+type myAgent struct {
+	id int
+}
+
+func (a myAgent) Run(ctx agent.Context) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		for i := 0; i < 3; i++ {
+			if !yield(&session.Event{
+				LLMResponse: &llm.Response{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{
+								Text: fmt.Sprintf("Hello from MyAgent id: %v!\n", a.id),
+							},
+						},
+					},
+				},
+			}, nil) {
+				return
+			}
+
+			r := 1 + rand.IntN(5)
+			time.Sleep(time.Duration(r) * time.Second)
+		}
+	}
+}
