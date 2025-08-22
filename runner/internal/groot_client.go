@@ -45,6 +45,15 @@ type executeActionsMsg struct {
 	StreamFrames []*StreamFrame `json:"streamFrames,omitempty"`
 }
 
+type ShadowStatus string
+
+const (
+	ShadowStatusPending   = "pending"
+	ShadowStatusCompleted = "completed"
+)
+
+type Shadow struct{}
+
 func NewClient(endpoint string, apiKey string) (*Client, error) {
 	c, _, err := websocket.DefaultDialer.Dial(endpoint+"?key="+apiKey, nil)
 	if err != nil {
@@ -63,6 +72,10 @@ func (c *Client) OpenSession(sessionID string) (*Session, error) {
 	return &Session{c: c, sessionID: sessionID}, nil
 }
 
+func (s *Session) ShadowADK(name string, input string, output string) (*Shadow, ShadowStatus, error) {
+	panic("not implemented")
+}
+
 func (s *Session) ExecuteActions(actions []*Action, outputs []string) iter.Seq2[*StreamFrame, error] {
 	outputs = []string{"test"}
 	return func(yield func(*StreamFrame, error) bool) {
@@ -75,10 +88,6 @@ func (s *Session) ExecuteActions(actions []*Action, outputs []string) iter.Seq2[
 						Inputs:  []*Port{{Name: "input", StreamID: "test"}},
 						Outputs: []*Port{{Name: "output", StreamID: "save_output"}},
 					},
-					// {
-					// 	Name:    "restore_stream",
-					// 	Outputs: []*Port{{Name: "output", StreamID: "test"}},
-					// },
 				},
 				Outputs: []*Port{{Name: "output", StreamID: "test"}},
 			},
