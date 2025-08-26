@@ -17,8 +17,8 @@ package parallelagent
 import (
 	"fmt"
 	"iter"
-	"sync"
 
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
@@ -30,7 +30,7 @@ type Config struct {
 
 // New creates a ParallelAgent.
 //
-// It is a shell agent that run its sub-agents in parallel in isolated manner.
+// Parallel agent runs its sub-agents in parallel in isolated manner.
 //
 // This approach is beneficial for scenarios requiring multiple perspectives or
 // attempts on a single task, such as:
@@ -49,8 +49,11 @@ func New(cfg Config) (agent.Agent, error) {
 func run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 	curAgent := ctx.Agent()
 
-	var wg sync.WaitGroup
-	results := make(chan result)
+	var (
+		errGroup, errGroupCtx = errgroup.WithContext(ctx)
+		doneChan              = make(chan bool)
+		resultsChan           = make(chan result)
+	)
 
 	for _, subAgent := range ctx.Agent().SubAgents() {
 		branch := fmt.Sprintf("%s.%s", curAgent.Name(), subAgent.Name())
@@ -58,23 +61,26 @@ func run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
 		}
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		errGroup.Go(func() error {
+			ctx := agent.NewContext(errGroupCtx, subAgent, ctx.UserContent(), ctx.Session(), branch)
 
-			ctx := agent.NewContext(ctx, subAgent, ctx.UserContent(), ctx.Session(), branch)
-			runSubAgent(ctx, subAgent, results)
-		}()
+			if err := runSubAgent(ctx, subAgent, resultsChan, doneChan); err != nil {
+				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)
+			}
+
+			return nil
+		})
 	}
 
 	go func() {
-		wg.Wait()
-		close(results)
+		_ = errGroup.Wait() // this error is already sent to the user via iterator
+		close(resultsChan)
 	}()
 
 	return func(yield func(*session.Event, error) bool) {
-		for res := range results {
+		for res := range resultsChan {
 			if !yield(res.event, res.err) {
+				close(doneChan)
 				break
 			}
 		}
@@ -83,17 +89,26 @@ func run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 	}
 }
 
-func runSubAgent(ctx agent.Context, agent agent.Agent, results chan<- result) {
+func runSubAgent(ctx agent.Context, agent agent.Agent, results chan<- result, done <-chan bool) error {
 	for event, err := range agent.Run(ctx) {
 		select {
+		case <-done:
+			return nil
 		case <-ctx.Done():
-			return
+			results <- result{
+				err: ctx.Err(),
+			}
+			return ctx.Err()
 		case results <- result{
 			event: event,
 			err:   err,
 		}:
+			if err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 type result struct {
