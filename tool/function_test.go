@@ -27,6 +27,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/modelcontextprotocol/go-sdk/jsonschema"
 	"google.golang.org/adk/internal/httprr"
+	"google.golang.org/adk/internal/itype"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/llm"
@@ -136,7 +137,11 @@ func TestFunctionTool_Simple(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// TODO: replace with testing using LLMAgent, instead of directly calling the model.
 			var req llm.Request
-			if err := weatherReportTool.ProcessRequest(nil, &req); err != nil {
+			requestProcessor, ok := weatherReportTool.(itype.RequestProcessor)
+			if !ok {
+				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
+			}
+			if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
 				t.Fatalf("weatherReportTool.ProcessRequest failed: %v", err)
 			}
 			if req.GenerateConfig == nil || len(req.GenerateConfig.Tools) != 1 {
@@ -157,7 +162,11 @@ func TestFunctionTool_Simple(t *testing.T) {
 				t.Fatalf("unexpected function call %v", resp)
 			}
 			// Call the function.
-			callResult, err := weatherReportTool.Run(nil, resp.Args)
+			funcTool, ok := weatherReportTool.(itype.FunctionTool)
+			if !ok {
+				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
+			}
+			callResult, err := funcTool.Run(nil, resp.Args)
 			if err != nil {
 				t.Fatalf("weatherReportTool.Run failed: %v", err)
 			}
@@ -267,7 +276,11 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 
 	t.Run("ProcessRequest", func(t *testing.T) {
 		var req llm.Request
-		if err := inventoryTool.ProcessRequest(nil, &req); err != nil {
+		requestProcessor, ok := inventoryTool.(itype.RequestProcessor)
+		if !ok {
+			t.Fatal("inventoryTool does not implement itype.RequestProcessor")
+		}
+		if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
 			t.Fatalf("inventoryTool.ProcessRequest failed: %v", err)
 		}
 		decl := toolDeclaration(req.GenerateConfig)
@@ -317,7 +330,11 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		}
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				ret, err := inventoryTool.Run(nil, tc.in)
+				funcTool, ok := inventoryTool.(itype.FunctionTool)
+				if !ok {
+					t.Fatal("inventoryTool does not implement itype.RequestProcessor")
+				}
+				ret, err := funcTool.Run(nil, tc.in)
 				// ret is expected to be nil always.
 				if tc.wantErr && err == nil {
 					t.Errorf("inventoryTool.Run = (%v, %v), want error", ret, err)

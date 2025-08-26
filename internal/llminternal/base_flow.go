@@ -22,6 +22,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
+	"google.golang.org/adk/internal/itype"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
@@ -188,9 +189,13 @@ func (f *Flow) preprocess(ctx agent.Context, req *llm.Request) error {
 	// run processors for tools.
 	// TODO: check need/feasibility of running this concurrently.
 	for _, t := range Reveal(llmAgent).Tools {
+		requestProcessor, ok := t.(itype.RequestProcessor)
+		if !ok {
+			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
+		}
 		// TODO: how to prevent mutation on this?
 		toolCtx := tool.NewContext(ctx, "", &session.Actions{})
-		if err := t.ProcessRequest(toolCtx, req); err != nil {
+		if err := requestProcessor.ProcessRequest(toolCtx, req); err != nil {
 			return err
 		}
 	}
@@ -316,10 +321,14 @@ func handleFunctionCalls(ctx agent.Context, toolsDict map[string]tool.Tool, resp
 		if !ok {
 			return nil, fmt.Errorf("unknown tool: %q", fnCall.Name)
 		}
+		funcTool, ok := curTool.(itype.FunctionTool)
+		if !ok {
+			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
+		}
 		toolCtx := tool.NewContext(ctx, fnCall.ID, &session.Actions{})
 		//toolCtx := tool.
 		// TODO: agent.canonical_before_tool_callbacks
-		result, err := curTool.Run(toolCtx, fnCall.Args)
+		result, err := funcTool.Run(toolCtx, fnCall.Args)
 		// genai.FunctionResponse expects to use "output" key to specify function output
 		// and "error" key to specify error details (if any). If "output" and "error" keys
 		// are not specified, then whole "response" is treated as function output.

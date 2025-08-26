@@ -19,7 +19,6 @@ import (
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonschema"
-	"google.golang.org/adk/internal/itype"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/llm"
 	"google.golang.org/genai"
@@ -56,7 +55,7 @@ type Function[TArgs, TResults any] func(context.Context, TArgs) TResults
 
 // NewFunctionTool creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
-func NewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Function[TArgs, TResults]) (*FunctionTool[TArgs, TResults], error) {
+func NewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Function[TArgs, TResults]) (Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
 	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
@@ -90,7 +89,6 @@ type FunctionTool[TArgs, TResults any] struct {
 }
 
 var _ Tool = (*FunctionTool[any, any])(nil)
-var _ itype.FunctionTool = (*FunctionTool[any, any])(nil)
 
 // Description implements types.Tool.
 func (f *FunctionTool[TArgs, TResults]) Description() string {
@@ -104,7 +102,25 @@ func (f *FunctionTool[TArgs, TResults]) Name() string {
 
 // ProcessRequest implements types.Tool.
 func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *llm.Request) error {
-	return appendTools(req, f)
+	if req.Tools == nil {
+		req.Tools = make(map[string]any)
+	}
+
+	name := f.Name()
+	if _, ok := req.Tools[name]; ok {
+		return fmt.Errorf("duplicate tool: %q", name)
+	}
+	req.Tools[name] = f
+
+	if req.GenerateConfig == nil {
+		req.GenerateConfig = &genai.GenerateContentConfig{}
+	}
+	if decl := f.Declaration(); decl != nil {
+		req.GenerateConfig.Tools = append(req.GenerateConfig.Tools, &genai.Tool{
+			FunctionDeclarations: []*genai.FunctionDeclaration{decl},
+		})
+	}
+	return nil
 }
 
 // FunctionDeclaration implements interfaces.FunctionTool.
@@ -167,37 +183,4 @@ func resolvedSchema[T any](override *jsonschema.Schema) (*jsonschema.Resolved, e
 		return nil, err
 	}
 	return schema.Resolve(nil)
-}
-
-// TODO: remove copy in agent_transfer.go
-// AppendTools appends the tools to the request.
-// Appending duplicate tools or nameless tools is an error.
-func appendTools(r *llm.Request, tools ...Tool) error {
-	if r.Tools == nil {
-		r.Tools = make(map[string]any)
-	}
-
-	for i, tool := range tools {
-		if tool == nil || tool.Name() == "" {
-			return fmt.Errorf("tools[%d] tool without name: %v", i, tool)
-		}
-		name := tool.Name()
-		if _, ok := r.Tools[name]; ok {
-			return fmt.Errorf("tools[%d] duplicate tool: %q", i, name)
-		}
-		r.Tools[name] = tool
-
-		// If the tool is a function tool, add its declaration to GenerateConfig.Tools.
-		if fnTool, ok := tool.(itype.FunctionTool); ok {
-			if r.GenerateConfig == nil {
-				r.GenerateConfig = &genai.GenerateContentConfig{}
-			}
-			if decl := fnTool.Declaration(); decl != nil {
-				r.GenerateConfig.Tools = append(r.GenerateConfig.Tools, &genai.Tool{
-					FunctionDeclarations: []*genai.FunctionDeclaration{decl},
-				})
-			}
-		}
-	}
-	return nil
 }

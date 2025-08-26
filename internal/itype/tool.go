@@ -15,8 +15,17 @@
 // Package itype defines internal-only interfaces and types.
 package itype
 
-import "google.golang.org/genai"
+import (
+	"google.golang.org/adk/llm"
+	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
+)
 
 type FunctionTool interface {
 	Declaration() *genai.FunctionDeclaration
+	Run(ctx tool.Context, args any) (result any, err error)
+}
+
+type RequestProcessor interface {
+	ProcessRequest(ctx tool.Context, req *llm.Request) error
 }

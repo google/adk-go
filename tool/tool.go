@@ -17,19 +17,12 @@ package tool
 import (
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type Tool interface {
 	Name() string
 	Description() string
-	Declaration() *genai.FunctionDeclaration
-	Run(ctx Context, args any) (result any, err error)
-
-	// TODO: remove
-	ProcessRequest(ctx Context, req *llm.Request) error
 }
 
 type Context interface {
