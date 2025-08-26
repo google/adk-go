@@ -520,23 +520,23 @@ type testAgentRunner struct {
 func (r *testAgentRunner) session(t *testing.T, appName, userID, sessionID string) (sessionservice.StoredSession, error) {
 	ctx := t.Context()
 	if last := r.lastSession; last != nil && last.ID().SessionID == sessionID {
-		session, err := r.sessionService.Get(ctx, &sessionservice.GetRequest{
+		resp, err := r.sessionService.Get(ctx, &sessionservice.GetRequest{
 			ID: session.ID{
 				AppName:   "test_app",
 				UserID:    "test_user",
 				SessionID: sessionID,
 			},
 		})
-		r.lastSession = session
-		return session, err
+		r.lastSession = resp.Session
+		return resp.Session, err
 	}
-	session, err := r.sessionService.Create(ctx, &sessionservice.CreateRequest{
+	resp, err := r.sessionService.Create(ctx, &sessionservice.CreateRequest{
 		AppName:   "test_app",
 		UserID:    "test_user",
 		SessionID: sessionID,
 	})
-	r.lastSession = session
-	return session, err
+	r.lastSession = resp.Session
+	return resp.Session, err
 }
 
 func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.Seq2[*session.Event, error] {

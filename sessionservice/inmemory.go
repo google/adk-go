@@ -34,7 +34,7 @@ type inMemoryService struct {
 	sessions omap.Map[string, *storedSession] // session.ID) -> storedSession
 }
 
-func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (StoredSession, error) {
+func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
 	if req.AppName == "" || req.UserID == "" {
 		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
 	}
@@ -63,10 +63,12 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (Store
 
 	s.sessions.Set(encodedKey, val)
 
-	return val, nil
+	return &CreateResponse{
+		Session: val,
+	}, nil
 }
 
-func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (StoredSession, error) {
+func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
 	appName, userID, sessionID := req.ID.AppName, req.ID.UserID, req.ID.SessionID
 	if appName == "" || userID == "" || sessionID == "" {
 		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
@@ -81,11 +83,12 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (StoredSessi
 	}
 
 	// TODO: handle req.NumRecentEvents and req.After
-	return res, nil
+	return &GetResponse{
+		Session: res,
+	}, nil
 }
 
-// List returns a list of sessions.
-func (s *inMemoryService) List(ctx context.Context, req *ListRequest) ([]StoredSession, error) {
+func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 	if req.AppName == "" || req.UserID == "" {
 		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
 	}
@@ -109,7 +112,9 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) ([]StoredS
 
 		res = append(res, storedSession)
 	}
-	return res, nil
+	return &ListResponse{
+		Sessions: res,
+	}, nil
 }
 
 func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {

@@ -32,13 +32,15 @@ func Run(ctx context.Context, rootAgent agent.Agent) {
 
 	sessionService := sessionservice.Mem()
 
-	session, err := sessionService.Create(ctx, &sessionservice.CreateRequest{
+	resp, err := sessionService.Create(ctx, &sessionservice.CreateRequest{
 		AppName: appName,
 		UserID:  userID,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create the session service: %v", err)
 	}
+
+	session := resp.Session
 
 	r, err := runner.New(appName, rootAgent, sessionService)
 	if err != nil {

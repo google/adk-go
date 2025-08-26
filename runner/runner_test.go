@@ -225,7 +225,7 @@ func createSession(t *testing.T, ctx context.Context, id session.ID, events []*s
 
 	service := sessionservice.Mem()
 
-	storedSession, err := service.Create(ctx, &sessionservice.CreateRequest{
+	resp, err := service.Create(ctx, &sessionservice.CreateRequest{
 		AppName:   id.AppName,
 		UserID:    id.UserID,
 		SessionID: id.SessionID,
@@ -235,10 +235,10 @@ func createSession(t *testing.T, ctx context.Context, id session.ID, events []*s
 	}
 
 	for _, event := range events {
-		if err := service.AppendEvent(ctx, storedSession, event); err != nil {
+		if err := service.AppendEvent(ctx, resp.Session, event); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	return storedSession
+	return resp.Session
 }

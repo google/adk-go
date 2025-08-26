@@ -59,7 +59,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
 	return func(yield func(*session.Event, error) bool) {
-		session, err := r.sessionService.Get(ctx, &sessionservice.GetRequest{
+		resp, err := r.sessionService.Get(ctx, &sessionservice.GetRequest{
 			ID: session.ID{
 				AppName:   r.appName,
 				UserID:    userID,
@@ -70,6 +70,8 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			yield(nil, err)
 			return
 		}
+
+		session := resp.Session
 
 		agentToRun, err := r.findAgentToRun(session)
 		if err != nil {

@@ -83,25 +83,25 @@ func Test_inMemoryService_Create(t *testing.T) {
 				return
 			}
 
-			if got.ID().AppName != tt.req.AppName {
-				t.Errorf("AppName got: %v, want: %v", got.ID().AppName, tt.wantErr)
+			if got.Session.ID().AppName != tt.req.AppName {
+				t.Errorf("AppName got: %v, want: %v", got.Session.ID().AppName, tt.wantErr)
 			}
 
-			if got.ID().UserID != tt.req.UserID {
-				t.Errorf("UserID got: %v, want: %v", got.ID().AppName, tt.wantErr)
+			if got.Session.ID().UserID != tt.req.UserID {
+				t.Errorf("UserID got: %v, want: %v", got.Session.ID().AppName, tt.wantErr)
 			}
 
 			if tt.req.SessionID != "" {
-				if got.ID().SessionID != tt.req.SessionID {
-					t.Errorf("SessionID got: %v, want: %v", got.ID().AppName, tt.wantErr)
+				if got.Session.ID().SessionID != tt.req.SessionID {
+					t.Errorf("SessionID got: %v, want: %v", got.Session.ID().AppName, tt.wantErr)
 				}
 			} else {
-				if got.ID().SessionID == "" {
+				if got.Session.ID().SessionID == "" {
 					t.Errorf("SessionID was not generated on empty user input.")
 				}
 			}
 
-			gotState := maps.Collect(got.State().All())
+			gotState := maps.Collect(got.Session.State().All())
 			wantState := tt.req.State
 
 			if diff := cmp.Diff(wantState, gotState); diff != "" {
@@ -113,11 +113,11 @@ func Test_inMemoryService_Create(t *testing.T) {
 
 func Test_inMemoryService_Get(t *testing.T) {
 	tests := []struct {
-		name              string
-		req               *GetRequest
-		inMemoryService   *inMemoryService
-		wantStoredSession *storedSession
-		wantErr           bool
+		name            string
+		req             *GetRequest
+		inMemoryService *inMemoryService
+		wantResponse    *GetResponse
+		wantErr         bool
 	}{
 		{
 			name:            "ok",
@@ -129,14 +129,16 @@ func Test_inMemoryService_Get(t *testing.T) {
 					SessionID: "session1",
 				},
 			},
-			wantStoredSession: &storedSession{
-				id: session.ID{
-					AppName:   "app1",
-					UserID:    "user1",
-					SessionID: "session1",
-				},
-				state: map[string]any{
-					"k1": "v1",
+			wantResponse: &GetResponse{
+				Session: &storedSession{
+					id: session.ID{
+						AppName:   "app1",
+						UserID:    "user1",
+						SessionID: "session1",
+					},
+					state: map[string]any{
+						"k1": "v1",
+					},
 				},
 			},
 		},
@@ -169,7 +171,7 @@ func Test_inMemoryService_Get(t *testing.T) {
 				return
 			}
 
-			if diff := cmp.Diff(tt.wantStoredSession, got,
+			if diff := cmp.Diff(tt.wantResponse, got,
 				cmp.AllowUnexported(storedSession{}),
 				cmpopts.IgnoreFields(storedSession{}, "mu")); diff != "" {
 				t.Errorf("Create session mismatch: (-want +got):\n%s", diff)
@@ -180,11 +182,11 @@ func Test_inMemoryService_Get(t *testing.T) {
 
 func Test_inMemoryService_List(t *testing.T) {
 	tests := []struct {
-		name               string
-		req                *ListRequest
-		inMemoryService    *inMemoryService
-		wantStoredSessions []StoredSession
-		wantErr            bool
+		name            string
+		req             *ListRequest
+		inMemoryService *inMemoryService
+		wantResponse    *ListResponse
+		wantErr         bool
 	}{
 		{
 			name:            "ok",
@@ -193,25 +195,27 @@ func Test_inMemoryService_List(t *testing.T) {
 				AppName: "app1",
 				UserID:  "user1",
 			},
-			wantStoredSessions: []StoredSession{
-				&storedSession{
-					id: session.ID{
-						AppName:   "app1",
-						UserID:    "user1",
-						SessionID: "session1",
+			wantResponse: &ListResponse{
+				Sessions: []StoredSession{
+					&storedSession{
+						id: session.ID{
+							AppName:   "app1",
+							UserID:    "user1",
+							SessionID: "session1",
+						},
+						state: map[string]any{
+							"k1": "v1",
+						},
 					},
-					state: map[string]any{
-						"k1": "v1",
-					},
-				},
-				&storedSession{
-					id: session.ID{
-						AppName:   "app1",
-						UserID:    "user1",
-						SessionID: "session2",
-					},
-					state: map[string]any{
-						"k1": "v2",
+					&storedSession{
+						id: session.ID{
+							AppName:   "app1",
+							UserID:    "user1",
+							SessionID: "session2",
+						},
+						state: map[string]any{
+							"k1": "v2",
+						},
 					},
 				},
 			},
@@ -223,7 +227,7 @@ func Test_inMemoryService_List(t *testing.T) {
 				AppName: "app1",
 				UserID:  "custom_user",
 			},
-			wantStoredSessions: nil,
+			wantResponse: &ListResponse{},
 		},
 	}
 	for _, tt := range tests {
@@ -238,7 +242,7 @@ func Test_inMemoryService_List(t *testing.T) {
 			}
 
 			if err == nil {
-				if diff := cmp.Diff(tt.wantStoredSessions, got,
+				if diff := cmp.Diff(tt.wantResponse, got,
 					cmp.AllowUnexported(storedSession{}),
 					cmpopts.IgnoreFields(storedSession{}, "mu")); diff != "" {
 					t.Errorf("inMemoryService.List() = %v (-want +got):\n%s", got, diff)
@@ -369,7 +373,7 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 				return
 			}
 
-			got, err := s.Get(ctx, &GetRequest{
+			resp, err := s.Get(ctx, &GetRequest{
 				ID: tt.session.ID(),
 			})
 			if err != nil {
@@ -377,7 +381,7 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 				return
 			}
 
-			if diff := cmp.Diff(tt.wantStoredSession, got,
+			if diff := cmp.Diff(tt.wantStoredSession, resp.Session,
 				cmp.AllowUnexported(storedSession{}),
 				cmpopts.IgnoreFields(storedSession{}, "mu")); diff != "" {
 				t.Errorf("Create session mismatch: (-want +got):\n%s", diff)
