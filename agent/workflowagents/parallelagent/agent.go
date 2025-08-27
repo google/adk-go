@@ -78,14 +78,13 @@ func run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 	}()
 
 	return func(yield func(*session.Event, error) bool) {
+		defer close(doneChan)
+
 		for res := range resultsChan {
 			if !yield(res.event, res.err) {
-				close(doneChan)
 				break
 			}
 		}
-
-		ctx.End()
 	}
 }
 

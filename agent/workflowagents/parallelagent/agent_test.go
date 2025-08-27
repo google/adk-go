@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"math/rand/v2"
 	"slices"
 	"testing"
 	"time"
@@ -38,7 +39,8 @@ func TestNewParallelAgent(t *testing.T) {
 	tests := []struct {
 		name          string
 		maxIterations uint
-		agentError    error // the agent will return this error
+		numSubAgents  int
+		agentError    error // one of the subAgents will return this error
 		cancelContext bool
 		wantEvents    []*session.Event
 		wantErr       bool
@@ -46,9 +48,10 @@ func TestNewParallelAgent(t *testing.T) {
 		{
 			name:          "subagents complete run",
 			maxIterations: 2,
+			numSubAgents:  3,
 			wantEvents: func() []*session.Event {
 				var res []*session.Event
-				for agentID := 1; agentID <= 2; agentID++ {
+				for agentID := 1; agentID <= 3; agentID++ {
 					for responseCount := 1; responseCount <= 2; responseCount++ {
 						res = append(res, &session.Event{
 							Author: fmt.Sprintf("sub%d", agentID),
@@ -73,8 +76,10 @@ func TestNewParallelAgent(t *testing.T) {
 			wantErr:       true,
 		},
 		{
+			// one agent returns error, other agents run infinitely
 			name:          "agent returns error",
 			maxIterations: 0,
+			numSubAgents:  100,
 			agentError:    fmt.Errorf("agent error"),
 			wantErr:       true,
 		},
@@ -85,7 +90,7 @@ func TestNewParallelAgent(t *testing.T) {
 
 			ctx := t.Context()
 
-			agent := newParallelAgent(t, tt.maxIterations, tt.agentError)
+			agent := newParallelAgent(t, tt.maxIterations, tt.numSubAgents, tt.agentError)
 
 			var gotEvents []*session.Event
 
@@ -121,6 +126,10 @@ func TestNewParallelAgent(t *testing.T) {
 						// In case of context cancellation some events can be processed before cancel is applied.
 						continue
 					}
+					if tt.agentError != nil && err == nil {
+						// In case of agent error some events from other agents can be processed before error is returned.
+						continue
+					}
 					t.Errorf("got unexpected error: %v", err)
 				}
 
@@ -150,34 +159,30 @@ func TestNewParallelAgent(t *testing.T) {
 }
 
 // newParallelAgent creates parallel agent with 2 subagents emitting maxIterations events or infinitely if maxIterations==0.
-func newParallelAgent(t *testing.T, maxIterations uint, agentErr error) agent.Agent {
-	subAgents := []agent.Agent{
-		must(loopagent.New(loopagent.Config{
+func newParallelAgent(t *testing.T, maxIterations uint, numSubAgents int, agentErr error) agent.Agent {
+	var subAgents []agent.Agent
+
+	for i := 1; i <= numSubAgents; i++ {
+		subAgents = append(subAgents, must(loopagent.New(loopagent.Config{
 			MaxIterations: maxIterations,
 			AgentConfig: agent.Config{
-				Name: "loop1",
+				Name: fmt.Sprintf("loop_agent_%d", i),
 				SubAgents: []agent.Agent{
 					must(agent.New(agent.Config{
-						Name: "sub1",
-						Run:  customRun(1, agentErr),
+						Name: fmt.Sprintf("sub%d", i),
+						Run:  customRun(i, nil),
 					},
 					)),
 				},
 			},
-		})),
-		must(loopagent.New(loopagent.Config{
-			MaxIterations: maxIterations,
-			AgentConfig: agent.Config{
-				Name: "loop2",
-				SubAgents: []agent.Agent{
-					must(agent.New(agent.Config{
-						Name: "sub2",
-						Run:  customRun(2, agentErr),
-					},
-					)),
-				},
-			},
-		})),
+		})))
+	}
+
+	if agentErr != nil {
+		subAgents = append(subAgents, must(agent.New(agent.Config{
+			Name: "error_agent",
+			Run:  customRun(-1, agentErr),
+		})))
 	}
 
 	agent, err := parallelagent.New(parallelagent.Config{
@@ -203,7 +208,7 @@ func must[T agent.Agent](a T, err error) T {
 func customRun(id int, agentErr error) func(agent.Context) iter.Seq2[*session.Event, error] {
 	return func(agent.Context) iter.Seq2[*session.Event, error] {
 		return func(yield func(*session.Event, error) bool) {
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep((time.Duration(rand.IntN(5) + 1)) * time.Millisecond)
 			if agentErr != nil {
 				yield(nil, agentErr)
 				return
