@@ -1,0 +1,74 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package tool_test
+
+import (
+	"context"
+	"testing"
+
+	"google.golang.org/adk/internal/toolinternal"
+	"google.golang.org/adk/tool"
+)
+
+func TestTypes(t *testing.T) {
+	const (
+		functionTool = "FunctionTool"
+		requestProc  = "RequestProcessor"
+	)
+
+	tests := []struct {
+		name          string
+		constructor   func() (tool.Tool, error)
+		expectedTypes []string
+	}{
+		{
+			name:          "GoogleSearchTool",
+			constructor:   func() (tool.Tool, error) { return tool.NewGoogleSearchTool(nil), nil },
+			expectedTypes: []string{requestProc},
+		},
+		{
+			name: "FunctionTool",
+			constructor: func() (tool.Tool, error) {
+				return tool.NewFunctionTool(tool.FunctionToolConfig{}, func(context.Context, int) int { return 0 })
+			},
+			expectedTypes: []string{requestProc, functionTool},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool, err := tt.constructor()
+			if err != nil {
+				t.Fatalf("Failed to create tool %s: %v", tt.name, err)
+			}
+
+			for _, s := range tt.expectedTypes {
+				switch s {
+				case functionTool:
+					if _, ok := tool.(toolinternal.FunctionTool); !ok {
+						t.Errorf("Expected %s to implement toolinternal.FunctionTool", tt.name)
+					}
+				case requestProc:
+					if _, ok := tool.(toolinternal.RequestProcessor); !ok {
+						t.Errorf("Expected %s to implement toolinternal.RequestProcessor", tt.name)
+					}
+				default:
+					t.Fatalf("Unknown expected type: %s", s)
+				}
+			}
+		})
+	}
+
+}

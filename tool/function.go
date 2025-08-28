@@ -67,7 +67,7 @@ func NewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Functi
 		return nil, fmt.Errorf("failed to infer output schema: %w", err)
 	}
 
-	return &FunctionTool[TArgs, TResults]{
+	return &functionTool[TArgs, TResults]{
 		cfg:          cfg,
 		inputSchema:  ischema,
 		outputSchema: oschema,
@@ -75,8 +75,8 @@ func NewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Functi
 	}, nil
 }
 
-// FunctionTool wraps a Go function.
-type FunctionTool[TArgs, TResults any] struct {
+// functionTool wraps a Go function.
+type functionTool[TArgs, TResults any] struct {
 	cfg FunctionToolConfig
 
 	// A JSON Schema object defining the expected parameters for the tool.
@@ -88,20 +88,18 @@ type FunctionTool[TArgs, TResults any] struct {
 	handler Function[TArgs, TResults]
 }
 
-var _ Tool = (*FunctionTool[any, any])(nil)
-
 // Description implements types.Tool.
-func (f *FunctionTool[TArgs, TResults]) Description() string {
+func (f *functionTool[TArgs, TResults]) Description() string {
 	return f.cfg.Description
 }
 
 // Name implements types.Tool.
-func (f *FunctionTool[TArgs, TResults]) Name() string {
+func (f *functionTool[TArgs, TResults]) Name() string {
 	return f.cfg.Name
 }
 
 // ProcessRequest implements types.Tool.
-func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *llm.Request) error {
+func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *llm.Request) error {
 	if req.Tools == nil {
 		req.Tools = make(map[string]any)
 	}
@@ -124,7 +122,7 @@ func (f *FunctionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *llm.Req
 }
 
 // FunctionDeclaration implements interfaces.FunctionTool.
-func (f *FunctionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration {
+func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration {
 	decl := &genai.FunctionDeclaration{
 		Name:        f.Name(),
 		Description: f.Description(),
@@ -139,7 +137,7 @@ func (f *FunctionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *FunctionTool[TArgs, TResults]) Run(ctx Context, args any) (any, error) {
+func (f *functionTool[TArgs, TResults]) Run(ctx Context, args any) (any, error) {
 	// TODO: Handle function call request from tc.InvocationContext.
 	// TODO: Handle panic -> convert to error.
 	m, ok := args.(map[string]any)
