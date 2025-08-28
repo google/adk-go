@@ -22,7 +22,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
-	"google.golang.org/adk/internal/itype"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -199,7 +199,7 @@ func appendTools(r *llm.Request, tools ...tool.Tool) error {
 		r.Tools[name] = tool
 
 		// If the tool is a function tool, add its declaration to GenerateConfig.Tools.
-		if fnTool, ok := tool.(itype.FunctionTool); ok {
+		if fnTool, ok := tool.(toolinternal.FunctionTool); ok {
 			if r.GenerateConfig == nil {
 				r.GenerateConfig = &genai.GenerateContentConfig{}
 			}

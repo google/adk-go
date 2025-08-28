@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package itype defines internal-only interfaces and types.
-package itype
+// Package tool defines internal-only interfaces and logic for tools.
+package toolinternal
 
 import (
 	"google.golang.org/adk/llm"

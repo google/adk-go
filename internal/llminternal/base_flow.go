@@ -22,7 +22,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
-	"google.golang.org/adk/internal/itype"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
@@ -189,7 +189,7 @@ func (f *Flow) preprocess(ctx agent.Context, req *llm.Request) error {
 	// run processors for tools.
 	// TODO: check need/feasibility of running this concurrently.
 	for _, t := range Reveal(llmAgent).Tools {
-		requestProcessor, ok := t.(itype.RequestProcessor)
+		requestProcessor, ok := t.(toolinternal.RequestProcessor)
 		if !ok {
 			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
 		}
@@ -321,7 +321,7 @@ func handleFunctionCalls(ctx agent.Context, toolsDict map[string]tool.Tool, resp
 		if !ok {
 			return nil, fmt.Errorf("unknown tool: %q", fnCall.Name)
 		}
-		funcTool, ok := curTool.(itype.FunctionTool)
+		funcTool, ok := curTool.(toolinternal.FunctionTool)
 		if !ok {
 			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
 		}

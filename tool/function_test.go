@@ -27,8 +27,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/modelcontextprotocol/go-sdk/jsonschema"
 	"google.golang.org/adk/internal/httprr"
-	"google.golang.org/adk/internal/itype"
 	"google.golang.org/adk/internal/testutil"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/llm/gemini"
@@ -137,7 +137,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// TODO: replace with testing using LLMAgent, instead of directly calling the model.
 			var req llm.Request
-			requestProcessor, ok := weatherReportTool.(itype.RequestProcessor)
+			requestProcessor, ok := weatherReportTool.(toolinternal.RequestProcessor)
 			if !ok {
 				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
 			}
@@ -162,7 +162,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 				t.Fatalf("unexpected function call %v", resp)
 			}
 			// Call the function.
-			funcTool, ok := weatherReportTool.(itype.FunctionTool)
+			funcTool, ok := weatherReportTool.(toolinternal.FunctionTool)
 			if !ok {
 				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
 			}
@@ -276,7 +276,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 
 	t.Run("ProcessRequest", func(t *testing.T) {
 		var req llm.Request
-		requestProcessor, ok := inventoryTool.(itype.RequestProcessor)
+		requestProcessor, ok := inventoryTool.(toolinternal.RequestProcessor)
 		if !ok {
 			t.Fatal("inventoryTool does not implement itype.RequestProcessor")
 		}
@@ -330,7 +330,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		}
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				funcTool, ok := inventoryTool.(itype.FunctionTool)
+				funcTool, ok := inventoryTool.(toolinternal.FunctionTool)
 				if !ok {
 					t.Fatal("inventoryTool does not implement itype.RequestProcessor")
 				}
