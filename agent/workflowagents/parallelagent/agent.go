@@ -94,8 +94,11 @@ func runSubAgent(ctx agent.Context, agent agent.Agent, results chan<- result, do
 		case <-done:
 			return nil
 		case <-ctx.Done():
-			results <- result{
+			select {
+			case <-done:
+			case results <- result{
 				err: ctx.Err(),
+			}:
 			}
 			return ctx.Err()
 		case results <- result{
