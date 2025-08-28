@@ -31,15 +31,15 @@ func TestAgentCallbacks(t *testing.T) {
 	ctx := t.Context()
 
 	tests := []struct {
-		name                 string
-		beforeAgentCallbacks []BeforeAgentCallback
-		afterAgentCallbacks  []AfterAgentCallback
-		wantLLMCalls         int
-		wantEvents           []*session.Event
+		name         string
+		beforeAgent  []BeforeAgentCallback
+		afterAgent   []AfterAgentCallback
+		wantLLMCalls int
+		wantEvents   []*session.Event
 	}{
 		{
 			name: "before agent callback runs, no llm calls",
-			beforeAgentCallbacks: []BeforeAgentCallback{
+			beforeAgent: []BeforeAgentCallback{
 				func(ctx Context) (*genai.Content, error) {
 					return genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel), nil
 				},
@@ -55,12 +55,12 @@ func TestAgentCallbacks(t *testing.T) {
 		},
 		{
 			name: "no callback effect if callbacks return nil",
-			beforeAgentCallbacks: []BeforeAgentCallback{
+			beforeAgent: []BeforeAgentCallback{
 				func(ctx Context) (*genai.Content, error) {
 					return nil, nil
 				},
 			},
-			afterAgentCallbacks: []AfterAgentCallback{
+			afterAgent: []AfterAgentCallback{
 				func(Context, *session.Event, error) (*genai.Content, error) {
 					return nil, nil
 				},
@@ -77,7 +77,7 @@ func TestAgentCallbacks(t *testing.T) {
 		},
 		{
 			name: "after agent callback replaces event content",
-			afterAgentCallbacks: []AfterAgentCallback{
+			afterAgent: []AfterAgentCallback{
 				func(Context, *session.Event, error) (*genai.Content, error) {
 					return genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel), nil
 				},
@@ -100,9 +100,9 @@ func TestAgentCallbacks(t *testing.T) {
 
 			testAgent, err := New(Config{
 				Name:        "test",
-				BeforeAgent: tt.beforeAgentCallbacks,
+				BeforeAgent: tt.beforeAgent,
 				Run:         custom.Run,
-				AfterAgent:  tt.afterAgentCallbacks,
+				AfterAgent:  tt.afterAgent,
 			})
 			if err != nil {
 				t.Fatalf("failed to create agent: %v", err)
