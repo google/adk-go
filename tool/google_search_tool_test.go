@@ -115,7 +115,7 @@ func TestGoogleSearchTool_ProcessRequest(t *testing.T) {
 
 			requestProcessor, ok := gsTool.(toolinternal.RequestProcessor)
 			if !ok {
-				t.Fatalf("googleSearchTool does not implement RequestProcessor")
+				t.Fatal("googleSearchTool does not implement RequestProcessor")
 			}
 
 			if err := requestProcessor.ProcessRequest(nil, req); err != nil {
