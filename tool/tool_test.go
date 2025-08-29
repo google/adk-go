@@ -20,6 +20,7 @@ import (
 
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/geminitool"
 )
 
 func TestTypes(t *testing.T) {
@@ -34,16 +35,16 @@ func TestTypes(t *testing.T) {
 		expectedTypes []string
 	}{
 		{
-			name:          "GoogleSearchTool",
-			constructor:   func() (tool.Tool, error) { return tool.NewGoogleSearchTool(nil), nil },
-			expectedTypes: []string{requestProc},
-		},
-		{
 			name: "FunctionTool",
 			constructor: func() (tool.Tool, error) {
 				return tool.NewFunctionTool(tool.FunctionToolConfig{}, func(context.Context, int) int { return 0 })
 			},
 			expectedTypes: []string{requestProc, functionTool},
+		},
+		{
+			name:          "GeminiTool",
+			constructor:   func() (tool.Tool, error) { return geminitool.New("", nil), nil },
+			expectedTypes: []string{requestProc},
 		},
 	}
 
