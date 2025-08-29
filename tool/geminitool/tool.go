@@ -12,6 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package geminitool provides access to Gemini native tools. You can use any
+// tool from genai with geminitool.New().
+//
+// For example, to create a Gemini retrieval tool:
+//
+//	geminitool.New("data_retrieval", &genai.Tool{
+//		Retrieval: &genai.Retrieval{
+//			ExternalAPI: &genai.ExternalAPI{
+//				Endpoint: ,
+//				AuthConfig:
+//			},
+//		},
+//	})
+//
+// Package also provides default tools like GoogleSearch.
 package geminitool
 
 import (
@@ -36,17 +51,7 @@ type geminiTool struct {
 }
 
 func (t *geminiTool) ProcessRequest(ctx tool.Context, req *llm.Request) error {
-	if req == nil {
-		return fmt.Errorf("llm request is nil")
-	}
-
-	if req.GenerateConfig == nil {
-		req.GenerateConfig = &genai.GenerateContentConfig{}
-	}
-
-	req.GenerateConfig.Tools = append(req.GenerateConfig.Tools, t.value)
-
-	return nil
+	return setTool(req, t.value)
 }
 
 func (t *geminiTool) Name() string {
@@ -55,4 +60,17 @@ func (t *geminiTool) Name() string {
 
 func (t *geminiTool) Description() string {
 	return t.name
+}
+
+func setTool(req *llm.Request, t *genai.Tool) error {
+	if req == nil {
+		return fmt.Errorf("llm request is nil")
+	}
+
+	if req.GenerateConfig == nil {
+		req.GenerateConfig = &genai.GenerateContentConfig{}
+	}
+
+	req.GenerateConfig.Tools = append(req.GenerateConfig.Tools, t)
+	return nil
 }

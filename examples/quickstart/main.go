@@ -43,9 +43,7 @@ func main() {
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
 		Tools: []tool.Tool{
-			geminitool.New("google_search", &genai.Tool{
-				GoogleSearch: &genai.GoogleSearch{},
-			}),
+			geminitool.GoogleSearch{},
 		},
 	})
 	if err != nil {
