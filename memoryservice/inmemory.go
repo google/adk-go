@@ -16,6 +16,7 @@ package memoryservice
 
 import (
 	"context"
+	"maps"
 	"regexp"
 	"strings"
 	"sync"
@@ -58,22 +59,22 @@ func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Ses
 			continue
 		}
 
-		var text []string
+		words := make(map[string]struct{})
 		for _, part := range event.LLMResponse.Content.Parts {
 			if part.Text == "" {
 				continue
 			}
 
-			text = append(text, part.Text)
+			maps.Copy(words, extractWords(part.Text))
 		}
 
-		if len(text) == 0 {
+		if len(words) == 0 {
 			continue
 		}
 
 		values = append(values, value{
 			event: event,
-			words: extractWords(strings.Join(text, " ")),
+			words: words,
 		})
 	}
 
