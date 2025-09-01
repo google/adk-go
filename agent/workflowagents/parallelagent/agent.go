@@ -1,0 +1,119 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package parallelagent
+
+import (
+	"fmt"
+	"iter"
+
+	"golang.org/x/sync/errgroup"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/session"
+)
+
+type Config struct {
+	// Basic agent setup.
+	AgentConfig agent.Config
+}
+
+// New creates a ParallelAgent.
+//
+// Parallel agent runs its sub-agents in parallel in isolated manner.
+//
+// This approach is beneficial for scenarios requiring multiple perspectives or
+// attempts on a single task, such as:
+// - Running different algorithms simultaneously.
+// - Generating multiple responses for review by a subsequent evaluation agent.
+func New(cfg Config) (agent.Agent, error) {
+	if cfg.AgentConfig.Run != nil {
+		return nil, fmt.Errorf("ParallelAgent doesn't allow custom Run implementations")
+	}
+
+	cfg.AgentConfig.Run = run
+
+	return agent.New(cfg.AgentConfig)
+}
+
+func run(ctx agent.Context) iter.Seq2[*session.Event, error] {
+	curAgent := ctx.Agent()
+
+	var (
+		errGroup, errGroupCtx = errgroup.WithContext(ctx)
+		doneChan              = make(chan bool)
+		resultsChan           = make(chan result)
+	)
+
+	for _, subAgent := range ctx.Agent().SubAgents() {
+		branch := fmt.Sprintf("%s.%s", curAgent.Name(), subAgent.Name())
+		if ctx.Branch() != "" {
+			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
+		}
+
+		errGroup.Go(func() error {
+			ctx := agent.NewContext(errGroupCtx, subAgent, ctx.UserContent(), ctx.Session(), branch)
+
+			if err := runSubAgent(ctx, subAgent, resultsChan, doneChan); err != nil {
+				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)
+			}
+
+			return nil
+		})
+	}
+
+	go func() {
+		_ = errGroup.Wait() // this error is already sent to the user via iterator
+		close(resultsChan)
+	}()
+
+	return func(yield func(*session.Event, error) bool) {
+		defer close(doneChan)
+
+		for res := range resultsChan {
+			if !yield(res.event, res.err) {
+				break
+			}
+		}
+	}
+}
+
+func runSubAgent(ctx agent.Context, agent agent.Agent, results chan<- result, done <-chan bool) error {
+	for event, err := range agent.Run(ctx) {
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+			select {
+			case <-done:
+			case results <- result{
+				err: ctx.Err(),
+			}:
+			}
+			return ctx.Err()
+		case results <- result{
+			event: event,
+			err:   err,
+		}:
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type result struct {
+	event *session.Event
+	err   error
+}

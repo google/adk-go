@@ -27,11 +27,8 @@ import (
 type Agent interface {
 	Name() string
 	Description() string
-	// TODO: verify if the interface would have "Run(Context) error" and agent will call agent.Context.Report(Event)
 	Run(Context) iter.Seq2[*session.Event, error]
 	SubAgents() []Agent
-	// TODO: verify if we should add unexported methods to ensure only this package can implement this interface.
-	// TODO: maybe opact struct?
 
 	internal() *agent
 }
@@ -52,11 +49,9 @@ type Config struct {
 	Description string
 	SubAgents   []Agent
 
-	BeforeAgent []Callback
-	// TODO: verify if the interface would have "Run(Context) error" and agent will call agent.Context.Report(Event)
-	Run func(Context) iter.Seq2[*session.Event, error]
-	// TODO: after agent callback should take: ctx, actual_resp, actual_err. So the callback can inspect and decide what to return.
-	AfterAgent []Callback
+	BeforeAgent []BeforeAgentCallback
+	Run         func(Context) iter.Seq2[*session.Event, error]
+	AfterAgent  []AfterAgentCallback
 }
 
 type Context interface {
@@ -70,8 +65,6 @@ type Context interface {
 	Session() session.Session
 	Artifacts() Artifacts
 
-	Report(*session.Event)
-
 	End()
 	Ended() bool
 }
@@ -82,15 +75,16 @@ type Artifacts interface {
 	LoadVersion(name string, version int) (genai.Part, error)
 }
 
-type Callback func(Context) (*genai.Content, error)
+type BeforeAgentCallback func(Context) (*genai.Content, error)
+type AfterAgentCallback func(Context, *session.Event, error) (*genai.Content, error)
 
 type agent struct {
 	name, description string
 	subAgents         []Agent
 
-	beforeAgent []Callback
+	beforeAgent []BeforeAgentCallback
 	run         func(Context) iter.Seq2[*session.Event, error]
-	afterAgent  []Callback
+	afterAgent  []AfterAgentCallback
 }
 
 func (a *agent) Name() string {
@@ -178,8 +172,7 @@ func runBeforeAgentCallbacks(ctx Context) (*session.Event, error) {
 func runAfterAgentCallbacks(ctx Context, agentEvent *session.Event, agentError error) (*session.Event, error) {
 	agent := ctx.Agent()
 	for _, callback := range agent.internal().afterAgent {
-		// TODO: after agent callback should take: ctx, actual_resp, actual_err. So the callback can inspect and decide what to return.
-		newContent, err := callback(ctx)
+		newContent, err := callback(ctx, agentEvent, agentError)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run after agent callback: %w", err)
 		}

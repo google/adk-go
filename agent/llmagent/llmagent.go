@@ -77,8 +77,8 @@ type Config struct {
 	Description string
 	SubAgents   []agent.Agent
 
-	BeforeAgent []agent.Callback
-	AfterAgent  []agent.Callback
+	BeforeAgent []agent.BeforeAgentCallback
+	AfterAgent  []agent.AfterAgentCallback
 
 	GenerateContentConfig *genai.GenerateContentConfig
 

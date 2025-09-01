@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/llm/gemini"
 	"google.golang.org/adk/tool"
@@ -112,7 +113,12 @@ func TestGoogleSearchTool_ProcessRequest(t *testing.T) {
 
 			gsTool := tool.NewGoogleSearchTool(m)
 
-			if err := gsTool.ProcessRequest(nil, req); err != nil {
+			requestProcessor, ok := gsTool.(toolinternal.RequestProcessor)
+			if !ok {
+				t.Fatal("googleSearchTool does not implement RequestProcessor")
+			}
+
+			if err := requestProcessor.ProcessRequest(nil, req); err != nil {
 				if tc.wantErr != "" {
 					if !strings.Contains(err.Error(), tc.wantErr) {
 						t.Fatalf("ProcessRequest error: got %v, want %v", err, tc.wantErr)
@@ -133,15 +139,5 @@ func TestGoogleSearchTool_ProcessRequest(t *testing.T) {
 				t.Errorf("ProcessRequest returned unexpected tools (-want +got):\n%s", diff)
 			}
 		})
-	}
-}
-
-func TestGoogleSearchTool_Run(t *testing.T) {
-	gsTool := tool.NewGoogleSearchTool(nil)
-
-	_, err := gsTool.Run(nil, nil)
-
-	if err == nil {
-		t.Fatal("Run expected error, but got nil")
 	}
 }

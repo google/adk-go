@@ -22,42 +22,39 @@ import (
 	"google.golang.org/genai"
 )
 
-// GoogleSearchTool is a tool that adds google search configuration to the LLM request.
-type GoogleSearchTool struct {
-	name        string
-	description string
-	// TODO: temporary the model is the input for the tool
-	model llm.Model
-}
-
-// Assert that GoogleSearchTool implements adk.Tool
-var _ Tool = (*GoogleSearchTool)(nil)
-
 // NewGoogleSearchTool creates a new GoogleSearchTool.
-func NewGoogleSearchTool(model llm.Model) *GoogleSearchTool {
-	return &GoogleSearchTool{
+func NewGoogleSearchTool(model llm.Model) Tool {
+	return &googleSearchTool{
 		name:        "google_search",
 		description: "google_search",
 		model:       model,
 	}
 }
 
+// googleSearchTool is a tool that adds google search configuration to the LLM request.
+type googleSearchTool struct {
+	name        string
+	description string
+	// TODO: temporary the model is the input for the tool
+	model llm.Model
+}
+
 // Name implements adk.Tool.
-func (t *GoogleSearchTool) Name() string {
+func (t *googleSearchTool) Name() string {
 	return t.name
 }
 
 // Description implements adk.Tool.
-func (t *GoogleSearchTool) Description() string {
+func (t *googleSearchTool) Description() string {
 	return t.description
 }
 
-func (t *GoogleSearchTool) Declaration() *genai.FunctionDeclaration {
+func (t *googleSearchTool) Declaration() *genai.FunctionDeclaration {
 	return nil
 }
 
 // ProcessRequest modifies the LLM request to include the google search tool configuration.
-func (t *GoogleSearchTool) ProcessRequest(ctx Context, req *llm.Request) error {
+func (t *googleSearchTool) ProcessRequest(ctx Context, req *llm.Request) error {
 	if req == nil {
 		return fmt.Errorf("llm request is nil")
 	}
@@ -88,6 +85,6 @@ func (t *GoogleSearchTool) ProcessRequest(ctx Context, req *llm.Request) error {
 }
 
 // Run is not implemented for this tool, as it's an internal model tool.
-func (t *GoogleSearchTool) Run(ctx Context, args any) (any, error) {
+func (t *googleSearchTool) Run(ctx Context, args any) (any, error) {
 	return nil, fmt.Errorf("google search tool runs internally on the model, it can not be run directly")
 }
