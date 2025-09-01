@@ -95,7 +95,7 @@ func (s *gcsService) getUserPrefix(appName, userID string) string {
 	return fmt.Sprintf("%s/%s/user/", appName, userID)
 }
 
-func (s *gcsService) Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error) {
+func (s *gcsService) Save(ctx context.Context, req *SaveRequest) (_ *SaveResponse, err error) {
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	artifact := req.Part
 
@@ -119,7 +119,11 @@ func (s *gcsService) Save(ctx context.Context, req *SaveRequest) (*SaveResponse,
 
 	blobName := s.getBlobName(appName, userID, sessionID, fileName, nextVersion)
 	writer := s.bucket.Object(blobName).NewWriter(ctx)
-	defer writer.Close()
+	defer func() {
+		if closeErr := writer.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to close blob reader: %w", closeErr)
+		}
+	}()
 
 	writer.SetContentType(artifact.InlineData.MIMEType)
 
@@ -163,7 +167,7 @@ func (s *gcsService) Delete(ctx context.Context, req *DeleteRequest) error {
 	return nil
 }
 
-func (s *gcsService) Load(ctx context.Context, req *LoadRequest) (*LoadResponse, error) {
+func (s *gcsService) Load(ctx context.Context, req *LoadRequest) (_ *LoadResponse, err error) {
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
 		return nil, fmt.Errorf("invalid request: missing required fields")
@@ -200,7 +204,11 @@ func (s *gcsService) Load(ctx context.Context, req *LoadRequest) (*LoadResponse,
 	if err != nil {
 		return nil, fmt.Errorf("could not create reader for blob '%s': %w", blobName, err)
 	}
-	defer reader.Close()
+	defer func() {
+		if closeErr := reader.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to close blob reader: %w", closeErr)
+		}
+	}()
 
 	// Read all the content into a byte slice
 	data, err := io.ReadAll(reader)
@@ -286,7 +294,7 @@ func (s *gcsService) _versions(ctx context.Context, req *VersionsRequest) (*Vers
 	}
 	blobsIterator := s.bucket.Objects(ctx, query)
 
-	var versions []int64 = make([]int64, 0)
+	var versions = make([]int64, 0)
 	for {
 		blob, err := blobsIterator.Next()
 		if err == iterator.Done {
