@@ -49,7 +49,7 @@ func TestInMemoryArtifactService(t *testing.T) {
 
 func TestGCSArtifactService(t *testing.T) {
 	ctx := t.Context()
-	srv, err := NewGcsArtifactServiceWithClient(ctx, NewFakeClient(), "new")
+	srv, err := NewGCSArtifactServiceWithClient(ctx, NewFakeClient(), "new")
 	if err != nil {
 		t.Fatalf("TestGcsArtifactService() failed: %v", err)
 		return
@@ -217,7 +217,7 @@ func TestInMemoryArtifactService_Empty(t *testing.T) {
 
 func TestGCSArtifactService_Empty(t *testing.T) {
 	ctx := t.Context()
-	srv, err := NewGcsArtifactServiceWithClient(ctx, NewFakeClient(), "new")
+	srv, err := NewGCSArtifactServiceWithClient(ctx, NewFakeClient(), "new")
 	if err != nil {
 		t.Fatalf("TestGcsArtifactService() failed: %v", err)
 		return

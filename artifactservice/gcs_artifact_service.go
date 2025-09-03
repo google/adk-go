@@ -37,8 +37,8 @@ type gcsService struct {
 	bucket        GCSBucket
 }
 
-// NewGcsArtifactService creates a gcsService for the specified bucket using a default client
-func NewGcsArtifactService(ctx context.Context, bucketName string) (Service, error) {
+// NewGCSArtifactService creates a gcsService for the specified bucket using a default client
+func NewGCSArtifactService(ctx context.Context, bucketName string) (Service, error) {
 	var err error
 	storageClient, err := storage.NewClient(ctx)
 	if err != nil {
@@ -56,9 +56,9 @@ func NewGcsArtifactService(ctx context.Context, bucketName string) (Service, err
 	return s, nil
 }
 
-// NewGcsArtifactServiceWithClient creates a gcsService for the specified bucket using a specific client
+// NewGCSArtifactServiceWithClient creates a gcsService for the specified bucket using a specific client
 // used for mocking
-func NewGcsArtifactServiceWithClient(ctx context.Context, client GCSClient, bucketName string) (Service, error) {
+func NewGCSArtifactServiceWithClient(ctx context.Context, client GCSClient, bucketName string) (Service, error) {
 	s := &gcsService{
 		bucketName:    bucketName,
 		storageClient: client,
@@ -68,30 +68,30 @@ func NewGcsArtifactServiceWithClient(ctx context.Context, client GCSClient, buck
 }
 
 // fileHasUserNamespace checks if a filename indicates a user-namespaced blob.
-func (s *gcsService) fileHasUserNamespace(filename string) bool {
+func fileHasUserNamespace(filename string) bool {
 	return strings.HasPrefix(filename, "user:")
 }
 
-// getBlobName constructs the blob name in GCS.
-func (s *gcsService) getBlobName(appName, userID, sessionID, fileName string, version int64) string {
-	if s.fileHasUserNamespace(fileName) {
+// buildBlobName constructs the blob name in GCS.
+func buildBlobName(appName, userID, sessionID, fileName string, version int64) string {
+	if fileHasUserNamespace(fileName) {
 		return fmt.Sprintf("%s/%s/user/%s/%d", appName, userID, fileName, version)
 	}
 	return fmt.Sprintf("%s/%s/%s/%s/%d", appName, userID, sessionID, fileName, version)
 }
 
-func (s *gcsService) getBlobNamePrefix(appName, userID, sessionID, fileName string) string {
-	if s.fileHasUserNamespace(fileName) {
+func buildBlobNamePrefix(appName, userID, sessionID, fileName string) string {
+	if fileHasUserNamespace(fileName) {
 		return fmt.Sprintf("%s/%s/user/%s/", appName, userID, fileName)
 	}
 	return fmt.Sprintf("%s/%s/%s/%s/", appName, userID, sessionID, fileName)
 }
 
-func (s *gcsService) getSessionPrefix(appName, userID, sessionID string) string {
+func buildSessionPrefix(appName, userID, sessionID string) string {
 	return fmt.Sprintf("%s/%s/%s/", appName, userID, sessionID)
 }
 
-func (s *gcsService) getUserPrefix(appName, userID string) string {
+func buildUserPrefix(appName, userID string) string {
 	return fmt.Sprintf("%s/%s/user/", appName, userID)
 }
 
@@ -107,7 +107,7 @@ func (s *gcsService) Save(ctx context.Context, req *SaveRequest) (_ *SaveRespons
 
 	// TODO race condition, could use mutex but it's a remote resource so the issue would still occurs
 	// with multiple consumers, and gcs does not have transactions spanning several operations
-	response, err := s._versions(ctx, &VersionsRequest{
+	response, err := s.versions(ctx, &VersionsRequest{
 		req.AppName, req.UserID, req.SessionID, req.FileName,
 	})
 	if err != nil {
@@ -117,7 +117,7 @@ func (s *gcsService) Save(ctx context.Context, req *SaveRequest) (_ *SaveRespons
 		nextVersion = slices.Max(response.Versions) + 1
 	}
 
-	blobName := s.getBlobName(appName, userID, sessionID, fileName, nextVersion)
+	blobName := buildBlobName(appName, userID, sessionID, fileName, nextVersion)
 	writer := s.bucket.Object(blobName).NewWriter(ctx)
 	defer func() {
 		if closeErr := writer.Close(); closeErr != nil && err == nil {
@@ -143,20 +143,20 @@ func (s *gcsService) Delete(ctx context.Context, req *DeleteRequest) error {
 
 	//Delete specific version
 	if version != 0 {
-		blobName := s.getBlobName(appName, userID, sessionID, fileName, version)
+		blobName := buildBlobName(appName, userID, sessionID, fileName, version)
 		obj := s.bucket.Object(blobName)
 		return obj.Delete(ctx)
 	}
 
 	// Delete all versions
-	response, err := s._versions(ctx, &VersionsRequest{
+	response, err := s.versions(ctx, &VersionsRequest{
 		req.AppName, req.UserID, req.SessionID, req.FileName,
 	})
 	if err != nil {
 		return err
 	}
 	for _, version := range response.Versions {
-		blobName := s.getBlobName(appName, userID, sessionID, fileName, version)
+		blobName := buildBlobName(appName, userID, sessionID, fileName, version)
 		// Delete the object using its full name
 		obj := s.bucket.Object(blobName)
 		if err := obj.Delete(ctx); err != nil {
@@ -175,7 +175,7 @@ func (s *gcsService) Load(ctx context.Context, req *LoadRequest) (_ *LoadRespons
 	version := req.Version
 
 	if version <= 0 {
-		response, err := s._versions(ctx, &VersionsRequest{
+		response, err := s.versions(ctx, &VersionsRequest{
 			req.AppName, req.UserID, req.SessionID, req.FileName,
 		})
 		if err != nil {
@@ -187,7 +187,7 @@ func (s *gcsService) Load(ctx context.Context, req *LoadRequest) (_ *LoadRespons
 		version = slices.Max(response.Versions)
 	}
 
-	blobName := s.getBlobName(appName, userID, sessionID, fileName, version)
+	blobName := buildBlobName(appName, userID, sessionID, fileName, version)
 	blob := s.bucket.Object(blobName)
 
 	// Check if the blob exists before trying to read it
@@ -222,8 +222,8 @@ func (s *gcsService) Load(ctx context.Context, req *LoadRequest) (_ *LoadRespons
 	return &LoadResponse{Part: part}, nil
 }
 
-// getFilenamesFromPrefix is a reusable helper function.
-func (s *gcsService) getFilenamesFromPrefix(ctx context.Context, prefix string, filenamesSet map[string]bool) error {
+// fetchFilenamesFromPrefix is a reusable helper function.
+func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string, filenamesSet map[string]bool) error {
 	// Add a guard clause to prevent a panic if a nil map is passed.
 	if filenamesSet == nil {
 		return fmt.Errorf("filenamesSet cannot be nil")
@@ -265,13 +265,13 @@ func (s *gcsService) List(ctx context.Context, req *ListRequest) (*ListResponse,
 	filenamesSet := map[string]bool{}
 
 	// Fetch filenames for the session.
-	err := s.getFilenamesFromPrefix(ctx, s.getSessionPrefix(appName, userID, sessionID), filenamesSet)
+	err := s.fetchFilenamesFromPrefix(ctx, buildSessionPrefix(appName, userID, sessionID), filenamesSet)
 	if err != nil {
 		return nil, err
 	}
 
 	// Fetch filenames for the user.
-	err = s.getFilenamesFromPrefix(ctx, s.getUserPrefix(appName, userID), filenamesSet)
+	err = s.fetchFilenamesFromPrefix(ctx, buildUserPrefix(appName, userID), filenamesSet)
 	if err != nil {
 		return nil, err
 	}
@@ -281,14 +281,14 @@ func (s *gcsService) List(ctx context.Context, req *ListRequest) (*ListResponse,
 	return &ListResponse{FileNames: filenames}, nil
 }
 
-// _versions internal function that does not return error if versions are empty
-func (s *gcsService) _versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error) {
+// versions internal function that does not return error if versions are empty
+func (s *gcsService) versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error) {
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
 		return nil, fmt.Errorf("invalid request: missing required fields")
 	}
 
-	prefix := s.getBlobNamePrefix(appName, userID, sessionID, fileName)
+	prefix := buildBlobNamePrefix(appName, userID, sessionID, fileName)
 	query := &storage.Query{
 		Prefix: prefix,
 	}
@@ -319,7 +319,7 @@ func (s *gcsService) _versions(ctx context.Context, req *VersionsRequest) (*Vers
 
 // Versions implements types.Service and return err if versions is empty
 func (s *gcsService) Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error) {
-	response, err := s._versions(ctx, req)
+	response, err := s.versions(ctx, req)
 	if err != nil {
 		return response, err
 	}
