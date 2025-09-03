@@ -17,7 +17,6 @@ package memoryservice_test
 import (
 	"iter"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -32,8 +31,8 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 	tests := []struct {
 		name         string
 		initSessions []session.Session
-		req          *memoryservice.SearchMemoryRequest
-		wantResp     *memoryservice.SearchMemoryResponse
+		req          *memoryservice.SearchRequest
+		wantResp     *memoryservice.SearchResponse
 		wantErr      bool
 	}{
 		{
@@ -64,22 +63,22 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: &llm.Response{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memoryservice.SearchMemoryRequest{
+			req: &memoryservice.SearchRequest{
 				AppName: "app1",
 				UserID:  "user1",
 				Query:   "quick hello",
 			},
-			wantResp: &memoryservice.SearchMemoryResponse{
+			wantResp: &memoryservice.SearchResponse{
 				Memories: []memoryservice.MemoryEntry{
 					{
 						Content:   genai.NewContentFromText("The Quick brown fox", genai.RoleUser),
 						Author:    "user1",
-						Timestamp: "2023-10-01T10:00:00Z",
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
 					},
 					{
 						Content:   genai.NewContentFromText("hello world", genai.RoleModel),
 						Author:    "test-bot",
-						Timestamp: "2023-10-02T10:00:00Z",
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-02T10:00:00Z")),
 					},
 				},
 			},
@@ -91,12 +90,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: &llm.Response{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memoryservice.SearchMemoryRequest{
+			req: &memoryservice.SearchRequest{
 				AppName: "other_app",
 				UserID:  "user1",
 				Query:   "test text",
 			},
-			wantResp: &memoryservice.SearchMemoryResponse{},
+			wantResp: &memoryservice.SearchResponse{},
 		},
 		{
 			name: "no leakage for different user",
@@ -105,12 +104,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: &llm.Response{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memoryservice.SearchMemoryRequest{
+			req: &memoryservice.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "test text",
 			},
-			wantResp: &memoryservice.SearchMemoryResponse{},
+			wantResp: &memoryservice.SearchResponse{},
 		},
 		{
 			name: "no matches",
@@ -119,21 +118,21 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: &llm.Response{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memoryservice.SearchMemoryRequest{
+			req: &memoryservice.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "something different",
 			},
-			wantResp: &memoryservice.SearchMemoryResponse{},
+			wantResp: &memoryservice.SearchResponse{},
 		},
 		{
 			name: "lookup on empty store",
-			req: &memoryservice.SearchMemoryRequest{
+			req: &memoryservice.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "something different",
 			},
-			wantResp: &memoryservice.SearchMemoryResponse{},
+			wantResp: &memoryservice.SearchResponse{},
 		},
 	}
 	for _, tt := range tests {
@@ -146,7 +145,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 				}
 			}
 
-			got, err := s.SearchMemory(t.Context(), tt.req)
+			got, err := s.Search(t.Context(), tt.req)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("inMemoryService.SearchMemory() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -169,9 +168,9 @@ func makeSession(t *testing.T, appName, userID, sessionID string, events []*sess
 	}
 }
 
-var sortMemories = cmp.Transformer("Sort", func(in *memoryservice.SearchMemoryResponse) *memoryservice.SearchMemoryResponse {
+var sortMemories = cmp.Transformer("Sort", func(in *memoryservice.SearchResponse) *memoryservice.SearchResponse {
 	slices.SortFunc(in.Memories, func(m1, m2 memoryservice.MemoryEntry) int {
-		return strings.Compare(m1.Timestamp, m2.Timestamp)
+		return m1.Timestamp.Compare(m2.Timestamp)
 	})
 	return in
 })

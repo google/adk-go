@@ -17,12 +17,12 @@ package memoryservice
 import (
 	"context"
 	"maps"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
 
 // Mem returns a new in-memory implementation of the memory service. Thread-safe.
@@ -39,7 +39,9 @@ type key struct {
 type sessionID = string
 
 type value struct {
-	event *session.Event
+	content   *genai.Content
+	author    string
+	timestamp time.Time
 
 	// precomputed set of words in the content for simple keyword matching.
 	words map[string]struct{}
@@ -73,8 +75,10 @@ func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Ses
 		}
 
 		values = append(values, value{
-			event: event,
-			words: words,
+			content:   event.LLMResponse.Content,
+			author:    event.Author,
+			timestamp: event.Time,
+			words:     words,
 		})
 	}
 
@@ -88,17 +92,15 @@ func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Ses
 
 	v, ok := s.store[k]
 	if !ok {
-		s.store[k] = map[sessionID][]value{
-			curSession.ID().SessionID: values,
-		}
-		return nil
+		v = map[sessionID][]value{}
+		s.store[k] = v
 	}
 
 	v[curSession.ID().SessionID] = values
 	return nil
 }
 
-func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchMemoryRequest) (*SearchMemoryResponse, error) {
+func (s *inMemoryService) Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error) {
 	queryWords := extractWords(req.Query)
 
 	k := key{
@@ -110,18 +112,18 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchMemoryReq
 	values, ok := s.store[k]
 	s.mu.RUnlock()
 	if !ok {
-		return &SearchMemoryResponse{}, nil
+		return &SearchResponse{}, nil
 	}
 
-	res := &SearchMemoryResponse{}
+	res := &SearchResponse{}
 
 	for _, events := range values {
 		for _, e := range events {
 			if checkMapsIntersect(e.words, queryWords) {
 				res.Memories = append(res.Memories, MemoryEntry{
-					Content:   e.event.LLMResponse.Content,
-					Author:    e.event.Author,
-					Timestamp: e.event.Time.Format(time.RFC3339),
+					Content:   e.content,
+					Author:    e.author,
+					Timestamp: e.timestamp,
 				})
 			}
 		}
@@ -149,13 +151,14 @@ func checkMapsIntersect(m1, m2 map[string]struct{}) bool {
 	return false
 }
 
-var wordRegex = regexp.MustCompile(`[A-Za-z]+`)
-
 func extractWords(text string) map[string]struct{} {
 	res := make(map[string]struct{})
 
-	for _, word := range wordRegex.FindAllString(text, -1) {
-		res[strings.ToLower(word)] = struct{}{}
+	for s := range strings.SplitSeq(text, " ") {
+		if s == "" {
+			continue
+		}
+		res[strings.ToLower(s)] = struct{}{}
 	}
 
 	return res

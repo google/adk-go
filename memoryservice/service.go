@@ -16,6 +16,7 @@ package memoryservice
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -30,19 +31,19 @@ type Service interface {
 	//
 	// A session can be added multiple times during its lifetime.
 	AddSession(ctx context.Context, s session.Session) error
-	// SearchMemory searches the memory for entries relevant to the given query.
-	SearchMemory(ctx context.Context, req *SearchMemoryRequest) (*SearchMemoryResponse, error)
+	// Search returns memory entries relevant to the given query.
+	Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error)
 }
 
 // CreateRequest represents a request for memory search.
-type SearchMemoryRequest struct {
+type SearchRequest struct {
 	Query   string
 	UserID  string
 	AppName string
 }
 
-// SearchMemoryResponse represents the response from a memory search.
-type SearchMemoryResponse struct {
+// SearchResponse represents the response from a memory search.
+type SearchResponse struct {
 	Memories []MemoryEntry
 }
 
@@ -54,5 +55,5 @@ type MemoryEntry struct {
 	Author string
 	// Timestamp shows when the original content of this memory happened.
 	// This string will be forwarded to LLM. Preferred format is ISO 8601 format.
-	Timestamp string
+	Timestamp time.Time
 }
