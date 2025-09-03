@@ -20,7 +20,10 @@ import (
 	"google.golang.org/genai"
 )
 
-// GoogleSearch is a tool that enables Google Search in the Model.
+// GoogleSearch is a built-in tool that is automatically invoked by Gemini 2
+// models to retrieve search results from Google Search.
+// The tool operates internally within the model and does not require or
+// perform local code execution.
 type GoogleSearch struct{}
 
 func (s GoogleSearch) Name() string {
