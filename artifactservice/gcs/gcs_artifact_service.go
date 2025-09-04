@@ -34,8 +34,8 @@ import (
 // gcsService is an google cloud storage implementation of the Service.
 type gcsService struct {
 	bucketName    string
-	storageClient GCSClient
-	bucket        GCSBucket
+	storageClient gcsClient
+	bucket        gcsBucket
 }
 
 // NewGCSArtifactService creates a gcsService for the specified bucket using a default client
@@ -46,24 +46,24 @@ func NewGCSArtifactService(ctx context.Context, bucketName string) (as.Service, 
 		return nil, err
 	}
 	// Wrap the real client
-	clientWrapper := &GCSClientWrapper{client: storageClient}
+	clientWrapper := &gcsClientWrapper{client: storageClient}
 
 	s := &gcsService{
 		bucketName:    bucketName,
 		storageClient: clientWrapper,
-		bucket:        clientWrapper.Bucket(bucketName),
+		bucket:        clientWrapper.bucket(bucketName),
 	}
 
 	return s, nil
 }
 
-// NewGCSArtifactServiceWithClient creates a gcsService for the specified bucket using a specific client
-// used for mocking
-func NewGCSArtifactServiceWithClient(ctx context.Context, client GCSClient, bucketName string) (as.Service, error) {
+// newGCSArtifactServiceForTesting creates a gcsService for the specified bucket using a mocked inmemory client
+func newGCSArtifactServiceForTesting(ctx context.Context, bucketName string) (as.Service, error) {
+	client := newFakeClient()
 	s := &gcsService{
 		bucketName:    bucketName,
 		storageClient: client,
-		bucket:        client.Bucket(bucketName),
+		bucket:        client.bucket(bucketName),
 	}
 	return s, nil
 }
@@ -122,7 +122,7 @@ func (s *gcsService) Save(ctx context.Context, req *as.SaveRequest) (_ *as.SaveR
 	}
 
 	blobName := buildBlobName(appName, userID, sessionID, fileName, nextVersion)
-	writer := s.bucket.Object(blobName).NewWriter(ctx)
+	writer := s.bucket.object(blobName).newWriter(ctx)
 	defer func() {
 		if closeErr := writer.Close(); closeErr != nil && err == nil {
 			err = fmt.Errorf("failed to close blob reader: %w", closeErr)
@@ -149,8 +149,8 @@ func (s *gcsService) Delete(ctx context.Context, req *as.DeleteRequest) error {
 	//Delete specific version
 	if version != 0 {
 		blobName := buildBlobName(appName, userID, sessionID, fileName, version)
-		obj := s.bucket.Object(blobName)
-		return obj.Delete(ctx)
+		obj := s.bucket.object(blobName)
+		return obj.delete(ctx)
 	}
 
 	// Delete all versions
@@ -163,8 +163,8 @@ func (s *gcsService) Delete(ctx context.Context, req *as.DeleteRequest) error {
 	for _, version := range response.Versions {
 		blobName := buildBlobName(appName, userID, sessionID, fileName, version)
 		// Delete the object using its full name
-		obj := s.bucket.Object(blobName)
-		if err := obj.Delete(ctx); err != nil {
+		obj := s.bucket.object(blobName)
+		if err := obj.delete(ctx); err != nil {
 			return fmt.Errorf("failed to delete object %s: %w", blobName, err)
 		}
 	}
@@ -194,10 +194,10 @@ func (s *gcsService) Load(ctx context.Context, req *as.LoadRequest) (_ *as.LoadR
 	}
 
 	blobName := buildBlobName(appName, userID, sessionID, fileName, version)
-	blob := s.bucket.Object(blobName)
+	blob := s.bucket.object(blobName)
 
 	// Check if the blob exists before trying to read it
-	attrs, err := blob.Attrs(ctx)
+	attrs, err := blob.attrs(ctx)
 	if err != nil {
 		if err == storage.ErrObjectNotExist {
 			return nil, fmt.Errorf("artifact '%s' not found: %w", blobName, fs.ErrNotExist)
@@ -206,7 +206,7 @@ func (s *gcsService) Load(ctx context.Context, req *as.LoadRequest) (_ *as.LoadR
 	}
 
 	// Create a reader to stream the blob's content
-	reader, err := blob.NewReader(ctx)
+	reader, err := blob.newReader(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("could not create reader for blob '%s': %w", blobName, err)
 	}
@@ -238,10 +238,10 @@ func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string
 	query := &storage.Query{
 		Prefix: prefix,
 	}
-	blobsIterator := s.bucket.Objects(ctx, query)
+	blobsIterator := s.bucket.objects(ctx, query)
 
 	for {
-		blob, err := blobsIterator.Next()
+		blob, err := blobsIterator.next()
 		if err == iterator.Done {
 			break
 		}
@@ -299,11 +299,11 @@ func (s *gcsService) versions(ctx context.Context, req *as.VersionsRequest) (*as
 	query := &storage.Query{
 		Prefix: prefix,
 	}
-	blobsIterator := s.bucket.Objects(ctx, query)
+	blobsIterator := s.bucket.objects(ctx, query)
 
 	var versions = make([]int64, 0)
 	for {
-		blob, err := blobsIterator.Next()
+		blob, err := blobsIterator.next()
 		if err == iterator.Done {
 			break
 		}

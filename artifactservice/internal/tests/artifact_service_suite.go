@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package artifactservice_test
+package tests
 
 import (
 	"context"
@@ -24,39 +24,28 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	as "google.golang.org/adk/artifactservice"
-	"google.golang.org/adk/artifactservice/gcs"
 	"google.golang.org/genai"
 )
 
-var serviceImplementations = []struct {
-	name    string
-	factory func(t *testing.T) (as.Service, error)
-}{
-	{"InMemory",
-		func(t *testing.T) (as.Service, error) {
-			return as.Mem(), nil
-		},
-	},
-	{"GCS",
-		func(t *testing.T) (as.Service, error) {
-			ctx := t.Context()
-			return gcs.NewGCSArtifactServiceWithClient(ctx, gcs.NewFakeClient(), "new")
-		},
-	},
-}
-
-func TestArtifactService(t *testing.T) {
-	for _, tc := range serviceImplementations {
-		t.Run(fmt.Sprintf("Test%sArtifactService", tc.name), func(t *testing.T) {
-			ctx := t.Context()
-			// Create the service using the factory for this sub-test
-			srv, err := tc.factory(t)
-			if err != nil {
-				t.Fatalf("Failed to set up service: %v", err)
-			}
-			testArtifactService(ctx, t, srv, tc.name)
-		})
-	}
+func TestArtifactService(t *testing.T, name string, factory func(t *testing.T) (as.Service, error)) {
+	t.Run(fmt.Sprintf("Test%sArtifactService", name), func(t *testing.T) {
+		ctx := t.Context()
+		// Create the service using the factory for this sub-test
+		srv, err := factory(t)
+		if err != nil {
+			t.Fatalf("Failed to set up service: %v", err)
+		}
+		testArtifactService(ctx, t, srv, name)
+	})
+	t.Run(fmt.Sprintf("Test%sArtifactService_Empty", name), func(t *testing.T) {
+		ctx := t.Context()
+		// Create the service using the factory for this sub-test
+		srv, err := factory(t)
+		if err != nil {
+			t.Fatalf("Failed to set up service: %v", err)
+		}
+		testArtifactService_Empty(ctx, t, srv, name)
+	})
 }
 
 func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, testSuffix string) {
@@ -208,20 +197,6 @@ func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, test
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file2",
 	}); err != nil {
 		t.Fatalf("Delete(file2) failed: %v", err)
-	}
-}
-
-func TestArtifactService_Empty(t *testing.T) {
-	for _, tc := range serviceImplementations {
-		t.Run(fmt.Sprintf("Test%sArtifactService_Empty", tc.name), func(t *testing.T) {
-			ctx := t.Context()
-			// Create the service using the factory for this sub-test
-			srv, err := tc.factory(t)
-			if err != nil {
-				t.Fatalf("Failed to set up service: %v", err)
-			}
-			testArtifactService_Empty(ctx, t, srv, tc.name)
-		})
 	}
 }
 

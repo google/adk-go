@@ -28,169 +28,169 @@ import (
 )
 
 // ------------------------ Defining interfaces to enable mocking --------------------------------
-// GCSClient is an interface that a GCS client must satisfy.
-type GCSClient interface {
-	Bucket(name string) GCSBucket
+// gcsClient is an interface that a gcs client must satisfy.
+type gcsClient interface {
+	bucket(name string) gcsBucket
 }
 
-// GCSBucket is an interface that a GCS bucket handle must satisfy.
-type GCSBucket interface {
-	Object(name string) GCSObject
-	Objects(ctx context.Context, q *storage.Query) GCSObjectIterator
+// gcsBucket is an interface that a gcs bucket handle must satisfy.
+type gcsBucket interface {
+	object(name string) gcsObject
+	objects(ctx context.Context, q *storage.Query) gcsObjectIterator
 }
 
-// GCSObject is an interface that a GCS object handle must satisfy.
-type GCSObject interface {
-	NewWriter(ctx context.Context) GCSWriter
-	NewReader(ctx context.Context) (io.ReadCloser, error)
-	Delete(ctx context.Context) error
-	Attrs(ctx context.Context) (*storage.ObjectAttrs, error)
+// gcsObject is an interface that a gcs object handle must satisfy.
+type gcsObject interface {
+	newWriter(ctx context.Context) gcsWriter
+	newReader(ctx context.Context) (io.ReadCloser, error)
+	delete(ctx context.Context) error
+	attrs(ctx context.Context) (*storage.ObjectAttrs, error)
 }
 
-// GCSObjectIterator
-type GCSObjectIterator interface {
-	Next() (*storage.ObjectAttrs, error)
+// gcsObjectIterator
+type gcsObjectIterator interface {
+	next() (*storage.ObjectAttrs, error)
 }
 
-// GCSObjectWriter
-type GCSWriter interface {
+// gcsObjectWriter
+type gcsWriter interface {
 	io.Writer // Provides Write(p []byte) (n int, err error)
 	io.Closer // Provides Close() error
 	SetContentType(string)
 }
 
-// ---------------------- Wrapper Implementations for Real GCS Types --------------------------------
-// GCSClientWrapper wraps a storage.Client to satisfy the GCSClient interface.
-type GCSClientWrapper struct {
+// ---------------------- Wrapper Implementations for Real gcs Types --------------------------------
+// gcsClientWrapper wraps a storage.Client to satisfy the gcsClient interface.
+type gcsClientWrapper struct {
 	client *storage.Client
 }
 
-// Bucket returns a GCSBucketWrapper that satisfies the GCSBucket interface.
-func (w *GCSClientWrapper) Bucket(name string) GCSBucket {
+// Bucket returns a gcsBucketWrapper that satisfies the gcsBucket interface.
+func (w *gcsClientWrapper) bucket(name string) gcsBucket {
 	bucketHandle := w.client.Bucket(name)
-	return &GCSBucketWrapper{bucket: bucketHandle}
+	return &gcsBucketWrapper{bucket: bucketHandle}
 }
 
-// GCSBucketWrapper wraps a storage.BucketHandle to satisfy the GCSBucket interface.
-type GCSBucketWrapper struct {
+// gcsBucketWrapper wraps a storage.BucketHandle to satisfy the gcsBucket interface.
+type gcsBucketWrapper struct {
 	bucket *storage.BucketHandle
 }
 
-// Object returns a GCSObjectWrapper that satisfies the GCSObject interface.
-func (w *GCSBucketWrapper) Object(name string) GCSObject {
+// Object returns a gcsObjectWrapper that satisfies the gcsObject interface.
+func (w *gcsBucketWrapper) object(name string) gcsObject {
 	objectHandle := w.bucket.Object(name)
-	return &GCSObjectWrapper{object: objectHandle}
+	return &gcsObjectWrapper{object: objectHandle}
 }
 
-// Objects implements the GCSBucket interface for GCSBucketWrapper.
+// Objects implements the gcsBucket interface for gcsBucketWrapper.
 // It directly calls the underlying storage.BucketHandle's Objects method.
-// The GCSBucketWrapper returns an implementation of the GCSObjectIterator interface.
-func (w *GCSBucketWrapper) Objects(ctx context.Context, q *storage.Query) GCSObjectIterator {
-	// This is the real GCS iterator.
+// The gcsBucketWrapper returns an implementation of the gcsObjectIterator interface.
+func (w *gcsBucketWrapper) objects(ctx context.Context, q *storage.Query) gcsObjectIterator {
+	// This is the real gcs iterator.
 	realIterator := w.bucket.Objects(ctx, q)
 	// We return a wrapper around the real iterator.
-	return &GCSObjectIteratorWrapper{iter: realIterator}
+	return &gcsObjectIteratorWrapper{iter: realIterator}
 }
 
-// GCSObjectWrapper wraps a storage.ObjectHandle to satisfy the GCSObject interface.
-type GCSObjectWrapper struct {
+// gcsObjectWrapper wraps a storage.ObjectHandle to satisfy the gcsObject interface.
+type gcsObjectWrapper struct {
 	object *storage.ObjectHandle
 }
 
-// NewWriter implements the GCSObject interface for GCSObjectWrapper.
-func (w *GCSObjectWrapper) NewWriter(ctx context.Context) GCSWriter {
-	return &GCSWriterWrapper{w: w.object.NewWriter(ctx)}
+// NewWriter implements the gcsObject interface for gcsObjectWrapper.
+func (w *gcsObjectWrapper) newWriter(ctx context.Context) gcsWriter {
+	return &gcsWriterWrapper{w: w.object.NewWriter(ctx)}
 }
 
-// NewReader implements the GCSObject interface for GCSObjectWrapper.
-func (w *GCSObjectWrapper) NewReader(ctx context.Context) (io.ReadCloser, error) {
+// NewReader implements the gcsObject interface for gcsObjectWrapper.
+func (w *gcsObjectWrapper) newReader(ctx context.Context) (io.ReadCloser, error) {
 	return w.object.NewReader(ctx)
 }
 
-// Delete implements the GCSObject interface for GCSObjectWrapper.
-func (w *GCSObjectWrapper) Delete(ctx context.Context) error {
+// Delete implements the gcsObject interface for gcsObjectWrapper.
+func (w *gcsObjectWrapper) delete(ctx context.Context) error {
 	return w.object.Delete(ctx)
 }
 
-// Attrs implements the GCSObject interface for GCSObjectWrapper.
-func (w *GCSObjectWrapper) Attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
+// Attrs implements the gcsObject interface for gcsObjectWrapper.
+func (w *gcsObjectWrapper) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
 	return w.object.Attrs(ctx)
 }
 
 // Create the wrapper for the real iterator.
-type GCSObjectIteratorWrapper struct {
+type gcsObjectIteratorWrapper struct {
 	iter *storage.ObjectIterator
 }
 
-func (w *GCSObjectIteratorWrapper) Next() (*storage.ObjectAttrs, error) {
+func (w *gcsObjectIteratorWrapper) next() (*storage.ObjectAttrs, error) {
 	return w.iter.Next()
 }
 
-// GCSWriterWrapper wraps the real GCS writer to satisfy our ObjectWriter interface.
-type GCSWriterWrapper struct {
+// gcsWriterWrapper wraps the real gcs writer to satisfy our ObjectWriter interface.
+type gcsWriterWrapper struct {
 	w *storage.Writer
 }
 
-func (g *GCSWriterWrapper) Write(p []byte) (n int, err error) {
+func (g *gcsWriterWrapper) Write(p []byte) (n int, err error) {
 	return g.w.Write(p)
 }
 
-func (g *GCSWriterWrapper) Close() error {
+func (g *gcsWriterWrapper) Close() error {
 	return g.w.Close()
 }
 
-func (g *GCSWriterWrapper) SetContentType(cType string) {
+func (g *gcsWriterWrapper) SetContentType(cType string) {
 	g.w.ContentType = cType
 }
 
-var _ GCSClient = (*GCSClientWrapper)(nil)
-var _ GCSBucket = (*GCSBucketWrapper)(nil)
-var _ GCSObject = (*GCSObjectWrapper)(nil)
-var _ GCSObjectIterator = (*GCSObjectIteratorWrapper)(nil)
-var _ GCSWriter = (*GCSWriterWrapper)(nil)
+var _ gcsClient = (*gcsClientWrapper)(nil)
+var _ gcsBucket = (*gcsBucketWrapper)(nil)
+var _ gcsObject = (*gcsObjectWrapper)(nil)
+var _ gcsObjectIterator = (*gcsObjectIteratorWrapper)(nil)
+var _ gcsWriter = (*gcsWriterWrapper)(nil)
 
 // ---------------------------------- Mock Implementations -----------------------------------
-// FakeClient implements the GCSClient interface for testing.
-type FakeClient struct {
-	inMemoryBucket GCSBucket
+// fakeClient implements the gcsClient interface for testing.
+type fakeClient struct {
+	inMemoryBucket gcsBucket
 }
 
-func NewFakeClient() GCSClient {
-	return &FakeClient{
-		inMemoryBucket: &FakeBucket{
-			objects: make(map[string]*FakeObject),
+func newFakeClient() gcsClient {
+	return &fakeClient{
+		inMemoryBucket: &fakeBucket{
+			objectsMap: make(map[string]*fakeObject),
 		},
 	}
 }
 
 // Bucket returns the singleton in-memory bucket.
-func (c *FakeClient) Bucket(name string) GCSBucket {
+func (c *fakeClient) bucket(name string) gcsBucket {
 	return c.inMemoryBucket
 }
 
-// FakeBucket implements the GCSBucket interface for testing.
-type FakeBucket struct {
-	mu      sync.Mutex
-	objects map[string]*FakeObject
+// fakeBucket implements the gcsBucket interface for testing.
+type fakeBucket struct {
+	mu         sync.Mutex
+	objectsMap map[string]*fakeObject
 }
 
 // Object returns a fake object from the in-memory store.
-func (f *FakeBucket) Object(name string) GCSObject {
+func (f *fakeBucket) object(name string) gcsObject {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.objects[name]; !ok {
-		f.objects[name] = &FakeObject{name: name}
+	if _, ok := f.objectsMap[name]; !ok {
+		f.objectsMap[name] = &fakeObject{name: name}
 	}
-	return f.objects[name]
+	return f.objectsMap[name]
 }
 
 // Objects simulates iterating over objects with a prefix.
-func (f *FakeBucket) Objects(ctx context.Context, q *storage.Query) GCSObjectIterator {
+func (f *fakeBucket) objects(ctx context.Context, q *storage.Query) gcsObjectIterator {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	var matchingObjects []*FakeObject
-	for name, obj := range f.objects {
+	var matchingObjects []*fakeObject
+	for name, obj := range f.objectsMap {
 		if q != nil && q.Prefix != "" && !strings.HasPrefix(name, q.Prefix) {
 			continue
 		}
@@ -201,14 +201,14 @@ func (f *FakeBucket) Objects(ctx context.Context, q *storage.Query) GCSObjectIte
 
 	// This is the key change. We return a custom type that has a `Next` method
 	// that manages its own state and returns the correct values.
-	return &FakeObjectIterator{
+	return &fakeObjectIterator{
 		objects: matchingObjects,
 		index:   0,
 	}
 }
 
-// FakeObject implements the GCSObject interface for testing.
-type FakeObject struct {
+// fakeObject implements the gcsObject interface for testing.
+type fakeObject struct {
 	mu          sync.Mutex
 	name        string
 	data        []byte
@@ -217,7 +217,7 @@ type FakeObject struct {
 }
 
 // NewWriter returns a fake writer that stores data in memory.
-func (f *FakeObject) NewWriter(ctx context.Context) GCSWriter {
+func (f *fakeObject) newWriter(ctx context.Context) gcsWriter {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted = false // A write operation "undeletes" the object
@@ -226,7 +226,7 @@ func (f *FakeObject) NewWriter(ctx context.Context) GCSWriter {
 }
 
 // Attrs returns fake attributes for the object.
-func (f *FakeObject) Attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
+func (f *fakeObject) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.deleted || f.data == nil {
@@ -236,7 +236,7 @@ func (f *FakeObject) Attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
 }
 
 // Delete marks the object as deleted in memory.
-func (f *FakeObject) Delete(ctx context.Context) error {
+func (f *fakeObject) delete(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted = true
@@ -244,7 +244,7 @@ func (f *FakeObject) Delete(ctx context.Context) error {
 }
 
 // NewReader returns a reader for the in-memory data.
-func (f *FakeObject) NewReader(ctx context.Context) (io.ReadCloser, error) {
+func (f *fakeObject) newReader(ctx context.Context) (io.ReadCloser, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.deleted || f.data == nil {
@@ -255,7 +255,7 @@ func (f *FakeObject) NewReader(ctx context.Context) (io.ReadCloser, error) {
 
 // fakeWriter is a helper type to simulate an *storage.Writer
 type fakeWriter struct {
-	obj         *FakeObject
+	obj         *fakeObject
 	buffer      *bytes.Buffer
 	contentType string
 }
@@ -277,16 +277,16 @@ func (w *fakeWriter) SetContentType(cType string) {
 	w.contentType = cType
 }
 
-// FakeObjectIterator is a fake iterator that returns attributes from a slice.
+// fakeObjectIterator is a fake iterator that returns attributes from a slice.
 // This type is the key to solving the 'unknown field' error.
-type FakeObjectIterator struct {
-	objects []*FakeObject
+type fakeObjectIterator struct {
+	objects []*fakeObject
 	index   int
 }
 
 // Next implements the iterator pattern.
 // It returns the next object in the slice or an iterator.Done error.
-func (i *FakeObjectIterator) Next() (*storage.ObjectAttrs, error) {
+func (i *fakeObjectIterator) next() (*storage.ObjectAttrs, error) {
 	if i.index >= len(i.objects) {
 		return nil, iterator.Done
 	}
@@ -295,8 +295,8 @@ func (i *FakeObjectIterator) Next() (*storage.ObjectAttrs, error) {
 	return &storage.ObjectAttrs{Name: obj.name, ContentType: obj.contentType}, nil
 }
 
-var _ GCSClient = (*FakeClient)(nil)
-var _ GCSBucket = (*FakeBucket)(nil)
-var _ GCSObject = (*FakeObject)(nil)
-var _ GCSObjectIterator = (*FakeObjectIterator)(nil)
-var _ GCSWriter = (*fakeWriter)(nil)
+var _ gcsClient = (*fakeClient)(nil)
+var _ gcsBucket = (*fakeBucket)(nil)
+var _ gcsObject = (*fakeObject)(nil)
+var _ gcsObjectIterator = (*fakeObjectIterator)(nil)
+var _ gcsWriter = (*fakeWriter)(nil)
