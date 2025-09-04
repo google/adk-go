@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package artifactservice
+package artifactservice_test
 
 import (
 	"context"
@@ -23,41 +23,43 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	as "google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifactservice/gcs"
 	"google.golang.org/genai"
 )
 
-func TestArtifactKey(t *testing.T) {
-	key := artifactKey{
-		AppName:   "testapp",
-		UserID:    "testuser",
-		SessionID: "testsession",
-		FileName:  "testfile",
-		Version:   123,
-	}
-	var key2 artifactKey
-	_ = key2.Decode(key.Encode())
-	if diff := cmp.Diff(key, key2); diff != "" {
-		t.Errorf("key mismatch (-want +got):\n%s", diff)
+var serviceImplementations = []struct {
+	name    string
+	factory func(t *testing.T) (as.Service, error)
+}{
+	{"InMemory",
+		func(t *testing.T) (as.Service, error) {
+			return as.Mem(), nil
+		},
+	},
+	{"GCS",
+		func(t *testing.T) (as.Service, error) {
+			ctx := t.Context()
+			return gcs.NewGCSArtifactServiceWithClient(ctx, gcs.NewFakeClient(), "new")
+		},
+	},
+}
+
+func TestArtifactService(t *testing.T) {
+	for _, tc := range serviceImplementations {
+		t.Run(fmt.Sprintf("Test%sArtifactService", tc.name), func(t *testing.T) {
+			ctx := t.Context()
+			// Create the service using the factory for this sub-test
+			srv, err := tc.factory(t)
+			if err != nil {
+				t.Fatalf("Failed to set up service: %v", err)
+			}
+			testArtifactService(ctx, t, srv, tc.name)
+		})
 	}
 }
 
-func TestInMemoryArtifactService(t *testing.T) {
-	ctx := t.Context()
-	srv := Mem()
-	_testArtifactService(ctx, t, srv, "_InMemory")
-}
-
-func TestGCSArtifactService(t *testing.T) {
-	ctx := t.Context()
-	srv, err := NewGCSArtifactServiceWithClient(ctx, NewFakeClient(), "new")
-	if err != nil {
-		t.Fatalf("TestGcsArtifactService() failed: %v", err)
-		return
-	}
-	_testArtifactService(ctx, t, srv, "_GCS")
-}
-
-func _testArtifactService(ctx context.Context, t *testing.T, srv Service, testSuffix string) {
+func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, testSuffix string) {
 	appName := "testapp"
 	userID := "testuser"
 	sessionID := "testsession"
@@ -79,7 +81,7 @@ func _testArtifactService(ctx context.Context, t *testing.T, srv Service, testSu
 	t.Log("Save file1 and file2")
 	for i, data := range testData {
 		wantVersion := data.version
-		got, err := srv.Save(ctx, &SaveRequest{
+		got, err := srv.Save(ctx, &as.SaveRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: data.fileName,
 			Part: data.artifact,
 		})
@@ -89,7 +91,7 @@ func _testArtifactService(ctx context.Context, t *testing.T, srv Service, testSu
 		}
 	}
 
-	t.Run(fmt.Sprintf("Load%s", testSuffix), func(t *testing.T) {
+	t.Run(fmt.Sprintf("Load_%s", testSuffix), func(t *testing.T) {
 		fileName := "file1"
 		for _, tc := range []struct {
 			name    string
@@ -100,7 +102,7 @@ func _testArtifactService(ctx context.Context, t *testing.T, srv Service, testSu
 			{"ver=1", 1, genai.NewPartFromBytes([]byte("file v1"), "text/plain")},
 			{"ver=2", 2, genai.NewPartFromBytes([]byte("file v2"), "text/plain")},
 		} {
-			got, err := srv.Load(ctx, &LoadRequest{
+			got, err := srv.Load(ctx, &as.LoadRequest{
 				AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
 				Version: tc.version,
 			})
@@ -110,8 +112,8 @@ func _testArtifactService(ctx context.Context, t *testing.T, srv Service, testSu
 		}
 	})
 
-	t.Run(fmt.Sprintf("List%s", testSuffix), func(t *testing.T) {
-		resp, err := srv.List(ctx, &ListRequest{
+	t.Run(fmt.Sprintf("List_%s", testSuffix), func(t *testing.T) {
+		resp, err := srv.List(ctx, &as.ListRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID,
 		})
 		if err != nil {
@@ -125,8 +127,8 @@ func _testArtifactService(ctx context.Context, t *testing.T, srv Service, testSu
 		}
 	})
 
-	t.Run(fmt.Sprintf("Versions%s", testSuffix), func(t *testing.T) {
-		resp, err := srv.Versions(ctx, &VersionsRequest{
+	t.Run(fmt.Sprintf("Versions_%s", testSuffix), func(t *testing.T) {
+		resp, err := srv.Versions(ctx, &as.VersionsRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 		})
 		if err != nil {
@@ -141,15 +143,15 @@ func _testArtifactService(ctx context.Context, t *testing.T, srv Service, testSu
 	})
 
 	t.Log("Delete file1 version 3")
-	if err := srv.Delete(ctx, &DeleteRequest{
+	if err := srv.Delete(ctx, &as.DeleteRequest{
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 		Version: 3,
 	}); err != nil {
 		t.Fatalf("Delete(file1@v3) failed: %v", err)
 	}
 
-	t.Run(fmt.Sprintf("LoadAfterDeleteVersion3%s", testSuffix), func(t *testing.T) {
-		resp, err := srv.Load(ctx, &LoadRequest{
+	t.Run(fmt.Sprintf("LoadAfterDeleteVersion3_%s", testSuffix), func(t *testing.T) {
+		resp, err := srv.Load(ctx, &as.LoadRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 		})
 		if err != nil {
@@ -162,14 +164,14 @@ func _testArtifactService(ctx context.Context, t *testing.T, srv Service, testSu
 		}
 	})
 
-	if err := srv.Delete(ctx, &DeleteRequest{
+	if err := srv.Delete(ctx, &as.DeleteRequest{
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 	}); err != nil {
 		t.Fatalf("Delete(file1) failed: %v", err)
 	}
 
-	t.Run(fmt.Sprintf("LoadAfterDelete%s", testSuffix), func(t *testing.T) {
-		got, err := srv.Load(ctx, &LoadRequest{
+	t.Run(fmt.Sprintf("LoadAfterDelete_%s", testSuffix), func(t *testing.T) {
+		got, err := srv.Load(ctx, &as.LoadRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 		})
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -177,8 +179,8 @@ func _testArtifactService(ctx context.Context, t *testing.T, srv Service, testSu
 		}
 	})
 
-	t.Run(fmt.Sprintf("ListAfterDelete%s", testSuffix), func(t *testing.T) {
-		resp, err := srv.List(ctx, &ListRequest{
+	t.Run(fmt.Sprintf("ListAfterDelete_%s", testSuffix), func(t *testing.T) {
+		resp, err := srv.List(ctx, &as.ListRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID,
 		})
 		if err != nil {
@@ -192,8 +194,8 @@ func _testArtifactService(ctx context.Context, t *testing.T, srv Service, testSu
 		}
 	})
 
-	t.Run(fmt.Sprintf("VersionsAfterDelete%s", testSuffix), func(t *testing.T) {
-		got, err := srv.Versions(ctx, &VersionsRequest{
+	t.Run(fmt.Sprintf("VersionsAfterDelete_%s", testSuffix), func(t *testing.T) {
+		got, err := srv.Versions(ctx, &as.VersionsRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 		})
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -202,53 +204,51 @@ func _testArtifactService(ctx context.Context, t *testing.T, srv Service, testSu
 	})
 
 	//Clean up
-	if err := srv.Delete(ctx, &DeleteRequest{
+	if err := srv.Delete(ctx, &as.DeleteRequest{
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file2",
 	}); err != nil {
 		t.Fatalf("Delete(file2) failed: %v", err)
 	}
 }
 
-func TestInMemoryArtifactService_Empty(t *testing.T) {
-	ctx := t.Context()
-	srv := Mem()
-	_testArtifactService_Empty(ctx, t, srv, "_InMemory")
-}
-
-func TestGCSArtifactService_Empty(t *testing.T) {
-	ctx := t.Context()
-	srv, err := NewGCSArtifactServiceWithClient(ctx, NewFakeClient(), "new")
-	if err != nil {
-		t.Fatalf("TestGcsArtifactService() failed: %v", err)
-		return
+func TestArtifactService_Empty(t *testing.T) {
+	for _, tc := range serviceImplementations {
+		t.Run(fmt.Sprintf("Test%sArtifactService_Empty", tc.name), func(t *testing.T) {
+			ctx := t.Context()
+			// Create the service using the factory for this sub-test
+			srv, err := tc.factory(t)
+			if err != nil {
+				t.Fatalf("Failed to set up service: %v", err)
+			}
+			testArtifactService_Empty(ctx, t, srv, tc.name)
+		})
 	}
-	_testArtifactService_Empty(ctx, t, srv, "_GCS")
 }
 
-func _testArtifactService_Empty(ctx context.Context, t *testing.T, srv Service, testSuffix string) {
-	t.Run(fmt.Sprintf("Load%s", testSuffix), func(t *testing.T) {
-		got, err := srv.Load(ctx, &LoadRequest{
+func testArtifactService_Empty(ctx context.Context, t *testing.T, srv as.Service, testSuffix string) {
+	t.Run(fmt.Sprintf("Load_%s", testSuffix), func(t *testing.T) {
+		got, err := srv.Load(ctx, &as.LoadRequest{
 			AppName: "app", UserID: "user", SessionID: "session", FileName: "file"})
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("List() = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
 		}
 	})
-	t.Run(fmt.Sprintf("List%s", testSuffix), func(t *testing.T) {
-		_, err := srv.List(ctx, &ListRequest{
+	t.Run(fmt.Sprintf("List_%s", testSuffix), func(t *testing.T) {
+		_, err := srv.List(ctx, &as.ListRequest{
 			AppName: "app", UserID: "user", SessionID: "session"})
 		if err != nil {
 			t.Fatalf("List() failed: %v", err)
 		}
 	})
-	t.Run(fmt.Sprintf("Delete%s", testSuffix), func(t *testing.T) {
-		err := srv.Delete(ctx, &DeleteRequest{
+	t.Run(fmt.Sprintf("Delete_%s", testSuffix), func(t *testing.T) {
+		err := srv.Delete(ctx, &as.DeleteRequest{
 			AppName: "app", UserID: "user", SessionID: "sesion", FileName: "file1"})
 		if err != nil {
 			t.Fatalf("Delete() failed: %v", err)
 		}
 	})
-	t.Run(fmt.Sprintf("Versions%s", testSuffix), func(t *testing.T) {
-		got, err := srv.Versions(ctx, &VersionsRequest{
+	t.Run(fmt.Sprintf("Versions_%s", testSuffix), func(t *testing.T) {
+		got, err := srv.Versions(ctx, &as.VersionsRequest{
 			AppName: "app", UserID: "user", SessionID: "session", FileName: "file1"})
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("Versions() = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)

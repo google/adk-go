@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package artifactservice
+package gcs
 
 import (
 	"context"
@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"cloud.google.com/go/storage"
+	as "google.golang.org/adk/artifactservice"
 	"google.golang.org/api/iterator"
 	"google.golang.org/genai"
 )
@@ -38,7 +39,7 @@ type gcsService struct {
 }
 
 // NewGCSArtifactService creates a gcsService for the specified bucket using a default client
-func NewGCSArtifactService(ctx context.Context, bucketName string) (Service, error) {
+func NewGCSArtifactService(ctx context.Context, bucketName string) (as.Service, error) {
 	var err error
 	storageClient, err := storage.NewClient(ctx)
 	if err != nil {
@@ -58,7 +59,7 @@ func NewGCSArtifactService(ctx context.Context, bucketName string) (Service, err
 
 // NewGCSArtifactServiceWithClient creates a gcsService for the specified bucket using a specific client
 // used for mocking
-func NewGCSArtifactServiceWithClient(ctx context.Context, client GCSClient, bucketName string) (Service, error) {
+func NewGCSArtifactServiceWithClient(ctx context.Context, client GCSClient, bucketName string) (as.Service, error) {
 	s := &gcsService{
 		bucketName:    bucketName,
 		storageClient: client,
@@ -95,20 +96,23 @@ func buildUserPrefix(appName, userID string) string {
 	return fmt.Sprintf("%s/%s/user/", appName, userID)
 }
 
-func (s *gcsService) Save(ctx context.Context, req *SaveRequest) (_ *SaveResponse, err error) {
+func (s *gcsService) Save(ctx context.Context, req *as.SaveRequest) (_ *as.SaveResponse, err error) {
+	err = req.Validate()
+	if err != nil {
+		return nil, err
+	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	artifact := req.Part
-
-	if appName == "" || userID == "" || sessionID == "" || fileName == "" || artifact == nil {
-		return nil, fmt.Errorf("invalid request: missing required fields")
+	if artifact.InlineData == nil {
+		return nil, fmt.Errorf("failed to save to GCS: Part.InlineData cannot be nil")
 	}
 
 	nextVersion := int64(1)
 
 	// TODO race condition, could use mutex but it's a remote resource so the issue would still occurs
 	// with multiple consumers, and gcs does not have transactions spanning several operations
-	response, err := s.versions(ctx, &VersionsRequest{
-		req.AppName, req.UserID, req.SessionID, req.FileName,
+	response, err := s.versions(ctx, &as.VersionsRequest{
+		AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID, FileName: req.FileName,
 	})
 	if err != nil {
 		return nil, err
@@ -131,15 +135,16 @@ func (s *gcsService) Save(ctx context.Context, req *SaveRequest) (_ *SaveRespons
 		return nil, fmt.Errorf("failed to write to GCS: %w", err)
 	}
 
-	return &SaveResponse{Version: nextVersion}, nil
+	return &as.SaveResponse{Version: nextVersion}, nil
 }
 
-func (s *gcsService) Delete(ctx context.Context, req *DeleteRequest) error {
+func (s *gcsService) Delete(ctx context.Context, req *as.DeleteRequest) error {
+	err := req.Validate()
+	if err != nil {
+		return err
+	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
-	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
-		return fmt.Errorf("invalid request: missing required fields")
-	}
 
 	//Delete specific version
 	if version != 0 {
@@ -149,8 +154,8 @@ func (s *gcsService) Delete(ctx context.Context, req *DeleteRequest) error {
 	}
 
 	// Delete all versions
-	response, err := s.versions(ctx, &VersionsRequest{
-		req.AppName, req.UserID, req.SessionID, req.FileName,
+	response, err := s.versions(ctx, &as.VersionsRequest{
+		AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID, FileName: req.FileName,
 	})
 	if err != nil {
 		return err
@@ -167,16 +172,17 @@ func (s *gcsService) Delete(ctx context.Context, req *DeleteRequest) error {
 	return nil
 }
 
-func (s *gcsService) Load(ctx context.Context, req *LoadRequest) (_ *LoadResponse, err error) {
-	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
-		return nil, fmt.Errorf("invalid request: missing required fields")
+func (s *gcsService) Load(ctx context.Context, req *as.LoadRequest) (_ *as.LoadResponse, err error) {
+	err = req.Validate()
+	if err != nil {
+		return nil, err
 	}
+	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
 
 	if version <= 0 {
-		response, err := s.versions(ctx, &VersionsRequest{
-			req.AppName, req.UserID, req.SessionID, req.FileName,
+		response, err := s.versions(ctx, &as.VersionsRequest{
+			AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID, FileName: req.FileName,
 		})
 		if err != nil {
 			return nil, err
@@ -219,7 +225,7 @@ func (s *gcsService) Load(ctx context.Context, req *LoadRequest) (_ *LoadRespons
 	// Create the genai.Part and return the response.
 	part := genai.NewPartFromBytes(data, attrs.ContentType)
 
-	return &LoadResponse{Part: part}, nil
+	return &as.LoadResponse{Part: part}, nil
 }
 
 // fetchFilenamesFromPrefix is a reusable helper function.
@@ -256,16 +262,16 @@ func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string
 	return nil
 }
 
-func (s *gcsService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
-	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
-	if appName == "" || userID == "" || sessionID == "" {
-		return nil, fmt.Errorf("invalid request: missing required fields")
+func (s *gcsService) List(ctx context.Context, req *as.ListRequest) (*as.ListResponse, error) {
+	err := req.Validate()
+	if err != nil {
+		return nil, err
 	}
-
+	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
 	filenamesSet := map[string]bool{}
 
 	// Fetch filenames for the session.
-	err := s.fetchFilenamesFromPrefix(ctx, buildSessionPrefix(appName, userID, sessionID), filenamesSet)
+	err = s.fetchFilenamesFromPrefix(ctx, buildSessionPrefix(appName, userID, sessionID), filenamesSet)
 	if err != nil {
 		return nil, err
 	}
@@ -278,15 +284,16 @@ func (s *gcsService) List(ctx context.Context, req *ListRequest) (*ListResponse,
 
 	filenames := slices.Collect(maps.Keys(filenamesSet))
 	sort.Strings(filenames)
-	return &ListResponse{FileNames: filenames}, nil
+	return &as.ListResponse{FileNames: filenames}, nil
 }
 
 // versions internal function that does not return error if versions are empty
-func (s *gcsService) versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error) {
-	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
-		return nil, fmt.Errorf("invalid request: missing required fields")
+func (s *gcsService) versions(ctx context.Context, req *as.VersionsRequest) (*as.VersionsResponse, error) {
+	err := req.Validate()
+	if err != nil {
+		return nil, err
 	}
+	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 
 	prefix := buildBlobNamePrefix(appName, userID, sessionID, fileName)
 	query := &storage.Query{
@@ -314,11 +321,11 @@ func (s *gcsService) versions(ctx context.Context, req *VersionsRequest) (*Versi
 		}
 		versions = append(versions, version)
 	}
-	return &VersionsResponse{Versions: versions}, nil
+	return &as.VersionsResponse{Versions: versions}, nil
 }
 
 // Versions implements types.Service and return err if versions is empty
-func (s *gcsService) Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error) {
+func (s *gcsService) Versions(ctx context.Context, req *as.VersionsRequest) (*as.VersionsResponse, error) {
 	response, err := s.versions(ctx, req)
 	if err != nil {
 		return response, err
@@ -330,4 +337,4 @@ func (s *gcsService) Versions(ctx context.Context, req *VersionsRequest) (*Versi
 }
 
 // Ensure interface implementation
-var _ Service = (*gcsService)(nil)
+var _ as.Service = (*gcsService)(nil)
