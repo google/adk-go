@@ -11,6 +11,8 @@ require (
 	rsc.io/ordered v1.1.1
 )
 
+require github.com/google/jsonschema-go v0.2.0
+
 require (
 	cloud.google.com/go v0.116.0 // indirect
 	cloud.google.com/go/auth v0.9.3 // indirect
@@ -19,7 +21,6 @@ require (
 	github.com/google/s2a-go v0.1.8 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/modelcontextprotocol/go-sdk v0.0.0-20250625185707-09181c2c2e89
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/net v0.38.0 // indirect

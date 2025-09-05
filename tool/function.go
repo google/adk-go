@@ -18,7 +18,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/modelcontextprotocol/go-sdk/jsonschema"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/llm"
 	"google.golang.org/genai"
@@ -176,7 +176,7 @@ func resolvedSchema[T any](override *jsonschema.Schema) (*jsonschema.Resolved, e
 	if override != nil {
 		return override.Resolve(nil)
 	}
-	schema, err := jsonschema.For[T]()
+	schema, err := jsonschema.For[T](nil)
 	if err != nil {
 		return nil, err
 	}
