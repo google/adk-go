@@ -1,8 +1,9 @@
-package web
+package routers
 
 import (
-	"google3/third_party/golang/gorilla/mux/mux"
 	"net/http"
+
+	"github.com/gorilla/mux"
 )
 
 // A Route defines the parameters for an api endpoint
@@ -14,7 +15,7 @@ type Route struct {
 }
 
 // Routes is a map of defined api endpoints
-type Routes map[string]Route
+type Routes []Route
 
 // Router defines the required methods for retrieving api routes
 type Router interface {
@@ -27,6 +28,7 @@ func NewRouter(routers ...Router) *mux.Router {
 	for _, api := range routers {
 		for _, route := range api.Routes() {
 			var handler http.Handler = route.HandlerFunc
+
 			// handler = Logger(handler, route.Name)
 
 			router.
