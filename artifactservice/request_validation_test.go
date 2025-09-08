@@ -15,21 +15,29 @@
 package artifactservice
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
 	"google.golang.org/genai"
 )
 
+// Validator describes a type that can validate itself.
+type Validator interface {
+	Validate() error
+}
+
+type ValidatorTestCase struct {
+	name       string
+	req        Validator
+	wantErr    bool
+	wantErrMsg string
+}
+
 // Test suite for the SaveRequest Validate method
 func TestSaveRequest_Validate(t *testing.T) {
 	// Define test cases
-	testCases := []struct {
-		name       string
-		req        *SaveRequest
-		wantErr    bool
-		wantErrMsg string
-	}{
+	testCases := []ValidatorTestCase{
 		{
 			name: "Valid request",
 			req: &SaveRequest{
@@ -80,33 +88,13 @@ func TestSaveRequest_Validate(t *testing.T) {
 			wantErrMsg: "invalid save request: missing required fields: AppName, UserID, SessionID, FileName, Part",
 		},
 	}
-
-	// Run the tests
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.req.Validate()
-
-			if (err != nil) != tc.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)
-				return
-			}
-			if err != nil && err.Error() != tc.wantErrMsg {
-				// NOTE: This simple string comparison works because our function produces a sorted, predictable output.
-				t.Errorf("Validate() error msg = %q, wantErrMsg %q", err.Error(), tc.wantErrMsg)
-			}
-		})
-	}
+	executeValidatorTestCases(t, "SaveRequest", testCases)
 }
 
 // Test suite for the LoadRequest Validate method
 func TestLoadRequest_Validate(t *testing.T) {
 	// Define test cases
-	testCases := []struct {
-		name       string
-		req        *LoadRequest
-		wantErr    bool
-		wantErrMsg string
-	}{
+	testCases := []ValidatorTestCase{
 		{
 			name: "Valid request",
 			req: &LoadRequest{
@@ -142,33 +130,13 @@ func TestLoadRequest_Validate(t *testing.T) {
 			wantErrMsg: "invalid load request: missing required fields: AppName, UserID, SessionID, FileName",
 		},
 	}
-
-	// Run the tests
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.req.Validate()
-
-			if (err != nil) != tc.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)
-				return
-			}
-			if err != nil && err.Error() != tc.wantErrMsg {
-				// NOTE: This simple string comparison works because our function produces a sorted, predictable output.
-				t.Errorf("Validate() error msg = %q, wantErrMsg %q", err.Error(), tc.wantErrMsg)
-			}
-		})
-	}
+	executeValidatorTestCases(t, "LoadRequest", testCases)
 }
 
 // Test suite for the DeleteRequest Validate method
 func TestDeleteRequest_Validate(t *testing.T) {
 	// Define test cases
-	testCases := []struct {
-		name       string
-		req        *DeleteRequest
-		wantErr    bool
-		wantErrMsg string
-	}{
+	testCases := []ValidatorTestCase{
 		{
 			name: "Valid request",
 			req: &DeleteRequest{
@@ -204,33 +172,13 @@ func TestDeleteRequest_Validate(t *testing.T) {
 			wantErrMsg: "invalid delete request: missing required fields: AppName, UserID, SessionID, FileName",
 		},
 	}
-
-	// Run the tests
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.req.Validate()
-
-			if (err != nil) != tc.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)
-				return
-			}
-			if err != nil && err.Error() != tc.wantErrMsg {
-				// NOTE: This simple string comparison works because our function produces a sorted, predictable output.
-				t.Errorf("Validate() error msg = %q, wantErrMsg %q", err.Error(), tc.wantErrMsg)
-			}
-		})
-	}
+	executeValidatorTestCases(t, "DeleteRequest", testCases)
 }
 
 // Test suite for the ListRequest Validate method
 func TestListRequest_Validate(t *testing.T) {
 	// Define test cases
-	testCases := []struct {
-		name       string
-		req        *ListRequest
-		wantErr    bool
-		wantErrMsg string
-	}{
+	testCases := []ValidatorTestCase{
 		{
 			name: "Valid request",
 			req: &ListRequest{
@@ -264,33 +212,13 @@ func TestListRequest_Validate(t *testing.T) {
 			wantErrMsg: "invalid list request: missing required fields: AppName, UserID, SessionID",
 		},
 	}
-
-	// Run the tests
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.req.Validate()
-
-			if (err != nil) != tc.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)
-				return
-			}
-			if err != nil && err.Error() != tc.wantErrMsg {
-				// NOTE: This simple string comparison works because our function produces a sorted, predictable output.
-				t.Errorf("Validate() error msg = %q, wantErrMsg %q", err.Error(), tc.wantErrMsg)
-			}
-		})
-	}
+	executeValidatorTestCases(t, "ListRequest", testCases)
 }
 
 // Test suite for the VersionsRequest Validate method
 func TestVersionsRequest_Validate(t *testing.T) {
 	// Define test cases
-	testCases := []struct {
-		name       string
-		req        *VersionsRequest
-		wantErr    bool
-		wantErrMsg string
-	}{
+	testCases := []ValidatorTestCase{
 		{
 			name: "Valid request",
 			req: &VersionsRequest{
@@ -326,10 +254,13 @@ func TestVersionsRequest_Validate(t *testing.T) {
 			wantErrMsg: "invalid versions request: missing required fields: AppName, UserID, SessionID, FileName",
 		},
 	}
+	executeValidatorTestCases(t, "VersionsRequest", testCases)
+}
 
+func executeValidatorTestCases(t *testing.T, requestTypeName string, testCases []ValidatorTestCase) {
 	// Run the tests
 	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s_%s", requestTypeName, tc.name), func(t *testing.T) {
 			err := tc.req.Validate()
 
 			if (err != nil) != tc.wantErr {
