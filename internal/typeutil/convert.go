@@ -18,7 +18,7 @@ package typeutil
 import (
 	"encoding/json"
 
-	"github.com/modelcontextprotocol/go-sdk/jsonschema"
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // ConvertToWithJSONSchema converts the given value to another type using json marshal/unmarshal.

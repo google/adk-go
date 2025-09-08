@@ -23,6 +23,7 @@ import (
 	"google.golang.org/adk/examples"
 	"google.golang.org/adk/llm/gemini"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
 )
 
@@ -42,7 +43,7 @@ func main() {
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
 		Tools: []tool.Tool{
-			tool.NewGoogleSearchTool(model),
+			geminitool.GoogleSearch{},
 		},
 	})
 	if err != nil {

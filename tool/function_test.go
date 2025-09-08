@@ -25,7 +25,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/modelcontextprotocol/go-sdk/jsonschema"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
@@ -248,7 +248,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		// Either apple or orange, nothing else.
 		Fruit string `json:"fruit"`
 	}
-	ischema, err := jsonschema.For[Args]()
+	ischema, err := jsonschema.For[Args](nil)
 	if err != nil {
 		t.Fatalf("jsonschema.For[Args]() failed: %v", err)
 	}
@@ -296,8 +296,8 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		if got, want := stringify(decl.ParametersJsonSchema), stringify(ischema); got != want {
 			t.Errorf("inventoryTool function declaration parameter json schema = %q, want %q", got, want)
 		}
-		if got, want := stringify(decl.ResponseJsonSchema), stringify(struct{}{}); got != want {
-			t.Errorf("inventoryTool function declaration parameter json schema = %q, want %q", got, want)
+		if got, want := stringify(decl.ResponseJsonSchema), stringify(&jsonschema.Schema{}); got != want {
+			t.Errorf("inventoryTool function response json schema = %q, want %q", got, want)
 		}
 	})
 
