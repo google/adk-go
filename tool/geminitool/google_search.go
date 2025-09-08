@@ -39,3 +39,8 @@ func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *llm.Request) error {
 		GoogleSearch: &genai.GoogleSearch{},
 	})
 }
+
+// IsLongRunning implements adk.Tool.
+func (t GoogleSearch) IsLongRunning() bool {
+	return false
+}

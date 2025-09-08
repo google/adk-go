@@ -23,6 +23,9 @@ import (
 type Tool interface {
 	Name() string
 	Description() string
+	//Whether the tool is a long running operation, which typically returns a
+	//resource id first and finishes the operation later.
+	IsLongRunning() bool
 }
 
 type Context interface {
