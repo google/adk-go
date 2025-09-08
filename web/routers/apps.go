@@ -20,7 +20,7 @@ func (r *AppsApiRouter) Routes() Routes {
 		Route{
 			Name:        "ListApps",
 			Method:      http.MethodGet,
-			Pattern:     "/apps",
+			Pattern:     "/list-apps",
 			HandlerFunc: r.appsController.ListApps,
 		},
 	}

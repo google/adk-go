@@ -20,13 +20,13 @@ func (r *DebugApiRouter) Routes() Routes {
 		Route{
 			Name:        "GetTraceDict",
 			Method:      http.MethodGet,
-			Pattern:     "/debug/trace/apps/{app_name}/users/{user_id}/sessions/{session_id}/events/{event_id}",
+			Pattern:     "/debug/trace/{event_id}",
 			HandlerFunc: r.runtimeController.TraceDict,
 		},
 		Route{
 			Name:        "GetEventGraph",
 			Method:      http.MethodGet,
-			Pattern:     "/debug/graph/apps/{app_name}/users/{user_id}/sessions/{session_id}/events/{event_id}",
+			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}/events/{event_id}/graph",
 			HandlerFunc: r.runtimeController.EventGraph,
 		},
 	}
