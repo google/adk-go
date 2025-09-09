@@ -153,7 +153,7 @@ type llmAgent struct {
 
 func (a *llmAgent) run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 	// TODO: branch context?
-	ctx = agent.NewContext(ctx, a, ctx.UserContent(), ctx.Session(), ctx.Branch())
+	ctx = agent.NewContext(ctx, a, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Branch())
 
 	f := &llminternal.Flow{
 		Model:                a.model,
