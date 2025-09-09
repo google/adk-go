@@ -32,6 +32,7 @@ type Service interface {
 	// A session can be added multiple times during its lifetime.
 	AddSession(ctx context.Context, s session.Session) error
 	// Search returns memory entries relevant to the given query.
+	// Empty slice is returned if there are no matches.
 	Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error)
 }
 

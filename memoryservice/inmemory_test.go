@@ -147,8 +147,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 
 			got, err := s.Search(t.Context(), tt.req)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("inMemoryService.SearchMemory() error = %v, wantErr %v", err, tt.wantErr)
-				return
+				t.Fatalf("inMemoryService.SearchMemory() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if diff := cmp.Diff(tt.wantResp, got, sortMemories); diff != "" {
 				t.Errorf("inMemoryiService.SearchMemory() mismatch (-want +got):\n%s", diff)
