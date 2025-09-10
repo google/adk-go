@@ -27,17 +27,17 @@ func (c *SessionsApiController) CreateSession(rw http.ResponseWriter, req *http.
 	params := mux.Vars(req)
 	appName := params["app_name"]
 	if appName == "" {
-		return StatusError{error: fmt.Errorf("app_name parameter is required"), Code: http.StatusBadRequest}
+		return NewStatusError(fmt.Errorf("app_name parameter is required"), http.StatusBadRequest)
 	}
 	userID := params["user_id"]
 	if userID == "" {
-		return StatusError{error: fmt.Errorf("user_id parameter is required"), Code: http.StatusBadRequest}
+		return NewStatusError(fmt.Errorf("user_id parameter is required"), http.StatusBadRequest)
 	}
 	sessionID := params["session_id"]
 	var createSessionRequest models.CreateSessionRequest
 	err := json.NewDecoder(req.Body).Decode(&createSessionRequest)
 	if err != nil {
-		return StatusError{error: err, Code: http.StatusBadRequest}
+		return NewStatusError(err, http.StatusBadRequest)
 	}
 	fmt.Printf("CreateSessionRequest: %v", createSessionRequest)
 	session, err := c.service.Create(req.Context(), &sessionservice.CreateRequest{
@@ -47,7 +47,7 @@ func (c *SessionsApiController) CreateSession(rw http.ResponseWriter, req *http.
 		State:     createSessionRequest.State,
 	})
 	if err != nil {
-		return StatusError{error: err, Code: http.StatusInternalServerError}
+		return NewStatusError(err, http.StatusInternalServerError)
 	}
 	json.NewEncoder(rw).Encode(models.FromSession(session.Session))
 	return nil
@@ -57,15 +57,15 @@ func (c *SessionsApiController) DeleteSession(rw http.ResponseWriter, req *http.
 	params := mux.Vars(req)
 	appName := params["app_name"]
 	if appName == "" {
-		return StatusError{error: fmt.Errorf("app_name parameter is required"), Code: http.StatusBadRequest}
+		return NewStatusError(fmt.Errorf("app_name parameter is required"), http.StatusBadRequest)
 	}
 	userID := params["user_id"]
 	if userID == "" {
-		return StatusError{error: fmt.Errorf("user_id parameter is required"), Code: http.StatusBadRequest}
+		return NewStatusError(fmt.Errorf("user_id parameter is required"), http.StatusBadRequest)
 	}
 	sessionID := params["session_id"]
 	if sessionID == "" {
-		return StatusError{error: fmt.Errorf("session_id parameter is required"), Code: http.StatusBadRequest}
+		return NewStatusError(fmt.Errorf("session_id parameter is required"), http.StatusBadRequest)
 	}
 	err := c.service.Delete(req.Context(), &sessionservice.DeleteRequest{
 		ID: session.ID{
@@ -75,7 +75,7 @@ func (c *SessionsApiController) DeleteSession(rw http.ResponseWriter, req *http.
 		},
 	})
 	if err != nil {
-		return StatusError{error: err, Code: http.StatusInternalServerError}
+		return NewStatusError(err, http.StatusInternalServerError)
 	}
 	return nil
 }
@@ -85,15 +85,15 @@ func (c *SessionsApiController) GetSession(rw http.ResponseWriter, req *http.Req
 	params := mux.Vars(req)
 	appName := params["app_name"]
 	if appName == "" {
-		return StatusError{error: fmt.Errorf("app_name parameter is required"), Code: http.StatusBadRequest}
+		return NewStatusError(fmt.Errorf("app_name parameter is required"), http.StatusBadRequest)
 	}
 	userID := params["user_id"]
 	if userID == "" {
-		return StatusError{error: fmt.Errorf("user_id parameter is required"), Code: http.StatusBadRequest}
+		return NewStatusError(fmt.Errorf("user_id parameter is required"), http.StatusBadRequest)
 	}
 	sessionID := params["session_id"]
 	if sessionID == "" {
-		return StatusError{error: fmt.Errorf("session_id parameter is required"), Code: http.StatusBadRequest}
+		return NewStatusError(fmt.Errorf("session_id parameter is required"), http.StatusBadRequest)
 	}
 	session, err := c.service.Get(req.Context(), &sessionservice.GetRequest{
 		ID: session.ID{
@@ -103,7 +103,7 @@ func (c *SessionsApiController) GetSession(rw http.ResponseWriter, req *http.Req
 		},
 	})
 	if err != nil {
-		return StatusError{error: err, Code: http.StatusInternalServerError}
+		return NewStatusError(err, http.StatusInternalServerError)
 	}
 	json.NewEncoder(rw).Encode(models.FromSession(session.Session))
 	return nil
@@ -113,18 +113,18 @@ func (c *SessionsApiController) ListSessions(rw http.ResponseWriter, req *http.R
 	params := mux.Vars(req)
 	appName := params["app_name"]
 	if appName == "" {
-		return StatusError{error: fmt.Errorf("app_name parameter is required"), Code: http.StatusBadRequest}
+		return NewStatusError(fmt.Errorf("app_name parameter is required"), http.StatusBadRequest)
 	}
 	userID := params["user_id"]
 	if userID == "" {
-		return StatusError{error: fmt.Errorf("user_id parameter is required"), Code: http.StatusBadRequest}
+		return NewStatusError(fmt.Errorf("user_id parameter is required"), http.StatusBadRequest)
 	}
 	resp, err := c.service.List(req.Context(), &sessionservice.ListRequest{
 		AppName: appName,
 		UserID:  userID,
 	})
 	if err != nil {
-		return StatusError{error: err, Code: http.StatusInternalServerError}
+		return NewStatusError(err, http.StatusInternalServerError)
 	}
 	sessions := []models.Session{}
 	for _, session := range resp.Sessions {

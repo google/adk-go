@@ -5,13 +5,17 @@ import (
 )
 
 type StatusError struct {
-	error
+	Err  error
 	Code int
 }
 
+func NewStatusError(err error, code int) StatusError {
+	return StatusError{Err: err, Code: code}
+}
+
 // Error returns an associated error
-func (se StatusError) Unwrap() error {
-	return se.error
+func (se StatusError) Error() string {
+	return se.Err.Error()
 }
 
 // Status returns an associated status code
