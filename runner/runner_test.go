@@ -15,13 +15,19 @@
 package runner
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"iter"
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
+	"google.golang.org/genai"
 )
 
 func TestRunner_findAgentToRun(t *testing.T) {
@@ -183,6 +189,115 @@ func Test_isTransferrableAcrossAgentTree(t *testing.T) {
 				t.Errorf("isTransferrableAcrossAgentTree() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
+	ctx := context.Background()
+	appName := "testApp"
+	userID := "testUser"
+	sessionID := "testSession"
+
+	sessionService := sessionservice.Mem()
+	artifactService := artifactservice.Mem()
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.Context) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// no-op, we are testing logic before agent run.
+			}
+		},
+	}))
+
+	r, err := New(appName, testAgent, sessionService)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	r.artifactService = artifactService
+
+	createResp, err := sessionService.Create(ctx, &sessionservice.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+
+	// Blob data, the message is saved only when inline data is present.
+	blobData := []byte("this is not blob data - René Magritte")
+	msg := &genai.Content{
+		Parts: []*genai.Part{
+			genai.NewPartFromText("here is a file"),
+			{InlineData: &genai.Blob{MIMEType: "application/octet-stream", Data: blobData}},
+		},
+		Role: genai.RoleUser,
+	}
+
+	cfg := &RunConfig{
+		SaveInputBlobsAsArtifacts: true,
+	}
+
+	// Consume the iterator from Run. The agent itself does nothing, but the runner
+	// will save the artifact before calling the agent.
+	for _, err := range r.Run(ctx, userID, sessionID, msg, cfg) {
+		if err != nil {
+			t.Fatalf("r.Run() returned an error: %v", err)
+		}
+	}
+
+	listResp, err := artifactService.List(ctx, &artifactservice.ListRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatalf("artifactService.List() error = %v", err)
+	}
+	if len(listResp.FileNames) != 1 {
+		t.Fatalf("expected 1 artifact, got %d", len(listResp.FileNames))
+	}
+	savedFileName := listResp.FileNames[0]
+
+	if !strings.HasPrefix(savedFileName, "artifact_") {
+		t.Errorf("saved file name should start with 'artifact_', got %q", savedFileName)
+	}
+
+	loadResp, err := artifactService.Load(ctx, &artifactservice.LoadRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+		FileName:  savedFileName,
+	})
+	if err != nil {
+		t.Fatalf("artifactService.Load() error = %v", err)
+	}
+
+	if !bytes.Equal(loadResp.Part.InlineData.Data, blobData) {
+		t.Errorf("loaded artifact data does not match original blob data")
+	}
+
+	events := createResp.Session.Events()
+	if events.Len() == 0 {
+		t.Fatal("no events in session")
+	}
+	userEvent := events.At(0)
+	if userEvent.Author != "user" {
+		t.Fatalf("expected first event to be from user, got %s", userEvent.Author)
+	}
+
+	// The part with InlineData should be replaced.
+	if len(userEvent.LLMResponse.Content.Parts) != 2 {
+		t.Fatalf("expected 2 parts in user message event, got %d", len(userEvent.LLMResponse.Content.Parts))
+	}
+	partWithBlob := userEvent.LLMResponse.Content.Parts[1]
+	if partWithBlob.InlineData != nil {
+		t.Errorf("InlineData was not removed from the message part in the session")
+	}
+	expectedText := fmt.Sprintf("Uploaded file: %s. It has been saved to the artifacts", savedFileName)
+	if partWithBlob.Text != expectedText {
+		t.Errorf("unexpected text in placeholder part. got %q, want %q", partWithBlob.Text, expectedText)
 	}
 }
 

@@ -106,7 +106,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			storedSession: session,
 		}, "")
 
-		if err := r.appendMessageToSession(ctx, session, msg); err != nil {
+		if err := r.appendMessageToSession(ctx, session, msg, cfg.SaveInputBlobsAsArtifacts); err != nil {
 			yield(nil, err)
 			return
 		}
@@ -157,10 +157,28 @@ func (r *Runner) setupCFC(curAgent agent.Agent) error {
 	return nil
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession sessionservice.StoredSession, msg *genai.Content) error {
+func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession sessionservice.StoredSession, msg *genai.Content, saveInputBlobsAsArtifacts bool) error {
 	if msg == nil {
 		return nil
 	}
+
+	artifactsService := ctx.Artifacts()
+	if artifactsService != nil && saveInputBlobsAsArtifacts {
+		for i, part := range msg.Parts {
+			if part.InlineData == nil {
+				continue
+			}
+			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
+			if err := artifactsService.Save(fileName, *part); err != nil {
+				return fmt.Errorf("failed to save artifact %s: %w", fileName, err)
+			}
+			// Replace the part with a text placeholder
+			msg.Parts[i] = &genai.Part{
+				Text: fmt.Sprintf("Uploaded file: %s. It has been saved to the artifacts", fileName),
+			}
+		}
+	}
+
 	event := session.NewEvent(ctx.InvocationID())
 
 	event.Author = "user"
