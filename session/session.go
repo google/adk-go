@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/adk/llm"
+	"google.golang.org/genai"
 )
 
 type Session interface {
@@ -96,7 +97,69 @@ func NewEvent(invocationID string) *Event {
 	}
 }
 
-func (e *Event) Clone() *Event { return nil }
+//func (e *Event) Clone() *Event { return nil }
+
+func (e *Event) FunctionCalls() []*genai.FunctionCall {
+	funcCalls := make([]*genai.FunctionCall, 0)
+	if e.LLMResponse != nil && e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
+		for _, part := range e.LLMResponse.Content.Parts {
+			if part.FunctionCall != nil {
+				funcCalls = append(funcCalls, part.FunctionCall)
+			}
+		}
+	}
+	return funcCalls
+}
+
+func (e *Event) FunctionResponses() []*genai.FunctionResponse {
+	funcResponses := make([]*genai.FunctionResponse, 0)
+	if e.LLMResponse != nil && e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
+		for _, part := range e.LLMResponse.Content.Parts {
+			if part.FunctionResponse != nil {
+				funcResponses = append(funcResponses, part.FunctionResponse)
+			}
+		}
+	}
+	return funcResponses
+}
+
+func (e *Event) DeepCopy() *Event {
+	if e == nil {
+		return nil
+	}
+
+	// 1. Create a new Event instance
+	newEvent := &Event{
+		ID:           e.ID,
+		Time:         e.Time,
+		InvocationID: e.InvocationID,
+		Branch:       e.Branch,
+		Author:       e.Author,
+		Partial:      e.Partial,
+		Actions:      e.Actions,
+	}
+
+	// 2. Deep copy the LongRunningToolIDs slice
+	if e.LongRunningToolIDs != nil {
+		newEvent.LongRunningToolIDs = make([]string, len(e.LongRunningToolIDs))
+		copy(newEvent.LongRunningToolIDs, e.LongRunningToolIDs)
+	}
+
+	// TODO check if copy parts is needed
+	// 3. Deep copy the LLMResponse pointer struct and content
+	if e.LLMResponse != nil {
+		newEvent.LLMResponse = &llm.Response{}
+		if e.LLMResponse.Content != nil {
+			newEvent.LLMResponse.Content = &genai.Content{
+				Parts: make([]*genai.Part, len(e.LLMResponse.Content.Parts)),
+				Role:  e.LLMResponse.Content.Role,
+			}
+			copy(newEvent.LLMResponse.Content.Parts, e.LLMResponse.Content.Parts)
+		}
+	}
+
+	return newEvent
+}
 
 // Actions represents the actions attached to an event.
 type Actions struct {
