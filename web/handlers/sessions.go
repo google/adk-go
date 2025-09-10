@@ -126,7 +126,7 @@ func (c *SessionsApiController) ListSessions(rw http.ResponseWriter, req *http.R
 	if err != nil {
 		return StatusError{error: err, Code: http.StatusInternalServerError}
 	}
-	var sessions []models.Session
+	sessions := []models.Session{}
 	for _, session := range resp.Sessions {
 		sessions = append(sessions, models.FromSession(session))
 	}

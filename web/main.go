@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/llm/gemini"
 	"google.golang.org/adk/sessionservice"
@@ -16,6 +17,7 @@ import (
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/adk/web/handlers"
 	"google.golang.org/adk/web/routers"
+	"google.golang.org/adk/web/services"
 	"google.golang.org/adk/web/utils"
 	"google.golang.org/genai"
 )
@@ -35,7 +37,7 @@ func corsWithArgs(serverArgs utils.AdkAPIArgs) func(next http.Handler) http.Hand
 	}
 }
 
-func initAdk() {
+func agentLoader() services.AgentLoader {
 	ctx := context.Background()
 	model, err := gemini.NewModel(ctx, "gemini-2.0-flash", &genai.ClientConfig{
 		APIKey: os.Getenv("GEMINI_API_KEY"),
@@ -44,7 +46,7 @@ func initAdk() {
 		panic(err)
 	}
 
-	agent, err := llmagent.New(llmagent.Config{
+	agent1, err := llmagent.New(llmagent.Config{
 		Name:        "weather_time_agent",
 		Model:       model,
 		Description: "Agent to answer questions about the time and weather in a city.",
@@ -53,6 +55,9 @@ func initAdk() {
 			geminitool.GoogleSearch{},
 		},
 	})
+	if err != nil {
+		panic(err)
+	}
 
 	agent2, err := llmagent.New(llmagent.Config{
 		Name:        "foobar",
@@ -60,29 +65,31 @@ func initAdk() {
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
 	})
+	if err != nil {
+		panic(err)
+	}
 
-	fmt.Printf("Agents created: %v, %v", agent, agent2)
+	fmt.Printf("Agents created: %v, %v", agent1, agent2)
 
-	// adkApi := adk.NewAPIImpl()
-
-	// adkApi.SessionService = sessionservice.Mem()
-	// adkApi.AddModel(model)
-	// adkApi.AddAgent(agent)
-	// adkApi.AddAgent(agent2)
-	// return adkApi
+	return services.NewStaticAgentLoader(
+		map[string]agent.Agent{
+			"weather_time_agent": agent1,
+			"foobar":             agent2,
+		},
+	)
 }
 
 func main() {
 
 	serverArgs := utils.ParseArgs()
-	initAdk()
+	agentLoader := agentLoader()
 
 	log.Printf("Starting server on port %d with front address %s", serverArgs.Port, serverArgs.FrontAddress)
 
 	router := routers.NewRouter(
 		routers.NewSessionsApiRouter(handlers.NewSessionsApiController(sessionservice.Mem())),
 		routers.NewRuntimeApiRouter(&handlers.RuntimeApiController{}),
-		routers.NewAppsApiRouter(&handlers.AppsApiController{}),
+		routers.NewAppsApiRouter(handlers.NewAppsApiController(agentLoader)),
 		routers.NewDebugApiRouter(&handlers.DebugApiController{}),
 		routers.NewArtifactsApiRouter(&handlers.ArtifactsApiController{}),
 	)
