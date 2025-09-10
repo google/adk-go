@@ -150,7 +150,21 @@ func (f *functionTool[TArgs, TResults]) Run(ctx Context, args any) (any, error) 
 	}
 	output := f.handler(ctx, input)
 	resp, err := typeutil.ConvertToWithJSONSchema[TResults, map[string]any](output, f.outputSchema)
-	return resp, err
+	if err == nil { // all good
+		return resp, err
+	}
+
+	// Specs requires the result to be a map (dict in python). python impl allows basic types when building response event
+	// functions.py __build_response_event does the following
+	// if not isinstance(function_result, dict):
+	// 		function_result = {'result': function_result}
+	if f.outputSchema != nil {
+		if err1 := f.outputSchema.Validate(output); err1 != nil {
+			return resp, err //if it fails propagate original err.
+		}
+	}
+	wrappedOutput := map[string]any{"result": output}
+	return wrappedOutput, nil
 }
 
 // ** NOTE FOR REVIEWERS **
