@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/adk/web/handlers"
@@ -79,7 +80,7 @@ func main() {
 	log.Printf("Starting server on port %d with front address %s", serverArgs.Port, serverArgs.FrontAddress)
 
 	router := routers.NewRouter(
-		routers.NewSessionsApiRouter(&handlers.SessionsApiController{}),
+		routers.NewSessionsApiRouter(handlers.NewSessionsApiController(sessionservice.Mem())),
 		routers.NewRuntimeApiRouter(&handlers.RuntimeApiController{}),
 		routers.NewAppsApiRouter(&handlers.AppsApiController{}),
 		routers.NewDebugApiRouter(&handlers.DebugApiController{}),

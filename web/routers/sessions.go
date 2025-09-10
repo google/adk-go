@@ -20,31 +20,31 @@ func (r *SessionsApiRouter) Routes() Routes {
 			Name:        "GetSession",
 			Method:      http.MethodGet,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
-			HandlerFunc: r.sessionController.GetSession,
+			HandlerFunc: handlers.FromErrorHandler(r.sessionController.GetSession),
 		},
 		Route{
 			Name:        "CreateSession",
 			Method:      http.MethodPost,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions",
-			HandlerFunc: r.sessionController.CreateSession,
+			HandlerFunc: handlers.FromErrorHandler(r.sessionController.CreateSession),
 		},
 		Route{
 			Name:        "CreateSessionWithId",
 			Method:      http.MethodPost,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
-			HandlerFunc: r.sessionController.CreateSession,
+			HandlerFunc: handlers.FromErrorHandler(r.sessionController.CreateSession),
 		},
 		Route{
 			Name:        "DeleteSession",
 			Method:      http.MethodDelete,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
-			HandlerFunc: r.sessionController.CreateSession,
+			HandlerFunc: handlers.FromErrorHandler(r.sessionController.DeleteSession),
 		},
 		Route{
 			Name:        "ListSessions",
 			Method:      http.MethodGet,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions",
-			HandlerFunc: r.sessionController.ListSessions,
+			HandlerFunc: handlers.FromErrorHandler(r.sessionController.ListSessions),
 		},
 	}
 }
