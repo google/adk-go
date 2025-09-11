@@ -36,13 +36,13 @@ func (c *SessionsApiController) CreateSession(rw http.ResponseWriter, req *http.
 	}
 	sessionID := params["session_id"]
 	createSessionRequest := models.CreateSessionRequest{}
+	// No state and no events, fails to decode req.Body failing with "EOF"
 	if req.ContentLength > 0 {
 		err := json.NewDecoder(req.Body).Decode(&createSessionRequest)
 		if err != nil {
-			return errors.NewStatusError(fmt.Errorf("decode request: %w", err), http.StatusBadRequest)
+			return errors.NewStatusError(err, http.StatusBadRequest)
 		}
 	}
-	fmt.Printf("CreateSessionRequest: %v", createSessionRequest)
 	session, err := c.service.Create(req.Context(), &sessionservice.CreateRequest{
 		AppName:   appName,
 		UserID:    userID,
@@ -52,11 +52,25 @@ func (c *SessionsApiController) CreateSession(rw http.ResponseWriter, req *http.
 	if err != nil {
 		return errors.NewStatusError(fmt.Errorf("create session: %w", err), http.StatusInternalServerError)
 	}
-	resp := models.FromSession(session.Session)
+	resp, err := models.FromSession(session.Session)
+	if err != nil {
+		return errors.NewStatusError(err, http.StatusInternalServerError)
+	}
 	err = json.NewEncoder(rw).Encode(resp)
 	if err != nil {
 		return errors.NewStatusError(fmt.Errorf("encode response: %w", err), http.StatusInternalServerError)
 	}
+	for _, event := range createSessionRequest.Events {
+		err = c.service.AppendEvent(req.Context(), session.Session, models.ToSessionEvent(event))
+		if err != nil {
+			return errors.NewStatusError(err, http.StatusInternalServerError)
+		}
+	}
+	respSession, err := models.FromSession(session.Session)
+	if err != nil {
+		return errors.NewStatusError(err, http.StatusInternalServerError)
+	}
+	json.NewEncoder(rw).Encode(respSession)
 	return nil
 }
 
@@ -112,7 +126,11 @@ func (c *SessionsApiController) GetSession(rw http.ResponseWriter, req *http.Req
 	if err != nil {
 		return errors.NewStatusError(err, http.StatusInternalServerError)
 	}
-	json.NewEncoder(rw).Encode(models.FromSession(session.Session))
+	respSession, err := models.FromSession(session.Session)
+	if err != nil {
+		return errors.NewStatusError(err, http.StatusInternalServerError)
+	}
+	json.NewEncoder(rw).Encode(respSession)
 	return nil
 }
 
@@ -135,7 +153,11 @@ func (c *SessionsApiController) ListSessions(rw http.ResponseWriter, req *http.R
 	}
 	sessions := []models.Session{}
 	for _, session := range resp.Sessions {
-		sessions = append(sessions, models.FromSession(session))
+		respSession, err := models.FromSession(session)
+		if err != nil {
+			return errors.NewStatusError(err, http.StatusInternalServerError)
+		}
+		sessions = append(sessions, respSession)
 	}
 	json.NewEncoder(rw).Encode(sessions)
 	return nil
