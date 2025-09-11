@@ -1,7 +1,9 @@
 package routers
 
 import (
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -20,6 +22,26 @@ type Routes []Route
 // Router defines the required methods for retrieving api routes
 type Router interface {
 	Routes() Routes
+}
+
+func Logger(inner http.Handler, name string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		inner.ServeHTTP(w, r)
+
+		log.Printf(
+			"%s %s %s %s",
+			r.Method,
+			r.RequestURI,
+			name,
+			time.Since(start),
+		)
+		log.Printf("Request Header: %v", r.Header)
+		log.Printf("Request Body: %v", r.Body)
+		log.Printf("Response Header: %v", w.Header())
+		log.Printf("Response: %v", w)
+	})
 }
 
 // NewRouter creates a new router for any number of api routers

@@ -11,7 +11,7 @@ type AdkAPIArgs struct {
 // ParseArgs parses the arguments for the ADK API server.
 func ParseArgs() AdkAPIArgs {
 	portFlag := flag.Int("port", 8080, "Port to listen on")
-	frontAddressFlag := flag.String("front_address", "localhost:8001", "Front address to allow CORS requests from")
+	frontAddressFlag := flag.String("front_address", "localhost:4200", "Front address to allow CORS requests from")
 	flag.Parse()
 	if !flag.Parsed() {
 		flag.Usage()

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"google.golang.org/adk/web/handlers"
-	"google.golang.org/adk/web/helpers"
+	"google.golang.org/adk/web/errors"
+	"google.golang.org/adk/web/utils"
 	"google.golang.org/genai"
 )
 
@@ -20,20 +20,20 @@ type RunAgentRequest struct {
 
 	Streaming bool `json:"streaming,omitempty"`
 
-	StateDelta *map[string]interface{} `json:"stateDelta,omitempty"`
+	StateDelta *map[string]any `json:"stateDelta,omitempty"`
 }
 
 // AssertRunAgentRequestRequired checks if the required fields are not zero-ed
-func AssertRunAgentRequestRequired(obj RunAgentRequest) error {
-	elements := map[string]interface{}{
-		"appName":    obj.AppName,
-		"userId":     obj.UserId,
-		"sessionId":  obj.SessionId,
-		"newMessage": obj.NewMessage,
+func (req RunAgentRequest) AssertRunAgentRequestRequired() error {
+	elements := map[string]any{
+		"appName":    req.AppName,
+		"userId":     req.UserId,
+		"sessionId":  req.SessionId,
+		"newMessage": req.NewMessage,
 	}
 	for name, el := range elements {
-		if isZero := helpers.IsZeroValue(el); isZero {
-			return handlers.StatusError{error: fmt.Errorf("%s is required", name), Code: http.StatusBadRequest}
+		if isZero := utils.IsZeroValue(el); isZero {
+			return errors.NewStatusError(fmt.Errorf("%s is required", name), http.StatusBadRequest)
 		}
 	}
 

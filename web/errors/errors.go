@@ -1,4 +1,4 @@
-package handlers
+package errors
 
 import (
 	"net/http"

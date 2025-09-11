@@ -3,6 +3,7 @@ package routers
 import (
 	"net/http"
 
+	"google.golang.org/adk/web/errors"
 	"google.golang.org/adk/web/handlers"
 )
 
@@ -21,13 +22,19 @@ func (r *RuntimeApiRouter) Routes() Routes {
 			Name:        "RunAgent",
 			Method:      http.MethodPost,
 			Pattern:     "/run",
-			HandlerFunc: r.runtimeController.RunAgent,
+			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgent),
 		},
 		Route{
 			Name:        "RunAgentSse",
 			Method:      http.MethodPost,
 			Pattern:     "/run_sse",
-			HandlerFunc: r.runtimeController.RunAgentSse,
+			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgent),
+		},
+		Route{
+			Name:        "RunAgentSse",
+			Method:      http.MethodOptions,
+			Pattern:     "/run_sse",
+			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgent),
 		},
 	}
 }

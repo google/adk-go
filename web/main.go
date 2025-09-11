@@ -88,7 +88,7 @@ func main() {
 
 	router := routers.NewRouter(
 		routers.NewSessionsApiRouter(handlers.NewSessionsApiController(sessionservice.Mem())),
-		routers.NewRuntimeApiRouter(&handlers.RuntimeApiController{}),
+		routers.NewRuntimeApiRouter(handlers.NewRuntimeApiRouter(sessionservice.Mem(), agentLoader)),
 		routers.NewAppsApiRouter(handlers.NewAppsApiController(agentLoader)),
 		routers.NewDebugApiRouter(&handlers.DebugApiController{}),
 		routers.NewArtifactsApiRouter(&handlers.ArtifactsApiController{}),
