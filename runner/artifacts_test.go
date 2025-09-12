@@ -98,3 +98,41 @@ func TestArtifacts_WithLoadVersion(t *testing.T) {
 		t.Errorf("Loaded part differs from saved part (-want +got):\n%s", diff)
 	}
 }
+
+func TestArtifacts_Errors(t *testing.T) {
+	inMemoryArtifactService := artifactservice.Mem()
+
+	testSessionID := session.ID{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "testSession",
+	}
+	a := artifacts{
+		service: inMemoryArtifactService,
+		id:      testSessionID,
+	}
+
+	// Attempt to Load non-existent artifact
+	_, err := a.Load("nonExistentArtifact")
+	if err == nil {
+		t.Errorf("Load(\"nonExistentArtifact\") succeeded, want error")
+	}
+
+	// Attempt to LoadVersion non-existent artifact
+	_, err = a.LoadVersion("nonExistentArtifact", 0)
+	if err == nil {
+		t.Errorf("LoadVersion(\"nonExistentArtifact\", 0) succeeded, want error")
+	}
+
+	// Save an artifact to test LoadVersion with an invalid version
+	part := *genai.NewPartFromText("test data")
+	if err := a.Save("existsArtifact", part); err != nil {
+		t.Fatalf("Save(\"existsArtifact\") failed: %v", err)
+	}
+
+	// Attempt to LoadVersion with a version number that doesn't exist
+	_, err = a.LoadVersion("existsArtifact", 99)
+	if err == nil {
+		t.Errorf("LoadVersion(\"existsArtifact\", 99) succeeded, want error")
+	}
+}
