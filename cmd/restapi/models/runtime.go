@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"google.golang.org/adk/web/errors"
-	"google.golang.org/adk/web/utils"
+	"google.golang.org/adk/cmd/restapi/errors"
+	"google.golang.org/adk/cmd/restapi/utils"
 	"google.golang.org/genai"
 )
 
