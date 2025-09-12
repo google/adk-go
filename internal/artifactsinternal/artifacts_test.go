@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package runner
+package artifactsinternal_test
 
 import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/internal/artifactsinternal"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -31,10 +32,7 @@ func TestArtifacts(t *testing.T) {
 		UserID:    "testUser",
 		SessionID: "testSession",
 	}
-	a := artifacts{
-		service: inMemoryArtifactService,
-		id:      testSessionID,
-	}
+	a := artifactsinternal.NewArtifacts(inMemoryArtifactService, testSessionID)
 
 	// Save
 	part := *genai.NewPartFromText("test data")
@@ -73,10 +71,8 @@ func TestArtifacts_WithLoadVersion(t *testing.T) {
 		UserID:    "testUser",
 		SessionID: "testSession",
 	}
-	a := artifacts{
-		service: inMemoryArtifactService,
-		id:      testSessionID,
-	}
+
+	a := artifactsinternal.NewArtifacts(inMemoryArtifactService, testSessionID)
 
 	part := *genai.NewPartFromText("test data")
 	err := a.Save("testArtifact", part)
@@ -107,10 +103,7 @@ func TestArtifacts_Errors(t *testing.T) {
 		UserID:    "testUser",
 		SessionID: "testSession",
 	}
-	a := artifacts{
-		service: inMemoryArtifactService,
-		id:      testSessionID,
-	}
+	a := artifactsinternal.NewArtifacts(inMemoryArtifactService, testSessionID)
 
 	// Attempt to Load non-existent artifact
 	_, err := a.Load("nonExistentArtifact")
