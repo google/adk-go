@@ -28,13 +28,13 @@ func (r *RuntimeApiRouter) Routes() Routes {
 			Name:        "RunAgentSse",
 			Method:      http.MethodPost,
 			Pattern:     "/run_sse",
-			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgent),
+			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgentSse),
 		},
 		Route{
-			Name:        "RunAgentSse",
+			Name:        "RunAgentSseOptions",
 			Method:      http.MethodOptions,
 			Pattern:     "/run_sse",
-			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgent),
+			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgentSse),
 		},
 	}
 }

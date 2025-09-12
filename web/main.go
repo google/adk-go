@@ -85,10 +85,11 @@ func main() {
 	agentLoader := agentLoader()
 
 	log.Printf("Starting server on port %d with front address %s", serverArgs.Port, serverArgs.FrontAddress)
+	sessionService := sessionservice.Mem()
 
 	router := routers.NewRouter(
-		routers.NewSessionsApiRouter(handlers.NewSessionsApiController(sessionservice.Mem())),
-		routers.NewRuntimeApiRouter(handlers.NewRuntimeApiRouter(sessionservice.Mem(), agentLoader)),
+		routers.NewSessionsApiRouter(handlers.NewSessionsApiController(sessionService)),
+		routers.NewRuntimeApiRouter(handlers.NewRuntimeApiRouter(sessionService, agentLoader)),
 		routers.NewAppsApiRouter(handlers.NewAppsApiController(agentLoader)),
 		routers.NewDebugApiRouter(&handlers.DebugApiController{}),
 		routers.NewArtifactsApiRouter(&handlers.ArtifactsApiController{}),

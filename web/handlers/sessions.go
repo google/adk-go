@@ -10,6 +10,7 @@ import (
 	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/web/errors"
 	"google.golang.org/adk/web/models"
+	"google.golang.org/adk/web/utils"
 )
 
 func unimplemented(rw http.ResponseWriter, req *http.Request) {
@@ -70,7 +71,7 @@ func (c *SessionsApiController) CreateSession(rw http.ResponseWriter, req *http.
 	if err != nil {
 		return errors.NewStatusError(err, http.StatusInternalServerError)
 	}
-	json.NewEncoder(rw).Encode(respSession)
+	utils.EncodeJSONResponse(respSession, http.StatusOK, rw)
 	return nil
 }
 
@@ -98,6 +99,7 @@ func (c *SessionsApiController) DeleteSession(rw http.ResponseWriter, req *http.
 	if err != nil {
 		return errors.NewStatusError(err, http.StatusInternalServerError)
 	}
+	rw.WriteHeader(http.StatusOK)
 	return nil
 }
 
@@ -130,7 +132,7 @@ func (c *SessionsApiController) GetSession(rw http.ResponseWriter, req *http.Req
 	if err != nil {
 		return errors.NewStatusError(err, http.StatusInternalServerError)
 	}
-	json.NewEncoder(rw).Encode(respSession)
+	utils.EncodeJSONResponse(respSession, http.StatusOK, rw)
 	return nil
 }
 
@@ -159,6 +161,6 @@ func (c *SessionsApiController) ListSessions(rw http.ResponseWriter, req *http.R
 		}
 		sessions = append(sessions, respSession)
 	}
-	json.NewEncoder(rw).Encode(sessions)
+	utils.EncodeJSONResponse(sessions, http.StatusOK, rw)
 	return nil
 }

@@ -16,12 +16,12 @@ const errMsgMinValueConstraint = "provided parameter is not respecting minimum v
 const errMsgMaxValueConstraint = "provided parameter is not respecting maximum value constraint"
 
 // IsZeroValue checks if the val is the zero-ed value.
-func IsZeroValue(val interface{}) bool {
+func IsZeroValue(val any) bool {
 	return val == nil || reflect.DeepEqual(val, reflect.Zero(reflect.TypeOf(val)).Interface())
 }
 
 // EncodeJSONResponse uses the json encoder to write an interface to the http response with an optional status code
-func EncodeJSONResponse(i interface{}, status int, w http.ResponseWriter) error {
+func EncodeJSONResponse(i any, status int, w http.ResponseWriter) error {
 	wHeader := w.Header()
 	wHeader.Set("Content-Type", "application/json; charset=UTF-8")
 
