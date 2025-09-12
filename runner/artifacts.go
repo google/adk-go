@@ -47,7 +47,10 @@ func (a *artifacts) Load(name string) (genai.Part, error) {
 		SessionID: a.id.SessionID,
 		FileName:  name,
 	})
-	return *loadResponse.Part, err
+	if err != nil {
+		return genai.Part{}, err
+	}
+	return *loadResponse.Part, nil
 }
 
 func (a *artifacts) LoadVersion(name string, version int) (genai.Part, error) {
@@ -58,7 +61,10 @@ func (a *artifacts) LoadVersion(name string, version int) (genai.Part, error) {
 		FileName:  name,
 		Version:   int64(version),
 	})
-	return *loadResponse.Part, err
+	if err != nil {
+		return genai.Part{}, err
+	}
+	return *loadResponse.Part, nil
 }
 
 func (a *artifacts) List() ([]string, error) {
@@ -67,7 +73,10 @@ func (a *artifacts) List() ([]string, error) {
 		UserID:    a.id.UserID,
 		SessionID: a.id.SessionID,
 	})
-	return ListResponse.FileNames, err
+	if err != nil {
+		return nil, err
+	}
+	return ListResponse.FileNames, nil
 }
 
 var _ agent.Artifacts = (*artifacts)(nil)
