@@ -10,12 +10,12 @@ import (
 	"strconv"
 
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/cmd/restapi/handlers"
+	"google.golang.org/adk/cmd/restapi/routers"
+	"google.golang.org/adk/cmd/restapi/utils"
 	"google.golang.org/adk/llm/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/adk/web/handlers"
-	"google.golang.org/adk/web/routers"
-	"google.golang.org/adk/web/utils"
 	"google.golang.org/genai"
 )
 
@@ -52,6 +52,9 @@ func initAdk() {
 			geminitool.GoogleSearch{},
 		},
 	})
+	if err != nil {
+		panic(err)
+	}
 
 	agent2, err := llmagent.New(llmagent.Config{
 		Name:        "foobar",
@@ -59,6 +62,9 @@ func initAdk() {
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
 	})
+	if err != nil {
+		panic(err)
+	}
 
 	fmt.Printf("Agents created: %v, %v", agent, agent2)
 

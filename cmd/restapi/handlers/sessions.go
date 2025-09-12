@@ -28,34 +28,6 @@ func (*SessionsApiController) DeleteSession(rw http.ResponseWriter, req *http.Re
 
 // GetSession handles receiving a sesion from the system.
 func (*SessionsApiController) GetSession(rw http.ResponseWriter, req *http.Request) {
-	// swagger:operation POST /apps/{app_name}/users/{user_id}/sessions/{session_id} sessions getSession
-	//
-	// Returns a session.
-	//
-	// ---
-	//
-	//	parameters:
-	//	- name: app_name
-	//	  in: path
-	//	  description: The app name.
-	//	  required: true
-	//	  type: string
-	//	- name: user_id
-	//	  in: path
-	//	  description: The user id.
-	//	  required: true
-	//	  type: string
-	//	- name: session_id
-	//	  in: path
-	//	  description: The session id.
-	//	  required: true
-	//	  type: string
-	//
-	//	responses:
-	//	  '200':
-	//	    description: The session was found.
-	//	  '400':
-	//	    description: Bad request.
 	unimplemented(rw, req)
 }
 

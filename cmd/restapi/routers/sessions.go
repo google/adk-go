@@ -3,7 +3,7 @@ package routers
 import (
 	"net/http"
 
-	"google.golang.org/adk/web/handlers"
+	"google.golang.org/adk/cmd/restapi/handlers"
 )
 
 type SessionsApiRouter struct {
