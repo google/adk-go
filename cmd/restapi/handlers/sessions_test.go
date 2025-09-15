@@ -99,7 +99,7 @@ func TestGetSession(t *testing.T) {
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
 			sessionService := utils.FakeSessionService{Sessions: tt.storedSessions}
-			apiController := handlers.NewSessionsApiController(&sessionService)
+			apiController := handlers.NewSessionsAPIController(&sessionService)
 			req, err := http.NewRequest(http.MethodGet, "/apps/testApp/users/testUser/sessions/testSession", nil)
 			if err != nil {
 				t.Fatalf("new request: %v", err)
@@ -195,7 +195,7 @@ func TestCreateSession(t *testing.T) {
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
 			sessionService := utils.FakeSessionService{Sessions: tt.storedSessions}
-			apiController := handlers.NewSessionsApiController(&sessionService)
+			apiController := handlers.NewSessionsAPIController(&sessionService)
 			reqBytes, err := json.Marshal(tt.createRequestObj)
 			if err != nil {
 				t.Fatalf("marshal request: %v", err)
@@ -265,7 +265,7 @@ func TestDeleteSession(t *testing.T) {
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
 			sessionService := utils.FakeSessionService{Sessions: tt.storedSessions}
-			apiController := handlers.NewSessionsApiController(&sessionService)
+			apiController := handlers.NewSessionsAPIController(&sessionService)
 			req, err := http.NewRequest(http.MethodDelete, "/apps/testApp/users/testUser/sessions/testSession", nil)
 			if err != nil {
 				t.Fatalf("new request: %v", err)
@@ -360,7 +360,7 @@ func TestListSessions(t *testing.T) {
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
 			sessionService := utils.FakeSessionService{Sessions: tt.storedSessions}
-			apiController := handlers.NewSessionsApiController(&sessionService)
+			apiController := handlers.NewSessionsAPIController(&sessionService)
 			req, err := http.NewRequest(http.MethodDelete, "/apps/testApp/users/testUser/sessions/testSession", nil)
 			if err != nil {
 				t.Fatalf("new request: %v", err)
