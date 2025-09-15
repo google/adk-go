@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// package routers defines the HTTP routes for the ADK-Web REST API.
 package routers
 
 import (

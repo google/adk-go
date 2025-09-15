@@ -32,6 +32,7 @@ type LLMResponse struct {
 	ErrorMessage      string                   `json:"errorMessage"`
 }
 
+// Event represents a single event in a session.
 type Event struct {
 	ID                 string      `json:"id"`
 	Time               time.Time   `json:"time"`

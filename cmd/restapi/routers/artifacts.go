@@ -20,15 +20,18 @@ import (
 	"google.golang.org/adk/cmd/restapi/handlers"
 )
 
-type ArtifactsApiRouter struct {
-	artifactsController *handlers.ArtifactsApiController
+// ArtifactsAPIRouter defines the routes for the Artifacts API.
+type ArtifactsAPIRouter struct {
+	artifactsController *handlers.ArtifactsAPIController
 }
 
-func NewArtifactsApiRouter(controller *handlers.ArtifactsApiController) *ArtifactsApiRouter {
-	return &ArtifactsApiRouter{artifactsController: controller}
+// NewArtifactsAPIRouter creates a new ArtifactsAPIRouter.
+func NewArtifactsAPIRouter(controller *handlers.ArtifactsAPIController) *ArtifactsAPIRouter {
+	return &ArtifactsAPIRouter{artifactsController: controller}
 }
 
-func (r *ArtifactsApiRouter) Routes() Routes {
+// Routes returns the routes for the Artifacts API.
+func (r *ArtifactsAPIRouter) Routes() Routes {
 	return Routes{
 		Route{
 			Name:        "ListArtifacts",

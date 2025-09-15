@@ -18,12 +18,15 @@ import (
 	"net/http"
 )
 
-type DebugApiController struct{}
+// DebugAPIController is the controller for the Debug API.
+type DebugAPIController struct{}
 
-func (*DebugApiController) TraceDict(rw http.ResponseWriter, req *http.Request) {
+// TraceDict returns the debug information for the session in form of dictionary.
+func (*DebugAPIController) TraceDict(rw http.ResponseWriter, req *http.Request) {
 	unimplemented(rw, req)
 }
 
-func (*DebugApiController) EventGraph(rw http.ResponseWriter, req *http.Request) {
+// EventGraph returns the debug information for the session and session events in form of graph.
+func (*DebugAPIController) EventGraph(rw http.ResponseWriter, req *http.Request) {
 	unimplemented(rw, req)
 }

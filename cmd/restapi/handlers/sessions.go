@@ -29,15 +29,18 @@ func unimplemented(rw http.ResponseWriter, req *http.Request) {
 	rw.WriteHeader(http.StatusNotImplemented)
 }
 
-type SessionsApiController struct {
+// SessionsAPIController is the controller for the Sessions API.
+type SessionsAPIController struct {
 	service sessionservice.Service
 }
 
-func NewSessionsApiController(service sessionservice.Service) *SessionsApiController {
-	return &SessionsApiController{service: service}
+// NewSessionsAPIController creates a new SessionsAPIController.
+func NewSessionsAPIController(service sessionservice.Service) *SessionsAPIController {
+	return &SessionsAPIController{service: service}
 }
 
-func (c *SessionsApiController) CreateSession(rw http.ResponseWriter, req *http.Request) error {
+// DeleteSession handles deleting a specific session.
+func (c *SessionsAPIController) CreateSession(rw http.ResponseWriter, req *http.Request) error {
 	params := mux.Vars(req)
 	appName := params["app_name"]
 	if appName == "" {
@@ -79,7 +82,7 @@ func (c *SessionsApiController) CreateSession(rw http.ResponseWriter, req *http.
 	return nil
 }
 
-func (c *SessionsApiController) DeleteSession(rw http.ResponseWriter, req *http.Request) error {
+func (c *SessionsAPIController) DeleteSession(rw http.ResponseWriter, req *http.Request) error {
 	params := mux.Vars(req)
 	appName := params["app_name"]
 	if appName == "" {
@@ -106,8 +109,8 @@ func (c *SessionsApiController) DeleteSession(rw http.ResponseWriter, req *http.
 	return nil
 }
 
-// GetSession handles receiving a sesion from the system.
-func (c *SessionsApiController) GetSession(rw http.ResponseWriter, req *http.Request) error {
+// GetSession retrieves a specific session by its ID.
+func (c *SessionsAPIController) GetSession(rw http.ResponseWriter, req *http.Request) error {
 	params := mux.Vars(req)
 	appName := params["app_name"]
 	if appName == "" {
@@ -139,7 +142,8 @@ func (c *SessionsApiController) GetSession(rw http.ResponseWriter, req *http.Req
 	return nil
 }
 
-func (c *SessionsApiController) ListSessions(rw http.ResponseWriter, req *http.Request) error {
+// ListSessions handles listing all sessions for a given app and user.
+func (c *SessionsAPIController) ListSessions(rw http.ResponseWriter, req *http.Request) error {
 	params := mux.Vars(req)
 	appName := params["app_name"]
 	if appName == "" {

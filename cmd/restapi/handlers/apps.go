@@ -18,8 +18,10 @@ import (
 	"net/http"
 )
 
-type AppsApiController struct{}
+// AppsAPIController is the controller for the Apps API.
+type AppsAPIController struct{}
 
-func (*AppsApiController) ListApps(rw http.ResponseWriter, req *http.Request) {
+// ListApps handles listing all loaded agents.
+func (*AppsAPIController) ListApps(rw http.ResponseWriter, req *http.Request) {
 	unimplemented(rw, req)
 }

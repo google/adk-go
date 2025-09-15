@@ -22,6 +22,7 @@ import (
 	"google.golang.org/adk/sessionservice"
 )
 
+// Session represents an agent's session.
 type Session struct {
 	ID        string         `json:"id"`
 	AppName   string         `json:"app_name"`

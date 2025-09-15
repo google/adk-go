@@ -12,21 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package handlers
-
-import (
-	"net/http"
-)
-
-// RuntimeAPIController is the controller for the Runtime API.
-type RuntimeAPIController struct{}
-
-// RunAgent executes a non-streaming agent run for a given session and message.
-func (*RuntimeAPIController) RunAgent(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
-}
-
-// RunAgentSSE executes an agent run and streams the resulting events using Server-Sent Events (SSE).
-func (*RuntimeAPIController) RunAgentSSE(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
-}
+// package models defines the data structures for the REST API.
+package models
