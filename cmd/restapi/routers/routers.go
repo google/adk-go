@@ -29,7 +29,7 @@ type Route struct {
 	HandlerFunc http.HandlerFunc
 }
 
-// Routes is a map of defined api endpoints
+// Routes is a list of defined api endpoints
 type Routes []Route
 
 // Router defines the required methods for retrieving api routes
