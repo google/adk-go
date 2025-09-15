@@ -22,16 +22,6 @@ import (
 	"google.golang.org/genai"
 )
 
-type LLMResponse struct {
-	Content           *genai.Content           `json:"content"`
-	GroundingMetadata *genai.GroundingMetadata `json:"groundingMetadata"`
-	Partial           bool                     `json:"partial"`
-	TurnComplete      bool                     `json:"turnComplete"`
-	Interrupted       bool                     `json:"interrupted"`
-	ErrorCode         int                      `json:"errorCode"`
-	ErrorMessage      string                   `json:"errorMessage"`
-}
-
 // Event represents a single event in a session.
 type Event struct {
 	ID                 string                   `json:"id"`
