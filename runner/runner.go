@@ -32,17 +32,25 @@ import (
 	"google.golang.org/genai"
 )
 
-func New(appName string, rootAgent agent.Agent, sessionService sessionservice.Service) (*Runner, error) {
-	parents, err := parentmap.New(rootAgent)
+type Config struct {
+	AppName         string
+	Agent           agent.Agent
+	SessionService  sessionservice.Service
+	ArtifactService artifactservice.Service
+}
+
+func New(cfg *Config) (*Runner, error) {
+	parents, err := parentmap.New(cfg.Agent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)
 	}
 
 	return &Runner{
-		appName:        appName,
-		rootAgent:      rootAgent,
-		sessionService: sessionService,
-		parents:        parents,
+		appName:         cfg.AppName,
+		rootAgent:       cfg.Agent,
+		sessionService:  cfg.SessionService,
+		artifactService: cfg.ArtifactService,
+		parents:         parents,
 	}, nil
 }
 

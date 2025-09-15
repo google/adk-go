@@ -181,7 +181,11 @@ func Test_isTransferrableAcrossAgentTree(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			runner, err := New("testApp", tt.agent, sessionservice.Mem())
+			runner, err := New(&Config{
+				AppName:        "testApp",
+				Agent:          tt.agent,
+				SessionService: sessionservice.Mem(),
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -210,7 +214,11 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 		},
 	}))
 
-	r, err := New(appName, testAgent, sessionService)
+	r, err := New(&Config{
+		AppName:        appName,
+		Agent:          testAgent,
+		SessionService: sessionService,
+	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
