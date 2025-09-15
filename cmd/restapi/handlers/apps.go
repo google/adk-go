@@ -21,15 +21,17 @@ import (
 	"google.golang.org/adk/cmd/restapi/services"
 )
 
-type AppsApiController struct {
+// AppsAPIController is the controller for the Apps API.
+type AppsAPIController struct {
 	agentLoader services.AgentLoader
 }
 
-func NewAppsApiController(agentLoader services.AgentLoader) *AppsApiController {
-	return &AppsApiController{agentLoader: agentLoader}
+func NewAppsAPIController(agentLoader services.AgentLoader) *AppsAPIController {
+	return &AppsAPIController{agentLoader: agentLoader}
 }
 
-func (c *AppsApiController) ListApps(rw http.ResponseWriter, req *http.Request) {
+// ListApps handles listing all loaded agents.
+func (c *AppsAPIController) ListApps(rw http.ResponseWriter, req *http.Request) {
 	apps := c.agentLoader.ListAgents()
 	rw.WriteHeader(http.StatusOK)
 	rw.Header().Set("Content-Type", "application/json")

@@ -20,16 +20,19 @@ import (
 	"google.golang.org/adk/cmd/restapi/handlers"
 )
 
-type AppsApiRouter struct {
-	appsController *handlers.AppsApiController
+// AppsAPIRouter defines the routes for the Apps API.
+type AppsAPIRouter struct {
+	appsController *handlers.AppsAPIController
 }
 
-func NewAppsApiRouter(controller *handlers.AppsApiController) *AppsApiRouter {
-	return &AppsApiRouter{appsController: controller}
+// NewAppsAPIRouter creates a new AppsAPIRouter.
+func NewAppsAPIRouter(controller *handlers.AppsAPIController) *AppsAPIRouter {
+	return &AppsAPIRouter{appsController: controller}
 
 }
 
-func (r *AppsApiRouter) Routes() Routes {
+// Routes returns the routes for the Apps API.
+func (r *AppsAPIRouter) Routes() Routes {
 	return Routes{
 		Route{
 			Name:        "ListApps",

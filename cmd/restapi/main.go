@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// package main is the entry point for the REST API server.
 package main
 
 import (
@@ -101,11 +102,11 @@ func main() {
 	sessionService := sessionservice.Mem()
 
 	router := routers.NewRouter(
-		routers.NewSessionsApiRouter(handlers.NewSessionsApiController(sessionService)),
-		routers.NewRuntimeApiRouter(handlers.NewRuntimeApiRouter(sessionService, agentLoader)),
-		routers.NewAppsApiRouter(handlers.NewAppsApiController(agentLoader)),
-		routers.NewDebugApiRouter(&handlers.DebugApiController{}),
-		routers.NewArtifactsApiRouter(&handlers.ArtifactsApiController{}),
+		routers.NewSessionsAPIRouter(handlers.NewSessionsAPIController(sessionService)),
+		routers.NewRuntimeAPIRouter(handlers.NewRuntimeAPIRouter(sessionService, agentLoader)),
+		routers.NewAppsAPIRouter(handlers.NewAppsAPIController(agentLoader)),
+		routers.NewDebugAPIRouter(&handlers.DebugAPIController{}),
+		routers.NewArtifactsAPIRouter(&handlers.ArtifactsAPIController{}),
 	)
 	router.Use(corsWithArgs(serverArgs))
 

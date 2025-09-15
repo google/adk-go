@@ -12,21 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package handlers
-
-import (
-	"net/http"
-)
-
-// DebugAPIController is the controller for the Debug API.
-type DebugAPIController struct{}
-
-// TraceDict returns the debug information for the session in form of dictionary.
-func (*DebugAPIController) TraceDict(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
-}
-
-// EventGraph returns the debug information for the session and session events in form of graph.
-func (*DebugAPIController) EventGraph(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
-}
+// package models defines the data structures for the REST API.
+package models

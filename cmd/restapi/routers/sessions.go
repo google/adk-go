@@ -21,15 +21,18 @@ import (
 	"google.golang.org/adk/cmd/restapi/handlers"
 )
 
-type SessionsApiRouter struct {
-	sessionController *handlers.SessionsApiController
+// SessionsAPIRouter defines the routes for the Sessions API.
+type SessionsAPIRouter struct {
+	sessionController *handlers.SessionsAPIController
 }
 
-func NewSessionsApiRouter(controller *handlers.SessionsApiController) *SessionsApiRouter {
-	return &SessionsApiRouter{sessionController: controller}
+// NewSessionsAPIRouter creates a new SessionsAPIRouter.
+func NewSessionsAPIRouter(controller *handlers.SessionsAPIController) *SessionsAPIRouter {
+	return &SessionsAPIRouter{sessionController: controller}
 }
 
-func (r *SessionsApiRouter) Routes() Routes {
+// Routes returns the routes for the Sessions API.
+func (r *SessionsAPIRouter) Routes() Routes {
 	return Routes{
 		Route{
 			Name:        "GetSession",

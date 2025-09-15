@@ -21,16 +21,19 @@ import (
 	"google.golang.org/adk/cmd/restapi/handlers"
 )
 
-type RuntimeApiRouter struct {
-	runtimeController *handlers.RuntimeApiController
+// RuntimeAPIRouter defines the routes for the Runtime API.
+type RuntimeAPIRouter struct {
+	runtimeController *handlers.RuntimeAPIController
 }
 
-func NewRuntimeApiRouter(controller *handlers.RuntimeApiController) *RuntimeApiRouter {
-	return &RuntimeApiRouter{runtimeController: controller}
+// NewRuntimeAPIRouter creates a new RuntimeAPIRouter.
+func NewRuntimeAPIRouter(controller *handlers.RuntimeAPIController) *RuntimeAPIRouter {
+	return &RuntimeAPIRouter{runtimeController: controller}
 
 }
 
-func (r *RuntimeApiRouter) Routes() Routes {
+// Routes returns the routes for the Runtime API.
+func (r *RuntimeAPIRouter) Routes() Routes {
 	return Routes{
 		Route{
 			Name:        "RunAgent",
@@ -42,13 +45,13 @@ func (r *RuntimeApiRouter) Routes() Routes {
 			Name:        "RunAgentSse",
 			Method:      http.MethodPost,
 			Pattern:     "/run_sse",
-			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgentSse),
+			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgentSSE),
 		},
 		Route{
 			Name:        "RunAgentSseOptions",
 			Method:      http.MethodOptions,
 			Pattern:     "/run_sse",
-			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgentSse),
+			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgentSSE),
 		},
 	}
 }

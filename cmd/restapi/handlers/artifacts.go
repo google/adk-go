@@ -18,16 +18,20 @@ import (
 	"net/http"
 )
 
-type ArtifactsApiController struct{}
+// ArtifactsAPIController is the controller for the Artifacts API.
+type ArtifactsAPIController struct{}
 
-func (*ArtifactsApiController) ListArtifacts(rw http.ResponseWriter, req *http.Request) {
+// ListArtifacts lists all the artifact filenames within a session.
+func (*ArtifactsAPIController) ListArtifacts(rw http.ResponseWriter, req *http.Request) {
 	unimplemented(rw, req)
 }
 
-func (*ArtifactsApiController) LoadArtifact(rw http.ResponseWriter, req *http.Request) {
+// LoadArtifact gets an artifact from the artifact service storage.
+func (*ArtifactsAPIController) LoadArtifact(rw http.ResponseWriter, req *http.Request) {
 	unimplemented(rw, req)
 }
 
-func (*ArtifactsApiController) DeleteArtifact(rw http.ResponseWriter, req *http.Request) {
+// DeleteArtifact handles deleting an artifact.
+func (*ArtifactsAPIController) DeleteArtifact(rw http.ResponseWriter, req *http.Request) {
 	unimplemented(rw, req)
 }

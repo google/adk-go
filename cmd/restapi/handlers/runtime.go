@@ -30,16 +30,18 @@ import (
 	"google.golang.org/adk/sessionservice"
 )
 
-type RuntimeApiController struct {
+// RuntimeAPIController is the controller for the Runtime API.
+type RuntimeAPIController struct {
 	sessionService sessionservice.Service
 	agentLoader    services.AgentLoader
 }
 
-func NewRuntimeApiRouter(sessionService sessionservice.Service, agentLoader services.AgentLoader) *RuntimeApiController {
-	return &RuntimeApiController{sessionService: sessionService, agentLoader: agentLoader}
+func NewRuntimeAPIRouter(sessionService sessionservice.Service, agentLoader services.AgentLoader) *RuntimeAPIController {
+	return &RuntimeAPIController{sessionService: sessionService, agentLoader: agentLoader}
 }
 
-func (c *RuntimeApiController) RunAgent(rw http.ResponseWriter, req *http.Request) error {
+// RunAgent executes a non-streaming agent run for a given session and message.
+func (c *RuntimeAPIController) RunAgent(rw http.ResponseWriter, req *http.Request) error {
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
 		return err
@@ -74,7 +76,8 @@ func (c *RuntimeApiController) RunAgent(rw http.ResponseWriter, req *http.Reques
 	return nil
 }
 
-func (c *RuntimeApiController) RunAgentSse(rw http.ResponseWriter, req *http.Request) error {
+// RunAgentSSE executes an agent run and streams the resulting events using Server-Sent Events (SSE).
+func (c *RuntimeAPIController) RunAgentSSE(rw http.ResponseWriter, req *http.Request) error {
 	flusher, ok := rw.(http.Flusher)
 	if !ok {
 		return errors.NewStatusError(fmt.Errorf("streaming not supported"), http.StatusInternalServerError)
@@ -120,7 +123,7 @@ func flashEvent(flusher http.Flusher, rw http.ResponseWriter, event session.Even
 	flusher.Flush()
 }
 
-func (c *RuntimeApiController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
+func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
 	_, err := c.sessionService.Get(ctx, &sessionservice.GetRequest{
 		ID: session.ID{
 			AppName:   appName,
@@ -134,7 +137,7 @@ func (c *RuntimeApiController) validateSessionExists(ctx context.Context, appNam
 	return nil
 }
 
-func (c *RuntimeApiController) getRunner(req models.RunAgentRequest) (*runner.Runner, *runner.RunConfig, error) {
+func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Runner, *runner.RunConfig, error) {
 	agent, err := c.agentLoader.LoadAgent(req.AppName)
 	if err != nil {
 		return nil, nil, errors.NewStatusError(fmt.Errorf("load agent: %w", err), http.StatusInternalServerError)
