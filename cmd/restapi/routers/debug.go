@@ -20,16 +20,19 @@ import (
 	"google.golang.org/adk/cmd/restapi/handlers"
 )
 
-type DebugApiRouter struct {
-	runtimeController *handlers.DebugApiController
+// DebugAPIRouter defines the routes for the Debug API.
+type DebugAPIRouter struct {
+	runtimeController *handlers.DebugAPIController
 }
 
-func NewDebugApiRouter(controller *handlers.DebugApiController) *DebugApiRouter {
-	return &DebugApiRouter{runtimeController: controller}
+// NewDebugAPIRouter creates a new DebugAPIRouter.
+func NewDebugAPIRouter(controller *handlers.DebugAPIController) *DebugAPIRouter {
+	return &DebugAPIRouter{runtimeController: controller}
 
 }
 
-func (r *DebugApiRouter) Routes() Routes {
+// Routes returns the routes for the Debug API.
+func (r *DebugAPIRouter) Routes() Routes {
 	return Routes{
 		Route{
 			Name:        "GetTraceDict",

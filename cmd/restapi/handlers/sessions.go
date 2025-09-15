@@ -24,27 +24,32 @@ func unimplemented(rw http.ResponseWriter, req *http.Request) {
 	rw.WriteHeader(http.StatusNotImplemented)
 }
 
-type SessionsApiController struct {
+// SessionsAPIController is the controller for the Sessions API.
+type SessionsAPIController struct {
 	service sessionservice.Service
 }
 
-func New(service sessionservice.Service) *SessionsApiController {
-	return &SessionsApiController{service: service}
+// New creates a new SessionsAPIController.
+func New(service sessionservice.Service) *SessionsAPIController {
+	return &SessionsAPIController{service: service}
 }
 
-func (c *SessionsApiController) CreateSession(rw http.ResponseWriter, req *http.Request) {
+// CreateSession creates a new session and appends events if provided.
+func (c *SessionsAPIController) CreateSession(rw http.ResponseWriter, req *http.Request) {
 	unimplemented(rw, req)
 }
 
-func (*SessionsApiController) DeleteSession(rw http.ResponseWriter, req *http.Request) {
+// DeleteSession handles deleting a specific session.
+func (*SessionsAPIController) DeleteSession(rw http.ResponseWriter, req *http.Request) {
 	unimplemented(rw, req)
 }
 
-// GetSession handles receiving a sesion from the system.
-func (*SessionsApiController) GetSession(rw http.ResponseWriter, req *http.Request) {
+// GetSession retrieves a specific session by its ID.
+func (*SessionsAPIController) GetSession(rw http.ResponseWriter, req *http.Request) {
 	unimplemented(rw, req)
 }
 
-func (*SessionsApiController) ListSessions(rw http.ResponseWriter, req *http.Request) {
+// ListSessions handles listing all sessions for a given app and user.
+func (*SessionsAPIController) ListSessions(rw http.ResponseWriter, req *http.Request) {
 	unimplemented(rw, req)
 }
