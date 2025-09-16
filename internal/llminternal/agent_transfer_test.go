@@ -48,7 +48,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		ctx := agent.NewContext(parentmap.ToContext(t.Context(), parents), curAgent, nil, nil, "")
+		ctx := agent.NewContext(parentmap.ToContext(t.Context(), parents), curAgent, nil, nil, nil, "")
 
 		if err := llminternal.AgentTransferRequestProcessor(ctx, req); err != nil {
 			t.Fatalf("AgentTransferRequestProcessor() = %v, want success", err)
@@ -335,7 +335,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 func TestTransferToAgentToolRun(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		curTool := &llminternal.TransferToAgentTool{}
-		ctx := tool.NewContext(agent.NewContext(t.Context(), nil, nil, nil, ""), "", &session.Actions{})
+		ctx := tool.NewContext(agent.NewContext(t.Context(), nil, nil, nil, nil, ""), "", &session.Actions{})
 		wantAgentName := "TestAgent"
 		args := map[string]any{"agent_name": wantAgentName}
 		if _, err := curTool.Run(ctx, args); err != nil {
@@ -360,7 +360,7 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				curTool := &llminternal.TransferToAgentTool{}
-				ctx := tool.NewContext(agent.NewContext(t.Context(), nil, nil, nil, ""), "", &session.Actions{})
+				ctx := tool.NewContext(agent.NewContext(t.Context(), nil, nil, nil, nil, ""), "", &session.Actions{})
 				if got, err := curTool.Run(ctx, tc.args); err == nil {
 					t.Fatalf("Run(%v) = (%v, %v), want error", tc.args, got, err)
 				}

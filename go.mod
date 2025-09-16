@@ -6,6 +6,7 @@ require (
 	cloud.google.com/go/storage v1.56.1
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/mux v1.8.1
 	golang.org/x/sync v0.16.0
 	google.golang.org/api v0.247.0
 	google.golang.org/genai v1.20.0
@@ -57,6 +58,8 @@ require (
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.6 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
+	github.com/joho/godotenv v1.5.1
+	github.com/rs/cors v1.11.1
 	golang.org/x/crypto v0.41.0 // indirect
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect

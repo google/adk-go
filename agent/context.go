@@ -29,12 +29,14 @@ type agentContext struct {
 	invocationID string
 	agent        Agent
 	session      session.Session
-	userContent  *genai.Content
-	branch       string
+	artifacts    Artifacts
+
+	userContent *genai.Content
+	branch      string
 }
 
 // TODO: see if needed or possible to make internal
-func NewContext(ctx context.Context, agent Agent, userContent *genai.Content, session session.Session, branch string) *agentContext {
+func NewContext(ctx context.Context, agent Agent, userContent *genai.Content, artifacts Artifacts, session session.Session, branch string) *agentContext {
 	ctx, cancel := context.WithCancel(ctx)
 
 	return &agentContext{
@@ -43,6 +45,7 @@ func NewContext(ctx context.Context, agent Agent, userContent *genai.Content, se
 
 		invocationID: "e-" + uuid.NewString(),
 		agent:        agent,
+		artifacts:    artifacts,
 		session:      session,
 		userContent:  userContent,
 		branch:       branch,
@@ -69,8 +72,8 @@ func (a *agentContext) Session() session.Session {
 	return a.session
 }
 
-func (*agentContext) Artifacts() Artifacts {
-	return nil
+func (a *agentContext) Artifacts() Artifacts {
+	return a.artifacts
 }
 
 func (*agentContext) Report(*session.Event) {
