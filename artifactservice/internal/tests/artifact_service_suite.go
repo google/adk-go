@@ -61,10 +61,12 @@ func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, test
 	}{
 		// file1.
 		{"file1", 1, genai.NewPartFromBytes([]byte("file v1"), "text/plain")},
-		{"file1", 2, genai.NewPartFromText("file v2")},
+		{"file1", 2, genai.NewPartFromBytes([]byte("file v2"), "text/plain")},
 		{"file1", 3, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
 		// file2.
 		{"file2", 1, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
+		//file3.
+		{"file3", 1, genai.NewPartFromText("file v1")},
 	}
 
 	t.Log("Save file1 and file2")
@@ -89,7 +91,7 @@ func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, test
 		}{
 			{"latest", 0, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
 			{"ver=1", 1, genai.NewPartFromBytes([]byte("file v1"), "text/plain")},
-			{"ver=2", 2, genai.NewPartFromText("file v2")},
+			{"ver=2", 2, genai.NewPartFromBytes([]byte("file v2"), "text/plain")},
 		} {
 			got, err := srv.Load(ctx, &as.LoadRequest{
 				AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
@@ -110,7 +112,7 @@ func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, test
 		}
 		got := resp.FileNames
 		slices.Sort(got)
-		want := []string{"file1", "file2"} // testData has two files.
+		want := []string{"file1", "file2", "file3"} // testData has two files.
 		if diff := cmp.Diff(got, want); diff != "" {
 			t.Errorf("List() = %v, want %v", got, want)
 		}
@@ -147,7 +149,7 @@ func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, test
 			t.Fatalf("Load('file1') failed: %v", err)
 		}
 		got := resp.Part
-		want := genai.NewPartFromText("file v2")
+		want := genai.NewPartFromBytes([]byte("file v2"), "text/plain")
 		if diff := cmp.Diff(got, want); diff != "" {
 			t.Fatalf("Load('file1') = (%v, %v), want (%v, nil)", got, err, want)
 		}
@@ -177,7 +179,7 @@ func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, test
 		}
 		got := resp.FileNames
 		slices.Sort(got)
-		want := []string{"file2"} // testData has two files.
+		want := []string{"file2", "file3"} // testData has two files.
 		if diff := cmp.Diff(got, want); diff != "" {
 			t.Errorf("List() = %v, want %v", got, want)
 		}
@@ -197,6 +199,11 @@ func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, test
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file2",
 	}); err != nil {
 		t.Fatalf("Delete(file2) failed: %v", err)
+	}
+	if err := srv.Delete(ctx, &as.DeleteRequest{
+		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file3",
+	}); err != nil {
+		t.Fatalf("Delete(file3) failed: %v", err)
 	}
 }
 
