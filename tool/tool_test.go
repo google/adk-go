@@ -51,6 +51,11 @@ func TestTypes(t *testing.T) {
 			constructor:   func() (tool.Tool, error) { return geminitool.GoogleSearch{}, nil },
 			expectedTypes: []string{requestProc},
 		},
+		{
+			name:          "LoadArtifactsTool",
+			constructor:   func() (tool.Tool, error) { return tool.NewLoadArtifactsTool(), nil },
+			expectedTypes: []string{requestProc, functionTool},
+		},
 	}
 
 	for _, tt := range tests {
