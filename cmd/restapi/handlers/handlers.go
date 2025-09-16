@@ -25,15 +25,16 @@ func unimplemented(rw http.ResponseWriter, req *http.Request) {
 }
 
 // EncodeJSONResponse uses the json encoder to write an interface to the http response with an optional status code
-func EncodeJSONResponse(i any, status int, w http.ResponseWriter) error {
+func EncodeJSONResponse(i any, status int, w http.ResponseWriter) {
 	wHeader := w.Header()
 	wHeader.Set("Content-Type", "application/json; charset=UTF-8")
 
 	w.WriteHeader(status)
 
 	if i != nil {
-		return json.NewEncoder(w).Encode(i)
+		err := json.NewEncoder(w).Encode(i)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}
-
-	return nil
 }
