@@ -42,7 +42,11 @@ func Run(ctx context.Context, rootAgent agent.Agent) {
 
 	session := resp.Session
 
-	r, err := runner.New(appName, rootAgent, sessionService)
+	r, err := runner.New(&runner.Config{
+		AppName:        appName,
+		Agent:          rootAgent,
+		SessionService: sessionService,
+	})
 	if err != nil {
 		log.Fatalf("Failed to create runner: %v", err)
 	}

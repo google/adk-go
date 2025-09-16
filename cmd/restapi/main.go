@@ -20,15 +20,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/cmd/restapi/config"
 	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/routers"
 	"google.golang.org/adk/cmd/restapi/services"
-	"google.golang.org/adk/cmd/restapi/utils"
 	"google.golang.org/adk/llm/gemini"
 	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/tool"
@@ -36,10 +35,9 @@ import (
 	"google.golang.org/genai"
 )
 
-func corsWithArgs(serverArgs utils.AdkAPIArgs) func(next http.Handler) http.Handler {
+func corsWithArgs(serverConfig *config.ADKAPIServerConfigs) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "http://"+serverArgs.FrontAddress)
+		return serverConfig.Cors.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			if r.Method == "OPTIONS" {
@@ -47,14 +45,14 @@ func corsWithArgs(serverArgs utils.AdkAPIArgs) func(next http.Handler) http.Hand
 				return
 			}
 			next.ServeHTTP(w, r)
-		})
+		}))
 	}
 }
 
-func agentLoader() services.AgentLoader {
+func agentLoader(apiKey string) services.AgentLoader {
 	ctx := context.Background()
 	model, err := gemini.NewModel(ctx, "gemini-2.0-flash", &genai.ClientConfig{
-		APIKey: os.Getenv("GEMINI_API_KEY"),
+		APIKey: apiKey,
 	})
 	if err != nil {
 		panic(err)
@@ -95,10 +93,12 @@ func agentLoader() services.AgentLoader {
 
 func main() {
 
-	serverArgs := utils.ParseArgs()
-	agentLoader := agentLoader()
-
-	log.Printf("Starting server on port %d with front address %s", serverArgs.Port, serverArgs.FrontAddress)
+	serverConfig, err := config.LoadConfig()
+	agentLoader := agentLoader(serverConfig.GeminiAPIKey)
+	if err != nil {
+		panic(err)
+	}
+	log.Printf("Starting server on port %d", serverConfig.Port)
 	sessionService := sessionservice.Mem()
 
 	router := routers.NewRouter(
@@ -108,7 +108,7 @@ func main() {
 		routers.NewDebugAPIRouter(&handlers.DebugAPIController{}),
 		routers.NewArtifactsAPIRouter(&handlers.ArtifactsAPIController{}),
 	)
-	router.Use(corsWithArgs(serverArgs))
+	router.Use(corsWithArgs(serverConfig))
 
-	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(serverArgs.Port), router))
+	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(serverConfig.Port), router))
 }

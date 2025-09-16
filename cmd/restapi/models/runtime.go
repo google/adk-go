@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"google.golang.org/adk/cmd/restapi/errors"
-	"google.golang.org/adk/cmd/restapi/utils"
 	"google.golang.org/genai"
 )
 
@@ -32,7 +31,7 @@ func (req RunAgentRequest) AssertRunAgentRequestRequired() error {
 		"newMessage": req.NewMessage,
 	}
 	for name, el := range elements {
-		if isZero := utils.IsZeroValue(el); isZero {
+		if isZero := IsZeroValue(el); isZero {
 			return errors.NewStatusError(fmt.Errorf("%s is required", name), http.StatusBadRequest)
 		}
 	}

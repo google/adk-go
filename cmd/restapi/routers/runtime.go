@@ -17,7 +17,6 @@ package routers
 import (
 	"net/http"
 
-	"google.golang.org/adk/cmd/restapi/errors"
 	"google.golang.org/adk/cmd/restapi/handlers"
 )
 
@@ -39,19 +38,19 @@ func (r *RuntimeAPIRouter) Routes() Routes {
 			Name:        "RunAgent",
 			Method:      http.MethodPost,
 			Pattern:     "/run",
-			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgent),
+			HandlerFunc: handlers.FromErrorHandler(r.runtimeController.RunAgent),
 		},
 		Route{
 			Name:        "RunAgentSse",
 			Method:      http.MethodPost,
 			Pattern:     "/run_sse",
-			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgentSSE),
+			HandlerFunc: handlers.FromErrorHandler(r.runtimeController.RunAgentSSE),
 		},
 		Route{
 			Name:        "RunAgentSseOptions",
 			Method:      http.MethodOptions,
 			Pattern:     "/run_sse",
-			HandlerFunc: errors.FromErrorHandler(r.runtimeController.RunAgentSSE),
+			HandlerFunc: handlers.FromErrorHandler(r.runtimeController.RunAgentSSE),
 		},
 	}
 }

@@ -22,7 +22,6 @@ import (
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/restapi/errors"
 	"google.golang.org/adk/cmd/restapi/models"
-	"google.golang.org/adk/cmd/restapi/utils"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
 )
@@ -88,7 +87,7 @@ func (c *SessionsAPIController) CreateSession(rw http.ResponseWriter, req *http.
 	if err != nil {
 		return errors.NewStatusError(err, http.StatusInternalServerError)
 	}
-	utils.EncodeJSONResponse(respSession, http.StatusOK, rw)
+	EncodeJSONResponse(respSession, http.StatusOK, rw)
 	return nil
 }
 
@@ -149,7 +148,7 @@ func (c *SessionsAPIController) GetSession(rw http.ResponseWriter, req *http.Req
 	if err != nil {
 		return errors.NewStatusError(err, http.StatusInternalServerError)
 	}
-	utils.EncodeJSONResponse(respSession, http.StatusOK, rw)
+	EncodeJSONResponse(respSession, http.StatusOK, rw)
 	return nil
 }
 
@@ -179,6 +178,6 @@ func (c *SessionsAPIController) ListSessions(rw http.ResponseWriter, req *http.R
 		}
 		sessions = append(sessions, respSession)
 	}
-	utils.EncodeJSONResponse(sessions, http.StatusOK, rw)
+	EncodeJSONResponse(sessions, http.StatusOK, rw)
 	return nil
 }

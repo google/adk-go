@@ -24,7 +24,6 @@ import (
 	"google.golang.org/adk/cmd/restapi/errors"
 	"google.golang.org/adk/cmd/restapi/models"
 	"google.golang.org/adk/cmd/restapi/services"
-	"google.golang.org/adk/cmd/restapi/utils"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
@@ -72,7 +71,7 @@ func (c *RuntimeAPIController) RunAgent(rw http.ResponseWriter, req *http.Reques
 	if finalErr != nil {
 		return errors.NewStatusError(finalErr, http.StatusInternalServerError)
 	}
-	utils.EncodeJSONResponse(events, http.StatusOK, rw)
+	EncodeJSONResponse(events, http.StatusOK, rw)
 	return nil
 }
 
@@ -143,7 +142,13 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 		return nil, nil, errors.NewStatusError(fmt.Errorf("load agent: %w", err), http.StatusInternalServerError)
 	}
 
-	r, err := runner.New(req.AppName, agent, c.sessionService)
+	r, err := runner.New(
+		&runner.Config{
+			AppName:        req.AppName,
+			Agent:          agent,
+			SessionService: c.sessionService,
+		},
+	)
 	if err != nil {
 		return nil, nil, errors.NewStatusError(fmt.Errorf("create runner: %w", err), http.StatusInternalServerError)
 	}

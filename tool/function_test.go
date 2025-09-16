@@ -25,7 +25,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/modelcontextprotocol/go-sdk/jsonschema"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
@@ -186,6 +186,100 @@ func TestFunctionTool_Simple(t *testing.T) {
 	}
 }
 
+func TestFunctionTool_ReturnsBasicType(t *testing.T) {
+	type Args struct {
+		City string `json:"city"`
+	}
+	resultSet := map[string]string{
+		"london": "The current weather in London is cloudy with a temperature of18 degrees Celsius and a chance of rain.",
+		"paris":  "The weather in Paris is sunny with a temperature of 25 derees Celsius.",
+	}
+
+	weatherReport := func(ctx context.Context, input Args) string {
+		city := strings.ToLower(input.City)
+		if ret, ok := resultSet[city]; ok {
+			return ret
+		}
+		return fmt.Sprintf("Weather information for %q is not available.", city)
+	}
+
+	weatherReportTool, err := tool.NewFunctionTool(
+		tool.FunctionToolConfig{
+			Name:        "get_weather_report",
+			Description: "Retrieves the current weather report for a specified city.",
+		},
+		weatherReport)
+	if err != nil {
+		t.Fatalf("NewFunctionTool failed: %v", err)
+	}
+
+	for _, tc := range []struct {
+		args   map[string]any
+		name   string
+		prompt string
+		want   string
+	}{
+		{
+			args:   map[string]any{"city": "london"},
+			name:   "london",
+			prompt: "Report the current weather of the capital city of U.K.",
+			want:   resultSet["london"],
+		},
+		{
+			args:   map[string]any{"city": "paris"},
+			name:   "paris",
+			prompt: "How is the weather of Paris now?",
+			want:   resultSet["paris"],
+		},
+		{
+			args:   map[string]any{"city": "new york"},
+			name:   "new york",
+			prompt: "Tell me about the current weather in New York",
+			want:   `Weather information for "new york" is not available.`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// TODO: replace with testing using LLMAgent, instead of directly calling the model.
+			var req llm.Request
+			requestProcessor, ok := weatherReportTool.(toolinternal.RequestProcessor)
+			if !ok {
+				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
+			}
+			if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+				t.Fatalf("weatherReportTool.ProcessRequest failed: %v", err)
+			}
+			if req.GenerateConfig == nil || len(req.GenerateConfig.Tools) != 1 {
+				t.Fatalf("weatherReportTool.ProcessRequest did not configure tool info in LLMRequest: %v", req)
+			}
+			// Call the function.
+			funcTool, ok := weatherReportTool.(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
+			}
+			callResult, err := funcTool.Run(nil, tc.args)
+			if err != nil {
+				t.Fatalf("weatherReportTool.Run failed: %v", err)
+			}
+			m, ok := callResult.(map[string]any)
+			if !ok {
+				t.Fatalf("unexpected type for callResult, got: %T", callResult)
+			}
+			got, err := typeutil.ConvertToWithJSONSchema[map[string]any, map[string]string](m, nil)
+			if err != nil {
+				t.Fatalf("weatherReportTool.Run returned unexpected result of type %[1]T: %[1]v", callResult)
+			}
+			gotVal, ok := got["result"]
+			if !ok {
+				t.Fatalf("function response, incorrect %q value", got["result"])
+			}
+			want := tc.want
+			if diff := cmp.Diff(want, gotVal); diff != "" {
+				t.Errorf("weatherReportTool.Run returned unexpected result (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // newGeminiTestClientConfig returns the genai.ClientConfig configured for record and replay.
 func newGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig {
 	t.Helper()
@@ -248,7 +342,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		// Either apple or orange, nothing else.
 		Fruit string `json:"fruit"`
 	}
-	ischema, err := jsonschema.For[Args]()
+	ischema, err := jsonschema.For[Args](nil)
 	if err != nil {
 		t.Fatalf("jsonschema.For[Args]() failed: %v", err)
 	}
@@ -296,8 +390,8 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		if got, want := stringify(decl.ParametersJsonSchema), stringify(ischema); got != want {
 			t.Errorf("inventoryTool function declaration parameter json schema = %q, want %q", got, want)
 		}
-		if got, want := stringify(decl.ResponseJsonSchema), stringify(struct{}{}); got != want {
-			t.Errorf("inventoryTool function declaration parameter json schema = %q, want %q", got, want)
+		if got, want := stringify(decl.ResponseJsonSchema), stringify(&jsonschema.Schema{}); got != want {
+			t.Errorf("inventoryTool function response json schema = %q, want %q", got, want)
 		}
 	})
 
