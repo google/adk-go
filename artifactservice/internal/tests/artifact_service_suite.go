@@ -89,7 +89,7 @@ func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, test
 		}{
 			{"latest", 0, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
 			{"ver=1", 1, genai.NewPartFromBytes([]byte("file v1"), "text/plain")},
-			{"ver=2", 2, genai.NewPartFromBytes([]byte("file v2"), "text/plain")},
+			{"ver=2", 2, genai.NewPartFromText("file v2")},
 		} {
 			got, err := srv.Load(ctx, &as.LoadRequest{
 				AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
@@ -147,7 +147,7 @@ func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, test
 			t.Fatalf("Load('file1') failed: %v", err)
 		}
 		got := resp.Part
-		want := genai.NewPartFromBytes([]byte("file v2"), "text/plain")
+		want := genai.NewPartFromText("file v2")
 		if diff := cmp.Diff(got, want); diff != "" {
 			t.Fatalf("Load('file1') = (%v, %v), want (%v, nil)", got, err, want)
 		}

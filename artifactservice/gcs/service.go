@@ -245,7 +245,10 @@ func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string
 		Prefix: prefix,
 	}
 	// Only fill the atribute Name of the blob, the other attributes will have defaults.
-	query.SetAttrSelection([]string{"Name"})
+	err := query.SetAttrSelection([]string{"Name"})
+	if err != nil {
+		return fmt.Errorf("error setting query atribute selection: %w", err)
+	}
 	blobsIterator := s.bucket.objects(ctx, query)
 
 	for {
