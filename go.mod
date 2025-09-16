@@ -13,6 +13,11 @@ require (
 )
 
 require (
+	github.com/joho/godotenv v1.5.1 // indirect
+	github.com/rs/cors v1.11.1 // indirect
+)
+
+require (
 	cloud.google.com/go v0.116.0 // indirect
 	cloud.google.com/go/auth v0.9.3 // indirect
 	cloud.google.com/go/compute/metadata v0.5.0 // indirect
