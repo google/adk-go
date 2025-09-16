@@ -26,9 +26,9 @@ import (
 // Session represents an agent's session.
 type Session struct {
 	ID        string         `json:"id"`
-	AppName   string         `json:"app_name"`
-	UserID    string         `json:"user_id"`
-	UpdatedAt time.Time      `json:"updated_at"`
+	AppName   string         `json:"appName"`
+	UserID    string         `json:"userId"`
+	UpdatedAt time.Time      `json:"lastUpdateTime"`
 	Events    []Event        `json:"events"`
 	State     map[string]any `json:"state"`
 }
