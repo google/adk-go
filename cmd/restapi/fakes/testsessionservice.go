@@ -90,8 +90,6 @@ type FakeSessionService struct {
 }
 
 func (s *FakeSessionService) Create(ctx context.Context, req *sessionservice.CreateRequest) (*sessionservice.CreateResponse, error) {
-	fmt.Printf("sessions: %v\n", s.Sessions)
-	fmt.Printf("req: %v\n", req)
 	if _, ok := s.Sessions[session.ID{AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID}]; ok {
 		return nil, fmt.Errorf("session already exists")
 	}

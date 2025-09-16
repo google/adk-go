@@ -16,6 +16,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"google.golang.org/adk/cmd/restapi/errors"
@@ -35,4 +36,22 @@ func FromErrorHandler(fn errorHandler) http.HandlerFunc {
 			}
 		}
 	}
+}
+
+func unimplemented(rw http.ResponseWriter, req *http.Request) {
+	rw.WriteHeader(http.StatusNotImplemented)
+}
+
+// EncodeJSONResponse uses the json encoder to write an interface to the http response with an optional status code
+func EncodeJSONResponse(i any, status int, w http.ResponseWriter) error {
+	wHeader := w.Header()
+	wHeader.Set("Content-Type", "application/json; charset=UTF-8")
+
+	w.WriteHeader(status)
+
+	if i != nil {
+		return json.NewEncoder(w).Encode(i)
+	}
+
+	return nil
 }

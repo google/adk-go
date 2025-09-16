@@ -44,20 +44,26 @@ type SessionID struct {
 	UserID  string `mapstructure:"user_id,required"`
 }
 
-func SessionIDFromHTTPParameters(vars map[string]string) (*SessionID, error) {
+func SessionIDFromHTTPParameters(vars map[string]string) (SessionID, error) {
 	var sessionID SessionID
 	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
 		WeaklyTypedInput: true,
 		Result:           &sessionID,
 	})
 	if err != nil {
-		return nil, err
+		return sessionID, err
 	}
 	err = decoder.Decode(vars)
 	if err != nil {
-		return nil, err
+		return sessionID, err
 	}
-	return &sessionID, nil
+	if sessionID.AppName == "" {
+		return sessionID, fmt.Errorf("app_name parameter is required")
+	}
+	if sessionID.UserID == "" {
+		return sessionID, fmt.Errorf("user_id parameter is required")
+	}
+	return sessionID, nil
 }
 
 func FromSession(session sessionservice.StoredSession) (Session, error) {
