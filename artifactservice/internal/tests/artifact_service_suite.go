@@ -61,7 +61,7 @@ func testArtifactService(ctx context.Context, t *testing.T, srv as.Service, test
 	}{
 		// file1.
 		{"file1", 1, genai.NewPartFromBytes([]byte("file v1"), "text/plain")},
-		{"file1", 2, genai.NewPartFromBytes([]byte("file v2"), "text/plain")},
+		{"file1", 2, genai.NewPartFromText("file v2")},
 		{"file1", 3, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
 		// file2.
 		{"file2", 1, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},

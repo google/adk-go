@@ -92,6 +92,10 @@ func (req *SaveRequest) Validate() error {
 	if len(missingFields) > 0 {
 		return fmt.Errorf("invalid save request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
+
+	if req.Part.Text == "" && req.Part.InlineData == nil {
+		return fmt.Errorf("invalid save request: Part.InlineData or Part.Text have to be set")
+	}
 	return nil
 }
 

@@ -39,13 +39,24 @@ func TestSaveRequest_Validate(t *testing.T) {
 	// Define test cases
 	testCases := []ValidatorTestCase{
 		{
-			name: "Valid request",
+			name: "Valid request from bytes",
 			req: &SaveRequest{
 				AppName:   "MyApp",
 				UserID:    "user-123",
 				SessionID: "sess-abc",
 				FileName:  "file.txt",
 				Part:      genai.NewPartFromBytes([]byte("data"), "text/plain"),
+			},
+			wantErr: false,
+		},
+		{
+			name: "Valid request from text",
+			req: &SaveRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+				Part:      genai.NewPartFromText("data"),
 			},
 			wantErr: false,
 		},
@@ -80,6 +91,18 @@ func TestSaveRequest_Validate(t *testing.T) {
 			},
 			wantErr:    true,
 			wantErrMsg: "invalid save request: missing required fields: Part",
+		},
+		{
+			name: "Missing Part.Inline (nil slice)",
+			req: &SaveRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+				Part:      genai.NewPartFromFunctionCall("example", nil),
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid save request: Part.InlineData or Part.Text have to be set",
 		},
 		{
 			name:       "Completely empty request",

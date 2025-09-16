@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"cloud.google.com/go/storage"
+	"golang.org/x/sync/errgroup"
 	as "google.golang.org/adk/artifactservice"
 	"google.golang.org/api/iterator"
 	"google.golang.org/genai"
@@ -40,10 +41,9 @@ type gcsService struct {
 
 // NewGCSArtifactService creates a gcsService for the specified bucket using a default client
 func NewGCSArtifactService(ctx context.Context, bucketName string) (as.Service, error) {
-	var err error
 	storageClient, err := storage.NewClient(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create gcs service: %w", err)
 	}
 	// Wrap the real client
 	clientWrapper := &gcsClientWrapper{client: storageClient}
@@ -54,17 +54,6 @@ func NewGCSArtifactService(ctx context.Context, bucketName string) (as.Service, 
 		bucket:        clientWrapper.bucket(bucketName),
 	}
 
-	return s, nil
-}
-
-// newGCSArtifactServiceForTesting creates a gcsService for the specified bucket using a mocked inmemory client
-func newGCSArtifactServiceForTesting(ctx context.Context, bucketName string) (as.Service, error) {
-	client := newFakeClient()
-	s := &gcsService{
-		bucketName:    bucketName,
-		storageClient: client,
-		bucket:        client.bucket(bucketName),
-	}
 	return s, nil
 }
 
@@ -103,9 +92,6 @@ func (s *gcsService) Save(ctx context.Context, req *as.SaveRequest) (_ *as.SaveR
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	artifact := req.Part
-	if artifact.InlineData == nil {
-		return nil, fmt.Errorf("failed to save to GCS: Part.InlineData cannot be nil")
-	}
 
 	nextVersion := int64(1)
 
@@ -115,7 +101,7 @@ func (s *gcsService) Save(ctx context.Context, req *as.SaveRequest) (_ *as.SaveR
 		AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID, FileName: req.FileName,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list artifact versions: %w", err)
 	}
 	if len(response.Versions) > 0 {
 		nextVersion = slices.Max(response.Versions) + 1
@@ -129,10 +115,16 @@ func (s *gcsService) Save(ctx context.Context, req *as.SaveRequest) (_ *as.SaveR
 		}
 	}()
 
-	writer.SetContentType(artifact.InlineData.MIMEType)
-
-	if _, err := writer.Write(artifact.InlineData.Data); err != nil {
-		return nil, fmt.Errorf("failed to write to GCS: %w", err)
+	if artifact.InlineData != nil {
+		writer.SetContentType(artifact.InlineData.MIMEType)
+		if _, err := writer.Write(artifact.InlineData.Data); err != nil {
+			return nil, fmt.Errorf("failed to write blob to GCS: %w", err)
+		}
+	} else {
+		writer.SetContentType("text/plain")
+		if _, err := writer.Write([]byte(artifact.Text)); err != nil {
+			return nil, fmt.Errorf("failed to write text to GCS: %w", err)
+		}
 	}
 
 	return &as.SaveResponse{Version: nextVersion}, nil
@@ -146,11 +138,13 @@ func (s *gcsService) Delete(ctx context.Context, req *as.DeleteRequest) error {
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
 
-	//Delete specific version
+	// Delete specific version
 	if version != 0 {
 		blobName := buildBlobName(appName, userID, sessionID, fileName, version)
-		obj := s.bucket.object(blobName)
-		return obj.delete(ctx)
+		if err := s.bucket.object(blobName).delete(ctx); err != nil {
+			return fmt.Errorf("failed to delete artifact: %w", err)
+		}
+		return nil
 	}
 
 	// Delete all versions
@@ -158,15 +152,27 @@ func (s *gcsService) Delete(ctx context.Context, req *as.DeleteRequest) error {
 		AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID, FileName: req.FileName,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to fetch versions on delete artifact: %w", err)
 	}
+
+	g, gctx := errgroup.WithContext(ctx)
+
+	// delete versions in parallel
 	for _, version := range response.Versions {
-		blobName := buildBlobName(appName, userID, sessionID, fileName, version)
-		// Delete the object using its full name
-		obj := s.bucket.object(blobName)
-		if err := obj.delete(ctx); err != nil {
-			return fmt.Errorf("failed to delete object %s: %w", blobName, err)
-		}
+		v := version //capture loop variable for goroutine
+
+		g.Go(func() error {
+			blobName := buildBlobName(appName, userID, sessionID, fileName, v)
+			obj := s.bucket.object(blobName)
+			if err := obj.delete(gctx); err != nil {
+				return fmt.Errorf("failed to delete artifact %s: %w", blobName, err)
+			}
+			return nil // nil error indicates success for this goroutine
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
 	}
 
 	return nil
@@ -180,12 +186,12 @@ func (s *gcsService) Load(ctx context.Context, req *as.LoadRequest) (_ *as.LoadR
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
 
-	if version <= 0 {
+	if version == 0 {
 		response, err := s.versions(ctx, &as.VersionsRequest{
 			AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID, FileName: req.FileName,
 		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to list artifact versions: %w", err)
 		}
 		if len(response.Versions) == 0 {
 			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
@@ -238,6 +244,8 @@ func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string
 	query := &storage.Query{
 		Prefix: prefix,
 	}
+	// Only fill the atribute Name of the blob, the other attributes will have defaults.
+	query.SetAttrSelection([]string{"Name"})
 	blobsIterator := s.bucket.objects(ctx, query)
 
 	for {
@@ -248,10 +256,9 @@ func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string
 		if err != nil {
 			return fmt.Errorf("error iterating blobs: %w", err)
 		}
-
 		segments := strings.Split(blob.Name, "/")
 		if len(segments) < 2 {
-			return fmt.Errorf("error iterating blobs: incorrect number of segments in path")
+			return fmt.Errorf("error iterating blobs: incorrect number of segments in path %q", blob.Name)
 		}
 		// TODO agent can create files with multiple segments for example file a/b.txt
 		// This a/b.txt file will show as b.txt when listed and trying to load it will fail.
@@ -273,13 +280,13 @@ func (s *gcsService) List(ctx context.Context, req *as.ListRequest) (*as.ListRes
 	// Fetch filenames for the session.
 	err = s.fetchFilenamesFromPrefix(ctx, buildSessionPrefix(appName, userID, sessionID), filenamesSet)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to fetch session filenames: %w", err)
 	}
 
 	// Fetch filenames for the user.
 	err = s.fetchFilenamesFromPrefix(ctx, buildUserPrefix(appName, userID), filenamesSet)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to fetch user filenames: %w", err)
 	}
 
 	filenames := slices.Collect(maps.Keys(filenamesSet))
@@ -312,7 +319,7 @@ func (s *gcsService) versions(ctx context.Context, req *as.VersionsRequest) (*as
 		}
 		segments := strings.Split(blob.Name, "/")
 		if len(segments) < 1 {
-			return nil, fmt.Errorf("error iterating blobs: incorrect number of segments in path")
+			return nil, fmt.Errorf("error iterating blobs: incorrect number of segments in path %q", blob.Name)
 		}
 		version, err := strconv.ParseInt(segments[len(segments)-1], 10, 64)
 		//if the file version is not convertable to number, just ignore it
@@ -328,13 +335,10 @@ func (s *gcsService) versions(ctx context.Context, req *as.VersionsRequest) (*as
 func (s *gcsService) Versions(ctx context.Context, req *as.VersionsRequest) (*as.VersionsResponse, error) {
 	response, err := s.versions(ctx, req)
 	if err != nil {
-		return response, err
+		return nil, err
 	}
 	if len(response.Versions) == 0 {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
-	return response, err
+	return response, nil
 }
-
-// Ensure interface implementation
-var _ as.Service = (*gcsService)(nil)
