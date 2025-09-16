@@ -26,27 +26,27 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/gorilla/mux"
+	"google.golang.org/adk/cmd/restapi/fakes"
 	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/models"
-	"google.golang.org/adk/cmd/restapi/utils"
 	"google.golang.org/adk/session"
 )
 
 func TestGetSession(t *testing.T) {
 	tc := []struct {
 		name           string
-		storedSessions map[session.ID]utils.TestSession
+		storedSessions map[session.ID]fakes.TestSession
 		sessionID      session.ID
 		wantSession    models.Session
 		wantErr        error
 	}{
 		{
 			name: "session exists",
-			storedSessions: map[session.ID]utils.TestSession{
+			storedSessions: map[session.ID]fakes.TestSession{
 				sessionID("testApp", "testUser", "testSession"): {
 					Id:            sessionID("testApp", "testUser", "testSession"),
-					SessionState:  utils.TestState{"foo": "bar"},
-					SessionEvents: utils.TestEvents{},
+					SessionState:  fakes.TestState{"foo": "bar"},
+					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 			},
@@ -64,17 +64,17 @@ func TestGetSession(t *testing.T) {
 		},
 		{
 			name:           "session does not exist",
-			storedSessions: map[session.ID]utils.TestSession{},
+			storedSessions: map[session.ID]fakes.TestSession{},
 			sessionID:      sessionID("testApp", "testUser", "testSession"),
 			wantErr:        fmt.Errorf("not found"),
 		},
 		{
 			name: "session ID is missing in input",
-			storedSessions: map[session.ID]utils.TestSession{
+			storedSessions: map[session.ID]fakes.TestSession{
 				sessionID("testApp", "testUser", "testSession"): {
 					Id:            sessionID("testApp", "testUser", "testSession"),
-					SessionState:  utils.TestState{"foo": "bar"},
-					SessionEvents: utils.TestEvents{},
+					SessionState:  fakes.TestState{"foo": "bar"},
+					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 			},
@@ -83,11 +83,11 @@ func TestGetSession(t *testing.T) {
 		},
 		{
 			name: "session ID is missing",
-			storedSessions: map[session.ID]utils.TestSession{
+			storedSessions: map[session.ID]fakes.TestSession{
 				sessionID("testApp", "testUser", "testSession"): {
 					Id:            sessionID("testApp", "testUser", ""),
-					SessionState:  utils.TestState{"foo": "bar"},
-					SessionEvents: utils.TestEvents{},
+					SessionState:  fakes.TestState{"foo": "bar"},
+					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 			},
@@ -98,7 +98,7 @@ func TestGetSession(t *testing.T) {
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
-			sessionService := utils.FakeSessionService{Sessions: tt.storedSessions}
+			sessionService := fakes.FakeSessionService{Sessions: tt.storedSessions}
 			apiController := handlers.NewSessionsAPIController(&sessionService)
 			req, err := http.NewRequest(http.MethodGet, "/apps/testApp/users/testUser/sessions/testSession", nil)
 			if err != nil {
@@ -138,7 +138,7 @@ func TestGetSession(t *testing.T) {
 func TestCreateSession(t *testing.T) {
 	tc := []struct {
 		name             string
-		storedSessions   map[session.ID]utils.TestSession
+		storedSessions   map[session.ID]fakes.TestSession
 		sessionID        session.ID
 		createRequestObj models.CreateSessionRequest
 		wantSession      models.Session
@@ -146,11 +146,11 @@ func TestCreateSession(t *testing.T) {
 	}{
 		{
 			name: "session exists",
-			storedSessions: map[session.ID]utils.TestSession{
+			storedSessions: map[session.ID]fakes.TestSession{
 				sessionID("testApp", "testUser", "testSession"): {
 					Id:            sessionID("testApp", "testUser", "testSession"),
-					SessionState:  utils.TestState{"foo": "bar"},
-					SessionEvents: utils.TestEvents{},
+					SessionState:  fakes.TestState{"foo": "bar"},
+					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 			},
@@ -159,7 +159,7 @@ func TestCreateSession(t *testing.T) {
 		},
 		{
 			name:           "successful create operation",
-			storedSessions: map[session.ID]utils.TestSession{},
+			storedSessions: map[session.ID]fakes.TestSession{},
 			sessionID:      sessionID("testApp", "testUser", "testSession"),
 			createRequestObj: models.CreateSessionRequest{
 				State: map[string]any{
@@ -194,7 +194,7 @@ func TestCreateSession(t *testing.T) {
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
-			sessionService := utils.FakeSessionService{Sessions: tt.storedSessions}
+			sessionService := fakes.FakeSessionService{Sessions: tt.storedSessions}
 			apiController := handlers.NewSessionsAPIController(&sessionService)
 			reqBytes, err := json.Marshal(tt.createRequestObj)
 			if err != nil {
@@ -238,17 +238,17 @@ func TestCreateSession(t *testing.T) {
 func TestDeleteSession(t *testing.T) {
 	tc := []struct {
 		name           string
-		storedSessions map[session.ID]utils.TestSession
+		storedSessions map[session.ID]fakes.TestSession
 		sessionID      session.ID
 		wantErr        error
 	}{
 		{
 			name: "session exists",
-			storedSessions: map[session.ID]utils.TestSession{
+			storedSessions: map[session.ID]fakes.TestSession{
 				sessionID("testApp", "testUser", "testSession"): {
 					Id:            sessionID("testApp", "testUser", "testSession"),
-					SessionState:  utils.TestState{"foo": "bar"},
-					SessionEvents: utils.TestEvents{},
+					SessionState:  fakes.TestState{"foo": "bar"},
+					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 			},
@@ -256,7 +256,7 @@ func TestDeleteSession(t *testing.T) {
 		},
 		{
 			name:           "session does not exist",
-			storedSessions: map[session.ID]utils.TestSession{},
+			storedSessions: map[session.ID]fakes.TestSession{},
 			sessionID:      sessionID("testApp", "testUser", "testSession"),
 			wantErr:        fmt.Errorf("not found"),
 		},
@@ -264,7 +264,7 @@ func TestDeleteSession(t *testing.T) {
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
-			sessionService := utils.FakeSessionService{Sessions: tt.storedSessions}
+			sessionService := fakes.FakeSessionService{Sessions: tt.storedSessions}
 			apiController := handlers.NewSessionsAPIController(&sessionService)
 			req, err := http.NewRequest(http.MethodDelete, "/apps/testApp/users/testUser/sessions/testSession", nil)
 			if err != nil {
@@ -299,28 +299,28 @@ func TestDeleteSession(t *testing.T) {
 func TestListSessions(t *testing.T) {
 	tc := []struct {
 		name           string
-		storedSessions map[session.ID]utils.TestSession
+		storedSessions map[session.ID]fakes.TestSession
 		wantSessions   []models.Session
 	}{
 		{
 			name: "session exists",
-			storedSessions: map[session.ID]utils.TestSession{
+			storedSessions: map[session.ID]fakes.TestSession{
 				sessionID("testApp", "testUser", "testSession"): {
 					Id:            sessionID("testApp", "testUser", "testSession"),
-					SessionState:  utils.TestState{"foo": "bar"},
-					SessionEvents: utils.TestEvents{},
+					SessionState:  fakes.TestState{"foo": "bar"},
+					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 				sessionID("testApp", "testUser", "newSession"): {
 					Id:            sessionID("testApp", "testUser", "newSession"),
-					SessionState:  utils.TestState{"xyz": "abc"},
-					SessionEvents: utils.TestEvents{},
+					SessionState:  fakes.TestState{"xyz": "abc"},
+					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 				sessionID("testApp", "testUser", "oldSession"): {
 					Id:            sessionID("testApp", "testUser", "oldSession"),
-					SessionState:  utils.TestState{},
-					SessionEvents: utils.TestEvents{},
+					SessionState:  fakes.TestState{},
+					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 			},
@@ -359,7 +359,7 @@ func TestListSessions(t *testing.T) {
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
-			sessionService := utils.FakeSessionService{Sessions: tt.storedSessions}
+			sessionService := fakes.FakeSessionService{Sessions: tt.storedSessions}
 			apiController := handlers.NewSessionsAPIController(&sessionService)
 			req, err := http.NewRequest(http.MethodDelete, "/apps/testApp/users/testUser/sessions/testSession", nil)
 			if err != nil {
