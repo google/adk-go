@@ -125,6 +125,23 @@ func Must[T agent.Agent](a T, err error) T {
 	return a
 }
 
+func AppendInstructions(r *llm.Request, instructions ...string) {
+	if len(instructions) == 0 {
+		return
+	}
+
+	inst := strings.Join(instructions, "\n\n")
+
+	if r.GenerateConfig == nil {
+		r.GenerateConfig = &genai.GenerateContentConfig{}
+	}
+	if current := r.GenerateConfig.SystemInstruction; current != nil && len(current.Parts) > 0 && current.Parts[0].Text != "" {
+		r.GenerateConfig.SystemInstruction = genai.NewContentFromText(current.Parts[0].Text+"\n\n"+inst, "")
+	} else {
+		r.GenerateConfig.SystemInstruction = genai.NewContentFromText(inst, "")
+	}
+}
+
 // IsFinalResponse returns whether the LLMResponse in the event is the final response.
 func IsFinalResponse(ev *session.Event) bool {
 	if (ev.Actions.SkipSummarization) || len(ev.LongRunningToolIDs) > 0 {

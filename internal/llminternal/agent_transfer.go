@@ -23,6 +23,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/toolinternal"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -81,7 +82,7 @@ func AgentTransferRequestProcessor(ctx agent.Context, req *llm.Request) error {
 	if err != nil {
 		return err
 	}
-	appendInstructions(req, si)
+	utils.AppendInstructions(req, si)
 	return appendTools(req, transferToAgentTool)
 }
 

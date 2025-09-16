@@ -219,7 +219,7 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 				IncludeContents: tc.includeContents,
 			}))
 
-			ctx := agent.NewContext(t.Context(), testAgent, nil, &fakeSession{
+			ctx := agent.NewContext(t.Context(), testAgent, nil, nil, &fakeSession{
 				events: tc.events,
 			}, "")
 
@@ -368,7 +368,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 				Model: model,
 			}))
 
-			ctx := agent.NewContext(t.Context(), testAgent, nil, &fakeSession{
+			ctx := agent.NewContext(t.Context(), testAgent, nil, nil, &fakeSession{
 				events: tc.events,
 			}, tc.branch)
 
@@ -494,7 +494,7 @@ func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 		Name: "test_agent",
 	}))
 
-	ctx := agent.NewContext(t.Context(), testAgent, nil, nil, "")
+	ctx := agent.NewContext(t.Context(), testAgent, nil, nil, nil, "")
 
 	req := &llm.Request{}
 	if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {

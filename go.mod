@@ -12,9 +12,11 @@ require (
 	rsc.io/ordered v1.1.1
 )
 
+require github.com/google/jsonschema-go v0.2.0
+
 require (
-	github.com/joho/godotenv v1.5.1 // indirect
-	github.com/rs/cors v1.11.1 // indirect
+	github.com/joho/godotenv v1.5.1
+	github.com/rs/cors v1.11.1
 )
 
 require (
@@ -25,7 +27,6 @@ require (
 	github.com/google/s2a-go v0.1.8 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/modelcontextprotocol/go-sdk v0.0.0-20250625185707-09181c2c2e89
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/crypto v0.39.0 // indirect
 	golang.org/x/net v0.41.0 // indirect

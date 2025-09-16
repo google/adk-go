@@ -73,6 +73,7 @@ type Artifacts interface {
 	Save(name string, data genai.Part) error
 	Load(name string) (genai.Part, error)
 	LoadVersion(name string, version int) (genai.Part, error)
+	List() ([]string, error)
 }
 
 type BeforeAgentCallback func(Context) (*genai.Content, error)
@@ -102,7 +103,7 @@ func (a *agent) SubAgents() []Agent {
 func (a *agent) Run(ctx Context) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: verify&update the setup here. Should we branch etc.
-		ctx := NewContext(ctx, a, ctx.UserContent(), ctx.Session(), ctx.Branch())
+		ctx := NewContext(ctx, a, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Branch())
 
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
