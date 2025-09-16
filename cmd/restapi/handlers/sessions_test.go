@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,7 @@ func TestGetSession(t *testing.T) {
 		sessionID      session.ID
 		wantSession    models.Session
 		wantErr        error
+		wantStatus     int
 	}{
 		{
 			name: "session exists",
@@ -61,15 +63,17 @@ func TestGetSession(t *testing.T) {
 					"foo": "bar",
 				},
 			},
+			wantStatus: http.StatusOK,
 		},
 		{
 			name:           "session does not exist",
 			storedSessions: map[session.ID]fakes.TestSession{},
 			sessionID:      sessionID("testApp", "testUser", "testSession"),
 			wantErr:        fmt.Errorf("not found"),
+			wantStatus:     http.StatusInternalServerError,
 		},
 		{
-			name: "session ID is missing in input",
+			name: "user ID is missing in input",
 			storedSessions: map[session.ID]fakes.TestSession{
 				sessionID("testApp", "testUser", "testSession"): {
 					Id:            sessionID("testApp", "testUser", "testSession"),
@@ -78,8 +82,9 @@ func TestGetSession(t *testing.T) {
 					UpdatedAt:     time.Now(),
 				},
 			},
-			sessionID: sessionID("testApp", "testUser", ""),
-			wantErr:   fmt.Errorf("session_id parameter is required"),
+			sessionID:  sessionID("testApp", "", "testSession"),
+			wantErr:    fmt.Errorf("user_id parameter is required"),
+			wantStatus: http.StatusBadRequest,
 		},
 		{
 			name: "session ID is missing",
@@ -91,8 +96,9 @@ func TestGetSession(t *testing.T) {
 					UpdatedAt:     time.Now(),
 				},
 			},
-			sessionID: sessionID("testApp", "testUser", "testSession"),
-			wantErr:   fmt.Errorf("session_id is empty in received session"),
+			sessionID:  sessionID("testApp", "testUser", "testSession"),
+			wantErr:    fmt.Errorf("session_id is empty in received session"),
+			wantStatus: http.StatusInternalServerError,
 		},
 	}
 
@@ -108,20 +114,17 @@ func TestGetSession(t *testing.T) {
 			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
 			rr := httptest.NewRecorder()
 
-			err = apiController.GetSession(rr, req)
-			if tt.wantErr == nil && err != nil {
-				t.Fatalf("get session: %v", err)
-			} else if tt.wantErr != nil {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if err.Error() != tt.wantErr.Error() {
-					t.Fatalf("expected error %q, got %q", tt.wantErr, err)
+			apiController.GetSessionHTTP(rr, req)
+
+			if status := rr.Code; status != tt.wantStatus {
+				t.Fatalf("handler returned wrong status code: got %v want %v", status, tt.wantStatus)
+			}
+			if tt.wantErr != nil {
+				respErr := strings.Trim(rr.Body.String(), "\n")
+				if tt.wantErr.Error() != respErr {
+					t.Errorf("CreateSession() mismatch (-want +got):\n%v, %v", tt.wantErr.Error(), respErr)
 				}
 				return
-			}
-			if status := rr.Code; status != http.StatusOK {
-				t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
 			}
 			var gotSession models.Session
 			err = json.NewDecoder(rr.Body).Decode(&gotSession)
@@ -143,6 +146,7 @@ func TestCreateSession(t *testing.T) {
 		createRequestObj models.CreateSessionRequest
 		wantSession      models.Session
 		wantErr          error
+		wantStatus       int
 	}{
 		{
 			name: "session exists",
@@ -154,8 +158,9 @@ func TestCreateSession(t *testing.T) {
 					UpdatedAt:     time.Now(),
 				},
 			},
-			sessionID: sessionID("testApp", "testUser", "testSession"),
-			wantErr:   fmt.Errorf("session already exists"),
+			sessionID:  sessionID("testApp", "testUser", "testSession"),
+			wantErr:    fmt.Errorf("session already exists"),
+			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:           "successful create operation",
@@ -189,6 +194,15 @@ func TestCreateSession(t *testing.T) {
 					},
 				},
 			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:             "user id is missing",
+			storedSessions:   map[session.ID]fakes.TestSession{},
+			sessionID:        sessionID("testApp", "", "testSession"),
+			createRequestObj: models.CreateSessionRequest{},
+			wantStatus:       http.StatusBadRequest,
+			wantErr:          fmt.Errorf("user_id parameter is required"),
 		},
 	}
 
@@ -208,20 +222,17 @@ func TestCreateSession(t *testing.T) {
 			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
 			rr := httptest.NewRecorder()
 
-			err = apiController.CreateSession(rr, req)
-			if tt.wantErr == nil && err != nil {
-				t.Fatalf("create session: %v", err)
-			} else if tt.wantErr != nil {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if err.Error() != tt.wantErr.Error() {
-					t.Fatalf("expected error %q, got %q", tt.wantErr, err)
+			apiController.CreateSessionHTTP(rr, req)
+
+			if status := rr.Code; status != tt.wantStatus {
+				t.Errorf("handler returned wrong status code: got %v want %v", status, tt.wantStatus)
+			}
+			if tt.wantErr != nil {
+				respErr := strings.Trim(rr.Body.String(), "\n")
+				if tt.wantErr.Error() != respErr {
+					t.Errorf("CreateSession() mismatch (-want +got):\n%v, %v", tt.wantErr.Error(), respErr)
 				}
 				return
-			}
-			if status := rr.Code; status != http.StatusOK {
-				t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
 			}
 			var gotSession models.Session
 			err = json.NewDecoder(rr.Body).Decode(&gotSession)
@@ -229,7 +240,7 @@ func TestCreateSession(t *testing.T) {
 				t.Fatalf("decode response: %v", err)
 			}
 			if diff := cmp.Diff(tt.wantSession, gotSession, cmpopts.EquateApproxTime(time.Second)); diff != "" {
-				t.Errorf("GetSession() mismatch (-want +got):\n%s", diff)
+				t.Errorf("CreateSession() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -240,7 +251,7 @@ func TestDeleteSession(t *testing.T) {
 		name           string
 		storedSessions map[session.ID]fakes.TestSession
 		sessionID      session.ID
-		wantErr        error
+		wantStatus     int
 	}{
 		{
 			name: "session exists",
@@ -252,13 +263,14 @@ func TestDeleteSession(t *testing.T) {
 					UpdatedAt:     time.Now(),
 				},
 			},
-			sessionID: sessionID("testApp", "testUser", "testSession"),
+			sessionID:  sessionID("testApp", "testUser", "testSession"),
+			wantStatus: http.StatusOK,
 		},
 		{
 			name:           "session does not exist",
 			storedSessions: map[session.ID]fakes.TestSession{},
 			sessionID:      sessionID("testApp", "testUser", "testSession"),
-			wantErr:        fmt.Errorf("not found"),
+			wantStatus:     http.StatusInternalServerError,
 		},
 	}
 
@@ -274,20 +286,9 @@ func TestDeleteSession(t *testing.T) {
 			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
 			rr := httptest.NewRecorder()
 
-			err = apiController.DeleteSession(rr, req)
-			if tt.wantErr == nil && err != nil {
-				t.Fatalf("get session: %v", err)
-			} else if tt.wantErr != nil {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if err.Error() != tt.wantErr.Error() {
-					t.Fatalf("expected error %q, got %q", tt.wantErr, err)
-				}
-				return
-			}
-			if status := rr.Code; status != http.StatusOK {
-				t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+			apiController.DeleteSessionHTTP(rr, req)
+			if status := rr.Code; status != tt.wantStatus {
+				t.Fatalf("handler returned wrong status code: got %v want %v", status, tt.wantStatus)
 			}
 			if _, ok := sessionService.Sessions[tt.sessionID]; ok {
 				t.Errorf("session was not deleted")
@@ -301,6 +302,7 @@ func TestListSessions(t *testing.T) {
 		name           string
 		storedSessions map[session.ID]fakes.TestSession
 		wantSessions   []models.Session
+		wantStatus     int
 	}{
 		{
 			name: "session exists",
@@ -354,6 +356,7 @@ func TestListSessions(t *testing.T) {
 					Events:    []models.Event{},
 				},
 			},
+			wantStatus: http.StatusOK,
 		},
 	}
 
@@ -372,12 +375,9 @@ func TestListSessions(t *testing.T) {
 			})
 			rr := httptest.NewRecorder()
 
-			err = apiController.ListSessions(rr, req)
-			if err != nil {
-				t.Fatalf("get session: %v", err)
-			}
-			if status := rr.Code; status != http.StatusOK {
-				t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+			apiController.ListSessionsHTTP(rr, req)
+			if status := rr.Code; status != tt.wantStatus {
+				t.Fatalf("handler returned wrong status code: got %v want %v", status, tt.wantStatus)
 			}
 			got := []models.Session{}
 			err = json.NewDecoder(rr.Body).Decode(&got)

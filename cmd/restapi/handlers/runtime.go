@@ -17,7 +17,6 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	goerr "errors"
 	"fmt"
 	"net/http"
 
@@ -40,39 +39,45 @@ func NewRuntimeAPIRouter(sessionService sessionservice.Service, agentLoader serv
 }
 
 // RunAgent executes a non-streaming agent run for a given session and message.
-func (c *RuntimeAPIController) RunAgent(rw http.ResponseWriter, req *http.Request) error {
+func (c *RuntimeAPIController) RunAgentHTTP(rw http.ResponseWriter, req *http.Request) error {
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
 		return err
 	}
-
-	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
+	sessionEvents, err := c.runAgent(req.Context(), runAgentRequest)
 	if err != nil {
 		return err
+	}
+	var events []models.Event
+	for _, event := range sessionEvents {
+		events = append(events, models.FromSessionEvent(*event))
+	}
+	EncodeJSONResponse(events, http.StatusOK, rw)
+	return nil
+}
+
+// RunAgent executes a non-streaming agent run for a given session and message.
+func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest models.RunAgentRequest) ([]*session.Event, error) {
+	err := c.validateSessionExists(ctx, runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
+	if err != nil {
+		return nil, err
 	}
 
 	r, rCfg, err := c.getRunner(runAgentRequest)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, rCfg)
+	resp := r.Run(ctx, runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, rCfg)
 
-	var errs []error
-	var events []models.Event
+	var events []*session.Event
 	for event, err := range resp {
 		if err != nil {
-			errs = append(errs, err)
-			continue
+			return nil, errors.NewStatusError(fmt.Errorf("run agent: %w", err), http.StatusInternalServerError)
 		}
-		events = append(events, models.FromSessionEvent(*event))
+		events = append(events, event)
 	}
-	finalErr := goerr.Join(errs...)
-	if finalErr != nil {
-		return errors.NewStatusError(finalErr, http.StatusInternalServerError)
-	}
-	EncodeJSONResponse(events, http.StatusOK, rw)
-	return nil
+	return events, nil
 }
 
 // RunAgentSSE executes an agent run and streams the resulting events using Server-Sent Events (SSE).

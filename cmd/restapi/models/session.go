@@ -19,15 +19,16 @@ import (
 	"maps"
 	"time"
 
+	"github.com/cmatthias/mapstructure"
 	"google.golang.org/adk/sessionservice"
 )
 
 // Session represents an agent's session.
 type Session struct {
 	ID        string         `json:"id"`
-	AppName   string         `json:"app_name"`
-	UserID    string         `json:"user_id"`
-	UpdatedAt time.Time      `json:"updated_at"`
+	AppName   string         `json:"appName"`
+	UserID    string         `json:"userId"`
+	UpdatedAt time.Time      `json:"lastUpdateTime"`
 	Events    []Event        `json:"events"`
 	State     map[string]any `json:"state"`
 }
@@ -35,6 +36,34 @@ type Session struct {
 type CreateSessionRequest struct {
 	State  map[string]any `json:"state"`
 	Events []Event        `json:"events"`
+}
+
+type SessionID struct {
+	ID      string `mapstructure:"session_id,optional"`
+	AppName string `mapstructure:"app_name,required"`
+	UserID  string `mapstructure:"user_id,required"`
+}
+
+func SessionIDFromHTTPParameters(vars map[string]string) (SessionID, error) {
+	var sessionID SessionID
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		WeaklyTypedInput: true,
+		Result:           &sessionID,
+	})
+	if err != nil {
+		return sessionID, err
+	}
+	err = decoder.Decode(vars)
+	if err != nil {
+		return sessionID, err
+	}
+	if sessionID.AppName == "" {
+		return sessionID, fmt.Errorf("app_name parameter is required")
+	}
+	if sessionID.UserID == "" {
+		return sessionID, fmt.Errorf("user_id parameter is required")
+	}
+	return sessionID, nil
 }
 
 func FromSession(session sessionservice.StoredSession) (Session, error) {

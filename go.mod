@@ -15,6 +15,7 @@ require (
 require github.com/google/jsonschema-go v0.2.0
 
 require (
+	github.com/cmatthias/mapstructure v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/rs/cors v1.11.1
 )

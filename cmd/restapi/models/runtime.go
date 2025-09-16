@@ -2,9 +2,7 @@ package models
 
 import (
 	"fmt"
-	"net/http"
 
-	"google.golang.org/adk/cmd/restapi/errors"
 	"google.golang.org/genai"
 )
 
@@ -32,7 +30,7 @@ func (req RunAgentRequest) AssertRunAgentRequestRequired() error {
 	}
 	for name, el := range elements {
 		if isZero := IsZeroValue(el); isZero {
-			return errors.NewStatusError(fmt.Errorf("%s is required", name), http.StatusBadRequest)
+			return fmt.Errorf("%s is required", name)
 		}
 	}
 

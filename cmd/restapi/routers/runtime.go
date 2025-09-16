@@ -38,7 +38,7 @@ func (r *RuntimeAPIRouter) Routes() Routes {
 			Name:        "RunAgent",
 			Method:      http.MethodPost,
 			Pattern:     "/run",
-			HandlerFunc: handlers.FromErrorHandler(r.runtimeController.RunAgent),
+			HandlerFunc: handlers.FromErrorHandler(r.runtimeController.RunAgentHTTP),
 		},
 		Route{
 			Name:        "RunAgentSse",
