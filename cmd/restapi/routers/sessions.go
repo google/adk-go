@@ -43,13 +43,13 @@ func (r *SessionsAPIRouter) Routes() Routes {
 			Name:        "CreateSession",
 			Method:      http.MethodPost,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions",
-			HandlerFunc: handlers.FromErrorHandler(r.sessionController.CreateSession),
+			HandlerFunc: r.sessionController.CreateSessionHTTP,
 		},
 		Route{
 			Name:        "CreateSessionWithId",
 			Method:      http.MethodPost,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
-			HandlerFunc: handlers.FromErrorHandler(r.sessionController.CreateSession),
+			HandlerFunc: r.sessionController.CreateSessionHTTP,
 		},
 		Route{
 			Name:        "DeleteSession",

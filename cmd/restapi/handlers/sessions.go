@@ -15,6 +15,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -41,46 +42,52 @@ func NewSessionsAPIController(service sessionservice.Service) *SessionsAPIContro
 }
 
 // DeleteSession handles deleting a specific session.
-func (c *SessionsAPIController) CreateSession(rw http.ResponseWriter, req *http.Request) error {
+func (c *SessionsAPIController) CreateSessionHTTP(rw http.ResponseWriter, req *http.Request) {
 	params := mux.Vars(req)
-	appName := params["app_name"]
-	if appName == "" {
-		return errors.NewStatusError(fmt.Errorf("app_name parameter is required"), http.StatusBadRequest)
+	sessionID, err := models.SessionIDFromHTTPParameters(params)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
 	}
-	userID := params["user_id"]
-	if userID == "" {
-		return errors.NewStatusError(fmt.Errorf("user_id parameter is required"), http.StatusBadRequest)
-	}
-	sessionID := params["session_id"]
 	createSessionRequest := models.CreateSessionRequest{}
 	// No state and no events, fails to decode req.Body failing with "EOF"
 	if req.ContentLength > 0 {
 		err := json.NewDecoder(req.Body).Decode(&createSessionRequest)
 		if err != nil {
-			return errors.NewStatusError(err, http.StatusBadRequest)
+			http.Error(rw, err.Error(), http.StatusBadRequest)
+			return
 		}
 	}
-	session, err := c.service.Create(req.Context(), &sessionservice.CreateRequest{
-		AppName:   appName,
-		UserID:    userID,
-		SessionID: sessionID,
+	respSession, err := c.CreateSession(req.Context(), *sessionID, createSessionRequest)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	json.NewEncoder(rw).Encode(respSession)
+}
+
+// DeleteSession handles deleting a specific session.
+func (c *SessionsAPIController) CreateSession(ctx context.Context, sessionID models.SessionID, createSessionRequest models.CreateSessionRequest) (*models.Session, error) {
+	session, err := c.service.Create(ctx, &sessionservice.CreateRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
 		State:     createSessionRequest.State,
 	})
 	if err != nil {
-		return errors.NewStatusError(err, http.StatusInternalServerError)
+		return nil, errors.NewStatusError(err, http.StatusInternalServerError)
 	}
 	for _, event := range createSessionRequest.Events {
-		err = c.service.AppendEvent(req.Context(), session.Session, models.ToSessionEvent(event))
+		err = c.service.AppendEvent(ctx, session.Session, models.ToSessionEvent(event))
 		if err != nil {
-			return errors.NewStatusError(err, http.StatusInternalServerError)
+			return nil, errors.NewStatusError(err, http.StatusInternalServerError)
 		}
 	}
 	respSession, err := models.FromSession(session.Session)
 	if err != nil {
-		return errors.NewStatusError(err, http.StatusInternalServerError)
+		return nil, errors.NewStatusError(err, http.StatusInternalServerError)
 	}
-	json.NewEncoder(rw).Encode(respSession)
-	return nil
+	return &respSession, nil
 }
 
 func (c *SessionsAPIController) DeleteSession(rw http.ResponseWriter, req *http.Request) error {

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,6 +144,7 @@ func TestCreateSession(t *testing.T) {
 		createRequestObj models.CreateSessionRequest
 		wantSession      models.Session
 		wantErr          error
+		wantStatus       int
 	}{
 		{
 			name: "session exists",
@@ -154,8 +156,9 @@ func TestCreateSession(t *testing.T) {
 					UpdatedAt:     time.Now(),
 				},
 			},
-			sessionID: sessionID("testApp", "testUser", "testSession"),
-			wantErr:   fmt.Errorf("session already exists"),
+			sessionID:  sessionID("testApp", "testUser", "testSession"),
+			wantErr:    fmt.Errorf("session already exists"),
+			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:           "successful create operation",
@@ -189,6 +192,7 @@ func TestCreateSession(t *testing.T) {
 					},
 				},
 			},
+			wantStatus: http.StatusOK,
 		},
 	}
 
@@ -208,20 +212,27 @@ func TestCreateSession(t *testing.T) {
 			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
 			rr := httptest.NewRecorder()
 
-			err = apiController.CreateSession(rr, req)
-			if tt.wantErr == nil && err != nil {
-				t.Fatalf("create session: %v", err)
-			} else if tt.wantErr != nil {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if err.Error() != tt.wantErr.Error() {
-					t.Fatalf("expected error %q, got %q", tt.wantErr, err)
+			apiController.CreateSessionHTTP(rr, req)
+			// if tt.wantErr == nil && err != nil {
+			// 	t.Fatalf("create session: %v", err)
+			// } else if tt.wantErr != nil {
+			// 	if err == nil {
+			// 		t.Fatal("expected error, got nil")
+			// 	}
+			// 	if err.Error() != tt.wantErr.Error() {
+			// 		t.Fatalf("expected error %q, got %q", tt.wantErr, err)
+			// 	}
+			// 	return
+			// }
+			if status := rr.Code; status != tt.wantStatus {
+				t.Errorf("handler returned wrong status code: got %v want %v", status, tt.wantStatus)
+			}
+			if tt.wantErr != nil {
+				respErr := strings.Join(strings.Fields(rr.Body.String()), " ")
+				if tt.wantErr.Error() != respErr {
+					t.Errorf("CreateSession() mismatch (-want +got):\n%v, %v", tt.wantErr.Error(), respErr)
 				}
 				return
-			}
-			if status := rr.Code; status != http.StatusOK {
-				t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
 			}
 			var gotSession models.Session
 			err = json.NewDecoder(rr.Body).Decode(&gotSession)
@@ -229,7 +240,7 @@ func TestCreateSession(t *testing.T) {
 				t.Fatalf("decode response: %v", err)
 			}
 			if diff := cmp.Diff(tt.wantSession, gotSession, cmpopts.EquateApproxTime(time.Second)); diff != "" {
-				t.Errorf("GetSession() mismatch (-want +got):\n%s", diff)
+				t.Errorf("CreateSession() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

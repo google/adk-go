@@ -19,6 +19,7 @@ import (
 	"maps"
 	"time"
 
+	"github.com/cmatthias/mapstructure"
 	"google.golang.org/adk/sessionservice"
 )
 
@@ -35,6 +36,28 @@ type Session struct {
 type CreateSessionRequest struct {
 	State  map[string]any `json:"state"`
 	Events []Event        `json:"events"`
+}
+
+type SessionID struct {
+	ID      string `mapstructure:"session_id,optional"`
+	AppName string `mapstructure:"app_name,required"`
+	UserID  string `mapstructure:"user_id,required"`
+}
+
+func SessionIDFromHTTPParameters(vars map[string]string) (*SessionID, error) {
+	var sessionID SessionID
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		WeaklyTypedInput: true,
+		Result:           &sessionID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	err = decoder.Decode(vars)
+	if err != nil {
+		return nil, err
+	}
+	return &sessionID, nil
 }
 
 func FromSession(session sessionservice.StoredSession) (Session, error) {
