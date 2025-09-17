@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
+	"slices"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
@@ -322,11 +324,7 @@ func findLongRunningFunctionCallIDs(c *genai.Content, tools map[string]tool.Tool
 		}
 	}
 	// Transform the set (map keys) into a slice.
-	longRunningToolIDs := make([]string, 0, len(set))
-	for id := range set {
-		longRunningToolIDs = append(longRunningToolIDs, id)
-	}
-	return longRunningToolIDs
+	return slices.Collect(maps.Keys(set))
 }
 
 // handleFunctionCalls calls the functions and returns the function response event.

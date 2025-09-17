@@ -26,17 +26,17 @@ type longRunningFunctionTool[TArgs, TResults any] struct {
 	functionTool *functionTool[TArgs, TResults]
 }
 
-// Description implements types.Tool.
+// Description implements tool.Tool.
 func (f *longRunningFunctionTool[TArgs, TResults]) Description() string {
 	return f.functionTool.Description()
 }
 
-// Name implements types.Tool.
+// Name implements tool.Tool.
 func (f *longRunningFunctionTool[TArgs, TResults]) Name() string {
 	return f.functionTool.Name()
 }
 
-// IsLongRunning implements types.Tool.
+// IsLongRunning implements tool.Tool.
 func (f *longRunningFunctionTool[TArgs, TResults]) IsLongRunning() bool {
 	return f.functionTool.IsLongRunning()
 }

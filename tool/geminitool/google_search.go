@@ -40,7 +40,7 @@ func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *llm.Request) error {
 	})
 }
 
-// IsLongRunning implements adk.Tool.
+// IsLongRunning implements tool.Tool.
 func (t GoogleSearch) IsLongRunning() bool {
 	return false
 }

@@ -50,7 +50,7 @@ func (t *loadArtifactsTool) Description() string {
 	return t.description
 }
 
-// IsLongRunning implements adk.Tool.
+// IsLongRunning implements tool.Tool.
 func (t *loadArtifactsTool) IsLongRunning() bool {
 	return false
 }

@@ -99,7 +99,7 @@ func (t *TransferToAgentTool) Name() string {
 	return "transfer_to_agent"
 }
 
-// isLongRunning implements tool.Tool.
+// IsLongRunning implements tool.Tool.
 func (t *TransferToAgentTool) IsLongRunning() bool {
 	return false
 }

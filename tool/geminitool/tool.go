@@ -62,7 +62,7 @@ func (t *geminiTool) Description() string {
 	return t.name
 }
 
-// IsLongRunning implements adk.Tool.
+// IsLongRunning implements tool.Tool.
 func (t *geminiTool) IsLongRunning() bool {
 	return false
 }

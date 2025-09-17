@@ -90,22 +90,22 @@ type functionTool[TArgs, TResults any] struct {
 	handler Function[TArgs, TResults]
 }
 
-// Description implements types.Tool.
+// Description implements tool.Tool.
 func (f *functionTool[TArgs, TResults]) Description() string {
 	return f.cfg.Description
 }
 
-// Name implements types.Tool.
+// Name implements tool.Tool.
 func (f *functionTool[TArgs, TResults]) Name() string {
 	return f.cfg.Name
 }
 
-// IsLongRunning implements types.Tool.
+// IsLongRunning implements tool.Tool.
 func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
 	return f.cfg.isLongRunning
 }
 
-// ProcessRequest implements types.Tool.
+// ProcessRequest implements interfaces.Tool.
 func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *llm.Request) error {
 	if req.Tools == nil {
 		req.Tools = make(map[string]any)
