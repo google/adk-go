@@ -83,7 +83,11 @@ func NewTestAgentRunner(t *testing.T, agent agent.Agent) *TestAgentRunner {
 	appName := "test_app"
 	sessionService := sessionservice.Mem()
 
-	runner, err := runner.New(appName, agent, sessionService)
+	runner, err := runner.New(&runner.Config{
+		AppName:        appName,
+		Agent:          agent,
+		SessionService: sessionService,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
