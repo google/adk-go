@@ -47,6 +47,7 @@ func New(cfg Config) (agent.Agent, error) {
 		maxIterations: cfg.MaxIterations,
 	}
 	cfg.AgentConfig.Run = loopAgent.Run
+	cfg.AgentConfig.AgentType = "Loop"
 
 	return agent.New(cfg.AgentConfig)
 }

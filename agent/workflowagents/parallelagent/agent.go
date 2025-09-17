@@ -42,6 +42,7 @@ func New(cfg Config) (agent.Agent, error) {
 	}
 
 	cfg.AgentConfig.Run = run
+	cfg.AgentConfig.AgentType = "Parallel"
 
 	return agent.New(cfg.AgentConfig)
 }

@@ -29,6 +29,7 @@ type Agent interface {
 	Description() string
 	Run(Context) iter.Seq2[*session.Event, error]
 	SubAgents() []Agent
+	Type() string
 
 	internal() *agent
 }
@@ -41,6 +42,7 @@ func New(cfg Config) (Agent, error) {
 		beforeAgent: cfg.BeforeAgent,
 		run:         cfg.Run,
 		afterAgent:  cfg.AfterAgent,
+		agentType:   cfg.AgentType,
 	}, nil
 }
 
@@ -48,6 +50,7 @@ type Config struct {
 	Name        string
 	Description string
 	SubAgents   []Agent
+	AgentType   string // Loop, Sequential, Parallel
 
 	BeforeAgent []BeforeAgentCallback
 	Run         func(Context) iter.Seq2[*session.Event, error]
@@ -82,6 +85,7 @@ type AfterAgentCallback func(Context, *session.Event, error) (*genai.Content, er
 type agent struct {
 	name, description string
 	subAgents         []Agent
+	agentType         string // Loop, Parallel, Sequential
 
 	beforeAgent []BeforeAgentCallback
 	run         func(Context) iter.Seq2[*session.Event, error]
@@ -90,6 +94,10 @@ type agent struct {
 
 func (a *agent) Name() string {
 	return a.name
+}
+
+func (a *agent) Type() string {
+	return a.agentType
 }
 
 func (a *agent) Description() string {
