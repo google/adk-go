@@ -15,7 +15,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"google.golang.org/adk/cmd/restapi/services"
@@ -33,7 +32,5 @@ func NewAppsAPIController(agentLoader services.AgentLoader) *AppsAPIController {
 // ListApps handles listing all loaded agents.
 func (c *AppsAPIController) ListApps(rw http.ResponseWriter, req *http.Request) {
 	apps := c.agentLoader.ListAgents()
-	rw.WriteHeader(http.StatusOK)
-	rw.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(rw).Encode(apps)
+	EncodeJSONResponse(apps, http.StatusOK, rw)
 }
