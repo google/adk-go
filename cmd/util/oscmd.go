@@ -1,0 +1,100 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package util
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+)
+
+type Printer func(a ...any)
+
+var Reset = "\033[0m"
+var Red = "\033[31m"
+var Green = "\033[32m"
+var Yellow = "\033[33m"
+var Blue = "\033[34m"
+var Magenta = "\033[35m"
+var Cyan = "\033[36m"
+var Gray = "\033[37m"
+var White = "\033[97m"
+
+func LogStartStop(msg string, command func(p Printer) error) error {
+	fmt.Println(msg, ": "+Green+"Starting"+Reset)
+	defer fmt.Println(msg, ": "+Green+"Finished"+Reset)
+	defer fmt.Println()
+
+	return command(func(a ...any) { fmt.Println("    "+Green+"> "+Reset, a) })
+}
+
+type ReprintableStream struct {
+	prefix []byte
+	clean  bool
+	stream io.Writer
+}
+
+func (s *ReprintableStream) Write(p []byte) (total int, err error) {
+	start := 0
+	total = 0
+	err = nil
+	var n int = 0
+	if s.clean {
+		n, err = s.stream.Write(s.prefix)
+		total = total + n
+		if err != nil {
+			return total, err
+		}
+		s.clean = false
+	}
+	for i, c := range p {
+		if c == '\n' {
+			n, err = s.stream.Write(p[start:i])
+			total = total + n
+			if err != nil {
+				return total, err
+			}
+			// s.stream.Write( []byte(("\n       " + Gray + "out > " + Reset)) )
+			n, err = s.stream.Write(s.prefix)
+			total = total + n
+			if err != nil {
+				return total, err
+			}
+			start = i + 1
+		}
+	}
+	if start < len(p) {
+		n, err = s.stream.Write(p[start:])
+		total = total + n
+	}
+
+	//fmt.Print(start, "|", len(p), "|", err)
+	// fmt.Fprintln()Printf("s.stream: %v\n", s.stream)
+	return total, err
+}
+
+func NewReprintableStream(s io.Writer, prefix string, color string) io.Writer {
+	return &ReprintableStream{prefix: []byte("\n       " + color + prefix + " > " + Reset), stream: s, clean: true}
+}
+
+// io.Writer _= ReprintableStream{}.(os.Writer)
+
+func LogCommand(c *exec.Cmd, p Printer) error {
+	p("Running the command: ", c)
+	c.Stdout = NewReprintableStream(os.Stdout, "out", Yellow)
+	c.Stderr = NewReprintableStream(os.Stderr, "err", Red)
+	return c.Run()
+}
