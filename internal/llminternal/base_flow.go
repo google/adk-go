@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
+	"slices"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
@@ -118,14 +120,6 @@ func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
 			if resp.Content == nil && resp.ErrorCode == 0 && !resp.Interrupted {
 				continue
 			}
-			// Build the event and yield.
-			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp)
-			if !yield(modelResponseEvent, nil) {
-				return
-			}
-			// TODO: generate and yield an auth event if needed.
-
-			// Handle function calls.
 
 			// TODO: temporarily convert
 			tools := make(map[string]tool.Tool)
@@ -138,6 +132,15 @@ func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
 				}
 				tools[k] = tool
 			}
+
+			// Build the event and yield.
+			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools)
+			if !yield(modelResponseEvent, nil) {
+				return
+			}
+			// TODO: generate and yield an auth event if needed.
+
+			// Handle function calls.
 
 			ev, err := handleFunctionCalls(ctx, tools, resp)
 			if err != nil {
@@ -292,7 +295,7 @@ func (f *Flow) agentToRun(ctx agent.Context, agentName string) agent.Agent {
 	return nil
 }
 
-func (f *Flow) finalizeModelResponseEvent(ctx agent.Context, resp *llm.Response) *session.Event {
+func (f *Flow) finalizeModelResponseEvent(ctx agent.Context, resp *llm.Response, tools map[string]tool.Tool) *session.Event {
 	// FunctionCall & FunctionResponse matching algorithm assumes non-empty function call IDs
 	// but function call ID is optional in genai API and some models do not use the field.
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
@@ -303,9 +306,25 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.Context, resp *llm.Response)
 	ev.Branch = ctx.Branch()
 	ev.LLMResponse = resp
 
-	// TODO: populate ev.LongRunningToolIDs (see BaseLlmFlow._finalize_model_response_event)
+	// Populate ev.LongRunningToolIDs
+	ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)
 
 	return ev
+}
+
+// findLongRunningFunctionCallIDs iterates over the FunctionCalls and
+// returns the callIDs of the long running functions
+func findLongRunningFunctionCallIDs(c *genai.Content, tools map[string]tool.Tool) []string {
+	set := make(map[string]struct{})
+	// Iterate over function calls.
+	for _, fc := range utils.FunctionCalls(c) {
+		if tool, ok := tools[fc.Name]; ok && fc.ID != "" && tool.IsLongRunning() {
+			// If the tool exists and is long-running, add its ID to the set.
+			set[fc.ID] = struct{}{}
+		}
+	}
+	// Transform the set (map keys) into a slice.
+	return slices.Collect(maps.Keys(set))
 }
 
 // handleFunctionCalls calls the functions and returns the function response event.
