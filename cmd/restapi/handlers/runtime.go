@@ -111,20 +111,33 @@ func (c *RuntimeAPIController) RunAgentSSE(rw http.ResponseWriter, req *http.Req
 	rw.WriteHeader(http.StatusOK)
 	for event, err := range resp {
 		if err != nil {
-			fmt.Fprintf(rw, "Error while running agent: %v\n", err)
+			_, err := fmt.Fprintf(rw, "Error while running agent: %v\n", err)
+			if err != nil {
+				return errors.NewStatusError(fmt.Errorf("write response: %w", err), http.StatusInternalServerError)
+			}
 			flusher.Flush()
 			continue
 		}
-		flashEvent(flusher, rw, *event)
+		err := flashEvent(flusher, rw, *event)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func flashEvent(flusher http.Flusher, rw http.ResponseWriter, event session.Event) {
+func flashEvent(flusher http.Flusher, rw http.ResponseWriter, event session.Event) error {
 	fmt.Fprintf(rw, "data: ")
-	json.NewEncoder(rw).Encode(models.FromSessionEvent(event))
-	fmt.Fprintf(rw, "\n")
+	err := json.NewEncoder(rw).Encode(models.FromSessionEvent(event))
+	if err != nil {
+		return errors.NewStatusError(fmt.Errorf("encode response: %w", err), http.StatusInternalServerError)
+	}
+	_, err = fmt.Fprintf(rw, "\n")
+	if err != nil {
+		return errors.NewStatusError(fmt.Errorf("write response: %w", err), http.StatusInternalServerError)
+	}
 	flusher.Flush()
+	return nil
 }
 
 func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
@@ -168,9 +181,11 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 	}, nil
 }
 
-func decodeRequestBody(req *http.Request) (models.RunAgentRequest, error) {
+func decodeRequestBody(req *http.Request) (decodedReq models.RunAgentRequest, err error) {
 	var runAgentRequest models.RunAgentRequest
-	defer req.Body.Close()
+	defer func() {
+		err = req.Body.Close()
+	}()
 	d := json.NewDecoder(req.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(&runAgentRequest); err != nil {
