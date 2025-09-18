@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifactservice"
@@ -29,6 +30,7 @@ import (
 	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/routers"
 	"google.golang.org/adk/cmd/restapi/services"
+	"google.golang.org/adk/llm"
 	"google.golang.org/adk/llm/gemini"
 	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/tool"
@@ -50,6 +52,19 @@ func corsWithArgs(serverConfig *config.ADKAPIServerConfigs) func(next http.Handl
 	}
 }
 
+func saveReportfunc(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
+	if llmResponse == nil || llmResponse.Content == nil || llmResponseError != nil {
+		return llmResponse, llmResponseError
+	}
+	for _, part := range llmResponse.Content.Parts {
+		err := ctx.Artifacts().Save(uuid.NewString(), *part)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return llmResponse, llmResponseError
+}
+
 func agentLoader(apiKey string) services.AgentLoader {
 	ctx := context.Background()
 	model, err := gemini.NewModel(ctx, "gemini-2.0-flash", &genai.ClientConfig{
@@ -64,6 +79,9 @@ func agentLoader(apiKey string) services.AgentLoader {
 		Model:       model,
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
+		AfterModel: []llmagent.AfterModelCallback{
+			saveReportfunc,
+		},
 		Tools: []tool.Tool{
 			geminitool.GoogleSearch{},
 		},
@@ -105,7 +123,7 @@ func main() {
 
 	router := routers.NewRouter(
 		routers.NewSessionsAPIRouter(handlers.NewSessionsAPIController(sessionService)),
-		routers.NewRuntimeAPIRouter(handlers.NewRuntimeAPIRouter(sessionService, agentLoader)),
+		routers.NewRuntimeAPIRouter(handlers.NewRuntimeAPIRouter(sessionService, agentLoader, artifactService)),
 		routers.NewAppsAPIRouter(handlers.NewAppsAPIController(agentLoader)),
 		routers.NewDebugAPIRouter(&handlers.DebugAPIController{}),
 		routers.NewArtifactsAPIRouter(handlers.NewArtifactsAPIController(artifactService)),
