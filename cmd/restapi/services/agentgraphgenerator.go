@@ -1,12 +1,10 @@
 package services
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 	"slices"
 
-	"github.com/goccy/go-graphviz"
+	"github.com/awalterschulze/gographviz"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/tool"
 )
@@ -15,11 +13,11 @@ import (
 // Missing handling of different agent and tool types.
 
 const (
-	DarkGreen  = "#0F5223"
-	LightGreen = "#69CB87"
-	LightGray  = "#cccccc"
-	White      = "#ffffff"
-	Background = "#333537"
+	DarkGreen  = "\"#0F5223\""
+	LightGreen = "\"#69CB87\""
+	LightGray  = "\"#cccccc\""
+	White      = "\"#ffffff\""
+	Background = "\"#333537\""
 )
 
 type namedInstance interface {
@@ -37,24 +35,26 @@ func nodeName(instance any) string {
 	}
 }
 func nodeCaption(instance any) string {
+	caption := ""
 	switch i := instance.(type) {
 	case agent.Agent:
-		return "🤖 " + i.Name()
+		caption = "🤖 " + i.Name()
 	case tool.Tool:
-		return "🔧 " + i.Name()
+		caption = "🔧 " + i.Name()
 	default:
-		return "Unsupported tool type"
+		caption = "Unsupported tool type"
 	}
+	return "\"" + caption + "\""
 }
 
-func nodeShape(instance any) graphviz.Shape {
+func nodeShape(instance any) string {
 	switch instance.(type) {
 	case agent.Agent:
-		return graphviz.EllipseShape
+		return "ellipse"
 	case tool.Tool:
-		return graphviz.BoxShape
+		return "box"
 	default:
-		return graphviz.CylinderShape
+		return "cylinder"
 	}
 }
 
@@ -89,70 +89,49 @@ func edgeHighlighted(from string, to string, higlightedPairs [][]string) *bool {
 	return nil
 }
 
-func getOrCreateNode(graph *graphviz.Graph, name string) (*graphviz.Node, error) {
-	node, err := graph.NodeByName(name)
-	if err != nil || node == nil {
-		node, err = graph.CreateNodeByName(name)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return node, nil
-}
-
-func drawNode(graph *graphviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool) error {
+func drawNode(graph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool) error {
 	name := nodeName(instance)
 	shape := nodeShape(instance)
 	caption := nodeCaption(instance)
 	highlighted := highlighted(name, highlightedPairs)
 
-	node, err := getOrCreateNode(graph, name)
-	if err != nil {
-		return err
+	nodeAttributes := map[string]string{
+		"label":     caption,
+		"shape":     shape,
+		"fontcolor": LightGray,
 	}
-	node.SetLabel(caption)
-	node.SetShape(shape)
-	node.SetFontColor(LightGray)
 
 	if highlighted {
-		node.SetColor(DarkGreen)
-		node.SetStyle(graphviz.FilledNodeStyle)
+		nodeAttributes["color"] = DarkGreen
+		nodeAttributes["style"] = "filled"
 	} else {
-		node.SetColor(LightGray)
-		node.SetStyle(graphviz.RoundedNodeStyle)
+		nodeAttributes["color"] = LightGray
+		nodeAttributes["style"] = "rounded"
 	}
 	visitedNodes[name] = true
-	return nil
+
+	return graph.AddNode(graph.Name, name, nodeAttributes)
 }
 
-func drawEdge(graph *graphviz.Graph, from, to string, highlightedPairs [][]string) error {
-	fromNode, err := getOrCreateNode(graph, from)
-	if err != nil {
-		return err
-	}
-	toNode, err := getOrCreateNode(graph, to)
-	if err != nil {
-		return err
-	}
+func drawEdge(graph *gographviz.Graph, from, to string, highlightedPairs [][]string) error {
 	edgeHighlighted := edgeHighlighted(from, to, highlightedPairs)
-	edge, err := graph.CreateEdgeByName(fmt.Sprintf("%s->%s", from, to), fromNode, toNode)
-	if err != nil {
-		return err
-	}
+	edgeAttributes := map[string]string{}
 	if edgeHighlighted != nil {
-		edge.SetColor(LightGreen)
+		edgeAttributes["color"] = LightGreen
 		if !*edgeHighlighted {
-			edge.SetArrowHead(graphviz.NormalArrow).SetDir(graphviz.BackDir)
+			edgeAttributes["arrowhead"] = "normal"
+			edgeAttributes["dir"] = "back"
 		} else {
-			edge.SetArrowHead(graphviz.NormalArrow)
+			edgeAttributes["arrowhead"] = "normal"
 		}
 	} else {
-		edge.SetColor(LightGray).SetArrowHead(graphviz.NoneArrow)
+		edgeAttributes["color"] = LightGray
+		edgeAttributes["arrowhead"] = "none"
 	}
-	return nil
+	return graph.AddEdge(from, to, true, edgeAttributes)
 }
 
-func buildGraph(graph *graphviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool) error {
+func buildGraph(graph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool) error {
 	namedInstance, ok := instance.(namedInstance)
 	if !ok {
 		return nil
@@ -183,28 +162,19 @@ func buildGraph(graph *graphviz.Graph, instance any, highlightedPairs [][]string
 }
 
 func GetAgentGraph(ctx context.Context, agent agent.Agent, highlightedPairs [][]string) (string, error) {
-	viz, err := graphviz.New(ctx)
-	if err != nil {
+	graph := gographviz.NewGraph()
+	graph.SetName("AgentGraph")
+	graph.SetDir(true)
+	if err := graph.AddAttr(graph.Name, "rankdir", "LR"); err != nil {
 		return "", err
 	}
-	defer viz.Close()
-
-	graph, err := viz.Graph(
-		graphviz.WithName("AgentGraph"),
-		graphviz.WithDirectedType(graphviz.StrictDirected),
-	)
-	graph.SetRankDir(graphviz.LRRank).SetBackgroundColor(Background)
-	if err != nil {
+	if err := graph.AddAttr(graph.Name, "bgcolor", Background); err != nil {
 		return "", err
 	}
 	visitedNodes := map[string]bool{}
-	err = buildGraph(graph, agent, highlightedPairs, visitedNodes)
+	err := buildGraph(graph, agent, highlightedPairs, visitedNodes)
 	if err != nil {
 		return "", err
 	}
-	var buf bytes.Buffer
-	if err := viz.Render(ctx, graph, "dot", &buf); err != nil {
-		return "", err
-	}
-	return buf.String(), nil
+	return graph.String(), nil
 }

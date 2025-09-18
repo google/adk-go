@@ -141,7 +141,6 @@ Here are the question-answer pair and the reviewer-provided findings:
 `
 
 func afterCritic(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
-	fmt.Printf("llmResponse: %v\n", llmResponse)
 	if llmResponse == nil || llmResponse.Content == nil || llmResponse.Content.Parts == nil || llmResponse.GroundingMetadata == nil {
 		return llmResponse, nil
 	}
