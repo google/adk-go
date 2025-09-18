@@ -35,10 +35,16 @@ var White = "\033[97m"
 
 func LogStartStop(msg string, command func(p Printer) error) error {
 	fmt.Println(msg, ": "+Green+"Starting"+Reset)
-	defer fmt.Println(msg, ": "+Green+"Finished"+Reset)
-	defer fmt.Println()
+	err := command(func(a ...any) { fmt.Println("    "+Green+"> "+Reset, a) })
+	fmt.Println()
+	if err == nil {
+		fmt.Println(msg, ": "+Green+"Finished successfully"+Reset)
+	} else {
+		fmt.Println(msg, ": "+Red+"Finished with error"+Reset)
+		fmt.Println("Error:", err)
+	}
 
-	return command(func(a ...any) { fmt.Println("    "+Green+"> "+Reset, a) })
+	return err
 }
 
 type ReprintableStream struct {
@@ -48,6 +54,11 @@ type ReprintableStream struct {
 }
 
 func (s *ReprintableStream) Write(p []byte) (total int, err error) {
+
+	// s.stream.Write([]byte("-------------->>"))
+	// s.stream.Write(p)
+	// s.stream.Write([]byte("--------------<<"))
+
 	start := 0
 	total = 0
 	err = nil
@@ -74,16 +85,18 @@ func (s *ReprintableStream) Write(p []byte) (total int, err error) {
 				return total, err
 			}
 			start = i + 1
+
 		}
 	}
 	if start < len(p) {
+		// s.stream.Write([]byte("DD"))
+
 		n, err = s.stream.Write(p[start:])
 		total = total + n
 	}
 
-	//fmt.Print(start, "|", len(p), "|", err)
-	// fmt.Fprintln()Printf("s.stream: %v\n", s.stream)
-	return total, err
+	return len(p), err
+	// return total, err
 }
 
 func NewReprintableStream(s io.Writer, prefix string, color string) io.Writer {
@@ -93,8 +106,8 @@ func NewReprintableStream(s io.Writer, prefix string, color string) io.Writer {
 // io.Writer _= ReprintableStream{}.(os.Writer)
 
 func LogCommand(c *exec.Cmd, p Printer) error {
-	p("Running the command: ", c)
+	p("Running : ", Yellow, c.Dir, Reset, " ", c)
 	c.Stdout = NewReprintableStream(os.Stdout, "out", Yellow)
-	c.Stderr = NewReprintableStream(os.Stderr, "err", Red)
+	c.Stderr = NewReprintableStream(os.Stdout, "err", Red)
 	return c.Run()
 }
