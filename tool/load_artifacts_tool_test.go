@@ -15,110 +15,26 @@
 package tool_test
 
 import (
-	"context"
-	"fmt"
-	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/artifactsinternal"
 	"google.golang.org/adk/internal/toolinternal"
+
+	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
-// FakeArtifacts is a test double for agent.Artifacts.
-type FakeArtifacts struct {
-	data    map[string]genai.Part
-	ListErr error
-	LoadErr error
-}
-
-func NewFakeArtifacts(initialData map[string]*genai.Part) *FakeArtifacts {
-	d := make(map[string]genai.Part)
-	for k, v := range initialData {
-		if v != nil {
-			d[k] = *v
-		}
-	}
-	return &FakeArtifacts{data: d}
-}
-
-func (f *FakeArtifacts) Save(name string, data genai.Part) error {
-	return fmt.Errorf("Save not implemented in fake")
-}
-
-func (f *FakeArtifacts) Load(name string) (genai.Part, error) {
-	if f.LoadErr != nil {
-		return genai.Part{}, f.LoadErr
-	}
-	part, ok := f.data[name]
-	if !ok {
-		return genai.Part{}, fmt.Errorf("artifact %q not found", name)
-	}
-	return part, nil
-}
-
-func (f *FakeArtifacts) LoadVersion(name string, version int) (genai.Part, error) {
-	return genai.Part{}, fmt.Errorf("LoadVersion not implemented in fake")
-}
-
-func (f *FakeArtifacts) List() ([]string, error) {
-	if f.ListErr != nil {
-		return nil, f.ListErr
-	}
-	keys := make([]string, 0, len(f.data))
-	for k := range f.data {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys) // Ensure deterministic order
-	return keys, nil
-}
-
-var _ agent.Artifacts = (*FakeArtifacts)(nil)
-
-// FakeAgentContext is a test double for agent.Context.
-type FakeAgentContext struct {
-	context.Context
-	artifacts agent.Artifacts
-}
-
-func NewFakeAgentContext(ctx context.Context, artifacts agent.Artifacts) *FakeAgentContext {
-	return &FakeAgentContext{
-		Context:   ctx,
-		artifacts: artifacts,
-	}
-}
-
-func (f *FakeAgentContext) Artifacts() agent.Artifacts {
-	return f.artifacts
-}
-
-// Implement other agent.Context methods as minimally as possible for the tests.
-func (f *FakeAgentContext) UserContent() *genai.Content             { return nil }
-func (f *FakeAgentContext) InvocationID() string                    { return "test-invocation" }
-func (f *FakeAgentContext) Branch() string                          { return "main" }
-func (f *FakeAgentContext) Agent() agent.Agent                      { return nil }
-func (f *FakeAgentContext) Session() session.Session                { return nil }
-func (f *FakeAgentContext) End()                                    {}
-func (f *FakeAgentContext) Ended() bool                             { return false }
-func (f *FakeAgentContext) Value(key any) any                       { return f.Context.Value(key) }
-func (f *FakeAgentContext) Deadline() (deadline time.Time, ok bool) { return f.Context.Deadline() }
-func (f *FakeAgentContext) Done() <-chan struct{}                   { return f.Context.Done() }
-func (f *FakeAgentContext) Err() error                              { return f.Context.Err() }
-
-var _ agent.Context = (*FakeAgentContext)(nil)
-
 func TestLoadArtifactsTool_Run(t *testing.T) {
-	ctx := context.Background()
+
 	loadArtifactsTool := tool.NewLoadArtifactsTool()
-	fakeArtifacts := NewFakeArtifacts(nil)
-	agentCtx := NewFakeAgentContext(ctx, fakeArtifacts)
-	tc := tool.NewContext(agentCtx, "", nil)
+
+	tc := createToolContext(t)
 
 	args := map[string]any{
 		"artifact_names": []string{"file1", "file2"},
@@ -153,15 +69,19 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 }
 
 func TestLoadArtifactsTool_ProcessRequest(t *testing.T) {
-	ctx := context.Background()
 	loadArtifactsTool := tool.NewLoadArtifactsTool()
+
+	tc := createToolContext(t)
 	artifacts := map[string]*genai.Part{
 		"file1.txt": {Text: "content1"},
 		"file2.pdf": {Text: "content2"},
 	}
-	fakeArtifacts := NewFakeArtifacts(artifacts)
-	agentCtx := NewFakeAgentContext(ctx, fakeArtifacts)
-	tc := tool.NewContext(agentCtx, "", nil)
+	for name, part := range artifacts {
+		err := tc.Artifacts().Save(name, *part)
+		if err != nil {
+			t.Fatalf("Failed to save artifact %s: %v", name, err)
+		}
+	}
 
 	llmRequest := &llm.Request{}
 
@@ -188,15 +108,18 @@ func TestLoadArtifactsTool_ProcessRequest(t *testing.T) {
 }
 
 func TestLoadArtifactsTool_ProcessRequest_Artifacts_LoadArtifactsFunctionCall(t *testing.T) {
-	ctx := context.Background()
 	loadArtifactsTool := tool.NewLoadArtifactsTool()
 
+	tc := createToolContext(t)
 	artifacts := map[string]*genai.Part{
 		"doc1.txt": {Text: "This is the content of doc1.txt"},
 	}
-	fakeArtifacts := NewFakeArtifacts(artifacts)
-	agentCtx := NewFakeAgentContext(ctx, fakeArtifacts)
-	tc := tool.NewContext(agentCtx, "", nil)
+	for name, part := range artifacts {
+		err := tc.Artifacts().Save(name, *part)
+		if err != nil {
+			t.Fatalf("Failed to save artifact %s: %v", name, err)
+		}
+	}
 
 	functionResponse := &genai.FunctionResponse{
 		Name: "load_artifacts",
@@ -245,14 +168,18 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_LoadArtifactsFunctionCall(t 
 }
 
 func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing.T) {
-	ctx := context.Background()
 	loadArtifactsTool := tool.NewLoadArtifactsTool()
+
+	tc := createToolContext(t)
 	artifacts := map[string]*genai.Part{
 		"doc1.txt": {Text: "content1"},
 	}
-	fakeArtifacts := NewFakeArtifacts(artifacts)
-	agentCtx := NewFakeAgentContext(ctx, fakeArtifacts)
-	tc := tool.NewContext(agentCtx, "", nil)
+	for name, part := range artifacts {
+		err := tc.Artifacts().Save(name, *part)
+		if err != nil {
+			t.Fatalf("Failed to save artifact %s: %v", name, err)
+		}
+	}
 
 	functionResponse := &genai.FunctionResponse{
 		Name: "other_function",
@@ -287,4 +214,20 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	if llmRequest.Contents[0].Role != "model" {
 		t.Errorf("Content Role: got %v, want 'model'", llmRequest.Contents[0].Role)
 	}
+}
+
+func createToolContext(t *testing.T) tool.Context {
+	t.Helper()
+
+	sessionId := session.ID{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "session",
+	}
+
+	artifactsImpl := artifactsinternal.NewArtifacts(artifactservice.Mem(), sessionId)
+
+	agentCtx := agent.NewContext(t.Context(), nil, nil, artifactsImpl, nil, "")
+
+	return tool.NewContext(agentCtx, "", nil)
 }

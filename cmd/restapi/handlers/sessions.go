@@ -25,6 +25,8 @@ import (
 	"google.golang.org/adk/sessionservice"
 )
 
+// TODO: Confirm error handling and target semantic for REST API.
+
 // SessionsAPIController is the controller for the Sessions API.
 type SessionsAPIController struct {
 	service sessionservice.Service

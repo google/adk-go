@@ -20,9 +20,15 @@ import (
 	"google.golang.org/adk/session"
 )
 
+// Tool defines the interface for a callable tool.
 type Tool interface {
+	// Name returns the name of the tool.
 	Name() string
+	// Description returns a description of the tool.
 	Description() string
+	// IsLongRunning indicates whether the tool is a long-running operation,
+	// which typically returns a resource id first and finishes the operation later.
+	IsLongRunning() bool
 }
 
 type Context interface {
