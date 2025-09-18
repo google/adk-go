@@ -127,8 +127,11 @@ func (c *RuntimeAPIController) RunAgentSSE(rw http.ResponseWriter, req *http.Req
 }
 
 func flashEvent(flusher http.Flusher, rw http.ResponseWriter, event session.Event) error {
-	fmt.Fprintf(rw, "data: ")
-	err := json.NewEncoder(rw).Encode(models.FromSessionEvent(event))
+	_, err := fmt.Fprintf(rw, "data: ")
+	if err != nil {
+		return errors.NewStatusError(fmt.Errorf("write response: %w", err), http.StatusInternalServerError)
+	}
+	err = json.NewEncoder(rw).Encode(models.FromSessionEvent(event))
 	if err != nil {
 		return errors.NewStatusError(fmt.Errorf("encode response: %w", err), http.StatusInternalServerError)
 	}
