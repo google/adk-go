@@ -27,7 +27,6 @@ import (
 // strict order.
 func New(cfg Config) (agent.Agent, error) {
 	aCgf := cfg.AgentConfig
-	aCgf.AgentType = "Sequential"
 	return loopagent.New(loopagent.Config{
 		AgentConfig:   aCgf,
 		MaxIterations: 1,

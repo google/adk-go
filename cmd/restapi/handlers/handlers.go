@@ -16,10 +16,14 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"google.golang.org/adk/cmd/restapi/errors"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/sessionservice"
 )
 
 func unimplemented(rw http.ResponseWriter, req *http.Request) {
@@ -55,4 +59,18 @@ func FromErrorHandler(fn errorHandler) http.HandlerFunc {
 			}
 		}
 	}
+}
+
+func validateSessionExists(ctx context.Context, sessionService sessionservice.Service, appName, userID, sessionID string) (sessionservice.StoredSession, error) {
+	resp, err := sessionService.Get(ctx, &sessionservice.GetRequest{
+		ID: session.ID{
+			AppName:   appName,
+			UserID:    userID,
+			SessionID: sessionID,
+		},
+	})
+	if err != nil {
+		return resp.Session, errors.NewStatusError(fmt.Errorf("get session: %w", err), http.StatusNotFound)
+	}
+	return resp.Session, nil
 }

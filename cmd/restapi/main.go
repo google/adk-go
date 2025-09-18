@@ -17,22 +17,16 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/cmd/restapi/config"
 	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/routers"
 	"google.golang.org/adk/cmd/restapi/services"
-	"google.golang.org/adk/llm/gemini"
 	"google.golang.org/adk/sessionservice"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/genai"
 )
 
 func corsWithArgs(serverConfig *config.ADKAPIServerConfigs) func(next http.Handler) http.Handler {
@@ -51,42 +45,9 @@ func corsWithArgs(serverConfig *config.ADKAPIServerConfigs) func(next http.Handl
 
 func agentLoader(apiKey string) services.AgentLoader {
 	ctx := context.Background()
-	model, err := gemini.NewModel(ctx, "gemini-2.0-flash", &genai.ClientConfig{
-		APIKey: apiKey,
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	agent1, err := llmagent.New(llmagent.Config{
-		Name:        "weather_time_agent",
-		Model:       model,
-		Description: "Agent to answer questions about the time and weather in a city.",
-		Instruction: "I can answer your questions about the time and weather in a city.",
-		Tools: []tool.Tool{
-			geminitool.GoogleSearch{},
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	agent2, err := llmagent.New(llmagent.Config{
-		Name:        "foobar",
-		Model:       model,
-		Description: "Agent to answer questions about the time and weather in a city.",
-		Instruction: "I can answer your questions about the time and weather in a city.",
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("Agents created: %v, %v", agent1, agent2)
-
 	return services.NewStaticAgentLoader(
 		map[string]agent.Agent{
-			"weather_time_agent": agent1,
-			"foobar":             agent2,
+			"llm_auditor": getAgent(ctx, apiKey),
 		},
 	)
 }
@@ -98,14 +59,14 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	log.Printf("Starting server on port %d", serverConfig.Port)
+	log.Printf("Starting server on port %d\n", serverConfig.Port)
 	sessionService := sessionservice.Mem()
 
 	router := routers.NewRouter(
 		routers.NewSessionsAPIRouter(handlers.NewSessionsAPIController(sessionService)),
 		routers.NewRuntimeAPIRouter(handlers.NewRuntimeAPIRouter(sessionService, agentLoader)),
 		routers.NewAppsAPIRouter(handlers.NewAppsAPIController(agentLoader)),
-		routers.NewDebugAPIRouter(&handlers.DebugAPIController{}),
+		routers.NewDebugAPIRouter(handlers.NewDebugAPIRouter(sessionService, agentLoader)),
 		routers.NewArtifactsAPIRouter(&handlers.ArtifactsAPIController{}),
 	)
 	router.Use(corsWithArgs(serverConfig))

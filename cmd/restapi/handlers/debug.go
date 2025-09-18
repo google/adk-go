@@ -15,164 +15,25 @@
 package handlers
 
 import (
-	"fmt"
 	"net/http"
 
-	"github.com/goccy/go-graphviz"
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/tool"
+	"github.com/gorilla/mux"
+	"google.golang.org/adk/cmd/restapi/models"
+	"google.golang.org/adk/cmd/restapi/services"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/sessionservice"
+	"google.golang.org/genai"
 )
-
-const (
-	DarkGreen  = "#0F5223"
-	LightGreen = "#69CB87"
-	LightGray  = "#cccccc"
-	White      = "#ffffff"
-)
-
-type Graph struct {
-	// Agent agent.Agent
-	// HighlightPairs bool
-}
-
-func (g Graph) nodeName(instance any) (string, error) {
-	switch i := instance.(type) {
-	case agent.Agent:
-		return i.Name() + "(" + i.Type() + " Agent)", nil
-	case tool.Tool:
-		return i.Name() + "Tool", nil
-	default:
-		return "", fmt.Errorf("unknown instance type: %T", instance)
-	}
-}
-func (g Graph) nodeCaption(instance any) string {
-	switch i := instance.(type) {
-	case agent.Agent:
-		return i.Name() + "Agent"
-	case tool.Tool:
-		return i.Name() + "Tool"
-	default:
-		return "Unsupported tool type"
-	}
-}
-
-func (g Graph) nodeShape(instance any) graphviz.Shape {
-	switch instance.(type) {
-	case agent.Agent:
-		return graphviz.EllipseShape
-	case tool.Tool:
-		return graphviz.BoxShape
-	default:
-		return graphviz.CylinderShape
-	}
-}
-
-func (g Graph) agentCluster(instance any) bool {
-	switch instance.(type) {
-	case agent.Agent:
-		return true
-	case tool.Tool:
-		return false
-	default:
-		return false
-	}
-}
-
-func (g Graph) drawCluster(graph graphviz.Graph, instance any, parent agent.Agent) error {
-	agent, ok := instance.(agent.Agent)
-	if !ok {
-		return fmt.Errorf("instance is not an agent")
-	}
-	switch agent.Type() {
-	case "Loop":
-		if parent != nil {
-			err := g.drawEdge(graph, parent.Name(), agent.Name(), false)
-			if err != nil {
-				return err
-			}
-		}
-		for _, subAgent := range agent.SubAgents() {
-		}
-	case "Sequential":
-		length := len(agent.SubAgents())
-
-	case "Parallel":
-
-	}
-
-}
-
-func (g Graph) drawNode(graph graphviz.Graph, instance any) error {
-	name, err := g.nodeName(instance)
-	if err != nil {
-		return nil
-	}
-	shape := g.nodeShape(instance)
-	caption := g.nodeCaption(instance)
-	asAgentCluster := g.agentCluster(instance)
-	if asAgentCluster {
-		subg, err := graph.CreateSubGraphByName("cluster_" + name)
-		if err != nil {
-			return err
-		}
-	} else {
-		node, err := graph.CreateNodeByName(name)
-		if err != nil {
-			return err
-		}
-		node.SetColor(DarkGreen)
-		node.SetLabel(caption)
-		node.SetShape(shape)
-		node.SetFontColor(LightGray)
-		node.SetFillColor(DarkGreen)
-	}
-}
-
-func (g Graph) drawEdge(graph graphviz.Graph, from, to string, cluster bool) error {
-	fromNode, err := graph.NodeByName(from)
-	if err != nil {
-		return err
-	}
-	toNode, err := graph.NodeByName(to)
-	if err != nil {
-		return err
-	}
-
-	edge, err := graph.CreateEdgeByName("", fromNode, toNode)
-	if err != nil {
-		return err
-	}
-	edge.SetColor(LightGray)
-	if !cluster {
-		edge.SetArrowHead(graphviz.NoneArrow)
-	}
-	return nil
-}
-
-func (g Graph) buildGraph(graph graphviz.Graph, agent agent.Agent, parent agent.Agent) error {
-	err := g.drawNode(graph, agent)
-	if err != nil {
-		return err
-	}
-	for _, subAgent := range agent.SubAgents() {
-		err := g.buildGraph(graph, subAgent, agent)
-		if err != nil {
-			return err
-		}
-		cluster := g.agentCluster(subAgent)
-		if cluster {
-			err := g.drawEdge(graph, agent.Name(), subAgent.Name(), cluster)
-			if err != nil {
-				return err
-			}
-		}
-		// llmagent
-	}
-	return nil
-}
 
 // DebugAPIController is the controller for the Debug API.
-type DebugAPIController struct{}
+type DebugAPIController struct {
+	sessionService sessionservice.Service
+	agentloader    services.AgentLoader
+}
+
+func NewDebugAPIRouter(sessionService sessionservice.Service, agentLoader services.AgentLoader) *DebugAPIController {
+	return &DebugAPIController{sessionService: sessionService, agentloader: agentLoader}
+}
 
 // TraceDict returns the debug information for the session in form of dictionary.
 func (*DebugAPIController) TraceDict(rw http.ResponseWriter, req *http.Request) {
@@ -180,6 +41,92 @@ func (*DebugAPIController) TraceDict(rw http.ResponseWriter, req *http.Request) 
 }
 
 // EventGraph returns the debug information for the session and session events in form of graph.
-func (*DebugAPIController) EventGraph(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
+func (c *DebugAPIController) EventGraph(rw http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	sessionID, err := models.SessionIDFromHTTPParameters(vars)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	storedSession, err := validateSessionExists(req.Context(), c.sessionService, sessionID.AppName, sessionID.UserID, sessionID.ID)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	eventID := vars["event_id"]
+	if eventID == "" {
+		http.Error(rw, "event_id parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	var event *session.Event
+	for it := range storedSession.Events().All() {
+		if it.ID == eventID {
+			event = it
+			break
+		}
+	}
+
+	if event == nil {
+		http.Error(rw, "event not found", http.StatusNotFound)
+		return
+	}
+
+	highlightedPairs := [][]string{}
+	fc := functionalCalls(event)
+	fr := functionalResponses(event)
+
+	if len(fc) > 0 {
+		for _, f := range fc {
+			if f.Name != "" {
+				highlightedPairs = append(highlightedPairs, []string{f.Name, event.Author})
+			}
+		}
+	} else if len(fr) > 0 {
+		for _, f := range fr {
+			if f.Name != "" {
+				highlightedPairs = append(highlightedPairs, []string{f.Name, event.Author})
+			}
+		}
+	} else {
+		highlightedPairs = append(highlightedPairs, []string{event.Author, event.Author})
+	}
+
+	agent, err := c.agentloader.LoadAgent(sessionID.AppName)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	graph, err := services.GetAgentGraph(req.Context(), agent, highlightedPairs)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	EncodeJSONResponse(map[string]string{"dotSrc": graph}, http.StatusOK, rw)
+}
+
+func functionalCalls(event *session.Event) []*genai.FunctionCall {
+	if event.LLMResponse == nil || event.LLMResponse.Content == nil || event.LLMResponse.Content.Parts == nil {
+		return nil
+	}
+	fc := []*genai.FunctionCall{}
+	for _, part := range event.LLMResponse.Content.Parts {
+		if part.FunctionCall != nil {
+			fc = append(fc, part.FunctionCall)
+		}
+	}
+	return fc
+}
+
+func functionalResponses(event *session.Event) []*genai.FunctionResponse {
+	if event.LLMResponse == nil || event.LLMResponse.Content == nil || event.LLMResponse.Content.Parts == nil {
+		return nil
+	}
+	fr := []*genai.FunctionResponse{}
+	for _, part := range event.LLMResponse.Content.Parts {
+		if part.FunctionResponse != nil {
+			fr = append(fr, part.FunctionResponse)
+		}
+	}
+	return fr
 }
