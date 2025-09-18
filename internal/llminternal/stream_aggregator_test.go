@@ -13,3 +13,171 @@
 // limitations under the License.
 
 package llminternal_test
+
+import (
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/testutil"
+	"google.golang.org/adk/llm"
+	"google.golang.org/genai"
+)
+
+type streamAggregatorTest struct {
+	name                 string
+	initialResponses     []*genai.Content
+	numberOfStreamCalls  int
+	streamResponsesCount int
+	want                 []*genai.Content
+	wantPartial          []bool
+}
+
+func TestStreamAggregator(t *testing.T) {
+	ctx := t.Context()
+	testCases := []streamAggregatorTest{
+		{
+			name: "two streams of 2 responses each",
+			initialResponses: []*genai.Content{
+				genai.NewContentFromText("response1", "model"),
+				genai.NewContentFromText("response2", "model"),
+				genai.NewContentFromText("response3", "model"),
+				genai.NewContentFromText("response4", "model"),
+			},
+			numberOfStreamCalls:  2,
+			streamResponsesCount: 2,
+			want: []*genai.Content{
+				// Results from first GenerateStream call
+				genai.NewContentFromText("response1", "model"),
+				genai.NewContentFromText("response2", "model"),
+				genai.NewContentFromText("response1response2", "model"),
+				// Results from second GenerateStream call
+				genai.NewContentFromText("response3", "model"),
+				genai.NewContentFromText("response4", "model"),
+				genai.NewContentFromText("response3response4", "model"),
+			},
+			wantPartial: []bool{
+				// Results from first GenerateStream call
+				true, true, false,
+				// Results from second GenerateStream call
+				true, true, false,
+			},
+		},
+		{
+			name: "two streams of 3 and 2 responses each",
+			initialResponses: []*genai.Content{
+				genai.NewContentFromText("response1", "model"),
+				genai.NewContentFromText("response2", "model"),
+				genai.NewContentFromText("response3", "model"),
+				genai.NewContentFromText("response4", "model"),
+				genai.NewContentFromText("response5", "model"),
+			},
+			numberOfStreamCalls:  2,
+			streamResponsesCount: 3,
+			want: []*genai.Content{
+				// Results from first GenerateStream call
+				genai.NewContentFromText("response1", "model"),
+				genai.NewContentFromText("response2", "model"),
+				genai.NewContentFromText("response3", "model"),
+				genai.NewContentFromText("response1response2response3", "model"),
+				// Results from second GenerateStream call
+				genai.NewContentFromText("response4", "model"),
+				genai.NewContentFromText("response5", "model"),
+				genai.NewContentFromText("response4response5", "model"),
+			},
+			wantPartial: []bool{
+				// Results from first GenerateStream call
+				true, true, true, false,
+				// Results from second GenerateStream call
+				true, true, false,
+			},
+		},
+		{
+			name: "stream with intermidiate response should reset",
+			initialResponses: []*genai.Content{
+				genai.NewContentFromText("response1", "model"),
+				genai.NewContentFromText("response2", "model"),
+				nil, // force reset with empty context
+				genai.NewContentFromText("response3", "model"),
+				genai.NewContentFromText("response4", "model"),
+			},
+			numberOfStreamCalls:  1,
+			streamResponsesCount: 5,
+			want: []*genai.Content{
+				// Results from first GenerateStream call
+				genai.NewContentFromText("response1", "model"),
+				genai.NewContentFromText("response2", "model"),
+				genai.NewContentFromText("response1response2", "model"),
+				nil, // proxy still send the nil
+				// Results from second GenerateStream call
+				genai.NewContentFromText("response3", "model"),
+				genai.NewContentFromText("response4", "model"),
+				genai.NewContentFromText("response3response4", "model"),
+			},
+			wantPartial: []bool{
+				// Results from first GenerateStream call
+				true, true, false, false,
+				true, true, false,
+			},
+		},
+		{
+			name: "stream with audio should reset",
+			initialResponses: []*genai.Content{
+				genai.NewContentFromText("response1", "model"),
+				genai.NewContentFromText("response2", "model"),
+				genai.NewContentFromParts([]*genai.Part{{VideoMetadata: &genai.VideoMetadata{}}}, "model"),
+				genai.NewContentFromText("response3", "model"),
+				genai.NewContentFromText("response4", "model"),
+			},
+			numberOfStreamCalls:  1,
+			streamResponsesCount: 5,
+			want: []*genai.Content{
+				// Results from first GenerateStream call
+				genai.NewContentFromText("response1", "model"),
+				genai.NewContentFromText("response2", "model"),
+				genai.NewContentFromText("response1response2", "model"),
+				genai.NewContentFromParts([]*genai.Part{{VideoMetadata: &genai.VideoMetadata{}}}, "model"),
+				genai.NewContentFromText("response3", "model"),
+				genai.NewContentFromText("response4", "model"),
+				genai.NewContentFromText("response3response4", "model"),
+			},
+			wantPartial: []bool{
+				// Results from first GenerateStream call
+				true, true, false, false,
+				true, true, false,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			responsesCopy := make([]*genai.Content, len(tc.initialResponses))
+			copy(responsesCopy, tc.initialResponses)
+
+			mockModel := &testutil.MockModel{
+				Responses:            responsesCopy,
+				StreamResponsesCount: tc.streamResponsesCount,
+			}
+			modelWithAggregator := llminternal.WrapModelWithAggregator(mockModel)
+
+			count := 0
+			callCount := 0
+			for callCount < tc.numberOfStreamCalls {
+				for got, err := range modelWithAggregator.GenerateStream(ctx, &llm.Request{}) {
+					if err != nil {
+						t.Fatalf("found error while iterating stream")
+					}
+					if diff := cmp.Diff(tc.want[count], got.Content); diff != "" {
+						t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", got.Content, tc.want[count], diff)
+					}
+					if got.Partial != tc.wantPartial[count] {
+						t.Errorf("Model.GenerateStream() = %v, want Partial value %v\n", got.Partial, tc.wantPartial[count])
+					}
+					count++
+				}
+				callCount++
+			}
+		})
+	}
+
+}

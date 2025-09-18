@@ -22,26 +22,26 @@ import (
 	"google.golang.org/genai"
 )
 
-// ModelWithStreamAggregator proxys a llm.Model adding an aggregated event to the end of GenerateStream
-type ModelWithStreamAggregator struct {
+// modelWithStreamAggregator proxys a llm.Model adding an aggregated event to the end of GenerateStream
+type modelWithStreamAggregator struct {
 	model llm.Model
 }
 
-func WrapModelWithAggregator(model llm.Model) (llm.Model, error) {
-	return &ModelWithStreamAggregator{model: model}, nil
+func WrapModelWithAggregator(model llm.Model) llm.Model {
+	return &modelWithStreamAggregator{model: model}
 }
 
-func (m *ModelWithStreamAggregator) Name() string {
+func (m *modelWithStreamAggregator) Name() string {
 	return m.model.Name()
 }
 
 // Generate calls the inner model synchronously returning result from the first candidate.
-func (m *ModelWithStreamAggregator) Generate(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+func (m *modelWithStreamAggregator) Generate(ctx context.Context, req *llm.Request) (*llm.Response, error) {
 	return m.model.Generate(ctx, req)
 }
 
 // GenerateStream calls the iner model synchronously.
-func (m *ModelWithStreamAggregator) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
+func (m *modelWithStreamAggregator) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
 	stream := m.model.GenerateStream(ctx, req)
 	aggregator := newStreamingResponseAggregator()
 	return func(yield func(*llm.Response, error) bool) {
@@ -65,7 +65,7 @@ func (m *ModelWithStreamAggregator) GenerateStream(ctx context.Context, req *llm
 	}
 }
 
-var _ llm.Model = (*ModelWithStreamAggregator)(nil)
+var _ llm.Model = (*modelWithStreamAggregator)(nil)
 
 // ------------------------------------ response aggregator -----------------------------------
 
@@ -76,6 +76,7 @@ type streamingResponseAggregator struct {
 	text        string
 	thoughtText string
 	response    *llm.Response
+	role        string
 }
 
 // newStreamingResponseAggregator creates a new, initialized streamingResponseAggregator.
@@ -91,6 +92,7 @@ func (s *streamingResponseAggregator) ProcessResponse(llmResponse *llm.Response)
 	var part0 *genai.Part
 	if llmResponse.Content != nil && len(llmResponse.Content.Parts) > 0 {
 		part0 = llmResponse.Content.Parts[0]
+		s.role = llmResponse.Content.Role
 	}
 
 	// If part is text append it
@@ -126,13 +128,23 @@ func (s *streamingResponseAggregator) Close() *llm.Response {
 			parts = append(parts, &genai.Part{Text: s.text, Thought: false})
 		}
 
-		return &llm.Response{
-			Content:           &genai.Content{Parts: parts},
+		response := &llm.Response{
+			Content:           &genai.Content{Parts: parts, Role: s.role},
 			ErrorCode:         s.response.ErrorCode,
 			ErrorMessage:      s.response.ErrorMessage,
 			UsageMetadata:     s.response.UsageMetadata,
 			GroundingMetadata: s.response.GroundingMetadata,
 		}
+		s.Clear()
+		return response
 	}
+	s.Clear()
 	return nil
+}
+
+func (s *streamingResponseAggregator) Clear() {
+	s.response = nil
+	s.text = ""
+	s.thoughtText = ""
+	s.role = ""
 }

@@ -35,7 +35,7 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (l
 	if err != nil {
 		return nil, err
 	}
-	return llminternal.WrapModelWithAggregator(&model{name: modelName, client: client})
+	return llminternal.WrapModelWithAggregator(&model{name: modelName, client: client}), nil
 }
 
 func (m *model) Name() string {

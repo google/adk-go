@@ -101,8 +101,9 @@ func NewTestAgentRunner(t *testing.T, agent agent.Agent) *TestAgentRunner {
 }
 
 type MockModel struct {
-	Requests  []*llm.Request
-	Responses []*genai.Content
+	Requests             []*llm.Request
+	Responses            []*genai.Content
+	StreamResponsesCount int
 }
 
 var errNoModelData = errors.New("no data")
@@ -125,13 +126,20 @@ func (m *MockModel) Generate(ctx context.Context, req *llm.Request) (*llm.Respon
 
 func (m *MockModel) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
 	return func(yield func(*llm.Response, error) bool) {
-		if len(m.Responses) > 0 {
+		streamResponsesCount := m.StreamResponsesCount
+		if streamResponsesCount == 0 {
+			streamResponsesCount = 1
+		}
+		for i := 0; i < streamResponsesCount; i++ {
+			if len(m.Responses) == 0 {
+				break
+			}
 			resp := &llm.Response{Content: m.Responses[0]}
 			m.Responses = m.Responses[1:]
-			yield(resp, nil)
-			return
+			if !yield(resp, nil) {
+				return
+			}
 		}
-		yield(nil, fmt.Errorf("no more data"))
 	}
 }
 
