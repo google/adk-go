@@ -48,7 +48,13 @@ func (c *DebugAPIController) EventGraph(rw http.ResponseWriter, req *http.Reques
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
-	storedSession, err := validateSessionExists(req.Context(), c.sessionService, sessionID.AppName, sessionID.UserID, sessionID.ID)
+	resp, err := c.sessionService.Get(req.Context(), &sessionservice.GetRequest{
+		ID: session.ID{
+			AppName:   sessionID.AppName,
+			UserID:    sessionID.UserID,
+			SessionID: sessionID.ID,
+		},
+	})
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
@@ -60,7 +66,7 @@ func (c *DebugAPIController) EventGraph(rw http.ResponseWriter, req *http.Reques
 	}
 
 	var event *session.Event
-	for it := range storedSession.Events().All() {
+	for it := range resp.Session.Events().All() {
 		if it.ID == eventID {
 			event = it
 			break

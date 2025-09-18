@@ -58,7 +58,7 @@ func (c *RuntimeAPIController) RunAgentHTTP(rw http.ResponseWriter, req *http.Re
 
 // RunAgent executes a non-streaming agent run for a given session and message.
 func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest models.RunAgentRequest) ([]*session.Event, error) {
-	_, err := validateSessionExists(ctx, c.sessionService, runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
+	err := c.validateSessionExists(ctx, runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func (c *RuntimeAPIController) RunAgentSSE(rw http.ResponseWriter, req *http.Req
 		return err
 	}
 
-	_, err = validateSessionExists(req.Context(), c.sessionService, runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
+	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
 		return err
 	}
@@ -110,7 +110,6 @@ func (c *RuntimeAPIController) RunAgentSSE(rw http.ResponseWriter, req *http.Req
 
 	rw.WriteHeader(http.StatusOK)
 	for event, err := range resp {
-		fmt.Printf("event: %v\n", event)
 		if err != nil {
 			_, err := fmt.Fprintf(rw, "Error while running agent: %v\n", err)
 			if err != nil {
@@ -182,4 +181,18 @@ func decodeRequestBody(req *http.Request) (decodedReq models.RunAgentRequest, er
 		return runAgentRequest, errors.NewStatusError(fmt.Errorf("decode request: %w", err), http.StatusBadRequest)
 	}
 	return runAgentRequest, nil
+}
+
+func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
+	_, err := c.sessionService.Get(ctx, &sessionservice.GetRequest{
+		ID: session.ID{
+			AppName:   appName,
+			UserID:    userID,
+			SessionID: sessionID,
+		},
+	})
+	if err != nil {
+		return errors.NewStatusError(fmt.Errorf("get session: %w", err), http.StatusNotFound)
+	}
+	return nil
 }

@@ -26,9 +26,8 @@ import (
 // Use the SequentialAgent when you want the execution to occur in a fixed,
 // strict order.
 func New(cfg Config) (agent.Agent, error) {
-	aCgf := cfg.AgentConfig
 	return loopagent.New(loopagent.Config{
-		AgentConfig:   aCgf,
+		AgentConfig:   cfg.AgentConfig,
 		MaxIterations: 1,
 	})
 }
