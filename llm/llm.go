@@ -43,6 +43,7 @@ type Request struct {
 type Response struct {
 	Content           *genai.Content
 	GroundingMetadata *genai.GroundingMetadata
+	UsageMetadata     *genai.GenerateContentResponseUsageMetadata
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
 	Partial bool

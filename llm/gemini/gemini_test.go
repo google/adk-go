@@ -50,6 +50,13 @@ func TestModel_Generate(t *testing.T) {
 			},
 			want: &llm.Response{
 				Content: genai.NewContentFromText("Paris\n", genai.RoleModel),
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+					CandidatesTokenCount:    2,
+					CandidatesTokensDetails: []*genai.ModalityTokenCount{{Modality: "TEXT", TokenCount: 2}},
+					PromptTokenCount:        10,
+					PromptTokensDetails:     []*genai.ModalityTokenCount{{Modality: "TEXT", TokenCount: 10}},
+					TotalTokenCount:         12,
+				},
 			},
 		},
 	}
@@ -103,13 +110,22 @@ func TestModel_GenerateStream(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			got, err := readResponse(model.GenerateStream(t.Context(), tt.req))
+			gotPartial, err := readResponsePartial(model.GenerateStream(t.Context(), tt.req))
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Model.GenerateStream() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if diff := cmp.Diff(tt.want, got); diff != "" {
-				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", got, tt.want, diff)
+			if diff := cmp.Diff(tt.want, gotPartial); diff != "" {
+				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", gotPartial, tt.want, diff)
+			}
+
+			gotNonPartial, err := readResponseNonPartial(model.GenerateStream(t.Context(), tt.req))
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Model.GenerateStream() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if diff := cmp.Diff(tt.want, gotNonPartial); diff != "" {
+				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", gotNonPartial, tt.want, diff)
 			}
 		})
 	}
@@ -132,7 +148,7 @@ func newGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig 
 	}
 }
 
-func readResponse(s iter.Seq2[*llm.Response, error]) (string, error) {
+func readResponsePartial(s iter.Seq2[*llm.Response, error]) (string, error) {
 	var answer string
 	for resp, err := range s {
 		if err != nil {
@@ -141,7 +157,25 @@ func readResponse(s iter.Seq2[*llm.Response, error]) (string, error) {
 		if resp.Content == nil || len(resp.Content.Parts) == 0 {
 			return answer, fmt.Errorf("encountered an empty response: %v", resp)
 		}
-		answer += resp.Content.Parts[0].Text
+		if resp.Partial {
+			answer += resp.Content.Parts[0].Text
+		}
+	}
+	return answer, nil
+}
+
+func readResponseNonPartial(s iter.Seq2[*llm.Response, error]) (string, error) {
+	var answer string
+	for resp, err := range s {
+		if err != nil {
+			return answer, err
+		}
+		if resp.Content == nil || len(resp.Content.Parts) == 0 {
+			return answer, fmt.Errorf("encountered an empty response: %v", resp)
+		}
+		if !resp.Partial {
+			answer += resp.Content.Parts[0].Text
+		}
 	}
 	return answer, nil
 }

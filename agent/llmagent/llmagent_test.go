@@ -619,7 +619,7 @@ func (m *mockModel) Name() string {
 
 var _ llm.Model = (*mockModel)(nil)
 
-func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper) *gemini.Model {
+func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper) llm.Model {
 	apiKey := "fakeKey"
 	if transport == nil { // use httprr
 		trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))

@@ -19,30 +19,31 @@ import (
 	"fmt"
 	"iter"
 
+	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/llm"
 	"google.golang.org/genai"
 )
 
 // TODO: test coverage
-type Model struct {
+type model struct {
 	client *genai.Client
 	name   string
 }
 
-func NewModel(ctx context.Context, model string, cfg *genai.ClientConfig) (*Model, error) {
+func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (llm.Model, error) {
 	client, err := genai.NewClient(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &Model{name: model, client: client}, nil
+	return llminternal.WrapModelWithAggregator(&model{name: modelName, client: client})
 }
 
-func (m *Model) Name() string {
+func (m *model) Name() string {
 	return m.name
 }
 
 // Generate calls the model synchronously returning result from the first candidate.
-func (m *Model) Generate(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+func (m *model) Generate(ctx context.Context, req *llm.Request) (*llm.Response, error) {
 	m.maybeAppendUserContent(req)
 
 	resp, err := m.client.Models.GenerateContent(ctx, m.name, req.Contents, req.GenerateConfig)
@@ -57,11 +58,12 @@ func (m *Model) Generate(ctx context.Context, req *llm.Request) (*llm.Response, 
 	return &llm.Response{
 		Content:           candidate.Content,
 		GroundingMetadata: candidate.GroundingMetadata,
+		UsageMetadata:     resp.UsageMetadata,
 	}, nil
 }
 
 // GenerateStream calls the model synchronously.
-func (m *Model) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
+func (m *model) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
 	m.maybeAppendUserContent(req)
 
 	return func(yield func(*llm.Response, error) bool) {
@@ -80,7 +82,8 @@ func (m *Model) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[
 			if !yield(&llm.Response{
 				Content:           candidate.Content,
 				GroundingMetadata: candidate.GroundingMetadata,
-				Partial:           !complete,
+				UsageMetadata:     resp.UsageMetadata,
+				Partial:           true,
 				TurnComplete:      complete,
 				Interrupted:       false, // no interruptions in unary
 			}, nil) {
@@ -91,7 +94,7 @@ func (m *Model) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[
 }
 
 // maybeAppendUserContent appends a user content, so that model can continue to output.
-func (m *Model) maybeAppendUserContent(req *llm.Request) {
+func (m *model) maybeAppendUserContent(req *llm.Request) {
 	if len(req.Contents) == 0 {
 		req.Contents = append(req.Contents, genai.NewContentFromText("Handle the requests as specified in the System Instruction.", "user"))
 	}
@@ -101,4 +104,4 @@ func (m *Model) maybeAppendUserContent(req *llm.Request) {
 	}
 }
 
-var _ llm.Model = (*Model)(nil)
+var _ llm.Model = (*model)(nil)
