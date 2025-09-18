@@ -28,8 +28,8 @@ import (
 
 type TestState map[string]any
 
-func (s TestState) Get(key string) any {
-	return s[key]
+func (s TestState) Get(key string) (any, error) {
+	return s[key], nil
 }
 
 func (s TestState) All() iter.Seq2[string, any] {
@@ -149,3 +149,5 @@ func (s *FakeSessionService) AppendEvent(ctx context.Context, session sessionser
 	s.Sessions[TestSession.Id] = *TestSession
 	return nil
 }
+
+var _ sessionservice.Service = (*FakeSessionService)(nil)
