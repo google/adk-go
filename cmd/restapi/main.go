@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/cmd/restapi/config"
 	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/routers"
@@ -100,13 +101,14 @@ func main() {
 	}
 	log.Printf("Starting server on port %d", serverConfig.Port)
 	sessionService := sessionservice.Mem()
+	artifactService := artifactservice.Mem()
 
 	router := routers.NewRouter(
 		routers.NewSessionsAPIRouter(handlers.NewSessionsAPIController(sessionService)),
 		routers.NewRuntimeAPIRouter(handlers.NewRuntimeAPIRouter(sessionService, agentLoader)),
 		routers.NewAppsAPIRouter(handlers.NewAppsAPIController(agentLoader)),
 		routers.NewDebugAPIRouter(&handlers.DebugAPIController{}),
-		routers.NewArtifactsAPIRouter(&handlers.ArtifactsAPIController{}),
+		routers.NewArtifactsAPIRouter(handlers.NewArtifactsAPIController(artifactService)),
 	)
 	router.Use(corsWithArgs(serverConfig))
 
