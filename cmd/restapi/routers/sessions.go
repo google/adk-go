@@ -37,31 +37,31 @@ func (r *SessionsAPIRouter) Routes() Routes {
 			Name:        "GetSession",
 			Method:      http.MethodGet,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
-			HandlerFunc: r.sessionController.GetSession,
+			HandlerFunc: r.sessionController.GetSessionHTTP,
 		},
 		Route{
 			Name:        "CreateSession",
 			Method:      http.MethodPost,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions",
-			HandlerFunc: r.sessionController.CreateSession,
+			HandlerFunc: r.sessionController.CreateSessionHTTP,
 		},
 		Route{
 			Name:        "CreateSessionWithId",
 			Method:      http.MethodPost,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
-			HandlerFunc: r.sessionController.CreateSession,
+			HandlerFunc: r.sessionController.CreateSessionHTTP,
 		},
 		Route{
 			Name:        "DeleteSession",
 			Method:      http.MethodDelete,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
-			HandlerFunc: r.sessionController.CreateSession,
+			HandlerFunc: r.sessionController.DeleteSessionHTTP,
 		},
 		Route{
 			Name:        "ListSessions",
 			Method:      http.MethodGet,
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions",
-			HandlerFunc: r.sessionController.ListSessions,
+			HandlerFunc: r.sessionController.ListSessionsHTTP,
 		},
 	}
 }

@@ -32,9 +32,7 @@ import (
 
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/llm/gemini"
-	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -76,9 +74,9 @@ func TestLLMAgent(t *testing.T) {
 				t.Fatalf("NewLLMAgent failed: %v", err)
 			}
 			// TODO: set tools, planner.
-			runner := newTestAgentRunner(t, a)
+			runner := testutil.NewTestAgentRunner(t, a)
 			stream := runner.Run(t, "test_session", "")
-			texts, err := collectTextParts(stream)
+			texts, err := testutil.CollectTextParts(stream)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 				t.Fatalf("stream = (%q, %v), want (_, %v)", texts, err, tc.wantErr)
 			}
@@ -230,8 +228,8 @@ func TestModelCallbacks(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			model := &mockModel{
-				responses: tc.llmResponses,
+			model := &testutil.MockModel{
+				Responses: tc.llmResponses,
 			}
 			a, err := llmagent.New(llmagent.Config{
 				Name:        "hello_world_agent",
@@ -242,9 +240,9 @@ func TestModelCallbacks(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to create llm agent: %v", err)
 			}
-			runner := newTestAgentRunner(t, a)
+			runner := testutil.NewTestAgentRunner(t, a)
 			stream := runner.Run(t, "test_session", "")
-			texts, err := collectTextParts(stream)
+			texts, err := testutil.CollectTextParts(stream)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 				t.Fatalf("stream = (%q, %v), want (_, %v)", texts, err, tc.wantErr)
 			}
@@ -296,10 +294,10 @@ func TestFunctionTool(t *testing.T) {
 		t.Fatalf("failed to create LLM Agent: %v", err)
 	}
 
-	runner := newTestAgentRunner(t, agent)
+	runner := testutil.NewTestAgentRunner(t, agent)
 	stream := runner.Run(t, "session1", prompt)
 
-	ans, err := collectTextParts(stream)
+	ans, err := testutil.CollectTextParts(stream)
 	if err != nil || len(ans) == 0 {
 		t.Fatalf("agent returned (%v, %v), want result", ans, err)
 	}
@@ -329,7 +327,7 @@ func TestAgentTransfer(t *testing.T) {
 	}
 	// returns a model that returns the prepopulated resp one by one.
 	testModel := func(resp ...*genai.Content) llm.Model {
-		return &mockModel{responses: resp}
+		return &testutil.MockModel{Responses: resp}
 	}
 
 	type content struct {
@@ -360,7 +358,7 @@ func TestAgentTransfer(t *testing.T) {
 	}
 
 	check := func(t *testing.T, rootAgent agent.Agent, wants [][]content) {
-		runner := newTestAgentRunner(t, rootAgent)
+		runner := testutil.NewTestAgentRunner(t, rootAgent)
 		for i := range len(wants) {
 			got, err := contents(runner.Run(t, "session_id", fmt.Sprintf("round %d", i)))
 			if err != nil {
@@ -506,119 +504,6 @@ func TestAgentTransfer(t *testing.T) {
 	//   - test_auto_to_loop
 }
 
-// TODO(hakim): move testAgentRunner to an internal test utility package.
-// See adk-python's tests/unittests/testing_utils.py.
-type testAgentRunner struct {
-	agent          agent.Agent
-	sessionService sessionservice.Service
-	lastSession    sessionservice.StoredSession
-	appName        string
-	// TODO: move runner definition to the adk package and it's a part of public api, but the logic to the internal runner
-	runner *runner.Runner
-}
-
-func (r *testAgentRunner) session(t *testing.T, appName, userID, sessionID string) (sessionservice.StoredSession, error) {
-	ctx := t.Context()
-	if last := r.lastSession; last != nil && last.ID().SessionID == sessionID {
-		resp, err := r.sessionService.Get(ctx, &sessionservice.GetRequest{
-			ID: session.ID{
-				AppName:   "test_app",
-				UserID:    "test_user",
-				SessionID: sessionID,
-			},
-		})
-		r.lastSession = resp.Session
-		return resp.Session, err
-	}
-	resp, err := r.sessionService.Create(ctx, &sessionservice.CreateRequest{
-		AppName:   "test_app",
-		UserID:    "test_user",
-		SessionID: sessionID,
-	})
-	r.lastSession = resp.Session
-	return resp.Session, err
-}
-
-func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.Seq2[*session.Event, error] {
-	t.Helper()
-	ctx := t.Context()
-
-	userID := "test_user"
-
-	session, err := r.session(t, r.appName, userID, sessionID)
-	if err != nil {
-		t.Fatalf("failed to get/create session: %v", err)
-	}
-
-	var content *genai.Content
-	if newMessage != "" {
-		content = genai.NewContentFromText(newMessage, genai.RoleUser)
-	}
-
-	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &runner.RunConfig{})
-}
-
-func newTestAgentRunner(t *testing.T, agent agent.Agent) *testAgentRunner {
-	appName := "test_app"
-	sessionService := sessionservice.Mem()
-
-	runner, err := runner.New(&runner.Config{
-		AppName:        appName,
-		Agent:          agent,
-		SessionService: sessionService,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return &testAgentRunner{
-		agent:          agent,
-		sessionService: sessionService,
-		appName:        appName,
-		runner:         runner,
-	}
-}
-
-type mockModel struct {
-	responses []*genai.Content
-}
-
-var errNoModelData = errors.New("no data")
-
-// GenerateContent implements llm.Model.
-func (m *mockModel) Generate(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	if len(m.responses) == 0 {
-		return nil, errNoModelData
-	}
-
-	resp := &llm.Response{
-		Content: m.responses[0],
-	}
-
-	m.responses = m.responses[1:]
-
-	return resp, nil
-}
-
-func (m *mockModel) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
-	return func(yield func(*llm.Response, error) bool) {
-		if len(m.responses) > 0 {
-			resp := &llm.Response{Content: m.responses[0]}
-			m.responses = m.responses[1:]
-			yield(resp, nil)
-			return
-		}
-		yield(nil, fmt.Errorf("no more data"))
-	}
-}
-
-// Name implements llm.Model.
-func (m *mockModel) Name() string {
-	return "mock"
-}
-
-var _ llm.Model = (*mockModel)(nil)
-
 func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper) *gemini.Model {
 	apiKey := "fakeKey"
 	if transport == nil { // use httprr
@@ -637,26 +522,6 @@ func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper)
 		t.Fatalf("failed to create model: %v", err)
 	}
 	return model
-}
-
-// collectTextParts collects all text parts from the llm response until encountering an error.
-// It returns all collected text parts and the last error.
-func collectTextParts(stream iter.Seq2[*session.Event, error]) ([]string, error) {
-	var texts []string
-	for ev, err := range stream {
-		if err != nil {
-			return texts, err
-		}
-		if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
-			return texts, fmt.Errorf("unexpected empty event: %v", ev)
-		}
-		for _, p := range ev.LLMResponse.Content.Parts {
-			if p.Text != "" {
-				texts = append(texts, p.Text)
-			}
-		}
-	}
-	return texts, nil
 }
 
 func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, bool) {

@@ -23,6 +23,7 @@ import (
 	"google.golang.org/adk/cmd/restapi/config"
 	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/routers"
+	"google.golang.org/adk/sessionservice"
 )
 
 func corsWithArgs(serverConfig *config.ADKAPIServerConfigs) func(next http.Handler) http.Handler {
@@ -47,7 +48,7 @@ func main() {
 	log.Printf("Starting server on port %d", serverConfig.Port)
 
 	router := routers.NewRouter(
-		routers.NewSessionsAPIRouter(&handlers.SessionsAPIController{}),
+		routers.NewSessionsAPIRouter(handlers.NewSessionsAPIController(sessionservice.Mem())),
 		routers.NewRuntimeAPIRouter(&handlers.RuntimeAPIController{}),
 		routers.NewAppsAPIRouter(&handlers.AppsAPIController{}),
 		routers.NewDebugAPIRouter(&handlers.DebugAPIController{}),

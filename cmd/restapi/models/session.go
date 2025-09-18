@@ -15,15 +15,94 @@
 package models
 
 import (
+	"fmt"
+	"maps"
 	"time"
+
+	"github.com/mitchellh/mapstructure"
+	"google.golang.org/adk/sessionservice"
 )
 
 // Session represents an agent's session.
 type Session struct {
 	ID        string         `json:"id"`
-	AppName   string         `json:"app_name"`
-	UserID    string         `json:"user_id"`
-	UpdatedAt time.Time      `json:"updated_at"`
+	AppName   string         `json:"appName"`
+	UserID    string         `json:"userId"`
+	UpdatedAt time.Time      `json:"lastUpdateTime"`
 	Events    []Event        `json:"events"`
 	State     map[string]any `json:"state"`
+}
+
+type CreateSessionRequest struct {
+	State  map[string]any `json:"state"`
+	Events []Event        `json:"events"`
+}
+
+type SessionID struct {
+	ID      string `mapstructure:"session_id,optional"`
+	AppName string `mapstructure:"app_name,required"`
+	UserID  string `mapstructure:"user_id,required"`
+}
+
+func SessionIDFromHTTPParameters(vars map[string]string) (SessionID, error) {
+	var sessionID SessionID
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		WeaklyTypedInput: true,
+		Result:           &sessionID,
+	})
+	if err != nil {
+		return sessionID, err
+	}
+	err = decoder.Decode(vars)
+	if err != nil {
+		return sessionID, err
+	}
+	if sessionID.AppName == "" {
+		return sessionID, fmt.Errorf("app_name parameter is required")
+	}
+	if sessionID.UserID == "" {
+		return sessionID, fmt.Errorf("user_id parameter is required")
+	}
+	return sessionID, nil
+}
+
+func FromSession(session sessionservice.StoredSession) (Session, error) {
+	id := session.ID()
+	state := map[string]any{}
+	maps.Insert(state, session.State().All())
+	events := []Event{}
+	for event := range session.Events().All() {
+		events = append(events, FromSessionEvent(*event))
+	}
+	mappedSession := Session{
+		ID:        id.SessionID,
+		AppName:   id.AppName,
+		UserID:    id.UserID,
+		UpdatedAt: session.Updated(),
+		Events:    events,
+		State:     state,
+	}
+	return mappedSession, mappedSession.Validate()
+}
+
+func (s Session) Validate() error {
+	if s.AppName == "" {
+		return fmt.Errorf("app_name is empty in received session")
+	}
+	if s.UserID == "" {
+		return fmt.Errorf("user_id is empty in received session")
+	}
+	if s.ID == "" {
+		return fmt.Errorf("session_id is empty in received session")
+	}
+	if s.UpdatedAt.IsZero() {
+		return fmt.Errorf("updated_at is empty")
+	}
+	if s.State == nil {
+		return fmt.Errorf("state is nil")
+	}
+	if s.Events == nil {
+		return fmt.Errorf("events is nil")
+	}
+	return nil
 }

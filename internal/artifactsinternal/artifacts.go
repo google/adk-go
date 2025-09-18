@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package runner
+package artifactsinternal
 
 import (
 	"context"
@@ -23,13 +23,21 @@ import (
 	"google.golang.org/genai"
 )
 
-// artifacts implements Artifacts
-type artifacts struct {
+// Artifacts implements Artifacts
+type Artifacts struct {
 	service artifactservice.Service
 	id      session.ID
 }
 
-func (a *artifacts) Save(name string, data genai.Part) error {
+// NewArtifacts creates and returns Artifacts implementation.
+func NewArtifacts(service artifactservice.Service, id session.ID) *Artifacts {
+	return &Artifacts{
+		service: service,
+		id:      id,
+	}
+}
+
+func (a *Artifacts) Save(name string, data genai.Part) error {
 	_, err := a.service.Save(context.Background(), &artifactservice.SaveRequest{
 		AppName:   a.id.AppName,
 		UserID:    a.id.UserID,
@@ -40,7 +48,7 @@ func (a *artifacts) Save(name string, data genai.Part) error {
 	return err
 }
 
-func (a *artifacts) Load(name string) (genai.Part, error) {
+func (a *Artifacts) Load(name string) (genai.Part, error) {
 	loadResponse, err := a.service.Load(context.Background(), &artifactservice.LoadRequest{
 		AppName:   a.id.AppName,
 		UserID:    a.id.UserID,
@@ -53,7 +61,7 @@ func (a *artifacts) Load(name string) (genai.Part, error) {
 	return *loadResponse.Part, nil
 }
 
-func (a *artifacts) LoadVersion(name string, version int) (genai.Part, error) {
+func (a *Artifacts) LoadVersion(name string, version int) (genai.Part, error) {
 	loadResponse, err := a.service.Load(context.Background(), &artifactservice.LoadRequest{
 		AppName:   a.id.AppName,
 		UserID:    a.id.UserID,
@@ -67,7 +75,7 @@ func (a *artifacts) LoadVersion(name string, version int) (genai.Part, error) {
 	return *loadResponse.Part, nil
 }
 
-func (a *artifacts) List() ([]string, error) {
+func (a *Artifacts) List() ([]string, error) {
 	ListResponse, err := a.service.List(context.Background(), &artifactservice.ListRequest{
 		AppName:   a.id.AppName,
 		UserID:    a.id.UserID,
@@ -79,4 +87,4 @@ func (a *artifacts) List() ([]string, error) {
 	return ListResponse.FileNames, nil
 }
 
-var _ agent.Artifacts = (*artifacts)(nil)
+var _ agent.Artifacts = (*Artifacts)(nil)
