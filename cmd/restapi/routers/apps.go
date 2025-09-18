@@ -36,7 +36,7 @@ func (r *AppsAPIRouter) Routes() Routes {
 	return Routes{
 		Route{
 			Name:        "ListApps",
-			Method:      http.MethodGet,
+			Methods:     []string{http.MethodGet},
 			Pattern:     "/list-apps",
 			HandlerFunc: r.appsController.ListApps,
 		},

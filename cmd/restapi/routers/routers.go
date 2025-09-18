@@ -26,7 +26,7 @@ import (
 // A Route defines the parameters for an api endpoint
 type Route struct {
 	Name        string
-	Method      string
+	Methods     []string
 	Pattern     string
 	HandlerFunc http.HandlerFunc
 }
@@ -66,10 +66,10 @@ func NewRouter(routers ...Router) *mux.Router {
 		for _, route := range api.Routes() {
 			var handler http.Handler = route.HandlerFunc
 
-			// handler = Logger(handler, route.Name)
+			handler = Logger(handler, route.Name)
 
 			router.
-				Methods(route.Method).
+				Methods(route.Methods...).
 				Path(route.Pattern).
 				Name(route.Name).
 				Handler(handler)

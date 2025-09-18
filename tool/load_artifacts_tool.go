@@ -50,6 +50,11 @@ func (t *loadArtifactsTool) Description() string {
 	return t.description
 }
 
+// IsLongRunning implements tool.Tool.
+func (t *loadArtifactsTool) IsLongRunning() bool {
+	return false
+}
+
 // Declaration implements tool.Tool.
 func (t *loadArtifactsTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
