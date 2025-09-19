@@ -19,7 +19,7 @@ import (
 	"maps"
 	"time"
 
-	"github.com/cmatthias/mapstructure"
+	"github.com/mitchellh/mapstructure"
 	"google.golang.org/adk/sessionservice"
 )
 
