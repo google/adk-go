@@ -16,9 +16,7 @@
 package routers
 
 import (
-	"log"
 	"net/http"
-	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -39,34 +37,17 @@ type Router interface {
 	Routes() Routes
 }
 
-func Logger(inner http.Handler, name string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-
-		inner.ServeHTTP(w, r)
-
-		log.Printf(
-			"%s %s %s %s",
-			r.Method,
-			r.RequestURI,
-			name,
-			time.Since(start),
-		)
-		log.Printf("Request Header: %v", r.Header)
-		log.Printf("Request Body: %v", r.Body)
-		log.Printf("Response Header: %v", w.Header())
-		log.Printf("Response: %v", w)
-	})
-}
-
 // NewRouter creates a new router for any number of api routers
 func NewRouter(routers ...Router) *mux.Router {
 	router := mux.NewRouter().StrictSlash(true)
-	for _, api := range routers {
+	SetupSubRouters(router)
+	return router
+}
+
+func SetupSubRouters(router *mux.Router, subrouters ...Router) {
+	for _, api := range subrouters {
 		for _, route := range api.Routes() {
 			var handler http.Handler = route.HandlerFunc
-
-			handler = Logger(handler, route.Name)
 
 			router.
 				Methods(route.Methods...).
@@ -75,5 +56,5 @@ func NewRouter(routers ...Router) *mux.Router {
 				Handler(handler)
 		}
 	}
-	return router
+
 }

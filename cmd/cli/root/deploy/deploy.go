@@ -12,10 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package utils_test
+package deploy
 
-import "testing"
+import (
+	"github.com/spf13/cobra"
+	"google.golang.org/adk/cmd/cli/root"
+)
 
-func TestNothing(t *testing.T) {
-	// To make it buildable.
+// deployCmd represents the deploy command
+var DeployCmd = &cobra.Command{
+	Use:   "deploy",
+	Short: "Makes deployment to various platforms easy",
+	Long:  `Please see subcommands for details`,
+	Run: func(cmd *cobra.Command, args []string) {
+	},
+}
+
+func init() {
+	root.RootCmd.AddCommand(DeployCmd)
 }

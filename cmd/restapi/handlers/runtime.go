@@ -167,10 +167,9 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 
 	r, err := runner.New(
 		&runner.Config{
-			AppName:         req.AppName,
-			Agent:           agent,
-			SessionService:  c.sessionService,
-			ArtifactService: c.artifactService,
+			AppName:        req.AppName,
+			Agent:          agent,
+			SessionService: c.sessionService,
 		},
 	)
 	if err != nil {
