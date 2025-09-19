@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/cmd/restapi/errors"
 	"google.golang.org/adk/cmd/restapi/models"
 	"google.golang.org/adk/cmd/restapi/services"
@@ -30,12 +31,13 @@ import (
 
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
-	sessionService sessionservice.Service
-	agentLoader    services.AgentLoader
+	sessionService  sessionservice.Service
+	artifactService artifactservice.Service
+	agentLoader     services.AgentLoader
 }
 
-func NewRuntimeAPIRouter(sessionService sessionservice.Service, agentLoader services.AgentLoader) *RuntimeAPIController {
-	return &RuntimeAPIController{sessionService: sessionService, agentLoader: agentLoader}
+func NewRuntimeAPIRouter(sessionService sessionservice.Service, agentLoader services.AgentLoader, artifactService artifactservice.Service) *RuntimeAPIController {
+	return &RuntimeAPIController{sessionService: sessionService, agentLoader: agentLoader, artifactService: artifactService}
 }
 
 // RunAgent executes a non-streaming agent run for a given session and message.
@@ -165,9 +167,10 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 
 	r, err := runner.New(
 		&runner.Config{
-			AppName:        req.AppName,
-			Agent:          agent,
-			SessionService: c.sessionService,
+			AppName:         req.AppName,
+			Agent:           agent,
+			SessionService:  c.sessionService,
+			ArtifactService: c.artifactService,
 		},
 	)
 	if err != nil {

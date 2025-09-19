@@ -24,6 +24,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
+	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/cmd/restapi/config"
 	"google.golang.org/adk/cmd/restapi/services"
 	restapiweb "google.golang.org/adk/cmd/restapi/web"
@@ -69,15 +70,17 @@ func logRequestHandler(h http.Handler) http.Handler {
 }
 
 type ServeConfig struct {
-	SessionService sessionservice.Service
-	AgentLoader    services.AgentLoader
+	SessionService  sessionservice.Service
+	AgentLoader     services.AgentLoader
+	ArtifactService artifactservice.Service
 }
 
 // Serve initiates the http server and starts it according to WebConfig parameters
 func Serve(c *WebConfig, serveConfig *ServeConfig) {
 	serverConfig := config.ADKAPIRouterConfigs{
-		SessionService: serveConfig.SessionService,
-		AgentLoader:    serveConfig.AgentLoader,
+		SessionService:  serveConfig.SessionService,
+		AgentLoader:     serveConfig.AgentLoader,
+		ArtifactService: serveConfig.ArtifactService,
 	}
 	serverConfig.Cors = *cors.New(cors.Options{
 		AllowedOrigins:   []string{c.FrontEndServer},

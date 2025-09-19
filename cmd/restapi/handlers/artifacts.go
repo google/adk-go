@@ -16,22 +16,119 @@ package handlers
 
 import (
 	"net/http"
+	"strconv"
+
+	"github.com/gorilla/mux"
+	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/cmd/restapi/models"
 )
 
 // ArtifactsAPIController is the controller for the Artifacts API.
-type ArtifactsAPIController struct{}
+type ArtifactsAPIController struct {
+	artifactService artifactservice.Service
+}
+
+func NewArtifactsAPIController(artifactService artifactservice.Service) *ArtifactsAPIController {
+	return &ArtifactsAPIController{artifactService: artifactService}
+}
 
 // ListArtifacts lists all the artifact filenames within a session.
-func (*ArtifactsAPIController) ListArtifacts(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
+func (c *ArtifactsAPIController) ListArtifacts(rw http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	sessionID, err := models.SessionIDFromHTTPParameters(vars)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if sessionID.ID == "" {
+		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+	resp, err := c.artifactService.List(req.Context(), &artifactservice.ListRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
+	})
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	files := resp.FileNames
+	if files == nil {
+		files = []string{}
+	}
+	EncodeJSONResponse(files, http.StatusOK, rw)
 }
 
 // LoadArtifact gets an artifact from the artifact service storage.
-func (*ArtifactsAPIController) LoadArtifact(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
+func (c *ArtifactsAPIController) LoadArtifact(rw http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	sessionID, err := models.SessionIDFromHTTPParameters(vars)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if sessionID.ID == "" {
+		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+	artifactName := vars["artifact_name"]
+	if artifactName == "" {
+		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
+		return
+	}
+	loadReq := &artifactservice.LoadRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
+		FileName:  artifactName,
+	}
+
+	queryParams := req.URL.Query()
+	version := queryParams.Get("version")
+	if version != "" {
+		versionInt, err := strconv.Atoi(version)
+		if err != nil {
+			http.Error(rw, "version parameter must be an integer", http.StatusBadRequest)
+			return
+		}
+		loadReq.Version = int64(versionInt)
+	}
+
+	resp, err := c.artifactService.Load(req.Context(), loadReq)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	EncodeJSONResponse(resp.Part, http.StatusOK, rw)
 }
 
 // DeleteArtifact handles deleting an artifact.
-func (*ArtifactsAPIController) DeleteArtifact(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
+func (c *ArtifactsAPIController) DeleteArtifact(rw http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	sessionID, err := models.SessionIDFromHTTPParameters(vars)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if sessionID.ID == "" {
+		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+	artifactName := vars["artifact_name"]
+	if artifactName == "" {
+		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
+		return
+	}
+	err = c.artifactService.Delete(req.Context(), &artifactservice.DeleteRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
+		FileName:  artifactName,
+	})
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	EncodeJSONResponse(nil, http.StatusOK, rw)
 }
