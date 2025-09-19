@@ -60,12 +60,9 @@ func (s *ReprintableStream) Write(p []byte) (total int, err error) {
 	// s.stream.Write([]byte("--------------<<"))
 
 	start := 0
-	total = 0
 	err = nil
-	var n int = 0
 	if s.clean {
-		n, err = s.stream.Write(s.prefix)
-		total = total + n
+		_, err = s.stream.Write(s.prefix)
 		if err != nil {
 			return total, err
 		}
@@ -73,30 +70,23 @@ func (s *ReprintableStream) Write(p []byte) (total int, err error) {
 	}
 	for i, c := range p {
 		if c == '\n' {
-			n, err = s.stream.Write(p[start:i])
-			total = total + n
+			_, err = s.stream.Write(p[start:i])
 			if err != nil {
-				return total, err
+				return len(p), err
 			}
 			// s.stream.Write( []byte(("\n       " + Gray + "out > " + Reset)) )
-			n, err = s.stream.Write(s.prefix)
-			total = total + n
+			_, err = s.stream.Write(s.prefix)
 			if err != nil {
-				return total, err
+				return len(p), err
 			}
 			start = i + 1
-
 		}
 	}
 	if start < len(p) {
-		// s.stream.Write([]byte("DD"))
-
-		n, err = s.stream.Write(p[start:])
-		total = total + n
+		_, err = s.stream.Write(p[start:])
 	}
 
 	return len(p), err
-	// return total, err
 }
 
 func NewReprintableStream(s io.Writer, prefix string, color string) io.Writer {
