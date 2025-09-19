@@ -27,7 +27,10 @@ import (
 	"google.golang.org/adk/internal/agent/runconfig"
 	"google.golang.org/adk/internal/artifactsinternal"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/memoryinternal"
+	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/llm"
+	"google.golang.org/adk/memoryservice"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
@@ -38,6 +41,7 @@ type Config struct {
 	Agent           agent.Agent
 	SessionService  sessionservice.Service
 	ArtifactService artifactservice.Service
+	MemoryService   memoryservice.Service
 }
 
 func New(cfg *Config) (*Runner, error) {
@@ -51,6 +55,7 @@ func New(cfg *Config) (*Runner, error) {
 		rootAgent:       cfg.Agent,
 		sessionService:  cfg.SessionService,
 		artifactService: cfg.ArtifactService,
+		memoryService:   cfg.MemoryService,
 		parents:         parents,
 	}, nil
 }
@@ -60,6 +65,7 @@ type Runner struct {
 	rootAgent       agent.Agent
 	sessionService  sessionservice.Service
 	artifactService artifactservice.Service
+	memoryService   memoryservice.Service
 
 	parents parentmap.Map
 }
@@ -106,11 +112,12 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		if r.artifactService != nil {
 			artifactsImpl = artifactsinternal.NewArtifacts(r.artifactService, session.ID())
 		}
+		var memoryImpl agent.Memory = nil
+		if r.memoryService != nil {
+			memoryImpl = memoryinternal.NewMemory(r.memoryService, session.ID())
+		}
 
-		ctx := agent.NewContext(ctx, agentToRun, msg, artifactsImpl, &mutableSession{
-			service:       r.sessionService,
-			storedSession: session,
-		}, "")
+		ctx := agent.NewContext(ctx, agentToRun, msg, artifactsImpl, sessioninternal.NewMutableSession(r.sessionService, session), memoryImpl, "")
 
 		if err := r.appendMessageToSession(ctx, session, msg, cfg.SaveInputBlobsAsArtifacts); err != nil {
 			yield(nil, err)

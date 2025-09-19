@@ -62,7 +62,7 @@ func run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 		}
 
 		errGroup.Go(func() error {
-			ctx := agent.NewContext(errGroupCtx, subAgent, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), branch)
+			ctx := agent.NewContext(errGroupCtx, subAgent, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Memory(), branch)
 
 			if err := runSubAgent(ctx, subAgent, resultsChan, doneChan); err != nil {
 				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)

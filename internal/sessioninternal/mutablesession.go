@@ -12,41 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package runner
+package sessioninternal
 
 import (
 	"fmt"
 	"iter"
 	"time"
 
-	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
 )
 
-// mutableSession implements session.Session
-type mutableSession struct {
+// MutableSession implements session.Session
+type MutableSession struct {
 	service       sessionservice.Service
 	storedSession sessionservice.StoredSession
 }
 
-func (s *mutableSession) State() session.State {
+// NewMutableSession creates and returns session.Session implementation.
+func NewMutableSession(service sessionservice.Service, storedSession sessionservice.StoredSession) *MutableSession {
+	return &MutableSession{
+		service:       service,
+		storedSession: storedSession,
+	}
+}
+
+func (s *MutableSession) State() session.State {
 	return s
 }
 
-func (s *mutableSession) ID() session.ID {
+func (s *MutableSession) ID() session.ID {
 	return s.storedSession.ID()
 }
 
-func (s *mutableSession) Events() session.Events {
+func (s *MutableSession) Events() session.Events {
 	return s.storedSession.Events()
 }
 
-func (s *mutableSession) Updated() time.Time {
+func (s *MutableSession) Updated() time.Time {
 	return s.storedSession.Updated()
 }
 
-func (s *mutableSession) Get(key string) (any, error) {
+func (s *MutableSession) Get(key string) (any, error) {
 	value, err := s.storedSession.State().Get(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get key %q from state: %w", key, err)
@@ -54,12 +61,12 @@ func (s *mutableSession) Get(key string) (any, error) {
 	return value, nil
 }
 
-func (s *mutableSession) All() iter.Seq2[string, any] {
+func (s *MutableSession) All() iter.Seq2[string, any] {
 	return s.storedSession.State().All()
 }
 
-func (s *mutableSession) Set(key string, value any) error {
-	mutableState, ok := s.storedSession.State().(sessioninternal.MutableState)
+func (s *MutableSession) Set(key string, value any) error {
+	mutableState, ok := s.storedSession.State().(MutableState)
 	if !ok {
 		return fmt.Errorf("this session state is not mutable")
 
