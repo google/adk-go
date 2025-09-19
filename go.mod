@@ -15,11 +15,10 @@ require (
 require github.com/google/jsonschema-go v0.2.0
 
 require (
-	github.com/joho/godotenv v1.5.1
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/rs/cors v1.11.1
 	github.com/spf13/cobra v1.8.1
-) 
+)
 
 require (
 	cloud.google.com/go v0.116.0 // indirect
