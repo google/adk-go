@@ -55,10 +55,6 @@ type ReprintableStream struct {
 
 func (s *ReprintableStream) Write(p []byte) (total int, err error) {
 
-	// s.stream.Write([]byte("-------------->>"))
-	// s.stream.Write(p)
-	// s.stream.Write([]byte("--------------<<"))
-
 	start := 0
 	err = nil
 	if s.clean {
@@ -74,7 +70,6 @@ func (s *ReprintableStream) Write(p []byte) (total int, err error) {
 			if err != nil {
 				return len(p), err
 			}
-			// s.stream.Write( []byte(("\n       " + Gray + "out > " + Reset)) )
 			_, err = s.stream.Write(s.prefix)
 			if err != nil {
 				return len(p), err
@@ -92,8 +87,6 @@ func (s *ReprintableStream) Write(p []byte) (total int, err error) {
 func NewReprintableStream(s io.Writer, prefix string, color string) io.Writer {
 	return &ReprintableStream{prefix: []byte("\n       " + color + prefix + " > " + Reset), stream: s, clean: true}
 }
-
-// io.Writer _= ReprintableStream{}.(os.Writer)
 
 func LogCommand(c *exec.Cmd, p Printer) error {
 	p("Running : ", Yellow, c.Dir, Reset, " ", c)
