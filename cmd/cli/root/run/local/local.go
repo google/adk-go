@@ -15,7 +15,6 @@
 package local
 
 import (
-	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
@@ -116,8 +115,7 @@ func (f *runLocalFlags) cleanTemp() error {
 			if err != nil {
 				return err
 			}
-			err = os.MkdirAll(f.build.tempDir, os.ModeDir|0700)
-			return err
+			return os.MkdirAll(f.build.tempDir, os.ModeDir|0700)
 		})
 	return err
 }
@@ -126,11 +124,7 @@ func (f *runLocalFlags) makeDirs() error {
 	err := util.LogStartStop("Make build dirs",
 		func(p util.Printer) error {
 			p("Making", f.build.uiBuildDir)
-			err := os.MkdirAll(f.build.uiBuildDir, os.ModeDir|0700)
-			if err != nil {
-				return err
-			}
-			return nil
+			return os.MkdirAll(f.build.uiBuildDir, os.ModeDir|0700)
 		})
 	return err
 }
@@ -141,8 +135,7 @@ func (f *runLocalFlags) setBackendForAdkWebUI() error {
 		func(p util.Printer) error {
 			cmd := exec.Command("npm", "run", "inject-backend", "--backend="+f.webUI.backendUri)
 			cmd.Dir = f.source.uiDir
-			err := util.LogCommand(cmd, p)
-			return err
+			return util.LogCommand(cmd, p)
 		})
 	return err
 }
@@ -153,15 +146,15 @@ func (f *runLocalFlags) makeDistForAdkWebUI() error {
 
 			fileToCheck := path.Join(f.build.uiBuildDir, "browser/index.html")
 			_, err := os.Stat(fileToCheck)
-			if err != nil {
-				p("File", fileToCheck, "not found, building from scratch")
-				cmd := exec.Command("ng", "build", "--output-path="+f.build.uiBuildDir)
-				cmd.Dir = f.source.uiDir
-				err = util.LogCommand(cmd, p)
-			} else {
+			if err == nil {
 				p("File", fileToCheck, "found, building skipped")
+				return nil
 			}
-			return err
+			// else
+			p("File", fileToCheck, "not found, building from scratch")
+			cmd := exec.Command("ng", "build", "--output-path="+f.build.uiBuildDir)
+			cmd.Dir = f.source.uiDir
+			return util.LogCommand(cmd, p)
 		})
 	return err
 }
@@ -174,8 +167,7 @@ func (f *runLocalFlags) compileEntryPoint() error {
 
 			cmd.Dir = f.source.srcBasePath
 			cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
-			err := util.LogCommand(cmd, p)
-			return err
+			return util.LogCommand(cmd, p)
 		})
 	return err
 }
@@ -199,14 +191,12 @@ func (f *runLocalFlags) runLocalServer() error {
 			p("                                                                          ")
 			p("                          Press Ctrl-C to stop                            ")
 			p("--------------------------------------------------------------------------")
-			err := util.LogCommand(cmd, p)
-			return err
+			return util.LogCommand(cmd, p)
 		})
 	return err
 }
 
 func (f *runLocalFlags) runLocal() error {
-	fmt.Println(Flags)
 	var err error
 
 	err = f.computeFlags()

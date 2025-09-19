@@ -45,7 +45,7 @@ func ParseArgs() *WebConfig {
 	webuiDist := flag.String("webui_path", "", "Points to a static web ui dist path with the built version of ADK Web UI")
 
 	flag.Parse()
-	if flag.Parsed() == false {
+	if flag.Parsed() {
 		flag.Usage()
 		panic("Failed to parse flags")
 	}

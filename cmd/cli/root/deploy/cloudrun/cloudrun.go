@@ -78,8 +78,7 @@ var cloudrunCmd = &cobra.Command{
 	Local proxy adding authentication is optionally started. 
 	`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		err := Flags.deployOnCloudRun()
-		return err
+		return Flags.deployOnCloudRun()
 	},
 }
 
@@ -114,13 +113,11 @@ func (f *deployCloudRunFlags) cleanTemp() error {
 	err := util.LogStartStop("Cleaning temp",
 		func(p util.Printer) error {
 			p("Clean temp starting with", f.build.tempDir)
-			// fmt.Println(files)
 			err := os.RemoveAll(f.build.tempDir)
 			if err != nil {
 				return err
 			}
-			err = os.MkdirAll(f.build.tempDir, os.ModeDir|0700)
-			return err
+			return os.MkdirAll(f.build.tempDir, os.ModeDir|0700)
 		})
 	return err
 }
@@ -129,11 +126,7 @@ func (f *deployCloudRunFlags) makeDirs() error {
 	err := util.LogStartStop("Make build dirs",
 		func(p util.Printer) error {
 			p("Making", f.build.uiBuildDir)
-			err := os.MkdirAll(f.build.uiBuildDir, os.ModeDir|0700)
-			if err != nil {
-				return err
-			}
-			return nil
+			return os.MkdirAll(f.build.uiBuildDir, os.ModeDir|0700)
 		})
 	return err
 }
@@ -144,8 +137,7 @@ func (f *deployCloudRunFlags) setBackendForAdkWebUI() error {
 		func(p util.Printer) error {
 			cmd := exec.Command("npm", "run", "inject-backend", "--backend="+f.webUI.backendUri)
 			cmd.Dir = f.source.uiDir
-			err := util.LogCommand(cmd, p)
-			return err
+			return util.LogCommand(cmd, p)
 		})
 	return err
 }
@@ -156,8 +148,7 @@ func (f *deployCloudRunFlags) makeDistForAdkWebUI() error {
 			cmd := exec.Command("ng", "build", "--output-path="+f.build.uiBuildDir)
 
 			cmd.Dir = f.source.uiDir
-			err := util.LogCommand(cmd, p)
-			return err
+			return util.LogCommand(cmd, p)
 		})
 	return err
 }
@@ -170,8 +161,7 @@ func (f *deployCloudRunFlags) compileEntryPoint() error {
 
 			cmd.Dir = f.source.srcBasePath
 			cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
-			err := util.LogCommand(cmd, p)
-			return err
+			return util.LogCommand(cmd, p)
 		})
 	return err
 }
@@ -202,8 +192,7 @@ EXPOSE 8080
 # Command to run the executable when the container starts
 CMD ["/app/server", "--port", "8080", "--front_address", "` + f.webUI.backendUri + `"]
 `
-			err := os.WriteFile(f.build.dockerfileBuildPath, []byte(c), 0600)
-			return err
+			return os.WriteFile(f.build.dockerfileBuildPath, []byte(c), 0600)
 		})
 	return err
 }
@@ -218,8 +207,7 @@ func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
 				"--project", f.gcloud.projectName)
 
 			cmd.Dir = f.build.tempDir
-			err := util.LogCommand(cmd, p)
-			return err
+			return util.LogCommand(cmd, p)
 		})
 	return err
 }
@@ -230,23 +218,10 @@ func (f *deployCloudRunFlags) runGcloudProxy() error {
 			cmd := exec.Command("gcloud", "run", "services", "proxy", f.cloudRun.serviceName, "--project", f.gcloud.projectName, "--port", strconv.Itoa(f.proxy.port))
 
 			cmd.Dir = f.build.tempDir
-			err := util.LogCommand(cmd, p)
-			return err
+			return util.LogCommand(cmd, p)
 		})
 	return err
 }
-
-// func (f *deployCloudRunFlags) xxx() error {
-// 	err := util.LogStartStop("Deploy to cloud run",
-// 		func(p util.Printer) error {
-// 			cmd := exec.Command("find", "/usr/local/google/home/kdroste/Projects/adk-go/adk-go-cli/adk-go/cmd", "/asdfasdf")
-// 			cmd.Dir = f.build.tempDir
-// 			p("  Deploy: ", cmd.Dir, "Cmd: ", cmd)
-// 			err := util.LogCommand(cmd, p)
-// 			return err
-// 		})
-// 	return err
-// }
 
 func (f *deployCloudRunFlags) deployOnCloudRun() error {
 	fmt.Println(Flags)
