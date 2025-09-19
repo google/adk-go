@@ -12,16 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package main is an entry point for CLI.
-package main
+package deploy
 
 import (
-	"google.golang.org/adk/cmd/cli/root"
-	_ "google.golang.org/adk/cmd/cli/root/deploy"
-	_ "google.golang.org/adk/cmd/cli/root/deploy/cloudrun"
-	_ "google.golang.org/adk/cmd/cli/root/run/local"
+	"github.com/spf13/cobra"
+	"google.golang.org/adk/cmd/adkgo/root"
 )
 
-func main() {
-	root.Execute()
+// deployCmd represents the deploy command
+var DeployCmd = &cobra.Command{
+	Use:   "deploy",
+	Short: "Makes deployment to various platforms easy",
+	Long:  `Please see subcommands for details`,
+	Run: func(cmd *cobra.Command, args []string) {
+	},
+}
+
+func init() {
+	root.RootCmd.AddCommand(DeployCmd)
 }

@@ -23,7 +23,7 @@ import (
 	"strconv"
 
 	"github.com/spf13/cobra"
-	"google.golang.org/adk/cmd/cli/root/run"
+	"google.golang.org/adk/cmd/adkgo/root/run"
 	"google.golang.org/adk/cmd/util"
 )
 
