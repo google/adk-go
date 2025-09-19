@@ -36,14 +36,14 @@ type ID struct {
 }
 
 type State interface {
-	Get(string) any
-	Set(string, any)
+	Get(string) (any, error)
+	Set(string, any) error
 	All() iter.Seq2[string, any]
 }
 
 // TODO: It is provided for use by SessionService, and perhaps it should move there.
 type ReadOnlyState interface {
-	Get(string) any
+	Get(string) (any, error)
 	All() iter.Seq2[string, any]
 }
 

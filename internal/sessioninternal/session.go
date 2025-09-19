@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package utils_test
+// Package tool defines internal-only interfaces and logic for tools.
+package sessioninternal
 
-import "testing"
-
-func TestNothing(t *testing.T) {
-	// To make it buildable.
+type MutableState interface {
+	Set(string, any) error
 }

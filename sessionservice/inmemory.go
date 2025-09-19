@@ -52,9 +52,13 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 
 	encodedKey := key.Encode()
 
+	stateMap := req.State
+	if stateMap == nil {
+		stateMap = make(map[string]any)
+	}
 	val := &storedSession{
 		id:        session.ID(key),
-		state:     req.State,
+		state:     stateMap,
 		updatedAt: time.Now(),
 	}
 
@@ -231,11 +235,11 @@ type state struct {
 	state map[string]any
 }
 
-func (s *state) Get(key string) any {
+func (s *state) Get(key string) (any, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.state[key]
+	return s.state[key], nil
 }
 
 func (s *state) All() iter.Seq2[string, any] {
@@ -252,6 +256,14 @@ func (s *state) All() iter.Seq2[string, any] {
 
 		s.mu.RUnlock()
 	}
+}
+
+func (s *state) Set(key string, value any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.state[key] = value
+	return nil
 }
 
 var _ Service = (*inMemoryService)(nil)

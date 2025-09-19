@@ -16,20 +16,4 @@
 package main
 
 func main() {
-	// serverConfig, err := config.LoadConfigFromEnv()
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// log.Printf("Starting server on port %d", serverConfig.Port)
-
-	// router := routers.NewRouter(
-	// 	routers.NewSessionsAPIRouter(&handlers.SessionsAPIController{}),
-	// 	routers.NewRuntimeAPIRouter(&handlers.RuntimeAPIController{}),
-	// 	routers.NewAppsAPIRouter(&handlers.AppsAPIController{}),
-	// 	routers.NewDebugAPIRouter(&handlers.DebugAPIController{}),
-	// 	routers.NewArtifactsAPIRouter(&handlers.ArtifactsAPIController{}),
-	// )
-	// router.Use(web.CorsWithArgs(serverConfig))
-
-	// log.Fatal(http.ListenAndServe(":"+strconv.Itoa(serverConfig.Port), router))
 }

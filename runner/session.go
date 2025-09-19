@@ -15,9 +15,11 @@
 package runner
 
 import (
+	"fmt"
 	"iter"
 	"time"
 
+	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
 )
@@ -44,14 +46,26 @@ func (s *mutableSession) Updated() time.Time {
 	return s.storedSession.Updated()
 }
 
-func (s *mutableSession) Get(key string) any {
-	return s.State().Get(key)
+func (s *mutableSession) Get(key string) (any, error) {
+	value, err := s.storedSession.State().Get(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get key %q from state: %w", key, err)
+	}
+	return value, nil
 }
 
 func (s *mutableSession) All() iter.Seq2[string, any] {
-	return s.State().All()
+	return s.storedSession.State().All()
 }
 
-func (s *mutableSession) Set(string, any) {
-	panic("not implemented")
+func (s *mutableSession) Set(key string, value any) error {
+	mutableState, ok := s.storedSession.State().(sessioninternal.MutableState)
+	if !ok {
+		return fmt.Errorf("this session state is not mutable")
+
+	}
+	if err := mutableState.Set(key, value); err != nil {
+		return fmt.Errorf("failed to set key %q in state: %w", key, err)
+	}
+	return nil
 }

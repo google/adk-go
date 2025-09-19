@@ -99,6 +99,11 @@ func (t *TransferToAgentTool) Name() string {
 	return "transfer_to_agent"
 }
 
+// IsLongRunning implements tool.Tool.
+func (t *TransferToAgentTool) IsLongRunning() bool {
+	return false
+}
+
 func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        t.Name(),
