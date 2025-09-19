@@ -15,8 +15,6 @@
 package deploy
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 	"google.golang.org/adk/cmd/cli/root"
 )
@@ -27,11 +25,9 @@ var DeployCmd = &cobra.Command{
 	Short: "Makes deployment to various platforms easy",
 	Long:  `Please see subcommands for details`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("deploy called")
 	},
 }
 
 func init() {
-	fmt.Println("Deploy")
 	root.RootCmd.AddCommand(DeployCmd)
 }

@@ -33,6 +33,7 @@ type gCloudFlags struct {
 
 type cloudRunServiceFlags struct {
 	serviceName string
+	serverPort  int
 }
 
 type localProxyFlags struct {
@@ -90,6 +91,7 @@ func init() {
 	cloudrunCmd.PersistentFlags().StringVarP(&Flags.cloudRun.serviceName, "serviceName", "s", "", "Cloud Run Service name")
 	cloudrunCmd.PersistentFlags().StringVarP(&Flags.build.tempDir, "tempDir", "t", "", "Temp dir for build")
 	cloudrunCmd.PersistentFlags().IntVar(&Flags.proxy.port, "proxyPort", 8081, "Local proxy port")
+	cloudrunCmd.PersistentFlags().IntVar(&Flags.cloudRun.serverPort, "serverPort", 8080, "Cloudrun server port")
 	cloudrunCmd.PersistentFlags().StringVarP(&Flags.source.uiDir, "webUIDir", "a", "", "ADK Web UI base dir")
 	cloudrunCmd.PersistentFlags().StringVarP(&Flags.webUI.backendUri, "backendUri", "b", "", "ADK REST API uri")
 	cloudrunCmd.PersistentFlags().StringVarP(&Flags.source.entryPointPath, "entryPoint", "e", "", "Path to an entry point (go 'main')")
@@ -111,7 +113,7 @@ func (f *deployCloudRunFlags) computeFlags() error {
 func (f *deployCloudRunFlags) cleanTemp() error {
 	err := util.LogStartStop("Cleaning temp",
 		func(p util.Printer) error {
-			p("Clean temp starting with ", f.build.tempDir)
+			p("Clean temp starting with", f.build.tempDir)
 			// fmt.Println(files)
 			err := os.RemoveAll(f.build.tempDir)
 			if err != nil {
@@ -126,7 +128,7 @@ func (f *deployCloudRunFlags) cleanTemp() error {
 func (f *deployCloudRunFlags) makeDirs() error {
 	err := util.LogStartStop("Make build dirs",
 		func(p util.Printer) error {
-			p("making", f.build.uiBuildDir)
+			p("Making", f.build.uiBuildDir)
 			err := os.MkdirAll(f.build.uiBuildDir, os.ModeDir|0700)
 			if err != nil {
 				return err
@@ -163,7 +165,7 @@ func (f *deployCloudRunFlags) makeDistForAdkWebUI() error {
 func (f *deployCloudRunFlags) compileEntryPoint() error {
 	err := util.LogStartStop("Compiling server",
 		func(p util.Printer) error {
-			p("Using ", f.source.entryPointPath, " as entry point")
+			p("Using", f.source.entryPointPath, "as entry point")
 			cmd := exec.Command("go", "build", "-o", f.build.execPath, f.source.entryPointPath)
 
 			cmd.Dir = f.source.srcBasePath
@@ -177,7 +179,7 @@ func (f *deployCloudRunFlags) compileEntryPoint() error {
 func (f *deployCloudRunFlags) prepareDockerfile() error {
 	err := util.LogStartStop("Preparing Dockerfile",
 		func(p util.Printer) error {
-			p("Writing: ", f.build.dockerfileBuildPath)
+			p("Writing:", f.build.dockerfileBuildPath)
 			c := `
 FROM golang:1.22-alpine AS builder
 
@@ -249,10 +251,6 @@ func (f *deployCloudRunFlags) runGcloudProxy() error {
 func (f *deployCloudRunFlags) deployOnCloudRun() error {
 	fmt.Println(Flags)
 	var err error
-	// err = f.xxx()
-	// if err != nil {
-	// 	return err
-	// }
 
 	err = f.computeFlags()
 	if err != nil {

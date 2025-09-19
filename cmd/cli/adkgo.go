@@ -18,7 +18,7 @@ import (
 	"google.golang.org/adk/cmd/cli/root"
 	_ "google.golang.org/adk/cmd/cli/root/deploy"
 	_ "google.golang.org/adk/cmd/cli/root/deploy/cloudrun"
-	_ "google.golang.org/adk/cmd/cli/root/deploy/local"
+	_ "google.golang.org/adk/cmd/cli/root/run/local"
 )
 
 func main() {

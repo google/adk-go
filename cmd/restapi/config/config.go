@@ -16,50 +16,45 @@
 package config
 
 import (
-	"fmt"
-	"os"
-	"strconv"
-
-	"github.com/joho/godotenv"
 	"github.com/rs/cors"
 )
 
-// ADKAPIServerConfigs contains the configs for the ADK API server.
-type ADKAPIServerConfigs struct {
-	Env          string
-	Port         int
-	Cors         cors.Cors
-	GeminiAPIKey string
+// ADKAPIRouterConfigs contains the configs for the ADK API server.
+type ADKAPIRouterConfigs struct {
+	//Env          string
+	//Port         int
+	Cors cors.Cors
+	//GeminiAPIKey string
 }
 
-// LoadConfig parses the arguments for the ADK API server and returns parsed configs.
-func LoadConfig() (*ADKAPIServerConfigs, error) {
-	config := &ADKAPIServerConfigs{}
-	config.Env = os.Getenv("ENV")
+// // LoadConfig parses the arguments for the ADK API server and returns parsed configs.
+// func LoadConfigFromEnv() (*ADKAPIRouterConfigs, error) {
+// 	config := &ADKAPIRouterConfigs{}
+// 	// config.Env = os.Getenv("ENV")
 
-	if err := godotenv.Load(); err != nil && config.Env == "" {
-		return nil, err
-	}
+// 	// if err := godotenv.Load(); err != nil && config.Env == "" {
+// 	// 	return nil, err
+// 	// }
 
-	allowedOrigin, _ := os.LookupEnv("ALLOWED_ORIGIN")
-	config.Cors = *cors.New(cors.Options{
-		AllowedOrigins: []string{allowedOrigin},
-	})
+// 	allowedOrigin, _ := os.LookupEnv("ALLOWED_ORIGIN")
+// 	config.Cors = *cors.New(cors.Options{
+// 		AllowedOrigins: []string{allowedOrigin},
+// 	})
 
-	if webPort, ok := os.LookupEnv("PORT"); ok {
-		port, err := strconv.ParseInt(webPort, 10, 32)
-		if err != nil {
-			return nil, err
-		}
-		config.Port = int(port)
-	} else {
-		config.Port = 8080
-	}
+// 	// if webPort, ok := os.LookupEnv("PORT"); ok {
+// 	// 	port, err := strconv.ParseInt(webPort, 10, 32)
+// 	// 	if err != nil {
+// 	// 		return nil, err
+// 	// 	}
+// 	// 	config.Port = int(port)
+// 	// } else {
+// 	// 	config.Port = 8080
+// 	// }
 
-	apiKey, ok := os.LookupEnv("GEMINI_API_KEY")
-	if !ok {
-		return nil, fmt.Errorf("GEMINI_API_KEY is not set")
-	}
-	config.GeminiAPIKey = apiKey
-	return config, nil
-}
+// 	// apiKey, ok := os.LookupEnv("GEMINI_API_KEY")
+// 	// if !ok {
+// 	// 	return nil, fmt.Errorf("GEMINI_API_KEY is not set")
+// 	// }
+// 	// config.GeminiAPIKey = apiKey
+// 	return config, nil
+// }

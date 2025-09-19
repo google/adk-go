@@ -40,11 +40,14 @@ type Router interface {
 // NewRouter creates a new router for any number of api routers
 func NewRouter(routers ...Router) *mux.Router {
 	router := mux.NewRouter().StrictSlash(true)
-	for _, api := range routers {
+	SetupSubRouters(router)
+	return router
+}
+
+func SetupSubRouters(router *mux.Router, subrouters ...Router) {
+	for _, api := range subrouters {
 		for _, route := range api.Routes() {
 			var handler http.Handler = route.HandlerFunc
-
-			// handler = Logger(handler, route.Name)
 
 			router.
 				Methods(route.Method).
@@ -53,5 +56,5 @@ func NewRouter(routers ...Router) *mux.Router {
 				Handler(handler)
 		}
 	}
-	return router
+
 }
