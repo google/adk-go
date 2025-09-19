@@ -2,6 +2,7 @@ package web
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -19,20 +20,6 @@ type WebConfig struct {
 	StartRestApi   bool
 	StartWebUI     bool
 }
-
-// func corsWithArgs(serverConfig *config.ADKAPIRouterConfigs) func(next http.Handler) http.Handler {
-// 	return func(next http.Handler) http.Handler {
-// 		return serverConfig.Cors.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-// 			// w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-// 			// w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-// 			if r.Method == "OPTIONS" {
-// 				w.WriteHeader(http.StatusOK)
-// 				return
-// 			}
-// 			next.ServeHTTP(w, r)
-// 		}))
-// 	}
-// }
 
 // ParseArgs parses the arguments for the ADK API server.
 
@@ -57,12 +44,12 @@ func ParseArgs() *WebConfig {
 	})
 }
 
-// func logRequestHandler(h http.Handler) http.Handler {
-// 	fn := func(w http.ResponseWriter, r *http.Request) {
-// 		fmt.Println(r)
-// 	}
-// 	return http.HandlerFunc(fn)
-// }
+func logRequestHandler(h http.Handler) http.Handler {
+	fn := func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println(r)
+	}
+	return http.HandlerFunc(fn)
+}
 
 func Serve(c *WebConfig) {
 	var serverConfig config.ADKAPIRouterConfigs
@@ -72,6 +59,7 @@ func Serve(c *WebConfig) {
 		AllowCredentials: true})
 
 	rBase := mux.NewRouter().StrictSlash(true)
+	_ = logRequestHandler
 	// rBase.Use(logRequestHandler)
 
 	if c.StartWebUI {
@@ -81,6 +69,7 @@ func Serve(c *WebConfig) {
 
 	if c.StartRestApi {
 		rApi := rBase.Methods("GET", "POST", "DELETE").PathPrefix("/api/").Subrouter()
+		rApi.Use(serverConfig.Cors.Handler)
 		restapiweb.SetupRouter(rApi, &serverConfig)
 	}
 
