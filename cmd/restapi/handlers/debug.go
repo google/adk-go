@@ -31,7 +31,7 @@ type DebugAPIController struct {
 	agentloader    services.AgentLoader
 }
 
-func NewDebugAPIRouter(sessionService sessionservice.Service, agentLoader services.AgentLoader) *DebugAPIController {
+func NewDebugAPIController(sessionService sessionservice.Service, agentLoader services.AgentLoader) *DebugAPIController {
 	return &DebugAPIController{sessionService: sessionService, agentloader: agentLoader}
 }
 

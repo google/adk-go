@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package agents
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"google.golang.org/adk/agent"
@@ -219,7 +218,7 @@ func afterReviser(ctx agent.Context, llmResponse *llm.Response, llmResponseError
 	return llmResponse, nil
 }
 
-func getAgent(ctx context.Context, apiKey string) agent.Agent {
+func GetLLmAuditorAgent(ctx context.Context, apiKey string) agent.Agent {
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
 		APIKey: apiKey,
 	})
@@ -231,9 +230,6 @@ func getAgent(ctx context.Context, apiKey string) agent.Agent {
 		Model:       model,
 		Name:        "critic_agent",
 		Instruction: CriticPrompt,
-		// Tools: []tool.Tool{
-		// 	geminitool.GoogleSearch{},
-		// },
 		AfterModel: []llmagent.AfterModelCallback{
 			afterCritic,
 		},
@@ -272,6 +268,5 @@ func getAgent(ctx context.Context, apiKey string) agent.Agent {
 		panic(err)
 	}
 
-	fmt.Printf("Agent's created: %v, %v\n", rootAgent, rootAgent.SubAgents())
 	return rootAgent
 }

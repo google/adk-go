@@ -12,18 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package config provides configs for the REST API server.
-package config
+// package main is an entry point for CLI.
+package main
 
 import (
-	"github.com/rs/cors"
-	"google.golang.org/adk/cmd/restapi/services"
-	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/cmd/cli/root"
+	_ "google.golang.org/adk/cmd/cli/root/deploy"
+	_ "google.golang.org/adk/cmd/cli/root/deploy/cloudrun"
+	_ "google.golang.org/adk/cmd/cli/root/run/local"
 )
 
-// ADKAPIRouterConfigs contains the configs for the ADK API server.
-type ADKAPIRouterConfigs struct {
-	Cors           cors.Cors
-	SessionService sessionservice.Service
-	AgentLoader    services.AgentLoader
+func main() {
+	root.Execute()
 }
