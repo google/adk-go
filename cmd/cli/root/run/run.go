@@ -12,18 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package config provides configs for the REST API server.
-package config
+// package run handles command line parameters for "run"
+package run
 
 import (
-	"github.com/rs/cors"
-	"google.golang.org/adk/cmd/restapi/services"
-	"google.golang.org/adk/sessionservice"
+	"github.com/spf13/cobra"
+	"google.golang.org/adk/cmd/cli/root"
 )
 
-// ADKAPIRouterConfigs contains the configs for the ADK API server.
-type ADKAPIRouterConfigs struct {
-	Cors           cors.Cors
-	SessionService sessionservice.Service
-	AgentLoader    services.AgentLoader
+// deployCmd represents the deploy command
+var RunCmd = &cobra.Command{
+	Use:   "run",
+	Short: "Runs components",
+	Long:  `Please see subcommands for details`,
+	Run: func(cmd *cobra.Command, args []string) {
+	},
+}
+
+func init() {
+	root.RootCmd.AddCommand(RunCmd)
 }
