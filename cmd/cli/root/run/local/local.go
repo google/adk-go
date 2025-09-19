@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// package local handles command line parameters and execution logic for local run
 package local
 
 import (
@@ -55,7 +56,7 @@ type runLocalFlags struct {
 	webUI  webUIDeployFlags
 }
 
-var Flags runLocalFlags
+var flags runLocalFlags
 
 // localCmd represents the cloudrun command
 var localCmd = &cobra.Command{
@@ -74,7 +75,7 @@ var localCmd = &cobra.Command{
 	After you change the serverPort you will also need to force cleaning and build adk-web anew (due to change of the backend endpoint)
 	`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		err := Flags.runLocal()
+		err := flags.runLocal()
 		return err
 	},
 }
@@ -82,12 +83,12 @@ var localCmd = &cobra.Command{
 func init() {
 	run.RunCmd.AddCommand(localCmd)
 
-	localCmd.PersistentFlags().StringVarP(&Flags.build.tempDir, "tempDir", "t", "", "Temp dir for build")
-	localCmd.PersistentFlags().BoolVarP(&Flags.build.skipCleaning, "skipCleaning", "c", true, "Set to true in order to clean build")
-	localCmd.PersistentFlags().IntVarP(&Flags.server.port, "serverPort", "s", 8080, "Local proxy port")
-	localCmd.PersistentFlags().StringVarP(&Flags.source.uiDir, "webUIDir", "u", "", "ADK Web UI base dir")
-	localCmd.PersistentFlags().StringVarP(&Flags.source.entryPointPath, "entryPoint", "e", "", "Path to an entry point (go 'main'). ")
-	localCmd.PersistentFlags().StringVarP(&Flags.source.srcBasePath, "srcPath", "p", "", "Path to an base path of your project")
+	localCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "tempDir", "t", "", "Temp dir for build")
+	localCmd.PersistentFlags().BoolVarP(&flags.build.skipCleaning, "skipCleaning", "c", true, "Set to true in order to clean build")
+	localCmd.PersistentFlags().IntVarP(&flags.server.port, "serverPort", "s", 8080, "Local proxy port")
+	localCmd.PersistentFlags().StringVarP(&flags.source.uiDir, "webUIDir", "u", "", "ADK Web UI base dir")
+	localCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entryPoint", "e", "", "Path to an entry point (go 'main'). ")
+	localCmd.PersistentFlags().StringVarP(&flags.source.srcBasePath, "srcPath", "p", "", "Path to an base path of your project")
 }
 
 func (f *runLocalFlags) computeFlags() error {

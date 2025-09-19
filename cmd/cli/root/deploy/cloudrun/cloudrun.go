@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// package cloudrun handles command line parameters and execution logic for cloudrun deployment
 package cloudrun
 
 import (
@@ -67,7 +68,7 @@ type deployCloudRunFlags struct {
 	webUI    webUIDeployFlags
 }
 
-var Flags deployCloudRunFlags
+var flags deployCloudRunFlags
 
 // cloudrunCmd represents the cloudrun command
 var cloudrunCmd = &cobra.Command{
@@ -78,23 +79,23 @@ var cloudrunCmd = &cobra.Command{
 	Local proxy adding authentication is optionally started. 
 	`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return Flags.deployOnCloudRun()
+		return flags.deployOnCloudRun()
 	},
 }
 
 func init() {
 	deploy.DeployCmd.AddCommand(cloudrunCmd)
 
-	cloudrunCmd.PersistentFlags().StringVarP(&Flags.gcloud.region, "region", "r", "", "GCP Region")
-	cloudrunCmd.PersistentFlags().StringVarP(&Flags.gcloud.projectName, "projectName", "p", "", "GCP Project Name")
-	cloudrunCmd.PersistentFlags().StringVarP(&Flags.cloudRun.serviceName, "serviceName", "s", "", "Cloud Run Service name")
-	cloudrunCmd.PersistentFlags().StringVarP(&Flags.build.tempDir, "tempDir", "t", "", "Temp dir for build")
-	cloudrunCmd.PersistentFlags().IntVar(&Flags.proxy.port, "proxyPort", 8081, "Local proxy port")
-	cloudrunCmd.PersistentFlags().IntVar(&Flags.cloudRun.serverPort, "serverPort", 8080, "Cloudrun server port")
-	cloudrunCmd.PersistentFlags().StringVarP(&Flags.source.uiDir, "webUIDir", "a", "", "ADK Web UI base dir")
-	cloudrunCmd.PersistentFlags().StringVarP(&Flags.webUI.backendUri, "backendUri", "b", "", "ADK REST API uri")
-	cloudrunCmd.PersistentFlags().StringVarP(&Flags.source.entryPointPath, "entryPoint", "e", "", "Path to an entry point (go 'main')")
-	cloudrunCmd.PersistentFlags().StringVarP(&Flags.source.srcBasePath, "srcPath", "", "", "Path to an entry point (go 'main')")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.gcloud.region, "region", "r", "", "GCP Region")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.gcloud.projectName, "projectName", "p", "", "GCP Project Name")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.serviceName, "serviceName", "s", "", "Cloud Run Service name")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "tempDir", "t", "", "Temp dir for build")
+	cloudrunCmd.PersistentFlags().IntVar(&flags.proxy.port, "proxyPort", 8081, "Local proxy port")
+	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.serverPort, "serverPort", 8080, "Cloudrun server port")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.uiDir, "webUIDir", "a", "", "ADK Web UI base dir")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.webUI.backendUri, "backendUri", "b", "", "ADK REST API uri")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entryPoint", "e", "", "Path to an entry point (go 'main')")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.srcBasePath, "srcPath", "", "", "Path to an entry point (go 'main')")
 
 }
 
@@ -224,7 +225,7 @@ func (f *deployCloudRunFlags) runGcloudProxy() error {
 }
 
 func (f *deployCloudRunFlags) deployOnCloudRun() error {
-	fmt.Println(Flags)
+	fmt.Println(flags)
 	var err error
 
 	err = f.computeFlags()

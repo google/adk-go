@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// package web provides an ability to parse command line flags and easily run server for both ADK WEB UI and ADK REST API
 package web
 
 import (
@@ -27,6 +28,7 @@ import (
 	restapiweb "google.golang.org/adk/cmd/restapi/web"
 )
 
+// WebConfig is a struct with parameters to run a WebServer.
 type WebConfig struct {
 	LocalPort      int
 	UIDistPath     string
@@ -36,7 +38,6 @@ type WebConfig struct {
 }
 
 // ParseArgs parses the arguments for the ADK API server.
-
 func ParseArgs() *WebConfig {
 	localPortFlag := flag.Int("port", 8080, "Port to listen on")
 	frontendServerFlag := flag.String("front_address", "localhost:8001", "Front address to allow CORS requests from")
@@ -45,7 +46,7 @@ func ParseArgs() *WebConfig {
 	webuiDist := flag.String("webui_path", "", "Points to a static web ui dist path with the built version of ADK Web UI")
 
 	flag.Parse()
-	if flag.Parsed() {
+	if !flag.Parsed() {
 		flag.Usage()
 		panic("Failed to parse flags")
 	}
@@ -65,6 +66,7 @@ func logRequestHandler(h http.Handler) http.Handler {
 	return http.HandlerFunc(fn)
 }
 
+// Serve initiates the http server and starts it according to WebConfig parameters
 func Serve(c *WebConfig) {
 	var serverConfig config.ADKAPIRouterConfigs
 	serverConfig.Cors = *cors.New(cors.Options{

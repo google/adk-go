@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// package web prepeares router dedicated to ADK REST API for http web server
 package web
 
 import (
@@ -21,6 +22,7 @@ import (
 	"google.golang.org/adk/cmd/restapi/routers"
 )
 
+// SetupRouter initiates mux.Router with ADK REST API routers
 func SetupRouter(router *mux.Router, routerConfig *config.ADKAPIRouterConfigs) *mux.Router {
 	return setupRouter(router, routerConfig,
 		routers.NewSessionsAPIRouter(&handlers.SessionsAPIController{}),

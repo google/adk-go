@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// package util provides helper functions for execution of commands and presenting their stderr and stdout in uniform way
 package util
 
 import (
@@ -21,6 +22,7 @@ import (
 	"os/exec"
 )
 
+// Printer is a function printing its arguments
 type Printer func(a ...any)
 
 var Reset = "\033[0m"
@@ -33,6 +35,7 @@ var Cyan = "\033[36m"
 var Gray = "\033[37m"
 var White = "\033[97m"
 
+// LogStartStop is a helper function which executes a particular command with logging
 func LogStartStop(msg string, command func(p Printer) error) error {
 	fmt.Println(msg, ": "+Green+"Starting"+Reset)
 	err := command(func(a ...any) { fmt.Println("    "+Green+"> "+Reset, a) })
@@ -47,13 +50,14 @@ func LogStartStop(msg string, command func(p Printer) error) error {
 	return err
 }
 
-type ReprintableStream struct {
+type reprintableStream struct {
 	prefix []byte
 	clean  bool
 	stream io.Writer
 }
 
-func (s *ReprintableStream) Write(p []byte) (total int, err error) {
+// function Write is an interceptor of a stream adding some decorations
+func (s *reprintableStream) Write(p []byte) (total int, err error) {
 
 	start := 0
 	err = nil
@@ -84,13 +88,14 @@ func (s *ReprintableStream) Write(p []byte) (total int, err error) {
 	return len(p), err
 }
 
-func NewReprintableStream(s io.Writer, prefix string, color string) io.Writer {
-	return &ReprintableStream{prefix: []byte("\n       " + color + prefix + " > " + Reset), stream: s, clean: true}
+func newReprintableStream(s io.Writer, prefix string, color string) io.Writer {
+	return &reprintableStream{prefix: []byte("\n       " + color + prefix + " > " + Reset), stream: s, clean: true}
 }
 
+// function LogCommand runs a command pretty-printing its stdout and stderr
 func LogCommand(c *exec.Cmd, p Printer) error {
 	p("Running : ", Yellow, c.Dir, Reset, " ", c)
-	c.Stdout = NewReprintableStream(os.Stdout, "out", Yellow)
-	c.Stderr = NewReprintableStream(os.Stdout, "err", Red)
+	c.Stdout = newReprintableStream(os.Stdout, "out", Yellow)
+	c.Stderr = newReprintableStream(os.Stdout, "err", Red)
 	return c.Run()
 }
