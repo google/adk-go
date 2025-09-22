@@ -62,6 +62,11 @@ func (t *geminiTool) Description() string {
 	return t.name
 }
 
+// IsLongRunning implements tool.Tool.
+func (t *geminiTool) IsLongRunning() bool {
+	return false
+}
+
 func setTool(req *llm.Request, t *genai.Tool) error {
 	if req == nil {
 		return fmt.Errorf("llm request is nil")

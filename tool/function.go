@@ -42,6 +42,8 @@ type FunctionToolConfig struct {
 	Name string
 	// A human-readable description of the tool.
 	Description string
+	// An internal flag marking if the function is long running
+	isLongRunning bool
 	// An optional JSON schema object defining the expected parameters for the tool.
 	// If it is nil, FunctionTool tries to infer the schema based on the handler type.
 	InputSchema *jsonschema.Schema
@@ -88,17 +90,22 @@ type functionTool[TArgs, TResults any] struct {
 	handler Function[TArgs, TResults]
 }
 
-// Description implements types.Tool.
+// Description implements tool.Tool.
 func (f *functionTool[TArgs, TResults]) Description() string {
 	return f.cfg.Description
 }
 
-// Name implements types.Tool.
+// Name implements tool.Tool.
 func (f *functionTool[TArgs, TResults]) Name() string {
 	return f.cfg.Name
 }
 
-// ProcessRequest implements types.Tool.
+// IsLongRunning implements tool.Tool.
+func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
+	return f.cfg.isLongRunning
+}
+
+// ProcessRequest implements interfaces.Tool.
 func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *llm.Request) error {
 	if req.Tools == nil {
 		req.Tools = make(map[string]any)

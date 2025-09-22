@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
+	"google.golang.org/adk/internal/artifactsinternal"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
@@ -103,10 +104,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 		var artifactsImpl agent.Artifacts = nil
 		if r.artifactService != nil {
-			artifactsImpl = &artifacts{
-				service: r.artifactService,
-				id:      session.ID(),
-			}
+			artifactsImpl = artifactsinternal.NewArtifacts(r.artifactService, session.ID())
 		}
 
 		ctx := agent.NewContext(ctx, agentToRun, msg, artifactsImpl, &mutableSession{
