@@ -29,6 +29,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	as "google.golang.org/adk/artifactservice"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 	"google.golang.org/genai"
 )
 
@@ -40,8 +41,8 @@ type gcsService struct {
 }
 
 // NewGCSArtifactService creates a gcsService for the specified bucket using a default client
-func NewGCSArtifactService(ctx context.Context, bucketName string) (as.Service, error) {
-	storageClient, err := storage.NewClient(ctx)
+func NewGCSArtifactService(ctx context.Context, bucketName string, opts ...option.ClientOption) (as.Service, error) {
+	storageClient, err := storage.NewClient(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gcs service: %w", err)
 	}
