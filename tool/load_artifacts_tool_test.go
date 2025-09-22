@@ -227,7 +227,7 @@ func createToolContext(t *testing.T) tool.Context {
 
 	artifactsImpl := artifactsinternal.NewArtifacts(artifactservice.Mem(), sessionId)
 
-	agentCtx := agent.NewContext(t.Context(), nil, nil, artifactsImpl, nil, "")
+	agentCtx := agent.NewContext(t.Context(), nil, nil, artifactsImpl, nil, nil, "")
 
 	return tool.NewContext(agentCtx, "", nil)
 }

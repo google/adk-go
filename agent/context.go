@@ -30,13 +30,14 @@ type agentContext struct {
 	agent        Agent
 	session      session.Session
 	artifacts    Artifacts
+	memory       Memory
 
 	userContent *genai.Content
 	branch      string
 }
 
 // TODO: see if needed or possible to make internal
-func NewContext(ctx context.Context, agent Agent, userContent *genai.Content, artifacts Artifacts, session session.Session, branch string) *agentContext {
+func NewContext(ctx context.Context, agent Agent, userContent *genai.Content, artifacts Artifacts, session session.Session, memory Memory, branch string) *agentContext {
 	ctx, cancel := context.WithCancel(ctx)
 
 	return &agentContext{
@@ -47,6 +48,7 @@ func NewContext(ctx context.Context, agent Agent, userContent *genai.Content, ar
 		agent:        agent,
 		artifacts:    artifacts,
 		session:      session,
+		memory:       memory,
 		userContent:  userContent,
 		branch:       branch,
 	}
@@ -74,6 +76,10 @@ func (a *agentContext) Session() session.Session {
 
 func (a *agentContext) Artifacts() Artifacts {
 	return a.artifacts
+}
+
+func (a *agentContext) Memory() Memory {
+	return a.memory
 }
 
 func (*agentContext) Report(*session.Event) {

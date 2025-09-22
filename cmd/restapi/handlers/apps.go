@@ -16,12 +16,21 @@ package handlers
 
 import (
 	"net/http"
+
+	"google.golang.org/adk/cmd/restapi/services"
 )
 
 // AppsAPIController is the controller for the Apps API.
-type AppsAPIController struct{}
+type AppsAPIController struct {
+	agentLoader services.AgentLoader
+}
+
+func NewAppsAPIController(agentLoader services.AgentLoader) *AppsAPIController {
+	return &AppsAPIController{agentLoader: agentLoader}
+}
 
 // ListApps handles listing all loaded agents.
-func (*AppsAPIController) ListApps(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
+func (c *AppsAPIController) ListApps(rw http.ResponseWriter, req *http.Request) {
+	apps := c.agentLoader.ListAgents()
+	EncodeJSONResponse(apps, http.StatusOK, rw)
 }

@@ -18,6 +18,8 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+
+	"google.golang.org/adk/cmd/restapi/errors"
 )
 
 func unimplemented(rw http.ResponseWriter, req *http.Request) {
@@ -35,6 +37,22 @@ func EncodeJSONResponse(i any, status int, w http.ResponseWriter) {
 		err := json.NewEncoder(w).Encode(i)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}
+}
+
+type errorHandler func(http.ResponseWriter, *http.Request) error
+
+// FromErrorHandler writes the error code returned from the http handler.
+func FromErrorHandler(fn errorHandler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		err := fn(w, r)
+		if err != nil {
+			if statusErr, ok := err.(errors.StatusError); ok {
+				http.Error(w, statusErr.Error(), statusErr.Status())
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		}
 	}
 }

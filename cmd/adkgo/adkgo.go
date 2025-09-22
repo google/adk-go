@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package models defines the data structures for the REST API.
-package models
+// package main is an entry point for CLI.
+package main
 
-import "reflect"
+import (
+	"google.golang.org/adk/cmd/adkgo/root"
+	_ "google.golang.org/adk/cmd/adkgo/root/deploy"
+	_ "google.golang.org/adk/cmd/adkgo/root/deploy/cloudrun"
+	_ "google.golang.org/adk/cmd/adkgo/root/run/local"
+)
 
-// IsZeroValue checks if the val is the zero-ed value.
-func IsZeroValue(val any) bool {
-	return val == nil || reflect.DeepEqual(val, reflect.Zero(reflect.TypeOf(val)).Interface())
+func main() {
+	root.Execute()
 }

@@ -36,15 +36,15 @@ func (r *RuntimeAPIRouter) Routes() Routes {
 	return Routes{
 		Route{
 			Name:        "RunAgent",
-			Method:      http.MethodPost,
+			Methods:     []string{http.MethodPost, http.MethodOptions},
 			Pattern:     "/run",
-			HandlerFunc: r.runtimeController.RunAgent,
+			HandlerFunc: handlers.FromErrorHandler(r.runtimeController.RunAgentHTTP),
 		},
 		Route{
 			Name:        "RunAgentSse",
-			Method:      http.MethodPost,
+			Methods:     []string{http.MethodPost, http.MethodOptions},
 			Pattern:     "/run_sse",
-			HandlerFunc: r.runtimeController.RunAgentSSE,
+			HandlerFunc: handlers.FromErrorHandler(r.runtimeController.RunAgentSSE),
 		},
 	}
 }

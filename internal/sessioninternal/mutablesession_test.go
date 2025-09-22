@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package runner
+package sessioninternal_test
 
 import (
 	"context"
@@ -22,11 +22,12 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
 )
 
-func createMutableSession(ctx context.Context, t *testing.T, sessionID string, initialData map[string]any) (*mutableSession, sessionservice.Service) {
+func createMutableSession(ctx context.Context, t *testing.T, sessionID string, initialData map[string]any) (*sessioninternal.MutableSession, sessionservice.Service) {
 	t.Helper()
 	service := sessionservice.Mem()
 	req := &sessionservice.CreateRequest{
@@ -40,10 +41,7 @@ func createMutableSession(ctx context.Context, t *testing.T, sessionID string, i
 		t.Fatalf("Failed to create session %q: %v", sessionID, err)
 	}
 
-	return &mutableSession{
-		service:       service,
-		storedSession: createResp.Session,
-	}, service
+	return sessioninternal.NewMutableSession(service, createResp.Session), service
 }
 
 func TestMutableSession_SetGet(t *testing.T) {
@@ -164,10 +162,7 @@ func TestMutableSession_PassthroughMethods(t *testing.T) {
 		t.Fatalf("Failed to create session: %v", err)
 	}
 
-	ms := &mutableSession{
-		service:       service,
-		storedSession: createResp.Session,
-	}
+	ms := sessioninternal.NewMutableSession(service, createResp.Session)
 
 	if got := ms.ID(); !reflect.DeepEqual(got, testID) {
 		t.Errorf("ID() = %v, want %v", got, testID)
@@ -186,7 +181,7 @@ func TestMutableSession_PassthroughMethods(t *testing.T) {
 	if state == nil {
 		t.Fatalf("State() returned nil")
 	}
-	if _, ok := state.(*mutableSession); !ok {
+	if _, ok := state.(*sessioninternal.MutableSession); !ok {
 		t.Errorf("State() did not return *mutableSession as expected")
 	}
 }

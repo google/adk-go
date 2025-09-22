@@ -20,6 +20,7 @@ import (
 	"iter"
 
 	"google.golang.org/adk/llm"
+	"google.golang.org/adk/memoryservice"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -64,6 +65,7 @@ type Context interface {
 
 	Session() session.Session
 	Artifacts() Artifacts
+	Memory() Memory
 
 	End()
 	Ended() bool
@@ -74,6 +76,11 @@ type Artifacts interface {
 	Load(name string) (genai.Part, error)
 	LoadVersion(name string, version int) (genai.Part, error)
 	List() ([]string, error)
+}
+
+type Memory interface {
+	AddSession(session session.Session) error
+	Search(query string) ([]memoryservice.MemoryEntry, error)
 }
 
 type BeforeAgentCallback func(Context) (*genai.Content, error)
@@ -103,7 +110,7 @@ func (a *agent) SubAgents() []Agent {
 func (a *agent) Run(ctx Context) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: verify&update the setup here. Should we branch etc.
-		ctx := NewContext(ctx, a, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Branch())
+		ctx := NewContext(ctx, a, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Memory(), ctx.Branch())
 
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
