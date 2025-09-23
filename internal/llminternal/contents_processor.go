@@ -123,13 +123,13 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 	}
 
 	lastEvent := events[len(events)-1]
-	lastResponses := lastEvent.FunctionResponses()
+	lastResponses := listFunctionResponsesFromEvent(lastEvent)
 	// No need to process, since the latest event is not fuction_response.
 	if len(lastResponses) == 0 {
 		return events, nil
 	}
 
-	//Create response id set
+	// Create response id set
 	responseIDs := make(map[string]struct{})
 	for _, res := range lastResponses {
 		responseIDs[res.ID] = struct{}{}
@@ -137,7 +137,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 
 	// Check if its already in the correct position
 	prevEvent := events[len(events)-2]
-	prevCalls := prevEvent.FunctionCalls()
+	prevCalls := listFunctionCallsFromEvent(prevEvent)
 	if len(prevCalls) > 0 {
 		for _, call := range prevCalls {
 			if _, found := responseIDs[call.ID]; found {
@@ -154,7 +154,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 SearchLoop: // A label to allow breaking out of the nested loop
 	for idx := len(events) - 2; idx >= 0; idx-- {
 		event := events[idx]
-		calls := event.FunctionCalls()
+		calls := listFunctionCallsFromEvent(event)
 
 		if len(calls) > 0 {
 			for _, call := range calls {
@@ -201,7 +201,7 @@ SearchLoop: // A label to allow breaking out of the nested loop
 	var responseEventsToMerge []*session.Event
 	for i := functionCallEventIdx + 1; i < len(events)-1; i++ {
 		event := events[i]
-		responses := event.FunctionResponses()
+		responses := listFunctionResponsesFromEvent(event)
 		if len(responses) == 0 {
 			continue
 		}
@@ -252,7 +252,7 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 	// Create a map to store the index of the event containing each function response.
 	callIDToResponseEventIndex := make(map[string]int)
 	for i, event := range events {
-		responses := event.FunctionResponses()
+		responses := listFunctionResponsesFromEvent(event)
 
 		if len(responses) > 0 {
 			for _, res := range responses {
@@ -267,11 +267,11 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 	for _, event := range events {
 		// If the event contains responses, skip it. It will be handled
 		// when we process its corresponding call event.
-		if len(event.FunctionResponses()) > 0 {
+		if len(listFunctionResponsesFromEvent(event)) > 0 {
 			continue
 		}
 
-		calls := event.FunctionCalls()
+		calls := listFunctionCallsFromEvent(event)
 		if len(calls) == 0 {
 			// This is a regular event (e.g., user message). Just append it.
 			resultEvents = append(resultEvents, event)
@@ -351,7 +351,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 	}
 
 	// 1. Use the first event as the base
-	mergedEvent := functionResponseEvents[0].DeepCopy()
+	mergedEvent := cloneEvent(functionResponseEvents[0])
 	partsInMergedEvent := mergedEvent.LLMResponse.Content.Parts
 
 	if len(partsInMergedEvent) == 0 {
@@ -484,4 +484,66 @@ func isAuthEvent(ev *session.Event) bool {
 		}
 	}
 	return false
+}
+
+func listFunctionCallsFromEvent(e *session.Event) []*genai.FunctionCall {
+	funcCalls := make([]*genai.FunctionCall, 0)
+	if e.LLMResponse != nil && e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
+		for _, part := range e.LLMResponse.Content.Parts {
+			if part.FunctionCall != nil {
+				funcCalls = append(funcCalls, part.FunctionCall)
+			}
+		}
+	}
+	return funcCalls
+}
+
+func listFunctionResponsesFromEvent(e *session.Event) []*genai.FunctionResponse {
+	funcResponses := make([]*genai.FunctionResponse, 0)
+	if e.LLMResponse != nil && e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
+		for _, part := range e.LLMResponse.Content.Parts {
+			if part.FunctionResponse != nil {
+				funcResponses = append(funcResponses, part.FunctionResponse)
+			}
+		}
+	}
+	return funcResponses
+}
+
+func cloneEvent(e *session.Event) *session.Event {
+	if e == nil {
+		return nil
+	}
+
+	// 1. Create a new Event instance
+	newEvent := &session.Event{
+		ID:           e.ID,
+		Time:         e.Time,
+		InvocationID: e.InvocationID,
+		Branch:       e.Branch,
+		Author:       e.Author,
+		Partial:      e.Partial,
+		Actions:      e.Actions,
+	}
+
+	// 2. Deep copy the LongRunningToolIDs slice
+	if e.LongRunningToolIDs != nil {
+		newEvent.LongRunningToolIDs = make([]string, len(e.LongRunningToolIDs))
+		copy(newEvent.LongRunningToolIDs, e.LongRunningToolIDs)
+	}
+
+	// TODO check if copy parts is needed
+	// 3. Deep copy the LLMResponse pointer struct and content
+	if e.LLMResponse != nil {
+		newEvent.LLMResponse = &llm.Response{}
+		if e.LLMResponse.Content != nil {
+			newEvent.LLMResponse.Content = &genai.Content{
+				Parts: make([]*genai.Part, len(e.LLMResponse.Content.Parts)),
+				Role:  e.LLMResponse.Content.Role,
+			}
+			copy(newEvent.LLMResponse.Content.Parts, e.LLMResponse.Content.Parts)
+		}
+	}
+
+	return newEvent
 }
