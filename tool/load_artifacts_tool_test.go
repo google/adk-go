@@ -31,40 +31,107 @@ import (
 )
 
 func TestLoadArtifactsTool_Run(t *testing.T) {
-
 	loadArtifactsTool := tool.NewLoadArtifactsTool()
-
 	tc := createToolContext(t)
 
-	args := map[string]any{
-		"artifact_names": []string{"file1", "file2"},
-	}
 	toolImpl, ok := loadArtifactsTool.(toolinternal.FunctionTool)
 	if !ok {
 		t.Fatal("loadArtifactsTool does not implement FunctionTool")
 	}
-	result, err := toolImpl.Run(tc, args)
-	if err != nil {
-		t.Fatalf("Run with args failed: %v", err)
-	}
-	expected := map[string]any{
-		"artifact_names": []string{"file1", "file2"},
-	}
-	if diff := cmp.Diff(expected, result); diff != "" {
-		t.Errorf("Run with args result diff (-want +got):\n%s", diff)
+
+	tests := []struct {
+		name    string
+		args    map[string]any
+		want    map[string]any
+		wantErr bool
+	}{
+		{
+			name: "basic string slice",
+			args: map[string]any{
+				"artifact_names": []string{"file1", "file2"},
+			},
+			want: map[string]any{
+				"artifact_names": []string{"file1", "file2"},
+			},
+		},
+		{
+			name: "empty args",
+			args: map[string]any{},
+			want: map[string]any{
+				"artifact_names": []string{},
+			},
+		},
+		{
+			name: "any slice with strings",
+			args: map[string]any{
+				"artifact_names": []any{"fileA", "fileB"},
+			},
+			want: map[string]any{
+				"artifact_names": []string{"fileA", "fileB"},
+			},
+		},
+		{
+			name: "empty string slice",
+			args: map[string]any{
+				"artifact_names": []string{},
+			},
+			want: map[string]any{
+				"artifact_names": []string{},
+			},
+		},
+		{
+			name: "empty any slice",
+			args: map[string]any{
+				"artifact_names": []any{},
+			},
+			want: map[string]any{
+				"artifact_names": []string{},
+			},
+		},
+		{
+			name: "nil value",
+			args: map[string]any{
+				"artifact_names": nil,
+			},
+			want: map[string]any{
+				"artifact_names": []string{},
+			},
+		},
+		{
+			name: "incorrect type (not a slice)",
+			args: map[string]any{
+				"artifact_names": "not a slice",
+			},
+			wantErr: true,
+		},
+		{
+			name: "any slice with non-string",
+			args: map[string]any{
+				"artifact_names": []any{"fileA", 123},
+			},
+			wantErr: true,
+		},
 	}
 
-	// Test without artifact names
-	args = map[string]any{}
-	result, err = toolImpl.Run(tc, args)
-	if err != nil {
-		t.Fatalf("Run without args failed: %v", err)
-	}
-	expected = map[string]any{
-		"artifact_names": []string{},
-	}
-	if diff := cmp.Diff(expected, result); diff != "" {
-		t.Errorf("Run without args result diff (-want +got):\n%s", diff)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := toolImpl.Run(tc, tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Run() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+
+			resultMap, ok := result.(map[string]any)
+			if !ok {
+				t.Fatalf("Run() returned type %T, want map[string]any", result)
+			}
+
+			if diff := cmp.Diff(tt.want, resultMap); diff != "" {
+				t.Errorf("Run() result diff (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
