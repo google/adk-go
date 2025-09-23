@@ -65,18 +65,10 @@ func TestNewLongRunningFunctionTool(t *testing.T) {
 	_ = sumTool // use the tool
 }
 
-func contentWithPartsByModel(parts ...*genai.Part) *genai.Content {
-	return &genai.Content{Parts: parts, Role: genai.RoleModel}
-}
-
-func contentWithPartsByUser(parts ...*genai.Part) *genai.Content {
-	return &genai.Content{Parts: parts, Role: genai.RoleUser}
-}
-
-func NewPartFromFunctionResponseWithID(name string, response map[string]any, id string) *genai.Part {
-	part := genai.NewPartFromFunctionResponse(name, response)
-	part.FunctionResponse.ID = id
-	return part
+func NewContentFromFunctionResponseWithID(name string, response map[string]any, id string, role string) *genai.Content {
+	content := genai.NewContentFromFunctionResponse(name, response, genai.Role(role))
+	content.Parts[0].FunctionResponse.ID = id
+	return content
 }
 
 type IncArgs struct {
@@ -104,11 +96,11 @@ func TestLongRunningStringFunctionFlow(t *testing.T) {
 func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx context.Context, x IncArgs) Out, resultKey string, callCount *int) {
 	// 1. Setup
 	responses := []*genai.Content{
-		contentWithPartsByModel(genai.NewPartFromFunctionCall("increaseByOne", map[string]any{})),
-		contentWithPartsByModel(genai.NewPartFromText("response1")),
-		contentWithPartsByModel(genai.NewPartFromText("response2")),
-		contentWithPartsByModel(genai.NewPartFromText("response3")),
-		contentWithPartsByModel(genai.NewPartFromText("response4")),
+		genai.NewContentFromFunctionCall("increaseByOne", map[string]any{}, "model"),
+		genai.NewContentFromText("response1", "model"),
+		genai.NewContentFromText("response2", "model"),
+		genai.NewContentFromText("response3", "model"),
+		genai.NewContentFromText("response4", "model"),
 	}
 	mockModel := &testutil.MockModel{Responses: responses}
 
@@ -121,7 +113,7 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx c
 	}
 
 	a, err := llmagent.New(llmagent.Config{
-		Name:  "hello_world_agent",
+		Name:  "long_running_agent",
 		Model: mockModel,
 		Tools: []tool.Tool{longRunningTool},
 	})
@@ -200,7 +192,7 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx c
 	idFromTheFunctionCallEvent := functionCallEventPart.FunctionCall.ID
 
 	testCases := []struct {
-		name              string         // Name for the t.Run subtest
+		name              string         // Name for the Run subtest
 		inputContent      *genai.Content // The content to send
 		wantReqCount      int            // Expected len(mockModel.Requests)
 		wantEventCount    int            // Expected len(eventParts)
@@ -210,9 +202,9 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx c
 	}{
 		{
 			name: "function response still waiting",
-			inputContent: contentWithPartsByUser(NewPartFromFunctionResponseWithID(
-				"increaseByOne", map[string]any{"status": "still waiting"}, idFromTheFunctionCallEvent,
-			)),
+			inputContent: NewContentFromFunctionResponseWithID(
+				"increaseByOne", map[string]any{"status": "still waiting"}, idFromTheFunctionCallEvent, "user",
+			),
 			wantReqCount:      3,
 			wantEventCount:    1,
 			wantEventText:     "response2",
@@ -221,9 +213,9 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx c
 		},
 		{
 			name: "function response result 2",
-			inputContent: contentWithPartsByUser(NewPartFromFunctionResponseWithID(
-				"increaseByOne", map[string]any{"result": 2}, idFromTheFunctionCallEvent,
-			)),
+			inputContent: NewContentFromFunctionResponseWithID(
+				"increaseByOne", map[string]any{"result": 2}, idFromTheFunctionCallEvent, "user",
+			),
 			wantReqCount:      4,
 			wantEventCount:    1,
 			wantEventText:     "response3",
@@ -232,9 +224,9 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx c
 		},
 		{
 			name: "function response result 3",
-			inputContent: contentWithPartsByUser(NewPartFromFunctionResponseWithID(
-				"increaseByOne", map[string]any{"result": 3}, idFromTheFunctionCallEvent,
-			)),
+			inputContent: NewContentFromFunctionResponseWithID(
+				"increaseByOne", map[string]any{"result": 3}, idFromTheFunctionCallEvent, "user",
+			),
 			wantReqCount:      5,
 			wantEventCount:    1,
 			wantEventText:     "response4",
@@ -292,8 +284,8 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx c
 func TestLongRunningToolIDsAreSet(t *testing.T) {
 	// 1. Setup
 	responses := []*genai.Content{
-		contentWithPartsByModel(genai.NewPartFromFunctionCall("increaseByOne", map[string]any{})),
-		contentWithPartsByModel(genai.NewPartFromText("response1")),
+		genai.NewContentFromFunctionCall("increaseByOne", map[string]any{}, "model"),
+		genai.NewContentFromText("response1", "model"),
 	}
 	mockModel := &testutil.MockModel{Responses: responses}
 	functionCalled := 0
