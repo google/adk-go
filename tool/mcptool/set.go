@@ -48,28 +48,22 @@ import (
 //			}),
 //		},
 //	})
-func NewSet(cfg ToolSetConfig) tool.Set {
+func NewSet(cfg SetConfig) tool.Set {
 	return &set{
-		client:       cfg.Client,
-		transport:    cfg.Transport,
-		allowedTools: cfg.AllowedTools,
+		client:    cfg.Client,
+		transport: cfg.Transport,
 	}
 }
 
-// TooSetConfig provides initial configuration for the MCP ToolSet.
-type ToolSetConfig struct {
+// SetConfig provides initial configuration for the MCP ToolSet.
+type SetConfig struct {
 	Client    *mcp.Client
 	Transport mcp.Transport
-	// AllowedTools is an optional field.
-	// If non-empty, only those MCP tools will be fetched.
-	// If empty, all MCP tools will be fetched.
-	AllowedTools []string
 }
 
 type set struct {
-	client       *mcp.Client
-	transport    mcp.Transport
-	allowedTools []string
+	client    *mcp.Client
+	transport mcp.Transport
 
 	mu      sync.Mutex
 	session *mcp.ClientSession
@@ -96,11 +90,6 @@ func (s *set) Tools(ctx agent.Context) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 
-	allowedTools := make(map[string]bool)
-	for _, name := range s.allowedTools {
-		allowedTools[name] = true
-	}
-
 	cursor := ""
 	for {
 		resp, err := session.ListTools(ctx, &mcp.ListToolsParams{
@@ -111,10 +100,6 @@ func (s *set) Tools(ctx agent.Context) ([]tool.Tool, error) {
 		}
 
 		for _, mcpTool := range resp.Tools {
-			if len(allowedTools) > 0 && !allowedTools[mcpTool.Name] {
-				continue
-			}
-
 			t, err := convertTool(mcpTool, s.getSession)
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)

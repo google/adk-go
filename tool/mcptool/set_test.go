@@ -79,7 +79,7 @@ func TestMCPToolSet(t *testing.T) {
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
 		Tools: []tool.Tool{
-			mcptool.NewSet(mcptool.ToolSetConfig{
+			mcptool.NewSet(mcptool.SetConfig{
 				Client:    mcp.NewClient(&mcp.Implementation{Name: "mcp-client", Version: "v1.0.0"}, nil),
 				Transport: clientTransport,
 			}),
