@@ -75,7 +75,7 @@ type IncArgs struct {
 
 func TestLongRunningFunctionFlow(t *testing.T) {
 	functionCalled := 0
-	increaseByOne := func(ctx context.Context, x IncArgs) map[string]string {
+	increaseByOne := func(ctx tool.Context, x IncArgs) map[string]string {
 		functionCalled++
 		return map[string]string{"status": "pending"}
 	}
@@ -84,7 +84,7 @@ func TestLongRunningFunctionFlow(t *testing.T) {
 
 func TestLongRunningStringFunctionFlow(t *testing.T) {
 	functionCalled := 0
-	increaseByOne := func(ctx context.Context, x IncArgs) string {
+	increaseByOne := func(ctx tool.Context, x IncArgs) string {
 		functionCalled++
 		return "pending"
 	}
@@ -92,7 +92,7 @@ func TestLongRunningStringFunctionFlow(t *testing.T) {
 }
 
 // --- Test Suite ---
-func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx context.Context, x IncArgs) Out, resultKey string, callCount *int) {
+func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx tool.Context, x IncArgs) Out, resultKey string, callCount *int) {
 	// 1. Setup
 	responses := []*genai.Content{
 		genai.NewContentFromFunctionCall("increaseByOne", map[string]any{}, "model"),
