@@ -15,7 +15,6 @@
 package tool_test
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -35,7 +34,7 @@ func TestNewLongRunningFunctionTool(t *testing.T) {
 		Result string `json:"result"` // the operation result
 	}
 
-	handler := func(ctx context.Context, input SumArgs) SumResult {
+	handler := func(ctx tool.Context, input SumArgs) SumResult {
 		return SumResult{Result: "Processing sum"}
 	}
 	sumTool, err := tool.NewLongRunningFunctionTool(tool.FunctionToolConfig{
@@ -83,7 +82,7 @@ func TestAsyncFunction(t *testing.T) {
 	type IncArgs struct {
 	}
 
-	increaseByOne := func(ctx context.Context, x IncArgs) map[string]string {
+	increaseByOne := func(ctx tool.Context, x IncArgs) map[string]string {
 		functionCalled++
 		return map[string]string{"status": "pending"}
 	}

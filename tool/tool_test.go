@@ -15,7 +15,6 @@
 package tool_test
 
 import (
-	"context"
 	"testing"
 
 	"google.golang.org/adk/internal/toolinternal"
@@ -37,7 +36,7 @@ func TestTypes(t *testing.T) {
 		{
 			name: "FunctionTool",
 			constructor: func() (tool.Tool, error) {
-				return tool.NewFunctionTool(tool.FunctionToolConfig{}, func(context.Context, int) int { return 0 })
+				return tool.NewFunctionTool(tool.FunctionToolConfig{}, func(tool.Context, int) int { return 0 })
 			},
 			expectedTypes: []string{requestProc, functionTool},
 		},

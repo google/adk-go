@@ -15,7 +15,6 @@
 package llmagent_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"iter"
@@ -269,7 +268,7 @@ func TestFunctionTool(t *testing.T) {
 	}
 
 	prompt := "what is the sum of 1 + 2?"
-	handler := func(_ context.Context, input Args) Result {
+	handler := func(_ tool.Context, input Args) Result {
 		if input.A != 1 || input.B != 2 {
 			t.Errorf("handler received %+v, want {a: 1, b: 2}", input)
 		}

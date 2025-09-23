@@ -15,7 +15,6 @@
 package tool
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -53,7 +52,7 @@ type FunctionToolConfig struct {
 }
 
 // Funtion represents a Go function.
-type Function[TArgs, TResults any] func(context.Context, TArgs) TResults
+type Function[TArgs, TResults any] func(Context, TArgs) TResults
 
 // NewFunctionTool creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
