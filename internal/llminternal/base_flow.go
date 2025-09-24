@@ -206,21 +206,6 @@ func (f *Flow) preprocess(ctx agent.Context, req *llm.Request) error {
 	return nil
 }
 
-func removeDisplayNameIfPresent(dataObj any) {
-	switch content := dataObj.(type) {
-	case *genai.Blob:
-		if content != nil {
-			content.DisplayName = ""
-		}
-	case *genai.FileData:
-		if content != nil {
-			content.DisplayName = ""
-		}
-	default:
-		return
-	}
-}
-
 func preprocessRequest(req *llm.Request) {
 	if req.Contents == nil {
 		return
@@ -233,8 +218,12 @@ func preprocessRequest(req *llm.Request) {
 		// so it must be removed to prevent request failures.
 		if utils.GetGoogleLLMVariant() == utils.GoogleLLMVariantGeminiAPI {
 			for _, part := range content.Parts {
-				removeDisplayNameIfPresent(part.InlineData)
-				removeDisplayNameIfPresent(part.FileData)
+				if part.InlineData != nil {
+					part.InlineData.DisplayName = ""
+				}
+				if part.FileData != nil {
+					part.FileData.DisplayName = ""
+				}
 			}
 		}
 	}
