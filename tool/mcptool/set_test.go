@@ -73,16 +73,20 @@ func TestMCPToolSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	ts, err := mcptool.NewSet(mcptool.SetConfig{
+		Transport: clientTransport,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
 	agent, err := llmagent.New(llmagent.Config{
 		Name:        "weather_time_agent",
 		Model:       newGeminiModel(t, modelName),
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
 		Tools: []tool.Tool{
-			mcptool.NewSet(mcptool.SetConfig{
-				Client:    mcp.NewClient(&mcp.Implementation{Name: "mcp-client", Version: "v1.0.0"}, nil),
-				Transport: clientTransport,
-			}),
+			ts,
 		},
 	})
 	if err != nil {
@@ -126,8 +130,7 @@ func TestMCPToolSet(t *testing.T) {
 							FunctionResponse: &genai.FunctionResponse{
 								Name: "get_weather",
 								Response: map[string]any{
-									"text": string(`{"weather_summary":"Today in \"london\" is sunny"}`),
-									"type": string("text"),
+									"weather_summary": `Today in "london" is sunny`,
 								},
 							},
 						},

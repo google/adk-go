@@ -42,22 +42,20 @@ import (
 //		Description: "...",
 //		Instruction: "...",
 //		Tools: []tool.Tool{
-//			mcptool.NewSet(mcptool.ToolSetConfig{
-//				Client: mcp.NewClient(...),
+//			mcptool.NewSet(mcptool.SetConfig{
 //				Transport: &mcp.CommandTransport{Command: exec.Command("myserver")}
 //			}),
 //		},
 //	})
-func NewSet(cfg SetConfig) tool.Set {
+func NewSet(cfg SetConfig) (tool.Set, error) {
 	return &set{
-		client:    cfg.Client,
+		client:    mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: "v1.0.0"}, nil),
 		transport: cfg.Transport,
-	}
+	}, nil
 }
 
 // SetConfig provides initial configuration for the MCP ToolSet.
 type SetConfig struct {
-	Client    *mcp.Client
 	Transport mcp.Transport
 }
 

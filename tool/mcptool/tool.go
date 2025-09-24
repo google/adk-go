@@ -16,10 +16,7 @@ package mcptool
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"maps"
-	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/internal/toolinternal"
@@ -106,53 +103,7 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (any, error) {
 		return nil, fmt.Errorf("failed to call MCP tool %q with err: %w", t.name, err)
 	}
 
-	return t.parseCallResult(res), nil
-}
-
-func (t *mcpTool) parseCallResult(res *mcp.CallToolResult) map[string]any {
-	if res == nil {
-		return map[string]any{"error": "MCP framework error: CallToolResult was null"}
-	}
-
-	if res.IsError {
-		details := strings.Builder{}
-		for _, c := range res.Content {
-			textContent, ok := c.(*mcp.TextContent)
-			if !ok {
-				continue
-			}
-			if _, err := details.WriteString(textContent.Text); err != nil {
-				return map[string]any{"error": fmt.Sprintf("failed to parse error details: %q", err.Error())}
-			}
-		}
-
-		errMsg := "Tool execution failed."
-		if details.Len() > 0 {
-			errMsg += " Details: " + details.String()
-		}
-
-		return map[string]any{
-			"error": errMsg,
-		}
-	}
-
-	mapRes := make(map[string]any)
-
-	for _, c := range res.Content {
-		b, err := c.MarshalJSON()
-		if err != nil {
-			return map[string]any{"error": fmt.Sprintf("failed to marshal response: %q", err.Error())}
-		}
-
-		var m map[string]any
-		if err := json.Unmarshal(b, &m); err != nil {
-			return map[string]any{"error": fmt.Sprintf("failed to unmarshal response: %q", err.Error())}
-		}
-
-		maps.Copy(mapRes, m)
-	}
-
-	return mapRes
+	return res.StructuredContent, nil
 }
 
 var (

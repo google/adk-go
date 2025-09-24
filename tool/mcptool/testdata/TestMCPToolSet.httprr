@@ -1,5 +1,5 @@
 httprr trace v1
-925 1617
+925 1396
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
@@ -8,9 +8,9 @@ Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"what is the weather in london?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 12 Sep 2025 13:23:11 GMT
+Date: Wed, 24 Sep 2025 13:18:34 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=898
+Server-Timing: gfet4t7; dur=728
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -30,7 +30,7 @@ X-Xss-Protection: 0
                 "city": "london"
               }
             },
-            "thoughtSignature": "CsEDAdHtim+XHZr3OcfLvKb1CYMB4gpGejSskpeWjcAq0YuRqWmnFsCVGUjQzWUYhQJJB6vQ+ztVzSb2WI8FBTlIcoHYbK2OeVgA1WEtvr7ca0Ih9tKvYsVGehvZxK+YFeYHSGljQ8UIViRF1o0DrSvURFdZmHtAFgrt4UKgfTSCyu0L4cjCVuE5tscelmyrkXYtKa1NWqBCURPiVMNcndH0xn3OYiwcBU484qYh6oau/2wf73xNqp5ADZMEuJYNk/+yjyAvrYh91QPd9a5YzpI5OjOheley+0P6TDCgNKoGeELrHH9vuMUcva3jv4PSb4Gp0IpuLQECiHBgvZyy3UqKDsXEjM6qJxOTJaPiOUWAKnx4awkgrOgf54apQkHW3/kIRAnqsbFgICBsxz/dzxnX2c0FJtga2Heca+ihBwpgaxvRFsrc07NLYeBUC8lvUCsVO6KaAzfxF7asr5hbKkYKkdR26GUA1aMOnWGVLgf2btmGxoSLM6QZhjtpgyJZuKX1X1QyExUBFAaS81qo9XgIVWXx3C71rjo6qs0082O5WYk3DbscF3Aat7bUQvqIOzdYcxC8PLBodp0EbrAcUyL30ss="
+            "thoughtSignature": "CpsCAdHtim8WOVxCrHLFwbK3h2vgGLuRTJqZmyEznXRXLGOsS6T6FqtcZgmGBxpc8SPnWSIOjpwC1BoeGmm0HnIPlNVhmuEx0qZcmKQRIx9oxoLeDMkTt8/xW4cROn8C2rIxWCjUJArDj5ANjxjBRo3yjD8BvyqmvAwK1hOeYML2W31u0jE9dZd76eIpKZAI7XlmmuKHakfA8+fyhaIhSaBw/6dIQh2Ez4RTyj7m4kLxCu0MhX3HckN5qs5FwRjru40MOBJ8algKTxjTZF5ULne5Lb6iiFjxAd1iiPqtqzK1x9u7XnsDnnu5G2jK1x921VfPUNMZJhPSQ6jhrwfSciyZqt7bdBy85MAN7VUNNpEIRipx3f0qZxXiP9qKtA=="
           }
         ],
         "role": "model"
@@ -42,30 +42,30 @@ X-Xss-Protection: 0
   "usageMetadata": {
     "promptTokenCount": 113,
     "candidatesTokenCount": 15,
-    "totalTokenCount": 229,
+    "totalTokenCount": 192,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
         "tokenCount": 113
       }
     ],
-    "thoughtsTokenCount": 101
+    "thoughtsTokenCount": 64
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "vx7EaPaaNtrknsEPi-OYkAU"
+  "responseId": "qu_TaNGkB_unnsEPk9vZ0AY"
 }
-1809 842
+1556 842
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1576
+Content-Length: 1323
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"what is the weather in london?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"london"},"name":"get_weather"},"thoughtSignature":"CsEDAdHtim+XHZr3OcfLvKb1CYMB4gpGejSskpeWjcAq0YuRqWmnFsCVGUjQzWUYhQJJB6vQ+ztVzSb2WI8FBTlIcoHYbK2OeVgA1WEtvr7ca0Ih9tKvYsVGehvZxK+YFeYHSGljQ8UIViRF1o0DrSvURFdZmHtAFgrt4UKgfTSCyu0L4cjCVuE5tscelmyrkXYtKa1NWqBCURPiVMNcndH0xn3OYiwcBU484qYh6oau/2wf73xNqp5ADZMEuJYNk/+yjyAvrYh91QPd9a5YzpI5OjOheley+0P6TDCgNKoGeELrHH9vuMUcva3jv4PSb4Gp0IpuLQECiHBgvZyy3UqKDsXEjM6qJxOTJaPiOUWAKnx4awkgrOgf54apQkHW3/kIRAnqsbFgICBsxz/dzxnX2c0FJtga2Heca+ihBwpgaxvRFsrc07NLYeBUC8lvUCsVO6KaAzfxF7asr5hbKkYKkdR26GUA1aMOnWGVLgf2btmGxoSLM6QZhjtpgyJZuKX1X1QyExUBFAaS81qo9XgIVWXx3C71rjo6qs0082O5WYk3DbscF3Aat7bUQvqIOzdYcxC8PLBodp0EbrAcUyL30ss="}],"role":"model"},{"parts":[{"functionResponse":{"name":"get_weather","response":{"text":"{\"weather_summary\":\"Today in \\\"london\\\" is sunny\"}","type":"text"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"what is the weather in london?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"london"},"name":"get_weather"},"thoughtSignature":"CpsCAdHtim8WOVxCrHLFwbK3h2vgGLuRTJqZmyEznXRXLGOsS6T6FqtcZgmGBxpc8SPnWSIOjpwC1BoeGmm0HnIPlNVhmuEx0qZcmKQRIx9oxoLeDMkTt8/xW4cROn8C2rIxWCjUJArDj5ANjxjBRo3yjD8BvyqmvAwK1hOeYML2W31u0jE9dZd76eIpKZAI7XlmmuKHakfA8+fyhaIhSaBw/6dIQh2Ez4RTyj7m4kLxCu0MhX3HckN5qs5FwRjru40MOBJ8algKTxjTZF5ULne5Lb6iiFjxAd1iiPqtqzK1x9u7XnsDnnu5G2jK1x921VfPUNMZJhPSQ6jhrwfSciyZqt7bdBy85MAN7VUNNpEIRipx3f0qZxXiP9qKtA=="}],"role":"model"},{"parts":[{"functionResponse":{"name":"get_weather","response":{"weather_summary":"Today in \"london\" is sunny"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 12 Sep 2025 13:23:12 GMT
+Date: Wed, 24 Sep 2025 13:18:34 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=526
+Server-Timing: gfet4t7; dur=267
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -89,16 +89,16 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 163,
+    "promptTokenCount": 151,
     "candidatesTokenCount": 7,
-    "totalTokenCount": 170,
+    "totalTokenCount": 158,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 163
+        "tokenCount": 151
       }
     ]
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "wB7EaKaBGsfi7M8Pq7OQsA8"
+  "responseId": "qu_TaM_uF4bnnsEPj6WesAM"
 }
