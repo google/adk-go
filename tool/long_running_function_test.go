@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
@@ -137,100 +139,73 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx t
 	}
 
 	// Assert first request
-	expectedReqText1 := "test1"
-	if len(mockModel.Requests[0].Contents) != 1 {
-		t.Errorf("got %d requests content, want 1", len(mockModel.Requests[0].Contents))
+	wantFirsteq := []*genai.Content{
+		genai.NewContentFromText("test1", "user"),
 	}
-	if len(mockModel.Requests[0].Contents[0].Parts) != 1 {
-		t.Errorf("got %d requests content parts, want 1", len(mockModel.Requests[0].Contents[0].Parts))
-	}
-	if mockModel.Requests[0].Contents[0].Parts[0].Text != expectedReqText1 {
-		t.Errorf("request 1 mismatch:\ngot: %#v\nwant: %#v", mockModel.Requests[0].Contents[0].Parts[0].Text, expectedReqText1)
+	if diff := cmp.Diff(wantFirsteq, mockModel.Requests[0].Contents); diff != "" {
+		t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
 	}
 
 	// Assert second request
-	if len(mockModel.Requests[1].Contents) != 3 {
-		t.Errorf("got %d requests content, want 3", len(mockModel.Requests[1].Contents))
+	wantSecondReq := []*genai.Content{
+		genai.NewContentFromText("test1", "user"),
+		genai.NewContentFromFunctionCall("increaseByOne", map[string]any{}, "model"),
+		genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{resultKey: "pending"}, "user"),
 	}
-	if len(mockModel.Requests[1].Contents[2].Parts) != 1 {
-		t.Errorf("got %d requests content parts, want 1", len(mockModel.Requests[1].Contents[2].Parts))
-	}
-	functionResponse := mockModel.Requests[1].Contents[2].Parts[0].FunctionResponse
-	if functionResponse == nil {
-		t.Fatalf("request 2 mismatch:\ngot: nil function response ")
-	}
-	if functionResponse.Name != "increaseByOne" {
-		t.Errorf("got %q function response name, want increaseByOne", functionResponse.Name)
-	}
-	if functionResponse.Response == nil {
-		t.Errorf("got %q function response, want map", functionResponse.Response)
-	}
-	if val, ok := functionResponse.Response[resultKey]; !ok || val != "pending" {
-		t.Errorf("function response, incorrect %q value", resultKey)
+	if diff := cmp.Diff(wantSecondReq, mockModel.Requests[1].Contents); diff != "" {
+		t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
 	}
 
-	// Assert parts
-	if len(eventParts) != 3 {
-		t.Fatalf("got %d events parts, want 3", len(eventParts))
+	wantEventParts := []*genai.Part{
+		genai.NewPartFromFunctionCall("increaseByOne", map[string]any{}),
+		genai.NewPartFromFunctionResponse("increaseByOne", map[string]any{resultKey: "pending"}),
+		genai.NewPartFromText("response1"),
 	}
+	if diff := cmp.Diff(wantEventParts, eventParts, cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
+		cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID")); diff != "" {
+		t.Errorf("Event parts mismatch (-want +got):\n%s", diff)
+	}
+
 	functionCallEventPart := eventParts[0]
-	functionResponseEventPart := eventParts[1]
-	llmResponseEventPart := eventParts[2]
-	if functionCallEventPart.FunctionCall.Name != "increaseByOne" || len(functionCallEventPart.FunctionCall.Args) != 0 {
-		t.Errorf("Invalid functionCallEventPart")
-	}
-	if functionResponseEventPart.FunctionResponse.Name != "increaseByOne" {
-		t.Errorf("Invalid functionResponseEventPart")
-	}
-	if val, ok := functionResponseEventPart.FunctionResponse.Response[resultKey]; !ok || val != "pending" {
-		t.Errorf("Invalid functionResponseEventPart")
-	}
-	if llmResponseEventPart.Text != "response1" {
-		t.Errorf("Invalid llmResponseEventPart")
-	}
 	idFromTheFunctionCallEvent := functionCallEventPart.FunctionCall.ID
 
 	testCases := []struct {
-		name              string         // Name for the Run subtest
-		inputContent      *genai.Content // The content to send
-		wantReqCount      int            // Expected len(mockModel.Requests)
-		wantEventCount    int            // Expected len(eventParts)
-		wantEventText     string         // Expected eventParts[0].Text
-		wantResponseKey   string         // Expected key in fuction response
-		wantResponseValue any            // Expected value in fuction response
+		name           string         // Name for the Run subtest
+		inputContent   *genai.Content // The content to send
+		wantReqCount   int            // Expected len(mockModel.Requests)
+		wantEventCount int            // Expected len(eventParts)
+		wantEventText  string         // Expected eventParts[0].Text
+		wantContent    *genai.Content // Expected output content
 	}{
 		{
 			name: "function response still waiting",
 			inputContent: NewContentFromFunctionResponseWithID(
 				"increaseByOne", map[string]any{"status": "still waiting"}, idFromTheFunctionCallEvent, "user",
 			),
-			wantReqCount:      3,
-			wantEventCount:    1,
-			wantEventText:     "response2",
-			wantResponseKey:   "status",
-			wantResponseValue: "still waiting",
+			wantReqCount:   3,
+			wantEventCount: 1,
+			wantEventText:  "response2",
+			wantContent:    genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{"status": "still waiting"}, "user"),
 		},
 		{
 			name: "function response result 2",
 			inputContent: NewContentFromFunctionResponseWithID(
 				"increaseByOne", map[string]any{"result": 2}, idFromTheFunctionCallEvent, "user",
 			),
-			wantReqCount:      4,
-			wantEventCount:    1,
-			wantEventText:     "response3",
-			wantResponseKey:   "result",
-			wantResponseValue: 2,
+			wantReqCount:   4,
+			wantEventCount: 1,
+			wantEventText:  "response3",
+			wantContent:    genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{"result": 2}, "user"),
 		},
 		{
 			name: "function response result 3",
 			inputContent: NewContentFromFunctionResponseWithID(
 				"increaseByOne", map[string]any{"result": 3}, idFromTheFunctionCallEvent, "user",
 			),
-			wantReqCount:      5,
-			wantEventCount:    1,
-			wantEventText:     "response4",
-			wantResponseKey:   "result",
-			wantResponseValue: 3,
+			wantReqCount:   5,
+			wantEventCount: 1,
+			wantEventText:  "response4",
+			wantContent:    genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{"result": 3}, "user"),
 		},
 	}
 
@@ -251,25 +226,17 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx t
 			if len(latestRequestContents) != 3 {
 				t.Fatalf("got %d latest request contents size, want %d", len(latestRequestContents), 3)
 			}
-			latestRequestFunctionResponse := latestRequestContents[len(latestRequestContents)-1].Parts[0].FunctionResponse
-			if latestRequestFunctionResponse.Name != "increaseByOne" {
-				t.Errorf("got %q latestRequest Function response name want %q",
-					latestRequestFunctionResponse.Name, "increaseByOne")
+
+			if diff := cmp.Diff(tc.wantContent, latestRequestContents[len(latestRequestContents)-1]); diff != "" {
+				t.Errorf("LLMRequest.Content mismatch (-want +got):\n%s", diff)
 			}
-			val, ok := latestRequestFunctionResponse.Response[tc.wantResponseKey]
-			if !ok {
-				t.Fatalf("Function response map missing expected key: %q", tc.wantResponseKey)
-			}
-			if val != tc.wantResponseValue {
-				t.Errorf("Function response value mismatch for key %q:\n  got: %#v\n want: %#v",
-					tc.wantResponseKey, val, tc.wantResponseValue)
-			}
+
 			if len(eventParts) != tc.wantEventCount {
 				t.Fatalf("got %d events parts, want %d", len(eventParts), tc.wantEventCount)
 			}
 			// This check is now safe because the Fatalf above would have stopped the test
 			if len(eventParts) > 0 && eventParts[0].Text != tc.wantEventText {
-				t.Fatalf("got event part text %q, want %q", eventParts[0].Text, tc.wantEventText)
+				t.Errorf("got event part text %q, want %q", eventParts[0].Text, tc.wantEventText)
 			}
 		})
 	}
