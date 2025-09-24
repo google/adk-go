@@ -19,30 +19,58 @@ import (
 	"fmt"
 
 	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
 
 // VertexAiSessionService
 type vertexAiService struct {
+	client *genai.Client
+	model  string
+}
+
+func newVertexAiSessionService(ctx context.Context, model string) (Service, error) {
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		Backend: genai.BackendVertexAI,
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Vertex AI client: %w", err)
+	}
+
+	return &vertexAiService{client: client, model: model}, nil
 }
 
 func (s *vertexAiService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
-	return nil, fmt.Errorf("not implemented")
+	_, err := s.client.Chats.Create(ctx, s.model, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session: %w", err)
+	}
+
+	c := &CreateResponse{
+		Session: &storedSession{
+			id: session.ID{
+				AppName:   req.AppName,
+				UserID:    req.UserID,
+				SessionID: "test-id",
+			},
+		},
+	}
+
+	return c, nil
 }
 
 func (s *vertexAiService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
-	return nil, fmt.Errorf("not implemented")
+	return nil, fmt.Errorf("session Get function not implemented")
 }
 
 func (s *vertexAiService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
-	return nil, fmt.Errorf("not implemented")
+	return nil, fmt.Errorf("session List function not implemented")
 }
 
 func (s *vertexAiService) Delete(ctx context.Context, req *DeleteRequest) error {
-	return fmt.Errorf("not implemented")
+	return fmt.Errorf("session Delete function not implemented")
 }
 
 func (s *vertexAiService) AppendEvent(ctx context.Context, session StoredSession, event *session.Event) error {
-	return fmt.Errorf("not implemented")
+	return fmt.Errorf("session AppendEvent function not implemented")
 }
-
-var _ Service = (*vertexAiService)(nil)

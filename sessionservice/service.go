@@ -39,8 +39,8 @@ func Mem() Service {
 }
 
 // VertexAI returns VertextAiSessionService implementation.
-func VertexAI() Service {
-	return &vertexAiService{}
+func VertexAI(ctx context.Context, model string) (Service, error) {
+	return newVertexAiSessionService(ctx, model)
 }
 
 // StoredSession represents a session.

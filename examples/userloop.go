@@ -27,10 +27,12 @@ import (
 	"google.golang.org/genai"
 )
 
-func Run(ctx context.Context, rootAgent agent.Agent) {
+func Run(ctx context.Context, rootAgent agent.Agent, sessionService sessionservice.Service) {
 	userID, appName := "test_user", "test_app"
 
-	sessionService := sessionservice.Mem()
+	if sessionService == nil {
+		sessionService = sessionservice.Mem()
+	}
 
 	resp, err := sessionService.Create(ctx, &sessionservice.CreateRequest{
 		AppName: appName,
