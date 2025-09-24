@@ -26,6 +26,7 @@ import (
 	"github.com/rs/cors"
 	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/cmd/restapi/config"
+	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/services"
 	restapiweb "google.golang.org/adk/cmd/restapi/web"
 	"google.golang.org/adk/sessionservice"
@@ -36,6 +37,7 @@ type WebConfig struct {
 	LocalPort      int
 	UIDistPath     string
 	FrontEndServer string
+	BackEndServer  string
 	StartRestApi   bool
 	StartWebUI     bool
 }
@@ -43,7 +45,12 @@ type WebConfig struct {
 // ParseArgs parses the arguments for the ADK API server.
 func ParseArgs() *WebConfig {
 	localPortFlag := flag.Int("port", 8080, "Port to listen on")
+<<<<<<< HEAD
 	frontendServerFlag := flag.String("front_address", "http://localhost:8001", "Front address to allow CORS requests from")
+=======
+	frontendServerFlag := flag.String("front_address", "localhost:8001", "Front address to allow CORS requests from as seen from the user browser")
+	backendServerFlag := flag.String("backend_address", "http://localhost:8001/api", "Backend server as seen from the user browser")
+>>>>>>> e7c16be (Added runtime generation of /assets/config/runtime-config.json)
 	startRespApi := flag.Bool("start_restapi", true, "Set to start a rest api endpoint '/api'")
 	startWebUI := flag.Bool("start_webui", true, "Set to start a web ui endpoint '/ui'")
 	webuiDist := flag.String("webui_path", "", "Points to a static web ui dist path with the built version of ADK Web UI")
@@ -56,6 +63,7 @@ func ParseArgs() *WebConfig {
 	return &(WebConfig{
 		LocalPort:      *localPortFlag,
 		FrontEndServer: *frontendServerFlag,
+		BackEndServer:  *backendServerFlag,
 		StartRestApi:   *startRespApi,
 		StartWebUI:     *startWebUI,
 		UIDistPath:     *webuiDist,
@@ -83,6 +91,21 @@ type ServeConfig struct {
 	ArtifactService artifactservice.Service
 }
 
+func corsWithArgs(c *WebConfig) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", c.FrontEndServer)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // Serve initiates the http server and starts it according to WebConfig parameters
 func Serve(c *WebConfig, serveConfig *ServeConfig) {
 	serverConfig := config.ADKAPIRouterConfigs{
@@ -98,16 +121,31 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 	rBase := mux.NewRouter().StrictSlash(true)
 	rBase.Use(Logger)
 
+	runtimeConfigResponse := struct {
+		BackendUrl string `json:"backendUrl"`
+	}{BackendUrl: c.BackEndServer}
+
 	if c.StartWebUI {
 		rUi := rBase.Methods("GET").PathPrefix("/ui/").Subrouter()
+		rUi.Methods("GET").Path("/assets/config/runtime-config.json").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlers.EncodeJSONResponse(runtimeConfigResponse, http.StatusOK, w)
+		})
 		rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.Dir(c.UIDistPath))))
 	}
 
 	if c.StartRestApi {
+<<<<<<< HEAD
 		rApi := rBase.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
 		rApi.Use(serverConfig.Cors.Handler)
+=======
+		rApi := rBase.Methods("GET", "POST", "DELETE").PathPrefix("/api/").Subrouter()
+		rApi.Use(corsWithArgs(c))
+		// rApi= serverConfig.Cors.Handler(rApi)
+		// rApi = serverConfig.Cors.Handler(rApi)
+>>>>>>> e7c16be (Added runtime generation of /assets/config/runtime-config.json)
 		restapiweb.SetupRouter(rApi, &serverConfig)
 	}
 
 	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), rBase))
+	// log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), serverConfig.Cors.Handler(rBase)))
 }

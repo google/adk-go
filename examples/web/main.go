@@ -60,7 +60,7 @@ func main() {
 	}
 	sessionService := sessionservice.Mem()
 	rootAgent, err := llmagent.New(llmagent.Config{
-		Name:        "weather_time_agent",
+		Name:        "wweather_time_agent",
 		Model:       model,
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
@@ -76,8 +76,8 @@ func main() {
 
 	agentLoader := services.NewStaticAgentLoader(
 		map[string]agent.Agent{
-			"weather_time_agent": rootAgent,
-			"llm_auditor":        llmAuditor,
+			"wweather_time_agent": rootAgent,
+			"llm_auditor":         llmAuditor,
 		},
 	)
 	artifactservice := artifactservice.Mem()

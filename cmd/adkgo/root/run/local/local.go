@@ -64,15 +64,7 @@ var localCmd = &cobra.Command{
 	Short: "Runs a local server with WebUI.",
 	Long: `
 	Starts a local server on the given port. ADK Web UI runs on '/ui/' and ADK REST API runs on '/api/'
-	You need: 
-	  - a downloaded version of adk-web (available at https://github.com/google/adk-web)
-	  - an ability to build adk-web (prerequisites on  https://github.com/google/adk-web):
-	  	npm  (node js: see https://nodejs.org/en/download)
-		ng (anglural cli: see https://angular.dev/tools/cli/setup-local)		
-	  - go
-
-	Building the adk-web takes a while, so it is built once unless you force cleaning by providing --skipCleaning=false
-	After you change the serverPort you will also need to force cleaning and build adk-web anew (due to change of the backend endpoint)
+	You need adk-go sources to server static content of ADK Web UI.
 	`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		err := flags.runLocal()
@@ -179,6 +171,7 @@ func (f *runLocalFlags) runLocalServer() error {
 			cmd := exec.Command(f.build.execPath,
 				"--port", strconv.Itoa(f.server.port),
 				"--front_address", "localhost:"+strconv.Itoa(f.server.port),
+				"--backend_address", "http://localhost:"+strconv.Itoa(f.server.port)+"/api",
 				"--start_restapi=true",
 				"--start_webui=true",
 				"--webui_path", "./ui/browser/",
