@@ -15,6 +15,8 @@
 package utils
 
 import (
+	"os"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -26,7 +28,13 @@ import (
 
 // TODO: split in proper files/packages.
 
-const afFunctionCallIDPrefix = "adk-"
+const (
+	afFunctionCallIDPrefix = "adk-"
+	// For using credentials from Google Vertex AI
+	GoogleLLMVariantVertexAI = "VERTEX_AI"
+	// For using API Key from Google AI Studio
+	GoogleLLMVariantGeminiAPI = "GEMINI_API"
+)
 
 // PopulateClientFunctionCallID sets the function call ID field if it is empty.
 // Since the ID field is optional, some models don't fill the field, but
@@ -184,4 +192,17 @@ func hasTrailingCodeExecutionResult(resp *llm.Response) bool {
 	}
 	lastPart := resp.Content.Parts[len(resp.Content.Parts)-1]
 	return lastPart.CodeExecutionResult != nil
+}
+
+// GetGoogleLLMVariant returns the Google LLM variant to use.
+// see https://google.github.io/adk-docs/get-started/quickstart/#set-up-the-model
+func GetGoogleLLMVariant() string {
+	useVertexAI, ok := os.LookupEnv("GOOGLE_GENAI_USE_VERTEXAI")
+	if !ok {
+		useVertexAI = "0"
+	}
+	if slices.Contains([]string{"1", "true"}, useVertexAI) {
+		return GoogleLLMVariantVertexAI
+	}
+	return GoogleLLMVariantGeminiAPI
 }

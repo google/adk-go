@@ -182,8 +182,7 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 		streamingMode = runner.StreamingModeSSE
 	}
 	return r, &runner.RunConfig{
-		StreamingMode:             streamingMode,
-		SaveInputBlobsAsArtifacts: true,
+		StreamingMode: streamingMode,
 	}, nil
 }
 

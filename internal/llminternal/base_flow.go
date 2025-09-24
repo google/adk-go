@@ -202,7 +202,42 @@ func (f *Flow) preprocess(ctx agent.Context, req *llm.Request) error {
 			return err
 		}
 	}
+	preprocessRequest(req)
 	return nil
+}
+
+func removeDisplayNameIfPresent(dataObj any) {
+	switch content := dataObj.(type) {
+	case *genai.Blob:
+		if content != nil {
+			content.DisplayName = ""
+		}
+	case *genai.FileData:
+		if content != nil {
+			content.DisplayName = ""
+		}
+	default:
+		return
+	}
+}
+
+func preprocessRequest(req *llm.Request) {
+	if req.Contents == nil {
+		return
+	}
+	for _, content := range req.Contents {
+		if content.Parts == nil {
+			continue
+		}
+		// The Gemini API (non-Vertex) backend does not support the display_name parameter for file uploads,
+		// so it must be removed to prevent request failures.
+		if utils.GetGoogleLLMVariant() == utils.GoogleLLMVariantGeminiAPI {
+			for _, part := range content.Parts {
+				removeDisplayNameIfPresent(part.InlineData)
+				removeDisplayNameIfPresent(part.FileData)
+			}
+		}
+	}
 }
 
 func (f *Flow) callLLM(ctx agent.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
