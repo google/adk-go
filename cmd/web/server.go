@@ -34,12 +34,12 @@ import (
 
 // WebConfig is a struct with parameters to run a WebServer.
 type WebConfig struct {
-	LocalPort      int
-	UIDistPath     string
-	FrontEndServer string
-	BackEndServer  string
-	StartRestApi   bool
-	StartWebUI     bool
+	LocalPort       int
+	UIDistPath      string
+	FrontendAddress string
+	BackendAddress  string
+	StartRestApi    bool
+	StartWebUI      bool
 }
 
 // ParseArgs parses the arguments for the ADK API server.
@@ -54,6 +54,7 @@ func ParseArgs() *WebConfig {
 >>>>>>> e7c16be (Added runtime generation of /assets/config/runtime-config.json)
 =======
 	localPortFlag := flag.Int("port", 8080, "Localhost port for the server")
+<<<<<<< HEAD
 	frontendServerFlag := flag.String("front_address", "localhost:8080", "Front address to allow CORS requests from as seen from the user browser. Please specify only hostname and (optionally) port")
 	backendServerFlag := flag.String("backend_address", "http://localhost:8080/api", "Backend server as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'. ")
 >>>>>>> 672ccad (Modified command line description)
@@ -61,6 +62,14 @@ func ParseArgs() *WebConfig {
 	startWebUI := flag.Bool("start_webui", true, "Set to start a web ui endpoint '/ui'")
 	webuiDist := flag.String("webui_path", "",
 		`Points to a static web ui dist path with the built version of ADK Web UI (cmd/web/distr/browser in the repo). 
+=======
+	frontendAddressFlag := flag.String("front_address", "localhost:8080", "Front address to allow CORS requests from as seen from the user browser. Please specify only hostname and (optionally) port")
+	backendAddressFlag := flag.String("backend_address", "http://localhost:8080/api", "Backend server as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'. ")
+	startRespApiFlag := flag.Bool("start_restapi", true, "Set to start a rest api endpoint '/api'")
+	startWebUIFlag := flag.Bool("start_webui", true, "Set to start a web ui endpoint '/ui'")
+	webuiDistPathFlag := flag.String("webui_distr_path", "",
+		`Points to a static web ui dist path with the built version of ADK Web UI (cmd/web/distr/browser in the ADK-GO repo). 
+>>>>>>> a881883 (Modified the way the local server is run)
 Normally it should be the version distributed with adk-go. You may use CLI command build webui to experiment with other versions.`)
 
 	flag.Parse()
@@ -69,12 +78,12 @@ Normally it should be the version distributed with adk-go. You may use CLI comma
 		panic("Failed to parse flags")
 	}
 	return &(WebConfig{
-		LocalPort:      *localPortFlag,
-		FrontEndServer: *frontendServerFlag,
-		BackEndServer:  *backendServerFlag,
-		StartRestApi:   *startRespApi,
-		StartWebUI:     *startWebUI,
-		UIDistPath:     *webuiDist,
+		LocalPort:       *localPortFlag,
+		FrontendAddress: *frontendAddressFlag,
+		BackendAddress:  *backendAddressFlag,
+		StartRestApi:    *startRespApiFlag,
+		StartWebUI:      *startWebUIFlag,
+		UIDistPath:      *webuiDistPathFlag,
 	})
 }
 
@@ -102,7 +111,7 @@ type ServeConfig struct {
 func corsWithArgs(c *WebConfig) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", c.FrontEndServer)
+			w.Header().Set("Access-Control-Allow-Origin", c.FrontendAddress)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			if r.Method == "OPTIONS" {
@@ -122,7 +131,7 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 		ArtifactService: serveConfig.ArtifactService,
 	}
 	serverConfig.Cors = *cors.New(cors.Options{
-		AllowedOrigins:   []string{c.FrontEndServer},
+		AllowedOrigins:   []string{c.FrontendAddress},
 		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodOptions, http.MethodDelete, http.MethodPut},
 		AllowCredentials: true})
 
@@ -136,7 +145,7 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 		// generate runtime-config in the runtime
 		runtimeConfigResponse := struct {
 			BackendUrl string `json:"backendUrl"`
-		}{BackendUrl: c.BackEndServer}
+		}{BackendUrl: c.BackendAddress}
 		rUi.Methods("GET").Path("/assets/config/runtime-config.json").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			handlers.EncodeJSONResponse(runtimeConfigResponse, http.StatusOK, w)
 		})
