@@ -17,7 +17,6 @@ package models
 import (
 	"fmt"
 	"maps"
-	"time"
 
 	"github.com/mitchellh/mapstructure"
 	"google.golang.org/adk/sessionservice"
@@ -28,7 +27,7 @@ type Session struct {
 	ID        string         `json:"id"`
 	AppName   string         `json:"appName"`
 	UserID    string         `json:"userId"`
-	UpdatedAt time.Time      `json:"lastUpdateTime"`
+	UpdatedAt int64          `json:"lastUpdateTime"`
 	Events    []Event        `json:"events"`
 	State     map[string]any `json:"state"`
 }
@@ -78,7 +77,7 @@ func FromSession(session sessionservice.StoredSession) (Session, error) {
 		ID:        id.SessionID,
 		AppName:   id.AppName,
 		UserID:    id.UserID,
-		UpdatedAt: session.Updated(),
+		UpdatedAt: session.Updated().Unix(),
 		Events:    events,
 		State:     state,
 	}
@@ -95,7 +94,7 @@ func (s Session) Validate() error {
 	if s.ID == "" {
 		return fmt.Errorf("session_id is empty in received session")
 	}
-	if s.UpdatedAt.IsZero() {
+	if s.UpdatedAt == 0 {
 		return fmt.Errorf("updated_at is empty")
 	}
 	if s.State == nil {

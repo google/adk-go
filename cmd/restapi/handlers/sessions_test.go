@@ -57,7 +57,7 @@ func TestGetSession(t *testing.T) {
 				ID:        "testSession",
 				AppName:   "testApp",
 				UserID:    "testUser",
-				UpdatedAt: time.Now(),
+				UpdatedAt: time.Now().Unix(),
 				Events:    []models.Event{},
 				State: map[string]any{
 					"foo": "bar",
@@ -131,7 +131,7 @@ func TestGetSession(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if diff := cmp.Diff(tt.wantSession, gotSession, cmpopts.EquateApproxTime(time.Second)); diff != "" {
+			if diff := cmp.Diff(tt.wantSession, gotSession, EquateApproxInt(int64(time.Second))); diff != "" {
 				t.Errorf("GetSession() mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -173,7 +173,7 @@ func TestCreateSession(t *testing.T) {
 				Events: []models.Event{
 					{
 						ID:     "eventID",
-						Time:   time.Now().Add(5 * time.Minute),
+						Time:   time.Now().Add(5 * time.Minute).Unix(),
 						Author: "testUser",
 					},
 				},
@@ -182,7 +182,7 @@ func TestCreateSession(t *testing.T) {
 				ID:        "testSession",
 				AppName:   "testApp",
 				UserID:    "testUser",
-				UpdatedAt: time.Now().Add(5 * time.Minute),
+				UpdatedAt: time.Now().Add(5 * time.Minute).Unix(),
 				State: map[string]any{
 					"foo": "bar",
 				},
@@ -190,7 +190,7 @@ func TestCreateSession(t *testing.T) {
 					{
 						ID:     "eventID",
 						Author: "testUser",
-						Time:   time.Now().Add(5 * time.Minute),
+						Time:   time.Now().Add(5 * time.Minute).Unix(),
 					},
 				},
 			},
@@ -239,7 +239,7 @@ func TestCreateSession(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if diff := cmp.Diff(tt.wantSession, gotSession, cmpopts.EquateApproxTime(time.Second)); diff != "" {
+			if diff := cmp.Diff(tt.wantSession, gotSession, EquateApproxInt(int64(time.Second))); diff != "" {
 				t.Errorf("CreateSession() mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -331,7 +331,7 @@ func TestListSessions(t *testing.T) {
 					ID:        "testSession",
 					AppName:   "testApp",
 					UserID:    "testUser",
-					UpdatedAt: time.Now(),
+					UpdatedAt: time.Now().Unix(),
 					Events:    []models.Event{},
 					State: map[string]any{
 						"foo": "bar",
@@ -341,7 +341,7 @@ func TestListSessions(t *testing.T) {
 					ID:        "newSession",
 					AppName:   "testApp",
 					UserID:    "testUser",
-					UpdatedAt: time.Now(),
+					UpdatedAt: time.Now().Unix(),
 					Events:    []models.Event{},
 					State: map[string]any{
 						"xyz": "abc",
@@ -352,7 +352,7 @@ func TestListSessions(t *testing.T) {
 					AppName:   "testApp",
 					UserID:    "testUser",
 					State:     map[string]any{},
-					UpdatedAt: time.Now(),
+					UpdatedAt: time.Now().Unix(),
 					Events:    []models.Event{},
 				},
 			},
@@ -384,7 +384,7 @@ func TestListSessions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if diff := cmp.Diff(tt.wantSessions, got, cmpopts.EquateApproxTime(time.Second), cmpopts.SortSlices(func(a, b models.Session) bool {
+			if diff := cmp.Diff(tt.wantSessions, got, EquateApproxInt(int64(time.Second)), cmpopts.SortSlices(func(a, b models.Session) bool {
 				return a.ID < b.ID
 			})); diff != "" {
 				t.Errorf("ListSessions() mismatch (-want +got):\n%s", diff)
@@ -408,4 +408,17 @@ func sessionVars(sessionID session.ID) map[string]string {
 		"user_id":    sessionID.UserID,
 		"session_id": sessionID.SessionID,
 	}
+}
+
+// EquateApproxInt returns a cmp.Comparer option that determines integer values
+// to be equal if they are within a certain absolute margin.
+func EquateApproxInt(margin int64) cmp.Option {
+	return cmp.Comparer(func(x, y int64) bool {
+		diff := x - y
+		if diff < 0 {
+			diff = -diff
+		}
+
+		return diff <= margin
+	})
 }

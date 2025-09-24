@@ -25,7 +25,7 @@ import (
 // Event represents a single event in a session.
 type Event struct {
 	ID                 string                   `json:"id"`
-	Time               time.Time                `json:"time"`
+	Time               int64                    `json:"time"`
 	InvocationID       string                   `json:"invocationId"`
 	Branch             string                   `json:"branch"`
 	Author             string                   `json:"author"`
@@ -42,7 +42,7 @@ type Event struct {
 func ToSessionEvent(event Event) *session.Event {
 	return &session.Event{
 		ID:                 event.ID,
-		Time:               event.Time,
+		Time:               time.Unix(event.Time, 0),
 		InvocationID:       event.InvocationID,
 		Branch:             event.Branch,
 		Author:             event.Author,
@@ -63,7 +63,7 @@ func ToSessionEvent(event Event) *session.Event {
 func FromSessionEvent(event session.Event) Event {
 	return Event{
 		ID:                 event.ID,
-		Time:               event.Time,
+		Time:               event.Time.Unix(),
 		InvocationID:       event.InvocationID,
 		Branch:             event.Branch,
 		Author:             event.Author,
