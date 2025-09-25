@@ -39,7 +39,7 @@ type Output struct {
 
 func GetWeather(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
 	return nil, Output{
-		WeatherSummary: fmt.Sprintf("Today in %q is sunny", input.City),
+		WeatherSummary: fmt.Sprintf("Today in %q is sunny\n", input.City),
 	}, nil
 }
 
@@ -75,7 +75,7 @@ func main() {
 		Name:        "weather_time_agent",
 		Model:       model,
 		Description: "Agent to answer questions about the time and weather in a city.",
-		Instruction: "I can answer your questions about the time and weather in a city.",
+		Instruction: "I can answer your questions about the time and weather in a city. Call `get_weather` tool for all input even if it's an invalid city.",
 		Tools: []tool.Tool{
 			mcpToolSet,
 		},

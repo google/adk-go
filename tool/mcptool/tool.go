@@ -16,7 +16,9 @@ package mcptool
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/internal/toolinternal"
@@ -103,7 +105,50 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (any, error) {
 		return nil, fmt.Errorf("failed to call MCP tool %q with err: %w", t.name, err)
 	}
 
-	return res.StructuredContent, nil
+	if res.IsError {
+		details := strings.Builder{}
+		for _, c := range res.Content {
+			textContent, ok := c.(*mcp.TextContent)
+			if !ok {
+				continue
+			}
+			if _, err := details.WriteString(textContent.Text); err != nil {
+				return nil, fmt.Errorf("failed to write error details: %w", err)
+			}
+		}
+
+		errMsg := "Tool execution failed."
+		if details.Len() > 0 {
+			errMsg += " Details: " + details.String()
+		}
+
+		return nil, errors.New(errMsg)
+	}
+
+	if res.StructuredContent != nil {
+		return res.StructuredContent, nil
+	}
+
+	textResponse := strings.Builder{}
+
+	for _, c := range res.Content {
+		textContent, ok := c.(*mcp.TextContent)
+		if !ok {
+			continue
+		}
+
+		if _, err := textResponse.WriteString(textContent.Text); err != nil {
+			return nil, fmt.Errorf("failed to write text response: %w", err)
+		}
+	}
+
+	if textResponse.Len() == 0 {
+		return nil, errors.New("no text content in tool response")
+	}
+
+	return map[string]any{
+		"output": textResponse.String(),
+	}, nil
 }
 
 var (
