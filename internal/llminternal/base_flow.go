@@ -60,6 +60,7 @@ var (
 		// to optimize data files.
 		codeExecutionRequestProcessor,
 		AgentTransferRequestProcessor,
+		removeDisplayNameIfExists,
 	}
 	DefaultResponseProcessors = []func(ctx agent.Context, req *llm.Request, resp *llm.Response) error{
 		nlPlanningResponseProcessor,
@@ -223,13 +224,12 @@ func toolPreprocess(ctx agent.Context, req *llm.Request, tools []tool.Tool) erro
 			return err
 		}
 	}
-	preprocessRequest(req)
 	return nil
 }
 
-func preprocessRequest(req *llm.Request) {
+func removeDisplayNameIfExists(ctx agent.Context, req *llm.Request) error {
 	if req.Contents == nil {
-		return
+		return nil
 	}
 	for _, content := range req.Contents {
 		if content.Parts == nil {
@@ -248,6 +248,7 @@ func preprocessRequest(req *llm.Request) {
 			}
 		}
 	}
+	return nil
 }
 
 func (f *Flow) callLLM(ctx agent.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
