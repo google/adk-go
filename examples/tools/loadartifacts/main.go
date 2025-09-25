@@ -18,9 +18,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 
 	"google.golang.org/adk/agent/llmagent"
@@ -32,6 +30,8 @@ import (
 	"google.golang.org/genai"
 )
 
+// Note: you need to run the program from the loadartifacts directory
+// to fetch the image successfuly.
 func main() {
 	ctx := context.Background()
 
@@ -56,9 +56,7 @@ func main() {
 	}
 
 	userID, appName := "test_user", "test_app"
-
 	sessionService := sessionservice.Mem()
-
 	// Create session.
 	resp, err := sessionService.Create(ctx, &sessionservice.CreateRequest{
 		AppName: appName,
@@ -69,13 +67,12 @@ func main() {
 	}
 
 	session := resp.Session
-
 	artifactService := artifactservice.Mem()
-
 	// Populate artifacts that can be described later.
-	imageResp, _ := http.Get("https://png.pngtree.com/png-vector/20250111/ourmid/pngtree-golden-retriever-dog-pictures-png-image_15147078.png")
-	imageBytes, _ := io.ReadAll(imageResp.Body)
-
+	imageBytes, err := os.ReadFile("animal_picture.png")
+	if err != nil {
+		log.Fatalf("Failed to read image file: %v", err)
+	}
 	genai.NewPartFromBytes(imageBytes, "image/png")
 
 	_, err = artifactService.Save(ctx, &artifactservice.SaveRequest{
@@ -85,7 +82,6 @@ func main() {
 		FileName:  "animal_picture.png",
 		Part:      genai.NewPartFromBytes(imageBytes, "image/png"),
 	})
-
 	if err != nil {
 		log.Fatalf("Failed to save artifact: %v", err)
 	}
@@ -100,7 +96,6 @@ func main() {
 				"A frog jumps into the pond," +
 				"splash! Silence again."),
 	})
-
 	if err != nil {
 		log.Fatalf("Failed to save artifact: %v", err)
 	}
@@ -116,7 +111,6 @@ func main() {
 	}
 
 	reader := bufio.NewReader(os.Stdin)
-
 	for {
 		fmt.Print("\nUser -> ")
 

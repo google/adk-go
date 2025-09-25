@@ -85,7 +85,7 @@ func (t *loadArtifactsTool) Run(ctx Context, args any) (any, error) {
 	if !exists {
 		artifactNames = []string{}
 	} else {
-		// In order to cast porperly from []any to []string we're gonna marshal and then
+		// In order to cast properly from []any to []string we're gonna marshal and then
 		// unmarshal the artifact_names value.
 		artifactNamesJson, err := json.Marshal(artifactNamesRaw)
 		if err != nil {
