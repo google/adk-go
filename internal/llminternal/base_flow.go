@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
+	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/llm"
@@ -216,7 +217,7 @@ func preprocessRequest(req *llm.Request) {
 		}
 		// The Gemini API (non-Vertex) backend does not support the display_name parameter for file uploads,
 		// so it must be removed to prevent request failures.
-		if utils.GetGoogleLLMVariant() == utils.GoogleLLMVariantGeminiAPI {
+		if googlellm.GetGoogleLLMVariant() == googlellm.GoogleLLMVariantGeminiAPI {
 			for _, part := range content.Parts {
 				if part.InlineData != nil {
 					part.InlineData.DisplayName = ""
