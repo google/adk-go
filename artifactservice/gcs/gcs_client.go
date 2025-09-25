@@ -61,8 +61,9 @@ type gcsClientWrapper struct {
 
 // Bucket returns a gcsBucketWrapper that satisfies the gcsBucket interface.
 func (w *gcsClientWrapper) bucket(name string) gcsBucket {
-	bucketHandle := w.client.Bucket(name)
-	return &gcsBucketWrapper{bucket: bucketHandle}
+	return &gcsBucketWrapper{
+		bucket: w.client.Bucket(name),
+	}
 }
 
 // gcsBucketWrapper wraps a storage.BucketHandle to satisfy the gcsBucket interface.

@@ -89,7 +89,7 @@ func buildUserPrefix(appName, userID string) string {
 func (s *gcsService) Save(ctx context.Context, req *as.SaveRequest) (_ *as.SaveResponse, err error) {
 	err = req.Validate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	artifact := req.Part
@@ -134,7 +134,7 @@ func (s *gcsService) Save(ctx context.Context, req *as.SaveRequest) (_ *as.SaveR
 func (s *gcsService) Delete(ctx context.Context, req *as.DeleteRequest) error {
 	err := req.Validate()
 	if err != nil {
-		return err
+		return fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
@@ -172,17 +172,13 @@ func (s *gcsService) Delete(ctx context.Context, req *as.DeleteRequest) error {
 		})
 	}
 
-	if err := g.Wait(); err != nil {
-		return err
-	}
-
-	return nil
+	return g.Wait()
 }
 
 func (s *gcsService) Load(ctx context.Context, req *as.LoadRequest) (_ *as.LoadResponse, err error) {
 	err = req.Validate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
@@ -276,7 +272,7 @@ func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string
 func (s *gcsService) List(ctx context.Context, req *as.ListRequest) (*as.ListResponse, error) {
 	err := req.Validate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
 	filenamesSet := map[string]bool{}
@@ -302,7 +298,7 @@ func (s *gcsService) List(ctx context.Context, req *as.ListRequest) (*as.ListRes
 func (s *gcsService) versions(ctx context.Context, req *as.VersionsRequest) (*as.VersionsResponse, error) {
 	err := req.Validate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 

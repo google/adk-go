@@ -127,7 +127,7 @@ func (s *inMemoryService) delete(appName, userID, sessionID, fileName string, ve
 func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error) {
 	err := req.Validate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	artifact := req.Part
@@ -146,7 +146,7 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {
 	err := req.Validate()
 	if err != nil {
-		return err
+		return fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
@@ -169,7 +169,7 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResponse, error) {
 	err := req.Validate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
@@ -195,7 +195,7 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 	err := req.Validate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
 	s.mu.RLock()
@@ -218,7 +218,7 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error) {
 	err := req.Validate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	s.mu.RLock()
