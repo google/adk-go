@@ -14,7 +14,7 @@ require (
 
 require (
 	github.com/google/jsonschema-go v0.3.0
-	github.com/modelcontextprotocol/go-sdk v0.4.0
+	github.com/modelcontextprotocol/go-sdk v0.7.0
 )
 
 require (

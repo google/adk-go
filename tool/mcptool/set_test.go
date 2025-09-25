@@ -57,6 +57,8 @@ func weatherFunc(ctx context.Context, req *mcp.CallToolRequest, input Input) (*m
 
 const modelName = "gemini-2.5-flash"
 
+//go:generate go test -httprecord=.*
+
 func TestMCPToolSet(t *testing.T) {
 	const (
 		toolName        = "get_weather"
