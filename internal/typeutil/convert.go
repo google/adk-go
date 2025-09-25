@@ -26,14 +26,21 @@ import (
 // during the conversion.
 func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Resolved) (To, error) {
 	var zero To
-	if resolvedSchema != nil {
-		if err := resolvedSchema.Validate(v); err != nil {
-			return zero, err
-		}
-	}
 	rawArgs, err := json.Marshal(v)
 	if err != nil {
 		return zero, err
+	}
+	if resolvedSchema != nil {
+		// See https://github.com/google/jsonschema-go/issues/23: in order to
+		// validate, we must validate against a map[string]any. Struct validation
+		// does not work as it cannot account for `omitempty` or custom marshalling.
+		var m map[string]any
+		if err := json.Unmarshal(rawArgs, &m); err != nil {
+			return zero, err
+		}
+		if err := resolvedSchema.Validate(m); err != nil {
+			return zero, err
+		}
 	}
 	var typed To
 	if err := json.Unmarshal(rawArgs, &typed); err != nil {

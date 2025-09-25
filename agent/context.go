@@ -36,7 +36,7 @@ type agentContext struct {
 	branch      string
 }
 
-// TODO: see if needed or possible to make internal
+// TODO: make internal and use params args
 func NewContext(ctx context.Context, agent Agent, userContent *genai.Content, artifacts Artifacts, session session.Session, memory Memory, branch string) *agentContext {
 	ctx, cancel := context.WithCancel(ctx)
 
