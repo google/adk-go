@@ -39,10 +39,10 @@ type Context interface {
 	EventActions() *session.Actions
 }
 
-// TODO: implement
-type Set struct{}
-
-func NewSet(t ...Tool) Set { return Set{} }
+type Set interface {
+	Tool // to allow passing a toolset to agent tools
+	Tools(ctx agent.Context) ([]Tool, error)
+}
 
 func NewContext(ctx agent.Context, functionCallID string, actions *session.Actions) Context {
 	if functionCallID == "" {
