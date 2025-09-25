@@ -15,6 +15,7 @@
 package tool_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -132,7 +133,9 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx t
 
 	// 3. Assertions for Initial Run
 	if len(mockModel.Requests) != 2 {
-		t.Errorf("got %d requests, want 2", len(mockModel.Requests))
+		// Marshal the slice into a readable JSON string
+		requestsJSON, _ := json.MarshalIndent(mockModel.Requests, "", "  ")
+		t.Fatalf("got %d requests, want 2;\n- requests:\n%s", len(mockModel.Requests), requestsJSON)
 	}
 	if *callCount != 1 {
 		t.Errorf("function called %d times, want 1", *callCount)
@@ -232,7 +235,9 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx t
 			}
 
 			if len(eventParts) != tc.wantEventCount {
-				t.Fatalf("got %d events parts, want %d", len(eventParts), tc.wantEventCount)
+				// Marshal the slice into a readable JSON string
+				partsJSON, _ := json.MarshalIndent(eventParts, "", "  ")
+				t.Fatalf("got %d events parts, want %d;\n- parts:\n%s", len(eventParts), tc.wantEventCount, partsJSON)
 			}
 			// This check is now safe because the Fatalf above would have stopped the test
 			if len(eventParts) > 0 && eventParts[0].Text != tc.wantEventText {
@@ -290,7 +295,9 @@ func TestLongRunningToolIDsAreSet(t *testing.T) {
 	}
 
 	if len(events) != 3 { // first event is function call, seconds is function response, third is llm message back
-		t.Errorf("got %d events, want 3", len(events))
+		// Marshal the slice into a readable JSON string
+		eventsJSON, _ := json.MarshalIndent(events, "", "  ")
+		t.Fatalf("got %d for events length, want 3;\n- events:\n%s", len(events), eventsJSON)
 	}
 
 	// Assert responses
