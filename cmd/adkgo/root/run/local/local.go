@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -82,17 +81,6 @@ func init() {
 	localCmd.PersistentFlags().StringVarP(&flags.build.execPath, "target_exec_path", "t", "", "Path to the output executable. Defaults to entry_point_path with no '.go' suffix.")
 }
 
-func stripExtension(p string, expected string) (string, error) {
-	ex := path.Ext(p)
-	if ex == "" {
-		return "", errors.New("Cannot find extension in '" + p + "'")
-	}
-	if ex != expected {
-		return "", errors.New("Unexpected extension. Found '" + ex + "' instead of '" + expected + "'")
-	}
-	return p[:len(p)-len(ex)], nil
-}
-
 func (f *runLocalFlags) computeFlags() error {
 	err := util.LogStartStop("Computing flags",
 		func(p util.Printer) error {
@@ -112,7 +100,7 @@ func (f *runLocalFlags) computeFlags() error {
 			f.source.srcBasePath = dir
 			f.source.entryPointPath = file
 			if f.build.execPath == "" {
-				exec, err := stripExtension(f.source.entryPointPath, ".go")
+				exec, err := util.StripExtension(f.source.entryPointPath, ".go")
 				if err != nil {
 					return err
 				}
@@ -139,7 +127,7 @@ func (f *runLocalFlags) compileEntryPoint() error {
 			cmd := exec.Command("go", "build", "-o", f.build.execPath, f.source.entryPointPath)
 
 			cmd.Dir = f.source.srcBasePath
-			cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
+			// cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
 			return util.LogCommand(cmd, p)
 		})
 	return err

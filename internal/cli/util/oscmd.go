@@ -16,10 +16,12 @@
 package util
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path"
 )
 
 // Printer is a function printing its arguments
@@ -98,4 +100,15 @@ func LogCommand(c *exec.Cmd, p Printer) error {
 	c.Stdout = newReprintableStream(os.Stdout, "out", Yellow)
 	c.Stderr = newReprintableStream(os.Stdout, "err", Red)
 	return c.Run()
+}
+
+func StripExtension(p string, expected string) (string, error) {
+	ex := path.Ext(p)
+	if ex == "" {
+		return "", errors.New("Cannot find extension in '" + p + "'")
+	}
+	if ex != expected {
+		return "", errors.New("Unexpected extension. Found '" + ex + "' instead of '" + expected + "'")
+	}
+	return p[:len(p)-len(ex)], nil
 }
