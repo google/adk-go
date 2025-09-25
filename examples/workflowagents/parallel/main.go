@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/examples"
+	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -61,6 +62,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
+
+	fmt.Println(agentinternal.Reveal(parallelAgent.(agentinternal.Agent)).AgentType)
 
 	examples.Run(ctx, parallelAgent)
 }
