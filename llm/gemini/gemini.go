@@ -35,7 +35,7 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (l
 	if err != nil {
 		return nil, err
 	}
-	return llminternal.WrapModelWithAggregator(&model{name: modelName, client: client}), nil
+	return &model{name: modelName, client: client}, nil
 }
 
 func (m *model) Name() string {
@@ -65,30 +65,21 @@ func (m *model) Generate(ctx context.Context, req *llm.Request) (*llm.Response, 
 // GenerateStream calls the model synchronously.
 func (m *model) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
 	m.maybeAppendUserContent(req)
-
+	aggregator := llminternal.NewStreamingResponseAggregator()
 	return func(yield func(*llm.Response, error) bool) {
 		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.name, req.Contents, req.GenerateConfig) {
 			if err != nil {
 				yield(nil, err)
 				return
 			}
-			if len(resp.Candidates) == 0 {
-				// shouldn't happen?
-				yield(nil, fmt.Errorf("empty response"))
-				return
+			for llmResponse, err := range aggregator.ProcessResponse(ctx, resp) {
+				if !yield(llmResponse, err) {
+					return // Consumer stopped
+				}
 			}
-			candidate := resp.Candidates[0]
-			complete := candidate.FinishReason != ""
-			if !yield(&llm.Response{
-				Content:           candidate.Content,
-				GroundingMetadata: candidate.GroundingMetadata,
-				UsageMetadata:     resp.UsageMetadata,
-				Partial:           true,
-				TurnComplete:      complete,
-				Interrupted:       false, // no interruptions in unary
-			}, nil) {
-				return
-			}
+		}
+		if closeResult := aggregator.Close(); closeResult != nil {
+			yield(closeResult, nil)
 		}
 	}
 }
@@ -103,5 +94,3 @@ func (m *model) maybeAppendUserContent(req *llm.Request) {
 		req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
 	}
 }
-
-var _ llm.Model = (*model)(nil)

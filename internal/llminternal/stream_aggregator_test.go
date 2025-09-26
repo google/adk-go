@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/llm"
 	"google.golang.org/genai"
@@ -147,6 +146,26 @@ func TestStreamAggregator(t *testing.T) {
 				true, true, false,
 			},
 		},
+		{
+			name: "audio stream should not generate any aggregated",
+			initialResponses: []*genai.Content{
+				genai.NewContentFromParts([]*genai.Part{{VideoMetadata: &genai.VideoMetadata{}}}, "model"),
+				genai.NewContentFromParts([]*genai.Part{{VideoMetadata: &genai.VideoMetadata{}}}, "model"),
+				genai.NewContentFromParts([]*genai.Part{{VideoMetadata: &genai.VideoMetadata{}}}, "model"),
+			},
+			numberOfStreamCalls:  1,
+			streamResponsesCount: 3,
+			want: []*genai.Content{
+				// Results from first GenerateStream call
+				genai.NewContentFromParts([]*genai.Part{{VideoMetadata: &genai.VideoMetadata{}}}, "model"),
+				genai.NewContentFromParts([]*genai.Part{{VideoMetadata: &genai.VideoMetadata{}}}, "model"),
+				genai.NewContentFromParts([]*genai.Part{{VideoMetadata: &genai.VideoMetadata{}}}, "model"),
+			},
+			wantPartial: []bool{
+				// Results from first GenerateStream call
+				false, false, false,
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -158,14 +177,16 @@ func TestStreamAggregator(t *testing.T) {
 				Responses:            responsesCopy,
 				StreamResponsesCount: tc.streamResponsesCount,
 			}
-			modelWithAggregator := llminternal.WrapModelWithAggregator(mockModel)
 
 			count := 0
 			callCount := 0
 			for callCount < tc.numberOfStreamCalls {
-				for got, err := range modelWithAggregator.GenerateStream(ctx, &llm.Request{}) {
+				for got, err := range mockModel.GenerateStream(ctx, &llm.Request{}) {
 					if err != nil {
 						t.Fatalf("found error while iterating stream")
+					}
+					if count >= len(tc.want) {
+						t.Fatalf("stream generated more values than the expected %d", len(tc.want))
 					}
 					if diff := cmp.Diff(tc.want[count], got.Content); diff != "" {
 						t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", got.Content, tc.want[count], diff)
@@ -177,7 +198,9 @@ func TestStreamAggregator(t *testing.T) {
 				}
 				callCount++
 			}
+			if count != len(tc.want) {
+				t.Errorf("unexpected stream lenght, expected %d got %d", len(tc.want), count)
+			}
 		})
 	}
-
 }

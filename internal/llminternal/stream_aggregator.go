@@ -16,58 +16,12 @@ package llminternal
 
 import (
 	"context"
+	"fmt"
 	"iter"
 
 	"google.golang.org/adk/llm"
 	"google.golang.org/genai"
 )
-
-// modelWithStreamAggregator proxys a llm.Model adding an aggregated event to the end of GenerateStream
-type modelWithStreamAggregator struct {
-	model llm.Model
-}
-
-func WrapModelWithAggregator(model llm.Model) llm.Model {
-	return &modelWithStreamAggregator{model: model}
-}
-
-func (m *modelWithStreamAggregator) Name() string {
-	return m.model.Name()
-}
-
-// Generate calls the inner model synchronously returning result from the first candidate.
-func (m *modelWithStreamAggregator) Generate(ctx context.Context, req *llm.Request) (*llm.Response, error) {
-	return m.model.Generate(ctx, req)
-}
-
-// GenerateStream calls the iner model synchronously.
-func (m *modelWithStreamAggregator) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
-	stream := m.model.GenerateStream(ctx, req)
-	aggregator := newStreamingResponseAggregator()
-	return func(yield func(*llm.Response, error) bool) {
-		for resp, err := range stream {
-			if err == nil {
-				if aggrResp := aggregator.ProcessResponse(resp); aggrResp != nil {
-					if !yield(aggrResp, nil) {
-						return // Consumer stopped
-					}
-				}
-			}
-			if !yield(resp, err) {
-				return // Consumer stopped
-			}
-		}
-		if aggrResp := aggregator.Close(); aggrResp != nil {
-			if !yield(aggrResp, nil) {
-				return // Consumer stopped
-			}
-		}
-	}
-}
-
-var _ llm.Model = (*modelWithStreamAggregator)(nil)
-
-// ------------------------------------ response aggregator -----------------------------------
 
 // streamingResponseAggregator aggregates partial streaming responses.
 // It aggregates content from partial responses, and generates LlmResponses for
@@ -79,14 +33,44 @@ type streamingResponseAggregator struct {
 	role        string
 }
 
-// newStreamingResponseAggregator creates a new, initialized streamingResponseAggregator.
-func newStreamingResponseAggregator() *streamingResponseAggregator {
+// NewStreamingResponseAggregator creates a new, initialized streamingResponseAggregator.
+func NewStreamingResponseAggregator() *streamingResponseAggregator {
 	return &streamingResponseAggregator{}
 }
 
-// ProcessResponse processes a single model response,
+// ProcessResponse transforms the GenerateContentResponse into an llm.Response and yields that result,
+// also yielding an aggregated response if the GenerateContentResponse has zero parts or is audio data
+func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genResp *genai.GenerateContentResponse) iter.Seq2[*llm.Response, error] {
+	return func(yield func(*llm.Response, error) bool) {
+		if len(genResp.Candidates) == 0 {
+			// shouldn't happen?
+			yield(nil, fmt.Errorf("empty response"))
+			return
+		}
+		candidate := genResp.Candidates[0]
+		complete := candidate.FinishReason != ""
+		resp := &llm.Response{
+			Content:           candidate.Content,
+			GroundingMetadata: candidate.GroundingMetadata,
+			UsageMetadata:     genResp.UsageMetadata,
+			Partial:           false,
+			TurnComplete:      complete,
+			Interrupted:       false, // no interruptions in unary
+		}
+		if aggrResp := s.aggregateResponse(resp); aggrResp != nil {
+			if !yield(aggrResp, nil) {
+				return // Consumer stopped
+			}
+		}
+		if !yield(resp, nil) {
+			return // Consumer stopped
+		}
+	}
+}
+
+// aggregateResponse processes a single model response,
 // returning an aggregated response if the next event has zero parts or is audio data
-func (s *streamingResponseAggregator) ProcessResponse(llmResponse *llm.Response) *llm.Response {
+func (s *streamingResponseAggregator) aggregateResponse(llmResponse *llm.Response) *llm.Response {
 	s.response = llmResponse
 
 	var part0 *genai.Part
@@ -104,7 +88,7 @@ func (s *streamingResponseAggregator) ProcessResponse(llmResponse *llm.Response)
 		}
 		llmResponse.Partial = true
 	} else
-	// If part is text append it
+	// If there is aggregated text and there is no content or parts return aggregated response
 	if (s.thoughtText != "" || s.text != "") &&
 		(llmResponse.Content == nil ||
 			len(llmResponse.Content.Parts) == 0 ||

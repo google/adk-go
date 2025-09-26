@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
@@ -125,6 +126,7 @@ func (m *MockModel) Generate(ctx context.Context, req *llm.Request) (*llm.Respon
 }
 
 func (m *MockModel) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
+	aggregator := llminternal.NewStreamingResponseAggregator()
 	return func(yield func(*llm.Response, error) bool) {
 		streamResponsesCount := m.StreamResponsesCount
 		if streamResponsesCount == 0 {
@@ -134,11 +136,16 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *llm.Request) iter.S
 			if len(m.Responses) == 0 {
 				break
 			}
-			resp := &llm.Response{Content: m.Responses[0]}
+			resp := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{Content: m.Responses[0]}}}
 			m.Responses = m.Responses[1:]
-			if !yield(resp, nil) {
-				return
+			for llmResponse, err := range aggregator.ProcessResponse(ctx, resp) {
+				if !yield(llmResponse, err) {
+					return // Consumer stopped
+				}
 			}
+		}
+		if closeResult := aggregator.Close(); closeResult != nil {
+			yield(closeResult, nil)
 		}
 	}
 }
