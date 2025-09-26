@@ -15,7 +15,6 @@
 package tool
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -53,7 +52,7 @@ type FunctionToolConfig struct {
 }
 
 // Funtion represents a Go function.
-type Function[TArgs, TResults any] func(context.Context, TArgs) TResults
+type Function[TArgs, TResults any] func(Context, TArgs) TResults
 
 // NewFunctionTool creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
@@ -167,7 +166,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx Context, args any) (any, error) 
 	// 		function_result = {'result': function_result}
 	if f.outputSchema != nil {
 		if err1 := f.outputSchema.Validate(output); err1 != nil {
-			return resp, err //if it fails propagate original err.
+			return resp, err // if it fails propagate original err.
 		}
 	}
 	wrappedOutput := map[string]any{"result": output}

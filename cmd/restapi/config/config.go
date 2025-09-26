@@ -16,50 +16,16 @@
 package config
 
 import (
-	"fmt"
-	"os"
-	"strconv"
-
-	"github.com/joho/godotenv"
 	"github.com/rs/cors"
+	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/cmd/restapi/services"
+	"google.golang.org/adk/sessionservice"
 )
 
-// ADKAPIServerConfigs contains the configs for the ADK API server.
-type ADKAPIServerConfigs struct {
-	Env          string
-	Port         int
-	Cors         cors.Cors
-	GeminiAPIKey string
-}
-
-// LoadConfig parses the arguments for the ADK API server and returns parsed configs.
-func LoadConfig() (*ADKAPIServerConfigs, error) {
-	config := &ADKAPIServerConfigs{}
-	config.Env = os.Getenv("ENV")
-
-	if err := godotenv.Load(); err != nil && config.Env == "" {
-		return nil, err
-	}
-
-	allowedOrigin, _ := os.LookupEnv("ALLOWED_ORIGIN")
-	config.Cors = *cors.New(cors.Options{
-		AllowedOrigins: []string{allowedOrigin},
-	})
-
-	if webPort, ok := os.LookupEnv("PORT"); ok {
-		port, err := strconv.ParseInt(webPort, 10, 32)
-		if err != nil {
-			return nil, err
-		}
-		config.Port = int(port)
-	} else {
-		config.Port = 8080
-	}
-
-	apiKey, ok := os.LookupEnv("GEMINI_API_KEY")
-	if !ok {
-		return nil, fmt.Errorf("GEMINI_API_KEY is not set")
-	}
-	config.GeminiAPIKey = apiKey
-	return config, nil
+// ADKAPIRouterConfigs contains the configs for the ADK API server.
+type ADKAPIRouterConfigs struct {
+	Cors            cors.Cors
+	SessionService  sessionservice.Service
+	AgentLoader     services.AgentLoader
+	ArtifactService artifactservice.Service
 }

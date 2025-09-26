@@ -17,6 +17,7 @@ package llminternal_test
 import (
 	"iter"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,7 +222,7 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 
 			ctx := agent.NewContext(t.Context(), testAgent, nil, nil, &fakeSession{
 				events: tc.events,
-			}, "")
+			}, nil, "")
 
 			req := &llm.Request{}
 			if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
@@ -370,7 +371,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 
 			ctx := agent.NewContext(t.Context(), testAgent, nil, nil, &fakeSession{
 				events: tc.events,
-			}, tc.branch)
+			}, nil, tc.branch)
 
 			req := &llm.Request{}
 			if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
@@ -494,7 +495,7 @@ func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 		Name: "test_agent",
 	}))
 
-	ctx := agent.NewContext(t.Context(), testAgent, nil, nil, nil, "")
+	ctx := agent.NewContext(t.Context(), testAgent, nil, nil, nil, nil, "")
 
 	req := &llm.Request{}
 	if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
@@ -504,6 +505,363 @@ func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 	want := &llm.Request{}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("LLMRequest after contentRequestProcessor mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestContentsRequestProcessor_Rearrange(t *testing.T) {
+	const agentName = "test_agent"
+	model := &model{}
+
+	// --- Reusable Test Data ---
+	// Basic Call/Response
+	fcBasic := &genai.FunctionCall{
+		ID:   "call_123",
+		Name: "search_tool",
+		Args: map[string]any{"query": "test"},
+	}
+	frBasic := &genai.FunctionResponse{
+		ID:       "call_123",
+		Name:     "search_tool",
+		Response: map[string]any{"results": []string{"item1", "item2"}},
+	}
+
+	// LRO Call/Responses
+	fcLRO := &genai.FunctionCall{
+		ID:   "long_call_123",
+		Name: "long_running_tool",
+		Args: map[string]any{"task": "process"},
+	}
+	frLROInter := &genai.FunctionResponse{
+		ID:       "long_call_123",
+		Name:     "long_running_tool",
+		Response: map[string]any{"status": "processing", "progress": 50},
+	}
+	frLROFinal := &genai.FunctionResponse{
+		ID:       "long_call_123",
+		Name:     "long_running_tool",
+		Response: map[string]any{"status": "completed", "result": "done"},
+	}
+
+	// Mixed LRO/Normal Calls/Responses
+	fcLROMixed := &genai.FunctionCall{
+		ID:   "lro_call_456",
+		Name: "long_running_tool",
+		Args: map[string]any{"task": "analyze"},
+	}
+	fcNormalMixed := &genai.FunctionCall{
+		ID:   "normal_call_789",
+		Name: "search_tool",
+		Args: map[string]any{"query": "test"},
+	}
+	frLROInterMixed := &genai.FunctionResponse{
+		ID:       "lro_call_456",
+		Name:     "long_running_tool",
+		Response: map[string]any{"status": "processing", "progress": 25},
+	}
+	frNormalMixed := &genai.FunctionResponse{
+		ID:       "normal_call_789",
+		Name:     "search_tool",
+		Response: map[string]any{"results": []string{"item1", "item2"}},
+	}
+	frLROFinalMixed := &genai.FunctionResponse{
+		ID:       "lro_call_456",
+		Name:     "long_running_tool",
+		Response: map[string]any{"status": "completed", "analysis": "done"},
+	}
+
+	// History LRO Call/Responses
+	fcHistLRO := &genai.FunctionCall{
+		ID:   "history_call_123",
+		Name: "long_running_tool",
+		Args: map[string]any{"task": "process"},
+	}
+	frHistLROInter := &genai.FunctionResponse{
+		ID:       "history_call_123",
+		Name:     "long_running_tool",
+		Response: map[string]any{"status": "processing", "progress": 50},
+	}
+	frHistLROFinal := &genai.FunctionResponse{
+		ID:       "history_call_123",
+		Name:     "long_running_tool",
+		Response: map[string]any{"status": "completed", "result": "done"},
+	}
+
+	// History Mixed Call/Responses
+	fcHistLROMixed := &genai.FunctionCall{
+		ID:   "history_lro_123",
+		Name: "long_running_tool",
+		Args: map[string]any{"task": "analyze"},
+	}
+	fcHistNormalMixed := &genai.FunctionCall{
+		ID:   "history_normal_456",
+		Name: "search_tool",
+		Args: map[string]any{"query": "data"},
+	}
+	frHistLROInterMixed := &genai.FunctionResponse{
+		ID:       "history_lro_123",
+		Name:     "long_running_tool",
+		Response: map[string]any{"status": "processing", "progress": 30},
+	}
+	frHistNormalMixed := &genai.FunctionResponse{
+		ID:       "history_normal_456",
+		Name:     "search_tool",
+		Response: map[string]any{"results": []string{"result1", "result2"}},
+	}
+	frHistLROFinalMixed := &genai.FunctionResponse{
+		ID:       "history_lro_123",
+		Name:     "long_running_tool",
+		Response: map[string]any{"status": "completed", "analysis": "finished"},
+	}
+
+	// Preserve Content Call/Responses
+	fcPreserve := &genai.FunctionCall{
+		ID:   "preserve_test",
+		Name: "long_running_tool",
+		Args: map[string]any{"test": "value"},
+	}
+	frPreserveInter := &genai.FunctionResponse{
+		ID:       "preserve_test",
+		Name:     "long_running_tool",
+		Response: map[string]any{"status": "processing"},
+	}
+	frPreserveFinal := &genai.FunctionResponse{
+		ID:       "preserve_test",
+		Name:     "long_running_tool",
+		Response: map[string]any{"output": "preserved"},
+	}
+
+	// Error Call/Response
+	frOrphaned := &genai.FunctionResponse{
+		ID:       "no_matching_call",
+		Name:     "orphaned_tool",
+		Response: map[string]any{"error": "no matching call"},
+	}
+
+	// --- Test Cases ---
+	testCases := []struct {
+		name    string
+		events  []*session.Event
+		want    []*genai.Content
+		wantErr string // Use string to check for specific error messages
+	}{
+		{
+			name:   "NilEvent",
+			events: nil,
+			want:   nil,
+		},
+		{
+			name:   "EmptyEvents",
+			events: []*session.Event{},
+			want:   nil,
+		},
+		{
+			name: "EventWithoutContent",
+			events: []*session.Event{
+				{Author: "user"},
+			},
+			want: nil,
+		},
+		{
+			name: "Basic function call no rearrangement",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: &llm.Response{Content: genai.NewContentFromText("Search for test", "user")}},
+				{Author: agentName, LLMResponse: &llm.Response{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: "user", LLMResponse: &llm.Response{Content: NewContentFromFunctionResponse(frBasic, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Search for test", "user"),
+				NewContentFromFunctionCall(fcBasic, "model"),
+				NewContentFromFunctionResponse(frBasic, "user"),
+			},
+		},
+		{
+			name: "Rearrangement with intermediate response",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: &llm.Response{Content: genai.NewContentFromText("Run long process", "user")}},
+				{Author: agentName, LLMResponse: &llm.Response{Content: NewContentFromFunctionCall(fcLRO, "model")}},
+				{Author: "user", LLMResponse: &llm.Response{Content: NewContentFromFunctionResponse(frLROInter, "user")}},
+				{Author: agentName, LLMResponse: &llm.Response{Content: genai.NewContentFromText("Still processing...", "model")}},
+				{Author: "user", LLMResponse: &llm.Response{Content: NewContentFromFunctionResponse(frLROFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Run long process", "user"),
+				NewContentFromFunctionCall(fcLRO, "model"),
+				NewContentFromFunctionResponse(frLROFinal, "user"),
+			},
+		},
+		{
+			name: "Rearrangement with mixed LRO and normal calls",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: &llm.Response{Content: genai.NewContentFromText("Analyze data and search for info", "user")}},
+				{Author: agentName,
+					LLMResponse: &llm.Response{Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{FunctionCall: fcLROMixed}, {FunctionCall: fcNormalMixed}}},
+					},
+				},
+				{Author: "user",
+					LLMResponse: &llm.Response{Content: &genai.Content{
+						Role:  "user",
+						Parts: []*genai.Part{{FunctionResponse: frLROInterMixed}, {FunctionResponse: frNormalMixed}}},
+					},
+				},
+				{Author: agentName, LLMResponse: &llm.Response{Content: genai.NewContentFromText("Analysis in progress, search completed", "model")}},
+				{Author: "user", LLMResponse: &llm.Response{Content: NewContentFromFunctionResponse(frLROFinalMixed, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Analyze data and search for info", "user"),
+				{Role: "model", Parts: []*genai.Part{{FunctionCall: fcLROMixed}, {FunctionCall: fcNormalMixed}}},
+				{Role: "user", Parts: []*genai.Part{{FunctionResponse: frLROFinalMixed}, {FunctionResponse: frNormalMixed}}},
+			},
+		},
+		{
+			name: "Rearrangement in history (non-final event)",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: &llm.Response{Content: genai.NewContentFromText("Start long process", "user")}},
+				{Author: agentName, LLMResponse: &llm.Response{Content: NewContentFromFunctionCall(fcHistLRO, "model")}},
+				{Author: "user", LLMResponse: &llm.Response{Content: NewContentFromFunctionResponse(frHistLROInter, "user")}},
+				{Author: agentName, LLMResponse: &llm.Response{Content: genai.NewContentFromText("Still processing...", "model")}},
+				{Author: "user", LLMResponse: &llm.Response{Content: NewContentFromFunctionResponse(frHistLROFinal, "user")}},
+				{Author: agentName, LLMResponse: &llm.Response{Content: genai.NewContentFromText("Process completed successfully!", "model")}},
+				{Author: "user", LLMResponse: &llm.Response{Content: genai.NewContentFromText("Great! What's next?", "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Start long process", "user"),
+				NewContentFromFunctionCall(fcHistLRO, "model"),
+				NewContentFromFunctionResponse(frHistLROFinal, "user"),
+				genai.NewContentFromText("Still processing...", "model"),
+				genai.NewContentFromText("Process completed successfully!", "model"),
+				genai.NewContentFromText("Great! What's next?", "user"),
+			},
+		},
+		{
+			name: "Mixed rearrangement in history (non-final event)",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: &llm.Response{Content: genai.NewContentFromText("Analyze and search simultaneously", "user")}},
+				{Author: agentName,
+					LLMResponse: &llm.Response{Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{FunctionCall: fcHistLROMixed}, {FunctionCall: fcHistNormalMixed}}},
+					},
+				},
+				{Author: "user",
+					LLMResponse: &llm.Response{Content: &genai.Content{
+						Role:  "user",
+						Parts: []*genai.Part{{FunctionResponse: frHistLROInterMixed}, {FunctionResponse: frHistNormalMixed}}},
+					},
+				},
+				{Author: agentName, LLMResponse: &llm.Response{Content: genai.NewContentFromText("Analysis continuing, search done", "model")}},
+				{Author: "user", LLMResponse: &llm.Response{Content: NewContentFromFunctionResponse(frHistLROFinalMixed, "user")}},
+				{Author: agentName, LLMResponse: &llm.Response{Content: genai.NewContentFromText("Both tasks completed successfully!", "model")}},
+				{Author: "user", LLMResponse: &llm.Response{Content: genai.NewContentFromText("Perfect! What should we do next?", "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Analyze and search simultaneously", "user"),
+				{Role: "model", Parts: []*genai.Part{{FunctionCall: fcHistLROMixed}, {FunctionCall: fcHistNormalMixed}}},
+				{Role: "user", Parts: []*genai.Part{{FunctionResponse: frHistLROFinalMixed}, {FunctionResponse: frHistNormalMixed}}},
+				genai.NewContentFromText("Analysis continuing, search done", "model"),
+				genai.NewContentFromText("Both tasks completed successfully!", "model"),
+				genai.NewContentFromText("Perfect! What should we do next?", "user"),
+			},
+		},
+		{
+			name: "Rearrangement preserves mixed text parts",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: &llm.Response{Content: genai.NewContentFromText("Before function call", "user")}},
+				{Author: agentName,
+					LLMResponse: &llm.Response{Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{Text: "I'll process this for you"}, {FunctionCall: fcPreserve}}},
+					},
+				},
+				{Author: "user",
+					LLMResponse: &llm.Response{Content: &genai.Content{
+						Role:  "user",
+						Parts: []*genai.Part{{Text: "Intermediate prefix"}, {FunctionResponse: frPreserveInter}, {Text: "Processing..."}}},
+					},
+				},
+				{Author: agentName, LLMResponse: &llm.Response{Content: genai.NewContentFromText("Still working on it...", "model")}},
+				{Author: "user",
+					LLMResponse: &llm.Response{Content: &genai.Content{
+						Role:  "user",
+						Parts: []*genai.Part{{Text: "Final prefix"}, {FunctionResponse: frPreserveFinal}, {Text: "Final suffix"}}},
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Before function call", "user"),
+				{Role: "model", Parts: []*genai.Part{{Text: "I'll process this for you"}, {FunctionCall: fcPreserve}}},
+				{Role: "user", Parts: []*genai.Part{
+					{Text: "Intermediate prefix"},
+					{FunctionResponse: frPreserveFinal},
+					{Text: "Processing..."},
+					{Text: "Final prefix"},
+					{Text: "Final suffix"},
+				}},
+			},
+		},
+		{
+			name: "Error on function response without matching call",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: &llm.Response{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "Regular message"}}}}},
+				{Author: "user", LLMResponse: &llm.Response{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: frOrphaned}}}}},
+			},
+			want:    nil,
+			wantErr: "no function call event found",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			testAgent := utils.Must(llmagent.New(llmagent.Config{
+				Name:  agentName,
+				Model: model,
+			}))
+
+			ctx := agent.NewContext(t.Context(), testAgent, nil, nil, &fakeSession{
+				events: tc.events,
+			}, nil, "")
+
+			req := &llm.Request{}
+			err := llminternal.ContentsRequestProcessor(ctx, req)
+
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatal("ContentsRequestProcessor succeeded; expected an error")
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("Expected error to contain %q, got: %v", tc.wantErr, err)
+				}
+				return // Test is done
+			}
+
+			if err != nil {
+				t.Fatalf("ContentsRequestProcessor failed: %v", err)
+			}
+
+			got := req.Contents
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// NewContentFromFunctionCall creates a new Content struct with a single FunctionCall part.
+// It assigns the provided role to the Content.
+func NewContentFromFunctionCall(fc *genai.FunctionCall, role string) *genai.Content {
+	return &genai.Content{
+		Role:  role,
+		Parts: []*genai.Part{{FunctionCall: fc}},
+	}
+}
+
+// NewContentFromFunctionResponse creates a new Content struct with a single FunctionResponse part.
+// It assigns the provided role to the Content.
+func NewContentFromFunctionResponse(fr *genai.FunctionResponse, role string) *genai.Content {
+	return &genai.Content{
+		Role:  role,
+		Parts: []*genai.Part{{FunctionResponse: fr}},
 	}
 }
 

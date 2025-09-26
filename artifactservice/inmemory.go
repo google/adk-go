@@ -125,12 +125,13 @@ func (s *inMemoryService) delete(appName, userID, sessionID, fileName string, ve
 }
 
 func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error) {
+	err := req.Validate()
+	if err != nil {
+		return nil, fmt.Errorf("request validation failed: %w", err)
+	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	artifact := req.Part
 
-	if appName == "" || userID == "" || sessionID == "" || fileName == "" || artifact == nil {
-		return nil, fmt.Errorf("invalid request: missing required fields")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -143,11 +144,13 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 }
 
 func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {
+	err := req.Validate()
+	if err != nil {
+		return fmt.Errorf("request validation failed: %w", err)
+	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
-	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
-		return fmt.Errorf("invalid request: missing required fields")
-	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -164,10 +167,11 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 }
 
 func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResponse, error) {
-	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
-		return nil, fmt.Errorf("invalid request: missing required fields")
+	err := req.Validate()
+	if err != nil {
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
+	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
 
 	s.mu.RLock()
@@ -189,10 +193,11 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 }
 
 func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
-	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
-	if appName == "" || userID == "" || sessionID == "" {
-		return nil, fmt.Errorf("invalid request: missing required fields")
+	err := req.Validate()
+	if err != nil {
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
+	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -211,10 +216,11 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 
 // Versions implements types.ArtifactService.
 func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error) {
-	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	if appName == "" || userID == "" || sessionID == "" || fileName == "" {
-		return nil, fmt.Errorf("invalid request: missing required fields")
+	err := req.Validate()
+	if err != nil {
+		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
+	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"iter"
 
+	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/llm"
+	"google.golang.org/adk/memoryservice"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -41,6 +43,9 @@ func New(cfg Config) (Agent, error) {
 		beforeAgent: cfg.BeforeAgent,
 		run:         cfg.Run,
 		afterAgent:  cfg.AfterAgent,
+		State: agentinternal.State{
+			AgentType: agentinternal.TypeCustomAgent,
+		},
 	}, nil
 }
 
@@ -64,6 +69,7 @@ type Context interface {
 
 	Session() session.Session
 	Artifacts() Artifacts
+	Memory() Memory
 
 	End()
 	Ended() bool
@@ -76,10 +82,17 @@ type Artifacts interface {
 	List() ([]string, error)
 }
 
+type Memory interface {
+	AddSession(session session.Session) error
+	Search(query string) ([]memoryservice.MemoryEntry, error)
+}
+
 type BeforeAgentCallback func(Context) (*genai.Content, error)
 type AfterAgentCallback func(Context, *session.Event, error) (*genai.Content, error)
 
 type agent struct {
+	agentinternal.State
+
 	name, description string
 	subAgents         []Agent
 
@@ -103,7 +116,7 @@ func (a *agent) SubAgents() []Agent {
 func (a *agent) Run(ctx Context) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: verify&update the setup here. Should we branch etc.
-		ctx := NewContext(ctx, a, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Branch())
+		ctx := NewContext(ctx, a, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Memory(), ctx.Branch())
 
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {

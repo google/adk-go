@@ -16,6 +16,8 @@ package artifactservice
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"google.golang.org/genai"
 )
@@ -37,6 +39,12 @@ type Service interface {
 	Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error)
 }
 
+// requiredField is an internal type to use on validate operations
+type requiredField struct {
+	Name  string
+	Value string
+}
+
 // SaveRequest is the parameter for [ArtifactService.Save].
 type SaveRequest struct {
 	AppName, UserID, SessionID, FileName string
@@ -50,6 +58,47 @@ type SaveRequest struct {
 	Version int64
 }
 
+// validateRequiredStrings checks a slice of fields in order.
+// It returns the names of any fields with empty values, preserving the original order.
+func validateRequiredStrings(fields []requiredField) []string {
+	var missingFields []string
+	for _, field := range fields {
+		if field.Value == "" {
+			missingFields = append(missingFields, field.Name)
+		}
+	}
+	return missingFields
+}
+
+// Validate checks if the struct is valid or if its missing field
+func (req *SaveRequest) Validate() error {
+	// Define the fields to check in the desired order
+	fieldsToCheck := []requiredField{
+		{Name: "AppName", Value: req.AppName},
+		{Name: "UserID", Value: req.UserID},
+		{Name: "SessionID", Value: req.SessionID},
+		{Name: "FileName", Value: req.FileName},
+	}
+
+	// Use the helper function for all required string fields
+	missingFields := validateRequiredStrings(fieldsToCheck)
+
+	// Perform checks that don't fit the helper
+	if req.Part == nil {
+		missingFields = append(missingFields, "Part")
+	}
+
+	// If the slice has any items, it means fields were missing.
+	if len(missingFields) > 0 {
+		return fmt.Errorf("invalid save request: missing required fields: %s", strings.Join(missingFields, ", "))
+	}
+
+	if req.Part.Text == "" && req.Part.InlineData == nil {
+		return fmt.Errorf("invalid save request: Part.InlineData or Part.Text have to be set")
+	}
+	return nil
+}
+
 // SaveResponse is the return type of [ArtifactService.Save].
 type SaveResponse struct {
 	Version int64
@@ -61,6 +110,26 @@ type LoadRequest struct {
 
 	// Belows are optional fields.
 	Version int64
+}
+
+// Validate checks if the struct is valid or if its missing field
+func (req *LoadRequest) Validate() error {
+	// Define the fields to check in the desired order
+	fieldsToCheck := []requiredField{
+		{Name: "AppName", Value: req.AppName},
+		{Name: "UserID", Value: req.UserID},
+		{Name: "SessionID", Value: req.SessionID},
+		{Name: "FileName", Value: req.FileName},
+	}
+
+	// Use the helper function for all required string fields
+	missingFields := validateRequiredStrings(fieldsToCheck)
+
+	// If the slice has any items, it means fields were missing.
+	if len(missingFields) > 0 {
+		return fmt.Errorf("invalid load request: missing required fields: %s", strings.Join(missingFields, ", "))
+	}
+	return nil
 }
 
 // LoadResponse is the return type of [ArtifactService.Load].
@@ -77,9 +146,48 @@ type DeleteRequest struct {
 	Version int64
 }
 
+// Validate checks if the struct is valid or if its missing field
+func (req *DeleteRequest) Validate() error {
+	// Define the fields to check in the desired order
+	fieldsToCheck := []requiredField{
+		{Name: "AppName", Value: req.AppName},
+		{Name: "UserID", Value: req.UserID},
+		{Name: "SessionID", Value: req.SessionID},
+		{Name: "FileName", Value: req.FileName},
+	}
+
+	// Use the helper function for all required string fields
+	missingFields := validateRequiredStrings(fieldsToCheck)
+
+	// If the slice has any items, it means fields were missing.
+	if len(missingFields) > 0 {
+		return fmt.Errorf("invalid delete request: missing required fields: %s", strings.Join(missingFields, ", "))
+	}
+	return nil
+}
+
 // ListRequest is the parameter for [ArtifactService.List].
 type ListRequest struct {
 	AppName, UserID, SessionID string
+}
+
+// Validate checks if the struct is valid or if its missing field
+func (req *ListRequest) Validate() error {
+	// Define the fields to check in the desired order
+	fieldsToCheck := []requiredField{
+		{Name: "AppName", Value: req.AppName},
+		{Name: "UserID", Value: req.UserID},
+		{Name: "SessionID", Value: req.SessionID},
+	}
+
+	// Use the helper function for all required string fields
+	missingFields := validateRequiredStrings(fieldsToCheck)
+
+	// If the slice has any items, it means fields were missing.
+	if len(missingFields) > 0 {
+		return fmt.Errorf("invalid list request: missing required fields: %s", strings.Join(missingFields, ", "))
+	}
+	return nil
 }
 
 // ListResponse is the return type of [ArtifactService.List].
@@ -90,6 +198,26 @@ type ListResponse struct {
 // VersionsRequest is the parameter for [ArtifactService.Versions].
 type VersionsRequest struct {
 	AppName, UserID, SessionID, FileName string
+}
+
+// Validate checks if the struct is valid or if its missing field
+func (req *VersionsRequest) Validate() error {
+	// Define the fields to check in the desired order
+	fieldsToCheck := []requiredField{
+		{Name: "AppName", Value: req.AppName},
+		{Name: "UserID", Value: req.UserID},
+		{Name: "SessionID", Value: req.SessionID},
+		{Name: "FileName", Value: req.FileName},
+	}
+
+	// Use the helper function for all required string fields
+	missingFields := validateRequiredStrings(fieldsToCheck)
+
+	// If the slice has any items, it means fields were missing.
+	if len(missingFields) > 0 {
+		return fmt.Errorf("invalid versions request: missing required fields: %s", strings.Join(missingFields, ", "))
+	}
+	return nil
 }
 
 // VersionsResponse is the parameter for [ArtifactService.Versions].

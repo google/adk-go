@@ -69,7 +69,7 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	loopAgent, err := sequentialagent.New(sequentialagent.Config{
+	sequentialAgent, err := sequentialagent.New(sequentialagent.Config{
 		AgentConfig: agent.Config{
 			Name:        "sequential_agent",
 			Description: "A sequential agent that runs sub-agents",
@@ -80,5 +80,5 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, loopAgent)
+	examples.Run(ctx, sequentialAgent)
 }

@@ -19,6 +19,7 @@ import (
 	"iter"
 
 	"google.golang.org/adk/agent"
+	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
@@ -68,6 +69,8 @@ func New(cfg Config) (agent.Agent, error) {
 	}
 
 	a.Agent = baseAgent
+
+	a.AgentType = agentinternal.TypeLLMAgent
 
 	return a, nil
 }
@@ -144,6 +147,7 @@ type AfterModelCallback func(ctx agent.Context, llmResponse *llm.Response, llmRe
 type llmAgent struct {
 	agent.Agent
 	llminternal.State
+	agentState
 
 	beforeModel []llminternal.BeforeModelCallback
 	model       llm.Model
@@ -151,9 +155,11 @@ type llmAgent struct {
 	instruction string
 }
 
+type agentState = agentinternal.State
+
 func (a *llmAgent) run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 	// TODO: branch context?
-	ctx = agent.NewContext(ctx, a, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Branch())
+	ctx = agent.NewContext(ctx, a, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Memory(), ctx.Branch())
 
 	f := &llminternal.Flow{
 		Model:                a.model,

@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/adk/agent"
+	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/session"
 )
 
@@ -43,7 +44,18 @@ func New(cfg Config) (agent.Agent, error) {
 
 	cfg.AgentConfig.Run = run
 
-	return agent.New(cfg.AgentConfig)
+	parallelAgent, err := agent.New(cfg.AgentConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	internalAgent, ok := parallelAgent.(agentinternal.Agent)
+	if !ok {
+		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
+	}
+	agentinternal.Reveal(internalAgent).AgentType = agentinternal.TypeParallelAgent
+
+	return parallelAgent, nil
 }
 
 func run(ctx agent.Context) iter.Seq2[*session.Event, error] {
@@ -62,7 +74,7 @@ func run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 		}
 
 		errGroup.Go(func() error {
-			ctx := agent.NewContext(errGroupCtx, subAgent, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), branch)
+			ctx := agent.NewContext(errGroupCtx, subAgent, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Memory(), branch)
 
 			if err := runSubAgent(ctx, subAgent, resultsChan, doneChan); err != nil {
 				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)

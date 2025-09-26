@@ -15,7 +15,6 @@
 package tool_test
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -45,7 +44,7 @@ func ExampleNewFunctionTool() {
 		Sum int `json:"sum"` // the sum of two integers
 	}
 
-	handler := func(ctx context.Context, input SumArgs) SumResult {
+	handler := func(ctx tool.Context, input SumArgs) SumResult {
 		return SumResult{Sum: input.A + input.B}
 	}
 	sumTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
@@ -89,7 +88,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 		},
 	}
 
-	weatherReport := func(ctx context.Context, input Args) Result {
+	weatherReport := func(ctx tool.Context, input Args) Result {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
 			return ret
@@ -195,7 +194,7 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 		"paris":  "The weather in Paris is sunny with a temperature of 25 derees Celsius.",
 	}
 
-	weatherReport := func(ctx context.Context, input Args) string {
+	weatherReport := func(ctx tool.Context, input Args) string {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
 			return ret
@@ -357,7 +356,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		Name:        "print_quantity",
 		Description: "print the remaining quantity of the given fruit.",
 		InputSchema: ischema,
-	}, func(ctx context.Context, input Args) any {
+	}, func(ctx tool.Context, input Args) any {
 		fruit := strings.ToLower(input.Fruit)
 		if fruit != "mandarin" && fruit != "kiwi" {
 			t.Errorf("unexpected fruit: %q", fruit)

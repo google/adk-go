@@ -16,10 +16,24 @@ package handlers
 
 import (
 	"net/http"
+
+	"github.com/gorilla/mux"
+	"google.golang.org/adk/cmd/restapi/models"
+	"google.golang.org/adk/cmd/restapi/services"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/sessionservice"
+	"google.golang.org/genai"
 )
 
 // DebugAPIController is the controller for the Debug API.
-type DebugAPIController struct{}
+type DebugAPIController struct {
+	sessionService sessionservice.Service
+	agentloader    services.AgentLoader
+}
+
+func NewDebugAPIController(sessionService sessionservice.Service, agentLoader services.AgentLoader) *DebugAPIController {
+	return &DebugAPIController{sessionService: sessionService, agentloader: agentLoader}
+}
 
 // TraceDict returns the debug information for the session in form of dictionary.
 func (*DebugAPIController) TraceDict(rw http.ResponseWriter, req *http.Request) {
@@ -27,6 +41,98 @@ func (*DebugAPIController) TraceDict(rw http.ResponseWriter, req *http.Request) 
 }
 
 // EventGraph returns the debug information for the session and session events in form of graph.
-func (*DebugAPIController) EventGraph(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
+func (c *DebugAPIController) EventGraph(rw http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	sessionID, err := models.SessionIDFromHTTPParameters(vars)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	resp, err := c.sessionService.Get(req.Context(), &sessionservice.GetRequest{
+		ID: session.ID{
+			AppName:   sessionID.AppName,
+			UserID:    sessionID.UserID,
+			SessionID: sessionID.ID,
+		},
+	})
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	eventID := vars["event_id"]
+	if eventID == "" {
+		http.Error(rw, "event_id parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	var event *session.Event
+	for it := range resp.Session.Events().All() {
+		if it.ID == eventID {
+			event = it
+			break
+		}
+	}
+
+	if event == nil {
+		http.Error(rw, "event not found", http.StatusNotFound)
+		return
+	}
+
+	highlightedPairs := [][]string{}
+	fc := functionalCalls(event)
+	fr := functionalResponses(event)
+
+	if len(fc) > 0 {
+		for _, f := range fc {
+			if f.Name != "" {
+				highlightedPairs = append(highlightedPairs, []string{f.Name, event.Author})
+			}
+		}
+	} else if len(fr) > 0 {
+		for _, f := range fr {
+			if f.Name != "" {
+				highlightedPairs = append(highlightedPairs, []string{f.Name, event.Author})
+			}
+		}
+	} else {
+		highlightedPairs = append(highlightedPairs, []string{event.Author, event.Author})
+	}
+
+	agent, err := c.agentloader.LoadAgent(sessionID.AppName)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	graph, err := services.GetAgentGraph(req.Context(), agent, highlightedPairs)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	EncodeJSONResponse(map[string]string{"dotSrc": graph}, http.StatusOK, rw)
+}
+
+func functionalCalls(event *session.Event) []*genai.FunctionCall {
+	if event.LLMResponse == nil || event.LLMResponse.Content == nil || event.LLMResponse.Content.Parts == nil {
+		return nil
+	}
+	fc := []*genai.FunctionCall{}
+	for _, part := range event.LLMResponse.Content.Parts {
+		if part.FunctionCall != nil {
+			fc = append(fc, part.FunctionCall)
+		}
+	}
+	return fc
+}
+
+func functionalResponses(event *session.Event) []*genai.FunctionResponse {
+	if event.LLMResponse == nil || event.LLMResponse.Content == nil || event.LLMResponse.Content.Parts == nil {
+		return nil
+	}
+	fr := []*genai.FunctionResponse{}
+	for _, part := range event.LLMResponse.Content.Parts {
+		if part.FunctionResponse != nil {
+			fr = append(fr, part.FunctionResponse)
+		}
+	}
+	return fr
 }

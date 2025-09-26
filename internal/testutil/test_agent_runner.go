@@ -80,6 +80,20 @@ func (r *TestAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &runner.RunConfig{})
 }
 
+func (r *TestAgentRunner) RunContent(t *testing.T, sessionID string, content *genai.Content) iter.Seq2[*session.Event, error] {
+	t.Helper()
+	ctx := t.Context()
+
+	userID := "test_user"
+
+	session, err := r.session(t, r.appName, userID, sessionID)
+	if err != nil {
+		t.Fatalf("failed to get/create session: %v", err)
+	}
+
+	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &runner.RunConfig{})
+}
+
 func NewTestAgentRunner(t *testing.T, agent agent.Agent) *TestAgentRunner {
 	appName := "test_app"
 	sessionService := sessionservice.Mem()
@@ -156,6 +170,38 @@ func (m *MockModel) Name() string {
 }
 
 var _ llm.Model = (*MockModel)(nil)
+
+// CollectEvents collects all event from the llm response until encountering an error.
+// It returns all collected events and the last error.
+func CollectEvents(stream iter.Seq2[*session.Event, error]) ([]*session.Event, error) {
+	var events []*session.Event
+	for ev, err := range stream {
+		if err != nil {
+			return events, err
+		}
+		if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+			return events, fmt.Errorf("unexpected empty event: %v", ev)
+		}
+		events = append(events, ev)
+	}
+	return events, nil
+}
+
+// CollectParts collects all parts from the llm response until encountering an error.
+// It returns all collected parts and the last error.
+func CollectParts(stream iter.Seq2[*session.Event, error]) ([]*genai.Part, error) {
+	var parts []*genai.Part
+	for ev, err := range stream {
+		if err != nil {
+			return parts, err
+		}
+		if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+			return parts, fmt.Errorf("unexpected empty event: %v", ev)
+		}
+		parts = append(parts, ev.LLMResponse.Content.Parts...)
+	}
+	return parts, nil
+}
 
 // CollectTextParts collects all text parts from the llm response until encountering an error.
 // It returns all collected text parts and the last error.
