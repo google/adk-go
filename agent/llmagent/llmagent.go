@@ -70,11 +70,7 @@ func New(cfg Config) (agent.Agent, error) {
 
 	a.Agent = baseAgent
 
-	internalAgent, ok := baseAgent.(agentinternal.Agent)
-	if !ok {
-		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
-	}
-	agentinternal.Reveal(internalAgent).AgentType = agentinternal.TypeLLMAgent
+	a.AgentType = agentinternal.TypeLLMAgent
 
 	return a, nil
 }
@@ -151,12 +147,15 @@ type AfterModelCallback func(ctx agent.Context, llmResponse *llm.Response, llmRe
 type llmAgent struct {
 	agent.Agent
 	llminternal.State
+	agentState
 
 	beforeModel []llminternal.BeforeModelCallback
 	model       llm.Model
 	afterModel  []llminternal.AfterModelCallback
 	instruction string
 }
+
+type agentState = agentinternal.State
 
 func (a *llmAgent) run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 	// TODO: branch context?
