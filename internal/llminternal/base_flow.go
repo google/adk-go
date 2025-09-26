@@ -190,8 +190,28 @@ func (f *Flow) preprocess(ctx agent.Context, req *llm.Request) error {
 		}
 	}
 	// run processors for tools.
-	// TODO: check need/feasibility of running this concurrently.
-	for _, t := range Reveal(llmAgent).Tools {
+	return toolPreprocess(ctx, req, Reveal(llmAgent).Tools)
+}
+
+// toolPreprocess runs tool preprocess on the given request
+// If a tool set is encountered, it's expanded recursively in DFS fashion.
+// TODO: check need/feasibility of running this concurrently.
+func toolPreprocess(ctx agent.Context, req *llm.Request, tools []tool.Tool) error {
+	for _, t := range tools {
+		toolSet, ok := t.(tool.Set)
+		if ok {
+			tsTools, err := toolSet.Tools(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
+			}
+
+			if err := toolPreprocess(ctx, req, tsTools); err != nil {
+				return fmt.Errorf("failed to tool preprocess for tool set %q: %w", toolSet.Name(), err)
+			}
+
+			continue
+		}
+
 		requestProcessor, ok := t.(toolinternal.RequestProcessor)
 		if !ok {
 			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
@@ -202,6 +222,7 @@ func (f *Flow) preprocess(ctx agent.Context, req *llm.Request) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
