@@ -38,7 +38,7 @@ import (
 //   - define golang function (in this case -- GetWeather)
 //   - register it as MCP tool in the in-memory MCP server, using mcp.NewServer and mcp.Tool
 //
-// 2. GitHub MCP server:
+// 2. GitHub's remote MCP server (https://github.com/github/github-mcp-server):
 //   - create http.Client with authenticated transport. In this case it's oauth2 transport with GitHub personal access token.
 //   - use `export GITHUB_PAT=...` to set GitHub personal access token.
 
