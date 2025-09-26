@@ -49,7 +49,7 @@ var webuiCmd = &cobra.Command{
 	WARNINIG: deletes the whole build directory and recreates it anew!
 	You need: 
 	  - a downloaded version of adk-web (available at https://github.com/google/adk-web)
-	  - an ability to build adk-web (prerequisites on  https://github.com/google/adk-web):
+	  - an ability to build adk-web (prerequisites on https://github.com/google/adk-web):
 	  	npm (node js: see https://nodejs.org/en/download)
 		ng (angular cli: see https://angular.dev/tools/cli/setup-local)		
 	  - go
@@ -70,7 +70,7 @@ func init() {
 }
 
 func (f *runLocalFlags) cleanTemp() error {
-	err := util.LogStartStop("Cleaning target directory",
+	return util.LogStartStop("Cleaning target directory",
 		func(p util.Printer) error {
 			p("Clean target directory starting with", f.build.targetDir)
 			err := os.RemoveAll(f.build.targetDir)
@@ -83,17 +83,15 @@ func (f *runLocalFlags) cleanTemp() error {
 			}
 			return nil
 		})
-	return err
 }
 
-func (f *runLocalFlags) makeDistForAdkWebUI() error {
-	err := util.LogStartStop("Making dist for Adk Web UI",
+func (f *runLocalFlags) ngBuildADKWebUI() error {
+	return util.LogStartStop("Building ADK Web UI",
 		func(p util.Printer) error {
 			cmd := exec.Command("ng", "build", "--output-path="+f.build.targetDir)
 			cmd.Dir = f.source.webuiDir
 			return util.LogCommand(cmd, p)
 		})
-	return err
 }
 
 func (f *runLocalFlags) buildWebui() error {
@@ -101,10 +99,5 @@ func (f *runLocalFlags) buildWebui() error {
 	if err != nil {
 		return err
 	}
-	err = f.makeDistForAdkWebUI()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return f.ngBuildADKWebUI()
 }
