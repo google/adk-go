@@ -12,19 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package main is an entry point for CLI.
-package main
+package agentinternal
 
-import (
-	"google.golang.org/adk/cmd/adkgo/root"
-	_ "google.golang.org/adk/cmd/adkgo/root/build"
-	_ "google.golang.org/adk/cmd/adkgo/root/build/webui"
-	_ "google.golang.org/adk/cmd/adkgo/root/deploy"
-	_ "google.golang.org/adk/cmd/adkgo/root/deploy/cloudrun"
-	_ "google.golang.org/adk/cmd/adkgo/root/run"
-	_ "google.golang.org/adk/cmd/adkgo/root/run/local"
+// holds Agent internal state
+type Agent interface {
+	internal() *State
+}
+
+type State struct {
+	AgentType Type
+}
+
+type Type string
+
+const (
+	TypeLLMAgent        Type = "LLMAgent"
+	TypeLoopAgent       Type = "LoopAgent"
+	TypeSequentialAgent Type = "SequentialAgent"
+	TypeParallelAgent   Type = "ParallelAgent"
+	TypeCustomAgent     Type = "CustomAgent"
 )
 
-func main() {
-	root.Execute()
-}
+func (s *State) internal() *State { return s }
+
+func Reveal(a Agent) *State { return a.internal() }

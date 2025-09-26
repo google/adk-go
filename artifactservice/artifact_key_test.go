@@ -12,19 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package main is an entry point for CLI.
-package main
+package artifactservice
 
 import (
-	"google.golang.org/adk/cmd/adkgo/root"
-	_ "google.golang.org/adk/cmd/adkgo/root/build"
-	_ "google.golang.org/adk/cmd/adkgo/root/build/webui"
-	_ "google.golang.org/adk/cmd/adkgo/root/deploy"
-	_ "google.golang.org/adk/cmd/adkgo/root/deploy/cloudrun"
-	_ "google.golang.org/adk/cmd/adkgo/root/run"
-	_ "google.golang.org/adk/cmd/adkgo/root/run/local"
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
-func main() {
-	root.Execute()
+func TestArtifactKey(t *testing.T) {
+	key := artifactKey{
+		AppName:   "testapp",
+		UserID:    "testuser",
+		SessionID: "testsession",
+		FileName:  "testfile",
+		Version:   123,
+	}
+	var key2 artifactKey
+	err := key2.Decode(key.Encode())
+	if err != nil {
+		t.Fatalf("error decoding key:%s", err)
+	}
+	if diff := cmp.Diff(key, key2); diff != "" {
+		t.Errorf("key mismatch (-want +got):\n%s", diff)
+	}
 }
