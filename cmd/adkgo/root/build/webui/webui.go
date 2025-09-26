@@ -22,7 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"google.golang.org/adk/cmd/adkgo/root/build"
-	"google.golang.org/adk/cmd/util"
+	"google.golang.org/adk/internal/cli/util"
 )
 
 type buildFlags struct {
