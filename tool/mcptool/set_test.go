@@ -158,6 +158,7 @@ func TestMCPToolSet(t *testing.T) {
 
 	if diff := cmp.Diff(wantEvents, gotEvents,
 		cmpopts.IgnoreFields(session.Event{}, "ID", "Time", "InvocationID"),
+		cmpopts.IgnoreFields(llm.Response{}, "UsageMetadata"),
 		cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
 		cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID"),
 		cmpopts.IgnoreFields(genai.Part{}, "ThoughtSignature")); diff != "" {
@@ -175,7 +176,7 @@ func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, 
 	return rr, recording
 }
 
-func newGeminiModel(t *testing.T, modelName string) *gemini.Model {
+func newGeminiModel(t *testing.T, modelName string) llm.Model {
 	apiKey := "fakeKey"
 	trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
 	recording := false
