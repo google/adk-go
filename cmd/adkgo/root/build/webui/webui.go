@@ -57,7 +57,7 @@ var webuiCmd = &cobra.Command{
 	Building the adk-web takes a while, and sometimes presents some warnings.
 	`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		err := flags.runLocal()
+		err := flags.buildWebui()
 		return err
 	},
 }
@@ -96,7 +96,7 @@ func (f *runLocalFlags) makeDistForAdkWebUI() error {
 	return err
 }
 
-func (f *runLocalFlags) runLocal() error {
+func (f *runLocalFlags) buildWebui() error {
 	err := f.cleanTemp()
 	if err != nil {
 		return err
