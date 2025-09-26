@@ -133,13 +133,6 @@ func (f *runLocalFlags) compileEntryPoint() error {
 	return err
 }
 
-func pad(s string, w int) string {
-	sw := w - len(s)
-	lw := sw / 2
-	rw := sw - lw
-	return strings.Repeat(" ", lw) + s + strings.Repeat(" ", rw)
-}
-
 func (f *runLocalFlags) runLocalServer() error {
 	err := util.LogStartStop("Running local server",
 		func(p util.Printer) error {
@@ -156,12 +149,12 @@ func (f *runLocalFlags) runLocalServer() error {
 			targetWidth := 80
 
 			p(strings.Repeat("-", targetWidth))
-			p(pad("", targetWidth))
-			p(pad("Running ADK Web UI on http://localhost:"+strconv.Itoa(f.server.port)+"/ui/    <-- open this", targetWidth))
-			p(pad("ADK REST API on http://localhost:"+strconv.Itoa(f.server.port)+"/api/         ", targetWidth))
-			p(pad("", targetWidth))
-			p(pad("Press Ctrl-C to stop", targetWidth))
-			p(pad("", targetWidth))
+			p(util.CenterString("", targetWidth))
+			p(util.CenterString("Running ADK Web UI on http://localhost:"+strconv.Itoa(f.server.port)+"/ui/    <-- open this", targetWidth))
+			p(util.CenterString("ADK REST API on http://localhost:"+strconv.Itoa(f.server.port)+"/api/         ", targetWidth))
+			p(util.CenterString("", targetWidth))
+			p(util.CenterString("Press Ctrl-C to stop", targetWidth))
+			p(util.CenterString("", targetWidth))
 			p(strings.Repeat("-", targetWidth))
 			return util.LogCommand(cmd, p)
 		})

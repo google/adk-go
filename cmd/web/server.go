@@ -150,6 +150,11 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 			handlers.EncodeJSONResponse(runtimeConfigResponse, http.StatusOK, w)
 		})
 
+		// redirect the user from / to /ui/
+		rBase.Methods("GET").Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/ui/", http.StatusFound)
+		})
+
 		rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.Dir(c.UIDistPath))))
 	}
 
@@ -160,12 +165,14 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 =======
 		rApi := rBase.Methods("GET", "POST", "DELETE").PathPrefix("/api/").Subrouter()
 		rApi.Use(corsWithArgs(c))
+<<<<<<< HEAD
 		// rApi= serverConfig.Cors.Handler(rApi)
 		// rApi = serverConfig.Cors.Handler(rApi)
 >>>>>>> e7c16be (Added runtime generation of /assets/config/runtime-config.json)
+=======
+>>>>>>> 247c9e6 (Text changes. Default redirection from / to /ui/)
 		restapiweb.SetupRouter(rApi, &serverConfig)
 	}
 
 	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), rBase))
-	// log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), serverConfig.Cors.Handler(rBase)))
 }

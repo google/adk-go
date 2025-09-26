@@ -22,6 +22,7 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/adk/cmd/adkgo/root/deploy"
@@ -56,17 +57,12 @@ type sourceFlags struct {
 	entryPointPath string
 }
 
-// type webUIDeployFlags struct {
-// 	backendUri string
-// }
-
 type deployCloudRunFlags struct {
 	gcloud   gCloudFlags
 	cloudRun cloudRunServiceFlags
 	proxy    localProxyFlags
 	build    buildFlags
 	source   sourceFlags
-	// webUI    webUIDeployFlags
 }
 
 var flags deployCloudRunFlags
@@ -197,7 +193,7 @@ COPY --from=builder /app/webui_distr /app/webui_distr
 EXPOSE ` + strconv.Itoa(flags.cloudRun.serverPort) + `
 
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "--front_address", "localhost:` + strconv.Itoa(f.proxy.port) + `", "--webui_distr_path", "/app/webui_distr",  "--backend_address", "http://localhost:` + strconv.Itoa(f.proxy.port) + `/api"]
+CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "--front_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "--webui_distr_path", "/app/webui_distr",  "--backend_address", "http://localhost:` + strconv.Itoa(f.proxy.port) + `/api"]
  `
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(c), 0600)
 		})
@@ -220,6 +216,17 @@ func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
 func (f *deployCloudRunFlags) runGcloudProxy() error {
 	return util.LogStartStop("Running local gcloud authenticating proxy",
 		func(p util.Printer) error {
+			targetWidth := 80
+
+			p(strings.Repeat("-", targetWidth))
+			p(util.CenterString("", targetWidth))
+			p(util.CenterString("Running ADK Web UI on http://localhost:"+strconv.Itoa(f.proxy.port)+"/ui/    <-- open this", targetWidth))
+			p(util.CenterString("ADK REST API on http://localhost:"+strconv.Itoa(f.proxy.port)+"/api/         ", targetWidth))
+			p(util.CenterString("", targetWidth))
+			p(util.CenterString("Press Ctrl-C to stop", targetWidth))
+			p(util.CenterString("", targetWidth))
+			p(strings.Repeat("-", targetWidth))
+
 			cmd := exec.Command("gcloud", "run", "services", "proxy", f.cloudRun.serviceName, "--project", f.gcloud.projectName, "--port", strconv.Itoa(f.proxy.port))
 
 			cmd.Dir = f.build.tempDir
