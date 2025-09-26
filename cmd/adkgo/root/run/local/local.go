@@ -24,7 +24,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"google.golang.org/adk/cmd/adkgo/root/run"
-	"google.golang.org/adk/cmd/util"
+	"google.golang.org/adk/internal/cli/util"
 )
 
 type localServerFlags struct {
