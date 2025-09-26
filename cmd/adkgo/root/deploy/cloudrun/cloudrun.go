@@ -56,9 +56,9 @@ type sourceFlags struct {
 	entryPointPath string
 }
 
-type webUIDeployFlags struct {
-	backendUri string
-}
+// type webUIDeployFlags struct {
+// 	backendUri string
+// }
 
 type deployCloudRunFlags struct {
 	gcloud   gCloudFlags
@@ -66,7 +66,7 @@ type deployCloudRunFlags struct {
 	proxy    localProxyFlags
 	build    buildFlags
 	source   sourceFlags
-	webUI    webUIDeployFlags
+	// webUI    webUIDeployFlags
 }
 
 var flags deployCloudRunFlags
@@ -229,9 +229,8 @@ func (f *deployCloudRunFlags) runGcloudProxy() error {
 
 func (f *deployCloudRunFlags) deployOnCloudRun() error {
 	fmt.Println(flags)
-	var err error
 
-	err = f.computeFlags()
+	err := f.computeFlags()
 	if err != nil {
 		return err
 	}
