@@ -16,6 +16,7 @@
 package webui
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 
@@ -39,7 +40,7 @@ type runLocalFlags struct {
 
 var flags runLocalFlags
 
-// webuiCmd represents the cloudrun command
+// webuiCmd represents the build webui command
 var webuiCmd = &cobra.Command{
 	Use:   "webui",
 	Short: "Build static ADK Web UI from sources.",
@@ -49,8 +50,8 @@ var webuiCmd = &cobra.Command{
 	You need: 
 	  - a downloaded version of adk-web (available at https://github.com/google/adk-web)
 	  - an ability to build adk-web (prerequisites on  https://github.com/google/adk-web):
-	  	npm  (node js: see https://nodejs.org/en/download)
-		ng (anglural cli: see https://angular.dev/tools/cli/setup-local)		
+	  	npm (node js: see https://nodejs.org/en/download)
+		ng (angular cli: see https://angular.dev/tools/cli/setup-local)		
 	  - go
 
 	Building the adk-web takes a while, and sometimes presents some warnings.
@@ -74,9 +75,13 @@ func (f *runLocalFlags) cleanTemp() error {
 			p("Clean target directory starting with", f.build.targetDir)
 			err := os.RemoveAll(f.build.targetDir)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to clean target directory %v: %v", f.build.targetDir, err)
 			}
-			return os.MkdirAll(f.build.targetDir, os.ModeDir|0700)
+			err = os.MkdirAll(f.build.targetDir, os.ModeDir|0700)
+			if err != nil {
+				return fmt.Errorf("failed to create the target directory %v: %v", f.build.targetDir, err)
+			}
+			return nil
 		})
 	return err
 }
@@ -92,9 +97,7 @@ func (f *runLocalFlags) makeDistForAdkWebUI() error {
 }
 
 func (f *runLocalFlags) runLocal() error {
-	var err error
-
-	err = f.cleanTemp()
+	err := f.cleanTemp()
 	if err != nil {
 		return err
 	}
