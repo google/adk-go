@@ -16,7 +16,6 @@
 package cloudrun
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -77,8 +76,8 @@ var cloudrunCmd = &cobra.Command{
 	Use:   "cloudrun",
 	Short: "Deploys the application to cloudrun.",
 	Long: `Deployment prepares a Dockerfile which is fed with locally compiled server executable and Web UI static files.
-	Service on Cloud run is created using this information. 
-	Local proxy adding authentication is optionally started. 
+	Service on Cloudrun is created using this information. 
+	Local proxy adding authentication is started. 
 	`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return flags.deployOnCloudRun()
@@ -95,103 +94,75 @@ func init() {
 	cloudrunCmd.PersistentFlags().IntVar(&flags.proxy.port, "proxy_port", 8081, "Local proxy port")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.serverPort, "server_port", 8080, "Cloudrun server port")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.webUIDistrPath, "webui_distr_path", "a", "", "ADK Web UI base dir")
-	// cloudrunCmd.PersistentFlags().StringVarP(&flags.webUI.backendUri, "backend_uri", "b", "", "ADK REST API uri")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
-	// cloudrunCmd.PersistentFlags().StringVarP(&flags.source.srcBasePath, "srcPath", "", "", "Path to an entry point (go 'main')")
-
 }
 
 func (f *deployCloudRunFlags) computeFlags() error {
-	err := util.LogStartStop("Computing flags",
+	return util.LogStartStop("Computing flags",
 		func(p util.Printer) error {
-
 			absp, err := filepath.Abs(flags.source.webUIDistrPath)
 			if err != nil {
-				return errors.New("Cannot make an absolute path from '" + f.source.webUIDistrPath + "'")
+				return fmt.Errorf("cannot make an absolute path from '%v': %v", f.source.webUIDistrPath, err)
 			}
 			f.source.webUIDistrPath = path.Join(absp, "browser")
 			absp, err = filepath.Abs(flags.source.entryPointPath)
 			if err != nil {
-				return errors.New("Cannot make an absolute path from '" + f.source.entryPointPath + "'")
+				return fmt.Errorf("cannot make an absolute path from '%v': %v", f.source.entryPointPath, err)
 			}
 			f.source.entryPointPath = absp
 			absp, err = filepath.Abs(flags.build.tempDir)
 			if err != nil {
-				return errors.New("Cannot make an absolute path from '" + f.build.tempDir + "'")
+				return fmt.Errorf("cannot make an absolute path from '%v': %v", f.build.tempDir, err)
 			}
 			f.build.tempDir = absp
 
+			// come up with a executable name based on entry point path
 			dir, file := path.Split(f.source.entryPointPath)
 			f.source.srcBasePath = dir
 			f.source.entryPointPath = file
 			if f.build.execPath == "" {
 				exec, err := util.StripExtension(f.source.entryPointPath, ".go")
 				if err != nil {
-					return err
+					return fmt.Errorf("cannot strip '.go' extension from entry point path '%v': %v", f.source.entryPointPath, err)
 				}
 				f.build.execFile = exec
-				// absp, err = filepath.Abs(exec)
-				// if err != nil {
-				// 	return errors.New("Cannot make an absolute path from '" + exec + "'")
-				// }
 				f.build.execPath = path.Join(f.build.tempDir, exec)
 			}
 
-			// f.build.uiBuildDir = path.Join(f.build.tempDir, "ui")
 			f.build.uiDistDir = path.Join(f.build.tempDir, "webui_distr")
-			// f.build.execPath = path.Join(f.build.tempDir, "server")
 			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
 
-			p(fmt.Sprintf("%+v", f))
 			return nil
 		})
-	return err
 }
 
 func (f *deployCloudRunFlags) cleanTemp() error {
-	err := util.LogStartStop("Cleaning temp",
+	return util.LogStartStop("Cleaning temp",
 		func(p util.Printer) error {
 			p("Clean temp starting with", f.build.tempDir)
 			err := os.RemoveAll(f.build.tempDir)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to clean temp directory %v: %v", f.build.tempDir, err)
 			}
-			return os.MkdirAll(f.build.tempDir, os.ModeDir|0700)
+			err = os.MkdirAll(f.build.tempDir, os.ModeDir|0700)
+			if err != nil {
+				return fmt.Errorf("failed to create the target directory %v: %v", f.build.tempDir, err)
+			}
+			return nil
 		})
-	return err
 }
 
-// func (f *deployCloudRunFlags) makeDirs() error {
-// 	err := util.LogStartStop("Make build dirs",
-// 		func(p util.Printer) error {
-// 			p("Making", f.build.uiBuildDir)
-// 			return os.MkdirAll(f.build.uiBuildDir, os.ModeDir|0700)
-// 		})
-// 	return err
-// }
-
-// func (f *deployCloudRunFlags) setBackendForAdkWebUI() error {
-// 	err := util.LogStartStop("Setting backend for Adk Web UI",
-// 		func(p util.Printer) error {
-// 			cmd := exec.Command("npm", "run", "inject-backend", "--backend="+f.webUI.backendUri)
-// 			cmd.Dir = f.source.uiDir
-// 			return util.LogCommand(cmd, p)
-// 		})
-// 	return err
-// }
-
-func (f *deployCloudRunFlags) makeDistForAdkWebUI() error {
-	err := util.LogStartStop("Copying distr for Adk Web UI",
+func (f *deployCloudRunFlags) copyStaticADKWebUIFiles() error {
+	return util.LogStartStop("Copying static files for ADK Web UI",
 		func(p util.Printer) error {
 			p("Source: " + f.source.webUIDistrPath)
 			p("Destination: " + f.build.uiDistDir)
 			return os.CopyFS(f.build.uiDistDir, os.DirFS(f.source.webUIDistrPath))
 		})
-	return err
 }
 
 func (f *deployCloudRunFlags) compileEntryPoint() error {
-	err := util.LogStartStop("Compiling server",
+	return util.LogStartStop("Compiling server",
 		func(p util.Printer) error {
 			p("Using", f.source.entryPointPath, "as entry point")
 			cmd := exec.Command("go", "build", "-o", f.build.execPath, f.source.entryPointPath)
@@ -200,11 +171,10 @@ func (f *deployCloudRunFlags) compileEntryPoint() error {
 			cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
 			return util.LogCommand(cmd, p)
 		})
-	return err
 }
 
 func (f *deployCloudRunFlags) prepareDockerfile() error {
-	err := util.LogStartStop("Preparing Dockerfile",
+	return util.LogStartStop("Preparing Dockerfile",
 		func(p util.Printer) error {
 			p("Writing:", f.build.dockerfileBuildPath)
 			c := `
@@ -231,11 +201,10 @@ CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun
  `
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(c), 0600)
 		})
-	return err
 }
 
 func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
-	err := util.LogStartStop("Deploying to Cloud Run",
+	return util.LogStartStop("Deploying to Cloud Run",
 		func(p util.Printer) error {
 			cmd := exec.Command("gcloud", "run", "deploy", f.cloudRun.serviceName,
 				"--source", ".",
@@ -246,18 +215,16 @@ func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
 			cmd.Dir = f.build.tempDir
 			return util.LogCommand(cmd, p)
 		})
-	return err
 }
 
 func (f *deployCloudRunFlags) runGcloudProxy() error {
-	err := util.LogStartStop("Running local gcloud authenticating proxy",
+	return util.LogStartStop("Running local gcloud authenticating proxy",
 		func(p util.Printer) error {
 			cmd := exec.Command("gcloud", "run", "services", "proxy", f.cloudRun.serviceName, "--project", f.gcloud.projectName, "--port", strconv.Itoa(f.proxy.port))
 
 			cmd.Dir = f.build.tempDir
 			return util.LogCommand(cmd, p)
 		})
-	return err
 }
 
 func (f *deployCloudRunFlags) deployOnCloudRun() error {
@@ -272,15 +239,7 @@ func (f *deployCloudRunFlags) deployOnCloudRun() error {
 	if err != nil {
 		return err
 	}
-	// err = f.makeDirs()
-	// if err != nil {
-	// 	return err
-	// }
-	// err = f.setBackendForAdkWebUI()
-	// if err != nil {
-	// 	return err
-	// }
-	err = f.makeDistForAdkWebUI()
+	err = f.copyStaticADKWebUIFiles()
 	if err != nil {
 		return err
 	}
