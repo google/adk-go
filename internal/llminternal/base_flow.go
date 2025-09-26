@@ -24,7 +24,6 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
-	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/llm"
@@ -222,30 +221,6 @@ func toolPreprocess(ctx agent.Context, req *llm.Request, tools []tool.Tool) erro
 		toolCtx := tool.NewContext(ctx, "", &session.Actions{})
 		if err := requestProcessor.ProcessRequest(toolCtx, req); err != nil {
 			return err
-		}
-	}
-	return nil
-}
-
-func removeDisplayNameIfExists(ctx agent.Context, req *llm.Request) error {
-	if req.Contents == nil {
-		return nil
-	}
-	for _, content := range req.Contents {
-		if content.Parts == nil {
-			continue
-		}
-		// The Gemini API (non-Vertex) backend does not support the display_name parameter for file uploads,
-		// so it must be removed to prevent request failures.
-		if googlellm.GetGoogleLLMVariant() == googlellm.GoogleLLMVariantGeminiAPI {
-			for _, part := range content.Parts {
-				if part.InlineData != nil {
-					part.InlineData.DisplayName = ""
-				}
-				if part.FileData != nil {
-					part.FileData.DisplayName = ""
-				}
-			}
 		}
 	}
 	return nil
