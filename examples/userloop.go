@@ -27,9 +27,19 @@ import (
 	"google.golang.org/genai"
 )
 
-func Run(ctx context.Context, rootAgent agent.Agent, sessionService sessionservice.Service) {
+type RunConfig struct {
+	SessionService sessionservice.Service
+	StreamingMode  runner.StreamingMode
+}
+
+func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
 	userID, appName := "test_user", "test_app"
 
+	if runConfig == nil {
+		runConfig = &RunConfig{}
+	}
+
+	sessionService := runConfig.SessionService
 	if sessionService == nil {
 		sessionService = sessionservice.Mem()
 	}
@@ -65,9 +75,13 @@ func Run(ctx context.Context, rootAgent agent.Agent, sessionService sessionservi
 
 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
+		streamingMode := runConfig.StreamingMode
+		if streamingMode == "" {
+			streamingMode = runner.StreamingModeSSE
+		}
 		fmt.Print("\nAgent -> ")
 		for event, err := range r.Run(ctx, userID, session.ID().SessionID, userMsg, &runner.RunConfig{
-			StreamingMode: runner.StreamingModeSSE,
+			StreamingMode: streamingMode,
 		}) {
 			if err != nil {
 				fmt.Printf("\nAGENT_ERROR: %v\n", err)

@@ -32,7 +32,6 @@ func newVertexAiSessionService(ctx context.Context, model string) (Service, erro
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Backend: genai.BackendVertexAI,
 	})
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Vertex AI client: %w", err)
 	}

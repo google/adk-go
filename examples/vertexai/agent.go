@@ -44,7 +44,9 @@ func main() {
 		log.Fatalf("Failed to create session service: %v", err)
 	}
 
-	examples.Run(ctx, rootAgent, srvs)
+	examples.Run(ctx, rootAgent, &examples.RunConfig{
+		SessionService: srvs,
+	})
 }
 
 func сreateAgent() (agent.Agent, error) {
