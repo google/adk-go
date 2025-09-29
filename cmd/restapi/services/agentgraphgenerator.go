@@ -178,8 +178,11 @@ func drawNode(graph *gographviz.Graph, parentGraph *gographviz.Graph, instance a
 			return nil
 		}
 		cluster := gographviz.NewGraph()
-		cluster.SetName("cluster_" + name)
-		err := graph.AddSubGraph(graph.Name, cluster.Name, map[string]string{
+		err := cluster.SetName("cluster_" + name)
+		if err != nil {
+			return fmt.Errorf("set subgraph name: %w", err)
+		}
+		err = graph.AddSubGraph(graph.Name, cluster.Name, map[string]string{
 			"style":     "rounded",
 			"color":     White,
 			"label":     caption,
