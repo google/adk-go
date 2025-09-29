@@ -113,4 +113,10 @@ type EventActions struct {
 	Escalate bool
 }
 
+const (
+	KeyPrefixApp  string = "app:"
+	KeyPrefixTemp string = "temp:"
+	KeyPrefixUser string = "user:"
+)
+
 var ErrStateKeyNotExist = errors.New("state key does not exist")

@@ -70,10 +70,12 @@ func New(cfg Config) (agent.Agent, error) {
 			InputSchema:              cfg.InputSchema,
 			OutputSchema:             cfg.OutputSchema,
 			// TODO: internal type for includeContents
-			IncludeContents:   string(cfg.IncludeContents),
-			Instruction:       cfg.Instruction,
-			GlobalInstruction: cfg.GlobalInstruction,
-			OutputKey:         cfg.OutputKey,
+			IncludeContents:           string(cfg.IncludeContents),
+			Instruction:               cfg.Instruction,
+			InstructionProvider:       llminternal.InstructionProvider(cfg.InstructionProvider),
+			GlobalInstruction:         cfg.GlobalInstruction,
+			GlobalInstructionProvider: llminternal.InstructionProvider(cfg.GlobalInstructionProvider),
+			OutputKey:                 cfg.OutputKey,
 		},
 	}
 
@@ -128,8 +130,59 @@ type Config struct {
 	// usage, or perform post-processing on the raw `LLMResponse`.
 	AfterModelCallbacks []AfterModelCallback
 
-	Instruction       string
+	// Instruction is set for the LLM model guiding the agent's behavior.
+	//
+	// These instructions can contain placeholders like {variable_name} that
+	// will be resolved at runtime using session state and context.
+	//
+	// {var} is used to insert the value of the state variable named var.
+	// {artifact.var} is used to insert the text content of the artifact named var.
+	// State key identifier should be match "^[a-zA-Z_][a-zA-Z0-9_]*$".
+	// Otherwise it will be treated as a literal.
+	//
+	// If the state variable or artifact does not exist, the agent will raise an
+	// error. If you want to ignore the error, you can append a ? to the
+	// variable name as in {var?}.
+	Instruction string
+	// InstructionProvider allows to create instructions dynamically based on
+	// the agent context.
+	//
+	// It takes precedence over the Instruction field if both are set.
+	//
+	// When InstructionProvider is used, ADK will NOT inject session state
+	// placeholders into the instruction. You can use
+	// llmagent.InjectSessionState() helper for that.
+	InstructionProvider InstructionProvider
+
+	// GlobalInstruction is the instruction for all agents in the entire
+	// agent tree.
+	//
+	// ONLY the GlobalInstruction in the root agent will take effect.
+	//
+	// For example: GlobalInstruction can make all agents have a stable identity
+	// or personality.
+	//
+	// The instructions can contain placeholders like {variable_name} that
+	// will be resolved at runtime using session state and context.
+	//
+	// {var} is used to insert the value of the state variable named var.
+	// {artifact.var} is used to insert the text content of the artifact named var.
+	// State key identifier should be match "^[a-zA-Z_][a-zA-Z0-9_]*$".
+	// Otherwise it will be treated as a literal.
+	//
+	// If the state variable or artifact does not exist, the agent will raise an
+	// error. If you want to ignore the error, you can append a ? to the
+	// variable name as in {var?}.
 	GlobalInstruction string
+	// GlobalInstructionProvider allows to create global instructions
+	// dynamically based on the agent context.
+	//
+	// It takes precedence over the GlobalInstruction field if both are set.
+	//
+	// When InstructionProvider is used, ADK will NOT inject session state
+	// placeholders into the instruction. You can use
+	// llmagent.InjectSessionState() helper for that.
+	GlobalInstructionProvider InstructionProvider
 
 	// LLM-based agent transfer configs.
 	DisallowTransferToParent bool
@@ -303,3 +356,5 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		event.Actions.StateDelta[a.OutputKey] = result
 	}
 }
+
+type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
