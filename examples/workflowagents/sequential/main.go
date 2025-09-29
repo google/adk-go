@@ -80,5 +80,5 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, sequentialAgent)
+	examples.Run(ctx, sequentialAgent, nil)
 }

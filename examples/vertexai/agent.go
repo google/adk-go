@@ -17,24 +17,44 @@ package main
 import (
 	"context"
 	"log"
-	"os"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/examples"
 	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
 )
 
+const (
+	modelName = "gemini-2.5-flash"
+)
+
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
-		APIKey: os.Getenv("GEMINI_API_KEY"),
-	})
+	rootAgent, err := сreateAgent()
 	if err != nil {
-		log.Fatalf("Failed to create model: %v", err)
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+	srvs, err := sessionservice.VertexAI(ctx, modelName)
+	if err != nil {
+		log.Fatalf("Failed to create session service: %v", err)
+	}
+
+	examples.Run(ctx, rootAgent, &examples.RunConfig{
+		SessionService: srvs,
+	})
+}
+
+func сreateAgent() (agent.Agent, error) {
+	ctx := context.Background()
+
+	model, err := gemini.NewModel(ctx, modelName, &genai.ClientConfig{})
+	if err != nil {
+		return nil, err
 	}
 
 	agent, err := llmagent.New(llmagent.Config{
@@ -47,8 +67,8 @@ func main() {
 		},
 	})
 	if err != nil {
-		log.Fatalf("Failed to create agent: %v", err)
+		return nil, err
 	}
 
-	examples.Run(ctx, agent, nil)
+	return agent, nil
 }

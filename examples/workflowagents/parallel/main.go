@@ -62,7 +62,7 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, parallelAgent)
+	examples.Run(ctx, parallelAgent, nil)
 }
 
 type myAgent struct {
