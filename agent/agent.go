@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 
+	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/memoryservice"
 	"google.golang.org/adk/session"
@@ -42,6 +43,9 @@ func New(cfg Config) (Agent, error) {
 		beforeAgent: cfg.BeforeAgent,
 		run:         cfg.Run,
 		afterAgent:  cfg.AfterAgent,
+		State: agentinternal.State{
+			AgentType: agentinternal.TypeCustomAgent,
+		},
 	}, nil
 }
 
@@ -87,6 +91,8 @@ type BeforeAgentCallback func(Context) (*genai.Content, error)
 type AfterAgentCallback func(Context, *session.Event, error) (*genai.Content, error)
 
 type agent struct {
+	agentinternal.State
+
 	name, description string
 	subAgents         []Agent
 

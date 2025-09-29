@@ -15,9 +15,12 @@
 package tool_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
@@ -64,17 +67,196 @@ func TestNewLongRunningFunctionTool(t *testing.T) {
 	_ = sumTool // use the tool
 }
 
+func NewContentFromFunctionResponseWithID(name string, response map[string]any, id string, role string) *genai.Content {
+	content := genai.NewContentFromFunctionResponse(name, response, genai.Role(role))
+	content.Parts[0].FunctionResponse.ID = id
+	return content
+}
+
+type IncArgs struct {
+}
+
+func TestLongRunningFunctionFlow(t *testing.T) {
+	functionCalled := 0
+	increaseByOne := func(ctx tool.Context, x IncArgs) map[string]string {
+		functionCalled++
+		return map[string]string{"status": "pending"}
+	}
+	testLongRunningFunctionFlow(t, increaseByOne, "status", &functionCalled)
+}
+
+func TestLongRunningStringFunctionFlow(t *testing.T) {
+	functionCalled := 0
+	increaseByOne := func(ctx tool.Context, x IncArgs) string {
+		functionCalled++
+		return "pending"
+	}
+	testLongRunningFunctionFlow(t, increaseByOne, "result", &functionCalled)
+}
+
 // --- Test Suite ---
-func TestAsyncFunction(t *testing.T) {
+func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx tool.Context, x IncArgs) Out, resultKey string, callCount *int) {
 	// 1. Setup
 	responses := []*genai.Content{
-		&genai.Content{Parts: []*genai.Part{
-			genai.NewPartFromFunctionCall("increaseByOne", map[string]any{}),
-		}},
-		&genai.Content{Parts: []*genai.Part{genai.NewPartFromText("response1")}},
-		&genai.Content{Parts: []*genai.Part{genai.NewPartFromText("response2")}},
-		&genai.Content{Parts: []*genai.Part{genai.NewPartFromText("response3")}},
-		&genai.Content{Parts: []*genai.Part{genai.NewPartFromText("response4")}},
+		genai.NewContentFromFunctionCall("increaseByOne", map[string]any{}, "model"),
+		genai.NewContentFromText("response1", "model"),
+		genai.NewContentFromText("response2", "model"),
+		genai.NewContentFromText("response3", "model"),
+		genai.NewContentFromText("response4", "model"),
+	}
+	mockModel := &testutil.MockModel{Responses: responses}
+
+	longRunningTool, err := tool.NewLongRunningFunctionTool(tool.FunctionToolConfig{
+		Name:        "increaseByOne",
+		Description: "increaseByOne",
+	}, increaseByOne)
+	if err != nil {
+		t.Fatalf("failed to create longRunningTool: %v", err)
+	}
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "long_running_agent",
+		Model: mockModel,
+		Tools: []tool.Tool{longRunningTool},
+	})
+	if err != nil {
+		t.Fatalf("failed to create llm agent: %v", err)
+	}
+	runner := testutil.NewTestAgentRunner(t, a)
+
+	// 2. Initial Run
+	eventStream := runner.Run(t, "test_session", "test1")
+	eventParts, err := testutil.CollectParts(eventStream)
+	if err != nil {
+		t.Fatalf("failed to collect events: %v", err)
+	}
+
+	// 3. Assertions for Initial Run
+	if len(mockModel.Requests) != 2 {
+		// Marshal the slice into a readable JSON string
+		requestsJSON, _ := json.MarshalIndent(mockModel.Requests, "", "  ")
+		t.Fatalf("got %d requests, want 2;\n- requests:\n%s", len(mockModel.Requests), requestsJSON)
+	}
+	if *callCount != 1 {
+		t.Errorf("function called %d times, want 1", *callCount)
+	}
+
+	// Assert first request
+	wantFirsteq := []*genai.Content{
+		genai.NewContentFromText("test1", "user"),
+	}
+	if diff := cmp.Diff(wantFirsteq, mockModel.Requests[0].Contents); diff != "" {
+		t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
+	}
+
+	// Assert second request
+	wantSecondReq := []*genai.Content{
+		genai.NewContentFromText("test1", "user"),
+		genai.NewContentFromFunctionCall("increaseByOne", map[string]any{}, "model"),
+		genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{resultKey: "pending"}, "user"),
+	}
+	if diff := cmp.Diff(wantSecondReq, mockModel.Requests[1].Contents); diff != "" {
+		t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
+	}
+
+	wantEventParts := []*genai.Part{
+		genai.NewPartFromFunctionCall("increaseByOne", map[string]any{}),
+		genai.NewPartFromFunctionResponse("increaseByOne", map[string]any{resultKey: "pending"}),
+		genai.NewPartFromText("response1"),
+	}
+	if diff := cmp.Diff(wantEventParts, eventParts, cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
+		cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID")); diff != "" {
+		t.Errorf("Event parts mismatch (-want +got):\n%s", diff)
+	}
+
+	functionCallEventPart := eventParts[0]
+	idFromTheFunctionCallEvent := functionCallEventPart.FunctionCall.ID
+
+	testCases := []struct {
+		name           string         // Name for the Run subtest
+		inputContent   *genai.Content // The content to send
+		wantReqCount   int            // Expected len(mockModel.Requests)
+		wantEventCount int            // Expected len(eventParts)
+		wantEventText  string         // Expected eventParts[0].Text
+		wantContent    *genai.Content // Expected output content
+	}{
+		{
+			name: "function response still waiting",
+			inputContent: NewContentFromFunctionResponseWithID(
+				"increaseByOne", map[string]any{"status": "still waiting"}, idFromTheFunctionCallEvent, "user",
+			),
+			wantReqCount:   3,
+			wantEventCount: 1,
+			wantEventText:  "response2",
+			wantContent:    genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{"status": "still waiting"}, "user"),
+		},
+		{
+			name: "function response result 2",
+			inputContent: NewContentFromFunctionResponseWithID(
+				"increaseByOne", map[string]any{"result": 2}, idFromTheFunctionCallEvent, "user",
+			),
+			wantReqCount:   4,
+			wantEventCount: 1,
+			wantEventText:  "response3",
+			wantContent:    genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{"result": 2}, "user"),
+		},
+		{
+			name: "function response result 3",
+			inputContent: NewContentFromFunctionResponseWithID(
+				"increaseByOne", map[string]any{"result": 3}, idFromTheFunctionCallEvent, "user",
+			),
+			wantReqCount:   5,
+			wantEventCount: 1,
+			wantEventText:  "response4",
+			wantContent:    genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{"result": 3}, "user"),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			eventStream := runner.RunContent(t, "test_session", tc.inputContent)
+			eventParts, err := testutil.CollectParts(eventStream)
+			if err != nil {
+				t.Fatalf("failed to collect events: %v", err)
+			}
+
+			// Assert against the values from the test case struct
+			if len(mockModel.Requests) != tc.wantReqCount {
+				t.Fatalf("got %d requests, want %d", len(mockModel.Requests), tc.wantReqCount)
+			}
+			latestRequestContents := mockModel.Requests[len(mockModel.Requests)-1].Contents
+			// content should still be 3 since the function responses are merged into one in contents_processor
+			if len(latestRequestContents) != 3 {
+				t.Fatalf("got %d latest request contents size, want %d", len(latestRequestContents), 3)
+			}
+
+			if diff := cmp.Diff(tc.wantContent, latestRequestContents[len(latestRequestContents)-1]); diff != "" {
+				t.Errorf("LLMRequest.Content mismatch (-want +got):\n%s", diff)
+			}
+
+			if len(eventParts) != tc.wantEventCount {
+				// Marshal the slice into a readable JSON string
+				partsJSON, _ := json.MarshalIndent(eventParts, "", "  ")
+				t.Fatalf("got %d events parts, want %d;\n- parts:\n%s", len(eventParts), tc.wantEventCount, partsJSON)
+			}
+			// This check is now safe because the Fatalf above would have stopped the test
+			if len(eventParts) > 0 && eventParts[0].Text != tc.wantEventText {
+				t.Errorf("got event part text %q, want %q", eventParts[0].Text, tc.wantEventText)
+			}
+		})
+	}
+
+	// Should still be one
+	if *callCount != 1 {
+		t.Errorf("function called %d times, want 1", *callCount)
+	}
+}
+
+func TestLongRunningToolIDsAreSet(t *testing.T) {
+	// 1. Setup
+	responses := []*genai.Content{
+		genai.NewContentFromFunctionCall("increaseByOne", map[string]any{}, "model"),
+		genai.NewContentFromText("response1", "model"),
 	}
 	mockModel := &testutil.MockModel{Responses: responses}
 	functionCalled := 0
@@ -106,33 +288,35 @@ func TestAsyncFunction(t *testing.T) {
 	runner := testutil.NewTestAgentRunner(t, a)
 
 	// 2. Initial Run
-	events := runner.Run(t, "test_session", "test1")
-	textParts, err := testutil.CollectTextParts(events)
+	eventStream := runner.Run(t, "test_session", "test1")
+	events, err := testutil.CollectEvents(eventStream)
 	if err != nil {
-		t.Fatalf("failed to collect text parts: %v", err)
+		t.Fatalf("failed to collect events: %v", err)
 	}
 
-	// 3. Assertions for Initial Run
-	if len(mockModel.Requests) != 2 {
-		t.Errorf("got %d requests, want 2", len(mockModel.Requests))
-	}
-	if functionCalled != 1 {
-		t.Errorf("function called %d times, want 1", functionCalled)
-	}
-	if len(textParts) != 1 {
-		t.Errorf("got %d text parts, want 1", len(textParts))
+	if len(events) != 3 { // first event is function call, seconds is function response, third is llm message back
+		// Marshal the slice into a readable JSON string
+		eventsJSON, _ := json.MarshalIndent(events, "", "  ")
+		t.Fatalf("got %d for events length, want 3;\n- events:\n%s", len(events), eventsJSON)
 	}
 
-	// Assert first request
-	expectedReqText1 := "test1"
-	if len(mockModel.Requests[0].Contents) != 1 {
-		t.Errorf("got %d requests content, want 1", len(mockModel.Requests[0].Contents))
+	// Assert responses
+	functionCallEvent := events[0]
+	functionResponseEvent := events[1]
+	llmResponseEvent := events[2]
+	// First event should have LongRunningToolIDs field
+	if functionCallEvent.LongRunningToolIDs == nil || len(functionCallEvent.LongRunningToolIDs) != 1 {
+		t.Fatalf("Invalid LongRunningToolIDs for functionCallEvent")
 	}
-	if len(mockModel.Requests[0].Contents[0].Parts) != 1 {
-		t.Errorf("got %d requests content parts, want 1", len(mockModel.Requests[0].Contents[0].Parts))
+	if functionResponseEvent.LongRunningToolIDs != nil {
+		t.Errorf("Invalid LongRunningToolIDs for functionResponseEvent")
 	}
-	if mockModel.Requests[0].Contents[0].Parts[0].Text != expectedReqText1 {
-		t.Errorf("request 1 mismatch:\ngot: %#v\nwant: %#v", mockModel.Requests[0].Contents[0].Parts[0].Text, expectedReqText1)
+	if len(llmResponseEvent.LongRunningToolIDs) != 0 {
+		t.Errorf("Invalid LongRunningToolIDs for llmResponseEvent")
 	}
-
+	if functionCallEvent.LongRunningToolIDs[0] != functionCallEvent.LLMResponse.Content.Parts[0].FunctionCall.ID {
+		t.Fatalf("Invalid LongRunningToolIDs for functionCallEvent got %q expected %q",
+			functionCallEvent.LongRunningToolIDs[0],
+			functionCallEvent.LLMResponse.Content.Parts[0].FunctionCall.ID)
+	}
 }

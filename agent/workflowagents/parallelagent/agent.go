@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/adk/agent"
+	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/session"
 )
 
@@ -43,7 +44,18 @@ func New(cfg Config) (agent.Agent, error) {
 
 	cfg.AgentConfig.Run = run
 
-	return agent.New(cfg.AgentConfig)
+	parallelAgent, err := agent.New(cfg.AgentConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	internalAgent, ok := parallelAgent.(agentinternal.Agent)
+	if !ok {
+		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
+	}
+	agentinternal.Reveal(internalAgent).AgentType = agentinternal.TypeParallelAgent
+
+	return parallelAgent, nil
 }
 
 func run(ctx agent.Context) iter.Seq2[*session.Event, error] {

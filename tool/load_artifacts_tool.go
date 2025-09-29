@@ -80,9 +80,24 @@ func (t *loadArtifactsTool) Run(ctx Context, args any) (any, error) {
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
 	}
-	artifactNames, ok := m["artifact_names"].([]string)
-	if !ok {
+	var artifactNames []string
+	artifactNamesRaw, exists := m["artifact_names"]
+	if !exists {
 		artifactNames = []string{}
+	} else {
+		// In order to cast properly from []any to []string we're gonna marshal and then
+		// unmarshal the artifact_names value.
+		artifactNamesJson, err := json.Marshal(artifactNamesRaw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal artifact_names to JSON: %w", err)
+		}
+		if err := json.Unmarshal(artifactNamesJson, &artifactNames); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal artifact_names from JSON to []string: %w", err)
+		}
+		// Ensure the slice is not nil if it's empty
+		if artifactNames == nil {
+			artifactNames = []string{}
+		}
 	}
 	result := map[string]any{
 		"artifact_names": artifactNames,
@@ -132,7 +147,9 @@ func (t *loadArtifactsTool) appendInitialInstructions(ctx Context, req *llm.Requ
 		"You have a list of artifacts:\n  %s\n\nWhen the user asks questions about"+
 			" any of the artifacts, you should call the `load_artifacts` function"+
 			" to load the artifact. Do not generate any text other than the"+
-			" function call.", string(artifactNamesJSON))
+			" function call. Whenever you are asked about artifacts, you"+
+			" should first load it. You must always load an artifact to access its"+
+			" content, even if it has been loaded before.", string(artifactNamesJSON))
 
 	utils.AppendInstructions(req, instructions)
 	return nil

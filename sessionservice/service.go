@@ -38,6 +38,11 @@ func Mem() Service {
 	return &inMemoryService{}
 }
 
+// VertexAI returns VertextAiSessionService implementation.
+func VertexAI(ctx context.Context, model string) (Service, error) {
+	return newVertexAiSessionService(ctx, model)
+}
+
 // StoredSession represents a session.
 //
 // Events and state can be modified only via the Service methods.

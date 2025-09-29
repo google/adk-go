@@ -15,8 +15,11 @@
 package sequentialagent
 
 import (
+	"fmt"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
+	agentinternal "google.golang.org/adk/internal/agent"
 )
 
 // New creates a SequentialAgent.
@@ -26,10 +29,21 @@ import (
 // Use the SequentialAgent when you want the execution to occur in a fixed,
 // strict order.
 func New(cfg Config) (agent.Agent, error) {
-	return loopagent.New(loopagent.Config{
+	sequentialAgent, err := loopagent.New(loopagent.Config{
 		AgentConfig:   cfg.AgentConfig,
 		MaxIterations: 1,
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	internalAgent, ok := sequentialAgent.(agentinternal.Agent)
+	if !ok {
+		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
+	}
+	agentinternal.Reveal(internalAgent).AgentType = agentinternal.TypeSequentialAgent
+
+	return sequentialAgent, nil
 }
 
 type Config struct {

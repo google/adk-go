@@ -50,5 +50,5 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, agent)
+	examples.Run(ctx, agent, nil)
 }

@@ -17,8 +17,11 @@ package main
 
 import (
 	"google.golang.org/adk/cmd/adkgo/root"
+	_ "google.golang.org/adk/cmd/adkgo/root/build"
+	_ "google.golang.org/adk/cmd/adkgo/root/build/webui"
 	_ "google.golang.org/adk/cmd/adkgo/root/deploy"
 	_ "google.golang.org/adk/cmd/adkgo/root/deploy/cloudrun"
+	_ "google.golang.org/adk/cmd/adkgo/root/run"
 	_ "google.golang.org/adk/cmd/adkgo/root/run/local"
 )
 

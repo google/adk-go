@@ -1,0 +1,137 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/runner"
+	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
+)
+
+// Note: you need to run the program from the loadartifacts directory
+// to fetch the image successfuly.
+func main() {
+	ctx := context.Background()
+
+	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+		APIKey: os.Getenv("GEMINI_API_KEY"),
+	})
+	if err != nil {
+		log.Fatalf("Failed to create model: %v", err)
+	}
+
+	agent, err := llmagent.New(llmagent.Config{
+		Name:        "artifact_describer",
+		Model:       model,
+		Description: "Agent to answer questions about artifacts.",
+		Instruction: "When user asks about the artifact, load them and describe them.",
+		Tools: []tool.Tool{
+			tool.NewLoadArtifactsTool(),
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	userID, appName := "test_user", "test_app"
+	sessionService := sessionservice.Mem()
+	// Create session.
+	resp, err := sessionService.Create(ctx, &sessionservice.CreateRequest{
+		AppName: appName,
+		UserID:  userID,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create the session service: %v", err)
+	}
+
+	session := resp.Session
+	artifactService := artifactservice.Mem()
+	// Populate artifacts that can be described later.
+	imageBytes, err := os.ReadFile("animal_picture.png")
+	if err != nil {
+		log.Fatalf("Failed to read image file: %v", err)
+	}
+	genai.NewPartFromBytes(imageBytes, "image/png")
+
+	_, err = artifactService.Save(ctx, &artifactservice.SaveRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: session.ID().SessionID,
+		FileName:  "animal_picture.png",
+		Part:      genai.NewPartFromBytes(imageBytes, "image/png"),
+	})
+	if err != nil {
+		log.Fatalf("Failed to save artifact: %v", err)
+	}
+
+	_, err = artifactService.Save(ctx, &artifactservice.SaveRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: session.ID().SessionID,
+		FileName:  "haiku.txt",
+		Part: genai.NewPartFromText(
+			"An old silent pond..." +
+				"A frog jumps into the pond," +
+				"splash! Silence again."),
+	})
+	if err != nil {
+		log.Fatalf("Failed to save artifact: %v", err)
+	}
+
+	r, err := runner.New(&runner.Config{
+		AppName:         appName,
+		Agent:           agent,
+		SessionService:  sessionService,
+		ArtifactService: artifactService,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create runner: %v", err)
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("\nUser -> ")
+
+		userInput, err := reader.ReadString('\n')
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
+
+		fmt.Print("\nAgent -> ")
+		for event, err := range r.Run(ctx, userID, session.ID().SessionID, userMsg, &runner.RunConfig{
+			StreamingMode: runner.StreamingModeSSE,
+		}) {
+			if err != nil {
+				fmt.Printf("\nAGENT_ERROR: %v\n", err)
+			} else {
+				for _, p := range event.LLMResponse.Content.Parts {
+					fmt.Print(p.Text)
+				}
+			}
+		}
+	}
+}

@@ -96,8 +96,6 @@ func NewEvent(invocationID string) *Event {
 	}
 }
 
-func (e *Event) Clone() *Event { return nil }
-
 // Actions represents the actions attached to an event.
 type Actions struct {
 	// Set by agent.Context implementation.
