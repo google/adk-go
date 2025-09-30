@@ -40,6 +40,7 @@ type State struct {
 	DisallowTransferToParent bool
 	DisallowTransferToPeers  bool
 
+	InputSchema  *genai.Schema
 	OutputSchema *genai.Schema
 
 	OutputKey string
