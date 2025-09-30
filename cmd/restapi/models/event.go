@@ -35,7 +35,7 @@ type Event struct {
 	GroundingMetadata  *genai.GroundingMetadata `json:"groundingMetadata"`
 	TurnComplete       bool                     `json:"turnComplete"`
 	Interrupted        bool                     `json:"interrupted"`
-	ErrorCode          int                      `json:"errorCode"`
+	ErrorCode          string                   `json:"errorCode"`
 	ErrorMessage       string                   `json:"errorMessage"`
 }
 

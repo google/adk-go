@@ -42,6 +42,7 @@ type Request struct {
 // It provides the first candidate response from the model if available.
 type Response struct {
 	Content           *genai.Content
+	CitationMetadata  *genai.CitationMetadata
 	GroundingMetadata *genai.GroundingMetadata
 	UsageMetadata     *genai.GenerateContentResponseUsageMetadata
 	// Partial indicates whether the content is part of a unfinished content stream.
@@ -53,6 +54,49 @@ type Response struct {
 	// Flag indicating that LLM was interrupted when generating the content.
 	// Usually it is due to user interruption during a bidi streaming.
 	Interrupted  bool
-	ErrorCode    int
+	ErrorCode    string
 	ErrorMessage string
+	FinishReason genai.FinishReason
+	AvgLogprobs  float64
+}
+
+func CreateResponse(res *genai.GenerateContentResponse) *Response {
+	usageMetadata := res.UsageMetadata
+	if len(res.Candidates) > 0 && res.Candidates[0] != nil {
+		candidate := res.Candidates[0]
+		if candidate.Content != nil && len(candidate.Content.Parts) > 0 {
+			return &Response{
+				Content:           candidate.Content,
+				GroundingMetadata: candidate.GroundingMetadata,
+				FinishReason:      candidate.FinishReason,
+				CitationMetadata:  candidate.CitationMetadata,
+				AvgLogprobs:       candidate.AvgLogprobs,
+				UsageMetadata:     usageMetadata,
+			}
+		} else {
+			return &Response{
+				ErrorCode:         candidate.FinishMessage,
+				ErrorMessage:      candidate.FinishMessage,
+				GroundingMetadata: candidate.GroundingMetadata,
+				FinishReason:      candidate.FinishReason,
+				CitationMetadata:  candidate.CitationMetadata,
+				AvgLogprobs:       candidate.AvgLogprobs,
+				UsageMetadata:     usageMetadata,
+			}
+		}
+	} else {
+		if res.PromptFeedback != nil {
+			return &Response{
+				ErrorCode:     string(res.PromptFeedback.BlockReason),
+				ErrorMessage:  res.PromptFeedback.BlockReasonMessage,
+				UsageMetadata: usageMetadata,
+			}
+		} else {
+			return &Response{
+				ErrorCode:     "UNKNOWN_ERROR",
+				ErrorMessage:  "Unkown error.",
+				UsageMetadata: usageMetadata,
+			}
+		}
+	}
 }

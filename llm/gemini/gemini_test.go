@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/llm"
@@ -57,6 +58,7 @@ func TestModel_Generate(t *testing.T) {
 					PromptTokensDetails:     []*genai.ModalityTokenCount{{Modality: "TEXT", TokenCount: 10}},
 					TotalTokenCount:         12,
 				},
+				FinishReason: "STOP",
 			},
 		},
 	}
@@ -74,7 +76,7 @@ func TestModel_Generate(t *testing.T) {
 				t.Errorf("Model.Generate() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if diff := cmp.Diff(tt.want, got); diff != "" {
+			if diff := cmp.Diff(tt.want, got, cmpopts.IgnoreFields(llm.Response{}, "AvgLogprobs")); diff != "" {
 				t.Errorf("Model.Generate() = %v, want %v\ndiff(-want +got):\n%v", got, tt.want, diff)
 			}
 		})

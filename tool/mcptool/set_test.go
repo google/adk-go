@@ -158,7 +158,7 @@ func TestMCPToolSet(t *testing.T) {
 
 	if diff := cmp.Diff(wantEvents, gotEvents,
 		cmpopts.IgnoreFields(session.Event{}, "ID", "Time", "InvocationID"),
-		cmpopts.IgnoreFields(llm.Response{}, "UsageMetadata"),
+		cmpopts.IgnoreFields(llm.Response{}, "UsageMetadata", "AvgLogprobs", "FinishReason"),
 		cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
 		cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID"),
 		cmpopts.IgnoreFields(genai.Part{}, "ThoughtSignature")); diff != "" {

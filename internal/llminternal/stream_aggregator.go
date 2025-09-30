@@ -48,20 +48,15 @@ func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genRe
 			return
 		}
 		candidate := genResp.Candidates[0]
-		complete := candidate.FinishReason != ""
-		resp := &llm.Response{
-			Content:           candidate.Content,
-			GroundingMetadata: candidate.GroundingMetadata,
-			UsageMetadata:     genResp.UsageMetadata,
-			Partial:           false,
-			TurnComplete:      complete,
-			Interrupted:       false, // no interruptions in unary
-		}
+		resp := llm.CreateResponse(genResp)
+		resp.TurnComplete = candidate.FinishReason != ""
+		// Aggregate the response and check if an intermidiate event to yield was created
 		if aggrResp := s.aggregateResponse(resp); aggrResp != nil {
 			if !yield(aggrResp, nil) {
 				return // Consumer stopped
 			}
 		}
+		// Yield the processed response
 		if !yield(resp, nil) {
 			return // Consumer stopped
 		}
@@ -87,6 +82,7 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *llm.Respons
 			s.text += part0.Text
 		}
 		llmResponse.Partial = true
+		return nil
 	} else
 	// If there is aggregated text and there is no content or parts return aggregated response
 	if (s.thoughtText != "" || s.text != "") &&
@@ -94,7 +90,7 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *llm.Respons
 			len(llmResponse.Content.Parts) == 0 ||
 			// don't yield the merged text event when receiving audio data
 			(len(llmResponse.Content.Parts) > 0 && llmResponse.Content.Parts[0].InlineData == nil)) {
-		return s.Close()
+		return s.createAggregateResponse()
 	}
 
 	return nil
@@ -103,6 +99,10 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *llm.Respons
 // Close generates an aggregated response at the end, if needed,
 // this should be called after all the model responses are processed.
 func (s *streamingResponseAggregator) Close() *llm.Response {
+	return s.createAggregateResponse()
+}
+
+func (s *streamingResponseAggregator) createAggregateResponse() *llm.Response {
 	if (s.text != "" || s.thoughtText != "") && s.response != nil {
 		var parts []*genai.Part
 		if s.thoughtText != "" {
@@ -118,15 +118,16 @@ func (s *streamingResponseAggregator) Close() *llm.Response {
 			ErrorMessage:      s.response.ErrorMessage,
 			UsageMetadata:     s.response.UsageMetadata,
 			GroundingMetadata: s.response.GroundingMetadata,
+			FinishReason:      s.response.FinishReason,
 		}
-		s.Clear()
+		s.clear()
 		return response
 	}
-	s.Clear()
+	s.clear()
 	return nil
 }
 
-func (s *streamingResponseAggregator) Clear() {
+func (s *streamingResponseAggregator) clear() {
 	s.response = nil
 	s.text = ""
 	s.thoughtText = ""

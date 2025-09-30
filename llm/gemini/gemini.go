@@ -54,12 +54,7 @@ func (m *model) Generate(ctx context.Context, req *llm.Request) (*llm.Response, 
 		// shouldn't happen?
 		return nil, fmt.Errorf("empty response")
 	}
-	candidate := resp.Candidates[0]
-	return &llm.Response{
-		Content:           candidate.Content,
-		GroundingMetadata: candidate.GroundingMetadata,
-		UsageMetadata:     resp.UsageMetadata,
-	}, nil
+	return llm.CreateResponse(resp), nil
 }
 
 // GenerateStream calls the model synchronously.
