@@ -146,5 +146,4 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 	}
 
 	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), rBase))
-	// log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), serverConfig.Cors.Handler(rBase)))
 }
