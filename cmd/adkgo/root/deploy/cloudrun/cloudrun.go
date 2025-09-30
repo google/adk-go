@@ -204,9 +204,11 @@ func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
 		func(p util.Printer) error {
 			cmd := exec.Command("gcloud", "run", "deploy", f.cloudRun.serviceName,
 				"--source", ".",
-				"--set-secrets=GOOGLE_API_KEY=ADK_KEY:latest",
+				"--set-secrets=GOOGLE_API_KEY=GOOGLE_API_KEY:latest",
 				"--region", f.gcloud.region,
-				"--project", f.gcloud.projectName)
+				"--project", f.gcloud.projectName,
+				"--ingress", "internal",
+				"--no-allow-unauthenticated")
 
 			cmd.Dir = f.build.tempDir
 			return util.LogCommand(cmd, p)

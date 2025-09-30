@@ -16,20 +16,13 @@
 package webui
 
 import (
-<<<<<<< HEAD
 	"fmt"
-=======
->>>>>>> dcf3b20 (CLI for command build webui)
 	"os"
 	"os/exec"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/adk/cmd/adkgo/root/build"
-<<<<<<< HEAD
 	"google.golang.org/adk/internal/cli/util"
-=======
-	"google.golang.org/adk/cmd/util"
->>>>>>> dcf3b20 (CLI for command build webui)
 )
 
 type buildFlags struct {
@@ -47,11 +40,7 @@ type runLocalFlags struct {
 
 var flags runLocalFlags
 
-<<<<<<< HEAD
 // webuiCmd represents the build webui command
-=======
-// webuiCmd represents the cloudrun command
->>>>>>> dcf3b20 (CLI for command build webui)
 var webuiCmd = &cobra.Command{
 	Use:   "webui",
 	Short: "Build static ADK Web UI from sources.",
@@ -60,25 +49,15 @@ var webuiCmd = &cobra.Command{
 	WARNINIG: deletes the whole build directory and recreates it anew!
 	You need: 
 	  - a downloaded version of adk-web (available at https://github.com/google/adk-web)
-<<<<<<< HEAD
 	  - an ability to build adk-web (prerequisites on https://github.com/google/adk-web):
 	  	npm (node js: see https://nodejs.org/en/download)
 		ng (angular cli: see https://angular.dev/tools/cli/setup-local)		
-=======
-	  - an ability to build adk-web (prerequisites on  https://github.com/google/adk-web):
-	  	npm  (node js: see https://nodejs.org/en/download)
-		ng (anglural cli: see https://angular.dev/tools/cli/setup-local)		
->>>>>>> dcf3b20 (CLI for command build webui)
 	  - go
 
 	Building the adk-web takes a while, and sometimes presents some warnings.
 	`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-<<<<<<< HEAD
 		err := flags.buildWebui()
-=======
-		err := flags.runLocal()
->>>>>>> dcf3b20 (CLI for command build webui)
 		return err
 	},
 }
@@ -91,16 +70,11 @@ func init() {
 }
 
 func (f *runLocalFlags) cleanTemp() error {
-<<<<<<< HEAD
 	return util.LogStartStop("Cleaning target directory",
-=======
-	err := util.LogStartStop("Cleaning target directory",
->>>>>>> dcf3b20 (CLI for command build webui)
 		func(p util.Printer) error {
 			p("Clean target directory starting with", f.build.targetDir)
 			err := os.RemoveAll(f.build.targetDir)
 			if err != nil {
-<<<<<<< HEAD
 				return fmt.Errorf("failed to clean target directory %v: %v", f.build.targetDir, err)
 			}
 			err = os.MkdirAll(f.build.targetDir, os.ModeDir|0700)
@@ -113,23 +87,11 @@ func (f *runLocalFlags) cleanTemp() error {
 
 func (f *runLocalFlags) ngBuildADKWebUI() error {
 	return util.LogStartStop("Building ADK Web UI",
-=======
-				return err
-			}
-			return os.MkdirAll(f.build.targetDir, os.ModeDir|0700)
-		})
-	return err
-}
-
-func (f *runLocalFlags) makeDistForAdkWebUI() error {
-	err := util.LogStartStop("Making dist for Adk Web UI",
->>>>>>> dcf3b20 (CLI for command build webui)
 		func(p util.Printer) error {
 			cmd := exec.Command("ng", "build", "--output-path="+f.build.targetDir)
 			cmd.Dir = f.source.webuiDir
 			return util.LogCommand(cmd, p)
 		})
-<<<<<<< HEAD
 }
 
 func (f *runLocalFlags) buildWebui() error {
@@ -138,22 +100,4 @@ func (f *runLocalFlags) buildWebui() error {
 		return err
 	}
 	return f.ngBuildADKWebUI()
-=======
-	return err
-}
-
-func (f *runLocalFlags) runLocal() error {
-	var err error
-
-	err = f.cleanTemp()
-	if err != nil {
-		return err
-	}
-	err = f.makeDistForAdkWebUI()
-	if err != nil {
-		return err
-	}
-
-	return nil
->>>>>>> dcf3b20 (CLI for command build webui)
 }

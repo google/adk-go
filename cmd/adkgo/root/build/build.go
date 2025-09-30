@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-<<<<<<< HEAD
 // package build handles command line parameters for command build
-=======
->>>>>>> dcf3b20 (CLI for command build webui)
 package build
 
 import (
