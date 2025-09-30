@@ -162,9 +162,7 @@ func (f *runLocalFlags) runLocalServer() error {
 }
 
 func (f *runLocalFlags) runLocal() error {
-	var err error = nil
-
-	err = f.computeFlags()
+	err := f.computeFlags()
 	if err != nil {
 		return err
 	}
