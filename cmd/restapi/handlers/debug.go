@@ -50,7 +50,6 @@ func (c *DebugAPIController) TraceDict(rw http.ResponseWriter, req *http.Request
 		return
 	}
 	traceDict := c.spansExporter.GetTraceDict()
-	fmt.Printf("traceDict: %v\n", traceDict)
 	eventDict, ok := traceDict[eventID]
 	if !ok {
 		http.Error(rw, fmt.Sprintf("event not found: %s", eventID), http.StatusNotFound)

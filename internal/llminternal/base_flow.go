@@ -137,7 +137,7 @@ func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
 
 			// Build the event and yield.
 			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools)
-			telemetry.TraceLLMCall(spans, ctx, modelResponseEvent, req)
+			telemetry.TraceLLMCall(spans, ctx, req, f.Model, modelResponseEvent)
 			if !yield(modelResponseEvent, nil) {
 				return
 			}

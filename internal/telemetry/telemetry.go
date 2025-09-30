@@ -17,6 +17,7 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -26,6 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
@@ -54,6 +56,10 @@ var (
 		spanProcessors: []sdktrace.SpanProcessor{},
 		mu:             &sync.RWMutex{},
 	}
+)
+
+const (
+	systemName = "gcp.vertex.agent"
 )
 
 // AddSpanProcessor adds a span processor to the local tracer config.
@@ -88,8 +94,8 @@ func getTracers() []trace.Tracer {
 		RegisterTelemetry()
 	}
 	return []trace.Tracer{
-		localTracer.tp.Tracer("gcp.vertex.agent"),
-		otel.GetTracerProvider().Tracer("gcp.vertex.agent"),
+		localTracer.tp.Tracer(systemName),
+		otel.GetTracerProvider().Tracer(systemName),
 	}
 }
 
@@ -105,17 +111,62 @@ func StartTrace(ctx context.Context, traceName string) []trace.Span {
 }
 
 // TraceLLMCall fills the call_llm event details.
-func TraceLLMCall(spans []trace.Span, agentCtx agent.Context, event *session.Event, llmRequest *llm.Request) {
+func TraceLLMCall(spans []trace.Span, agentCtx agent.Context, llmRequest *llm.Request, model llm.Model, event *session.Event) {
 	for _, span := range spans {
 		fmt.Printf("TraceLLMCall: %v\n", span)
 		attributes := []attribute.KeyValue{
-			attribute.String("gen_ai.system", "gcp.vertex.agent"),
-			// attribute.String("gen_ai.request.model", agentCtx.Agent().Model),
+			attribute.String("gen_ai.system", systemName),
+			attribute.String("gen_ai.request.model", model.Name()),
 			attribute.String("gcp.vertex.agent.invocation_id", event.InvocationID),
 			attribute.String("gcp.vertex.agent.session_id", agentCtx.Session().ID().SessionID),
 			attribute.String("gcp.vertex.agent.event_id", event.ID),
+			attribute.String("gcp.vertex.agent.llm_request", safeSerialize(llmRequestToTrace(llmRequest, model))),
+			attribute.String("gcp.vertex.agent.llm_response", safeSerialize(event.LLMResponse)),
 		}
+
+		if llmRequest.GenerateConfig.TopP != nil {
+			attributes = append(attributes, attribute.Float64("gen_ai.request.top_p", float64(*llmRequest.GenerateConfig.TopP)))
+		}
+
+		if llmRequest.GenerateConfig.MaxOutputTokens != 0 {
+			attributes = append(attributes, attribute.Int("gen_ai.request.max_tokens", int(llmRequest.GenerateConfig.MaxOutputTokens)))
+		}
+
+		// TODO: add usage_metadata and finish_reason once ADK has them.
+
 		span.SetAttributes(attributes...)
 		span.End()
 	}
+}
+
+func safeSerialize(obj any) string {
+	dump, err := json.Marshal(obj)
+	if err != nil {
+		return "<not serializable>"
+	}
+	return string(dump)
+}
+
+func llmRequestToTrace(llmRequest *llm.Request, model llm.Model) map[string]any {
+	result := map[string]any{
+		"config":  llmRequest.GenerateConfig,
+		"model":   model.Name(),
+		"content": []*genai.Content{},
+	}
+	for _, content := range llmRequest.Contents {
+		parts := []*genai.Part{}
+		// filter out InlineData part
+		for _, part := range content.Parts {
+			if part.InlineData != nil {
+				continue
+			}
+			parts = append(parts, part)
+		}
+		filteredContent := &genai.Content{
+			Role:  content.Role,
+			Parts: parts,
+		}
+		result["content"] = append(result["content"].([]*genai.Content), filteredContent)
+	}
+	return result
 }
