@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/rs/cors"
 	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/cmd/restapi/config"
 	"google.golang.org/adk/cmd/restapi/handlers"
@@ -111,10 +110,6 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 		AgentLoader:     serveConfig.AgentLoader,
 		ArtifactService: serveConfig.ArtifactService,
 	}
-	serverConfig.Cors = *cors.New(cors.Options{
-		AllowedOrigins:   []string{c.FrontendAddress},
-		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodOptions, http.MethodDelete, http.MethodPut},
-		AllowCredentials: true})
 
 	rBase := mux.NewRouter().StrictSlash(true)
 	rBase.Use(Logger)
