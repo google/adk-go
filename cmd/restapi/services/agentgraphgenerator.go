@@ -180,7 +180,7 @@ func drawNode(graph *gographviz.Graph, parentGraph *gographviz.Graph, instance a
 		cluster := gographviz.NewGraph()
 		err := cluster.SetName("cluster_" + name)
 		if err != nil {
-			return fmt.Errorf("set subgraph name: %w", err)
+			return fmt.Errorf("set cluster name: %w", err)
 		}
 		err = graph.AddSubGraph(graph.Name, cluster.Name, map[string]string{
 			"style":     "rounded",
@@ -189,7 +189,7 @@ func drawNode(graph *gographviz.Graph, parentGraph *gographviz.Graph, instance a
 			"fontcolor": LightGray,
 		})
 		if err != nil {
-			return fmt.Errorf("add subgraph: %w", err)
+			return fmt.Errorf("add cluster: %w", err)
 		}
 		return drawCluster(graph, cluster, agent, highlightedPairs, visitedNodes)
 	} else {
@@ -239,7 +239,7 @@ func buildGraph(graph *gographviz.Graph, parentGraph *gographviz.Graph, instance
 
 	err := drawNode(graph, parentGraph, instance, highlightedPairs, visitedNodes)
 	if err != nil {
-		return err
+		return fmt.Errorf("draw node: %w", err)
 	}
 	agent, ok := instance.(agent.Agent)
 	if !ok {
@@ -251,18 +251,18 @@ func buildGraph(graph *gographviz.Graph, parentGraph *gographviz.Graph, instance
 		for _, tool := range tools {
 			err = drawNode(graph, parentGraph, tool, highlightedPairs, visitedNodes)
 			if err != nil {
-				return fmt.Errorf("draw node: %w", err)
+				return fmt.Errorf("draw tool node: %w", err)
 			}
 			err = drawEdge(graph, nodeName(agent), nodeName(tool), highlightedPairs)
 			if err != nil {
-				return fmt.Errorf("draw edge: %w", err)
+				return fmt.Errorf("draw tool edge: %w", err)
 			}
 		}
 	}
 	for _, subAgent := range agent.SubAgents() {
 		err = buildGraph(graph, parentGraph, subAgent, highlightedPairs, visitedNodes)
 		if err != nil {
-			return fmt.Errorf("build graph: %w", err)
+			return fmt.Errorf("build sub agent graph: %w", err)
 		}
 	}
 	return nil
@@ -271,21 +271,21 @@ func buildGraph(graph *gographviz.Graph, parentGraph *gographviz.Graph, instance
 func GetAgentGraph(ctx context.Context, agent agent.Agent, highlightedPairs [][]string) (string, error) {
 	graph := gographviz.NewGraph()
 	if err := graph.SetName("AgentGraph"); err != nil {
-		return "", err
+		return "", fmt.Errorf("set graph name: %w", err)
 	}
 	if err := graph.SetDir(true); err != nil {
-		return "", err
+		return "", fmt.Errorf("set graph direction: %w", err)
 	}
 	if err := graph.AddAttr(graph.Name, "rankdir", "LR"); err != nil {
-		return "", err
+		return "", fmt.Errorf("set graph rank direction: %w", err)
 	}
 	if err := graph.AddAttr(graph.Name, "bgcolor", Background); err != nil {
-		return "", err
+		return "", fmt.Errorf("set graph background color: %w", err)
 	}
 	visitedNodes := map[string]bool{}
 	err := buildGraph(graph, graph, agent, highlightedPairs, visitedNodes)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("build root graph: %w", err)
 	}
 	return graph.String(), nil
 }
