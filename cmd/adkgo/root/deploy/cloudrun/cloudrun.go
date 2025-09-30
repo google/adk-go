@@ -207,7 +207,7 @@ func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
 				"--set-secrets=GOOGLE_API_KEY=GOOGLE_API_KEY:latest",
 				"--region", f.gcloud.region,
 				"--project", f.gcloud.projectName,
-				"--ingress", "internal",
+				"--ingress", "all",
 				"--no-allow-unauthenticated")
 
 			cmd.Dir = f.build.tempDir
