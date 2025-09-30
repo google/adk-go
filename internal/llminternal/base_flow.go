@@ -110,10 +110,6 @@ func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
 		}
 		_, globalSpan := globalTracer.Start(ctx, "call_llm")
 		_, localSpan := localTracer.Start(ctx, "call_llm")
-		// defer func() {
-		// 	globalSpan.End()
-		// 	localSpan.End()
-		// }()
 		// Calls the LLM.
 		for resp, err := range f.callLLM(ctx, req) {
 			if err != nil {
