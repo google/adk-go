@@ -15,6 +15,7 @@
 package telemetry
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -77,15 +78,25 @@ func RegisterTelemetry() {
 
 // If the global tracer is not set, the default NoopTracerProvider will be used.
 // That means that the spans are NOT recording/exporting
-func GetGlobalTracer() trace.Tracer {
-	return otel.GetTracerProvider().Tracer("gcp.vertex.agent")
-}
-
-func GetLocalTracer() trace.Tracer {
+// If the local tracer is not set, we'll set up tracer with all registered span processors.
+func getTracers() []trace.Tracer {
 	if localTracer.tp == nil {
 		RegisterTelemetry()
 	}
-	return localTracer.tp.Tracer("gcp.vertex.agent")
+	return []trace.Tracer{
+		localTracer.tp.Tracer("gcp.vertex.agent"),
+		otel.GetTracerProvider().Tracer("gcp.vertex.agent"),
+	}
+}
+
+func StartTrace(ctx context.Context, traceName string) []trace.Span {
+	tracers := getTracers()
+	spans := make([]trace.Span, len(tracers))
+	for i, tracer := range tracers {
+		_, span := tracer.Start(ctx, traceName)
+		spans[i] = span
+	}
+	return spans
 }
 
 func TraceLLMCall(spans []trace.Span, agentCtx agent.Context, event *session.Event, llmRequest *llm.Request) {
