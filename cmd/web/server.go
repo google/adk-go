@@ -123,7 +123,8 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 
 		rUi := rBase.Methods("GET").PathPrefix("/ui/").Subrouter()
 
-		// generate runtime-config in the runtime
+		// generate /assets/config/runtime-config.json in the runtime.
+		// It removes the need to prepare this file during deployment and update the distribution files.
 		runtimeConfigResponse := struct {
 			BackendUrl string `json:"backendUrl"`
 		}{BackendUrl: c.BackendAddress}
