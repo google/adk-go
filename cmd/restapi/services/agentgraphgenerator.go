@@ -60,10 +60,10 @@ func nodeCaption(instance any) string {
 	switch i := instance.(type) {
 	case agent.Agent:
 		caption = "🤖 " + i.Name()
-		agentInternal, ok := i.(agentinternal.Agent)
+		typedAgent, ok := i.(agentinternal.Agent)
 		if ok {
-			if slices.Contains(supportedClusterAgents, agentinternal.Reveal(agentInternal).AgentType) {
-				caption = i.Name() + " (" + string(agentinternal.Reveal(agentInternal).AgentType) + ")"
+			if slices.Contains(supportedClusterAgents, agentinternal.Reveal(typedAgent).AgentType) {
+				caption = i.Name() + " (" + string(agentinternal.Reveal(typedAgent).AgentType) + ")"
 			}
 		}
 	case tool.Tool:
