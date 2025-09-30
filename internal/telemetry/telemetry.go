@@ -18,7 +18,6 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync"
 
 	"go.opentelemetry.io/otel"
@@ -113,7 +112,6 @@ func StartTrace(ctx context.Context, traceName string) []trace.Span {
 // TraceLLMCall fills the call_llm event details.
 func TraceLLMCall(spans []trace.Span, agentCtx agent.Context, llmRequest *llm.Request, model llm.Model, event *session.Event) {
 	for _, span := range spans {
-		fmt.Printf("TraceLLMCall: %v\n", span)
 		attributes := []attribute.KeyValue{
 			attribute.String("gen_ai.system", systemName),
 			attribute.String("gen_ai.request.model", model.Name()),
