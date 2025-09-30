@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package telemetry allows to set up custom telemetry processors that the ADK events
+// will be emitted to.
 package telemetry
 
 import (
@@ -19,6 +21,11 @@ import (
 	internaltelemetry "google.golang.org/adk/internal/telemetry"
 )
 
+// RegisterSpanProcessor registers the span processor to local trace provider instance.
+// Any processor should be registered BEFORE any of the events are emitted, otherwise
+// the registration will be ignored.
+// In addition to the RegisterSpanProcessor function, global trace provider configs
+// are respected.
 func RegisterSpanProcessor(processor sdktrace.SpanProcessor) {
 	internaltelemetry.AddSpanProcessor(processor)
 }

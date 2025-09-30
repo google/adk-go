@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package telemetry sets up the open telemetry exporters to the ADK.
 package telemetry
 
 import (
@@ -55,12 +56,15 @@ var (
 	}
 )
 
+// AddSpanProcessor adds a span processor to the local tracer config.
 func AddSpanProcessor(processor sdktrace.SpanProcessor) {
 	localTracerConfig.mu.Lock()
 	defer localTracerConfig.mu.Unlock()
 	localTracerConfig.spanProcessors = append(localTracerConfig.spanProcessors, processor)
 }
 
+// RegisterTelemetry sets up the local tracer that will be used to emit traces.
+// We use local tracer to respect the global tracer configurations.
 func RegisterTelemetry() {
 	once.Do(func() {
 		traceProvider := sdktrace.NewTracerProvider(
@@ -89,6 +93,7 @@ func getTracers() []trace.Tracer {
 	}
 }
 
+// StartTrace returns two spans to start emitting events, one from global tracer and second from the local.
 func StartTrace(ctx context.Context, traceName string) []trace.Span {
 	tracers := getTracers()
 	spans := make([]trace.Span, len(tracers))
@@ -99,6 +104,7 @@ func StartTrace(ctx context.Context, traceName string) []trace.Span {
 	return spans
 }
 
+// TraceLLMCall fills the call_llm event details.
 func TraceLLMCall(spans []trace.Span, agentCtx agent.Context, event *session.Event, llmRequest *llm.Request) {
 	for _, span := range spans {
 		fmt.Printf("TraceLLMCall: %v\n", span)
