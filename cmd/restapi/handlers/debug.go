@@ -15,6 +15,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gorilla/mux"
@@ -29,15 +30,33 @@ import (
 type DebugAPIController struct {
 	sessionService sessionservice.Service
 	agentloader    services.AgentLoader
+	spansExporter  *services.APIServerSpanExporter
 }
 
-func NewDebugAPIController(sessionService sessionservice.Service, agentLoader services.AgentLoader) *DebugAPIController {
-	return &DebugAPIController{sessionService: sessionService, agentloader: agentLoader}
+func NewDebugAPIController(sessionService sessionservice.Service, agentLoader services.AgentLoader, spansExporter *services.APIServerSpanExporter) *DebugAPIController {
+	return &DebugAPIController{
+		sessionService: sessionService,
+		agentloader:    agentLoader,
+		spansExporter:  spansExporter,
+	}
 }
 
 // TraceDict returns the debug information for the session in form of dictionary.
-func (*DebugAPIController) TraceDict(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
+func (c *DebugAPIController) TraceDict(rw http.ResponseWriter, req *http.Request) {
+	params := mux.Vars(req)
+	eventID := params["event_id"]
+	if eventID == "" {
+		http.Error(rw, "event_id parameter is required", http.StatusBadRequest)
+		return
+	}
+	traceDict := c.spansExporter.GetTraceDict()
+	fmt.Printf("traceDict: %v\n", traceDict)
+	eventDict, ok := traceDict[eventID]
+	if !ok {
+		http.Error(rw, fmt.Sprintf("event not found: %s", eventID), http.StatusNotFound)
+		return
+	}
+	EncodeJSONResponse(eventDict, http.StatusOK, rw)
 }
 
 // EventGraph returns the debug information for the session and session events in form of graph.
