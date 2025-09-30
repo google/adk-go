@@ -45,6 +45,7 @@ type Response struct {
 	CitationMetadata  *genai.CitationMetadata
 	GroundingMetadata *genai.GroundingMetadata
 	UsageMetadata     *genai.GenerateContentResponseUsageMetadata
+	LogprobsResult    *genai.LogprobsResult
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
 	Partial bool
@@ -71,16 +72,18 @@ func CreateResponse(res *genai.GenerateContentResponse) *Response {
 				FinishReason:      candidate.FinishReason,
 				CitationMetadata:  candidate.CitationMetadata,
 				AvgLogprobs:       candidate.AvgLogprobs,
+				LogprobsResult:    candidate.LogprobsResult,
 				UsageMetadata:     usageMetadata,
 			}
 		} else {
 			return &Response{
-				ErrorCode:         candidate.FinishMessage,
+				ErrorCode:         string(candidate.FinishReason),
 				ErrorMessage:      candidate.FinishMessage,
 				GroundingMetadata: candidate.GroundingMetadata,
 				FinishReason:      candidate.FinishReason,
 				CitationMetadata:  candidate.CitationMetadata,
 				AvgLogprobs:       candidate.AvgLogprobs,
+				LogprobsResult:    candidate.LogprobsResult,
 				UsageMetadata:     usageMetadata,
 			}
 		}
