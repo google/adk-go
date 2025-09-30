@@ -62,24 +62,20 @@ func (r *TestAgentRunner) session(t *testing.T, appName, userID, sessionID strin
 
 func (r *TestAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.Seq2[*session.Event, error] {
 	t.Helper()
-	ctx := t.Context()
-
-	userID := "test_user"
-
-	session, err := r.session(t, r.appName, userID, sessionID)
-	if err != nil {
-		t.Fatalf("failed to get/create session: %v", err)
-	}
 
 	var content *genai.Content
 	if newMessage != "" {
 		content = genai.NewContentFromText(newMessage, genai.RoleUser)
 	}
-
-	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &runner.RunConfig{})
+	return r.RunContent(t, sessionID, content)
 }
 
 func (r *TestAgentRunner) RunContent(t *testing.T, sessionID string, content *genai.Content) iter.Seq2[*session.Event, error] {
+	t.Helper()
+	return r.RunContentWithConfig(t, sessionID, content, &runner.RunConfig{})
+}
+
+func (r *TestAgentRunner) RunContentWithConfig(t *testing.T, sessionID string, content *genai.Content, cfg *runner.RunConfig) iter.Seq2[*session.Event, error] {
 	t.Helper()
 	ctx := t.Context()
 
@@ -90,7 +86,7 @@ func (r *TestAgentRunner) RunContent(t *testing.T, sessionID string, content *ge
 		t.Fatalf("failed to get/create session: %v", err)
 	}
 
-	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &runner.RunConfig{})
+	return r.runner.Run(ctx, userID, session.ID().SessionID, content, cfg)
 }
 
 func NewTestAgentRunner(t *testing.T, agent agent.Agent) *TestAgentRunner {

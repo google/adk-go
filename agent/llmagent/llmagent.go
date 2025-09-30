@@ -46,6 +46,7 @@ func New(cfg Config) (agent.Agent, error) {
 
 		State: llminternal.State{
 			Model:                    cfg.Model,
+			GenerateContentConfig:    cfg.GenerateContentConfig,
 			Tools:                    cfg.Tools,
 			DisallowTransferToParent: cfg.DisallowTransferToParent,
 			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,

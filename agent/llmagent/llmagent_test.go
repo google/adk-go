@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
+	"google.golang.org/adk/runner"
 
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/llm/gemini"
@@ -83,6 +84,52 @@ func TestLLMAgent(t *testing.T) {
 				t.Fatalf("stream = (%q, %v), want exactly one text response", texts, err)
 			}
 		})
+	}
+}
+
+func TestLLMAgentStreamingModeSSE(t *testing.T) {
+	model := newGeminiModel(t, "gemini-2.5-flash", nil)
+	a, err := llmagent.New(llmagent.Config{
+		Name:                     "calculator",
+		Description:              "calculating agent",
+		Model:                    model,
+		Instruction:              "Think deep. Always double check the answer before making the conclusion.",
+		DisallowTransferToParent: true,
+		DisallowTransferToPeers:  true,
+		GenerateContentConfig: &genai.GenerateContentConfig{
+			ThinkingConfig: &genai.ThinkingConfig{
+				IncludeThoughts: true, // can trigger multiple message.
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLLMAgent failed: %v", err)
+	}
+	testRunner := testutil.NewTestAgentRunner(t, a)
+	stream := testRunner.RunContentWithConfig(t, "test_session", genai.NewContentFromText("What is the sum of the first 50 prime numbers?", "user"), &runner.RunConfig{StreamingMode: runner.StreamingModeSSE})
+	events, err := testutil.CollectEvents(stream)
+	gotThought := false
+	numContents := 0
+	for _, e := range events {
+		t.Logf("event: %v", e)
+		if e.LLMResponse == nil || e.LLMResponse.Content == nil {
+			continue
+		}
+		numContents++
+		for _, p := range e.LLMResponse.Content.Parts {
+			if p.Thought {
+				gotThought = true
+			}
+		}
+	}
+	if err != nil {
+		t.Fatalf("stream = (_, %v), want (_, nil)", err)
+	}
+	if numContents <= 1 {
+		t.Errorf("stream returned %d events with content, want more than 1 event", numContents)
+	}
+	if !gotThought {
+		t.Error("stream returned no thought, want thought")
 	}
 }
 
