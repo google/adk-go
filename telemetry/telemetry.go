@@ -15,56 +15,10 @@
 package telemetry
 
 import (
-	"fmt"
-	"sync"
-
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/llm"
-	"google.golang.org/adk/session"
-
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	internaltelemetry "google.golang.org/adk/internal/telemetry"
 )
 
-var (
-	once   sync.Once
-	limits = sdktrace.SpanLimits{
-		AttributeValueLengthLimit:   -1,
-		AttributeCountLimit:         -1,
-		EventCountLimit:             -1,
-		LinkCountLimit:              -1,
-		AttributePerEventCountLimit: -1,
-		AttributePerLinkCountLimit:  -1,
-	}
-)
-
-func RegisterTelemetry(processors []sdktrace.SpanProcessor) {
-	once.Do(func() {
-		traceProvider := sdktrace.NewTracerProvider(
-			sdktrace.WithRawSpanLimits(limits),
-		)
-		for _, processor := range processors {
-			traceProvider.RegisterSpanProcessor(processor)
-		}
-		otel.SetTracerProvider(traceProvider)
-	})
-}
-
-func GetTracer() trace.Tracer {
-	return otel.GetTracerProvider().Tracer("gcp.vertex.agent")
-}
-
-func TraceLLMCall(span trace.Span, agentCtx agent.Context, event *session.Event, llmRequest *llm.Request) {
-	fmt.Printf("TraceLLMCall: %v\n", span)
-	attributes := []attribute.KeyValue{
-		attribute.String("gen_ai.system", "gcp.vertex.agent"),
-		// attribute.String("gen_ai.request.model", agentCtx.Agent().Model),
-		attribute.String("gcp.vertex.agent.invocation_id", event.InvocationID),
-		attribute.String("gcp.vertex.agent.session_id", agentCtx.Session().ID().SessionID),
-		attribute.String("gcp.vertex.agent.event_id", event.ID),
-	}
-	span.SetAttributes(attributes...)
-	span.End()
+func RegisterSpanProcessor(processor sdktrace.SpanProcessor) {
+	internaltelemetry.AddSpanProcessor(processor)
 }

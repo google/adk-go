@@ -21,14 +21,15 @@ import (
 	"maps"
 	"slices"
 
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
+	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/telemetry"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -97,7 +98,8 @@ func (f *Flow) Run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 }
 
 func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
-	tracer := telemetry.GetTracer()
+	globalTracer := telemetry.GetGlobalTracer()
+	localTracer := telemetry.GetLocalTracer()
 	return func(yield func(*session.Event, error) bool) {
 		req := &llm.Request{}
 
@@ -106,8 +108,12 @@ func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
 			yield(nil, err)
 			return
 		}
-		_, span := tracer.Start(ctx, "call_llm")
-		defer span.End()
+		_, globalSpan := globalTracer.Start(ctx, "call_llm")
+		_, localSpan := localTracer.Start(ctx, "call_llm")
+		// defer func() {
+		// 	globalSpan.End()
+		// 	localSpan.End()
+		// }()
 		// Calls the LLM.
 		for resp, err := range f.callLLM(ctx, req) {
 			if err != nil {
@@ -139,7 +145,7 @@ func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
 
 			// Build the event and yield.
 			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools)
-			telemetry.TraceLLMCall(span, ctx, modelResponseEvent, req)
+			telemetry.TraceLLMCall([]trace.Span{globalSpan, localSpan}, ctx, modelResponseEvent, req)
 			if !yield(modelResponseEvent, nil) {
 				return
 			}

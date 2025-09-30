@@ -21,7 +21,7 @@ import (
 	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/routers"
 	"google.golang.org/adk/cmd/restapi/services"
-	"google.golang.org/adk/telemetry"
+	"google.golang.org/adk/internal/telemetry"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
@@ -29,7 +29,7 @@ import (
 // SetupRouter initiates mux.Router with ADK REST API routers
 func SetupRouter(router *mux.Router, routerConfig *config.ADKAPIRouterConfigs) *mux.Router {
 	adkExporter := services.NewAPIServerSpanExporter()
-	telemetry.RegisterTelemetry([]sdktrace.SpanProcessor{sdktrace.NewSimpleSpanProcessor(adkExporter)})
+	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
 	return setupRouter(router,
 		routers.NewSessionsAPIRouter(handlers.NewSessionsAPIController(routerConfig.SessionService)),
 		routers.NewRuntimeAPIRouter(handlers.NewRuntimeAPIRouter(routerConfig.SessionService, routerConfig.AgentLoader, routerConfig.ArtifactService)),

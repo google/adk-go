@@ -46,7 +46,7 @@ func (s *APIServerSpanExporter) ExportSpans(ctx context.Context, spans []sdktrac
 			attributes := make(map[string]any)
 			for _, attribute := range spanAttributes {
 				key := string(attribute.Key)
-				attributes[key] = attribute.Value
+				attributes[key] = attribute.Value.AsString()
 			}
 			attributes["trace_id"] = span.SpanContext().TraceID()
 			attributes["span_id"] = span.SpanContext().SpanID()
