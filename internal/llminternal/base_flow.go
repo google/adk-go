@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/telemetry"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -96,6 +97,7 @@ func (f *Flow) Run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 }
 
 func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
+	tracer := telemetry.GetTracer()
 	return func(yield func(*session.Event, error) bool) {
 		req := &llm.Request{}
 
@@ -104,7 +106,8 @@ func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
 			yield(nil, err)
 			return
 		}
-
+		_, span := tracer.Start(ctx, "call_llm")
+		defer span.End()
 		// Calls the LLM.
 		for resp, err := range f.callLLM(ctx, req) {
 			if err != nil {
@@ -136,6 +139,7 @@ func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
 
 			// Build the event and yield.
 			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools)
+			telemetry.TraceLLMCall(span, ctx, modelResponseEvent, req)
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
