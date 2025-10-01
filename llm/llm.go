@@ -75,31 +75,29 @@ func CreateResponse(res *genai.GenerateContentResponse) *Response {
 				LogprobsResult:    candidate.LogprobsResult,
 				UsageMetadata:     usageMetadata,
 			}
-		} else {
-			return &Response{
-				ErrorCode:         string(candidate.FinishReason),
-				ErrorMessage:      candidate.FinishMessage,
-				GroundingMetadata: candidate.GroundingMetadata,
-				FinishReason:      candidate.FinishReason,
-				CitationMetadata:  candidate.CitationMetadata,
-				AvgLogprobs:       candidate.AvgLogprobs,
-				LogprobsResult:    candidate.LogprobsResult,
-				UsageMetadata:     usageMetadata,
-			}
 		}
-	} else {
-		if res.PromptFeedback != nil {
-			return &Response{
-				ErrorCode:     string(res.PromptFeedback.BlockReason),
-				ErrorMessage:  res.PromptFeedback.BlockReasonMessage,
-				UsageMetadata: usageMetadata,
-			}
-		} else {
-			return &Response{
-				ErrorCode:     "UNKNOWN_ERROR",
-				ErrorMessage:  "Unkown error.",
-				UsageMetadata: usageMetadata,
-			}
+		return &Response{
+			ErrorCode:         string(candidate.FinishReason),
+			ErrorMessage:      candidate.FinishMessage,
+			GroundingMetadata: candidate.GroundingMetadata,
+			FinishReason:      candidate.FinishReason,
+			CitationMetadata:  candidate.CitationMetadata,
+			AvgLogprobs:       candidate.AvgLogprobs,
+			LogprobsResult:    candidate.LogprobsResult,
+			UsageMetadata:     usageMetadata,
 		}
+
+	}
+	if res.PromptFeedback != nil {
+		return &Response{
+			ErrorCode:     string(res.PromptFeedback.BlockReason),
+			ErrorMessage:  res.PromptFeedback.BlockReasonMessage,
+			UsageMetadata: usageMetadata,
+		}
+	}
+	return &Response{
+		ErrorCode:     "UNKNOWN_ERROR",
+		ErrorMessage:  "Unkown error.",
+		UsageMetadata: usageMetadata,
 	}
 }

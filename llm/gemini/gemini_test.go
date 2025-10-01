@@ -112,22 +112,19 @@ func TestModel_GenerateStream(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			gotPartial, err := readResponsePartial(model.GenerateStream(t.Context(), tt.req))
+			// Transforms the stream into strings, concating the text value of the response parts
+			got, err := readResponse(model.GenerateStream(t.Context(), tt.req))
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Model.GenerateStream() error = %v, wantErr %v", err, tt.wantErr)
 				return
-			}
-			if diff := cmp.Diff(tt.want, gotPartial); diff != "" {
-				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", gotPartial, tt.want, diff)
 			}
 
-			gotNonPartial, err := readResponseNonPartial(model.GenerateStream(t.Context(), tt.req))
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Model.GenerateStream() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			if diff := cmp.Diff(tt.want, got.PartialText); diff != "" {
+				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", got.PartialText, tt.want, diff)
 			}
-			if diff := cmp.Diff(tt.want, gotNonPartial); diff != "" {
-				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", gotNonPartial, tt.want, diff)
+			// Since we are expecting GenerateStream to aggregate partial events, the text should be the same
+			if diff := cmp.Diff(tt.want, got.FinalText); diff != "" {
+				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", got.FinalText, tt.want, diff)
 			}
 		})
 	}
@@ -150,34 +147,41 @@ func newGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig 
 	}
 }
 
-func readResponsePartial(s iter.Seq2[*llm.Response, error]) (string, error) {
-	var answer string
-	for resp, err := range s {
-		if err != nil {
-			return answer, err
-		}
-		if resp.Content == nil || len(resp.Content.Parts) == 0 {
-			return answer, fmt.Errorf("encountered an empty response: %v", resp)
-		}
-		if resp.Partial {
-			answer += resp.Content.Parts[0].Text
-		}
-	}
-	return answer, nil
+// TextResponse holds the concatenated text from a response stream,
+// separated into partial and final parts.
+type TextResponse struct {
+	// PartialText is the full text concatenated from all partial (streaming) responses.
+	PartialText string
+	// FinalText is the full text concatenated from all final (non-partial) responses.
+	FinalText string
 }
 
-func readResponseNonPartial(s iter.Seq2[*llm.Response, error]) (string, error) {
-	var answer string
+// readResponse transforms a sequence into a TextResponse, concating the text value of the response parts
+// depending on the readPartial value it will only concat the text of partial events or the text of non partial events
+func readResponse(s iter.Seq2[*llm.Response, error]) (TextResponse, error) {
+	var partialBuilder, finalBuilder strings.Builder
+	var result TextResponse
+
 	for resp, err := range s {
 		if err != nil {
-			return answer, err
+			// Return what we have so far, along with the error.
+			result.PartialText = partialBuilder.String()
+			result.FinalText = finalBuilder.String()
+			return result, err
 		}
 		if resp.Content == nil || len(resp.Content.Parts) == 0 {
-			return answer, fmt.Errorf("encountered an empty response: %v", resp)
+			return result, fmt.Errorf("encountered an empty response: %v", resp)
 		}
-		if !resp.Partial {
-			answer += resp.Content.Parts[0].Text
+
+		text := resp.Content.Parts[0].Text
+		if resp.Partial {
+			partialBuilder.WriteString(text)
+		} else {
+			finalBuilder.WriteString(text)
 		}
 	}
-	return answer, nil
+
+	result.PartialText = partialBuilder.String()
+	result.FinalText = finalBuilder.String()
+	return result, nil
 }
