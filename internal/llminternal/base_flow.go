@@ -370,6 +370,7 @@ func handleFunctionCalls(ctx agent.Context, toolsDict map[string]tool.Tool, resp
 		toolCtx := tool.NewContext(ctx, fnCall.ID, &session.Actions{})
 		//toolCtx := tool.
 		// TODO: agent.canonical_before_tool_callbacks
+		spans := telemetry.StartTrace(ctx, "execute_tool "+fnCall.Name)
 		result, err := funcTool.Run(toolCtx, fnCall.Args)
 		// genai.FunctionResponse expects to use "output" key to specify function output
 		// and "error" key to specify error details (if any). If "output" and "error" keys
@@ -404,6 +405,7 @@ func handleFunctionCalls(ctx agent.Context, toolsDict map[string]tool.Tool, resp
 		ev.Author = ctx.Agent().Name()
 		ev.Branch = ctx.Branch()
 		ev.Actions = *toolCtx.EventActions()
+		telemetry.TraceToolCall(spans, curTool, fnCall.Args, ev)
 		fnResponseEvents = append(fnResponseEvents, ev)
 	}
 	return mergeParallelFunctionResponseEvents(fnResponseEvents)

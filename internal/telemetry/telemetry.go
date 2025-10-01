@@ -26,6 +26,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -58,7 +59,11 @@ var (
 )
 
 const (
-	systemName = "gcp.vertex.agent"
+	systemName           = "gcp.vertex.agent"
+	genAiOperationName   = "gen_ai.operation.name"
+	genAiToolDescription = "gen_ai.tool.description"
+	genAiToolName        = "gen_ai.tool.name"
+	genAiToolCallID      = "gen_ai.tool.call.id"
 )
 
 // AddSpanProcessor adds a span processor to the local tracer config.
@@ -107,6 +112,47 @@ func StartTrace(ctx context.Context, traceName string) []trace.Span {
 		spans[i] = span
 	}
 	return spans
+}
+
+func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fnResponseEvent *session.Event) {
+	for _, span := range spans {
+		attributes := []attribute.KeyValue{
+			attribute.String(genAiOperationName, "execute_tool"),
+			attribute.String(genAiToolName, tool.Name()),
+			attribute.String(genAiToolDescription, tool.Description()),
+			// TODO: add tool type
+
+			// Setting empty llm request and response (as UI expect these) while not
+			// applicable for tool_response.
+			attribute.String("gcp.vertex.agent.llm_request", "{}"),
+			attribute.String("gcp.vertex.agent.llm_request", "{}"),
+			attribute.String("gcp.vertex.agent.tool_call_args", safeSerialize(fnArgs)),
+		}
+
+		toolCallID := "<not specified>"
+		toolResponse := "<not specified>"
+
+		responseParts := fnResponseEvent.LLMResponse.Content.Parts
+
+		if len(responseParts) > 0 {
+			functionResponse := responseParts[0].FunctionResponse
+			if functionResponse != nil {
+				if functionResponse.ID != "" {
+					toolCallID = functionResponse.ID
+				}
+				if functionResponse.Response != nil {
+					toolResponse = safeSerialize(functionResponse.Response)
+				}
+			}
+		}
+
+		attributes = append(attributes, attribute.String(genAiToolCallID, toolCallID))
+		attributes = append(attributes, attribute.String("gcp.vertex.agent.tool_response", toolResponse))
+		attributes = append(attributes, attribute.String("gcp.vertex.agent.event_id", fnResponseEvent.ID))
+
+		span.SetAttributes(attributes...)
+		span.End()
+	}
 }
 
 // TraceLLMCall fills the call_llm event details.
