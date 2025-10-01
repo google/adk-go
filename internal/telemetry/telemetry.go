@@ -114,6 +114,27 @@ func StartTrace(ctx context.Context, traceName string) []trace.Span {
 	return spans
 }
 
+// TraceToolCall traces the tool execution events.
+func TraceMergedToolCalls(spans []trace.Span, fnResponseEvent *session.Event) {
+	for _, span := range spans {
+		attributes := []attribute.KeyValue{
+			attribute.String(genAiOperationName, "execute_tool"),
+			attribute.String(genAiToolName, "(merged tools)"),
+			attribute.String(genAiToolDescription, "(merged tools)"),
+			// Setting empty llm request and response (as UI expect these) while not
+			// applicable for tool_response.
+			attribute.String("gcp.vertex.agent.llm_request", "{}"),
+			attribute.String("gcp.vertex.agent.llm_request", "{}"),
+			attribute.String("gcp.vertex.agent.tool_call_args", "N/A"),
+			attribute.String("gcp.vertex.agent.event_id", fnResponseEvent.ID),
+			attribute.String("gcp.vertex.agent.tool_response", safeSerialize(fnResponseEvent)),
+		}
+		span.SetAttributes(attributes...)
+		span.End()
+	}
+}
+
+// TraceToolCall traces the tool execution events.
 func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fnResponseEvent *session.Event) {
 	for _, span := range spans {
 		attributes := []attribute.KeyValue{
@@ -127,6 +148,7 @@ func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fn
 			attribute.String("gcp.vertex.agent.llm_request", "{}"),
 			attribute.String("gcp.vertex.agent.llm_request", "{}"),
 			attribute.String("gcp.vertex.agent.tool_call_args", safeSerialize(fnArgs)),
+			attribute.String("gcp.vertex.agent.event_id", fnResponseEvent.ID),
 		}
 
 		toolCallID := "<not specified>"
@@ -148,7 +170,6 @@ func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fn
 
 		attributes = append(attributes, attribute.String(genAiToolCallID, toolCallID))
 		attributes = append(attributes, attribute.String("gcp.vertex.agent.tool_response", toolResponse))
-		attributes = append(attributes, attribute.String("gcp.vertex.agent.event_id", fnResponseEvent.ID))
 
 		span.SetAttributes(attributes...)
 		span.End()

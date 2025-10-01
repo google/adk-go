@@ -408,7 +408,14 @@ func handleFunctionCalls(ctx agent.Context, toolsDict map[string]tool.Tool, resp
 		telemetry.TraceToolCall(spans, curTool, fnCall.Args, ev)
 		fnResponseEvents = append(fnResponseEvents, ev)
 	}
-	return mergeParallelFunctionResponseEvents(fnResponseEvents)
+	mergedEvent, err := mergeParallelFunctionResponseEvents(fnResponseEvents)
+	if err != nil {
+		return mergedEvent, err
+	}
+	// this is needed for debug traces of parallel calls
+	spans := telemetry.StartTrace(ctx, "execute_tool (merged)")
+	telemetry.TraceMergedToolCalls(spans, mergedEvent)
+	return mergedEvent, nil
 }
 
 func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Event, error) {
