@@ -22,14 +22,14 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
 // the InvocationContext that includes the previous events.
-func ContentsRequestProcessor(ctx agent.Context, req *llm.Request) error {
+func ContentsRequestProcessor(ctx agent.Context, req *model.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
 	llmAgent := asLLMAgent(ctx.Agent())
 	if llmAgent == nil {
@@ -459,7 +459,7 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 	return &session.Event{ // made-up event. Don't go through types.NewEvent.
 		Time:        ev.Time,
 		Author:      "user",
-		LLMResponse: &llm.Response{Content: converted},
+		LLMResponse: &model.LLMResponse{Content: converted},
 		Branch:      ev.Branch,
 	}
 }
@@ -535,7 +535,7 @@ func cloneEvent(e *session.Event) *session.Event {
 	// TODO check if copy parts is needed
 	// 3. Deep copy the LLMResponse pointer struct and content
 	if e.LLMResponse != nil {
-		newEvent.LLMResponse = &llm.Response{}
+		newEvent.LLMResponse = &model.LLMResponse{}
 		if e.LLMResponse.Content != nil {
 			newEvent.LLMResponse.Content = &genai.Content{
 				Parts: make([]*genai.Part, len(e.LLMResponse.Content.Parts)),

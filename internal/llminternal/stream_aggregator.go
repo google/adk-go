@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"iter"
 
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
@@ -29,7 +29,7 @@ import (
 type streamingResponseAggregator struct {
 	text        string
 	thoughtText string
-	response    *llm.Response
+	response    *model.LLMResponse
 	role        string
 }
 
@@ -38,17 +38,17 @@ func NewStreamingResponseAggregator() *streamingResponseAggregator {
 	return &streamingResponseAggregator{}
 }
 
-// ProcessResponse transforms the GenerateContentResponse into an llm.Response and yields that result,
+// ProcessResponse transforms the GenerateContentResponse into an model.Response and yields that result,
 // also yielding an aggregated response if the GenerateContentResponse has zero parts or is audio data
-func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genResp *genai.GenerateContentResponse) iter.Seq2[*llm.Response, error] {
-	return func(yield func(*llm.Response, error) bool) {
+func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genResp *genai.GenerateContentResponse) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
 		if len(genResp.Candidates) == 0 {
 			// shouldn't happen?
 			yield(nil, fmt.Errorf("empty response"))
 			return
 		}
 		candidate := genResp.Candidates[0]
-		resp := llm.CreateResponse(genResp)
+		resp := model.CreateResponse(genResp)
 		resp.TurnComplete = candidate.FinishReason != ""
 		// Aggregate the response and check if an intermidiate event to yield was created
 		if aggrResp := s.aggregateResponse(resp); aggrResp != nil {
@@ -65,7 +65,7 @@ func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genRe
 
 // aggregateResponse processes a single model response,
 // returning an aggregated response if the next event has zero parts or is audio data
-func (s *streamingResponseAggregator) aggregateResponse(llmResponse *llm.Response) *llm.Response {
+func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMResponse) *model.LLMResponse {
 	s.response = llmResponse
 
 	var part0 *genai.Part
@@ -98,11 +98,11 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *llm.Respons
 
 // Close generates an aggregated response at the end, if needed,
 // this should be called after all the model responses are processed.
-func (s *streamingResponseAggregator) Close() *llm.Response {
+func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 	return s.createAggregateResponse()
 }
 
-func (s *streamingResponseAggregator) createAggregateResponse() *llm.Response {
+func (s *streamingResponseAggregator) createAggregateResponse() *model.LLMResponse {
 	if (s.text != "" || s.thoughtText != "") && s.response != nil {
 		var parts []*genai.Part
 		if s.thoughtText != "" {
@@ -112,7 +112,7 @@ func (s *streamingResponseAggregator) createAggregateResponse() *llm.Response {
 			parts = append(parts, &genai.Part{Text: s.text, Thought: false})
 		}
 
-		response := &llm.Response{
+		response := &model.LLMResponse{
 			Content:           &genai.Content{Parts: parts, Role: s.role},
 			ErrorCode:         s.response.ErrorCode,
 			ErrorMessage:      s.response.ErrorMessage,

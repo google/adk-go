@@ -27,15 +27,15 @@ import (
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/cmd/web"
 	"google.golang.org/adk/examples/web/agents"
-	"google.golang.org/adk/llm"
-	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
 )
 
-func saveReportfunc(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
+func saveReportfunc(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 	if llmResponse == nil || llmResponse.Content == nil || llmResponseError != nil {
 		return llmResponse, llmResponseError
 	}

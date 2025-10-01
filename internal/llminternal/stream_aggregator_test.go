@@ -19,7 +19,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
@@ -181,7 +181,7 @@ func TestStreamAggregator(t *testing.T) {
 			count := 0
 			callCount := 0
 			for callCount < tc.numberOfStreamCalls {
-				for got, err := range mockModel.GenerateStream(ctx, &llm.Request{}) {
+				for got, err := range mockModel.GenerateStream(ctx, &model.LLMRequest{}) {
 					if err != nil {
 						t.Fatalf("found error while iterating stream")
 					}

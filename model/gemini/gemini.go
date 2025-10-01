@@ -20,33 +20,33 @@ import (
 	"iter"
 
 	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
 // TODO: test coverage
-type model struct {
+type geminiModel struct {
 	client *genai.Client
 	name   string
 }
 
-func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (llm.Model, error) {
+func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (model.LLM, error) {
 	client, err := genai.NewClient(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &model{name: modelName, client: client}, nil
+	return &geminiModel{name: modelName, client: client}, nil
 }
 
-func (m *model) Name() string {
+func (m *geminiModel) Name() string {
 	return m.name
 }
 
 // Generate calls the model synchronously returning result from the first candidate.
-func (m *model) Generate(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+func (m *geminiModel) Generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	m.maybeAppendUserContent(req)
 
-	resp, err := m.client.Models.GenerateContent(ctx, m.name, req.Contents, req.GenerateConfig)
+	resp, err := m.client.Models.GenerateContent(ctx, m.name, req.Contents, req.Config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
 	}
@@ -54,15 +54,15 @@ func (m *model) Generate(ctx context.Context, req *llm.Request) (*llm.Response, 
 		// shouldn't happen?
 		return nil, fmt.Errorf("empty response")
 	}
-	return llm.CreateResponse(resp), nil
+	return model.CreateResponse(resp), nil
 }
 
 // GenerateStream calls the model synchronously.
-func (m *model) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
+func (m *geminiModel) GenerateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	m.maybeAppendUserContent(req)
 	aggregator := llminternal.NewStreamingResponseAggregator()
-	return func(yield func(*llm.Response, error) bool) {
-		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.name, req.Contents, req.GenerateConfig) {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.name, req.Contents, req.Config) {
 			if err != nil {
 				yield(nil, err)
 				return
@@ -80,7 +80,7 @@ func (m *model) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[
 }
 
 // maybeAppendUserContent appends a user content, so that model can continue to output.
-func (m *model) maybeAppendUserContent(req *llm.Request) {
+func (m *geminiModel) maybeAppendUserContent(req *model.LLMRequest) {
 	if len(req.Contents) == 0 {
 		req.Contents = append(req.Contents, genai.NewContentFromText("Handle the requests as specified in the System Instruction.", "user"))
 	}

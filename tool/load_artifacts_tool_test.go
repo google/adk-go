@@ -22,9 +22,9 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/artifactsinternal"
 	"google.golang.org/adk/internal/toolinternal"
+	"google.golang.org/adk/model"
 
 	"google.golang.org/adk/artifactservice"
-	"google.golang.org/adk/llm"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -150,7 +150,7 @@ func TestLoadArtifactsTool_ProcessRequest(t *testing.T) {
 		}
 	}
 
-	llmRequest := &llm.Request{}
+	llmRequest := &model.LLMRequest{}
 
 	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
 	if !ok {
@@ -162,7 +162,7 @@ func TestLoadArtifactsTool_ProcessRequest(t *testing.T) {
 		t.Fatalf("ProcessRequest failed: %v", err)
 	}
 
-	instruction := llmRequest.GenerateConfig.SystemInstruction.Parts[0].Text
+	instruction := llmRequest.Config.SystemInstruction.Parts[0].Text
 	if !strings.Contains(instruction, "You have a list of artifacts") {
 		t.Errorf("Instruction should contain 'You have a list of artifacts', but got: %v", instruction)
 	}
@@ -194,7 +194,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_LoadArtifactsFunctionCall(t 
 			"artifact_names": []string{"doc1.txt"},
 		},
 	}
-	llmRequest := &llm.Request{
+	llmRequest := &model.LLMRequest{
 		Contents: []*genai.Content{
 			{
 				Role: "model",
@@ -254,7 +254,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 			"some_key": "some_value",
 		},
 	}
-	llmRequest := &llm.Request{
+	llmRequest := &model.LLMRequest{
 		Contents: []*genai.Content{
 			{
 				Role: "model",

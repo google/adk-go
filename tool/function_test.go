@@ -29,8 +29,8 @@ import (
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/typeutil"
-	"google.golang.org/adk/llm"
-	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -135,7 +135,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// TODO: replace with testing using LLMAgent, instead of directly calling the model.
-			var req llm.Request
+			var req model.LLMRequest
 			requestProcessor, ok := weatherReportTool.(toolinternal.RequestProcessor)
 			if !ok {
 				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
@@ -143,12 +143,12 @@ func TestFunctionTool_Simple(t *testing.T) {
 			if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
 				t.Fatalf("weatherReportTool.ProcessRequest failed: %v", err)
 			}
-			if req.GenerateConfig == nil || len(req.GenerateConfig.Tools) != 1 {
+			if req.Config == nil || len(req.Config.Tools) != 1 {
 				t.Fatalf("weatherReportTool.ProcessRequest did not configure tool info in LLMRequest: %v", req)
 			}
 			req.Contents = genai.Text(tc.prompt)
-			f := func() iter.Seq2[*llm.Response, error] {
-				return func(yield func(*llm.Response, error) bool) {
+			f := func() iter.Seq2[*model.LLMResponse, error] {
+				return func(yield func(*model.LLMResponse, error) bool) {
 					resp, err := m.Generate(ctx, &req)
 					yield(resp, err)
 				}
@@ -239,7 +239,7 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// TODO: replace with testing using LLMAgent, instead of directly calling the model.
-			var req llm.Request
+			var req model.LLMRequest
 			requestProcessor, ok := weatherReportTool.(toolinternal.RequestProcessor)
 			if !ok {
 				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
@@ -247,7 +247,7 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 			if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
 				t.Fatalf("weatherReportTool.ProcessRequest failed: %v", err)
 			}
-			if req.GenerateConfig == nil || len(req.GenerateConfig.Tools) != 1 {
+			if req.Config == nil || len(req.Config.Tools) != 1 {
 				t.Fatalf("weatherReportTool.ProcessRequest did not configure tool info in LLMRequest: %v", req)
 			}
 			// Call the function.
@@ -296,9 +296,9 @@ func newGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig 
 	}
 }
 
-func readFirstResponse[T any](s iter.Seq2[*llm.Response, error]) (T, error) {
+func readFirstResponse[T any](s iter.Seq2[*model.LLMResponse, error]) (T, error) {
 	var zero T
-	do := func(s iter.Seq2[*llm.Response, error]) (any, error) {
+	do := func(s iter.Seq2[*model.LLMResponse, error]) (any, error) {
 		for resp, err := range s {
 			if err != nil {
 				return zero, err
@@ -368,7 +368,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 	}
 
 	t.Run("ProcessRequest", func(t *testing.T) {
-		var req llm.Request
+		var req model.LLMRequest
 		requestProcessor, ok := inventoryTool.(toolinternal.RequestProcessor)
 		if !ok {
 			t.Fatal("inventoryTool does not implement itype.RequestProcessor")
@@ -376,7 +376,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
 			t.Fatalf("inventoryTool.ProcessRequest failed: %v", err)
 		}
-		decl := toolDeclaration(req.GenerateConfig)
+		decl := toolDeclaration(req.Config)
 		if decl == nil {
 			t.Fatalf("inventoryTool.ProcessRequest did not configure function declaration: %v", req)
 		}

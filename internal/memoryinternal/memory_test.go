@@ -23,8 +23,8 @@ import (
 
 	"google.golang.org/adk/internal/memoryinternal"
 	"google.golang.org/adk/internal/sessioninternal"
-	"google.golang.org/adk/llm"
 	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
@@ -46,14 +46,14 @@ func TestMemory_AddAndSearch(t *testing.T) {
 		{
 			Time:   time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 			Author: "user1",
-			LLMResponse: &llm.Response{
+			LLMResponse: &model.LLMResponse{
 				Content: content1,
 			},
 		},
 		{
 			Time:   time.Date(2025, 1, 1, 10, 5, 0, 0, time.UTC),
 			Author: "user1",
-			LLMResponse: &llm.Response{
+			LLMResponse: &model.LLMResponse{
 				Content: content2,
 			},
 		},
@@ -187,7 +187,7 @@ func TestMemory_Search_Isolation(t *testing.T) {
 	if err := sessionService.AppendEvent(t.Context(), storedSession, &session.Event{
 		Time:        time.Now(),
 		Author:      "user1",
-		LLMResponse: &llm.Response{Content: content1},
+		LLMResponse: &model.LLMResponse{Content: content1},
 	}); err != nil {
 		t.Fatalf("Failed to append event: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestMemory_Search_Isolation(t *testing.T) {
 	if err := sessionService.AppendEvent(t.Context(), storedSession2, &session.Event{
 		Time:        time.Now(),
 		Author:      "user2",
-		LLMResponse: &llm.Response{Content: content2},
+		LLMResponse: &model.LLMResponse{Content: content2},
 	}); err != nil {
 		t.Fatalf("Failed to append event: %v", err)
 	}

@@ -23,7 +23,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
@@ -112,7 +112,7 @@ func NewTestAgentRunner(t *testing.T, agent agent.Agent) *TestAgentRunner {
 }
 
 type MockModel struct {
-	Requests             []*llm.Request
+	Requests             []*model.LLMRequest
 	Responses            []*genai.Content
 	StreamResponsesCount int
 }
@@ -120,13 +120,13 @@ type MockModel struct {
 var errNoModelData = errors.New("no data")
 
 // GenerateContent implements llm.Model.
-func (m *MockModel) Generate(ctx context.Context, req *llm.Request) (*llm.Response, error) {
+func (m *MockModel) Generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	m.Requests = append(m.Requests, req)
 	if len(m.Responses) == 0 {
 		return nil, errNoModelData
 	}
 
-	resp := &llm.Response{
+	resp := &model.LLMResponse{
 		Content: m.Responses[0],
 	}
 
@@ -135,9 +135,9 @@ func (m *MockModel) Generate(ctx context.Context, req *llm.Request) (*llm.Respon
 	return resp, nil
 }
 
-func (m *MockModel) GenerateStream(ctx context.Context, req *llm.Request) iter.Seq2[*llm.Response, error] {
+func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	aggregator := llminternal.NewStreamingResponseAggregator()
-	return func(yield func(*llm.Response, error) bool) {
+	return func(yield func(*model.LLMResponse, error) bool) {
 		streamResponsesCount := m.StreamResponsesCount
 		if streamResponsesCount == 0 {
 			streamResponsesCount = 1
@@ -165,7 +165,7 @@ func (m *MockModel) Name() string {
 	return "mock"
 }
 
-var _ llm.Model = (*MockModel)(nil)
+var _ model.LLM = (*MockModel)(nil)
 
 // CollectEvents collects all event from the llm response until encountering an error.
 // It returns all collected events and the last error.

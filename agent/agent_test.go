@@ -20,7 +20,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -47,7 +47,7 @@ func TestAgentCallbacks(t *testing.T) {
 			wantEvents: []*session.Event{
 				{
 					Author: "test",
-					LLMResponse: &llm.Response{
+					LLMResponse: &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel),
 					},
 				},
@@ -69,7 +69,7 @@ func TestAgentCallbacks(t *testing.T) {
 			wantEvents: []*session.Event{
 				{
 					Author: "test",
-					LLMResponse: &llm.Response{
+					LLMResponse: &model.LLMResponse{
 						Content: genai.NewContentFromText("hello", genai.RoleModel),
 					},
 				},
@@ -86,7 +86,7 @@ func TestAgentCallbacks(t *testing.T) {
 			wantEvents: []*session.Event{
 				{
 					Author: "test",
-					LLMResponse: &llm.Response{
+					LLMResponse: &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel),
 					},
 				},
@@ -145,7 +145,7 @@ func (a *customAgent) Run(Context) iter.Seq2[*session.Event, error] {
 		a.callCounter++
 
 		yield(&session.Event{
-			LLMResponse: &llm.Response{
+			LLMResponse: &model.LLMResponse{
 				Content: genai.NewContentFromText("hello", genai.RoleModel),
 			},
 		}, nil)

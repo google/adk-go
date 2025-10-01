@@ -19,7 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -125,20 +125,20 @@ func Must[T agent.Agent](a T, err error) T {
 	return a
 }
 
-func AppendInstructions(r *llm.Request, instructions ...string) {
+func AppendInstructions(r *model.LLMRequest, instructions ...string) {
 	if len(instructions) == 0 {
 		return
 	}
 
 	inst := strings.Join(instructions, "\n\n")
 
-	if r.GenerateConfig == nil {
-		r.GenerateConfig = &genai.GenerateContentConfig{}
+	if r.Config == nil {
+		r.Config = &genai.GenerateContentConfig{}
 	}
-	if current := r.GenerateConfig.SystemInstruction; current != nil && len(current.Parts) > 0 && current.Parts[0].Text != "" {
-		r.GenerateConfig.SystemInstruction = genai.NewContentFromText(current.Parts[0].Text+"\n\n"+inst, "")
+	if current := r.Config.SystemInstruction; current != nil && len(current.Parts) > 0 && current.Parts[0].Text != "" {
+		r.Config.SystemInstruction = genai.NewContentFromText(current.Parts[0].Text+"\n\n"+inst, "")
 	} else {
-		r.GenerateConfig.SystemInstruction = genai.NewContentFromText(inst, "")
+		r.Config.SystemInstruction = genai.NewContentFromText(inst, "")
 	}
 }
 
@@ -154,7 +154,7 @@ func IsFinalResponse(ev *session.Event) bool {
 	return !hasFunctionCalls(ev.LLMResponse) && !hasFunctionResponses(ev.LLMResponse) && !ev.LLMResponse.Partial && !hasTrailingCodeExecutionResult(ev.LLMResponse)
 }
 
-func hasFunctionCalls(resp *llm.Response) bool {
+func hasFunctionCalls(resp *model.LLMResponse) bool {
 	if resp == nil || resp.Content == nil {
 		return false
 	}
@@ -166,7 +166,7 @@ func hasFunctionCalls(resp *llm.Response) bool {
 	return false
 }
 
-func hasFunctionResponses(resp *llm.Response) bool {
+func hasFunctionResponses(resp *model.LLMResponse) bool {
 	if resp == nil || resp.Content == nil {
 		return false
 	}
@@ -178,7 +178,7 @@ func hasFunctionResponses(resp *llm.Response) bool {
 	return false
 }
 
-func hasTrailingCodeExecutionResult(resp *llm.Response) bool {
+func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
 	if resp == nil || resp.Content == nil || len(resp.Content.Parts) == 0 {
 		return false
 	}

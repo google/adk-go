@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package llm_test
+package model_test
 
 import (
 	"reflect"
 	"testing"
 
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
@@ -63,7 +63,7 @@ func TestCreateResponse(t *testing.T) {
 	testCases := []struct {
 		name  string
 		input genai.GenerateContentResponse
-		want  llm.Response
+		want  model.LLMResponse
 	}{
 		{
 			name: "CreateWithLogprobs",
@@ -75,7 +75,7 @@ func TestCreateResponse(t *testing.T) {
 					LogprobsResult: emptyLogprobs,
 				}},
 			},
-			want: llm.Response{
+			want: model.LLMResponse{
 				Content:        &genai.Content{Parts: []*genai.Part{{Text: "Response text"}}},
 				FinishReason:   FinishReasonStop,
 				AvgLogprobs:    -0.75,
@@ -90,7 +90,7 @@ func TestCreateResponse(t *testing.T) {
 					FinishReason: FinishReasonStop,
 				}},
 			},
-			want: llm.Response{
+			want: model.LLMResponse{
 				Content:      &genai.Content{Parts: []*genai.Part{{Text: "Response text"}}},
 				FinishReason: FinishReasonStop,
 			},
@@ -104,7 +104,7 @@ func TestCreateResponse(t *testing.T) {
 					AvgLogprobs:   -2.1,
 				}},
 			},
-			want: llm.Response{
+			want: model.LLMResponse{
 				ErrorCode:    string(FinishReasonSafety),
 				ErrorMessage: "Safety filter triggered",
 				AvgLogprobs:  -2.1,
@@ -120,7 +120,7 @@ func TestCreateResponse(t *testing.T) {
 					BlockReasonMessage: "Prompt blocked for safety",
 				},
 			},
-			want: llm.Response{
+			want: model.LLMResponse{
 				ErrorCode:    string(BlockedReasonSafety),
 				ErrorMessage: "Prompt blocked for safety",
 			},
@@ -135,7 +135,7 @@ func TestCreateResponse(t *testing.T) {
 					LogprobsResult: concreteLogprobs,
 				}},
 			},
-			want: llm.Response{
+			want: model.LLMResponse{
 				Content:        &genai.Content{Parts: []*genai.Part{{Text: "The capital of France is Paris."}}},
 				FinishReason:   FinishReasonStop,
 				AvgLogprobs:    -0.27,
@@ -152,7 +152,7 @@ func TestCreateResponse(t *testing.T) {
 					LogprobsResult: partialLogprobs,
 				}},
 			},
-			want: llm.Response{
+			want: model.LLMResponse{
 				Content:        &genai.Content{Parts: []*genai.Part{{Text: "Hello world"}}},
 				FinishReason:   FinishReasonStop,
 				AvgLogprobs:    -0.425,
@@ -168,7 +168,7 @@ func TestCreateResponse(t *testing.T) {
 					CitationMetadata: citationMeta,
 				}},
 			},
-			want: llm.Response{
+			want: model.LLMResponse{
 				Content:          &genai.Content{Parts: []*genai.Part{{Text: "Response text"}}},
 				FinishReason:     FinishReasonStop,
 				CitationMetadata: citationMeta,
@@ -182,7 +182,7 @@ func TestCreateResponse(t *testing.T) {
 					FinishReason: FinishReasonStop,
 				}},
 			},
-			want: llm.Response{
+			want: model.LLMResponse{
 				Content:      &genai.Content{Parts: []*genai.Part{{Text: "Response text"}}},
 				FinishReason: FinishReasonStop,
 			},
@@ -196,7 +196,7 @@ func TestCreateResponse(t *testing.T) {
 					CitationMetadata: citationMeta,
 				}},
 			},
-			want: llm.Response{
+			want: model.LLMResponse{
 				ErrorCode:        string(FinishReasonRecitation),
 				ErrorMessage:     "Response blocked due to recitation triggered",
 				CitationMetadata: citationMeta,
@@ -207,7 +207,7 @@ func TestCreateResponse(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := llm.CreateResponse(&tc.input)
+			got := model.CreateResponse(&tc.input)
 
 			if tc.want.AvgLogprobs != got.AvgLogprobs {
 				t.Errorf("AvgLogprobs mismatch: want %f, got %f", tc.want.AvgLogprobs, got.AvgLogprobs)

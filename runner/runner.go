@@ -29,8 +29,8 @@ import (
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/memoryinternal"
 	"google.golang.org/adk/internal/sessioninternal"
-	"google.golang.org/adk/llm"
 	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
@@ -195,7 +195,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	event := session.NewEvent(ctx.InvocationID())
 
 	event.Author = "user"
-	event.LLMResponse = &llm.Response{
+	event.LLMResponse = &model.LLMResponse{
 		Content: msg,
 	}
 

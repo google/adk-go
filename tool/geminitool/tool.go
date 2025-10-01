@@ -32,7 +32,7 @@ package geminitool
 import (
 	"fmt"
 
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -50,7 +50,7 @@ type geminiTool struct {
 	value *genai.Tool
 }
 
-func (t *geminiTool) ProcessRequest(ctx tool.Context, req *llm.Request) error {
+func (t *geminiTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return setTool(req, t.value)
 }
 
@@ -67,15 +67,15 @@ func (t *geminiTool) IsLongRunning() bool {
 	return false
 }
 
-func setTool(req *llm.Request, t *genai.Tool) error {
+func setTool(req *model.LLMRequest, t *genai.Tool) error {
 	if req == nil {
 		return fmt.Errorf("llm request is nil")
 	}
 
-	if req.GenerateConfig == nil {
-		req.GenerateConfig = &genai.GenerateContentConfig{}
+	if req.Config == nil {
+		req.Config = &genai.GenerateContentConfig{}
 	}
 
-	req.GenerateConfig.Tools = append(req.GenerateConfig.Tools, t)
+	req.Config.Tools = append(req.Config.Tools, t)
 	return nil
 }

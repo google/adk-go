@@ -24,7 +24,7 @@ import (
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -61,7 +61,7 @@ import (
 //
 // TODO: implement it in the runners package and update this doc.
 
-func AgentTransferRequestProcessor(ctx agent.Context, req *llm.Request) error {
+func AgentTransferRequestProcessor(ctx agent.Context, req *model.LLMRequest) error {
 	// TODO: support agent types other than LLMAgent, that have parent/subagents?
 	agent := ctx.Agent()
 	if !shouldUseAutoFlow(agent) {
@@ -122,7 +122,7 @@ func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
 }
 
 // ProcessRequest implements types.Tool.
-func (t *TransferToAgentTool) ProcessRequest(ctx tool.Context, req *llm.Request) error {
+func (t *TransferToAgentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return appendTools(req, t)
 }
 
@@ -189,7 +189,7 @@ func shouldUseAutoFlow(agent agent.Agent) bool {
 
 // AppendTools appends the tools to the request.
 // Appending duplicate tools or nameless tools is an error.
-func appendTools(r *llm.Request, tools ...tool.Tool) error {
+func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 	if r.Tools == nil {
 		r.Tools = make(map[string]any)
 	}
@@ -206,12 +206,12 @@ func appendTools(r *llm.Request, tools ...tool.Tool) error {
 
 		// If the tool is a function tool, add its declaration to GenerateConfig.Tools.
 		if fnTool, ok := tool.(toolinternal.FunctionTool); ok {
-			if r.GenerateConfig == nil {
-				r.GenerateConfig = &genai.GenerateContentConfig{}
+			if r.Config == nil {
+				r.Config = &genai.GenerateContentConfig{}
 			}
 			if decl := fnTool.Declaration(); decl != nil {
 				// TODO: verify for duplicates.
-				r.GenerateConfig.Tools = append(r.GenerateConfig.Tools, &genai.Tool{
+				r.Config.Tools = append(r.Config.Tools, &genai.Tool{
 					FunctionDeclarations: []*genai.FunctionDeclaration{decl},
 				})
 			}

@@ -31,8 +31,8 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/llm"
-	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
@@ -109,7 +109,7 @@ func TestMCPToolSet(t *testing.T) {
 	wantEvents := []*session.Event{
 		{
 			Author: "weather_time_agent",
-			LLMResponse: &llm.Response{
+			LLMResponse: &model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -125,7 +125,7 @@ func TestMCPToolSet(t *testing.T) {
 		},
 		{
 			Author: "weather_time_agent",
-			LLMResponse: &llm.Response{
+			LLMResponse: &model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -143,7 +143,7 @@ func TestMCPToolSet(t *testing.T) {
 		},
 		{
 			Author: "weather_time_agent",
-			LLMResponse: &llm.Response{
+			LLMResponse: &model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -158,7 +158,7 @@ func TestMCPToolSet(t *testing.T) {
 
 	if diff := cmp.Diff(wantEvents, gotEvents,
 		cmpopts.IgnoreFields(session.Event{}, "ID", "Time", "InvocationID"),
-		cmpopts.IgnoreFields(llm.Response{}, "UsageMetadata", "AvgLogprobs", "FinishReason"),
+		cmpopts.IgnoreFields(model.LLMResponse{}, "UsageMetadata", "AvgLogprobs", "FinishReason"),
 		cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
 		cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID"),
 		cmpopts.IgnoreFields(genai.Part{}, "ThoughtSignature")); diff != "" {
@@ -176,7 +176,7 @@ func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, 
 	return rr, recording
 }
 
-func newGeminiModel(t *testing.T, modelName string) llm.Model {
+func newGeminiModel(t *testing.T, modelName string) model.LLM {
 	apiKey := "fakeKey"
 	trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
 	recording := false

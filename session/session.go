@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 )
 
 type Session interface {
@@ -84,7 +84,7 @@ type Event struct {
 	// Agent client will know from this field about which function call is long running.
 	// Only valid for function call event.
 	LongRunningToolIDs []string
-	LLMResponse        *llm.Response
+	LLMResponse        *model.LLMResponse
 }
 
 // NewEvent creates a new event.

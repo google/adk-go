@@ -17,7 +17,7 @@ package tool
 import (
 	"fmt"
 
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
@@ -42,7 +42,7 @@ func (f *longRunningFunctionTool[TArgs, TResults]) IsLongRunning() bool {
 }
 
 // ProcessRequest implements interfaces.RequestProcessor.
-func (f *longRunningFunctionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *llm.Request) error {
+func (f *longRunningFunctionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *model.LLMRequest) error {
 	return f.functionTool.ProcessRequest(ctx, req)
 }
 

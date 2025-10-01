@@ -27,7 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
 	"google.golang.org/adk/agent/workflowagents/parallelagent"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
@@ -55,7 +55,7 @@ func TestNewParallelAgent(t *testing.T) {
 					for responseCount := 1; responseCount <= 2; responseCount++ {
 						res = append(res, &session.Event{
 							Author: fmt.Sprintf("sub%d", agentID),
-							LLMResponse: &llm.Response{
+							LLMResponse: &model.LLMResponse{
 								Content: &genai.Content{
 									Parts: []*genai.Part{
 										genai.NewPartFromText(fmt.Sprintf("hello %d", agentID)),
@@ -218,7 +218,7 @@ func customRun(id int, agentErr error) func(agent.Context) iter.Seq2[*session.Ev
 				return
 			}
 			yield(&session.Event{
-				LLMResponse: &llm.Response{
+				LLMResponse: &model.LLMResponse{
 					Content: genai.NewContentFromText(fmt.Sprintf("hello %v", id), genai.RoleModel),
 				},
 			}, nil)

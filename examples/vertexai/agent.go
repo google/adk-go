@@ -21,7 +21,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/examples"
-	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"

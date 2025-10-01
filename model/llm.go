@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package llm
+package model
 
 import (
 	"context"
@@ -21,30 +21,30 @@ import (
 	"google.golang.org/genai"
 )
 
-// Model represents LLM.
-type Model interface {
+// LLM provides the access to the underlying LLM.
+type LLM interface {
 	Name() string
-	Generate(ctx context.Context, req *Request) (*Response, error)
-	GenerateStream(ctx context.Context, req *Request) iter.Seq2[*Response, error]
+	Generate(ctx context.Context, req *LLMRequest) (*LLMResponse, error)
+	GenerateStream(ctx context.Context, req *LLMRequest) iter.Seq2[*LLMResponse, error]
 }
 
-// Request is the raw LLM request.
-type Request struct {
-	Contents       []*genai.Content
-	GenerateConfig *genai.GenerateContentConfig
+// LLMRequest is the raw LLM request.
+type LLMRequest struct {
+	Model    string
+	Contents []*genai.Content
+	Config   *genai.GenerateContentConfig
 
-	// TODO: this field should be removed
-	// any is of the Tool type. Used temporarily to migrate code and avoid cycle dependency.
-	Tools map[string]any
+	Tools map[string]any `json:"-"`
 }
 
-// Response is the raw LLM response.
+// LLMResponse is the raw LLM response.
 // It provides the first candidate response from the model if available.
-type Response struct {
+type LLMResponse struct {
 	Content           *genai.Content
 	CitationMetadata  *genai.CitationMetadata
 	GroundingMetadata *genai.GroundingMetadata
 	UsageMetadata     *genai.GenerateContentResponseUsageMetadata
+	CustomMetadata    map[string]any
 	LogprobsResult    *genai.LogprobsResult
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
@@ -61,12 +61,12 @@ type Response struct {
 	AvgLogprobs  float64
 }
 
-func CreateResponse(res *genai.GenerateContentResponse) *Response {
+func CreateResponse(res *genai.GenerateContentResponse) *LLMResponse {
 	usageMetadata := res.UsageMetadata
 	if len(res.Candidates) > 0 && res.Candidates[0] != nil {
 		candidate := res.Candidates[0]
 		if candidate.Content != nil && len(candidate.Content.Parts) > 0 {
-			return &Response{
+			return &LLMResponse{
 				Content:           candidate.Content,
 				GroundingMetadata: candidate.GroundingMetadata,
 				FinishReason:      candidate.FinishReason,
@@ -76,7 +76,7 @@ func CreateResponse(res *genai.GenerateContentResponse) *Response {
 				UsageMetadata:     usageMetadata,
 			}
 		}
-		return &Response{
+		return &LLMResponse{
 			ErrorCode:         string(candidate.FinishReason),
 			ErrorMessage:      candidate.FinishMessage,
 			GroundingMetadata: candidate.GroundingMetadata,
@@ -89,13 +89,13 @@ func CreateResponse(res *genai.GenerateContentResponse) *Response {
 
 	}
 	if res.PromptFeedback != nil {
-		return &Response{
+		return &LLMResponse{
 			ErrorCode:     string(res.PromptFeedback.BlockReason),
 			ErrorMessage:  res.PromptFeedback.BlockReasonMessage,
 			UsageMetadata: usageMetadata,
 		}
 	}
-	return &Response{
+	return &LLMResponse{
 		ErrorCode:     "UNKNOWN_ERROR",
 		ErrorMessage:  "Unkown error.",
 		UsageMetadata: usageMetadata,

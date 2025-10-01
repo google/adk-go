@@ -17,7 +17,7 @@ package models
 import (
 	"time"
 
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -48,7 +48,7 @@ func ToSessionEvent(event Event) *session.Event {
 		Author:             event.Author,
 		Partial:            event.Partial,
 		LongRunningToolIDs: event.LongRunningToolIDs,
-		LLMResponse: &llm.Response{
+		LLMResponse: &model.LLMResponse{
 			Content:           event.Content,
 			GroundingMetadata: event.GroundingMetadata,
 			Partial:           event.Partial,

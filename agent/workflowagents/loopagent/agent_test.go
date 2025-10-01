@@ -22,7 +22,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/sessionservice"
@@ -51,7 +51,7 @@ func TestNewLoopAgent(t *testing.T) {
 			wantEvents: []*session.Event{
 				{
 					Author: "custom_agent_0",
-					LLMResponse: &llm.Response{
+					LLMResponse: &model.LLMResponse{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 0"),
@@ -71,7 +71,7 @@ func TestNewLoopAgent(t *testing.T) {
 			wantEvents: []*session.Event{
 				{
 					Author: "custom_agent_0",
-					LLMResponse: &llm.Response{
+					LLMResponse: &model.LLMResponse{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 0"),
@@ -178,7 +178,7 @@ func (a *customAgent) Run(agent.Context) iter.Seq2[*session.Event, error] {
 		a.callCounter++
 
 		yield(&session.Event{
-			LLMResponse: &llm.Response{
+			LLMResponse: &model.LLMResponse{
 				Content: genai.NewContentFromText(fmt.Sprintf("hello %v", a.id), genai.RoleModel),
 			},
 		}, nil)

@@ -21,7 +21,7 @@ import (
 	"google.golang.org/adk/agent"
 	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -97,7 +97,7 @@ type Config struct {
 	// object. It can also be used to implement caching by returning a cached
 	// `LLMResponse`, which would skip the actual model call.
 	BeforeModel []BeforeModelCallback
-	Model       llm.Model
+	Model       model.LLM
 	// AfterModel callbacks are executed sequentially right after a response is
 	// received from the model.
 	//
@@ -141,9 +141,9 @@ type Config struct {
 	// AfterToolCallback
 }
 
-type BeforeModelCallback func(ctx agent.Context, llmRequest *llm.Request) (*llm.Response, error)
+type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
-type AfterModelCallback func(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error)
+type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 type llmAgent struct {
 	agent.Agent
@@ -151,7 +151,7 @@ type llmAgent struct {
 	agentState
 
 	beforeModel []llminternal.BeforeModelCallback
-	model       llm.Model
+	model       model.LLM
 	afterModel  []llminternal.AfterModelCallback
 	instruction string
 }

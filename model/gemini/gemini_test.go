@@ -26,7 +26,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
@@ -36,20 +36,20 @@ func TestModel_Generate(t *testing.T) {
 	tests := []struct {
 		name      string
 		modelName string
-		req       *llm.Request
-		want      *llm.Response
+		req       *model.LLMRequest
+		want      *model.LLMResponse
 		wantErr   bool
 	}{
 		{
 			name:      "ok",
 			modelName: "gemini-2.0-flash",
-			req: &llm.Request{
+			req: &model.LLMRequest{
 				Contents: genai.Text("What is the capital of France? One word."),
-				GenerateConfig: &genai.GenerateContentConfig{
+				Config: &genai.GenerateContentConfig{
 					Temperature: new(float32),
 				},
 			},
-			want: &llm.Response{
+			want: &model.LLMResponse{
 				Content: genai.NewContentFromText("Paris\n", genai.RoleModel),
 				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 					CandidatesTokenCount:    2,
@@ -66,17 +66,17 @@ func TestModel_Generate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			httpRecordFilename := filepath.Join("testdata", strings.ReplaceAll(t.Name(), "/", "_")+".httprr")
 
-			model, err := NewModel(t.Context(), tt.modelName, newGeminiTestClientConfig(t, httpRecordFilename))
+			testModel, err := NewModel(t.Context(), tt.modelName, newGeminiTestClientConfig(t, httpRecordFilename))
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			got, err := model.Generate(t.Context(), tt.req)
+			got, err := testModel.Generate(t.Context(), tt.req)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Model.Generate() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if diff := cmp.Diff(tt.want, got, cmpopts.IgnoreFields(llm.Response{}, "AvgLogprobs")); diff != "" {
+			if diff := cmp.Diff(tt.want, got, cmpopts.IgnoreFields(model.LLMResponse{}, "AvgLogprobs")); diff != "" {
 				t.Errorf("Model.Generate() = %v, want %v\ndiff(-want +got):\n%v", got, tt.want, diff)
 			}
 		})
@@ -87,16 +87,16 @@ func TestModel_GenerateStream(t *testing.T) {
 	tests := []struct {
 		name      string
 		modelName string
-		req       *llm.Request
+		req       *model.LLMRequest
 		want      string
 		wantErr   bool
 	}{
 		{
 			name:      "ok",
 			modelName: "gemini-2.0-flash",
-			req: &llm.Request{
+			req: &model.LLMRequest{
 				Contents: genai.Text("What is the capital of France? One word."),
-				GenerateConfig: &genai.GenerateContentConfig{
+				Config: &genai.GenerateContentConfig{
 					Temperature: new(float32),
 				},
 			},
@@ -158,7 +158,7 @@ type TextResponse struct {
 
 // readResponse transforms a sequence into a TextResponse, concating the text value of the response parts
 // depending on the readPartial value it will only concat the text of partial events or the text of non partial events
-func readResponse(s iter.Seq2[*llm.Response, error]) (TextResponse, error) {
+func readResponse(s iter.Seq2[*model.LLMResponse, error]) (TextResponse, error) {
 	var partialBuilder, finalBuilder strings.Builder
 	var result TextResponse
 
