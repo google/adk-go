@@ -97,8 +97,8 @@ func newReprintableStream(s io.Writer, prefix string, color string) io.Writer {
 // function LogCommand runs a command pretty-printing its stdout and stderr
 func LogCommand(c *exec.Cmd, p Printer) error {
 	p("Running : ", Yellow, c.Dir, Reset, " ", c)
-	c.Stdout = newReprintableStream(os.Stdout, "out", Yellow)
-	c.Stderr = newReprintableStream(os.Stdout, "err", Red)
+	c.Stdout = newReprintableStream(os.Stdout, "  ", Yellow)
+	c.Stderr = newReprintableStream(os.Stdout, "  ", Yellow)
 	return c.Run()
 }
 
