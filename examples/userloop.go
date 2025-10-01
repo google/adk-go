@@ -22,14 +22,16 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
 )
 
 type RunConfig struct {
-	SessionService sessionservice.Service
-	StreamingMode  runner.StreamingMode
+	SessionService  sessionservice.Service
+	ArtifactService artifactservice.Service
+	StreamingMode   runner.StreamingMode
 }
 
 func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
@@ -55,9 +57,10 @@ func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
 	session := resp.Session
 
 	r, err := runner.New(&runner.Config{
-		AppName:        appName,
-		Agent:          rootAgent,
-		SessionService: sessionService,
+		AppName:         appName,
+		Agent:           rootAgent,
+		SessionService:  sessionService,
+		ArtifactService: runConfig.ArtifactService,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create runner: %v", err)

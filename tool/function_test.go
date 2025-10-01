@@ -185,6 +185,62 @@ func TestFunctionTool_Simple(t *testing.T) {
 	}
 }
 
+func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t *testing.T) {
+	// First tool
+	printer := func(ctx tool.Context, input string) string {
+		fmt.Print(input)
+		return input
+	}
+	printerTool, err := tool.NewFunctionTool(
+		tool.FunctionToolConfig{
+			Name:        "print_input",
+			Description: "Prints input.",
+		},
+		printer)
+	if err != nil {
+		t.Fatalf("NewFunctionTool failed: %v", err)
+	}
+
+	// Second tool
+	doublePrinter := func(ctx tool.Context, input string) string {
+		fmt.Print(input)
+		fmt.Print(input)
+		return input
+	}
+	doublePrinterTool, err := tool.NewFunctionTool(
+		tool.FunctionToolConfig{
+			Name:        "print_input_twice",
+			Description: "Prints input twice.",
+		},
+		doublePrinter)
+	if err != nil {
+		t.Fatalf("NewFunctionTool failed: %v", err)
+	}
+
+	var req model.LLMRequest
+	requestProcessor, ok := printerTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("printerTool does not implement itype.RequestProcessor")
+	}
+	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+		t.Fatalf("printerTool.ProcessRequest failed: %v", err)
+	}
+	requestProcessor, ok = doublePrinterTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("doublePrinterTool does not implement itype.RequestProcessor")
+	}
+	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+		t.Fatalf("doublePrinterTool.ProcessRequest failed: %v", err)
+	}
+
+	if len(req.Config.Tools) != 1 {
+		t.Errorf("number of tools should be one, got: %d", len(req.Config.Tools))
+	}
+	if len(req.Config.Tools[0].FunctionDeclarations) != 2 {
+		t.Errorf("number of function declarations should be two, got: %d", len(req.Config.Tools[0].FunctionDeclarations))
+	}
+}
+
 func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 	type Args struct {
 		City string `json:"city"`

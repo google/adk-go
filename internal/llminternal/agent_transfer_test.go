@@ -16,6 +16,7 @@ package llminternal_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -330,6 +332,43 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 
 		check(t, curAgent, root, "", nil, []string{"Parent", "Peer", "Current"})
 	})
+}
+
+func TestAgentTransferProcessRequest_(t *testing.T) {
+	// First Tool
+	var req model.LLMRequest
+	printer := func(ctx tool.Context, input string) string {
+		fmt.Print(input)
+		return input
+	}
+	printerTool, err := tool.NewFunctionTool(
+		tool.FunctionToolConfig{
+			Name:        "print_input",
+			Description: "Prints input.",
+		},
+		printer)
+	if err != nil {
+		t.Fatalf("NewFunctionTool failed: %v", err)
+	}
+	requestProcessor, ok := printerTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("printerTool does not implement itype.RequestProcessor")
+	}
+	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+		t.Fatalf("printerTool.ProcessRequest failed: %v", err)
+	}
+	// Second tool
+	transferToAgentTool := &llminternal.TransferToAgentTool{}
+	if err := transferToAgentTool.ProcessRequest(nil, &req); err != nil {
+		t.Fatalf("transferToAgentTool.ProcessRequest failed: %v", err)
+	}
+
+	if len(req.Config.Tools) != 1 {
+		t.Errorf("number of tools should be one, got: %d", len(req.Config.Tools))
+	}
+	if len(req.Config.Tools[0].FunctionDeclarations) != 2 {
+		t.Errorf("number of function declarations should be two, got: %d", len(req.Config.Tools[0].FunctionDeclarations))
+	}
 }
 
 func TestTransferToAgentToolRun(t *testing.T) {
