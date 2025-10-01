@@ -42,16 +42,8 @@ type tracerProviderConfig struct {
 }
 
 var (
-	once        sync.Once
-	localTracer tracerProviderHolder
-	limits      = sdktrace.SpanLimits{
-		AttributeValueLengthLimit:   -1,
-		AttributeCountLimit:         -1,
-		EventCountLimit:             -1,
-		LinkCountLimit:              -1,
-		AttributePerEventCountLimit: -1,
-		AttributePerLinkCountLimit:  -1,
-	}
+	once              sync.Once
+	localTracer       tracerProviderHolder
 	localTracerConfig = tracerProviderConfig{
 		spanProcessors: []sdktrace.SpanProcessor{},
 		mu:             &sync.RWMutex{},
@@ -77,9 +69,7 @@ func AddSpanProcessor(processor sdktrace.SpanProcessor) {
 // We use local tracer to respect the global tracer configurations.
 func RegisterTelemetry() {
 	once.Do(func() {
-		traceProvider := sdktrace.NewTracerProvider(
-			sdktrace.WithRawSpanLimits(limits),
-		)
+		traceProvider := sdktrace.NewTracerProvider()
 		localTracerConfig.mu.RLock()
 		spanProcessors := localTracerConfig.spanProcessors
 		localTracerConfig.mu.RUnlock()
