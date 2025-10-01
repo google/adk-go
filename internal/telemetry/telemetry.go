@@ -116,6 +116,9 @@ func StartTrace(ctx context.Context, traceName string) []trace.Span {
 
 // TraceToolCall traces the tool execution events.
 func TraceMergedToolCalls(spans []trace.Span, fnResponseEvent *session.Event) {
+	if fnResponseEvent == nil {
+		return
+	}
 	for _, span := range spans {
 		attributes := []attribute.KeyValue{
 			attribute.String(genAiOperationName, "execute_tool"),
@@ -136,6 +139,9 @@ func TraceMergedToolCalls(spans []trace.Span, fnResponseEvent *session.Event) {
 
 // TraceToolCall traces the tool execution events.
 func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fnResponseEvent *session.Event) {
+	if fnResponseEvent == nil {
+		return
+	}
 	for _, span := range spans {
 		attributes := []attribute.KeyValue{
 			attribute.String(genAiOperationName, "execute_tool"),
