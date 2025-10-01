@@ -16,7 +16,9 @@
 package web
 
 import (
+	"embed"
 	"flag"
+	"io/fs"
 	"log"
 	"net/http"
 	"strconv"
@@ -99,6 +101,11 @@ func corsWithArgs(c *WebConfig) func(next http.Handler) http.Handler {
 	}
 }
 
+// embed web UI files into the executable
+
+//go:embed distr/browser/*
+var content embed.FS
+
 // Serve initiates the http server and starts it according to WebConfig parameters
 func Serve(c *WebConfig, serveConfig *ServeConfig) {
 	serverConfig := config.ADKAPIRouterConfigs{
@@ -127,7 +134,13 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 		http.Redirect(w, r, "/ui/", http.StatusFound)
 	})
 
-	rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.Dir(c.UIDistPath))))
+		// serve web ui from the embedded resources
+		ui, err := fs.Sub(content, "distr/browser")
+		if err != nil {
+			log.Fatalf("cannot prepare ADK Web UI files as embedded content: %v", err)
+		}
+		rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.FS(ui))))
+	}
 
 	// Setup serving of ADK REST API
 	rApi := rBase.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
