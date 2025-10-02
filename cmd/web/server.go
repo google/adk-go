@@ -36,11 +36,8 @@ import (
 // WebConfig is a struct with parameters to run a WebServer.
 type WebConfig struct {
 	LocalPort       int
-	UIDistPath      string
 	FrontendAddress string
 	BackendAddress  string
-	StartRestApi    bool
-	StartWebUI      bool
 }
 
 // ParseArgs parses the arguments for the ADK API server.
@@ -48,9 +45,6 @@ func ParseArgs() *WebConfig {
 	localPortFlag := flag.Int("port", 8080, "Localhost port for the server")
 	frontendAddressFlag := flag.String("front_address", "localhost:8080", "Front address to allow CORS requests from as seen from the user browser. Please specify only hostname and (optionally) port")
 	backendAddressFlag := flag.String("backend_address", "http://localhost:8080/api", "Backend server as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'. ")
-	webuiDistPathFlag := flag.String("webui_distr_path", "",
-		`Points to a static ADK Web UI dist path with the pre-built version of ADK Web UI (cmd/web/distr/browser in the ADK-GO repo). 
-Normally it should be the version distributed with adk-go. You may use CLI command "build webui" to experiment with other versions.`)
 
 	flag.Parse()
 	if !flag.Parsed() {
@@ -61,7 +55,6 @@ Normally it should be the version distributed with adk-go. You may use CLI comma
 		LocalPort:       *localPortFlag,
 		FrontendAddress: *frontendAddressFlag,
 		BackendAddress:  *backendAddressFlag,
-		UIDistPath:      *webuiDistPathFlag,
 	})
 }
 

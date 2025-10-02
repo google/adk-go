@@ -52,7 +52,6 @@ type buildFlags struct {
 }
 
 type sourceFlags struct {
-	webUIDistrPath string
 	srcBasePath    string
 	entryPointPath string
 }
@@ -71,7 +70,7 @@ var flags deployCloudRunFlags
 var cloudrunCmd = &cobra.Command{
 	Use:   "cloudrun",
 	Short: "Deploys the application to cloudrun.",
-	Long: `Deployment prepares a Dockerfile which is fed with locally compiled server executable and Web UI static files.
+	Long: `Deployment prepares a Dockerfile which is fed with locally compiled server executable containing Web UI static files.
 	Service on Cloudrun is created using this information. 
 	Local proxy adding authentication is started. 
 	`,
@@ -89,19 +88,13 @@ func init() {
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "temp_dir", "t", "", "Temp dir for build")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.proxy.port, "proxy_port", 8081, "Local proxy port")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.serverPort, "server_port", 8080, "Cloudrun server port")
-	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.webUIDistrPath, "webui_distr_path", "a", "", "ADK Web UI base dir")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 }
 
 func (f *deployCloudRunFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags",
 		func(p util.Printer) error {
-			absp, err := filepath.Abs(flags.source.webUIDistrPath)
-			if err != nil {
-				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.source.webUIDistrPath, err)
-			}
-			f.source.webUIDistrPath = path.Join(absp, "browser")
-			absp, err = filepath.Abs(flags.source.entryPointPath)
+			absp, err := filepath.Abs(flags.source.entryPointPath)
 			if err != nil {
 				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.source.entryPointPath, err)
 			}
@@ -145,15 +138,6 @@ func (f *deployCloudRunFlags) cleanTemp() error {
 				return fmt.Errorf("failed to create the target directory %v: %w", f.build.tempDir, err)
 			}
 			return nil
-		})
-}
-
-func (f *deployCloudRunFlags) copyStaticADKWebUIFiles() error {
-	return util.LogStartStop("Copying static files for ADK Web UI",
-		func(p util.Printer) error {
-			p("Source: " + f.source.webUIDistrPath)
-			p("Destination: " + f.build.uiDistDir)
-			return os.CopyFS(f.build.uiDistDir, os.DirFS(f.source.webUIDistrPath))
 		})
 }
 
@@ -230,10 +214,6 @@ func (f *deployCloudRunFlags) deployOnCloudRun() error {
 		return err
 	}
 	err = f.cleanTemp()
-	if err != nil {
-		return err
-	}
-	err = f.copyStaticADKWebUIFiles()
 	if err != nil {
 		return err
 	}
