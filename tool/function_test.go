@@ -185,6 +185,57 @@ func TestFunctionTool_Simple(t *testing.T) {
 	}
 }
 
+func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t *testing.T) {
+	// First tool
+	identityFunc := func(ctx tool.Context, x int) int {
+		return x
+	}
+	identityTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+		Name:        "identity",
+		Description: "returns the input value",
+	}, identityFunc)
+	if err != nil {
+		panic(err)
+	}
+
+	// Second tool
+	stringIdentityFunc := func(ctx tool.Context, input string) string {
+		return input
+	}
+	stringIdentityTool, err := tool.NewFunctionTool(
+		tool.FunctionToolConfig{
+			Name:        "string_identity",
+			Description: "returns the input value",
+		},
+		stringIdentityFunc)
+	if err != nil {
+		t.Fatalf("NewFunctionTool failed: %v", err)
+	}
+
+	var req model.LLMRequest
+	requestProcessor, ok := identityTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("identityTool does not implement itype.RequestProcessor")
+	}
+	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+		t.Fatalf("identityTool.ProcessRequest failed: %v", err)
+	}
+	requestProcessor, ok = stringIdentityTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("stringIdentityTool does not implement itype.RequestProcessor")
+	}
+	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+		t.Fatalf("stringIdentityTool.ProcessRequest failed: %v", err)
+	}
+
+	if len(req.Config.Tools) != 1 {
+		t.Errorf("number of tools should be one, got: %d", len(req.Config.Tools))
+	}
+	if len(req.Config.Tools[0].FunctionDeclarations) != 2 {
+		t.Errorf("number of function declarations should be two, got: %d", len(req.Config.Tools[0].FunctionDeclarations))
+	}
+}
+
 func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 	type Args struct {
 		City string `json:"city"`

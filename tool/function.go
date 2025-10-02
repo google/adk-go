@@ -119,10 +119,23 @@ func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *model.L
 	if req.Config == nil {
 		req.Config = &genai.GenerateContentConfig{}
 	}
-	if decl := f.Declaration(); decl != nil {
+	if decl := f.Declaration(); decl == nil {
+		return nil
+	}
+	// Find an existing genai.Tool with FunctionDeclarations
+	var funcTool *genai.Tool
+	for _, tool := range req.Config.Tools {
+		if tool != nil && tool.FunctionDeclarations != nil {
+			funcTool = tool
+			break
+		}
+	}
+	if funcTool == nil {
 		req.Config.Tools = append(req.Config.Tools, &genai.Tool{
-			FunctionDeclarations: []*genai.FunctionDeclaration{decl},
+			FunctionDeclarations: []*genai.FunctionDeclaration{f.Declaration()},
 		})
+	} else {
+		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, f.Declaration())
 	}
 	return nil
 }

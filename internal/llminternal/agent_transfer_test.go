@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -330,6 +331,40 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 
 		check(t, curAgent, root, "", nil, []string{"Parent", "Peer", "Current"})
 	})
+}
+
+func TestAgentTransfer_ProcessRequest(t *testing.T) {
+	// First Tool
+	var req model.LLMRequest
+	handler := func(ctx tool.Context, x int) int {
+		return x
+	}
+	identityTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+		Name:        "identity",
+		Description: "returns the input value",
+	}, handler)
+	if err != nil {
+		panic(err)
+	}
+	requestProcessor, ok := identityTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("identityTool does not implement itype.RequestProcessor")
+	}
+	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+		t.Fatalf("identityTool.ProcessRequest failed: %v", err)
+	}
+	// Second tool
+	transferToAgentTool := &llminternal.TransferToAgentTool{}
+	if err := transferToAgentTool.ProcessRequest(nil, &req); err != nil {
+		t.Fatalf("transferToAgentTool.ProcessRequest failed: %v", err)
+	}
+
+	if len(req.Config.Tools) != 1 {
+		t.Errorf("number of tools should be one, got: %d", len(req.Config.Tools))
+	}
+	if len(req.Config.Tools[0].FunctionDeclarations) != 2 {
+		t.Errorf("number of function declarations should be two, got: %d", len(req.Config.Tools[0].FunctionDeclarations))
+	}
 }
 
 func TestTransferToAgentToolRun(t *testing.T) {

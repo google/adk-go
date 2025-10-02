@@ -194,6 +194,8 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 		r.Tools = make(map[string]any)
 	}
 
+	var declarations []*genai.FunctionDeclaration
+
 	for i, tool := range tools {
 		if tool == nil || tool.Name() == "" {
 			return fmt.Errorf("tools[%d] tool without name: %v", i, tool)
@@ -204,18 +206,33 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 		}
 		r.Tools[name] = tool
 
-		// If the tool is a function tool, add its declaration to GenerateConfig.Tools.
 		if fnTool, ok := tool.(toolinternal.FunctionTool); ok {
-			if r.Config == nil {
-				r.Config = &genai.GenerateContentConfig{}
-			}
 			if decl := fnTool.Declaration(); decl != nil {
 				// TODO: verify for duplicates.
-				r.Config.Tools = append(r.Config.Tools, &genai.Tool{
-					FunctionDeclarations: []*genai.FunctionDeclaration{decl},
-				})
+				declarations = append(declarations, decl)
 			}
 		}
+	}
+	if len(declarations) == 0 {
+		return nil
+	}
+	if r.Config == nil {
+		r.Config = &genai.GenerateContentConfig{}
+	}
+	// Find an existing genai.Tool with FunctionDeclarations
+	var funcTool *genai.Tool
+	for _, gt := range r.Config.Tools {
+		if gt.FunctionDeclarations != nil {
+			funcTool = gt
+			break
+		}
+	}
+	if funcTool != nil {
+		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, declarations...)
+	} else {
+		r.Config.Tools = append(r.Config.Tools, &genai.Tool{
+			FunctionDeclarations: declarations,
+		})
 	}
 	return nil
 }
