@@ -147,13 +147,9 @@ func TestFunctionTool_Simple(t *testing.T) {
 				t.Fatalf("weatherReportTool.ProcessRequest did not configure tool info in LLMRequest: %v", req)
 			}
 			req.Contents = genai.Text(tc.prompt)
-			f := func() iter.Seq2[*model.LLMResponse, error] {
-				return func(yield func(*model.LLMResponse, error) bool) {
-					resp, err := m.Generate(ctx, &req)
-					yield(resp, err)
-				}
-			}
-			resp, err := readFirstResponse[*genai.FunctionCall](f())
+			resp, err := readFirstResponse[*genai.FunctionCall](
+				m.GenerateContent(ctx, &req, false),
+			)
 			if err != nil {
 				t.Fatalf("GenerateContent(%v) failed: %v", req, err)
 			}

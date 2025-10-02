@@ -42,10 +42,22 @@ func (m *geminiModel) Name() string {
 	return m.name
 }
 
-// Generate calls the model synchronously returning result from the first candidate.
-func (m *geminiModel) Generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+// GenerateContent calls the underlying model.
+func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	m.maybeAppendUserContent(req)
 
+	if stream {
+		return m.generateStream(ctx, req)
+	}
+
+	return func(yield func(*model.LLMResponse, error) bool) {
+		resp, err := m.generate(ctx, req)
+		yield(resp, err)
+	}
+}
+
+// generate calls the model synchronously returning result from the first candidate.
+func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	resp, err := m.client.Models.GenerateContent(ctx, m.name, req.Contents, req.Config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
@@ -57,10 +69,10 @@ func (m *geminiModel) Generate(ctx context.Context, req *model.LLMRequest) (*mod
 	return model.CreateResponse(resp), nil
 }
 
-// GenerateStream calls the model synchronously.
-func (m *geminiModel) GenerateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
-	m.maybeAppendUserContent(req)
+// generateStream returns a stream of responses from the model.
+func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	aggregator := llminternal.NewStreamingResponseAggregator()
+
 	return func(yield func(*model.LLMResponse, error) bool) {
 		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.name, req.Contents, req.Config) {
 			if err != nil {

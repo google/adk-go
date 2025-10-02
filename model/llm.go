@@ -24,8 +24,7 @@ import (
 // LLM provides the access to the underlying LLM.
 type LLM interface {
 	Name() string
-	Generate(ctx context.Context, req *LLMRequest) (*LLMResponse, error)
-	GenerateStream(ctx context.Context, req *LLMRequest) iter.Seq2[*LLMResponse, error]
+	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]
 }
 
 // LLMRequest is the raw LLM request.

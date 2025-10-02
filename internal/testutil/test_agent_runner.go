@@ -119,6 +119,16 @@ type MockModel struct {
 
 var errNoModelData = errors.New("no data")
 
+func (m *MockModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if stream {
+		return m.GenerateStream(ctx, req)
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		resp, err := m.Generate(ctx, req)
+		yield(resp, err)
+	}
+}
+
 // GenerateContent implements llm.Model.
 func (m *MockModel) Generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	m.Requests = append(m.Requests, req)

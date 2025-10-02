@@ -15,7 +15,6 @@
 package llminternal
 
 import (
-	"context"
 	"fmt"
 	"iter"
 	"maps"
@@ -241,18 +240,9 @@ func (f *Flow) callLLM(ctx agent.Context, req *model.LLMRequest) iter.Seq2[*mode
 		// to help with slicing the billing reports on a per-agent basis.
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
+		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
 
-		gen := func(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
-			return func(yield func(*model.LLMResponse, error) bool) {
-				resp, err := f.Model.Generate(ctx, req)
-				yield(resp, err)
-			}
-		}
-		if runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE {
-			gen = f.Model.GenerateStream
-		}
-
-		for resp, err := range gen(ctx, req) {
+		for resp, err := range f.Model.GenerateContent(ctx, req, useStream) {
 			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp, err)
 			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
 			if callbackErr != nil {

@@ -71,13 +71,14 @@ func TestModel_Generate(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			got, err := testModel.Generate(t.Context(), tt.req)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Model.Generate() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if diff := cmp.Diff(tt.want, got, cmpopts.IgnoreFields(model.LLMResponse{}, "AvgLogprobs")); diff != "" {
-				t.Errorf("Model.Generate() = %v, want %v\ndiff(-want +got):\n%v", got, tt.want, diff)
+			for got, err := range testModel.GenerateContent(t.Context(), tt.req, false) {
+				if (err != nil) != tt.wantErr {
+					t.Errorf("Model.Generate() error = %v, wantErr %v", err, tt.wantErr)
+					return
+				}
+				if diff := cmp.Diff(tt.want, got, cmpopts.IgnoreFields(model.LLMResponse{}, "AvgLogprobs")); diff != "" {
+					t.Errorf("Model.Generate() = %v, want %v\ndiff(-want +got):\n%v", got, tt.want, diff)
+				}
 			}
 		})
 	}
@@ -113,7 +114,7 @@ func TestModel_GenerateStream(t *testing.T) {
 			}
 
 			// Transforms the stream into strings, concating the text value of the response parts
-			got, err := readResponse(model.GenerateStream(t.Context(), tt.req))
+			got, err := readResponse(model.GenerateContent(t.Context(), tt.req, true))
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Model.GenerateStream() error = %v, wantErr %v", err, tt.wantErr)
 				return
