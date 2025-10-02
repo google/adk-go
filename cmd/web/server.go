@@ -134,13 +134,12 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 		http.Redirect(w, r, "/ui/", http.StatusFound)
 	})
 
-		// serve web ui from the embedded resources
-		ui, err := fs.Sub(content, "distr/browser")
-		if err != nil {
-			log.Fatalf("cannot prepare ADK Web UI files as embedded content: %v", err)
-		}
-		rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.FS(ui))))
+	// serve web ui from the embedded resources
+	ui, err := fs.Sub(content, "distr/browser")
+	if err != nil {
+		log.Fatalf("cannot prepare ADK Web UI files as embedded content: %v", err)
 	}
+	rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.FS(ui))))
 
 	// Setup serving of ADK REST API
 	rApi := rBase.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
