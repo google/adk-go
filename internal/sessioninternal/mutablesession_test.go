@@ -155,7 +155,6 @@ func TestMutableSession_All(t *testing.T) {
 
 func TestMutableSession_PassthroughMethods(t *testing.T) {
 	ctx := context.Background()
-	sessionID := "testPassthrough"
 	appName, userID, sessionID := "testApp", "testUser", "testPassthrough"
 
 	service := session.InMemoryService()
