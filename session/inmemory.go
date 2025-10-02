@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package sessionservice
+package session
 
 import (
 	"context"
@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"google.golang.org/adk/session"
 	"rsc.io/omap"
 	"rsc.io/ordered"
 )
@@ -31,7 +30,7 @@ import (
 // Thread-safe.
 type inMemoryService struct {
 	mu       sync.RWMutex
-	sessions omap.Map[string, *storedSession] // session.ID) -> storedSession
+	sessions omap.Map[string, *session] // session.ID) -> storedSession
 }
 
 func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
@@ -44,10 +43,10 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 		sessionID = uuid.NewString()
 	}
 
-	key := sessionKey{
-		AppName:   req.AppName,
-		UserID:    req.UserID,
-		SessionID: sessionID,
+	key := id{
+		appName:   req.AppName,
+		userID:    req.UserID,
+		sessionID: sessionID,
 	}
 
 	encodedKey := key.Encode()
@@ -56,8 +55,8 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	if stateMap == nil {
 		stateMap = make(map[string]any)
 	}
-	val := &storedSession{
-		id:        session.ID(key),
+	val := &session{
+		id:        key,
 		state:     stateMap,
 		updatedAt: time.Now(),
 	}
@@ -73,7 +72,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 }
 
 func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
-	appName, userID, sessionID := req.ID.AppName, req.ID.UserID, req.ID.SessionID
+	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
 	if appName == "" || userID == "" || sessionID == "" {
 		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
 	}
@@ -81,9 +80,15 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	res, ok := s.sessions.Get(sessionKey(req.ID).Encode())
+	id := id{
+		appName:   appName,
+		userID:    userID,
+		sessionID: sessionID,
+	}
+
+	res, ok := s.sessions.Get(id.Encode())
 	if !ok {
-		return nil, fmt.Errorf("session %+v not found", req.ID)
+		return nil, fmt.Errorf("session %+v not found", req.SessionID)
 	}
 
 	// TODO: handle req.NumRecentEvents and req.After
@@ -100,17 +105,17 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	lo := sessionKey{AppName: req.AppName, UserID: req.UserID}.Encode()
-	hi := sessionKey{AppName: req.AppName, UserID: req.UserID + "\x00"}.Encode()
+	lo := id{appName: req.AppName, userID: req.UserID}.Encode()
+	hi := id{appName: req.AppName, userID: req.UserID + "\x00"}.Encode()
 
-	var res []StoredSession
+	var res []Session
 	for k, storedSession := range s.sessions.Scan(lo, hi) {
-		var key sessionKey
+		var key id
 		if err := key.Decode(k); err != nil {
 			return nil, fmt.Errorf("failed to decode key: %w", err)
 		}
 
-		if key.AppName != req.AppName && key.UserID != req.UserID {
+		if key.appName != req.AppName && key.userID != req.UserID {
 			break
 		}
 
@@ -122,7 +127,7 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 }
 
 func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {
-	appName, userID, sessionID := req.ID.AppName, req.ID.UserID, req.ID.SessionID
+	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
 	if appName == "" || userID == "" || sessionID == "" {
 		return fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
 	}
@@ -130,87 +135,105 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.sessions.Delete(sessionKey(req.ID).Encode())
+	id := id{
+		appName:   appName,
+		userID:    userID,
+		sessionID: sessionID,
+	}
+
+	s.sessions.Delete(id.Encode())
 	return nil
 }
 
-func (s *inMemoryService) AppendEvent(ctx context.Context, session StoredSession, event *session.Event) error {
-	if session == nil || event == nil {
+func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, event *Event) error {
+	if curSession == nil || event == nil {
 		return fmt.Errorf("session or event are nil")
 	}
 
 	// TODO: no-op if event is partial.
 	// TODO: process event actions and state delta.
 
-	storedSession, ok := session.(*storedSession)
+	sess, ok := curSession.(*session)
 	if !ok {
-		return fmt.Errorf("unexpected session type %T", session)
+		return fmt.Errorf("unexpected session type %T", sess)
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	storedSession.appendEvent(event)
+	sess.appendEvent(event)
 
-	s.sessions.Set(sessionKey(session.ID()).Encode(), storedSession)
+	s.sessions.Set(sess.id.Encode(), sess)
 
 	return nil
 }
 
-type sessionKey session.ID
-
-func (sk sessionKey) Encode() string {
-	return string(ordered.Encode(sk.AppName, sk.UserID, sk.SessionID))
+func (id id) Encode() string {
+	return string(ordered.Encode(id.appName, id.userID, id.sessionID))
 }
 
-func (sk *sessionKey) Decode(key string) error {
-	return ordered.Decode([]byte(key), &sk.AppName, &sk.UserID, &sk.SessionID)
+func (id *id) Decode(key string) error {
+	return ordered.Decode([]byte(key), &id.appName, &id.userID, &id.sessionID)
 }
 
-type storedSession struct {
-	id session.ID
+type id struct {
+	appName   string
+	userID    string
+	sessionID string
+}
+
+type session struct {
+	id id
 
 	// guards all mutable fields
 	mu        sync.RWMutex
-	events    []*session.Event
+	events    []*Event
 	state     map[string]any
 	updatedAt time.Time
 }
 
-func (s *storedSession) ID() session.ID {
-	return s.id
+func (s *session) ID() string {
+	return s.id.sessionID
 }
 
-func (s *storedSession) State() session.ReadOnlyState {
+func (s *session) AppName() string {
+	return s.id.appName
+}
+
+func (s *session) UserID() string {
+	return s.id.userID
+}
+
+func (s *session) State() State {
 	return &state{
 		mu:    &s.mu,
 		state: s.state,
 	}
 }
 
-func (s *storedSession) Events() session.Events {
+func (s *session) Events() Events {
 	return events(s.events)
 }
 
-func (s *storedSession) Updated() time.Time {
+func (s *session) LastUpdateTime() time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	return s.updatedAt
 }
 
-func (s *storedSession) appendEvent(event *session.Event) {
+func (s *session) appendEvent(event *Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.events = append(s.events, event)
-	s.updatedAt = event.Time
+	s.updatedAt = event.Timestamp
 }
 
-type events []*session.Event
+type events []*Event
 
-func (e events) All() iter.Seq[*session.Event] {
-	return func(yield func(*session.Event) bool) {
+func (e events) All() iter.Seq[*Event] {
+	return func(yield func(*Event) bool) {
 		for _, event := range e {
 			if !yield(event) {
 				return
@@ -223,7 +246,7 @@ func (e events) Len() int {
 	return len(e)
 }
 
-func (e events) At(i int) *session.Event {
+func (e events) At(i int) *Event {
 	if i >= 0 && i < len(e) {
 		return e[i]
 	}

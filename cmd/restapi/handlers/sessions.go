@@ -22,18 +22,17 @@ import (
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/restapi/models"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 )
 
 // TODO: Confirm error handling and target semantic for REST API.
 
 // SessionsAPIController is the controller for the Sessions API.
 type SessionsAPIController struct {
-	service sessionservice.Service
+	service session.Service
 }
 
 // NewSessionsAPIController creates a new SessionsAPIController.
-func NewSessionsAPIController(service sessionservice.Service) *SessionsAPIController {
+func NewSessionsAPIController(service session.Service) *SessionsAPIController {
 	return &SessionsAPIController{service: service}
 }
 
@@ -63,7 +62,7 @@ func (c *SessionsAPIController) CreateSessionHTTP(rw http.ResponseWriter, req *h
 }
 
 func (c *SessionsAPIController) createSession(ctx context.Context, sessionID models.SessionID, createSessionRequest models.CreateSessionRequest) (models.Session, error) {
-	session, err := c.service.Create(ctx, &sessionservice.CreateRequest{
+	session, err := c.service.Create(ctx, &session.CreateRequest{
 		AppName:   sessionID.AppName,
 		UserID:    sessionID.UserID,
 		SessionID: sessionID.ID,
@@ -94,12 +93,10 @@ func (c *SessionsAPIController) DeleteSessionHTTP(rw http.ResponseWriter, req *h
 		return
 	}
 
-	err = c.service.Delete(req.Context(), &sessionservice.DeleteRequest{
-		ID: session.ID{
-			AppName:   sessionID.AppName,
-			UserID:    sessionID.UserID,
-			SessionID: sessionID.ID,
-		},
+	err = c.service.Delete(req.Context(), &session.DeleteRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
 	})
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
@@ -120,12 +117,10 @@ func (c *SessionsAPIController) GetSessionHTTP(rw http.ResponseWriter, req *http
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	storedSession, err := c.service.Get(req.Context(), &sessionservice.GetRequest{
-		ID: session.ID{
-			AppName:   sessionID.AppName,
-			UserID:    sessionID.UserID,
-			SessionID: sessionID.ID,
-		},
+	storedSession, err := c.service.Get(req.Context(), &session.GetRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
 	})
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
@@ -148,7 +143,7 @@ func (c *SessionsAPIController) ListSessionsHTTP(rw http.ResponseWriter, req *ht
 		return
 	}
 	var sessions []models.Session
-	resp, err := c.service.List(req.Context(), &sessionservice.ListRequest{
+	resp, err := c.service.List(req.Context(), &session.ListRequest{
 		AppName: sessionID.AppName,
 		UserID:  sessionID.UserID,
 	})

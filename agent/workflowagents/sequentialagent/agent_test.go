@@ -25,7 +25,6 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
 )
 
@@ -92,7 +91,7 @@ func TestNewSequentialAgent(t *testing.T) {
 
 			var gotEvents []*session.Event
 
-			sessionService := sessionservice.Mem()
+			sessionService := session.InMemoryService()
 
 			agentRunner, err := runner.New(&runner.Config{
 				AppName:        "test_app",
@@ -103,7 +102,7 @@ func TestNewSequentialAgent(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, err = sessionService.Create(ctx, &sessionservice.CreateRequest{
+			_, err = sessionService.Create(ctx, &session.CreateRequest{
 				AppName:   "test_app",
 				UserID:    "user_id",
 				SessionID: "session_id",
@@ -129,7 +128,7 @@ func TestNewSequentialAgent(t *testing.T) {
 			}
 
 			for i, gotEvent := range gotEvents {
-				tt.wantEvents[i].Time = gotEvent.Time
+				tt.wantEvents[i].Timestamp = gotEvent.Timestamp
 				if diff := cmp.Diff(tt.wantEvents[i], gotEvent); diff != "" {
 					t.Errorf("event[i] mismatch (-want +got):\n%s", diff)
 				}

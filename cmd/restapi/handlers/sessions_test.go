@@ -30,29 +30,34 @@ import (
 	"google.golang.org/adk/cmd/restapi/fakes"
 	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/models"
-	"google.golang.org/adk/session"
 )
 
 func TestGetSession(t *testing.T) {
+	id := fakes.SessionID{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "testSession",
+	}
+
 	tc := []struct {
 		name           string
-		storedSessions map[session.ID]fakes.TestSession
-		sessionID      session.ID
+		storedSessions map[fakes.SessionID]fakes.TestSession
+		sessionID      fakes.SessionID
 		wantSession    models.Session
 		wantErr        error
 		wantStatus     int
 	}{
 		{
 			name: "session exists",
-			storedSessions: map[session.ID]fakes.TestSession{
-				sessionID("testApp", "testUser", "testSession"): {
-					Id:            sessionID("testApp", "testUser", "testSession"),
+			storedSessions: map[fakes.SessionID]fakes.TestSession{
+				id: {
+					Id:            id,
 					SessionState:  fakes.TestState{"foo": "bar"},
 					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 			},
-			sessionID: sessionID("testApp", "testUser", "testSession"),
+			sessionID: id,
 			wantSession: models.Session{
 				ID:        "testSession",
 				AppName:   "testApp",
@@ -67,36 +72,42 @@ func TestGetSession(t *testing.T) {
 		},
 		{
 			name:           "session does not exist",
-			storedSessions: map[session.ID]fakes.TestSession{},
-			sessionID:      sessionID("testApp", "testUser", "testSession"),
+			storedSessions: map[fakes.SessionID]fakes.TestSession{},
+			sessionID:      id,
 			wantErr:        fmt.Errorf("not found"),
 			wantStatus:     http.StatusInternalServerError,
 		},
 		{
 			name: "user ID is missing in input",
-			storedSessions: map[session.ID]fakes.TestSession{
-				sessionID("testApp", "testUser", "testSession"): {
-					Id:            sessionID("testApp", "testUser", "testSession"),
+			storedSessions: map[fakes.SessionID]fakes.TestSession{
+				id: {
+					Id:            id,
 					SessionState:  fakes.TestState{"foo": "bar"},
 					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 			},
-			sessionID:  sessionID("testApp", "", "testSession"),
+			sessionID: fakes.SessionID{
+				AppName:   "testApp",
+				SessionID: "testSession",
+			},
 			wantErr:    fmt.Errorf("user_id parameter is required"),
 			wantStatus: http.StatusBadRequest,
 		},
 		{
 			name: "session ID is missing",
-			storedSessions: map[session.ID]fakes.TestSession{
-				sessionID("testApp", "testUser", "testSession"): {
-					Id:            sessionID("testApp", "testUser", ""),
+			storedSessions: map[fakes.SessionID]fakes.TestSession{
+				id: {
+					Id: fakes.SessionID{
+						AppName: "testApp",
+						UserID:  "testUser",
+					},
 					SessionState:  fakes.TestState{"foo": "bar"},
 					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 			},
-			sessionID:  sessionID("testApp", "testUser", "testSession"),
+			sessionID:  id,
 			wantErr:    fmt.Errorf("session_id is empty in received session"),
 			wantStatus: http.StatusInternalServerError,
 		},
@@ -139,10 +150,16 @@ func TestGetSession(t *testing.T) {
 }
 
 func TestCreateSession(t *testing.T) {
+	id := fakes.SessionID{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "testSession",
+	}
+
 	tc := []struct {
 		name             string
-		storedSessions   map[session.ID]fakes.TestSession
-		sessionID        session.ID
+		storedSessions   map[fakes.SessionID]fakes.TestSession
+		sessionID        fakes.SessionID
 		createRequestObj models.CreateSessionRequest
 		wantSession      models.Session
 		wantErr          error
@@ -150,22 +167,22 @@ func TestCreateSession(t *testing.T) {
 	}{
 		{
 			name: "session exists",
-			storedSessions: map[session.ID]fakes.TestSession{
-				sessionID("testApp", "testUser", "testSession"): {
-					Id:            sessionID("testApp", "testUser", "testSession"),
+			storedSessions: map[fakes.SessionID]fakes.TestSession{
+				id: {
+					Id:            id,
 					SessionState:  fakes.TestState{"foo": "bar"},
 					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 			},
-			sessionID:  sessionID("testApp", "testUser", "testSession"),
+			sessionID:  id,
 			wantErr:    fmt.Errorf("session already exists"),
 			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:           "successful create operation",
-			storedSessions: map[session.ID]fakes.TestSession{},
-			sessionID:      sessionID("testApp", "testUser", "testSession"),
+			storedSessions: map[fakes.SessionID]fakes.TestSession{},
+			sessionID:      id,
 			createRequestObj: models.CreateSessionRequest{
 				State: map[string]any{
 					"foo": "bar",
@@ -197,9 +214,12 @@ func TestCreateSession(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:             "user id is missing",
-			storedSessions:   map[session.ID]fakes.TestSession{},
-			sessionID:        sessionID("testApp", "", "testSession"),
+			name:           "user id is missing",
+			storedSessions: map[fakes.SessionID]fakes.TestSession{},
+			sessionID: fakes.SessionID{
+				AppName:   "testApp",
+				SessionID: "testSession",
+			},
 			createRequestObj: models.CreateSessionRequest{},
 			wantStatus:       http.StatusBadRequest,
 			wantErr:          fmt.Errorf("user_id parameter is required"),
@@ -247,29 +267,35 @@ func TestCreateSession(t *testing.T) {
 }
 
 func TestDeleteSession(t *testing.T) {
+	id := fakes.SessionID{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "testSession",
+	}
+
 	tc := []struct {
 		name           string
-		storedSessions map[session.ID]fakes.TestSession
-		sessionID      session.ID
+		storedSessions map[fakes.SessionID]fakes.TestSession
+		sessionID      fakes.SessionID
 		wantStatus     int
 	}{
 		{
 			name: "session exists",
-			storedSessions: map[session.ID]fakes.TestSession{
-				sessionID("testApp", "testUser", "testSession"): {
-					Id:            sessionID("testApp", "testUser", "testSession"),
+			storedSessions: map[fakes.SessionID]fakes.TestSession{
+				id: {
+					Id:            id,
 					SessionState:  fakes.TestState{"foo": "bar"},
 					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
 			},
-			sessionID:  sessionID("testApp", "testUser", "testSession"),
+			sessionID:  id,
 			wantStatus: http.StatusOK,
 		},
 		{
 			name:           "session does not exist",
-			storedSessions: map[session.ID]fakes.TestSession{},
-			sessionID:      sessionID("testApp", "testUser", "testSession"),
+			storedSessions: map[fakes.SessionID]fakes.TestSession{},
+			sessionID:      id,
 			wantStatus:     http.StatusInternalServerError,
 		},
 	}
@@ -298,29 +324,45 @@ func TestDeleteSession(t *testing.T) {
 }
 
 func TestListSessions(t *testing.T) {
+	id := fakes.SessionID{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "testSession",
+	}
+	newSessionID := fakes.SessionID{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "newSession",
+	}
+	oldSessionID := fakes.SessionID{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "oldSession",
+	}
+
 	tc := []struct {
 		name           string
-		storedSessions map[session.ID]fakes.TestSession
+		storedSessions map[fakes.SessionID]fakes.TestSession
 		wantSessions   []models.Session
 		wantStatus     int
 	}{
 		{
 			name: "session exists",
-			storedSessions: map[session.ID]fakes.TestSession{
-				sessionID("testApp", "testUser", "testSession"): {
-					Id:            sessionID("testApp", "testUser", "testSession"),
+			storedSessions: map[fakes.SessionID]fakes.TestSession{
+				id: {
+					Id:            id,
 					SessionState:  fakes.TestState{"foo": "bar"},
 					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
-				sessionID("testApp", "testUser", "newSession"): {
-					Id:            sessionID("testApp", "testUser", "newSession"),
+				newSessionID: {
+					Id:            newSessionID,
 					SessionState:  fakes.TestState{"xyz": "abc"},
 					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
 				},
-				sessionID("testApp", "testUser", "oldSession"): {
-					Id:            sessionID("testApp", "testUser", "oldSession"),
+				oldSessionID: {
+					Id:            oldSessionID,
 					SessionState:  fakes.TestState{},
 					SessionEvents: fakes.TestEvents{},
 					UpdatedAt:     time.Now(),
@@ -394,15 +436,7 @@ func TestListSessions(t *testing.T) {
 
 }
 
-func sessionID(appName, userID, sessionID string) session.ID {
-	return session.ID{
-		AppName:   appName,
-		UserID:    userID,
-		SessionID: sessionID,
-	}
-}
-
-func sessionVars(sessionID session.ID) map[string]string {
+func sessionVars(sessionID fakes.SessionID) map[string]string {
 	return map[string]string{
 		"app_name":   sessionID.AppName,
 		"user_id":    sessionID.UserID,

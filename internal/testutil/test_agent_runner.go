@@ -26,33 +26,30 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
 )
 
 type TestAgentRunner struct {
 	agent          agent.Agent
-	sessionService sessionservice.Service
-	lastSession    sessionservice.StoredSession
+	sessionService session.Service
+	lastSession    session.Session
 	appName        string
 	// TODO: move runner definition to the adk package and it's a part of public api, but the logic to the internal runner
 	runner *runner.Runner
 }
 
-func (r *TestAgentRunner) session(t *testing.T, appName, userID, sessionID string) (sessionservice.StoredSession, error) {
+func (r *TestAgentRunner) session(t *testing.T, appName, userID, sessionID string) (session.Session, error) {
 	ctx := t.Context()
-	if last := r.lastSession; last != nil && last.ID().SessionID == sessionID {
-		resp, err := r.sessionService.Get(ctx, &sessionservice.GetRequest{
-			ID: session.ID{
-				AppName:   "test_app",
-				UserID:    "test_user",
-				SessionID: sessionID,
-			},
+	if last := r.lastSession; last != nil && last.ID() == sessionID {
+		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
+			AppName:   "test_app",
+			UserID:    "test_user",
+			SessionID: sessionID,
 		})
 		r.lastSession = resp.Session
 		return resp.Session, err
 	}
-	resp, err := r.sessionService.Create(ctx, &sessionservice.CreateRequest{
+	resp, err := r.sessionService.Create(ctx, &session.CreateRequest{
 		AppName:   "test_app",
 		UserID:    "test_user",
 		SessionID: sessionID,
@@ -87,12 +84,12 @@ func (r *TestAgentRunner) RunContentWithConfig(t *testing.T, sessionID string, c
 		t.Fatalf("failed to get/create session: %v", err)
 	}
 
-	return r.runner.Run(ctx, userID, session.ID().SessionID, content, cfg)
+	return r.runner.Run(ctx, userID, session.ID(), content, cfg)
 }
 
 func NewTestAgentRunner(t *testing.T, agent agent.Agent) *TestAgentRunner {
 	appName := "test_app"
-	sessionService := sessionservice.Mem()
+	sessionService := session.InMemoryService()
 
 	runner, err := runner.New(&runner.Config{
 		AppName:        appName,

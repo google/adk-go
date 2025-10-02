@@ -19,29 +19,22 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifactservice"
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
 // Artifacts implements Artifacts
 type Artifacts struct {
-	service artifactservice.Service
-	id      session.ID
-}
-
-// NewArtifacts creates and returns Artifacts implementation.
-func NewArtifacts(service artifactservice.Service, id session.ID) *Artifacts {
-	return &Artifacts{
-		service: service,
-		id:      id,
-	}
+	Service   artifactservice.Service
+	AppName   string
+	UserID    string
+	SessionID string
 }
 
 func (a *Artifacts) Save(name string, data genai.Part) error {
-	_, err := a.service.Save(context.Background(), &artifactservice.SaveRequest{
-		AppName:   a.id.AppName,
-		UserID:    a.id.UserID,
-		SessionID: a.id.SessionID,
+	_, err := a.Service.Save(context.Background(), &artifactservice.SaveRequest{
+		AppName:   a.AppName,
+		UserID:    a.UserID,
+		SessionID: a.SessionID,
 		FileName:  name,
 		Part:      &data,
 	})
@@ -49,10 +42,10 @@ func (a *Artifacts) Save(name string, data genai.Part) error {
 }
 
 func (a *Artifacts) Load(name string) (genai.Part, error) {
-	loadResponse, err := a.service.Load(context.Background(), &artifactservice.LoadRequest{
-		AppName:   a.id.AppName,
-		UserID:    a.id.UserID,
-		SessionID: a.id.SessionID,
+	loadResponse, err := a.Service.Load(context.Background(), &artifactservice.LoadRequest{
+		AppName:   a.AppName,
+		UserID:    a.UserID,
+		SessionID: a.SessionID,
 		FileName:  name,
 	})
 	if err != nil {
@@ -62,10 +55,10 @@ func (a *Artifacts) Load(name string) (genai.Part, error) {
 }
 
 func (a *Artifacts) LoadVersion(name string, version int) (genai.Part, error) {
-	loadResponse, err := a.service.Load(context.Background(), &artifactservice.LoadRequest{
-		AppName:   a.id.AppName,
-		UserID:    a.id.UserID,
-		SessionID: a.id.SessionID,
+	loadResponse, err := a.Service.Load(context.Background(), &artifactservice.LoadRequest{
+		AppName:   a.AppName,
+		UserID:    a.UserID,
+		SessionID: a.SessionID,
 		FileName:  name,
 		Version:   int64(version),
 	})
@@ -76,10 +69,10 @@ func (a *Artifacts) LoadVersion(name string, version int) (genai.Part, error) {
 }
 
 func (a *Artifacts) List() ([]string, error) {
-	ListResponse, err := a.service.List(context.Background(), &artifactservice.ListRequest{
-		AppName:   a.id.AppName,
-		UserID:    a.id.UserID,
-		SessionID: a.id.SessionID,
+	ListResponse, err := a.Service.List(context.Background(), &artifactservice.ListRequest{
+		AppName:   a.AppName,
+		UserID:    a.UserID,
+		SessionID: a.SessionID,
 	})
 	if err != nil {
 		return nil, err

@@ -127,7 +127,7 @@ func TestAgentCallbacks(t *testing.T) {
 			}
 
 			for i, gotEvent := range gotEvents {
-				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Time", "InvocationID")); diff != "" {
+				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID")); diff != "" {
 					t.Errorf("diff in the events: got event[%d]: %v, want: %v, diff: %v", i, gotEvent, tt.wantEvents[i], diff)
 				}
 			}

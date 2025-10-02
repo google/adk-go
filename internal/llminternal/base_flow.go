@@ -217,7 +217,7 @@ func toolPreprocess(ctx agent.Context, req *model.LLMRequest, tools []tool.Tool)
 			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
 		}
 		// TODO: how to prevent mutation on this?
-		toolCtx := tool.NewContext(ctx, "", &session.Actions{})
+		toolCtx := tool.NewContext(ctx, "", &session.EventActions{})
 		if err := requestProcessor.ProcessRequest(toolCtx, req); err != nil {
 			return err
 		}
@@ -355,7 +355,7 @@ func handleFunctionCalls(ctx agent.Context, toolsDict map[string]tool.Tool, resp
 		if !ok {
 			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
 		}
-		toolCtx := tool.NewContext(ctx, fnCall.ID, &session.Actions{})
+		toolCtx := tool.NewContext(ctx, fnCall.ID, &session.EventActions{})
 		//toolCtx := tool.
 		// TODO: agent.canonical_before_tool_callbacks
 		result, err := funcTool.Run(toolCtx, fnCall.Args)
@@ -405,7 +405,7 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 		return events[0], nil
 	}
 	var parts []*genai.Part
-	var actions *session.Actions
+	var actions *session.EventActions
 	for _, ev := range events {
 		if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
 			continue
@@ -425,7 +425,7 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 	return ev, nil
 }
 
-func mergeEventActions(base, other *session.Actions) *session.Actions {
+func mergeEventActions(base, other *session.EventActions) *session.EventActions {
 	// flows/llm_flows/functions.py merge_parallel_function_response_events
 	//
 	// TODO: merge_parallel_function_response_events creates a "last one wins" scenario

@@ -18,12 +18,12 @@ package config
 import (
 	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/cmd/restapi/services"
-	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/session"
 )
 
 // ADKAPIRouterConfigs contains the configs for the ADK API server.
 type ADKAPIRouterConfigs struct {
-	SessionService  sessionservice.Service
+	SessionService  session.Service
 	AgentLoader     services.AgentLoader
 	ArtifactService artifactservice.Service
 }

@@ -30,7 +30,6 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 
 	"google.golang.org/genai"
 )
@@ -94,7 +93,7 @@ func TestNewParallelAgent(t *testing.T) {
 
 			var gotEvents []*session.Event
 
-			sessionService := sessionservice.Mem()
+			sessionService := session.InMemoryService()
 
 			agentRunner, err := runner.New(&runner.Config{
 				AppName:        "test_app",
@@ -105,7 +104,7 @@ func TestNewParallelAgent(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, err = sessionService.Create(ctx, &sessionservice.CreateRequest{
+			_, err = sessionService.Create(ctx, &session.CreateRequest{
 				AppName:   "test_app",
 				UserID:    "user_id",
 				SessionID: "session_id",

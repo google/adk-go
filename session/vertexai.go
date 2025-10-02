@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package sessionservice
+package session
 
 import (
 	"context"
 	"fmt"
 
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
@@ -46,11 +45,11 @@ func (s *vertexAiService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	}
 
 	c := &CreateResponse{
-		Session: &storedSession{
-			id: session.ID{
-				AppName:   req.AppName,
-				UserID:    req.UserID,
-				SessionID: "test-id",
+		Session: &session{
+			id: id{
+				appName:   req.AppName,
+				userID:    req.UserID,
+				sessionID: "test-id",
 			},
 		},
 	}
@@ -70,6 +69,6 @@ func (s *vertexAiService) Delete(ctx context.Context, req *DeleteRequest) error 
 	return fmt.Errorf("session Delete function not implemented")
 }
 
-func (s *vertexAiService) AppendEvent(ctx context.Context, session StoredSession, event *session.Event) error {
+func (s *vertexAiService) AppendEvent(ctx context.Context, session Session, event *Event) error {
 	return fmt.Errorf("session AppendEvent function not implemented")
 }

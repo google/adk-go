@@ -25,7 +25,6 @@ import (
 	"google.golang.org/adk/model"
 
 	"google.golang.org/adk/artifactservice"
-	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -286,15 +285,14 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 func createToolContext(t *testing.T) tool.Context {
 	t.Helper()
 
-	sessionId := session.ID{
+	artifacts := &artifactsinternal.Artifacts{
+		Service:   artifactservice.Mem(),
 		AppName:   "app",
 		UserID:    "user",
 		SessionID: "session",
 	}
 
-	artifactsImpl := artifactsinternal.NewArtifacts(artifactservice.Mem(), sessionId)
-
-	agentCtx := agent.NewContext(t.Context(), nil, nil, artifactsImpl, nil, nil, "")
+	agentCtx := agent.NewContext(t.Context(), nil, nil, artifacts, nil, nil, "")
 
 	return tool.NewContext(agentCtx, "", nil)
 }

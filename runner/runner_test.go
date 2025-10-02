@@ -26,31 +26,26 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
 )
 
 func TestRunner_findAgentToRun(t *testing.T) {
 	t.Parallel()
 
-	sessionID := session.ID{
-		AppName:   "test",
-		UserID:    "userID",
-		SessionID: "sessionID",
-	}
+	appName, userID, sessionID := "test", "userID", "sessionID"
 
 	agentTree := agentTree(t)
 
 	tests := []struct {
 		name      string
 		rootAgent agent.Agent
-		session   sessionservice.StoredSession
+		session   session.Session
 		wantAgent agent.Agent
 		wantErr   bool
 	}{
 		{
 			name: "last event from agent allowing transfer",
-			session: createSession(t, t.Context(), sessionID, []*session.Event{
+			session: createSession(t, t.Context(), appName, userID, sessionID, []*session.Event{
 				{
 					Author: "allows_transfer_agent",
 				},
@@ -63,7 +58,7 @@ func TestRunner_findAgentToRun(t *testing.T) {
 		},
 		{
 			name: "last event from agent not allowing transfer",
-			session: createSession(t, t.Context(), sessionID, []*session.Event{
+			session: createSession(t, t.Context(), appName, userID, sessionID, []*session.Event{
 				{
 					Author: "no_transfer_agent",
 				},
@@ -76,7 +71,7 @@ func TestRunner_findAgentToRun(t *testing.T) {
 		},
 		{
 			name: "no events from agents, call root",
-			session: createSession(t, t.Context(), sessionID, []*session.Event{
+			session: createSession(t, t.Context(), appName, userID, sessionID, []*session.Event{
 				{
 					Author: "user",
 				},
@@ -184,7 +179,7 @@ func Test_isTransferrableAcrossAgentTree(t *testing.T) {
 			runner, err := New(&Config{
 				AppName:        "testApp",
 				Agent:          tt.agent,
-				SessionService: sessionservice.Mem(),
+				SessionService: session.InMemoryService(),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -202,7 +197,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 	userID := "testUser"
 	sessionID := "testSession"
 
-	sessionService := sessionservice.Mem()
+	sessionService := session.InMemoryService()
 	artifactService := artifactservice.Mem()
 
 	testAgent := must(agent.New(agent.Config{
@@ -224,7 +219,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 	}
 	r.artifactService = artifactService
 
-	createResp, err := sessionService.Create(ctx, &sessionservice.CreateRequest{
+	createResp, err := sessionService.Create(ctx, &session.CreateRequest{
 		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,
@@ -343,15 +338,15 @@ func must[T agent.Agent](a T, err error) T {
 	return a
 }
 
-func createSession(t *testing.T, ctx context.Context, id session.ID, events []*session.Event) sessionservice.StoredSession {
+func createSession(t *testing.T, ctx context.Context, sessionID, appName, userID string, events []*session.Event) session.Session {
 	t.Helper()
 
-	service := sessionservice.Mem()
+	service := session.InMemoryService()
 
-	resp, err := service.Create(ctx, &sessionservice.CreateRequest{
-		AppName:   id.AppName,
-		UserID:    id.UserID,
-		SessionID: id.SessionID,
+	resp, err := service.Create(ctx, &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
 	})
 	if err != nil {
 		t.Fatal(err)

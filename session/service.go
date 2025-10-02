@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package sessionservice
+package session
 
 import (
 	"context"
 	"time"
-
-	"google.golang.org/adk/session"
 )
 
 // Service is a session storage service.
@@ -30,31 +28,17 @@ type Service interface {
 	List(context.Context, *ListRequest) (*ListResponse, error)
 	Delete(context.Context, *DeleteRequest) error
 	// AppendEvent is used to append an event to a session.
-	AppendEvent(context.Context, StoredSession, *session.Event) error
+	AppendEvent(context.Context, Session, *Event) error
 }
 
-// Mem returns an in-memory implementation of the session service.
-func Mem() Service {
+// InMemoryService returns an in-memory implementation of the session service.
+func InMemoryService() Service {
 	return &inMemoryService{}
 }
 
-// VertexAI returns VertextAiSessionService implementation.
-func VertexAI(ctx context.Context, model string) (Service, error) {
+// VertexAIService returns VertextAiSessionService implementation.
+func VertexAIService(ctx context.Context, model string) (Service, error) {
 	return newVertexAiSessionService(ctx, model)
-}
-
-// StoredSession represents a session.
-//
-// Events and state can be modified only via the Service methods.
-type StoredSession interface {
-	// ID uniquely identifies the session.
-	ID() session.ID
-	// State returns the session state.
-	State() session.ReadOnlyState
-	// Events returns the list of events in the session.
-	Events() session.Events
-	// Updated returns the last updated time of the session.
-	Updated() time.Time
 }
 
 // CreateRequest represents a request to create a session.
@@ -70,12 +54,14 @@ type CreateRequest struct {
 
 // CreateResponse represents a response for newly created session.
 type CreateResponse struct {
-	Session StoredSession
+	Session Session
 }
 
 // GetRequest represents a request to get a session.
 type GetRequest struct {
-	ID session.ID
+	AppName   string
+	UserID    string
+	SessionID string
 
 	// NumRecentEvents returns at most NumRecentEvents most recent events.
 	// Optional: if zero, the filter is not applied.
@@ -87,7 +73,7 @@ type GetRequest struct {
 
 // GetResponse represents a response from Get.
 type GetResponse struct {
-	Session StoredSession
+	Session Session
 }
 
 // ListRequest represents a request to list sessions.
@@ -98,16 +84,12 @@ type ListRequest struct {
 
 // ListResponse represents a response from List.
 type ListResponse struct {
-	Sessions []StoredSession
+	Sessions []Session
 }
 
 // DeleteRequest represents a request to delete a session.
 type DeleteRequest struct {
-	ID session.ID
+	AppName   string
+	UserID    string
+	SessionID string
 }
-
-// TODO: potentially consider returning lightweight struct in the List().
-// type SessionInfo struct {
-// 	ID      session.ID
-// 	Updated time.Time
-// }

@@ -21,17 +21,16 @@ import (
 	"google.golang.org/adk/cmd/restapi/models"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
 )
 
 // DebugAPIController is the controller for the Debug API.
 type DebugAPIController struct {
-	sessionService sessionservice.Service
+	sessionService session.Service
 	agentloader    services.AgentLoader
 }
 
-func NewDebugAPIController(sessionService sessionservice.Service, agentLoader services.AgentLoader) *DebugAPIController {
+func NewDebugAPIController(sessionService session.Service, agentLoader services.AgentLoader) *DebugAPIController {
 	return &DebugAPIController{sessionService: sessionService, agentloader: agentLoader}
 }
 
@@ -48,12 +47,10 @@ func (c *DebugAPIController) EventGraph(rw http.ResponseWriter, req *http.Reques
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
-	resp, err := c.sessionService.Get(req.Context(), &sessionservice.GetRequest{
-		ID: session.ID{
-			AppName:   sessionID.AppName,
-			UserID:    sessionID.UserID,
-			SessionID: sessionID.ID,
-		},
+	resp, err := c.sessionService.Get(req.Context(), &session.GetRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
 	})
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusBadRequest)

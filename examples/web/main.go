@@ -29,7 +29,7 @@ import (
 	"google.golang.org/adk/examples/web/agents"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
@@ -58,7 +58,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
-	sessionService := sessionservice.Mem()
+	sessionService := session.InMemoryService()
 	rootAgent, err := llmagent.New(llmagent.Config{
 		Name:        "weather_time_agent",
 		Model:       model,

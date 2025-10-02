@@ -26,43 +26,44 @@ import (
 	"google.golang.org/adk/memoryservice"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
 )
 
 func TestMemory_AddAndSearch(t *testing.T) {
 	memService := memoryservice.Mem()
-	testID := session.ID{
-		AppName:   "testApp",
-		UserID:    "testUser",
-		SessionID: "sess1",
+
+	appName, userID, sessionID := "testApp", "testUser", "sess1"
+	memory := memoryinternal.Memory{
+		Service:   memService,
+		UserID:    userID,
+		AppName:   appName,
+		SessionID: sessionID,
 	}
-	memory := memoryinternal.NewMemory(memService, testID)
 
 	content1 := genai.NewContentFromText("The quick brown fox", genai.RoleUser)
 	content2 := genai.NewContentFromText("jumps over the lazy dog", genai.RoleUser)
 
 	events := []*session.Event{
 		{
-			Time:   time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
-			Author: "user1",
+			Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
+			Author:    "user1",
 			LLMResponse: &model.LLMResponse{
 				Content: content1,
 			},
 		},
 		{
-			Time:   time.Date(2025, 1, 1, 10, 5, 0, 0, time.UTC),
-			Author: "user1",
+			Timestamp: time.Date(2025, 1, 1, 10, 5, 0, 0, time.UTC),
+			Author:    "user1",
 			LLMResponse: &model.LLMResponse{
 				Content: content2,
 			},
 		},
 	}
-	sessionService := sessionservice.Mem()
-	createResponse, err := sessionService.Create(t.Context(), &sessionservice.CreateRequest{
-		AppName:   testID.AppName,
-		UserID:    testID.UserID,
-		SessionID: testID.SessionID,
+	sessionService := session.InMemoryService()
+	createResponse, err := sessionService.Create(t.Context(), &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create session: %v", err)
@@ -146,13 +147,12 @@ func TestMemory_AddAndSearch(t *testing.T) {
 }
 
 func TestMemory_Search_NoData(t *testing.T) {
-	memService := memoryservice.Mem()
-	testID := session.ID{
-		AppName:   "testApp",
+	memory := memoryinternal.Memory{
+		Service:   memoryservice.Mem(),
 		UserID:    "testUser",
+		AppName:   "testApp",
 		SessionID: "sess2",
 	}
-	memory := memoryinternal.NewMemory(memService, testID)
 
 	got, err := memory.Search("any query")
 	if err != nil {
@@ -165,27 +165,29 @@ func TestMemory_Search_NoData(t *testing.T) {
 
 func TestMemory_Search_Isolation(t *testing.T) {
 	memService := memoryservice.Mem()
+	appName := "testApp"
 
-	// Add data for User1
-	testID1 := session.ID{
-		AppName:   "testApp",
-		UserID:    "user1",
-		SessionID: "sess1",
+	userID1, sessionID1 := "user1", "sess1"
+
+	memory1 := memoryinternal.Memory{
+		Service:   memService,
+		UserID:    userID1,
+		AppName:   appName,
+		SessionID: sessionID1,
 	}
-	memory1 := memoryinternal.NewMemory(memService, testID1)
 	content1 := genai.NewContentFromText("Content for user1", genai.RoleUser)
-	sessionService := sessionservice.Mem()
-	createResponse, err := sessionService.Create(t.Context(), &sessionservice.CreateRequest{
-		AppName:   testID1.AppName,
-		UserID:    testID1.UserID,
-		SessionID: testID1.SessionID,
+	sessionService := session.InMemoryService()
+	createResponse, err := sessionService.Create(t.Context(), &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID1,
+		SessionID: sessionID1,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create session: %v", err)
 	}
 	storedSession := createResponse.Session
 	if err := sessionService.AppendEvent(t.Context(), storedSession, &session.Event{
-		Time:        time.Now(),
+		Timestamp:   time.Now(),
 		Author:      "user1",
 		LLMResponse: &model.LLMResponse{Content: content1},
 	}); err != nil {
@@ -197,24 +199,25 @@ func TestMemory_Search_Isolation(t *testing.T) {
 	}
 
 	// Add data for User2
-	testID2 := session.ID{
+	userID2, sessionID2 := "user2", "sess2"
+	memory2 := memoryinternal.Memory{
+		Service:   memService,
+		UserID:    userID2,
 		AppName:   "testApp",
-		UserID:    "user2",
-		SessionID: "sess2",
+		SessionID: sessionID2,
 	}
-	memory2 := memoryinternal.NewMemory(memService, testID2)
 	content2 := genai.NewContentFromText("Content for user2", genai.RoleUser)
-	createResponse2, err := sessionService.Create(t.Context(), &sessionservice.CreateRequest{
-		AppName:   testID2.AppName,
-		UserID:    testID2.UserID,
-		SessionID: testID2.SessionID,
+	createResponse2, err := sessionService.Create(t.Context(), &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID2,
+		SessionID: sessionID2,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create session: %v", err)
 	}
 	storedSession2 := createResponse2.Session
 	if err := sessionService.AppendEvent(t.Context(), storedSession2, &session.Event{
-		Time:        time.Now(),
+		Timestamp:   time.Now(),
 		Author:      "user2",
 		LLMResponse: &model.LLMResponse{Content: content2},
 	}); err != nil {

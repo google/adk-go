@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package sessionservice
+package session
 
 import (
 	"maps"
@@ -20,7 +20,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"google.golang.org/adk/session"
 )
 
 func Test_inMemoryService_Create(t *testing.T) {
@@ -28,7 +27,7 @@ func Test_inMemoryService_Create(t *testing.T) {
 		name            string
 		inMemoryService *inMemoryService
 		req             *CreateRequest
-		want            StoredSession
+		want            Session
 		wantErr         bool
 	}{
 		{
@@ -83,20 +82,20 @@ func Test_inMemoryService_Create(t *testing.T) {
 				return
 			}
 
-			if got.Session.ID().AppName != tt.req.AppName {
-				t.Errorf("AppName got: %v, want: %v", got.Session.ID().AppName, tt.wantErr)
+			if got.Session.AppName() != tt.req.AppName {
+				t.Errorf("AppName got: %v, want: %v", got.Session.AppName(), tt.wantErr)
 			}
 
-			if got.Session.ID().UserID != tt.req.UserID {
-				t.Errorf("UserID got: %v, want: %v", got.Session.ID().AppName, tt.wantErr)
+			if got.Session.UserID() != tt.req.UserID {
+				t.Errorf("UserID got: %v, want: %v", got.Session.UserID(), tt.wantErr)
 			}
 
 			if tt.req.SessionID != "" {
-				if got.Session.ID().SessionID != tt.req.SessionID {
-					t.Errorf("SessionID got: %v, want: %v", got.Session.ID().AppName, tt.wantErr)
+				if got.Session.ID() != tt.req.SessionID {
+					t.Errorf("SessionID got: %v, want: %v", got.Session.ID(), tt.wantErr)
 				}
 			} else {
-				if got.Session.ID().SessionID == "" {
+				if got.Session.ID() == "" {
 					t.Errorf("SessionID was not generated on empty user input.")
 				}
 			}
@@ -123,18 +122,16 @@ func Test_inMemoryService_Get(t *testing.T) {
 			name:            "ok",
 			inMemoryService: serviceWithData(t),
 			req: &GetRequest{
-				ID: session.ID{
-					AppName:   "app1",
-					UserID:    "user1",
-					SessionID: "session1",
-				},
+				AppName:   "app1",
+				UserID:    "user1",
+				SessionID: "session1",
 			},
 			wantResponse: &GetResponse{
-				Session: &storedSession{
-					id: session.ID{
-						AppName:   "app1",
-						UserID:    "user1",
-						SessionID: "session1",
+				Session: &session{
+					id: id{
+						appName:   "app1",
+						userID:    "user1",
+						sessionID: "session1",
 					},
 					state: map[string]any{
 						"k1": "v1",
@@ -146,11 +143,9 @@ func Test_inMemoryService_Get(t *testing.T) {
 			name:            "error when not found",
 			inMemoryService: serviceWithData(t),
 			req: &GetRequest{
-				ID: session.ID{
-					AppName:   "testApp",
-					UserID:    "user1",
-					SessionID: "session1",
-				},
+				AppName:   "testApp",
+				UserID:    "user1",
+				SessionID: "session1",
 			},
 			wantErr: true,
 		},
@@ -172,8 +167,9 @@ func Test_inMemoryService_Get(t *testing.T) {
 			}
 
 			if diff := cmp.Diff(tt.wantResponse, got,
-				cmp.AllowUnexported(storedSession{}),
-				cmpopts.IgnoreFields(storedSession{}, "mu")); diff != "" {
+				cmp.AllowUnexported(session{}),
+				cmp.AllowUnexported(id{}),
+				cmpopts.IgnoreFields(session{}, "mu")); diff != "" {
 				t.Errorf("Create session mismatch: (-want +got):\n%s", diff)
 			}
 		})
@@ -196,22 +192,22 @@ func Test_inMemoryService_List(t *testing.T) {
 				UserID:  "user1",
 			},
 			wantResponse: &ListResponse{
-				Sessions: []StoredSession{
-					&storedSession{
-						id: session.ID{
-							AppName:   "app1",
-							UserID:    "user1",
-							SessionID: "session1",
+				Sessions: []Session{
+					&session{
+						id: id{
+							appName:   "app1",
+							userID:    "user1",
+							sessionID: "session1",
 						},
 						state: map[string]any{
 							"k1": "v1",
 						},
 					},
-					&storedSession{
-						id: session.ID{
-							AppName:   "app1",
-							UserID:    "user1",
-							SessionID: "session2",
+					&session{
+						id: id{
+							appName:   "app1",
+							userID:    "user1",
+							sessionID: "session2",
 						},
 						state: map[string]any{
 							"k1": "v2",
@@ -243,8 +239,9 @@ func Test_inMemoryService_List(t *testing.T) {
 
 			if err == nil {
 				if diff := cmp.Diff(tt.wantResponse, got,
-					cmp.AllowUnexported(storedSession{}),
-					cmpopts.IgnoreFields(storedSession{}, "mu")); diff != "" {
+					cmp.AllowUnexported(session{}),
+					cmp.AllowUnexported(id{}),
+					cmpopts.IgnoreFields(session{}, "mu")); diff != "" {
 					t.Errorf("inMemoryService.List() = %v (-want +got):\n%s", got, diff)
 				}
 			}
@@ -263,22 +260,18 @@ func Test_inMemoryService_Delete(t *testing.T) {
 			name:            "delete ok",
 			inMemoryService: serviceWithData(t),
 			req: &DeleteRequest{
-				ID: session.ID{
-					AppName:   "app1",
-					UserID:    "user1",
-					SessionID: "session1",
-				},
+				AppName:   "app1",
+				UserID:    "user1",
+				SessionID: "session1",
 			},
 		},
 		{
 			name:            "no error when not found",
 			inMemoryService: serviceWithData(t),
 			req: &DeleteRequest{
-				ID: session.ID{
-					AppName:   "appTest",
-					UserID:    "user1",
-					SessionID: "session1",
-				},
+				AppName:   "appTest",
+				UserID:    "user1",
+				SessionID: "session1",
 			},
 		},
 	}
@@ -298,31 +291,31 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 	tests := []struct {
 		name              string
 		inMemoryService   *inMemoryService
-		session           *storedSession
-		event             *session.Event
-		wantStoredSession *storedSession
+		session           *session
+		event             *Event
+		wantStoredSession *session
 		wantErr           bool
 	}{
 		{
 			name:            "append event to the session and overwrite in storage",
 			inMemoryService: serviceWithData(t),
-			session: &storedSession{
-				id: session.ID{
-					AppName:   "app1",
-					UserID:    "user1",
-					SessionID: "session1",
+			session: &session{
+				id: id{
+					appName:   "app1",
+					userID:    "user1",
+					sessionID: "session1",
 				},
 			},
-			event: &session.Event{
+			event: &Event{
 				ID: "new_event",
 			},
-			wantStoredSession: &storedSession{
-				id: session.ID{
-					AppName:   "app1",
-					UserID:    "user1",
-					SessionID: "session1",
+			wantStoredSession: &session{
+				id: id{
+					appName:   "app1",
+					userID:    "user1",
+					sessionID: "session1",
 				},
-				events: []*session.Event{
+				events: []*Event{
 					{
 						ID: "new_event",
 					},
@@ -332,23 +325,23 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 		{
 			name:            "append event when session not found",
 			inMemoryService: serviceWithData(t),
-			session: &storedSession{
-				id: session.ID{
-					AppName:   "app1",
-					UserID:    "user1",
-					SessionID: "custom_session",
+			session: &session{
+				id: id{
+					appName:   "app1",
+					userID:    "user1",
+					sessionID: "custom_session",
 				},
 			},
-			event: &session.Event{
+			event: &Event{
 				ID: "new_event",
 			},
-			wantStoredSession: &storedSession{
-				id: session.ID{
-					AppName:   "app1",
-					UserID:    "user1",
-					SessionID: "custom_session",
+			wantStoredSession: &session{
+				id: id{
+					appName:   "app1",
+					userID:    "user1",
+					sessionID: "custom_session",
 				},
-				events: []*session.Event{
+				events: []*Event{
 					{
 						ID: "new_event",
 					},
@@ -374,7 +367,9 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 			}
 
 			resp, err := s.Get(ctx, &GetRequest{
-				ID: tt.session.ID(),
+				AppName:   tt.session.AppName(),
+				UserID:    tt.session.UserID(),
+				SessionID: tt.session.ID(),
 			})
 			if err != nil {
 				t.Fatalf("inMemoryService.Get() error = %v, wantErr %v", err, tt.wantErr)
@@ -382,8 +377,9 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 			}
 
 			if diff := cmp.Diff(tt.wantStoredSession, resp.Session,
-				cmp.AllowUnexported(storedSession{}),
-				cmpopts.IgnoreFields(storedSession{}, "mu")); diff != "" {
+				cmp.AllowUnexported(session{}),
+				cmp.AllowUnexported(id{}),
+				cmpopts.IgnoreFields(session{}, "mu")); diff != "" {
 				t.Errorf("Create session mismatch: (-want +got):\n%s", diff)
 			}
 		})
@@ -395,49 +391,49 @@ func serviceWithData(t *testing.T) *inMemoryService {
 
 	service := &inMemoryService{}
 
-	for _, storedSession := range []*storedSession{
+	for _, storedSession := range []*session{
 		{
-			id: session.ID{
-				AppName:   "app1",
-				UserID:    "user1",
-				SessionID: "session1",
+			id: id{
+				appName:   "app1",
+				userID:    "user1",
+				sessionID: "session1",
 			},
 			state: map[string]any{
 				"k1": "v1",
 			},
 		},
 		{
-			id: session.ID{
-				AppName:   "app1",
-				UserID:    "user2",
-				SessionID: "session1",
+			id: id{
+				appName:   "app1",
+				userID:    "user2",
+				sessionID: "session1",
 			},
 			state: map[string]any{
 				"k1": "v2",
 			},
 		},
 		{
-			id: session.ID{
-				AppName:   "app1",
-				UserID:    "user1",
-				SessionID: "session2",
+			id: id{
+				appName:   "app1",
+				userID:    "user1",
+				sessionID: "session2",
 			},
 			state: map[string]any{
 				"k1": "v2",
 			},
 		},
 		{
-			id: session.ID{
-				AppName:   "app2",
-				UserID:    "user2",
-				SessionID: "session2",
+			id: id{
+				appName:   "app2",
+				userID:    "user2",
+				sessionID: "session2",
 			},
 			state: map[string]any{
 				"k2": "v2",
 			},
 		},
 	} {
-		service.sessions.Set(sessionKey(storedSession.id).Encode(), storedSession)
+		service.sessions.Set(storedSession.id.Encode(), storedSession)
 	}
 
 	return service

@@ -26,17 +26,16 @@ import (
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 )
 
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
-	sessionService  sessionservice.Service
+	sessionService  session.Service
 	artifactService artifactservice.Service
 	agentLoader     services.AgentLoader
 }
 
-func NewRuntimeAPIRouter(sessionService sessionservice.Service, agentLoader services.AgentLoader, artifactService artifactservice.Service) *RuntimeAPIController {
+func NewRuntimeAPIRouter(sessionService session.Service, agentLoader services.AgentLoader, artifactService artifactservice.Service) *RuntimeAPIController {
 	return &RuntimeAPIController{sessionService: sessionService, agentLoader: agentLoader, artifactService: artifactService}
 }
 
@@ -146,12 +145,10 @@ func flashEvent(flusher http.Flusher, rw http.ResponseWriter, event session.Even
 }
 
 func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
-	_, err := c.sessionService.Get(ctx, &sessionservice.GetRequest{
-		ID: session.ID{
-			AppName:   appName,
-			UserID:    userID,
-			SessionID: sessionID,
-		},
+	_, err := c.sessionService.Get(ctx, &session.GetRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
 	})
 	if err != nil {
 		return errors.NewStatusError(fmt.Errorf("get session: %w", err), http.StatusNotFound)

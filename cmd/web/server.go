@@ -28,7 +28,7 @@ import (
 	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/services"
 	restapiweb "google.golang.org/adk/cmd/restapi/web"
-	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/session"
 )
 
 // WebConfig is a struct with parameters to run a WebServer.
@@ -79,7 +79,7 @@ func Logger(inner http.Handler) http.Handler {
 }
 
 type ServeConfig struct {
-	SessionService  sessionservice.Service
+	SessionService  session.Service
 	AgentLoader     services.AgentLoader
 	ArtifactService artifactservice.Service
 }

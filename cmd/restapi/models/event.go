@@ -42,7 +42,7 @@ type Event struct {
 func ToSessionEvent(event Event) *session.Event {
 	return &session.Event{
 		ID:                 event.ID,
-		Time:               time.Unix(event.Time, 0),
+		Timestamp:          time.Unix(event.Time, 0),
 		InvocationID:       event.InvocationID,
 		Branch:             event.Branch,
 		Author:             event.Author,
@@ -63,7 +63,7 @@ func ToSessionEvent(event Event) *session.Event {
 func FromSessionEvent(event session.Event) Event {
 	return Event{
 		ID:                 event.ID,
-		Time:               event.Time.Unix(),
+		Time:               event.Timestamp.Unix(),
 		InvocationID:       event.InvocationID,
 		Branch:             event.Branch,
 		Author:             event.Author,

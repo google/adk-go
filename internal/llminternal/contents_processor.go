@@ -457,7 +457,7 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 	}
 
 	return &session.Event{ // made-up event. Don't go through types.NewEvent.
-		Time:        ev.Time,
+		Timestamp:   ev.Timestamp,
 		Author:      "user",
 		LLMResponse: &model.LLMResponse{Content: converted},
 		Branch:      ev.Branch,
@@ -518,7 +518,7 @@ func cloneEvent(e *session.Event) *session.Event {
 	// 1. Create a new Event instance
 	newEvent := &session.Event{
 		ID:           e.ID,
-		Time:         e.Time,
+		Timestamp:    e.Timestamp,
 		InvocationID: e.InvocationID,
 		Branch:       e.Branch,
 		Author:       e.Author,

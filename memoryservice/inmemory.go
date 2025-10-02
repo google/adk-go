@@ -77,14 +77,14 @@ func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Ses
 		values = append(values, value{
 			content:   event.LLMResponse.Content,
 			author:    event.Author,
-			timestamp: event.Time,
+			timestamp: event.Timestamp,
 			words:     words,
 		})
 	}
 
 	k := key{
-		appName: curSession.ID().AppName,
-		userID:  curSession.ID().UserID,
+		appName: curSession.AppName(),
+		userID:  curSession.UserID(),
 	}
 
 	s.mu.Lock()
@@ -96,7 +96,7 @@ func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Ses
 		s.store[k] = v
 	}
 
-	v[curSession.ID().SessionID] = values
+	v[curSession.ID()] = values
 	return nil
 }
 

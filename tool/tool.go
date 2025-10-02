@@ -36,7 +36,7 @@ type Context interface {
 	FunctionCallID() string
 
 	// TODO: remove
-	EventActions() *session.Actions
+	EventActions() *session.EventActions
 }
 
 type Set interface {
@@ -44,7 +44,7 @@ type Set interface {
 	Tools(ctx agent.Context) ([]Tool, error)
 }
 
-func NewContext(ctx agent.Context, functionCallID string, actions *session.Actions) Context {
+func NewContext(ctx agent.Context, functionCallID string, actions *session.EventActions) Context {
 	if functionCallID == "" {
 		functionCallID = uuid.NewString()
 	}
@@ -58,13 +58,13 @@ func NewContext(ctx agent.Context, functionCallID string, actions *session.Actio
 type toolContext struct {
 	agent.Context
 	functionCallID string
-	eventActions   *session.Actions
+	eventActions   *session.EventActions
 }
 
 func (c *toolContext) FunctionCallID() string {
 	return c.functionCallID
 }
 
-func (c *toolContext) EventActions() *session.Actions {
+func (c *toolContext) EventActions() *session.EventActions {
 	return c.eventActions
 }

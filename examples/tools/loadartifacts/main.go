@@ -25,7 +25,7 @@ import (
 	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
-	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -56,9 +56,9 @@ func main() {
 	}
 
 	userID, appName := "test_user", "test_app"
-	sessionService := sessionservice.Mem()
+	sessionService := session.InMemoryService()
 	// Create session.
-	resp, err := sessionService.Create(ctx, &sessionservice.CreateRequest{
+	resp, err := sessionService.Create(ctx, &session.CreateRequest{
 		AppName: appName,
 		UserID:  userID,
 	})
@@ -78,7 +78,7 @@ func main() {
 	_, err = artifactService.Save(ctx, &artifactservice.SaveRequest{
 		AppName:   appName,
 		UserID:    userID,
-		SessionID: session.ID().SessionID,
+		SessionID: session.ID(),
 		FileName:  "animal_picture.png",
 		Part:      genai.NewPartFromBytes(imageBytes, "image/png"),
 	})
@@ -89,7 +89,7 @@ func main() {
 	_, err = artifactService.Save(ctx, &artifactservice.SaveRequest{
 		AppName:   appName,
 		UserID:    userID,
-		SessionID: session.ID().SessionID,
+		SessionID: session.ID(),
 		FileName:  "haiku.txt",
 		Part: genai.NewPartFromText(
 			"An old silent pond..." +
@@ -122,7 +122,7 @@ func main() {
 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
 		fmt.Print("\nAgent -> ")
-		for event, err := range r.Run(ctx, userID, session.ID().SessionID, userMsg, &runner.RunConfig{
+		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &runner.RunConfig{
 			StreamingMode: runner.StreamingModeSSE,
 		}) {
 			if err != nil {

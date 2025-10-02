@@ -20,19 +20,16 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/artifactservice"
 	"google.golang.org/adk/internal/artifactsinternal"
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
 func TestArtifacts(t *testing.T) {
-	inMemoryArtifactService := artifactservice.Mem()
-
-	testSessionID := session.ID{
+	a := artifactsinternal.Artifacts{
+		Service:   artifactservice.Mem(),
 		AppName:   "testApp",
 		UserID:    "testUser",
 		SessionID: "testSession",
 	}
-	a := artifactsinternal.NewArtifacts(inMemoryArtifactService, testSessionID)
 
 	// Save
 	part := *genai.NewPartFromText("test data")
@@ -64,15 +61,12 @@ func TestArtifacts(t *testing.T) {
 }
 
 func TestArtifacts_WithLoadVersion(t *testing.T) {
-	inMemoryArtifactService := artifactservice.Mem()
-
-	testSessionID := session.ID{
+	a := artifactsinternal.Artifacts{
+		Service:   artifactservice.Mem(),
 		AppName:   "testApp",
 		UserID:    "testUser",
 		SessionID: "testSession",
 	}
-
-	a := artifactsinternal.NewArtifacts(inMemoryArtifactService, testSessionID)
 
 	part := *genai.NewPartFromText("test data")
 	err := a.Save("testArtifact", part)
@@ -96,14 +90,12 @@ func TestArtifacts_WithLoadVersion(t *testing.T) {
 }
 
 func TestArtifacts_Errors(t *testing.T) {
-	inMemoryArtifactService := artifactservice.Mem()
-
-	testSessionID := session.ID{
+	a := artifactsinternal.Artifacts{
+		Service:   artifactservice.Mem(),
 		AppName:   "testApp",
 		UserID:    "testUser",
 		SessionID: "testSession",
 	}
-	a := artifactsinternal.NewArtifacts(inMemoryArtifactService, testSessionID)
 
 	// Attempt to Load non-existent artifact
 	_, err := a.Load("nonExistentArtifact")

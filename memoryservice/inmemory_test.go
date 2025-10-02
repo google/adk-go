@@ -44,7 +44,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 						LLMResponse: &model.LLMResponse{
 							Content: genai.NewContentFromText("The Quick brown fox", genai.RoleUser),
 						},
-						Time: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
 					},
 					{
 						LLMResponse: &model.LLMResponse{
@@ -56,7 +56,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{
 						Author:      "test-bot",
 						LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("hello world", genai.RoleModel)},
-						Time:        must(time.Parse(time.RFC3339, "2023-10-02T10:00:00Z")),
+						Timestamp:   must(time.Parse(time.RFC3339, "2023-10-02T10:00:00Z")),
 					},
 				}),
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{
@@ -179,12 +179,16 @@ type testSession struct {
 	events                     []*session.Event
 }
 
-func (s *testSession) ID() session.ID {
-	return session.ID{
-		AppName:   s.appName,
-		UserID:    s.userID,
-		SessionID: s.sessionID,
-	}
+func (s *testSession) ID() string {
+	return s.sessionID
+}
+
+func (s *testSession) AppName() string {
+	return s.appName
+}
+
+func (s *testSession) UserID() string {
+	return s.userID
 }
 
 func (s *testSession) Events() session.Events {
@@ -207,7 +211,7 @@ func (s *testSession) State() session.State {
 	panic("not implemented")
 }
 
-func (s *testSession) Updated() time.Time {
+func (s *testSession) LastUpdateTime() time.Time {
 	panic("not implemented")
 }
 

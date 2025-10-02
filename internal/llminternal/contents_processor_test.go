@@ -396,16 +396,16 @@ func TestConvertForeignEvent(t *testing.T) {
 		{
 			name: "Text",
 			event: &session.Event{
-				Time:   now,
-				Author: "foreign",
+				Timestamp: now,
+				Author:    "foreign",
 				LLMResponse: &model.LLMResponse{
 					Content: genai.NewContentFromText("hello", "model"),
 				},
 				Branch: "b",
 			},
 			want: &session.Event{
-				Time:   now,
-				Author: "user",
+				Timestamp: now,
+				Author:    "user",
 				LLMResponse: &model.LLMResponse{
 					Content: &genai.Content{
 						Role: "user",
@@ -421,8 +421,8 @@ func TestConvertForeignEvent(t *testing.T) {
 		{
 			name: "FunctionCall",
 			event: &session.Event{
-				Time:   now,
-				Author: "foreign",
+				Timestamp: now,
+				Author:    "foreign",
 				LLMResponse: &model.LLMResponse{
 					Content: &genai.Content{
 						Role: "model",
@@ -434,8 +434,8 @@ func TestConvertForeignEvent(t *testing.T) {
 				Branch: "b",
 			},
 			want: &session.Event{
-				Time:   now,
-				Author: "user",
+				Timestamp: now,
+				Author:    "user",
 				LLMResponse: &model.LLMResponse{
 					Content: &genai.Content{
 						Role: "user",
@@ -451,8 +451,8 @@ func TestConvertForeignEvent(t *testing.T) {
 		{
 			name: "FunctionResponse",
 			event: &session.Event{
-				Time:   now,
-				Author: "foreign",
+				Timestamp: now,
+				Author:    "foreign",
 				LLMResponse: &model.LLMResponse{
 					Content: &genai.Content{
 						Role: "model",
@@ -464,8 +464,8 @@ func TestConvertForeignEvent(t *testing.T) {
 				Branch: "b",
 			},
 			want: &session.Event{
-				Time:   now,
-				Author: "user",
+				Timestamp: now,
+				Author:    "user",
 				LLMResponse: &model.LLMResponse{
 					Content: &genai.Content{
 						Role: "user",
@@ -877,11 +877,19 @@ func (s *fakeSession) Events() session.Events {
 	return s
 }
 
-func (s *fakeSession) ID() session.ID {
-	return session.ID{}
+func (s *fakeSession) ID() string {
+	return ""
 }
 
-func (s *fakeSession) Updated() time.Time {
+func (s *fakeSession) AppName() string {
+	return ""
+}
+
+func (s *fakeSession) UserID() string {
+	return ""
+}
+
+func (s *fakeSession) LastUpdateTime() time.Time {
 	return time.Time{}
 }
 
