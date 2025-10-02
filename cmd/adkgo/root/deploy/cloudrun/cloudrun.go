@@ -174,26 +174,12 @@ func (f *deployCloudRunFlags) prepareDockerfile() error {
 		func(p util.Printer) error {
 			p("Writing:", f.build.dockerfileBuildPath)
 			c := `
-FROM golang:1.22-alpine AS builder
-
-WORKDIR /app
-
-COPY ` + f.build.execFile + `  /app/` + f.build.execFile + `
-COPY webui_distr  /app/webui_distr
-
 FROM gcr.io/distroless/static-debian11
 
-# Set the working directory
-WORKDIR /app
-
-# Copy the built executable from the builder stage
-COPY --from=builder /app/` + f.build.execFile + ` /app/` + f.build.execFile + `
-COPY --from=builder /app/webui_distr /app/webui_distr
-
+COPY ` + f.build.execFile + `  /app/` + f.build.execFile + `
 EXPOSE ` + strconv.Itoa(flags.cloudRun.serverPort) + `
-
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "--front_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "--webui_distr_path", "/app/webui_distr",  "--backend_address", "http://localhost:` + strconv.Itoa(f.proxy.port) + `/api"]
+CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "--front_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "--backend_address", "http://localhost:` + strconv.Itoa(f.proxy.port) + `/api"]
  `
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(c), 0600)
 		})
