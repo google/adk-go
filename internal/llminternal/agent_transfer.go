@@ -213,25 +213,26 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 			}
 		}
 	}
-	if len(declarations) > 0 {
-		if r.GenerateConfig == nil {
-			r.GenerateConfig = &genai.GenerateContentConfig{}
+	if len(declarations) == 0 {
+		return nil
+	}
+	if r.Config == nil {
+		r.Config = &genai.GenerateContentConfig{}
+	}
+	// Find an existing genai.Tool with FunctionDeclarations
+	var funcTool *genai.Tool
+	for _, gt := range r.Config.Tools {
+		if gt.FunctionDeclarations != nil {
+			funcTool = gt
+			break
 		}
-		// Find an existing genai.Tool with FunctionDeclarations
-		var funcTool *genai.Tool
-		for _, gt := range r.GenerateConfig.Tools {
-			if gt.FunctionDeclarations != nil {
-				funcTool = gt
-				break
-			}
-		}
-		if funcTool != nil {
-			funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, declarations...)
-		} else {
-			r.GenerateConfig.Tools = append(r.GenerateConfig.Tools, &genai.Tool{
-				FunctionDeclarations: declarations,
-			})
-		}
+	}
+	if funcTool != nil {
+		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, declarations...)
+	} else {
+		r.Config.Tools = append(r.Config.Tools, &genai.Tool{
+			FunctionDeclarations: declarations,
+		})
 	}
 	return nil
 }

@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package main demonstrates how to create an agent that can generate images
+// using Vertex AI's Imagen model, save them as artifacts, and then save them
+// to the local filesystem.
 package main
 
 import (
@@ -28,102 +31,10 @@ import (
 	"google.golang.org/genai"
 )
 
-type generateImageInput struct {
-	Prompt   string `json:"prompt"`
-	Filename string `json:"filename"`
-}
-
-type generateImageResult struct {
-	Filename string `json:"filename"`
-	Status   string `json:"Status"`
-}
-
-func generateImage(ctx tool.Context, input generateImageInput) generateImageResult {
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
-		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
-		Backend:  genai.BackendVertexAI,
-	})
-	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
-		return generateImageResult{
-			Status: "fail",
-		}
-	}
-
-	response, err := client.Models.GenerateImages(
-		context.Background(),
-		"imagen-3.0-generate-002",
-		input.Prompt,
-		&genai.GenerateImagesConfig{NumberOfImages: 1})
-	if err != nil {
-		log.Fatalf("Failed to generate an image: %v", err)
-		return generateImageResult{
-			Status: "fail",
-		}
-	}
-
-	if err := ctx.Artifacts().Save(input.Filename, *genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png")); err != nil {
-		log.Fatalf("Failed to save artifact: %v", err)
-		return generateImageResult{
-			Status: "fail",
-		}
-	}
-	return generateImageResult{
-		Status:   "success",
-		Filename: input.Filename,
-	}
-}
-
-type saveImageInput struct {
-	Filename string `json:"filename"`
-}
-
-type saveImageResult struct {
-	Status string `json:"Status"`
-}
-
-func saveImage(ctx tool.Context, input saveImageInput) saveImageResult {
-	filename := input.Filename
-	part, err := ctx.Artifacts().Load(filename)
-	if err != nil {
-		log.Printf("Failed to load artifact '%s': %v", filename, err)
-		return saveImageResult{Status: "fail"}
-	}
-
-	if part.InlineData == nil || len(part.InlineData.Data) == 0 {
-		log.Printf("Artifact '%s' has no inline data", filename)
-		return saveImageResult{Status: "fail"}
-	}
-
-	// Ensure the filename has a .png extension for the local file.
-	localFilename := filename
-	if filepath.Ext(localFilename) != ".png" {
-		localFilename += ".png"
-	}
-
-	// Create an "output" directory in the current working directory if it doesn't exist.
-	outputDir := "output"
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		log.Printf("Failed to create output directory '%s': %v", outputDir, err)
-		return saveImageResult{Status: "fail"}
-	}
-
-	localPath := filepath.Join(outputDir, localFilename)
-	err = os.WriteFile(localPath, part.InlineData.Data, 0644)
-	if err != nil {
-		log.Printf("Failed to write image to local file '%s': %v", localPath, err)
-		return saveImageResult{Status: "fail"}
-	}
-
-	log.Printf("Successfully saved image to %s", localPath)
-	return saveImageResult{Status: "success"}
-}
-
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.0-flash-001", &genai.ClientConfig{})
+	model, err := gemini.NewModel(ctx, "gemini-2.0-flash-001", nil)
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
@@ -164,4 +75,96 @@ func main() {
 	}
 
 	examples.Run(ctx, agent, &examples.RunConfig{ArtifactService: artifactservice.Mem()})
+}
+
+// This is a function tool to generate images using Vertex AI's Imagen model.
+func generateImage(ctx tool.Context, input generateImageInput) generateImageResult {
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
+		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
+		Backend:  genai.BackendVertexAI,
+	})
+	if err != nil {
+		return generateImageResult{
+			Status: "fail",
+		}
+	}
+
+	response, err := client.Models.GenerateImages(
+		ctx,
+		"imagen-3.0-generate-002",
+		input.Prompt,
+		&genai.GenerateImagesConfig{NumberOfImages: 1})
+	if err != nil {
+		return generateImageResult{
+			Status: "fail",
+		}
+	}
+
+	if err := ctx.Artifacts().Save(input.Filename, *genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png")); err != nil {
+		return generateImageResult{
+			Status: "fail",
+		}
+	}
+	return generateImageResult{
+		Status:   "success",
+		Filename: input.Filename,
+	}
+}
+
+type generateImageInput struct {
+	Prompt   string `json:"prompt"`
+	Filename string `json:"filename"`
+}
+
+type generateImageResult struct {
+	Filename string `json:"filename"`
+	Status   string `json:"Status"`
+}
+
+// This is function tool that loads image from the artifacts service and
+// saves is to the local filesystem.
+func saveImage(ctx tool.Context, input saveImageInput) saveImageResult {
+	filename := input.Filename
+	part, err := ctx.Artifacts().Load(filename)
+	if err != nil {
+		log.Printf("Failed to load artifact '%s': %v", filename, err)
+		return saveImageResult{Status: "fail"}
+	}
+
+	if part.InlineData == nil || len(part.InlineData.Data) == 0 {
+		log.Printf("Artifact '%s' has no inline data", filename)
+		return saveImageResult{Status: "fail"}
+	}
+
+	// Ensure the filename has a .png extension for the local file.
+	localFilename := filename
+	if filepath.Ext(localFilename) != ".png" {
+		localFilename += ".png"
+	}
+
+	// Create an "output" directory in the current working directory if it doesn't exist.
+	outputDir := "output"
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		log.Printf("Failed to create output directory '%s': %v", outputDir, err)
+		return saveImageResult{Status: "fail"}
+	}
+
+	localPath := filepath.Join(outputDir, localFilename)
+	err = os.WriteFile(localPath, part.InlineData.Data, 0644)
+	if err != nil {
+		log.Printf("Failed to write image to local file '%s': %v", localPath, err)
+		return saveImageResult{Status: "fail"}
+	}
+
+	log.Printf("Successfully saved image to %s", localPath)
+	return saveImageResult{Status: "success"}
+}
+
+type saveImageInput struct {
+	Filename string `json:"filename"`
+}
+
+type saveImageResult struct {
+	Status string `json:"Status"`
 }

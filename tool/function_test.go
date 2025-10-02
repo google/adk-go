@@ -187,50 +187,45 @@ func TestFunctionTool_Simple(t *testing.T) {
 
 func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t *testing.T) {
 	// First tool
-	printer := func(ctx tool.Context, input string) string {
-		fmt.Print(input)
-		return input
+	identityFunc := func(ctx tool.Context, x int) int {
+		return x
 	}
-	printerTool, err := tool.NewFunctionTool(
-		tool.FunctionToolConfig{
-			Name:        "print_input",
-			Description: "Prints input.",
-		},
-		printer)
+	identityTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+		Name:        "identity",
+		Description: "returns the input value",
+	}, identityFunc)
 	if err != nil {
-		t.Fatalf("NewFunctionTool failed: %v", err)
+		panic(err)
 	}
 
 	// Second tool
-	doublePrinter := func(ctx tool.Context, input string) string {
-		fmt.Print(input)
-		fmt.Print(input)
+	stringIdentityFunc := func(ctx tool.Context, input string) string {
 		return input
 	}
-	doublePrinterTool, err := tool.NewFunctionTool(
+	stringIdentityTool, err := tool.NewFunctionTool(
 		tool.FunctionToolConfig{
-			Name:        "print_input_twice",
-			Description: "Prints input twice.",
+			Name:        "string_identity",
+			Description: "returns the input value",
 		},
-		doublePrinter)
+		stringIdentityFunc)
 	if err != nil {
 		t.Fatalf("NewFunctionTool failed: %v", err)
 	}
 
 	var req model.LLMRequest
-	requestProcessor, ok := printerTool.(toolinternal.RequestProcessor)
+	requestProcessor, ok := identityTool.(toolinternal.RequestProcessor)
 	if !ok {
-		t.Fatal("printerTool does not implement itype.RequestProcessor")
+		t.Fatal("identityTool does not implement itype.RequestProcessor")
 	}
 	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
-		t.Fatalf("printerTool.ProcessRequest failed: %v", err)
+		t.Fatalf("identityTool.ProcessRequest failed: %v", err)
 	}
-	requestProcessor, ok = doublePrinterTool.(toolinternal.RequestProcessor)
+	requestProcessor, ok = stringIdentityTool.(toolinternal.RequestProcessor)
 	if !ok {
-		t.Fatal("doublePrinterTool does not implement itype.RequestProcessor")
+		t.Fatal("stringIdentityTool does not implement itype.RequestProcessor")
 	}
 	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
-		t.Fatalf("doublePrinterTool.ProcessRequest failed: %v", err)
+		t.Fatalf("stringIdentityTool.ProcessRequest failed: %v", err)
 	}
 
 	if len(req.Config.Tools) != 1 {

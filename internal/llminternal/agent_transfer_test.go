@@ -16,7 +16,6 @@ package llminternal_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -334,28 +333,25 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	})
 }
 
-func TestAgentTransferProcessRequest_(t *testing.T) {
+func TestAgentTransfer_ProcessRequest(t *testing.T) {
 	// First Tool
 	var req model.LLMRequest
-	printer := func(ctx tool.Context, input string) string {
-		fmt.Print(input)
-		return input
+	handler := func(ctx tool.Context, x int) int {
+		return x
 	}
-	printerTool, err := tool.NewFunctionTool(
-		tool.FunctionToolConfig{
-			Name:        "print_input",
-			Description: "Prints input.",
-		},
-		printer)
+	identityTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+		Name:        "identity",
+		Description: "returns the input value",
+	}, handler)
 	if err != nil {
-		t.Fatalf("NewFunctionTool failed: %v", err)
+		panic(err)
 	}
-	requestProcessor, ok := printerTool.(toolinternal.RequestProcessor)
+	requestProcessor, ok := identityTool.(toolinternal.RequestProcessor)
 	if !ok {
-		t.Fatal("printerTool does not implement itype.RequestProcessor")
+		t.Fatal("identityTool does not implement itype.RequestProcessor")
 	}
 	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
-		t.Fatalf("printerTool.ProcessRequest failed: %v", err)
+		t.Fatalf("identityTool.ProcessRequest failed: %v", err)
 	}
 	// Second tool
 	transferToAgentTool := &llminternal.TransferToAgentTool{}
