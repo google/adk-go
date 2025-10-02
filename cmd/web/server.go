@@ -111,33 +111,28 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 	rBase.Use(Logger)
 
 	// Setup serving of ADK Web UI
-	{
+	rUi := rBase.Methods("GET").PathPrefix("/ui/").Subrouter()
 
-		rUi := rBase.Methods("GET").PathPrefix("/ui/").Subrouter()
+	//   generate /assets/config/runtime-config.json in the runtime.
+	//   It removes the need to prepare this file during deployment and update the distribution files.
+	runtimeConfigResponse := struct {
+		BackendUrl string `json:"backendUrl"`
+	}{BackendUrl: c.BackendAddress}
+	rUi.Methods("GET").Path("/assets/config/runtime-config.json").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlers.EncodeJSONResponse(runtimeConfigResponse, http.StatusOK, w)
+	})
 
-		// generate /assets/config/runtime-config.json in the runtime.
-		// It removes the need to prepare this file during deployment and update the distribution files.
-		runtimeConfigResponse := struct {
-			BackendUrl string `json:"backendUrl"`
-		}{BackendUrl: c.BackendAddress}
-		rUi.Methods("GET").Path("/assets/config/runtime-config.json").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handlers.EncodeJSONResponse(runtimeConfigResponse, http.StatusOK, w)
-		})
+	//   redirect the user from / to /ui/
+	rBase.Methods("GET").Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusFound)
+	})
 
-		// redirect the user from / to /ui/
-		rBase.Methods("GET").Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "/ui/", http.StatusFound)
-		})
-
-		rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.Dir(c.UIDistPath))))
-	}
+	rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.Dir(c.UIDistPath))))
 
 	// Setup serving of ADK REST API
-	{
-		rApi := rBase.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
-		rApi.Use(corsWithArgs(c))
-		restapiweb.SetupRouter(rApi, &serverConfig)
-	}
+	rApi := rBase.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
+	rApi.Use(corsWithArgs(c))
+	restapiweb.SetupRouter(rApi, &serverConfig)
 
 	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), rBase))
 }
