@@ -136,8 +136,6 @@ func (f *runLocalFlags) runLocalServer() error {
 				"--port", strconv.Itoa(f.server.port),
 				"--front_address", "localhost:"+strconv.Itoa(f.server.port),
 				"--backend_address", "http://localhost:"+strconv.Itoa(f.server.port)+"/api",
-				"--start_restapi=true",
-				"--start_webui=true",
 				"--webui_distr_path", f.source.webUIDistrPath,
 			)
 
