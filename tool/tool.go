@@ -35,7 +35,6 @@ type Context interface {
 	agent.Context
 	FunctionCallID() string
 
-	// TODO: remove
 	EventActions() *session.EventActions
 }
 

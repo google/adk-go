@@ -67,7 +67,7 @@ func (e TestEvents) At(i int) *session.Event {
 }
 
 type TestSession struct {
-	Id            SessionID
+	Id            SessionKey
 	SessionState  TestState
 	SessionEvents TestEvents
 	UpdatedAt     time.Time
@@ -98,17 +98,17 @@ func (s TestSession) LastUpdateTime() time.Time {
 }
 
 type FakeSessionService struct {
-	Sessions map[SessionID]TestSession
+	Sessions map[SessionKey]TestSession
 }
 
-type SessionID struct {
+type SessionKey struct {
 	AppName   string
 	UserID    string
 	SessionID string
 }
 
 func (s *FakeSessionService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
-	if _, ok := s.Sessions[SessionID{AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID}]; ok {
+	if _, ok := s.Sessions[SessionKey{AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID}]; ok {
 		return nil, fmt.Errorf("session already exists")
 	}
 
@@ -117,7 +117,7 @@ func (s *FakeSessionService) Create(ctx context.Context, req *session.CreateRequ
 	}
 
 	testSession := TestSession{
-		Id: SessionID{
+		Id: SessionKey{
 			AppName:   req.AppName,
 			UserID:    req.UserID,
 			SessionID: req.SessionID,
@@ -125,7 +125,7 @@ func (s *FakeSessionService) Create(ctx context.Context, req *session.CreateRequ
 		SessionState: req.State,
 		UpdatedAt:    time.Now(),
 	}
-	s.Sessions[SessionID{
+	s.Sessions[SessionKey{
 		AppName:   req.AppName,
 		UserID:    req.UserID,
 		SessionID: req.SessionID,
@@ -136,7 +136,7 @@ func (s *FakeSessionService) Create(ctx context.Context, req *session.CreateRequ
 }
 
 func (s *FakeSessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
-	if sess, ok := s.Sessions[SessionID{
+	if sess, ok := s.Sessions[SessionKey{
 		AppName:   req.AppName,
 		UserID:    req.UserID,
 		SessionID: req.SessionID,
@@ -162,7 +162,7 @@ func (s *FakeSessionService) List(ctx context.Context, req *session.ListRequest)
 }
 
 func (s *FakeSessionService) Delete(ctx context.Context, req *session.DeleteRequest) error {
-	id := SessionID{
+	id := SessionKey{
 		AppName:   req.AppName,
 		UserID:    req.UserID,
 		SessionID: req.SessionID,
