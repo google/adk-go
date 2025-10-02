@@ -98,17 +98,17 @@ func (f *deployCloudRunFlags) computeFlags() error {
 		func(p util.Printer) error {
 			absp, err := filepath.Abs(flags.source.webUIDistrPath)
 			if err != nil {
-				return fmt.Errorf("cannot make an absolute path from '%v': %v", f.source.webUIDistrPath, err)
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.source.webUIDistrPath, err)
 			}
 			f.source.webUIDistrPath = path.Join(absp, "browser")
 			absp, err = filepath.Abs(flags.source.entryPointPath)
 			if err != nil {
-				return fmt.Errorf("cannot make an absolute path from '%v': %v", f.source.entryPointPath, err)
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.source.entryPointPath, err)
 			}
 			f.source.entryPointPath = absp
 			absp, err = filepath.Abs(flags.build.tempDir)
 			if err != nil {
-				return fmt.Errorf("cannot make an absolute path from '%v': %v", f.build.tempDir, err)
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.build.tempDir, err)
 			}
 			f.build.tempDir = absp
 
@@ -119,7 +119,7 @@ func (f *deployCloudRunFlags) computeFlags() error {
 			if f.build.execPath == "" {
 				exec, err := util.StripExtension(f.source.entryPointPath, ".go")
 				if err != nil {
-					return fmt.Errorf("cannot strip '.go' extension from entry point path '%v': %v", f.source.entryPointPath, err)
+					return fmt.Errorf("cannot strip '.go' extension from entry point path '%v': %w", f.source.entryPointPath, err)
 				}
 				f.build.execFile = exec
 				f.build.execPath = path.Join(f.build.tempDir, exec)
@@ -138,11 +138,11 @@ func (f *deployCloudRunFlags) cleanTemp() error {
 			p("Clean temp starting with", f.build.tempDir)
 			err := os.RemoveAll(f.build.tempDir)
 			if err != nil {
-				return fmt.Errorf("failed to clean temp directory %v: %v", f.build.tempDir, err)
+				return fmt.Errorf("failed to clean temp directory %v: %w", f.build.tempDir, err)
 			}
 			err = os.MkdirAll(f.build.tempDir, os.ModeDir|0700)
 			if err != nil {
-				return fmt.Errorf("failed to create the target directory %v: %v", f.build.tempDir, err)
+				return fmt.Errorf("failed to create the target directory %v: %w", f.build.tempDir, err)
 			}
 			return nil
 		})

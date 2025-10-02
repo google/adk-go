@@ -16,7 +16,6 @@
 package local
 
 import (
-	"errors"
 	"fmt"
 	"net/url"
 	"os/exec"
@@ -86,12 +85,12 @@ func (f *runLocalFlags) computeFlags() error {
 			//make paths absolute
 			absp, err := filepath.Abs(flags.source.webUIDistrPath)
 			if err != nil {
-				return errors.New("Cannot make an absolute path from '" + flags.source.webUIDistrPath + "'")
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", flags.source.webUIDistrPath, err)
 			}
 			flags.source.webUIDistrPath = path.Join(absp, "browser")
 			absp, err = filepath.Abs(flags.source.entryPointPath)
 			if err != nil {
-				return errors.New("Cannot make an absolute path from '" + flags.source.entryPointPath + "'")
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", flags.source.entryPointPath, err)
 			}
 			flags.source.entryPointPath = absp
 
@@ -105,16 +104,19 @@ func (f *runLocalFlags) computeFlags() error {
 				}
 				absp, err = filepath.Abs(exec)
 				if err != nil {
-					return errors.New("Cannot make an absolute path from '" + exec + "'")
+					return fmt.Errorf("cannot make an absolute path from '%v': %w", exec, err)
 				}
 				f.build.execPath = absp
 			}
 			u := "http://localhost:" + strconv.Itoa(f.server.port)
 			url, err := url.JoinPath(u, "api")
+			if err != nil {
+				return fmt.Errorf("JoinPath failed for '%v': %w", u, err)
+			}
 			f.webUI.backendUri = url
 
 			p(fmt.Sprintf("%+v", f))
-			return err
+			return nil
 		})
 }
 

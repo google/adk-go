@@ -75,11 +75,11 @@ func (f *runLocalFlags) cleanTemp() error {
 			p("Clean target directory starting with", f.build.targetDir)
 			err := os.RemoveAll(f.build.targetDir)
 			if err != nil {
-				return fmt.Errorf("failed to clean target directory %v: %v", f.build.targetDir, err)
+				return fmt.Errorf("failed to clean target directory %v: %w", f.build.targetDir, err)
 			}
 			err = os.MkdirAll(f.build.targetDir, os.ModeDir|0700)
 			if err != nil {
-				return fmt.Errorf("failed to create the target directory %v: %v", f.build.targetDir, err)
+				return fmt.Errorf("failed to create the target directory %v: %w", f.build.targetDir, err)
 			}
 			return nil
 		})
