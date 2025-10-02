@@ -26,6 +26,9 @@ var RunCmd = &cobra.Command{
 	Short: "Runs components",
 	Long:  `Please see subcommands for details`,
 	Run: func(cmd *cobra.Command, args []string) {
+		if len(args) == 0 {
+			cmd.Help()
+		}
 	},
 }
 

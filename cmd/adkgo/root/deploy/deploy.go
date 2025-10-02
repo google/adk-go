@@ -25,6 +25,9 @@ var DeployCmd = &cobra.Command{
 	Short: "Makes deployment to various platforms easy",
 	Long:  `Please see subcommands for details`,
 	Run: func(cmd *cobra.Command, args []string) {
+		if len(args) == 0 {
+			cmd.Help()
+		}
 	},
 }
 
