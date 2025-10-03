@@ -22,7 +22,7 @@ import (
 	"strings"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
 	"google.golang.org/adk/internal/artifactsinternal"
@@ -39,7 +39,7 @@ type Config struct {
 	AppName         string
 	Agent           agent.Agent
 	SessionService  session.Service
-	ArtifactService artifactservice.Service
+	ArtifactService artifact.Service
 	MemoryService   memoryservice.Service
 }
 
@@ -63,7 +63,7 @@ type Runner struct {
 	appName         string
 	rootAgent       agent.Agent
 	sessionService  session.Service
-	artifactService artifactservice.Service
+	artifactService artifact.Service
 	memoryService   memoryservice.Service
 
 	parents parentmap.Map

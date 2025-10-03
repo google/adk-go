@@ -16,7 +16,7 @@
 package config
 
 import (
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/session"
 )
@@ -25,5 +25,5 @@ import (
 type ADKAPIRouterConfigs struct {
 	SessionService  session.Service
 	AgentLoader     services.AgentLoader
-	ArtifactService artifactservice.Service
+	ArtifactService artifact.Service
 }

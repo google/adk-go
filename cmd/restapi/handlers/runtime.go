@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/restapi/errors"
 	"google.golang.org/adk/cmd/restapi/models"
 	"google.golang.org/adk/cmd/restapi/services"
@@ -31,11 +31,11 @@ import (
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
 	sessionService  session.Service
-	artifactService artifactservice.Service
+	artifactService artifact.Service
 	agentLoader     services.AgentLoader
 }
 
-func NewRuntimeAPIRouter(sessionService session.Service, agentLoader services.AgentLoader, artifactService artifactservice.Service) *RuntimeAPIController {
+func NewRuntimeAPIRouter(sessionService session.Service, agentLoader services.AgentLoader, artifactService artifact.Service) *RuntimeAPIController {
 	return &RuntimeAPIController{sessionService: sessionService, agentLoader: agentLoader, artifactService: artifactService}
 }
 

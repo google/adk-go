@@ -25,13 +25,13 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
-	as "google.golang.org/adk/artifactservice"
-	"google.golang.org/adk/artifactservice/internal/tests"
+	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/artifact/internal/tests"
 	"google.golang.org/api/iterator"
 )
 
 // newGCSArtifactServiceForTesting creates a gcsService for the specified bucket using a mocked inmemory client
-func newGCSArtifactServiceForTesting(bucketName string) (as.Service, error) {
+func newGCSArtifactServiceForTesting(bucketName string) (artifact.Service, error) {
 	client := newFakeClient()
 	s := &gcsService{
 		bucketName:    bucketName,
@@ -42,7 +42,7 @@ func newGCSArtifactServiceForTesting(bucketName string) (as.Service, error) {
 }
 
 func TestGCSArtifactService(t *testing.T) {
-	factory := func(t *testing.T) (as.Service, error) {
+	factory := func(t *testing.T) (artifact.Service, error) {
 		return newGCSArtifactServiceForTesting("new")
 	}
 	tests.TestArtifactService(t, "GCS", factory)

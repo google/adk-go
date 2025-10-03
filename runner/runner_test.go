@@ -24,7 +24,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -198,7 +198,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 	sessionID := "testSession"
 
 	sessionService := session.InMemoryService()
-	artifactService := artifactservice.Mem()
+	artifactService := artifact.Mem()
 
 	testAgent := must(agent.New(agent.Config{
 		Name: "test_agent",
@@ -250,7 +250,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 		}
 	}
 
-	listResp, err := artifactService.List(ctx, &artifactservice.ListRequest{
+	listResp, err := artifactService.List(ctx, &artifact.ListRequest{
 		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,
@@ -267,7 +267,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 		t.Errorf("saved file name should start with 'artifact_', got %q", savedFileName)
 	}
 
-	loadResp, err := artifactService.Load(ctx, &artifactservice.LoadRequest{
+	loadResp, err := artifactService.Load(ctx, &artifact.LoadRequest{
 		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,

@@ -22,7 +22,7 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
@@ -67,7 +67,7 @@ func main() {
 	}
 
 	session := resp.Session
-	artifactService := artifactservice.Mem()
+	artifactService := artifact.Mem()
 	// Populate artifacts that can be described later.
 	imageBytes, err := os.ReadFile("animal_picture.png")
 	if err != nil {
@@ -75,7 +75,7 @@ func main() {
 	}
 	genai.NewPartFromBytes(imageBytes, "image/png")
 
-	_, err = artifactService.Save(ctx, &artifactservice.SaveRequest{
+	_, err = artifactService.Save(ctx, &artifact.SaveRequest{
 		AppName:   appName,
 		UserID:    userID,
 		SessionID: session.ID(),
@@ -86,7 +86,7 @@ func main() {
 		log.Fatalf("Failed to save artifact: %v", err)
 	}
 
-	_, err = artifactService.Save(ctx, &artifactservice.SaveRequest{
+	_, err = artifactService.Save(ctx, &artifact.SaveRequest{
 		AppName:   appName,
 		UserID:    userID,
 		SessionID: session.ID(),

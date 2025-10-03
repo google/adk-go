@@ -24,7 +24,7 @@ import (
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -286,7 +286,7 @@ func createToolContext(t *testing.T) tool.Context {
 	t.Helper()
 
 	artifacts := &artifactsinternal.Artifacts{
-		Service:   artifactservice.Mem(),
+		Service:   artifact.Mem(),
 		AppName:   "app",
 		UserID:    "user",
 		SessionID: "session",

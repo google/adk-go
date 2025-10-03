@@ -24,7 +24,7 @@ import (
 	"path/filepath"
 
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/examples"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
@@ -74,7 +74,7 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, agent, &examples.RunConfig{ArtifactService: artifactservice.Mem()})
+	examples.Run(ctx, agent, &examples.RunConfig{ArtifactService: artifact.Mem()})
 }
 
 // This is a function tool to generate images using Vertex AI's Imagen model.

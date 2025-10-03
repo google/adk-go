@@ -18,20 +18,20 @@ import (
 	"context"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/genai"
 )
 
 // Artifacts implements Artifacts
 type Artifacts struct {
-	Service   artifactservice.Service
+	Service   artifact.Service
 	AppName   string
 	UserID    string
 	SessionID string
 }
 
 func (a *Artifacts) Save(name string, data genai.Part) error {
-	_, err := a.Service.Save(context.Background(), &artifactservice.SaveRequest{
+	_, err := a.Service.Save(context.Background(), &artifact.SaveRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
@@ -42,7 +42,7 @@ func (a *Artifacts) Save(name string, data genai.Part) error {
 }
 
 func (a *Artifacts) Load(name string) (genai.Part, error) {
-	loadResponse, err := a.Service.Load(context.Background(), &artifactservice.LoadRequest{
+	loadResponse, err := a.Service.Load(context.Background(), &artifact.LoadRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
@@ -55,7 +55,7 @@ func (a *Artifacts) Load(name string) (genai.Part, error) {
 }
 
 func (a *Artifacts) LoadVersion(name string, version int) (genai.Part, error) {
-	loadResponse, err := a.Service.Load(context.Background(), &artifactservice.LoadRequest{
+	loadResponse, err := a.Service.Load(context.Background(), &artifact.LoadRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
@@ -69,7 +69,7 @@ func (a *Artifacts) LoadVersion(name string, version int) (genai.Part, error) {
 }
 
 func (a *Artifacts) List() ([]string, error) {
-	ListResponse, err := a.Service.List(context.Background(), &artifactservice.ListRequest{
+	ListResponse, err := a.Service.List(context.Background(), &artifact.ListRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,

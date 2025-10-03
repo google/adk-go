@@ -23,7 +23,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/cmd/web"
 	"google.golang.org/adk/examples/web/agents"
@@ -80,7 +80,7 @@ func main() {
 			"llm_auditor":        llmAuditor,
 		},
 	)
-	artifactservice := artifactservice.Mem()
+	artifactservice := artifact.Mem()
 
 	config := web.ParseArgs()
 	fmt.Printf("%+v", config)

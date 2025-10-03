@@ -12,28 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package artifactservice
+package artifact_test
 
 import (
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/artifact/internal/tests"
 )
 
-func TestArtifactKey(t *testing.T) {
-	key := artifactKey{
-		AppName:   "testapp",
-		UserID:    "testuser",
-		SessionID: "testsession",
-		FileName:  "testfile",
-		Version:   123,
+func TestInMemoryArtifactService(t *testing.T) {
+	factory := func(t *testing.T) (artifact.Service, error) {
+		return artifact.Mem(), nil
 	}
-	var key2 artifactKey
-	err := key2.Decode(key.Encode())
-	if err != nil {
-		t.Fatalf("error decoding key:%s", err)
-	}
-	if diff := cmp.Diff(key, key2); diff != "" {
-		t.Errorf("key mismatch (-want +got):\n%s", diff)
-	}
+	tests.TestArtifactService(t, "InMemory", factory)
 }

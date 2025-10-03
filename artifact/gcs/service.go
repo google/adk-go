@@ -27,7 +27,7 @@ import (
 
 	"cloud.google.com/go/storage"
 	"golang.org/x/sync/errgroup"
-	as "google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/genai"
@@ -41,7 +41,7 @@ type gcsService struct {
 }
 
 // NewGCSArtifactService creates a gcsService for the specified bucket using a default client
-func NewGCSArtifactService(ctx context.Context, bucketName string, opts ...option.ClientOption) (as.Service, error) {
+func NewGCSArtifactService(ctx context.Context, bucketName string, opts ...option.ClientOption) (artifact.Service, error) {
 	storageClient, err := storage.NewClient(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gcs service: %w", err)
@@ -86,19 +86,19 @@ func buildUserPrefix(appName, userID string) string {
 	return fmt.Sprintf("%s/%s/user/", appName, userID)
 }
 
-func (s *gcsService) Save(ctx context.Context, req *as.SaveRequest) (_ *as.SaveResponse, err error) {
+func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (_ *artifact.SaveResponse, err error) {
 	err = req.Validate()
 	if err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	artifact := req.Part
+	newArtifact := req.Part
 
 	nextVersion := int64(1)
 
 	// TODO race condition, could use mutex but it's a remote resource so the issue would still occurs
 	// with multiple consumers, and gcs does not have transactions spanning several operations
-	response, err := s.versions(ctx, &as.VersionsRequest{
+	response, err := s.versions(ctx, &artifact.VersionsRequest{
 		AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID, FileName: req.FileName,
 	})
 	if err != nil {
@@ -116,22 +116,22 @@ func (s *gcsService) Save(ctx context.Context, req *as.SaveRequest) (_ *as.SaveR
 		}
 	}()
 
-	if artifact.InlineData != nil {
-		writer.SetContentType(artifact.InlineData.MIMEType)
-		if _, err := writer.Write(artifact.InlineData.Data); err != nil {
+	if newArtifact.InlineData != nil {
+		writer.SetContentType(newArtifact.InlineData.MIMEType)
+		if _, err := writer.Write(newArtifact.InlineData.Data); err != nil {
 			return nil, fmt.Errorf("failed to write blob to GCS: %w", err)
 		}
 	} else {
 		writer.SetContentType("text/plain")
-		if _, err := writer.Write([]byte(artifact.Text)); err != nil {
+		if _, err := writer.Write([]byte(newArtifact.Text)); err != nil {
 			return nil, fmt.Errorf("failed to write text to GCS: %w", err)
 		}
 	}
 
-	return &as.SaveResponse{Version: nextVersion}, nil
+	return &artifact.SaveResponse{Version: nextVersion}, nil
 }
 
-func (s *gcsService) Delete(ctx context.Context, req *as.DeleteRequest) error {
+func (s *gcsService) Delete(ctx context.Context, req *artifact.DeleteRequest) error {
 	err := req.Validate()
 	if err != nil {
 		return fmt.Errorf("request validation failed: %w", err)
@@ -149,7 +149,7 @@ func (s *gcsService) Delete(ctx context.Context, req *as.DeleteRequest) error {
 	}
 
 	// Delete all versions
-	response, err := s.versions(ctx, &as.VersionsRequest{
+	response, err := s.versions(ctx, &artifact.VersionsRequest{
 		AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID, FileName: req.FileName,
 	})
 	if err != nil {
@@ -175,7 +175,7 @@ func (s *gcsService) Delete(ctx context.Context, req *as.DeleteRequest) error {
 	return g.Wait()
 }
 
-func (s *gcsService) Load(ctx context.Context, req *as.LoadRequest) (_ *as.LoadResponse, err error) {
+func (s *gcsService) Load(ctx context.Context, req *artifact.LoadRequest) (_ *artifact.LoadResponse, err error) {
 	err = req.Validate()
 	if err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
@@ -184,7 +184,7 @@ func (s *gcsService) Load(ctx context.Context, req *as.LoadRequest) (_ *as.LoadR
 	version := req.Version
 
 	if version == 0 {
-		response, err := s.versions(ctx, &as.VersionsRequest{
+		response, err := s.versions(ctx, &artifact.VersionsRequest{
 			AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID, FileName: req.FileName,
 		})
 		if err != nil {
@@ -228,7 +228,7 @@ func (s *gcsService) Load(ctx context.Context, req *as.LoadRequest) (_ *as.LoadR
 	// Create the genai.Part and return the response.
 	part := genai.NewPartFromBytes(data, attrs.ContentType)
 
-	return &as.LoadResponse{Part: part}, nil
+	return &artifact.LoadResponse{Part: part}, nil
 }
 
 // fetchFilenamesFromPrefix is a reusable helper function.
@@ -269,7 +269,7 @@ func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string
 	return nil
 }
 
-func (s *gcsService) List(ctx context.Context, req *as.ListRequest) (*as.ListResponse, error) {
+func (s *gcsService) List(ctx context.Context, req *artifact.ListRequest) (*artifact.ListResponse, error) {
 	err := req.Validate()
 	if err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
@@ -291,11 +291,11 @@ func (s *gcsService) List(ctx context.Context, req *as.ListRequest) (*as.ListRes
 
 	filenames := slices.Collect(maps.Keys(filenamesSet))
 	sort.Strings(filenames)
-	return &as.ListResponse{FileNames: filenames}, nil
+	return &artifact.ListResponse{FileNames: filenames}, nil
 }
 
 // versions internal function that does not return error if versions are empty
-func (s *gcsService) versions(ctx context.Context, req *as.VersionsRequest) (*as.VersionsResponse, error) {
+func (s *gcsService) versions(ctx context.Context, req *artifact.VersionsRequest) (*artifact.VersionsResponse, error) {
 	err := req.Validate()
 	if err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
@@ -328,11 +328,11 @@ func (s *gcsService) versions(ctx context.Context, req *as.VersionsRequest) (*as
 		}
 		versions = append(versions, version)
 	}
-	return &as.VersionsResponse{Versions: versions}, nil
+	return &artifact.VersionsResponse{Versions: versions}, nil
 }
 
 // Versions implements types.Service and return err if versions is empty
-func (s *gcsService) Versions(ctx context.Context, req *as.VersionsRequest) (*as.VersionsResponse, error) {
+func (s *gcsService) Versions(ctx context.Context, req *artifact.VersionsRequest) (*artifact.VersionsResponse, error) {
 	response, err := s.versions(ctx, req)
 	if err != nil {
 		return nil, err

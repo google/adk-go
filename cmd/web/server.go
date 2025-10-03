@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/restapi/config"
 	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/services"
@@ -81,7 +81,7 @@ func Logger(inner http.Handler) http.Handler {
 type ServeConfig struct {
 	SessionService  session.Service
 	AgentLoader     services.AgentLoader
-	ArtifactService artifactservice.Service
+	ArtifactService artifact.Service
 }
 
 func corsWithArgs(c *WebConfig) func(next http.Handler) http.Handler {

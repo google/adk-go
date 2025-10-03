@@ -22,7 +22,7 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -30,7 +30,7 @@ import (
 
 type RunConfig struct {
 	SessionService  session.Service
-	ArtifactService artifactservice.Service
+	ArtifactService artifact.Service
 	StreamingMode   runner.StreamingMode
 }
 

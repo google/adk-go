@@ -18,14 +18,14 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/artifactsinternal"
 	"google.golang.org/genai"
 )
 
 func TestArtifacts(t *testing.T) {
 	a := artifactsinternal.Artifacts{
-		Service:   artifactservice.Mem(),
+		Service:   artifact.Mem(),
 		AppName:   "testApp",
 		UserID:    "testUser",
 		SessionID: "testSession",
@@ -62,7 +62,7 @@ func TestArtifacts(t *testing.T) {
 
 func TestArtifacts_WithLoadVersion(t *testing.T) {
 	a := artifactsinternal.Artifacts{
-		Service:   artifactservice.Mem(),
+		Service:   artifact.Mem(),
 		AppName:   "testApp",
 		UserID:    "testUser",
 		SessionID: "testSession",
@@ -91,7 +91,7 @@ func TestArtifacts_WithLoadVersion(t *testing.T) {
 
 func TestArtifacts_Errors(t *testing.T) {
 	a := artifactsinternal.Artifacts{
-		Service:   artifactservice.Mem(),
+		Service:   artifact.Mem(),
 		AppName:   "testApp",
 		UserID:    "testUser",
 		SessionID: "testSession",
