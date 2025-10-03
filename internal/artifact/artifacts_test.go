@@ -25,7 +25,7 @@ import (
 
 func TestArtifacts(t *testing.T) {
 	a := artifactinternal.Artifacts{
-		Service:   artifact.Mem(),
+		Service:   artifact.InMemoryService(),
 		AppName:   "testApp",
 		UserID:    "testUser",
 		SessionID: "testSession",
@@ -62,7 +62,7 @@ func TestArtifacts(t *testing.T) {
 
 func TestArtifacts_WithLoadVersion(t *testing.T) {
 	a := artifactinternal.Artifacts{
-		Service:   artifact.Mem(),
+		Service:   artifact.InMemoryService(),
 		AppName:   "testApp",
 		UserID:    "testUser",
 		SessionID: "testSession",
@@ -91,7 +91,7 @@ func TestArtifacts_WithLoadVersion(t *testing.T) {
 
 func TestArtifacts_Errors(t *testing.T) {
 	a := artifactinternal.Artifacts{
-		Service:   artifact.Mem(),
+		Service:   artifact.InMemoryService(),
 		AppName:   "testApp",
 		UserID:    "testUser",
 		SessionID: "testSession",

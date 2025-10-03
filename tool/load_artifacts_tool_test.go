@@ -286,7 +286,7 @@ func createToolContext(t *testing.T) tool.Context {
 	t.Helper()
 
 	artifacts := &artifactinternal.Artifacts{
-		Service:   artifact.Mem(),
+		Service:   artifact.InMemoryService(),
 		AppName:   "app",
 		UserID:    "user",
 		SessionID: "session",

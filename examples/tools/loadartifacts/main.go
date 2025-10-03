@@ -67,7 +67,7 @@ func main() {
 	}
 
 	session := resp.Session
-	artifactService := artifact.Mem()
+	artifactService := artifact.InMemoryService()
 	// Populate artifacts that can be described later.
 	imageBytes, err := os.ReadFile("animal_picture.png")
 	if err != nil {

@@ -198,7 +198,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 	sessionID := "testSession"
 
 	sessionService := session.InMemoryService()
-	artifactService := artifact.Mem()
+	artifactService := artifact.InMemoryService()
 
 	testAgent := must(agent.New(agent.Config{
 		Name: "test_agent",

@@ -74,7 +74,7 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, agent, &examples.RunConfig{ArtifactService: artifact.Mem()})
+	examples.Run(ctx, agent, &examples.RunConfig{ArtifactService: artifact.InMemoryService()})
 }
 
 // This is a function tool to generate images using Vertex AI's Imagen model.

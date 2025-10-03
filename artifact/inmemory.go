@@ -37,7 +37,7 @@ type inMemoryService struct {
 	artifacts omap.Map[string, *genai.Part]
 }
 
-func Mem() Service {
+func InMemoryService() Service {
 	return &inMemoryService{}
 }
 

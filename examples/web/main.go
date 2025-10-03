@@ -80,7 +80,7 @@ func main() {
 			"llm_auditor":        llmAuditor,
 		},
 	)
-	artifactservice := artifact.Mem()
+	artifactservice := artifact.InMemoryService()
 
 	config := web.ParseArgs()
 	fmt.Printf("%+v", config)

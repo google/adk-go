@@ -23,7 +23,7 @@ import (
 
 func TestInMemoryArtifactService(t *testing.T) {
 	factory := func(t *testing.T) (artifact.Service, error) {
-		return artifact.Mem(), nil
+		return artifact.InMemoryService(), nil
 	}
 	tests.TestArtifactService(t, "InMemory", factory)
 }
