@@ -32,7 +32,7 @@ type myAgent struct {
 	id int
 }
 
-func (a myAgent) Run(ctx agent.Context) iter.Seq2[*session.Event, error] {
+func (a myAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{
 			LLMResponse: &model.LLMResponse{

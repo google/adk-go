@@ -38,7 +38,7 @@ type State interface {
 	All() iter.Seq2[string, any]
 }
 
-type ReadOnlyState interface {
+type ReadonlyState interface {
 	Get(string) (any, error)
 	All() iter.Seq2[string, any]
 }

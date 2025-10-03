@@ -67,7 +67,7 @@ type loopAgent struct {
 	maxIterations uint
 }
 
-func (a *loopAgent) Run(ctx agent.Context) iter.Seq2[*session.Event, error] {
+func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	count := a.maxIterations
 
 	return func(yield func(*session.Event, error) bool) {

@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/model/gemini"
@@ -42,7 +43,7 @@ func main() {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
-	agent, err := llmagent.New(llmagent.Config{
+	llmagent, err := llmagent.New(llmagent.Config{
 		Name:        "artifact_describer",
 		Model:       model,
 		Description: "Agent to answer questions about artifacts.",
@@ -102,7 +103,7 @@ func main() {
 
 	r, err := runner.New(runner.Config{
 		AppName:         appName,
-		Agent:           agent,
+		Agent:           llmagent,
 		SessionService:  sessionService,
 		ArtifactService: artifactService,
 	})
@@ -122,8 +123,8 @@ func main() {
 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
 		fmt.Print("\nAgent -> ")
-		streamingMode := runner.StreamingModeSSE
-		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &runner.RunConfig{
+		streamingMode := agent.StreamingModeSSE
+		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &agent.RunConfig{
 			StreamingMode: streamingMode,
 		}) {
 			if err != nil {
@@ -131,7 +132,7 @@ func main() {
 			} else {
 				for _, p := range event.LLMResponse.Content.Parts {
 					// if its running in streaming mode, don't print the non partial llmResponses
-					if streamingMode != runner.StreamingModeSSE || event.LLMResponse.Partial {
+					if streamingMode != agent.StreamingModeSSE || event.LLMResponse.Partial {
 						fmt.Print(p.Text)
 					}
 				}

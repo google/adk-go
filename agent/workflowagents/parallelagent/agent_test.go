@@ -89,7 +89,7 @@ func TestNewParallelAgent(t *testing.T) {
 
 			ctx := t.Context()
 
-			agent := newParallelAgent(t, tt.maxIterations, tt.numSubAgents, tt.agentError)
+			parallelAgent := newParallelAgent(t, tt.maxIterations, tt.numSubAgents, tt.agentError)
 
 			var gotEvents []*session.Event
 
@@ -97,7 +97,7 @@ func TestNewParallelAgent(t *testing.T) {
 
 			agentRunner, err := runner.New(runner.Config{
 				AppName:        "test_app",
-				Agent:          agent,
+				Agent:          parallelAgent,
 				SessionService: sessionService,
 			})
 			if err != nil {
@@ -123,7 +123,7 @@ func TestNewParallelAgent(t *testing.T) {
 				}()
 			}
 
-			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), &runner.RunConfig{}) {
+			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), &agent.RunConfig{}) {
 				if tt.wantErr != (err != nil) {
 					if tt.cancelContext && err == nil {
 						// In case of context cancellation some events can be processed before cancel is applied.
@@ -208,8 +208,8 @@ func must[T agent.Agent](a T, err error) T {
 	return a
 }
 
-func customRun(id int, agentErr error) func(agent.Context) iter.Seq2[*session.Event, error] {
-	return func(agent.Context) iter.Seq2[*session.Event, error] {
+func customRun(id int, agentErr error) func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		return func(yield func(*session.Event, error) bool) {
 			time.Sleep((time.Duration(rand.IntN(5) + 1)) * time.Millisecond)
 			if agentErr != nil {

@@ -31,7 +31,7 @@ import (
 type RunConfig struct {
 	SessionService  session.Service
 	ArtifactService artifact.Service
-	StreamingMode   runner.StreamingMode
+	StreamingMode   agent.StreamingMode
 }
 
 func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
@@ -80,10 +80,10 @@ func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
 
 		streamingMode := runConfig.StreamingMode
 		if streamingMode == "" {
-			streamingMode = runner.StreamingModeSSE
+			streamingMode = agent.StreamingModeSSE
 		}
 		fmt.Print("\nAgent -> ")
-		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &runner.RunConfig{
+		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &agent.RunConfig{
 			StreamingMode: streamingMode,
 		}) {
 			if err != nil {

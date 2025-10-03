@@ -135,11 +135,7 @@ func TestMemory_AddAndSearch(t *testing.T) {
 				t.Fatalf("Search(%q) failed: %v", tc.query, err)
 			}
 
-			sortOpt := cmpopts.SortSlices(func(a, b memoryservice.MemoryEntry) bool {
-				return a.Timestamp.Before(b.Timestamp)
-			})
-
-			if diff := cmp.Diff(tc.want, got, sortOpt, cmpopts.EquateEmpty()); diff != "" {
+			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("Search(%q) returned diff (-want +got):\n%s", tc.query, diff)
 			}
 		})

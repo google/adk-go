@@ -22,7 +22,7 @@ import (
 )
 
 // instructionsRequestProcessor configures req's instructions and global instructions for LLM flow.
-func instructionsRequestProcessor(ctx agent.Context, req *model.LLMRequest) error {
+func instructionsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// reference: adk-python src/google/adk/flows/llm_flows/instructions.py
 
 	llmAgent := asLLMAgent(ctx.Agent())

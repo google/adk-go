@@ -29,7 +29,7 @@ import (
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
 // the InvocationContext that includes the previous events.
-func ContentsRequestProcessor(ctx agent.Context, req *model.LLMRequest) error {
+func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
 	llmAgent := asLLMAgent(ctx.Agent())
 	if llmAgent == nil {

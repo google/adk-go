@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -220,9 +221,12 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 				IncludeContents: tc.includeContents,
 			}))
 
-			ctx := agent.NewContext(t.Context(), testAgent, nil, nil, &fakeSession{
-				events: tc.events,
-			}, nil, "")
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Agent: testAgent,
+				Session: &fakeSession{
+					events: tc.events,
+				},
+			})
 
 			req := &model.LLMRequest{}
 			if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
@@ -369,9 +373,13 @@ func TestContentsRequestProcessor(t *testing.T) {
 				Model: testModel,
 			}))
 
-			ctx := agent.NewContext(t.Context(), testAgent, nil, nil, &fakeSession{
-				events: tc.events,
-			}, nil, tc.branch)
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Agent:  testAgent,
+				Branch: tc.branch,
+				Session: &fakeSession{
+					events: tc.events,
+				},
+			})
 
 			req := &model.LLMRequest{}
 			if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
@@ -495,7 +503,9 @@ func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 		Name: "test_agent",
 	}))
 
-	ctx := agent.NewContext(t.Context(), testAgent, nil, nil, nil, nil, "")
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent: testAgent,
+	})
 
 	req := &model.LLMRequest{}
 	if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
@@ -818,9 +828,12 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				Model: testModel,
 			}))
 
-			ctx := agent.NewContext(t.Context(), testAgent, nil, nil, &fakeSession{
-				events: tc.events,
-			}, nil, "")
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Agent: testAgent,
+				Session: &fakeSession{
+					events: tc.events,
+				},
+			})
 
 			req := &model.LLMRequest{}
 			err := llminternal.ContentsRequestProcessor(ctx, req)

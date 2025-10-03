@@ -26,6 +26,7 @@ import (
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/internal/artifact"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/memoryinternal"
 	"google.golang.org/adk/internal/sessioninternal"
@@ -70,7 +71,7 @@ type Runner struct {
 }
 
 // Run runs the agent.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *RunConfig) iter.Seq2[*session.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *agent.RunConfig) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
@@ -125,7 +126,13 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		ctx := agent.NewContext(ctx, agentToRun, msg, artifacts, sessioninternal.NewMutableSession(r.sessionService, session), memoryImpl, "")
+		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+			Artifacts:   artifacts,
+			Memory:      memoryImpl,
+			Session:     sessioninternal.NewMutableSession(r.sessionService, session),
+			Agent:       agentToRun,
+			UserContent: msg,
+		})
 
 		if err := r.appendMessageToSession(ctx, session, msg, cfg.SaveInputBlobsAsArtifacts); err != nil {
 			yield(nil, err)
@@ -178,7 +185,7 @@ func (r *Runner) setupCFC(curAgent agent.Agent) error {
 	return nil
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool) error {
+func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool) error {
 	if msg == nil {
 		return nil
 	}

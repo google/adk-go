@@ -12,44 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent
+package context
 
 import (
-	"context"
-
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
-type InvocationContext interface {
-	context.Context
-
-	Artifacts() Artifacts
-	Memory() Memory
-	Session() session.Session
-
-	InvocationID() string
-	Branch() string
-	Agent() Agent
-	UserContent() *genai.Content
-	RunConfig() *RunConfig
-
-	EndInvocation()
+func NewReadonlyContext(ctx agent.InvocationContext) agent.ReadonlyContext {
+	return &readonlyContext{
+		InvocationContext: ctx,
+	}
 }
 
-type ReadonlyContext interface {
-	context.Context
-
-	UserContent() *genai.Content
-	InvocationID() string
-	AgentName() string
-	ReadonlyState() session.ReadonlyState
+type readonlyContext struct {
+	agent.InvocationContext
 }
 
-type CallbackContext interface {
-	ReadonlyContext
+func (c *readonlyContext) AgentName() string {
+	return c.Agent().Name()
+}
 
-	Artifacts() Artifacts
-	State() session.State
-	Actions() *session.EventActions
+func (c *readonlyContext) ReadonlyState() session.ReadonlyState {
+	return c.Session().State()
 }

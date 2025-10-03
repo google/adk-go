@@ -27,7 +27,7 @@ import (
 	"google.golang.org/genai"
 )
 
-func CustomAgentRun(ctx agent.Context) iter.Seq2[*session.Event, error] {
+func CustomAgentRun(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{
 			LLMResponse: &model.LLMResponse{
