@@ -56,7 +56,7 @@ func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
 
 	session := resp.Session
 
-	r, err := runner.New(&runner.Config{
+	r, err := runner.New(runner.Config{
 		AppName:         appName,
 		Agent:           rootAgent,
 		SessionService:  sessionService,

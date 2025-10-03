@@ -43,7 +43,7 @@ type Config struct {
 	MemoryService   memoryservice.Service
 }
 
-func New(cfg *Config) (*Runner, error) {
+func New(cfg Config) (*Runner, error) {
 	parents, err := parentmap.New(cfg.Agent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)

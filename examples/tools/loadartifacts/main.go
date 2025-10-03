@@ -100,7 +100,7 @@ func main() {
 		log.Fatalf("Failed to save artifact: %v", err)
 	}
 
-	r, err := runner.New(&runner.Config{
+	r, err := runner.New(runner.Config{
 		AppName:         appName,
 		Agent:           agent,
 		SessionService:  sessionService,

@@ -162,13 +162,12 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 		return nil, nil, errors.NewStatusError(fmt.Errorf("load agent: %w", err), http.StatusInternalServerError)
 	}
 
-	r, err := runner.New(
-		&runner.Config{
-			AppName:         req.AppName,
-			Agent:           agent,
-			SessionService:  c.sessionService,
-			ArtifactService: c.artifactService,
-		},
+	r, err := runner.New(runner.Config{
+		AppName:         req.AppName,
+		Agent:           agent,
+		SessionService:  c.sessionService,
+		ArtifactService: c.artifactService,
+	},
 	)
 	if err != nil {
 		return nil, nil, errors.NewStatusError(fmt.Errorf("create runner: %w", err), http.StatusInternalServerError)

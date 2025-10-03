@@ -104,7 +104,7 @@ func TestNewLoopAgent(t *testing.T) {
 
 			sessionService := session.InMemoryService()
 
-			agentRunner, err := runner.New(&runner.Config{
+			agentRunner, err := runner.New(runner.Config{
 				AppName:        "test_app",
 				Agent:          agent,
 				SessionService: sessionService,
