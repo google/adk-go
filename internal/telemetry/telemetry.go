@@ -24,7 +24,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -173,24 +173,24 @@ func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fn
 }
 
 // TraceLLMCall fills the call_llm event details.
-func TraceLLMCall(spans []trace.Span, agentCtx agent.Context, llmRequest *llm.Request, model llm.Model, event *session.Event) {
+func TraceLLMCall(spans []trace.Span, agentCtx agent.Context, llmRequest *model.LLMRequest, event *session.Event) {
 	for _, span := range spans {
 		attributes := []attribute.KeyValue{
 			attribute.String("gen_ai.system", systemName),
-			attribute.String("gen_ai.request.model", model.Name()),
+			attribute.String("gen_ai.request.model", llmRequest.Model),
 			attribute.String("gcp.vertex.agent.invocation_id", event.InvocationID),
 			attribute.String("gcp.vertex.agent.session_id", agentCtx.Session().ID()),
 			attribute.String("gcp.vertex.agent.event_id", event.ID),
-			attribute.String("gcp.vertex.agent.llm_request", safeSerialize(llmRequestToTrace(llmRequest, model))),
+			attribute.String("gcp.vertex.agent.llm_request", safeSerialize(llmRequestToTrace(llmRequest))),
 			attribute.String("gcp.vertex.agent.llm_response", safeSerialize(event.LLMResponse)),
 		}
 
-		if llmRequest.GenerateConfig.TopP != nil {
-			attributes = append(attributes, attribute.Float64("gen_ai.request.top_p", float64(*llmRequest.GenerateConfig.TopP)))
+		if llmRequest.Config.TopP != nil {
+			attributes = append(attributes, attribute.Float64("gen_ai.request.top_p", float64(*llmRequest.Config.TopP)))
 		}
 
-		if llmRequest.GenerateConfig.MaxOutputTokens != 0 {
-			attributes = append(attributes, attribute.Int("gen_ai.request.max_tokens", int(llmRequest.GenerateConfig.MaxOutputTokens)))
+		if llmRequest.Config.MaxOutputTokens != 0 {
+			attributes = append(attributes, attribute.Int("gen_ai.request.max_tokens", int(llmRequest.Config.MaxOutputTokens)))
 		}
 
 		// TODO: add usage_metadata and finish_reason once ADK has them.
@@ -208,10 +208,10 @@ func safeSerialize(obj any) string {
 	return string(dump)
 }
 
-func llmRequestToTrace(llmRequest *llm.Request, model llm.Model) map[string]any {
+func llmRequestToTrace(llmRequest *model.LLMRequest) map[string]any {
 	result := map[string]any{
-		"config":  llmRequest.GenerateConfig,
-		"model":   model.Name(),
+		"config":  llmRequest.Config,
+		"model":   llmRequest.Model,
 		"content": []*genai.Content{},
 	}
 	for _, content := range llmRequest.Contents {
