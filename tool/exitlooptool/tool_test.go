@@ -123,7 +123,7 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 			runner := testutil.NewTestAgentRunner(t, looper)
 
 			// 2. Execution and Assertion
-			var eventCount int = 0
+			eventCount := 0
 			ev := runner.Run(t, "id", "message")
 
 			for got, err := range ev {
