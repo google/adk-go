@@ -90,7 +90,10 @@ func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
 				fmt.Printf("\nAGENT_ERROR: %v\n", err)
 			} else {
 				for _, p := range event.LLMResponse.Content.Parts {
-					fmt.Print(p.Text)
+					// if its running in streaming mode, don't print the non partial llmResponses
+					if streamingMode != runner.StreamingModeSSE || event.LLMResponse.Partial {
+						fmt.Print(p.Text)
+					}
 				}
 			}
 		}

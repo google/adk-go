@@ -75,7 +75,6 @@ type Event struct {
 	Branch string
 	Author string
 
-	Partial bool
 	// The actions taken by the agent.
 	Actions EventActions
 	// Set of IDs of the long running function calls.

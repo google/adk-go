@@ -122,14 +122,18 @@ func main() {
 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
 		fmt.Print("\nAgent -> ")
+		streamingMode := runner.StreamingModeSSE
 		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &runner.RunConfig{
-			StreamingMode: runner.StreamingModeSSE,
+			StreamingMode: streamingMode,
 		}) {
 			if err != nil {
 				fmt.Printf("\nAGENT_ERROR: %v\n", err)
 			} else {
 				for _, p := range event.LLMResponse.Content.Parts {
-					fmt.Print(p.Text)
+					// if its running in streaming mode, don't print the non partial llmResponses
+					if streamingMode != runner.StreamingModeSSE || event.LLMResponse.Partial {
+						fmt.Print(p.Text)
+					}
 				}
 			}
 		}

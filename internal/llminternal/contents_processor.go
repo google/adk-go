@@ -522,7 +522,6 @@ func cloneEvent(e *session.Event) *session.Event {
 		InvocationID: e.InvocationID,
 		Branch:       e.Branch,
 		Author:       e.Author,
-		Partial:      e.Partial,
 		Actions:      e.Actions,
 	}
 
