@@ -22,7 +22,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -63,7 +63,7 @@ func (t *mcpTool) IsLongRunning() bool {
 	return false
 }
 
-func (t *mcpTool) ProcessRequest(ctx tool.Context, req *llm.Request) error {
+func (t *mcpTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	if req.Tools == nil {
 		req.Tools = make(map[string]any)
 	}
@@ -74,10 +74,10 @@ func (t *mcpTool) ProcessRequest(ctx tool.Context, req *llm.Request) error {
 	}
 	req.Tools[name] = t
 
-	if req.GenerateConfig == nil {
-		req.GenerateConfig = &genai.GenerateContentConfig{}
+	if req.Config == nil {
+		req.Config = &genai.GenerateContentConfig{}
 	}
-	req.GenerateConfig.Tools = append(req.GenerateConfig.Tools, &genai.Tool{
+	req.Config.Tools = append(req.Config.Tools, &genai.Tool{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			t.funcDeclaration,
 		},

@@ -15,7 +15,7 @@
 package llminternal
 
 import (
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -26,7 +26,7 @@ type Agent interface {
 }
 
 type State struct {
-	Model llm.Model
+	Model model.LLM
 
 	Tools []tool.Tool
 

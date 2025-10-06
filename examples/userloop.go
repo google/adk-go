@@ -22,14 +22,16 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/runner"
-	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
 type RunConfig struct {
-	SessionService sessionservice.Service
-	StreamingMode  runner.StreamingMode
+	SessionService  session.Service
+	ArtifactService artifact.Service
+	StreamingMode   runner.StreamingMode
 }
 
 func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
@@ -41,10 +43,10 @@ func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
 
 	sessionService := runConfig.SessionService
 	if sessionService == nil {
-		sessionService = sessionservice.Mem()
+		sessionService = session.InMemoryService()
 	}
 
-	resp, err := sessionService.Create(ctx, &sessionservice.CreateRequest{
+	resp, err := sessionService.Create(ctx, &session.CreateRequest{
 		AppName: appName,
 		UserID:  userID,
 	})
@@ -54,10 +56,11 @@ func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
 
 	session := resp.Session
 
-	r, err := runner.New(&runner.Config{
-		AppName:        appName,
-		Agent:          rootAgent,
-		SessionService: sessionService,
+	r, err := runner.New(runner.Config{
+		AppName:         appName,
+		Agent:           rootAgent,
+		SessionService:  sessionService,
+		ArtifactService: runConfig.ArtifactService,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create runner: %v", err)
@@ -80,7 +83,7 @@ func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
 			streamingMode = runner.StreamingModeSSE
 		}
 		fmt.Print("\nAgent -> ")
-		for event, err := range r.Run(ctx, userID, session.ID().SessionID, userMsg, &runner.RunConfig{
+		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &runner.RunConfig{
 			StreamingMode: streamingMode,
 		}) {
 			if err != nil {

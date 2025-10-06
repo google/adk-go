@@ -22,7 +22,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 )
 
 func TestNew(t *testing.T) {
@@ -72,7 +72,7 @@ func TestNew(t *testing.T) {
 
 func TestMap_RootAgent(t *testing.T) {
 	model := struct {
-		llm.Model
+		model.LLM
 	}{}
 
 	nonLLM := utils.Must(agent.New(agent.Config{

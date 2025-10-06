@@ -20,17 +20,16 @@ import (
 	"time"
 
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 )
 
 // MutableSession implements session.Session
 type MutableSession struct {
-	service       sessionservice.Service
-	storedSession sessionservice.StoredSession
+	service       session.Service
+	storedSession session.Session
 }
 
 // NewMutableSession creates and returns session.Session implementation.
-func NewMutableSession(service sessionservice.Service, storedSession sessionservice.StoredSession) *MutableSession {
+func NewMutableSession(service session.Service, storedSession session.Session) *MutableSession {
 	return &MutableSession{
 		service:       service,
 		storedSession: storedSession,
@@ -41,7 +40,15 @@ func (s *MutableSession) State() session.State {
 	return s
 }
 
-func (s *MutableSession) ID() session.ID {
+func (s *MutableSession) AppName() string {
+	return s.storedSession.AppName()
+}
+
+func (s *MutableSession) UserID() string {
+	return s.storedSession.UserID()
+}
+
+func (s *MutableSession) ID() string {
 	return s.storedSession.ID()
 }
 
@@ -49,8 +56,8 @@ func (s *MutableSession) Events() session.Events {
 	return s.storedSession.Events()
 }
 
-func (s *MutableSession) Updated() time.Time {
-	return s.storedSession.Updated()
+func (s *MutableSession) LastUpdateTime() time.Time {
+	return s.storedSession.LastUpdateTime()
 }
 
 func (s *MutableSession) Get(key string) (any, error) {

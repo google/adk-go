@@ -25,8 +25,9 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -34,14 +35,14 @@ import (
 
 func TestAgentTransferRequestProcessor(t *testing.T) {
 	curTool := &llminternal.TransferToAgentTool{}
-	model := &struct{ llm.Model }{}
+	llm := &struct{ model.LLM }{}
 
 	if curTool.Name() == "" || curTool.Description() == "" || curTool.Declaration() == nil {
 		t.Fatalf("unexpected TransferToAgentTool: name=%q, desc=%q, decl=%v", curTool.Name(), curTool.Description(), curTool)
 	}
 
 	check := func(t *testing.T, curAgent, root agent.Agent, wantParent string, wantAgents []string, unwantAgents []string) {
-		req := &llm.Request{}
+		req := &model.LLMRequest{}
 
 		parents, err := parentmap.New(root)
 		if err != nil {
@@ -56,7 +57,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 
 		// We don't expect transfer. Check AgentTransferRequestProcessor was no-op.
 		if wantParent == "" && len(wantAgents) == 0 {
-			if diff := cmp.Diff(&llm.Request{}, req); diff != "" {
+			if diff := cmp.Diff(&model.LLMRequest{}, req); diff != "" {
 				t.Errorf("req was changed unexpectedly (-want, +got): %v", diff)
 			}
 			return
@@ -79,7 +80,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		}
 
 		// check instructions.
-		instructions := utils.TextParts(req.GenerateConfig.SystemInstruction)
+		instructions := utils.TextParts(req.Config.SystemInstruction)
 		if !slices.ContainsFunc(instructions, func(s string) bool {
 			return strings.Contains(s, wantToolName) && strings.Contains(s, "You have a list of other agents to transfer to")
 		}) {
@@ -120,7 +121,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 
 		// check function declarations.
 		wantToolDescription := curTool.Description()
-		functions := utils.FunctionDecls(req.GenerateConfig)
+		functions := utils.FunctionDecls(req.Config)
 		if !slices.ContainsFunc(functions, func(f *genai.FunctionDeclaration) bool {
 			return f.Name == wantToolName && strings.Contains(f.Description, wantToolDescription) && f.ParametersJsonSchema == nil
 		}) {
@@ -131,7 +132,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("SoloAgent", func(t *testing.T) {
 		agent := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Current",
-			Model: model,
+			Model: llm,
 		}))
 		check(t, agent, agent, "", nil, []string{"Current"})
 	})
@@ -144,11 +145,11 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("LLMAgentParent", func(t *testing.T) {
 		testAgent := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Current",
-			Model: model,
+			Model: llm,
 		}))
 		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:      "Parent",
-			Model:     model,
+			Model:     llm,
 			SubAgents: []agent.Agent{testAgent},
 		}))
 		check(t, testAgent, root, "Parent", nil, []string{"Current"})
@@ -156,15 +157,15 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("LLMAgentParentAndPeer", func(t *testing.T) {
 		curAgent := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Current",
-			Model: model,
+			Model: llm,
 		}))
 		peer := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Peer",
-			Model: model,
+			Model: llm,
 		}))
 		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:      "Parent",
-			Model:     model,
+			Model:     llm,
 			SubAgents: []agent.Agent{curAgent, peer},
 		}))
 		check(t, curAgent, root, "Parent", []string{"Peer"}, []string{"Current"})
@@ -172,14 +173,14 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("LLMAgentSubagents", func(t *testing.T) {
 		agent := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Current",
-			Model: model,
+			Model: llm,
 			SubAgents: []agent.Agent{
 				utils.Must(agent.New(agent.Config{
 					Name: "Sub1",
 				})),
 				utils.Must(llmagent.New(llmagent.Config{
 					Name:  "Sub2",
-					Model: model,
+					Model: llm,
 				})),
 			},
 		}))
@@ -189,14 +190,14 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("AgentWithParentAndPeersAndSubagents", func(t *testing.T) {
 		curAgent := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Current",
-			Model: model,
+			Model: llm,
 			SubAgents: []agent.Agent{
 				utils.Must(agent.New(agent.Config{
 					Name: "Sub1",
 				})),
 				utils.Must(llmagent.New(llmagent.Config{
 					Name:  "Sub2",
-					Model: model,
+					Model: llm,
 				})),
 			},
 		}))
@@ -205,7 +206,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		}))
 		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:      "Parent",
-			Model:     model,
+			Model:     llm,
 			SubAgents: []agent.Agent{curAgent, peer},
 		}))
 		check(t, curAgent, root, "Parent", []string{"Peer", "Sub1", "Sub2"}, []string{"Current"})
@@ -214,7 +215,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("NonLLMAgentSubagents", func(t *testing.T) {
 		agent := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Current",
-			Model: model,
+			Model: llm,
 			SubAgents: []agent.Agent{
 				utils.Must(agent.New(agent.Config{
 					Name: "Sub1",
@@ -230,22 +231,22 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("AgentWithDisallowTransferToParent", func(t *testing.T) {
 		curAgent := utils.Must(llmagent.New(llmagent.Config{
 			Name:                     "Current",
-			Model:                    model,
+			Model:                    llm,
 			DisallowTransferToParent: true,
 			SubAgents: []agent.Agent{
 				utils.Must(llmagent.New(llmagent.Config{
 					Name:  "Sub1",
-					Model: model,
+					Model: llm,
 				})),
 				utils.Must(llmagent.New(llmagent.Config{
 					Name:  "Sub2",
-					Model: model,
+					Model: llm,
 				})),
 			},
 		}))
 		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Parent",
-			Model: model,
+			Model: llm,
 			SubAgents: []agent.Agent{
 				curAgent,
 			},
@@ -257,24 +258,24 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("AgentWithDisallowTransferToPeers", func(t *testing.T) {
 		curAgent := utils.Must(llmagent.New(llmagent.Config{
 			Name:                    "Current",
-			Model:                   model,
+			Model:                   llm,
 			DisallowTransferToPeers: true,
 			SubAgents: []agent.Agent{
 				utils.Must(agent.New(agent.Config{
 					Name: "Sub1",
 				})), utils.Must(llmagent.New(llmagent.Config{
 					Name:  "Sub2",
-					Model: model,
+					Model: llm,
 				})),
 			},
 		}))
 		peer := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Peer",
-			Model: model,
+			Model: llm,
 		}))
 		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Parent",
-			Model: model,
+			Model: llm,
 			SubAgents: []agent.Agent{
 				curAgent, peer,
 			},
@@ -285,7 +286,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("AgentWithDisallowTransferToParentAndPeers", func(t *testing.T) {
 		curAgent := utils.Must(llmagent.New(llmagent.Config{
 			Name:                     "Current",
-			Model:                    model,
+			Model:                    llm,
 			DisallowTransferToParent: true,
 			DisallowTransferToPeers:  true,
 			SubAgents: []agent.Agent{
@@ -294,17 +295,17 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 				})),
 				utils.Must(llmagent.New(llmagent.Config{
 					Name:  "Sub2",
-					Model: model,
+					Model: llm,
 				})),
 			},
 		}))
 		peer := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Peer",
-			Model: model,
+			Model: llm,
 		}))
 		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:      "Parent",
-			Model:     model,
+			Model:     llm,
 			SubAgents: []agent.Agent{peer, curAgent},
 		}))
 
@@ -314,17 +315,17 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	t.Run("AgentWithDisallowTransfer", func(t *testing.T) {
 		curAgent := utils.Must(llmagent.New(llmagent.Config{
 			Name:                     "Current",
-			Model:                    model,
+			Model:                    llm,
 			DisallowTransferToParent: true,
 			DisallowTransferToPeers:  true,
 		}))
 		peer := utils.Must(llmagent.New(llmagent.Config{
 			Name:  "Peer",
-			Model: model,
+			Model: llm,
 		}))
 		root := utils.Must(llmagent.New(llmagent.Config{
 			Name:      "Parent",
-			Model:     model,
+			Model:     llm,
 			SubAgents: []agent.Agent{curAgent, peer},
 		}))
 
@@ -332,10 +333,44 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	})
 }
 
+func TestAgentTransfer_ProcessRequest(t *testing.T) {
+	// First Tool
+	var req model.LLMRequest
+	handler := func(ctx tool.Context, x int) int {
+		return x
+	}
+	identityTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+		Name:        "identity",
+		Description: "returns the input value",
+	}, handler)
+	if err != nil {
+		panic(err)
+	}
+	requestProcessor, ok := identityTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("identityTool does not implement itype.RequestProcessor")
+	}
+	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+		t.Fatalf("identityTool.ProcessRequest failed: %v", err)
+	}
+	// Second tool
+	transferToAgentTool := &llminternal.TransferToAgentTool{}
+	if err := transferToAgentTool.ProcessRequest(nil, &req); err != nil {
+		t.Fatalf("transferToAgentTool.ProcessRequest failed: %v", err)
+	}
+
+	if len(req.Config.Tools) != 1 {
+		t.Errorf("number of tools should be one, got: %d", len(req.Config.Tools))
+	}
+	if len(req.Config.Tools[0].FunctionDeclarations) != 2 {
+		t.Errorf("number of function declarations should be two, got: %d", len(req.Config.Tools[0].FunctionDeclarations))
+	}
+}
+
 func TestTransferToAgentToolRun(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		curTool := &llminternal.TransferToAgentTool{}
-		ctx := tool.NewContext(agent.NewContext(t.Context(), nil, nil, nil, nil, nil, ""), "", &session.Actions{})
+		ctx := tool.NewContext(agent.NewContext(t.Context(), nil, nil, nil, nil, nil, ""), "", &session.EventActions{})
 		wantAgentName := "TestAgent"
 		args := map[string]any{"agent_name": wantAgentName}
 		if _, err := curTool.Run(ctx, args); err != nil {
@@ -360,7 +395,7 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				curTool := &llminternal.TransferToAgentTool{}
-				ctx := tool.NewContext(agent.NewContext(t.Context(), nil, nil, nil, nil, nil, ""), "", &session.Actions{})
+				ctx := tool.NewContext(agent.NewContext(t.Context(), nil, nil, nil, nil, nil, ""), "", &session.EventActions{})
 				if got, err := curTool.Run(ctx, tc.args); err == nil {
 					t.Fatalf("Run(%v) = (%v, %v), want error", tc.args, got, err)
 				}

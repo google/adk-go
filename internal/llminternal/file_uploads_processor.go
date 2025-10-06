@@ -17,12 +17,12 @@ package llminternal
 import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/llminternal/googlellm"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 )
 
 // The Gemini API (non-Vertex) backend does not support the display_name parameter for file uploads,
 // so it must be removed to prevent request failures.
-func removeDisplayNameIfExists(ctx agent.Context, req *llm.Request) error {
+func removeDisplayNameIfExists(ctx agent.Context, req *model.LLMRequest) error {
 	if req.Contents == nil {
 		return nil
 	}

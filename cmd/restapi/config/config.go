@@ -16,16 +16,14 @@
 package config
 
 import (
-	"github.com/rs/cors"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/restapi/services"
-	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/session"
 )
 
 // ADKAPIRouterConfigs contains the configs for the ADK API server.
 type ADKAPIRouterConfigs struct {
-	Cors            cors.Cors
-	SessionService  sessionservice.Service
+	SessionService  session.Service
 	AgentLoader     services.AgentLoader
-	ArtifactService artifactservice.Service
+	ArtifactService artifact.Service
 }

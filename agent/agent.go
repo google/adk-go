@@ -20,8 +20,8 @@ import (
 	"iter"
 
 	agentinternal "google.golang.org/adk/internal/agent"
-	"google.golang.org/adk/llm"
 	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -165,7 +165,7 @@ func runBeforeAgentCallbacks(ctx Context) (*session.Event, error) {
 		}
 
 		event := session.NewEvent(ctx.InvocationID())
-		event.LLMResponse = &llm.Response{
+		event.LLMResponse = &model.LLMResponse{
 			Content: content,
 		}
 		event.Author = agent.Name()

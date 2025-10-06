@@ -23,13 +23,17 @@ import (
 	"time"
 
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 )
 
 type TestState map[string]any
 
 func (s TestState) Get(key string) (any, error) {
 	return s[key], nil
+}
+
+func (s TestState) Set(key string, val any) error {
+	s[key] = val
+	return nil
 }
 
 func (s TestState) All() iter.Seq2[string, any] {
@@ -63,17 +67,25 @@ func (e TestEvents) At(i int) *session.Event {
 }
 
 type TestSession struct {
-	Id            session.ID
+	Id            SessionKey
 	SessionState  TestState
 	SessionEvents TestEvents
 	UpdatedAt     time.Time
 }
 
-func (s TestSession) ID() session.ID {
-	return s.Id
+func (s TestSession) ID() string {
+	return s.Id.SessionID
 }
 
-func (s TestSession) State() session.ReadOnlyState {
+func (s TestSession) AppName() string {
+	return s.Id.AppName
+}
+
+func (s TestSession) UserID() string {
+	return s.Id.UserID
+}
+
+func (s TestSession) State() session.State {
 	return s.SessionState
 }
 
@@ -81,16 +93,22 @@ func (s TestSession) Events() session.Events {
 	return s.SessionEvents
 }
 
-func (s TestSession) Updated() time.Time {
+func (s TestSession) LastUpdateTime() time.Time {
 	return s.UpdatedAt
 }
 
 type FakeSessionService struct {
-	Sessions map[session.ID]TestSession
+	Sessions map[SessionKey]TestSession
 }
 
-func (s *FakeSessionService) Create(ctx context.Context, req *sessionservice.CreateRequest) (*sessionservice.CreateResponse, error) {
-	if _, ok := s.Sessions[session.ID{AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID}]; ok {
+type SessionKey struct {
+	AppName   string
+	UserID    string
+	SessionID string
+}
+
+func (s *FakeSessionService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
+	if _, ok := s.Sessions[SessionKey{AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID}]; ok {
 		return nil, fmt.Errorf("session already exists")
 	}
 
@@ -98,56 +116,73 @@ func (s *FakeSessionService) Create(ctx context.Context, req *sessionservice.Cre
 		req.SessionID = "testID"
 	}
 
-	session := TestSession{
-		Id:           session.ID{AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID},
+	testSession := TestSession{
+		Id: SessionKey{
+			AppName:   req.AppName,
+			UserID:    req.UserID,
+			SessionID: req.SessionID,
+		},
 		SessionState: req.State,
 		UpdatedAt:    time.Now(),
 	}
-	s.Sessions[session.Id] = session
-	return &sessionservice.CreateResponse{
-		Session: &session,
+	s.Sessions[SessionKey{
+		AppName:   req.AppName,
+		UserID:    req.UserID,
+		SessionID: req.SessionID,
+	}] = testSession
+	return &session.CreateResponse{
+		Session: &testSession,
 	}, nil
 }
 
-func (s *FakeSessionService) Get(ctx context.Context, req *sessionservice.GetRequest) (*sessionservice.GetResponse, error) {
-	if session, ok := s.Sessions[req.ID]; ok {
-		return &sessionservice.GetResponse{
-			Session: &session,
+func (s *FakeSessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
+	if sess, ok := s.Sessions[SessionKey{
+		AppName:   req.AppName,
+		UserID:    req.UserID,
+		SessionID: req.SessionID,
+	}]; ok {
+		return &session.GetResponse{
+			Session: &sess,
 		}, nil
 	}
 	return nil, fmt.Errorf("not found")
 }
 
-func (s *FakeSessionService) List(ctx context.Context, req *sessionservice.ListRequest) (*sessionservice.ListResponse, error) {
-	result := []sessionservice.StoredSession{}
+func (s *FakeSessionService) List(ctx context.Context, req *session.ListRequest) (*session.ListResponse, error) {
+	result := []session.Session{}
 	for _, session := range s.Sessions {
 		if session.Id.AppName != req.AppName || session.Id.UserID != req.UserID {
 			continue
 		}
 		result = append(result, session)
 	}
-	return &sessionservice.ListResponse{
+	return &session.ListResponse{
 		Sessions: result,
 	}, nil
 }
 
-func (s *FakeSessionService) Delete(ctx context.Context, req *sessionservice.DeleteRequest) error {
-	if _, ok := s.Sessions[req.ID]; !ok {
+func (s *FakeSessionService) Delete(ctx context.Context, req *session.DeleteRequest) error {
+	id := SessionKey{
+		AppName:   req.AppName,
+		UserID:    req.UserID,
+		SessionID: req.SessionID,
+	}
+	if _, ok := s.Sessions[id]; !ok {
 		return fmt.Errorf("not found")
 	}
-	delete(s.Sessions, req.ID)
+	delete(s.Sessions, id)
 	return nil
 }
 
-func (s *FakeSessionService) AppendEvent(ctx context.Context, session sessionservice.StoredSession, event *session.Event) error {
-	TestSession, ok := session.(*TestSession)
+func (s *FakeSessionService) AppendEvent(ctx context.Context, curSession session.Session, event *session.Event) error {
+	testSession, ok := curSession.(*TestSession)
 	if !ok {
 		return fmt.Errorf("invalid session type")
 	}
-	TestSession.SessionEvents = append(TestSession.SessionEvents, event)
-	TestSession.UpdatedAt = event.Time
-	s.Sessions[TestSession.Id] = *TestSession
+	testSession.SessionEvents = append(testSession.SessionEvents, event)
+	testSession.UpdatedAt = event.Timestamp
+	s.Sessions[testSession.Id] = *testSession
 	return nil
 }
 
-var _ sessionservice.Service = (*FakeSessionService)(nil)
+var _ session.Service = (*FakeSessionService)(nil)

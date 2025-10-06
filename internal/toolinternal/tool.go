@@ -16,7 +16,7 @@
 package toolinternal
 
 import (
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -27,5 +27,5 @@ type FunctionTool interface {
 }
 
 type RequestProcessor interface {
-	ProcessRequest(ctx tool.Context, req *llm.Request) error
+	ProcessRequest(ctx tool.Context, req *model.LLMRequest) error
 }

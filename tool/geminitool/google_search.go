@@ -15,7 +15,7 @@
 package geminitool
 
 import (
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -34,7 +34,7 @@ func (s GoogleSearch) Description() string {
 	return "google_search"
 }
 
-func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *llm.Request) error {
+func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return setTool(req, &genai.Tool{
 		GoogleSearch: &genai.GoogleSearch{},
 	})

@@ -19,20 +19,17 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 )
 
 type Session interface {
-	ID() ID
+	ID() string
+	AppName() string
+	UserID() string
+
 	State() State
 	Events() Events
-	Updated() time.Time
-}
-
-type ID struct {
-	AppName   string
-	UserID    string
-	SessionID string
+	LastUpdateTime() time.Time
 }
 
 type State interface {
@@ -41,7 +38,6 @@ type State interface {
 	All() iter.Seq2[string, any]
 }
 
-// TODO: It is provided for use by SessionService, and perhaps it should move there.
 type ReadOnlyState interface {
 	Get(string) (any, error)
 	All() iter.Seq2[string, any]
@@ -61,9 +57,11 @@ type Events interface {
 // It is used to store the content of the conversation, as well as
 // the actions taken by the agents like function calls, etc.
 type Event struct {
+	*model.LLMResponse
+
 	// Set by storage
-	ID   string
-	Time time.Time
+	ID        string
+	Timestamp time.Time
 
 	// Set by agent.Context implementation.
 	InvocationID string
@@ -79,12 +77,11 @@ type Event struct {
 
 	Partial bool
 	// The actions taken by the agent.
-	Actions Actions
+	Actions EventActions
 	// Set of IDs of the long running function calls.
 	// Agent client will know from this field about which function call is long running.
 	// Only valid for function call event.
 	LongRunningToolIDs []string
-	LLMResponse        *llm.Response
 }
 
 // NewEvent creates a new event.
@@ -92,12 +89,12 @@ func NewEvent(invocationID string) *Event {
 	return &Event{
 		ID:           uuid.NewString(),
 		InvocationID: invocationID,
-		Time:         time.Now(),
+		Timestamp:    time.Now(),
 	}
 }
 
-// Actions represents the actions attached to an event.
-type Actions struct {
+// EventActions represents the actions attached to an event.
+type EventActions struct {
 	// Set by agent.Context implementation.
 	StateDelta map[string]any
 

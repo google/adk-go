@@ -22,22 +22,15 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// Memory implements Memory
 type Memory struct {
-	service memoryservice.Service
-	id      session.ID
-}
-
-// NewMemory creates and returns Memory implementation.
-func NewMemory(service memoryservice.Service, id session.ID) *Memory {
-	return &Memory{
-		service: service,
-		id:      id,
-	}
+	Service   memoryservice.Service
+	SessionID string
+	UserID    string
+	AppName   string
 }
 
 func (a *Memory) AddSession(session session.Session) error {
-	err := a.service.AddSession(context.Background(), session)
+	err := a.Service.AddSession(context.Background(), session)
 	if err != nil {
 		return fmt.Errorf("could not add session to memory service: %w", err)
 	}
@@ -45,9 +38,9 @@ func (a *Memory) AddSession(session session.Session) error {
 }
 
 func (a *Memory) Search(query string) ([]memoryservice.MemoryEntry, error) {
-	searchResponse, err := a.service.Search(context.Background(), &memoryservice.SearchRequest{
-		AppName: a.id.AppName,
-		UserID:  a.id.UserID,
+	searchResponse, err := a.Service.Search(context.Background(), &memoryservice.SearchRequest{
+		AppName: a.AppName,
+		UserID:  a.UserID,
 		Query:   query,
 	})
 	if err != nil {

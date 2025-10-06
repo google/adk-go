@@ -17,7 +17,7 @@ package models
 import (
 	"time"
 
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -35,20 +35,20 @@ type Event struct {
 	GroundingMetadata  *genai.GroundingMetadata `json:"groundingMetadata"`
 	TurnComplete       bool                     `json:"turnComplete"`
 	Interrupted        bool                     `json:"interrupted"`
-	ErrorCode          int                      `json:"errorCode"`
+	ErrorCode          string                   `json:"errorCode"`
 	ErrorMessage       string                   `json:"errorMessage"`
 }
 
 func ToSessionEvent(event Event) *session.Event {
 	return &session.Event{
 		ID:                 event.ID,
-		Time:               time.Unix(event.Time, 0),
+		Timestamp:          time.Unix(event.Time, 0),
 		InvocationID:       event.InvocationID,
 		Branch:             event.Branch,
 		Author:             event.Author,
 		Partial:            event.Partial,
 		LongRunningToolIDs: event.LongRunningToolIDs,
-		LLMResponse: &llm.Response{
+		LLMResponse: &model.LLMResponse{
 			Content:           event.Content,
 			GroundingMetadata: event.GroundingMetadata,
 			Partial:           event.Partial,
@@ -63,7 +63,7 @@ func ToSessionEvent(event Event) *session.Event {
 func FromSessionEvent(event session.Event) Event {
 	return Event{
 		ID:                 event.ID,
-		Time:               event.Time.Unix(),
+		Time:               event.Timestamp.Unix(),
 		InvocationID:       event.InvocationID,
 		Branch:             event.Branch,
 		Author:             event.Author,

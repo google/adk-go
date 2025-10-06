@@ -22,10 +22,9 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 
 	"google.golang.org/genai"
 )
@@ -51,7 +50,7 @@ func TestNewLoopAgent(t *testing.T) {
 			wantEvents: []*session.Event{
 				{
 					Author: "custom_agent_0",
-					LLMResponse: &llm.Response{
+					LLMResponse: &model.LLMResponse{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 0"),
@@ -71,7 +70,7 @@ func TestNewLoopAgent(t *testing.T) {
 			wantEvents: []*session.Event{
 				{
 					Author: "custom_agent_0",
-					LLMResponse: &llm.Response{
+					LLMResponse: &model.LLMResponse{
 						Content: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("hello 0"),
@@ -103,9 +102,9 @@ func TestNewLoopAgent(t *testing.T) {
 
 			var gotEvents []*session.Event
 
-			sessionService := sessionservice.Mem()
+			sessionService := session.InMemoryService()
 
-			agentRunner, err := runner.New(&runner.Config{
+			agentRunner, err := runner.New(runner.Config{
 				AppName:        "test_app",
 				Agent:          agent,
 				SessionService: sessionService,
@@ -114,7 +113,7 @@ func TestNewLoopAgent(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, err = sessionService.Create(ctx, &sessionservice.CreateRequest{
+			_, err = sessionService.Create(ctx, &session.CreateRequest{
 				AppName:   "test_app",
 				UserID:    "user_id",
 				SessionID: "session_id",
@@ -140,7 +139,7 @@ func TestNewLoopAgent(t *testing.T) {
 			}
 
 			for i, gotEvent := range gotEvents {
-				tt.wantEvents[i].Time = gotEvent.Time
+				tt.wantEvents[i].Timestamp = gotEvent.Timestamp
 				if diff := cmp.Diff(tt.wantEvents[i], gotEvent); diff != "" {
 					t.Errorf("event[%v] mismatch (-want +got):\n%s", i, diff)
 				}
@@ -178,7 +177,7 @@ func (a *customAgent) Run(agent.Context) iter.Seq2[*session.Event, error] {
 		a.callCounter++
 
 		yield(&session.Event{
-			LLMResponse: &llm.Response{
+			LLMResponse: &model.LLMResponse{
 				Content: genai.NewContentFromText(fmt.Sprintf("hello %v", a.id), genai.RoleModel),
 			},
 		}, nil)

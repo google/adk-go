@@ -23,30 +23,32 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/rs/cors"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/restapi/config"
+	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/services"
 	restapiweb "google.golang.org/adk/cmd/restapi/web"
-	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/session"
 )
 
 // WebConfig is a struct with parameters to run a WebServer.
 type WebConfig struct {
-	LocalPort      int
-	UIDistPath     string
-	FrontEndServer string
-	StartRestApi   bool
-	StartWebUI     bool
+	LocalPort       int
+	UIDistPath      string
+	FrontendAddress string
+	BackendAddress  string
+	StartRestApi    bool
+	StartWebUI      bool
 }
 
 // ParseArgs parses the arguments for the ADK API server.
 func ParseArgs() *WebConfig {
-	localPortFlag := flag.Int("port", 8080, "Port to listen on")
-	frontendServerFlag := flag.String("front_address", "http://localhost:8001", "Front address to allow CORS requests from")
-	startRespApi := flag.Bool("start_restapi", true, "Set to start a rest api endpoint '/api'")
-	startWebUI := flag.Bool("start_webui", true, "Set to start a web ui endpoint '/ui'")
-	webuiDist := flag.String("webui_path", "", "Points to a static web ui dist path with the built version of ADK Web UI")
+	localPortFlag := flag.Int("port", 8080, "Localhost port for the server")
+	frontendAddressFlag := flag.String("front_address", "localhost:8080", "Front address to allow CORS requests from as seen from the user browser. Please specify only hostname and (optionally) port")
+	backendAddressFlag := flag.String("backend_address", "http://localhost:8080/api", "Backend server as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'. ")
+	webuiDistPathFlag := flag.String("webui_distr_path", "",
+		`Points to a static ADK Web UI dist path with the pre-built version of ADK Web UI (cmd/web/distr/browser in the ADK-GO repo). 
+Normally it should be the version distributed with adk-go. You may use CLI command "build webui" to experiment with other versions.`)
 
 	flag.Parse()
 	if !flag.Parsed() {
@@ -54,11 +56,10 @@ func ParseArgs() *WebConfig {
 		panic("Failed to parse flags")
 	}
 	return &(WebConfig{
-		LocalPort:      *localPortFlag,
-		FrontEndServer: *frontendServerFlag,
-		StartRestApi:   *startRespApi,
-		StartWebUI:     *startWebUI,
-		UIDistPath:     *webuiDist,
+		LocalPort:       *localPortFlag,
+		FrontendAddress: *frontendAddressFlag,
+		BackendAddress:  *backendAddressFlag,
+		UIDistPath:      *webuiDistPathFlag,
 	})
 }
 
@@ -78,9 +79,24 @@ func Logger(inner http.Handler) http.Handler {
 }
 
 type ServeConfig struct {
-	SessionService  sessionservice.Service
+	SessionService  session.Service
 	AgentLoader     services.AgentLoader
-	ArtifactService artifactservice.Service
+	ArtifactService artifact.Service
+}
+
+func corsWithArgs(c *WebConfig) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", c.FrontendAddress)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // Serve initiates the http server and starts it according to WebConfig parameters
@@ -90,24 +106,33 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 		AgentLoader:     serveConfig.AgentLoader,
 		ArtifactService: serveConfig.ArtifactService,
 	}
-	serverConfig.Cors = *cors.New(cors.Options{
-		AllowedOrigins:   []string{c.FrontEndServer},
-		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodOptions, http.MethodDelete, http.MethodPut},
-		AllowCredentials: true})
 
 	rBase := mux.NewRouter().StrictSlash(true)
 	rBase.Use(Logger)
 
-	if c.StartWebUI {
-		rUi := rBase.Methods("GET").PathPrefix("/ui/").Subrouter()
-		rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.Dir(c.UIDistPath))))
-	}
+	// Setup serving of ADK Web UI
+	rUi := rBase.Methods("GET").PathPrefix("/ui/").Subrouter()
 
-	if c.StartRestApi {
-		rApi := rBase.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
-		rApi.Use(serverConfig.Cors.Handler)
-		restapiweb.SetupRouter(rApi, &serverConfig)
-	}
+	//   generate /assets/config/runtime-config.json in the runtime.
+	//   It removes the need to prepare this file during deployment and update the distribution files.
+	runtimeConfigResponse := struct {
+		BackendUrl string `json:"backendUrl"`
+	}{BackendUrl: c.BackendAddress}
+	rUi.Methods("GET").Path("/assets/config/runtime-config.json").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlers.EncodeJSONResponse(runtimeConfigResponse, http.StatusOK, w)
+	})
+
+	//   redirect the user from / to /ui/
+	rBase.Methods("GET").Path("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusFound)
+	})
+
+	rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.Dir(c.UIDistPath))))
+
+	// Setup serving of ADK REST API
+	rApi := rBase.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
+	rApi.Use(corsWithArgs(c))
+	restapiweb.SetupRouter(rApi, &serverConfig)
 
 	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), rBase))
 }

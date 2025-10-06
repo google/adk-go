@@ -25,7 +25,7 @@ import (
 	"golang.org/x/oauth2"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/examples"
-	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptool"
 	"google.golang.org/genai"

@@ -22,7 +22,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
@@ -106,7 +106,7 @@ func (t *loadArtifactsTool) Run(ctx Context, args any) (any, error) {
 }
 
 // ProcessRequest implements tool.Tool.
-func (t *loadArtifactsTool) ProcessRequest(ctx Context, req *llm.Request) error {
+func (t *loadArtifactsTool) ProcessRequest(ctx Context, req *model.LLMRequest) error {
 	if req.Tools == nil {
 		req.Tools = make(map[string]any)
 	}
@@ -116,11 +116,11 @@ func (t *loadArtifactsTool) ProcessRequest(ctx Context, req *llm.Request) error 
 	}
 	req.Tools[name] = t
 
-	if req.GenerateConfig == nil {
-		req.GenerateConfig = &genai.GenerateContentConfig{}
+	if req.Config == nil {
+		req.Config = &genai.GenerateContentConfig{}
 	}
 	if decl := t.Declaration(); decl != nil {
-		req.GenerateConfig.Tools = append(req.GenerateConfig.Tools, &genai.Tool{
+		req.Config.Tools = append(req.Config.Tools, &genai.Tool{
 			FunctionDeclarations: []*genai.FunctionDeclaration{decl},
 		})
 	}
@@ -131,7 +131,7 @@ func (t *loadArtifactsTool) ProcessRequest(ctx Context, req *llm.Request) error 
 	return t.processLoadArtifactsFunctionCall(ctx, req)
 }
 
-func (t *loadArtifactsTool) appendInitialInstructions(ctx Context, req *llm.Request) error {
+func (t *loadArtifactsTool) appendInitialInstructions(ctx Context, req *model.LLMRequest) error {
 	artifactNames, err := ctx.Artifacts().List()
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", err)
@@ -155,7 +155,7 @@ func (t *loadArtifactsTool) appendInitialInstructions(ctx Context, req *llm.Requ
 	return nil
 }
 
-func (t *loadArtifactsTool) processLoadArtifactsFunctionCall(ctx Context, req *llm.Request) error {
+func (t *loadArtifactsTool) processLoadArtifactsFunctionCall(ctx Context, req *model.LLMRequest) error {
 	if len(req.Contents) == 0 {
 		return nil
 	}

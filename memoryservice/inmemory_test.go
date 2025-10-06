@@ -21,8 +21,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk/llm"
 	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -41,13 +41,13 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 				makeSession(t, "app1", "user1", "sess1", []*session.Event{
 					{
 						Author: "user1",
-						LLMResponse: &llm.Response{
+						LLMResponse: &model.LLMResponse{
 							Content: genai.NewContentFromText("The Quick brown fox", genai.RoleUser),
 						},
-						Time: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
 					},
 					{
-						LLMResponse: &llm.Response{
+						LLMResponse: &model.LLMResponse{
 							Content: genai.NewContentFromText("jumps over the lazy dog", genai.RoleModel),
 						},
 					},
@@ -55,12 +55,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 				makeSession(t, "app1", "user1", "sess2", []*session.Event{
 					{
 						Author:      "test-bot",
-						LLMResponse: &llm.Response{Content: genai.NewContentFromText("hello world", genai.RoleModel)},
-						Time:        must(time.Parse(time.RFC3339, "2023-10-02T10:00:00Z")),
+						LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("hello world", genai.RoleModel)},
+						Timestamp:   must(time.Parse(time.RFC3339, "2023-10-02T10:00:00Z")),
 					},
 				}),
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{
-					{LLMResponse: &llm.Response{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
+					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
 			req: &memoryservice.SearchRequest{
@@ -87,7 +87,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			name: "no leakage for different appName",
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{
-					{LLMResponse: &llm.Response{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
+					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
 			req: &memoryservice.SearchRequest{
@@ -101,7 +101,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			name: "no leakage for different user",
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{
-					{LLMResponse: &llm.Response{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
+					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
 			req: &memoryservice.SearchRequest{
@@ -115,7 +115,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			name: "no matches",
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{
-					{LLMResponse: &llm.Response{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
+					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
 			req: &memoryservice.SearchRequest{
@@ -179,12 +179,16 @@ type testSession struct {
 	events                     []*session.Event
 }
 
-func (s *testSession) ID() session.ID {
-	return session.ID{
-		AppName:   s.appName,
-		UserID:    s.userID,
-		SessionID: s.sessionID,
-	}
+func (s *testSession) ID() string {
+	return s.sessionID
+}
+
+func (s *testSession) AppName() string {
+	return s.appName
+}
+
+func (s *testSession) UserID() string {
+	return s.userID
 }
 
 func (s *testSession) Events() session.Events {
@@ -207,7 +211,7 @@ func (s *testSession) State() session.State {
 	panic("not implemented")
 }
 
-func (s *testSession) Updated() time.Time {
+func (s *testSession) LastUpdateTime() time.Time {
 	panic("not implemented")
 }
 
