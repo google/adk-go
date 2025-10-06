@@ -179,7 +179,7 @@ func TraceLLMCall(spans []trace.Span, agentCtx agent.Context, llmRequest *llm.Re
 			attribute.String("gen_ai.system", systemName),
 			attribute.String("gen_ai.request.model", model.Name()),
 			attribute.String("gcp.vertex.agent.invocation_id", event.InvocationID),
-			attribute.String("gcp.vertex.agent.session_id", agentCtx.Session().ID().SessionID),
+			attribute.String("gcp.vertex.agent.session_id", agentCtx.Session().ID()),
 			attribute.String("gcp.vertex.agent.event_id", event.ID),
 			attribute.String("gcp.vertex.agent.llm_request", safeSerialize(llmRequestToTrace(llmRequest, model))),
 			attribute.String("gcp.vertex.agent.llm_response", safeSerialize(event.LLMResponse)),
