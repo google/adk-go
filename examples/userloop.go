@@ -91,7 +91,7 @@ func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
 			} else {
 				for _, p := range event.LLMResponse.Content.Parts {
 					// if its running in streaming mode, don't print the non partial llmResponses
-					if streamingMode != runner.StreamingModeSSE || event.LLMResponse.Partial {
+					if streamingMode != agent.StreamingModeSSE || event.LLMResponse.Partial {
 						fmt.Print(p.Text)
 					}
 				}
