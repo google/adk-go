@@ -374,7 +374,8 @@ func TestTransferToAgentToolRun(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		curTool := &llminternal.TransferToAgentTool{}
 
-		ctx := toolinternal.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", &session.EventActions{})
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+		ctx := toolinternal.NewToolContext(invCtx, "", &session.EventActions{})
 
 		wantAgentName := "TestAgent"
 		args := map[string]any{"agent_name": wantAgentName}

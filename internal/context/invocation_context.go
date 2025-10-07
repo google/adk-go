@@ -37,46 +37,29 @@ type InvocationContextParams struct {
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
 	return &InvocationContext{
-		Context: ctx,
-
-		artifacts: params.Artifacts,
-		memory:    params.Memory,
-		session:   params.Session,
-
+		Context:      ctx,
+		params:       params,
 		invocationID: "e-" + uuid.NewString(),
-		branch:       params.Branch,
-		agent:        params.Agent,
-
-		userContent: params.UserContent,
-		runConfig:   params.RunConfig,
 	}
 }
 
 type InvocationContext struct {
 	context.Context
 
-	artifacts agent.Artifacts
-	memory    agent.Memory
-	session   session.Session
-
+	params       InvocationContextParams
 	invocationID string
-	branch       string
-	agent        agent.Agent
-
-	userContent *genai.Content
-	runConfig   *agent.RunConfig
 }
 
 func (c *InvocationContext) Artifacts() agent.Artifacts {
-	return c.artifacts
+	return c.params.Artifacts
 }
 
 func (c *InvocationContext) Agent() agent.Agent {
-	return c.agent
+	return c.params.Agent
 }
 
 func (c *InvocationContext) Branch() string {
-	return c.branch
+	return c.params.Branch
 }
 
 func (c *InvocationContext) InvocationID() string {
@@ -84,21 +67,26 @@ func (c *InvocationContext) InvocationID() string {
 }
 
 func (c *InvocationContext) Memory() agent.Memory {
-	return c.memory
+	return c.params.Memory
 }
 
 func (c *InvocationContext) Session() session.Session {
-	return c.session
+	return c.params.Session
 }
 
 func (c *InvocationContext) UserContent() *genai.Content {
-	return c.userContent
+	return c.params.UserContent
 }
 
 func (c *InvocationContext) RunConfig() *agent.RunConfig {
-	return c.runConfig
+	return c.params.RunConfig
 }
 
 // TODO: implement endInvocation
 func (c *InvocationContext) EndInvocation() {
+}
+
+// TODO: implement endInvocation
+func (c *InvocationContext) Ended() bool {
+	return false
 }

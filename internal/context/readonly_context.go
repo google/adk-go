@@ -15,24 +15,37 @@
 package context
 
 import (
+	"context"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
 
 func NewReadonlyContext(ctx agent.InvocationContext) agent.ReadonlyContext {
 	return &readonlyContext{
-		InvocationContext: ctx,
+		Context:           ctx,
+		invocationContext: ctx,
 	}
 }
 
 type readonlyContext struct {
-	agent.InvocationContext
+	context.Context
+	invocationContext agent.InvocationContext
 }
 
 func (c *readonlyContext) AgentName() string {
-	return c.Agent().Name()
+	return c.invocationContext.Agent().Name()
 }
 
 func (c *readonlyContext) ReadonlyState() session.ReadonlyState {
-	return c.Session().State()
+	return c.invocationContext.Session().State()
+}
+
+func (c *readonlyContext) InvocationID() string {
+	return c.invocationContext.InvocationID()
+}
+
+func (c *readonlyContext) UserContent() *genai.Content {
+	return c.invocationContext.UserContent()
 }

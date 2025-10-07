@@ -35,6 +35,7 @@ type InvocationContext interface {
 	RunConfig() *RunConfig
 
 	EndInvocation()
+	Ended() bool
 }
 
 type ReadonlyContext interface {

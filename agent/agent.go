@@ -152,7 +152,8 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
 
 	callbackCtx := &callbackContext{
-		InvocationContext: ctx,
+		Context:           ctx,
+		invocationContext: ctx,
 	}
 
 	for _, callback := range ctx.Agent().internal().beforeAgent {
@@ -187,7 +188,8 @@ func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, ag
 	agent := ctx.Agent()
 
 	callbackCtx := &callbackContext{
-		InvocationContext: ctx,
+		Context:           ctx,
+		invocationContext: ctx,
 	}
 
 	for _, callback := range agent.internal().afterAgent {
@@ -207,9 +209,9 @@ func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, ag
 }
 
 type callbackContext struct {
-	InvocationContext
-
-	actions *session.EventActions
+	context.Context
+	invocationContext InvocationContext
+	actions           *session.EventActions
 }
 
 func (c *callbackContext) Actions() *session.EventActions {
@@ -217,15 +219,27 @@ func (c *callbackContext) Actions() *session.EventActions {
 }
 
 func (c *callbackContext) AgentName() string {
-	return c.Agent().Name()
+	return c.invocationContext.Agent().Name()
 }
 
 func (c *callbackContext) ReadonlyState() session.ReadonlyState {
-	return c.InvocationContext.Session().State()
+	return c.invocationContext.Session().State()
 }
 
 func (c *callbackContext) State() session.State {
-	return c.InvocationContext.Session().State()
+	return c.invocationContext.Session().State()
+}
+
+func (c *callbackContext) Artifacts() Artifacts {
+	return c.invocationContext.Artifacts()
+}
+
+func (c *callbackContext) InvocationID() string {
+	return c.invocationContext.InvocationID()
+}
+
+func (c *callbackContext) UserContent() *genai.Content {
+	return c.invocationContext.UserContent()
 }
 
 type invocationContext struct {
@@ -276,4 +290,9 @@ func (c *invocationContext) RunConfig() *RunConfig {
 
 // TODO: implement endInvocation
 func (c *invocationContext) EndInvocation() {
+}
+
+// TODO: implement endInvocation
+func (c *invocationContext) Ended() bool {
+	return false
 }

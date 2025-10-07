@@ -15,24 +15,29 @@
 package context
 
 import (
+	"context"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
 
 func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
 	return &callbackContext{
-		InvocationContext: ctx,
-		eventActions:      &session.EventActions{},
+		Context:       ctx,
+		invocationCtx: ctx,
+		eventActions:  &session.EventActions{},
 	}
 }
 
 type callbackContext struct {
-	agent.InvocationContext
-	eventActions *session.EventActions
+	context.Context
+	invocationCtx agent.InvocationContext
+	eventActions  *session.EventActions
 }
 
 func (c *callbackContext) AgentName() string {
-	return c.Agent().Name()
+	return c.invocationCtx.Agent().Name()
 }
 
 func (c *callbackContext) Actions() *session.EventActions {
@@ -40,9 +45,21 @@ func (c *callbackContext) Actions() *session.EventActions {
 }
 
 func (c *callbackContext) ReadonlyState() session.ReadonlyState {
-	return c.Session().State()
+	return c.invocationCtx.Session().State()
 }
 
 func (c *callbackContext) State() session.State {
-	return c.Session().State()
+	return c.invocationCtx.Session().State()
+}
+
+func (c *callbackContext) Artifacts() agent.Artifacts {
+	return c.invocationCtx.Artifacts()
+}
+
+func (c *callbackContext) InvocationID() string {
+	return c.invocationCtx.InvocationID()
+}
+
+func (c *callbackContext) UserContent() *genai.Content {
+	return c.invocationCtx.UserContent()
 }
