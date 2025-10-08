@@ -20,7 +20,7 @@ import (
 	"iter"
 
 	agentinternal "google.golang.org/adk/internal/agent"
-	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -29,7 +29,7 @@ import (
 type Agent interface {
 	Name() string
 	Description() string
-	Run(Context) iter.Seq2[*session.Event, error]
+	Run(InvocationContext) iter.Seq2[*session.Event, error]
 	SubAgents() []Agent
 
 	internal() *agent
@@ -55,24 +55,8 @@ type Config struct {
 	SubAgents   []Agent
 
 	BeforeAgent []BeforeAgentCallback
-	Run         func(Context) iter.Seq2[*session.Event, error]
+	Run         func(InvocationContext) iter.Seq2[*session.Event, error]
 	AfterAgent  []AfterAgentCallback
-}
-
-type Context interface {
-	context.Context
-
-	UserContent() *genai.Content
-	InvocationID() string
-	Branch() string
-	Agent() Agent
-
-	Session() session.Session
-	Artifacts() Artifacts
-	Memory() Memory
-
-	End()
-	Ended() bool
 }
 
 type Artifacts interface {
@@ -84,11 +68,11 @@ type Artifacts interface {
 
 type Memory interface {
 	AddSession(session session.Session) error
-	Search(query string) ([]memoryservice.MemoryEntry, error)
+	Search(query string) ([]memory.Entry, error)
 }
 
-type BeforeAgentCallback func(Context) (*genai.Content, error)
-type AfterAgentCallback func(Context, *session.Event, error) (*genai.Content, error)
+type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)
+type AfterAgentCallback func(CallbackContext, *session.Event, error) (*genai.Content, error)
 
 type agent struct {
 	agentinternal.State
@@ -97,7 +81,7 @@ type agent struct {
 	subAgents         []Agent
 
 	beforeAgent []BeforeAgentCallback
-	run         func(Context) iter.Seq2[*session.Event, error]
+	run         func(InvocationContext) iter.Seq2[*session.Event, error]
 	afterAgent  []AfterAgentCallback
 }
 
@@ -113,10 +97,21 @@ func (a *agent) SubAgents() []Agent {
 	return a.subAgents
 }
 
-func (a *agent) Run(ctx Context) iter.Seq2[*session.Event, error] {
+func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: verify&update the setup here. Should we branch etc.
-		ctx := NewContext(ctx, a, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Memory(), ctx.Branch())
+		ctx := &invocationContext{
+			Context:   ctx,
+			agent:     a,
+			artifacts: ctx.Artifacts(),
+			memory:    ctx.Memory(),
+			session:   ctx.Session(),
+
+			invocationID: ctx.InvocationID(),
+			branch:       ctx.Branch(),
+			userContent:  ctx.UserContent(),
+			runConfig:    ctx.RunConfig(),
+		}
 
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
@@ -143,7 +138,7 @@ func (a *agent) internal() *agent {
 
 var _ Agent = (*agent)(nil)
 
-func getAuthorForEvent(ctx Context, event *session.Event) string {
+func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
 	if event.LLMResponse != nil && event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
 		return genai.RoleUser
 	}
@@ -153,10 +148,16 @@ func getAuthorForEvent(ctx Context, event *session.Event) string {
 
 // runBeforeAgentCallbacks checks if any beforeAgentCallback returns non-nil content
 // then it skips agent run and returns callback result.
-func runBeforeAgentCallbacks(ctx Context) (*session.Event, error) {
+func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
+
+	callbackCtx := &callbackContext{
+		Context:           ctx,
+		invocationContext: ctx,
+	}
+
 	for _, callback := range ctx.Agent().internal().beforeAgent {
-		content, err := callback(ctx)
+		content, err := callback(callbackCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run before agent callback: %w", err)
 		}
@@ -183,10 +184,16 @@ func runBeforeAgentCallbacks(ctx Context) (*session.Event, error) {
 
 // runAfterAgentCallbacks checks if any afterAgentCallback returns non-nil content
 // then it replaces the event content with a value from the callback.
-func runAfterAgentCallbacks(ctx Context, agentEvent *session.Event, agentError error) (*session.Event, error) {
+func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, agentError error) (*session.Event, error) {
 	agent := ctx.Agent()
+
+	callbackCtx := &callbackContext{
+		Context:           ctx,
+		invocationContext: ctx,
+	}
+
 	for _, callback := range agent.internal().afterAgent {
-		newContent, err := callback(ctx, agentEvent, agentError)
+		newContent, err := callback(callbackCtx, agentEvent, agentError)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run after agent callback: %w", err)
 		}
@@ -199,4 +206,93 @@ func runAfterAgentCallbacks(ctx Context, agentEvent *session.Event, agentError e
 	}
 
 	return agentEvent, agentError
+}
+
+type callbackContext struct {
+	context.Context
+	invocationContext InvocationContext
+	actions           *session.EventActions
+}
+
+func (c *callbackContext) Actions() *session.EventActions {
+	return c.actions
+}
+
+func (c *callbackContext) AgentName() string {
+	return c.invocationContext.Agent().Name()
+}
+
+func (c *callbackContext) ReadonlyState() session.ReadonlyState {
+	return c.invocationContext.Session().State()
+}
+
+func (c *callbackContext) State() session.State {
+	return c.invocationContext.Session().State()
+}
+
+func (c *callbackContext) Artifacts() Artifacts {
+	return c.invocationContext.Artifacts()
+}
+
+func (c *callbackContext) InvocationID() string {
+	return c.invocationContext.InvocationID()
+}
+
+func (c *callbackContext) UserContent() *genai.Content {
+	return c.invocationContext.UserContent()
+}
+
+type invocationContext struct {
+	context.Context
+
+	agent     Agent
+	artifacts Artifacts
+	memory    Memory
+	session   session.Session
+
+	invocationID string
+	branch       string
+	userContent  *genai.Content
+	runConfig    *RunConfig
+}
+
+func (c *invocationContext) Agent() Agent {
+	return c.agent
+}
+
+func (c *invocationContext) Artifacts() Artifacts {
+	return c.artifacts
+}
+
+func (c *invocationContext) Memory() Memory {
+	return c.memory
+}
+
+func (c *invocationContext) Session() session.Session {
+	return c.session
+}
+
+func (c *invocationContext) InvocationID() string {
+	return c.invocationID
+}
+
+func (c *invocationContext) Branch() string {
+	return c.branch
+}
+
+func (c *invocationContext) UserContent() *genai.Content {
+	return c.userContent
+}
+
+func (c *invocationContext) RunConfig() *RunConfig {
+	return c.runConfig
+}
+
+// TODO: implement endInvocation
+func (c *invocationContext) EndInvocation() {
+}
+
+// TODO: implement endInvocation
+func (c *invocationContext) Ended() bool {
+	return false
 }

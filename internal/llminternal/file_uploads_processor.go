@@ -22,7 +22,7 @@ import (
 
 // The Gemini API (non-Vertex) backend does not support the display_name parameter for file uploads,
 // so it must be removed to prevent request failures.
-func removeDisplayNameIfExists(ctx agent.Context, req *model.LLMRequest) error {
+func removeDisplayNameIfExists(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	if req.Contents == nil {
 		return nil
 	}

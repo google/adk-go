@@ -20,6 +20,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	agentinternal "google.golang.org/adk/internal/agent"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -141,9 +142,9 @@ type Config struct {
 	// AfterToolCallback
 }
 
-type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
-type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 type llmAgent struct {
 	agent.Agent
@@ -158,9 +159,17 @@ type llmAgent struct {
 
 type agentState = agentinternal.State
 
-func (a *llmAgent) run(ctx agent.Context) iter.Seq2[*session.Event, error] {
+func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	// TODO: branch context?
-	ctx = agent.NewContext(ctx, a, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Memory(), ctx.Branch())
+	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:   ctx.Artifacts(),
+		Memory:      ctx.Memory(),
+		Session:     ctx.Session(),
+		Branch:      ctx.Branch(),
+		Agent:       a,
+		UserContent: ctx.UserContent(),
+		RunConfig:   ctx.RunConfig(),
+	})
 
 	f := &llminternal.Flow{
 		Model:                a.model,

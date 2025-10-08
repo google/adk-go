@@ -23,6 +23,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -31,21 +32,21 @@ import (
 	"google.golang.org/genai"
 )
 
-type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
-type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 type Flow struct {
 	Model model.LLM
 
-	RequestProcessors    []func(ctx agent.Context, req *model.LLMRequest) error
-	ResponseProcessors   []func(ctx agent.Context, req *model.LLMRequest, resp *model.LLMResponse) error
+	RequestProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest) error
+	ResponseProcessors   []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error
 	BeforeModelCallbacks []BeforeModelCallback
 	AfterModelCallbacks  []AfterModelCallback
 }
 
 var (
-	DefaultRequestProcessors = []func(ctx agent.Context, req *model.LLMRequest) error{
+	DefaultRequestProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest) error{
 		basicRequestProcessor,
 		authPreprocesssor,
 		instructionsRequestProcessor,
@@ -60,13 +61,13 @@ var (
 		AgentTransferRequestProcessor,
 		removeDisplayNameIfExists,
 	}
-	DefaultResponseProcessors = []func(ctx agent.Context, req *model.LLMRequest, resp *model.LLMResponse) error{
+	DefaultResponseProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error{
 		nlPlanningResponseProcessor,
 		codeExecutionResponseProcessor,
 	}
 )
 
-func (f *Flow) Run(ctx agent.Context) iter.Seq2[*session.Event, error] {
+func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for {
 			var lastEvent *session.Event
@@ -94,7 +95,7 @@ func (f *Flow) Run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 	}
 }
 
-func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
+func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		req := &model.LLMRequest{}
 
@@ -177,7 +178,7 @@ func (f *Flow) runOneStep(ctx agent.Context) iter.Seq2[*session.Event, error] {
 	}
 }
 
-func (f *Flow) preprocess(ctx agent.Context, req *model.LLMRequest) error {
+func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	llmAgent, ok := ctx.Agent().(Agent)
 	if !ok {
 		return fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name())
@@ -196,11 +197,11 @@ func (f *Flow) preprocess(ctx agent.Context, req *model.LLMRequest) error {
 // toolPreprocess runs tool preprocess on the given request
 // If a tool set is encountered, it's expanded recursively in DFS fashion.
 // TODO: check need/feasibility of running this concurrently.
-func toolPreprocess(ctx agent.Context, req *model.LLMRequest, tools []tool.Tool) error {
+func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []tool.Tool) error {
 	for _, t := range tools {
 		toolSet, ok := t.(tool.Set)
 		if ok {
-			tsTools, err := toolSet.Tools(ctx)
+			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
 			if err != nil {
 				return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
 			}
@@ -217,7 +218,7 @@ func toolPreprocess(ctx agent.Context, req *model.LLMRequest, tools []tool.Tool)
 			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
 		}
 		// TODO: how to prevent mutation on this?
-		toolCtx := tool.NewContext(ctx, "", &session.EventActions{})
+		toolCtx := toolinternal.NewToolContext(ctx, "", &session.EventActions{})
 		if err := requestProcessor.ProcessRequest(toolCtx, req); err != nil {
 			return err
 		}
@@ -225,10 +226,10 @@ func toolPreprocess(ctx agent.Context, req *model.LLMRequest, tools []tool.Tool)
 	return nil
 }
 
-func (f *Flow) callLLM(ctx agent.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
+func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		for _, callback := range f.BeforeModelCallbacks {
-			callbackResponse, callbackErr := callback(ctx, req)
+			callbackResponse, callbackErr := callback(icontext.NewCallbackContext(ctx), req)
 
 			if callbackResponse != nil || callbackErr != nil {
 				yield(callbackResponse, callbackErr)
@@ -270,9 +271,9 @@ func (f *Flow) callLLM(ctx agent.Context, req *model.LLMRequest) iter.Seq2[*mode
 	}
 }
 
-func (f *Flow) runAfterModelCallbacks(ctx agent.Context, llmResp *model.LLMResponse, llmErr error) (*model.LLMResponse, error) {
+func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, llmErr error) (*model.LLMResponse, error) {
 	for _, callback := range f.AfterModelCallbacks {
-		callbackResponse, callbackErr := callback(ctx, llmResp, llmErr)
+		callbackResponse, callbackErr := callback(icontext.NewCallbackContext(ctx), llmResp, llmErr)
 
 		if callbackResponse != nil || callbackErr != nil {
 			return callbackResponse, callbackErr
@@ -282,7 +283,7 @@ func (f *Flow) runAfterModelCallbacks(ctx agent.Context, llmResp *model.LLMRespo
 	return nil, nil
 }
 
-func (f *Flow) postprocess(ctx agent.Context, req *model.LLMRequest, resp *model.LLMResponse) error {
+func (f *Flow) postprocess(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
 	// apply response processor functions to the response in the configured order.
 	for _, processor := range f.ResponseProcessors {
 		if err := processor(ctx, req, resp); err != nil {
@@ -292,7 +293,7 @@ func (f *Flow) postprocess(ctx agent.Context, req *model.LLMRequest, resp *model
 	return nil
 }
 
-func (f *Flow) agentToRun(ctx agent.Context, agentName string) agent.Agent {
+func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.Agent {
 	// NOTE: in python, BaseLlmFlow._get_agent_to_run searches the entire agent
 	// tree from the root_agent when processing _postprocess_handle_function_calls_async.
 	// I think that is strange. In our version, we check the agents included in transferTarget.
@@ -306,7 +307,7 @@ func (f *Flow) agentToRun(ctx agent.Context, agentName string) agent.Agent {
 	return nil
 }
 
-func (f *Flow) finalizeModelResponseEvent(ctx agent.Context, resp *model.LLMResponse, tools map[string]tool.Tool) *session.Event {
+func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *model.LLMResponse, tools map[string]tool.Tool) *session.Event {
 	// FunctionCall & FunctionResponse matching algorithm assumes non-empty function call IDs
 	// but function call ID is optional in genai API and some models do not use the field.
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
@@ -342,7 +343,7 @@ func findLongRunningFunctionCallIDs(c *genai.Content, tools map[string]tool.Tool
 //
 // TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
-func handleFunctionCalls(ctx agent.Context, toolsDict map[string]tool.Tool, resp *model.LLMResponse) (*session.Event, error) {
+func handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse) (*session.Event, error) {
 	var fnResponseEvents []*session.Event
 
 	fnCalls := utils.FunctionCalls(resp.Content)
@@ -355,7 +356,7 @@ func handleFunctionCalls(ctx agent.Context, toolsDict map[string]tool.Tool, resp
 		if !ok {
 			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
 		}
-		toolCtx := tool.NewContext(ctx, fnCall.ID, &session.EventActions{})
+		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{})
 		//toolCtx := tool.
 		// TODO: agent.canonical_before_tool_callbacks
 		result, err := funcTool.Run(toolCtx, fnCall.Args)
@@ -391,7 +392,7 @@ func handleFunctionCalls(ctx agent.Context, toolsDict map[string]tool.Tool, resp
 		}
 		ev.Author = ctx.Agent().Name()
 		ev.Branch = ctx.Branch()
-		ev.Actions = *toolCtx.EventActions()
+		ev.Actions = *toolCtx.Actions()
 		fnResponseEvents = append(fnResponseEvents, ev)
 	}
 	return mergeParallelFunctionResponseEvents(fnResponseEvents)

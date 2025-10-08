@@ -88,7 +88,7 @@ func TestNewLoopAgent(t *testing.T) {
 
 			ctx := t.Context()
 
-			agent, err := loopagent.New(loopagent.Config{
+			loopAgent, err := loopagent.New(loopagent.Config{
 				MaxIterations: tt.args.maxIterations,
 				AgentConfig: agent.Config{
 					Name:      "test_agent",
@@ -106,7 +106,7 @@ func TestNewLoopAgent(t *testing.T) {
 
 			agentRunner, err := runner.New(runner.Config{
 				AppName:        "test_app",
-				Agent:          agent,
+				Agent:          loopAgent,
 				SessionService: sessionService,
 			})
 			if err != nil {
@@ -122,7 +122,7 @@ func TestNewLoopAgent(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), &runner.RunConfig{}) {
+			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), &agent.RunConfig{}) {
 				if err != nil {
 					t.Errorf("got unexpected error: %v", err)
 				}
@@ -172,7 +172,7 @@ type customAgent struct {
 	callCounter int
 }
 
-func (a *customAgent) Run(agent.Context) iter.Seq2[*session.Event, error] {
+func (a *customAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		a.callCounter++
 

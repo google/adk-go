@@ -19,8 +19,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk/agent"
 	artifactinternal "google.golang.org/adk/internal/artifact"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 
@@ -292,7 +292,9 @@ func createToolContext(t *testing.T) tool.Context {
 		SessionID: "session",
 	}
 
-	agentCtx := agent.NewContext(t.Context(), nil, nil, artifacts, nil, nil, "")
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Artifacts: artifacts,
+	})
 
-	return tool.NewContext(agentCtx, "", nil)
+	return toolinternal.NewToolContext(ctx, "", nil)
 }

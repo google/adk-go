@@ -153,7 +153,7 @@ The sun is sphere-shaped and very hot.
 Here are the question-answer pair and the reviewer-provided findings:
 `
 
-func afterCritic(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+func afterCritic(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 	if llmResponse == nil || llmResponse.Content == nil || llmResponse.Content.Parts == nil || llmResponse.GroundingMetadata == nil {
 		return llmResponse, nil
 	}
@@ -204,7 +204,7 @@ func afterCritic(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseE
 	return llmResponse, nil
 }
 
-func afterReviser(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+func afterReviser(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 	if llmResponse.Content == nil || llmResponse.Content.Parts == nil {
 		return llmResponse, nil
 	}

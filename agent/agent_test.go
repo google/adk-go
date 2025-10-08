@@ -28,8 +28,6 @@ import (
 func TestAgentCallbacks(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
-
 	tests := []struct {
 		name         string
 		beforeAgent  []BeforeAgentCallback
@@ -40,7 +38,7 @@ func TestAgentCallbacks(t *testing.T) {
 		{
 			name: "before agent callback runs, no llm calls",
 			beforeAgent: []BeforeAgentCallback{
-				func(ctx Context) (*genai.Content, error) {
+				func(ctx CallbackContext) (*genai.Content, error) {
 					return genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel), nil
 				},
 			},
@@ -56,12 +54,12 @@ func TestAgentCallbacks(t *testing.T) {
 		{
 			name: "no callback effect if callbacks return nil",
 			beforeAgent: []BeforeAgentCallback{
-				func(ctx Context) (*genai.Content, error) {
+				func(ctx CallbackContext) (*genai.Content, error) {
 					return nil, nil
 				},
 			},
 			afterAgent: []AfterAgentCallback{
-				func(Context, *session.Event, error) (*genai.Content, error) {
+				func(CallbackContext, *session.Event, error) (*genai.Content, error) {
 					return nil, nil
 				},
 			},
@@ -78,7 +76,7 @@ func TestAgentCallbacks(t *testing.T) {
 		{
 			name: "after agent callback replaces event content",
 			afterAgent: []AfterAgentCallback{
-				func(Context, *session.Event, error) (*genai.Content, error) {
+				func(CallbackContext, *session.Event, error) (*genai.Content, error) {
 					return genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel), nil
 				},
 			},
@@ -108,7 +106,9 @@ func TestAgentCallbacks(t *testing.T) {
 				t.Fatalf("failed to create agent: %v", err)
 			}
 
-			ctx := NewContext(ctx, testAgent, genai.NewContentFromText("", genai.RoleUser), nil, nil, nil, "")
+			ctx := &invocationContext{
+				agent: testAgent,
+			}
 			var gotEvents []*session.Event
 			for event, err := range testAgent.Run(ctx) {
 				if err != nil {
@@ -140,7 +140,7 @@ type customAgent struct {
 	callCounter int
 }
 
-func (a *customAgent) Run(Context) iter.Seq2[*session.Event, error] {
+func (a *customAgent) Run(InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		a.callCounter++
 

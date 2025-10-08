@@ -25,7 +25,11 @@ var BuildCmd = &cobra.Command{
 	Use:   "build",
 	Short: "Makes build easy",
 	Long:  `Please see subcommands for details`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return cmd.Help()
+		}
+		return nil
 	},
 }
 

@@ -25,7 +25,7 @@ import (
 
 // basicRequestProcessor populates the LLMRequest
 // with the agent's LLM generation configs.
-func basicRequestProcessor(ctx agent.Context, req *model.LLMRequest) error {
+func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// reference: adk-python src/google/adk/flows/llm_flows/basic.py
 
 	llmAgent := asLLMAgent(ctx.Agent())

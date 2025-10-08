@@ -16,7 +16,9 @@
 package web
 
 import (
+	"embed"
 	"flag"
+	"io/fs"
 	"log"
 	"net/http"
 	"strconv"
@@ -34,11 +36,8 @@ import (
 // WebConfig is a struct with parameters to run a WebServer.
 type WebConfig struct {
 	LocalPort       int
-	UIDistPath      string
 	FrontendAddress string
 	BackendAddress  string
-	StartRestApi    bool
-	StartWebUI      bool
 }
 
 // ParseArgs parses the arguments for the ADK API server.
@@ -46,9 +45,6 @@ func ParseArgs() *WebConfig {
 	localPortFlag := flag.Int("port", 8080, "Localhost port for the server")
 	frontendAddressFlag := flag.String("front_address", "localhost:8080", "Front address to allow CORS requests from as seen from the user browser. Please specify only hostname and (optionally) port")
 	backendAddressFlag := flag.String("backend_address", "http://localhost:8080/api", "Backend server as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'. ")
-	webuiDistPathFlag := flag.String("webui_distr_path", "",
-		`Points to a static ADK Web UI dist path with the pre-built version of ADK Web UI (cmd/web/distr/browser in the ADK-GO repo). 
-Normally it should be the version distributed with adk-go. You may use CLI command "build webui" to experiment with other versions.`)
 
 	flag.Parse()
 	if !flag.Parsed() {
@@ -59,7 +55,6 @@ Normally it should be the version distributed with adk-go. You may use CLI comma
 		LocalPort:       *localPortFlag,
 		FrontendAddress: *frontendAddressFlag,
 		BackendAddress:  *backendAddressFlag,
-		UIDistPath:      *webuiDistPathFlag,
 	})
 }
 
@@ -99,6 +94,11 @@ func corsWithArgs(c *WebConfig) func(next http.Handler) http.Handler {
 	}
 }
 
+// embed web UI files into the executable
+
+//go:embed distr/browser/*
+var content embed.FS
+
 // Serve initiates the http server and starts it according to WebConfig parameters
 func Serve(c *WebConfig, serveConfig *ServeConfig) {
 	serverConfig := config.ADKAPIRouterConfigs{
@@ -127,7 +127,12 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 		http.Redirect(w, r, "/ui/", http.StatusFound)
 	})
 
-	rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.Dir(c.UIDistPath))))
+	// serve web ui from the embedded resources
+	ui, err := fs.Sub(content, "distr/browser")
+	if err != nil {
+		log.Fatalf("cannot prepare ADK Web UI files as embedded content: %v", err)
+	}
+	rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.FS(ui))))
 
 	// Setup serving of ADK REST API
 	rApi := rBase.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package memoryservice
+package memory
 
 import (
 	"context"
@@ -25,8 +25,8 @@ import (
 	"google.golang.org/genai"
 )
 
-// Mem returns a new in-memory implementation of the memory service. Thread-safe.
-func Mem() Service {
+// InMemoryService returns a new in-memory implementation of the memory service. Thread-safe.
+func InMemoryService() Service {
 	return &inMemoryService{
 		store: make(map[key]map[sessionID][]value),
 	}
@@ -120,7 +120,7 @@ func (s *inMemoryService) Search(ctx context.Context, req *SearchRequest) (*Sear
 	for _, events := range values {
 		for _, e := range events {
 			if checkMapsIntersect(e.words, queryWords) {
-				res.Memories = append(res.Memories, MemoryEntry{
+				res.Memories = append(res.Memories, Entry{
 					Content:   e.content,
 					Author:    e.author,
 					Timestamp: e.timestamp,

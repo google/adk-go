@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package memoryinternal
+package memory
 
 import (
 	"context"
 	"fmt"
 
-	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 )
 
 type Memory struct {
-	Service   memoryservice.Service
+	Service   memory.Service
 	SessionID string
 	UserID    string
 	AppName   string
@@ -37,8 +37,8 @@ func (a *Memory) AddSession(session session.Session) error {
 	return nil
 }
 
-func (a *Memory) Search(query string) ([]memoryservice.MemoryEntry, error) {
-	searchResponse, err := a.Service.Search(context.Background(), &memoryservice.SearchRequest{
+func (a *Memory) Search(query string) ([]memory.Entry, error) {
+	searchResponse, err := a.Service.Search(context.Background(), &memory.SearchRequest{
 		AppName: a.AppName,
 		UserID:  a.UserID,
 		Query:   query,

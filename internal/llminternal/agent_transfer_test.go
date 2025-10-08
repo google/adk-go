@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/agent/parentmap"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
@@ -49,7 +50,9 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		ctx := agent.NewContext(parentmap.ToContext(t.Context(), parents), curAgent, nil, nil, nil, nil, "")
+		ctx := icontext.NewInvocationContext(parentmap.ToContext(t.Context(), parents), icontext.InvocationContextParams{
+			Agent: curAgent,
+		})
 
 		if err := llminternal.AgentTransferRequestProcessor(ctx, req); err != nil {
 			t.Fatalf("AgentTransferRequestProcessor() = %v, want success", err)
@@ -370,13 +373,16 @@ func TestAgentTransfer_ProcessRequest(t *testing.T) {
 func TestTransferToAgentToolRun(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		curTool := &llminternal.TransferToAgentTool{}
-		ctx := tool.NewContext(agent.NewContext(t.Context(), nil, nil, nil, nil, nil, ""), "", &session.EventActions{})
+
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+		ctx := toolinternal.NewToolContext(invCtx, "", &session.EventActions{})
+
 		wantAgentName := "TestAgent"
 		args := map[string]any{"agent_name": wantAgentName}
 		if _, err := curTool.Run(ctx, args); err != nil {
 			t.Fatalf("Run(%v) failed: %v", args, err)
 		}
-		if got, want := ctx.EventActions().TransferToAgent, wantAgentName; got != want {
+		if got, want := ctx.Actions().TransferToAgent, wantAgentName; got != want {
 			t.Errorf("Run(%v) did not set TransferToAgent, got %q, want %q", args, got, want)
 		}
 	})
@@ -395,7 +401,7 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				curTool := &llminternal.TransferToAgentTool{}
-				ctx := tool.NewContext(agent.NewContext(t.Context(), nil, nil, nil, nil, nil, ""), "", &session.EventActions{})
+				ctx := toolinternal.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil)
 				if got, err := curTool.Run(ctx, tc.args); err == nil {
 					t.Fatalf("Run(%v) = (%v, %v), want error", tc.args, got, err)
 				}

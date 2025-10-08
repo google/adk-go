@@ -202,7 +202,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 
 	testAgent := must(agent.New(agent.Config{
 		Name: "test_agent",
-		Run: func(ctx agent.Context) iter.Seq2[*session.Event, error] {
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				// no-op, we are testing logic before agent run.
 			}
@@ -238,7 +238,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 		Role: genai.RoleUser,
 	}
 
-	cfg := &RunConfig{
+	cfg := &agent.RunConfig{
 		SaveInputBlobsAsArtifacts: true,
 	}
 
