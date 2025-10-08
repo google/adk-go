@@ -36,14 +36,13 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 		mockResponses []*genai.Content
 		maxIterations uint
 		want          []*genai.Content
-		wantErr       bool
 	}{
 		{
 			name: "ExitLoopToolStopsMidLoop",
 			mockResponses: []*genai.Content{
 				genai.NewContentFromText("response1", "model"),
 				genai.NewContentFromText("response2", "model"),
-				genai.NewContentFromFunctionCall("exitLoop", map[string]any{}, "model"),
+				genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
 				genai.NewContentFromText("this should not be processed", "model"),
 				genai.NewContentFromText("this should not be processed", "model"),
 			},
@@ -52,11 +51,10 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 				// Results from first GenerateStream call
 				genai.NewContentFromText("response1", "model"),
 				genai.NewContentFromText("response2", "model"),
-				genai.NewContentFromFunctionCall("exitLoop", map[string]any{}, "model"),
+				genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
 				// Result from the tool execution
-				genai.NewContentFromFunctionResponse("exitLoop", map[string]any{}, "user"),
+				genai.NewContentFromFunctionResponse("exit_loop", map[string]any{}, "user"),
 			},
-			wantErr: false,
 		},
 		{
 			name: "MaxIterationsStopsLoop",
@@ -73,21 +71,19 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 				genai.NewContentFromText("iteration 1 response", "model"),
 				genai.NewContentFromText("iteration 2 response", "model"),
 			},
-			wantErr: false,
 		},
 		{
 			name: "ExitLoopToolStopsImmediately",
 			mockResponses: []*genai.Content{
-				genai.NewContentFromFunctionCall("exitLoop", map[string]any{}, "model"),
+				genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
 				genai.NewContentFromText("this should not be processed", "model"),
 				genai.NewContentFromText("this should not be processed", "model"),
 			},
 			maxIterations: 3,
 			want: []*genai.Content{
-				genai.NewContentFromFunctionCall("exitLoop", map[string]any{}, "model"),
-				genai.NewContentFromFunctionResponse("exitLoop", map[string]any{}, "user"),
+				genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
+				genai.NewContentFromFunctionResponse("exit_loop", map[string]any{}, "user"),
 			},
-			wantErr: false,
 		},
 	}
 
@@ -129,9 +125,7 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 			for got, err := range ev {
 				if err != nil {
 					// Check if an error was expected
-					if !tc.wantErr {
-						t.Fatalf("runner returned unexpected error: %v", err)
-					}
+					t.Fatalf("runner returned unexpected error: %v", err)
 					// If error was expected, we can stop here or check for a specific error type.
 					return
 				}
@@ -145,11 +139,6 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 					t.Errorf("LoopAgent Run() mismatch (-want +got):\n%s", diff)
 				}
 				eventCount++
-			}
-
-			// Final check for unexpected errors if the loop finished cleanly
-			if tc.wantErr {
-				t.Fatal("expected an error but got none")
 			}
 
 			// Final check on the number of events
