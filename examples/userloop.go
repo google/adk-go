@@ -15,9 +15,11 @@
 package examples
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
+	"os"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
@@ -64,13 +66,12 @@ func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
 		log.Fatalf("Failed to create runner: %v", err)
 	}
 
-	//reader := bufio.NewReader(os.Stdin)
+	reader := bufio.NewReader(os.Stdin)
 
 	for {
 		fmt.Print("\nUser -> ")
 
-		//userInput, err := reader.ReadString('\n')
-		userInput := "can you write a function to add 2 numbers"
+		userInput, err := reader.ReadString('\n')
 		if err != nil {
 			log.Fatal(err)
 		}
