@@ -158,6 +158,13 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("unexpected session type %T", sess)
 	}
 
+	if event.Actions.StateDelta != nil {
+		state := sess.State()
+		for key, value := range event.Actions.StateDelta {
+			state.Set(key, value)
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
