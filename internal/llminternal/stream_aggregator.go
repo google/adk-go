@@ -50,7 +50,7 @@ func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genRe
 		candidate := genResp.Candidates[0]
 		resp := model.CreateResponse(genResp)
 		resp.TurnComplete = candidate.FinishReason != ""
-		// Aggregate the response and check if an intermidiate event to yield was created
+		// Aggregate the response and check if an intermediate event to yield was created
 		if aggrResp := s.aggregateResponse(resp); aggrResp != nil {
 			if !yield(aggrResp, nil) {
 				return // Consumer stopped

@@ -92,7 +92,7 @@ func TestStreamAggregator(t *testing.T) {
 			},
 		},
 		{
-			name: "stream with intermidiate response should reset",
+			name: "stream with intermediate response should reset",
 			initialResponses: []*genai.Content{
 				genai.NewContentFromText("response1", "model"),
 				genai.NewContentFromText("response2", "model"),
@@ -199,7 +199,7 @@ func TestStreamAggregator(t *testing.T) {
 				callCount++
 			}
 			if count != len(tc.want) {
-				t.Errorf("unexpected stream lenght, expected %d got %d", len(tc.want), count)
+				t.Errorf("unexpected stream length, expected %d got %d", len(tc.want), count)
 			}
 		})
 	}

@@ -30,7 +30,7 @@ type RunConfig struct {
 	SpeechConfig *genai.SpeechConfig
 	// Output transcription for live agents with audio response.
 	OutputAudioTranscriptionConfig *genai.AudioTranscriptionConfig
-	// The output modalities. If not set, it's default to AUDIO.
+	// The output modalities. If not set, it defaults to AUDIO.
 	ResponseModalities []string
 	// Streaming mode, None or StreamingMode.SSE or StreamingMode.BIDI.
 	StreamingMode StreamingMode

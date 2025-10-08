@@ -34,7 +34,7 @@ func codeExecutionRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 	return nil
 }
 
-func authPreprocesssor(ctx agent.InvocationContext, req *model.LLMRequest) error {
+func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/auth/auth_preprocessor.py)
 	return nil
 }

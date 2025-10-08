@@ -29,7 +29,7 @@ type Service interface {
 	// After saving the artifact, a revision ID is returned to identify the artifact version.
 	Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error)
 	// Load loads an artifact from the storage.
-	// The artifact is a file indentified by the appName, userID, sessionID and fileName.
+	// The artifact is a file identified by the appName, userID, sessionID and fileName.
 	Load(ctx context.Context, req *LoadRequest) (*LoadResponse, error)
 	// Delete deletes an artifact. Deleting a non-existing entry is not an error.
 	Delete(ctx context.Context, req *DeleteRequest) error

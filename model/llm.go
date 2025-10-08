@@ -96,7 +96,7 @@ func CreateResponse(res *genai.GenerateContentResponse) *LLMResponse {
 	}
 	return &LLMResponse{
 		ErrorCode:     "UNKNOWN_ERROR",
-		ErrorMessage:  "Unkown error.",
+		ErrorMessage:  "Unknown error.",
 		UsageMetadata: usageMetadata,
 	}
 }

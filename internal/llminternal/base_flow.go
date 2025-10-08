@@ -48,7 +48,7 @@ type Flow struct {
 var (
 	DefaultRequestProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest) error{
 		basicRequestProcessor,
-		authPreprocesssor,
+		authPreprocessor,
 		instructionsRequestProcessor,
 		identityRequestProcessor,
 		ContentsRequestProcessor,

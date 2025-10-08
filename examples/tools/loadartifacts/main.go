@@ -32,7 +32,7 @@ import (
 )
 
 // Note: you need to run the program from the loadartifacts directory
-// to fetch the image successfuly.
+// to fetch the image successfully.
 func main() {
 	ctx := context.Background()
 

@@ -80,7 +80,7 @@ func init() {
 func (f *runLocalFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags",
 		func(p util.Printer) error {
-			//make paths absolute
+			// make paths absolute
 			absp, err := filepath.Abs(flags.source.entryPointPath)
 			if err != nil {
 				return fmt.Errorf("cannot make an absolute path from '%v': %w", flags.source.entryPointPath, err)

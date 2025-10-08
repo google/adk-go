@@ -65,7 +65,7 @@ func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service
 		{"file1", 3, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
 		// file2.
 		{"file2", 1, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
-		//file3.
+		// file3.
 		{"file3", 1, genai.NewPartFromText("file v1")},
 	}
 
@@ -194,7 +194,7 @@ func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service
 		}
 	})
 
-	//Clean up
+	// Clean up
 	if err := srv.Delete(ctx, &artifact.DeleteRequest{
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file2",
 	}); err != nil {
@@ -224,7 +224,7 @@ func testArtifactService_Empty(ctx context.Context, t *testing.T, srv artifact.S
 	})
 	t.Run(fmt.Sprintf("Delete_%s", testSuffix), func(t *testing.T) {
 		err := srv.Delete(ctx, &artifact.DeleteRequest{
-			AppName: "app", UserID: "user", SessionID: "sesion", FileName: "file1"})
+			AppName: "app", UserID: "user", SessionID: "session", FileName: "file1"})
 		if err != nil {
 			t.Fatalf("Delete() failed: %v", err)
 		}
