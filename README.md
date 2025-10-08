@@ -1,4 +1,4 @@
-# Agent Development Kit (ADK) for GO
+# Agent Development Kit (ADK) for Go
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
