@@ -23,8 +23,8 @@ import (
 type EmptyArgs struct{}
 
 func exitLoop(ctx tool.Context, myArgs EmptyArgs) map[string]string {
-	ctx.EventActions().Escalate = true
-	ctx.EventActions().SkipSummarization = true
+	ctx.Actions().Escalate = true
+	ctx.Actions().SkipSummarization = true
 	return map[string]string{}
 }
 
