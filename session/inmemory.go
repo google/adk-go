@@ -161,7 +161,10 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	if event.Actions.StateDelta != nil {
 		state := sess.State()
 		for key, value := range event.Actions.StateDelta {
-			state.Set(key, value)
+			err := state.Set(key, value)
+			if err != nil {
+				return fmt.Errorf("fail to set state on appendEvent: %w", err)
+			}
 		}
 	}
 

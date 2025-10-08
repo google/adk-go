@@ -194,6 +194,9 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 // saves the model output to state if needed. skip if the event was authored by some other agent
 // (e.g. current agent transferred to another agent)
 func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
+	if event == nil {
+		return
+	}
 	if event.Author != a.Name() {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
 		return
