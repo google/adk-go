@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package memoryservice
+package memory
 
 import (
 	"context"
@@ -45,11 +45,11 @@ type SearchRequest struct {
 
 // SearchResponse represents the response from a memory search.
 type SearchResponse struct {
-	Memories []MemoryEntry
+	Memories []Entry
 }
 
-// MemoryEntry represents a single memory entry.
-type MemoryEntry struct {
+// Entry represents a single memory entry.
+type Entry struct {
 	// Content contains the main content of the memory.
 	Content *genai.Content
 	// Author of the memory.

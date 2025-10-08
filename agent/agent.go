@@ -20,7 +20,7 @@ import (
 	"iter"
 
 	agentinternal "google.golang.org/adk/internal/agent"
-	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -68,7 +68,7 @@ type Artifacts interface {
 
 type Memory interface {
 	AddSession(session session.Session) error
-	Search(query string) ([]memoryservice.MemoryEntry, error)
+	Search(query string) ([]memory.Entry, error)
 }
 
 type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package memoryinternal_test
+package memory_test
 
 import (
 	"testing"
@@ -21,20 +21,18 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 
-	"google.golang.org/adk/internal/memoryinternal"
+	imemory "google.golang.org/adk/internal/memory"
 	"google.golang.org/adk/internal/sessioninternal"
-	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
 func TestMemory_AddAndSearch(t *testing.T) {
-	memService := memoryservice.Mem()
-
 	appName, userID, sessionID := "testApp", "testUser", "sess1"
-	memory := memoryinternal.Memory{
-		Service:   memService,
+	memoryService := imemory.Memory{
+		Service:   memory.InMemoryService(),
 		UserID:    userID,
 		AppName:   appName,
 		SessionID: sessionID,
@@ -75,17 +73,17 @@ func TestMemory_AddAndSearch(t *testing.T) {
 		}
 	}
 
-	if err := memory.AddSession(sessioninternal.NewMutableSession(sessionService, session)); err != nil {
+	if err := memoryService.AddSession(sessioninternal.NewMutableSession(sessionService, session)); err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
 
 	// Expected MemoryEntry items
-	entry1 := memoryservice.MemoryEntry{
+	entry1 := memory.Entry{
 		Content:   content1,
 		Author:    "user1",
 		Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 	}
-	entry2 := memoryservice.MemoryEntry{
+	entry2 := memory.Entry{
 		Content:   content2,
 		Author:    "user1",
 		Timestamp: time.Date(2025, 1, 1, 10, 5, 0, 0, time.UTC),
@@ -94,27 +92,27 @@ func TestMemory_AddAndSearch(t *testing.T) {
 	tests := []struct {
 		name  string
 		query string
-		want  []memoryservice.MemoryEntry
+		want  []memory.Entry
 	}{
 		{
 			name:  "match first entry",
 			query: "fox",
-			want:  []memoryservice.MemoryEntry{entry1},
+			want:  []memory.Entry{entry1},
 		},
 		{
 			name:  "match second entry",
 			query: "DOG", // Search should be case-insensitive
-			want:  []memoryservice.MemoryEntry{entry2},
+			want:  []memory.Entry{entry2},
 		},
 		{
 			name:  "match both entries (any word)",
 			query: "quick dog",
-			want:  []memoryservice.MemoryEntry{entry1, entry2},
+			want:  []memory.Entry{entry1, entry2},
 		},
 		{
 			name:  "match word in both",
 			query: "the",
-			want:  []memoryservice.MemoryEntry{entry1, entry2},
+			want:  []memory.Entry{entry1, entry2},
 		},
 		{
 			name:  "no match",
@@ -130,7 +128,7 @@ func TestMemory_AddAndSearch(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := memory.Search(tc.query)
+			got, err := memoryService.Search(tc.query)
 			if err != nil {
 				t.Fatalf("Search(%q) failed: %v", tc.query, err)
 			}
@@ -143,8 +141,8 @@ func TestMemory_AddAndSearch(t *testing.T) {
 }
 
 func TestMemory_Search_NoData(t *testing.T) {
-	memory := memoryinternal.Memory{
-		Service:   memoryservice.Mem(),
+	memory := imemory.Memory{
+		Service:   memory.InMemoryService(),
 		UserID:    "testUser",
 		AppName:   "testApp",
 		SessionID: "sess2",
@@ -160,12 +158,12 @@ func TestMemory_Search_NoData(t *testing.T) {
 }
 
 func TestMemory_Search_Isolation(t *testing.T) {
-	memService := memoryservice.Mem()
+	memService := memory.InMemoryService()
 	appName := "testApp"
 
 	userID1, sessionID1 := "user1", "sess1"
 
-	memory1 := memoryinternal.Memory{
+	memory1 := imemory.Memory{
 		Service:   memService,
 		UserID:    userID1,
 		AppName:   appName,
@@ -196,7 +194,7 @@ func TestMemory_Search_Isolation(t *testing.T) {
 
 	// Add data for User2
 	userID2, sessionID2 := "user2", "sess2"
-	memory2 := memoryinternal.Memory{
+	memory2 := imemory.Memory{
 		Service:   memService,
 		UserID:    userID2,
 		AppName:   "testApp",

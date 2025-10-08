@@ -28,9 +28,9 @@ import (
 	artifactinternal "google.golang.org/adk/internal/artifact"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/internal/memoryinternal"
+	imemory "google.golang.org/adk/internal/memory"
 	"google.golang.org/adk/internal/sessioninternal"
-	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -41,7 +41,7 @@ type Config struct {
 	Agent           agent.Agent
 	SessionService  session.Service
 	ArtifactService artifact.Service
-	MemoryService   memoryservice.Service
+	MemoryService   memory.Service
 }
 
 func New(cfg Config) (*Runner, error) {
@@ -65,7 +65,7 @@ type Runner struct {
 	rootAgent       agent.Agent
 	sessionService  session.Service
 	artifactService artifact.Service
-	memoryService   memoryservice.Service
+	memoryService   memory.Service
 
 	parents parentmap.Map
 }
@@ -118,7 +118,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 		var memoryImpl agent.Memory = nil
 		if r.memoryService != nil {
-			memoryImpl = &memoryinternal.Memory{
+			memoryImpl = &imemory.Memory{
 				Service:   r.memoryService,
 				SessionID: session.ID(),
 				UserID:    session.UserID(),

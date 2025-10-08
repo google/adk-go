@@ -18,7 +18,7 @@ import (
 	"context"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 )
 
@@ -38,7 +38,7 @@ type Context interface {
 	FunctionCallID() string
 
 	Actions() *session.EventActions
-	SearchMemory(context.Context, string) ([]memoryservice.MemoryEntry, error)
+	SearchMemory(context.Context, string) ([]memory.Entry, error)
 }
 
 type Set interface {

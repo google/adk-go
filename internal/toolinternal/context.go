@@ -19,7 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
@@ -57,7 +57,7 @@ func (c *toolContext) ReadonlyState() session.ReadonlyState {
 	return c.Session().State()
 }
 
-func (c *toolContext) SearchMemory(ctx context.Context, query string) ([]memoryservice.MemoryEntry, error) {
+func (c *toolContext) SearchMemory(ctx context.Context, query string) ([]memory.Entry, error) {
 	return c.Memory().Search(query)
 }
 
