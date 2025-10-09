@@ -149,16 +149,20 @@ func transferTargets(agent, parent agent.Agent) []agent.Agent {
 	targets := slices.Clone(agent.SubAgents())
 
 	llmAgent := asLLMAgent(agent)
+	llmParent := asLLMAgent(parent)
 
-	if !llmAgent.internal().DisallowTransferToParent && parent != nil {
+	if parent == nil || llmParent == nil {
+		return targets
+	}
+
+	if !llmAgent.internal().DisallowTransferToParent {
 		targets = append(targets, parent)
 	}
 	// For peer-agent transfers, it's only enabled when all below conditions are met:
 	// - the parent agent is also of AutoFlow.
 	// - DisallowTransferToPeers is false.
 	if !llmAgent.internal().DisallowTransferToPeers {
-		llmParent := asLLMAgent(parent)
-		if llmParent != nil && shouldUseAutoFlow(parent) {
+		if shouldUseAutoFlow(parent) {
 			for _, peer := range parent.SubAgents() {
 				if peer.Name() != agent.Name() {
 					targets = append(targets, peer)
