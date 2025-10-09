@@ -96,7 +96,7 @@ func corsWithArgs(c *WebConfig) func(next http.Handler) http.Handler {
 
 // embed web UI files into the executable
 
-//go:embed distr/browser/*
+//go:embed distr/*
 var content embed.FS
 
 // Serve initiates the http server and starts it according to WebConfig parameters
