@@ -151,7 +151,7 @@ func transferTargets(agent, parent agent.Agent) []agent.Agent {
 	llmAgent := asLLMAgent(agent)
 	llmParent := asLLMAgent(parent)
 
-	if parent == nil || llmParent == nil {
+	if llmParent == nil {
 		return targets
 	}
 

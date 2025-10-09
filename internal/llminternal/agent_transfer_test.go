@@ -358,7 +358,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		check(t, curAgent, root, "", nil, []string{"Parent", "Peer", "Current"})
 	})
 
-	t.Run("AgentWithSequetialParent", func(t *testing.T) {
+	t.Run("AgentWithSequentialParent", func(t *testing.T) {
 		curAgent := utils.Must(llmagent.New(llmagent.Config{
 			Name:                     "Current",
 			Model:                    llm,
@@ -377,6 +377,30 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		}))
 
 		check(t, curAgent, root, "", nil, []string{"Parent", "Peer", "Current"})
+	})
+
+	t.Run("AgentWithSequentialSubagent", func(t *testing.T) {
+		seqSub := utils.Must(llmagent.New(llmagent.Config{
+			Name:  "Sub3",
+			Model: llm,
+		}))
+		agent := utils.Must(llmagent.New(llmagent.Config{
+			Name:  "Current",
+			Model: llm,
+			SubAgents: []agent.Agent{
+				utils.Must(sequentialagent.New(sequentialagent.Config{
+					AgentConfig: agent.Config{
+						Name:      "Sub1",
+						SubAgents: []agent.Agent{seqSub},
+					},
+				})),
+				utils.Must(llmagent.New(llmagent.Config{
+					Name:  "Sub2",
+					Model: llm,
+				})),
+			},
+		}))
+		check(t, agent, agent, "", []string{"Sub1", "Sub2"}, []string{"Current"})
 	})
 }
 
