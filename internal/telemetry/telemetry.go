@@ -173,7 +173,7 @@ func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fn
 }
 
 // TraceLLMCall fills the call_llm event details.
-func TraceLLMCall(spans []trace.Span, agentCtx agent.Context, llmRequest *model.LLMRequest, event *session.Event) {
+func TraceLLMCall(spans []trace.Span, agentCtx agent.InvocationContext, llmRequest *model.LLMRequest, event *session.Event) {
 	for _, span := range spans {
 		attributes := []attribute.KeyValue{
 			attribute.String("gen_ai.system", systemName),
