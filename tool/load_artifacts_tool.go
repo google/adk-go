@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -107,24 +108,9 @@ func (t *loadArtifactsTool) Run(ctx Context, args any) (any, error) {
 
 // ProcessRequest implements tool.Tool.
 func (t *loadArtifactsTool) ProcessRequest(ctx Context, req *model.LLMRequest) error {
-	if req.Tools == nil {
-		req.Tools = make(map[string]any)
+	if err := toolutils.PackTool(req, t); err != nil {
+		return err
 	}
-	name := t.Name()
-	if _, ok := req.Tools[name]; ok {
-		return fmt.Errorf("duplicate tool: %q", name)
-	}
-	req.Tools[name] = t
-
-	if req.Config == nil {
-		req.Config = &genai.GenerateContentConfig{}
-	}
-	if decl := t.Declaration(); decl != nil {
-		req.Config.Tools = append(req.Config.Tools, &genai.Tool{
-			FunctionDeclarations: []*genai.FunctionDeclaration{decl},
-		})
-	}
-
 	if err := t.appendInitialInstructions(ctx, req); err != nil {
 		return err
 	}

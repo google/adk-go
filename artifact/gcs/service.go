@@ -33,7 +33,7 @@ import (
 	"google.golang.org/genai"
 )
 
-// gcsService is an google cloud storage implementation of the Service.
+// gcsService is a google cloud storage implementation of the Service.
 type gcsService struct {
 	bucketName    string
 	storageClient gcsClient
@@ -160,7 +160,7 @@ func (s *gcsService) Delete(ctx context.Context, req *artifact.DeleteRequest) er
 
 	// delete versions in parallel
 	for _, version := range response.Versions {
-		v := version //capture loop variable for goroutine
+		v := version // capture loop variable for goroutine
 
 		g.Go(func() error {
 			blobName := buildBlobName(appName, userID, sessionID, fileName, v)
@@ -241,10 +241,10 @@ func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string
 	query := &storage.Query{
 		Prefix: prefix,
 	}
-	// Only fill the atribute Name of the blob, the other attributes will have defaults.
+	// Only fill the attribute Name of the blob, the other attributes will have defaults.
 	err := query.SetAttrSelection([]string{"Name"})
 	if err != nil {
-		return fmt.Errorf("error setting query atribute selection: %w", err)
+		return fmt.Errorf("error setting query attribute selection: %w", err)
 	}
 	blobsIterator := s.bucket.objects(ctx, query)
 
@@ -322,7 +322,7 @@ func (s *gcsService) versions(ctx context.Context, req *artifact.VersionsRequest
 			return nil, fmt.Errorf("error iterating blobs: incorrect number of segments in path %q", blob.Name)
 		}
 		version, err := strconv.ParseInt(segments[len(segments)-1], 10, 64)
-		//if the file version is not convertable to number, just ignore it
+		// if the file version is not convertible to number, just ignore it
 		if err != nil {
 			continue
 		}

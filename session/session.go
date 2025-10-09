@@ -38,7 +38,7 @@ type State interface {
 	All() iter.Seq2[string, any]
 }
 
-type ReadOnlyState interface {
+type ReadonlyState interface {
 	Get(string) (any, error)
 	All() iter.Seq2[string, any]
 }
@@ -75,7 +75,6 @@ type Event struct {
 	Branch string
 	Author string
 
-	Partial bool
 	// The actions taken by the agent.
 	Actions EventActions
 	// Set of IDs of the long running function calls.

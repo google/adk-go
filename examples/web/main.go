@@ -35,7 +35,7 @@ import (
 	"google.golang.org/genai"
 )
 
-func saveReportfunc(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 	if llmResponse == nil || llmResponse.Content == nil || llmResponseError != nil {
 		return llmResponse, llmResponseError
 	}

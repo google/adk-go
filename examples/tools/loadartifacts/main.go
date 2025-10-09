@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/model/gemini"
@@ -31,7 +32,7 @@ import (
 )
 
 // Note: you need to run the program from the loadartifacts directory
-// to fetch the image successfuly.
+// to fetch the image successfully.
 func main() {
 	ctx := context.Background()
 
@@ -42,7 +43,7 @@ func main() {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
-	agent, err := llmagent.New(llmagent.Config{
+	llmagent, err := llmagent.New(llmagent.Config{
 		Name:        "artifact_describer",
 		Model:       model,
 		Description: "Agent to answer questions about artifacts.",
@@ -102,7 +103,7 @@ func main() {
 
 	r, err := runner.New(runner.Config{
 		AppName:         appName,
-		Agent:           agent,
+		Agent:           llmagent,
 		SessionService:  sessionService,
 		ArtifactService: artifactService,
 	})
@@ -122,14 +123,18 @@ func main() {
 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
 		fmt.Print("\nAgent -> ")
-		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &runner.RunConfig{
-			StreamingMode: runner.StreamingModeSSE,
+		streamingMode := agent.StreamingModeSSE
+		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &agent.RunConfig{
+			StreamingMode: streamingMode,
 		}) {
 			if err != nil {
 				fmt.Printf("\nAGENT_ERROR: %v\n", err)
 			} else {
 				for _, p := range event.LLMResponse.Content.Parts {
-					fmt.Print(p.Text)
+					// if its running in streaming mode, don't print the non partial llmResponses
+					if streamingMode != agent.StreamingModeSSE || event.LLMResponse.Partial {
+						fmt.Print(p.Text)
+					}
 				}
 			}
 		}

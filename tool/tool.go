@@ -15,8 +15,10 @@
 package tool
 
 import (
-	"github.com/google/uuid"
+	"context"
+
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 )
 
@@ -32,38 +34,14 @@ type Tool interface {
 }
 
 type Context interface {
-	agent.Context
+	agent.CallbackContext
 	FunctionCallID() string
 
-	EventActions() *session.EventActions
+	Actions() *session.EventActions
+	SearchMemory(context.Context, string) ([]memory.Entry, error)
 }
 
 type Set interface {
 	Tool // to allow passing a toolset to agent tools
-	Tools(ctx agent.Context) ([]Tool, error)
-}
-
-func NewContext(ctx agent.Context, functionCallID string, actions *session.EventActions) Context {
-	if functionCallID == "" {
-		functionCallID = uuid.NewString()
-	}
-	return &toolContext{
-		Context:        ctx,
-		functionCallID: functionCallID,
-		eventActions:   actions,
-	}
-}
-
-type toolContext struct {
-	agent.Context
-	functionCallID string
-	eventActions   *session.EventActions
-}
-
-func (c *toolContext) FunctionCallID() string {
-	return c.functionCallID
-}
-
-func (c *toolContext) EventActions() *session.EventActions {
-	return c.eventActions
+	Tools(ctx agent.ReadonlyContext) ([]Tool, error)
 }

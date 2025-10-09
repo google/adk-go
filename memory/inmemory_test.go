@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package memoryservice_test
+package memory_test
 
 import (
 	"iter"
@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -31,8 +31,8 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 	tests := []struct {
 		name         string
 		initSessions []session.Session
-		req          *memoryservice.SearchRequest
-		wantResp     *memoryservice.SearchResponse
+		req          *memory.SearchRequest
+		wantResp     *memory.SearchResponse
 		wantErr      bool
 	}{
 		{
@@ -63,13 +63,13 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memoryservice.SearchRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "user1",
 				Query:   "quick hello",
 			},
-			wantResp: &memoryservice.SearchResponse{
-				Memories: []memoryservice.MemoryEntry{
+			wantResp: &memory.SearchResponse{
+				Memories: []memory.Entry{
 					{
 						Content:   genai.NewContentFromText("The Quick brown fox", genai.RoleUser),
 						Author:    "user1",
@@ -90,12 +90,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memoryservice.SearchRequest{
+			req: &memory.SearchRequest{
 				AppName: "other_app",
 				UserID:  "user1",
 				Query:   "test text",
 			},
-			wantResp: &memoryservice.SearchResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 		{
 			name: "no leakage for different user",
@@ -104,12 +104,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memoryservice.SearchRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "test text",
 			},
-			wantResp: &memoryservice.SearchResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 		{
 			name: "no matches",
@@ -118,26 +118,26 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memoryservice.SearchRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "something different",
 			},
-			wantResp: &memoryservice.SearchResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 		{
 			name: "lookup on empty store",
-			req: &memoryservice.SearchRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "something different",
 			},
-			wantResp: &memoryservice.SearchResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := memoryservice.Mem()
+			s := memory.InMemoryService()
 
 			for _, session := range tt.initSessions {
 				if err := s.AddSession(t.Context(), session); err != nil {
@@ -167,8 +167,8 @@ func makeSession(t *testing.T, appName, userID, sessionID string, events []*sess
 	}
 }
 
-var sortMemories = cmp.Transformer("Sort", func(in *memoryservice.SearchResponse) *memoryservice.SearchResponse {
-	slices.SortFunc(in.Memories, func(m1, m2 memoryservice.MemoryEntry) int {
+var sortMemories = cmp.Transformer("Sort", func(in *memory.SearchResponse) *memory.SearchResponse {
+	slices.SortFunc(in.Memories, func(m1, m2 memory.Entry) int {
 		return m1.Timestamp.Compare(m2.Timestamp)
 	})
 	return in

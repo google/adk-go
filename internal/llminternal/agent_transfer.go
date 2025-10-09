@@ -61,7 +61,7 @@ import (
 //
 // TODO: implement it in the runners package and update this doc.
 
-func AgentTransferRequestProcessor(ctx agent.Context, req *model.LLMRequest) error {
+func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// TODO: support agent types other than LLMAgent, that have parent/subagents?
 	agent := ctx.Agent()
 	if !shouldUseAutoFlow(agent) {
@@ -139,7 +139,7 @@ func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (any, error) {
 	if !ok || agent == "" {
 		return nil, fmt.Errorf("empty agent_name: %v", args)
 	}
-	ctx.EventActions().TransferToAgent = agent
+	ctx.Actions().TransferToAgent = agent
 	return map[string]any{}, nil
 }
 

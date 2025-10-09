@@ -46,7 +46,6 @@ func ToSessionEvent(event Event) *session.Event {
 		InvocationID:       event.InvocationID,
 		Branch:             event.Branch,
 		Author:             event.Author,
-		Partial:            event.Partial,
 		LongRunningToolIDs: event.LongRunningToolIDs,
 		LLMResponse: &model.LLMResponse{
 			Content:           event.Content,

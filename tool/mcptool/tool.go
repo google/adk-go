@@ -22,6 +22,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/internal/toolinternal"
+	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -64,26 +65,7 @@ func (t *mcpTool) IsLongRunning() bool {
 }
 
 func (t *mcpTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
-	if req.Tools == nil {
-		req.Tools = make(map[string]any)
-	}
-
-	name := t.Name()
-	if _, ok := req.Tools[name]; ok {
-		return fmt.Errorf("duplicate tool: %q", name)
-	}
-	req.Tools[name] = t
-
-	if req.Config == nil {
-		req.Config = &genai.GenerateContentConfig{}
-	}
-	req.Config.Tools = append(req.Config.Tools, &genai.Tool{
-		FunctionDeclarations: []*genai.FunctionDeclaration{
-			t.funcDeclaration,
-		},
-	})
-
-	return nil
+	return toolutils.PackTool(req, t)
 }
 
 func (t *mcpTool) Declaration() *genai.FunctionDeclaration {

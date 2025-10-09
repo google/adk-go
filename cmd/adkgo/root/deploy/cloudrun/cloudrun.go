@@ -52,7 +52,6 @@ type buildFlags struct {
 }
 
 type sourceFlags struct {
-	webUIDistrPath string
 	srcBasePath    string
 	entryPointPath string
 }
@@ -71,7 +70,7 @@ var flags deployCloudRunFlags
 var cloudrunCmd = &cobra.Command{
 	Use:   "cloudrun",
 	Short: "Deploys the application to cloudrun.",
-	Long: `Deployment prepares a Dockerfile which is fed with locally compiled server executable and Web UI static files.
+	Long: `Deployment prepares a Dockerfile which is fed with locally compiled server executable containing Web UI static files.
 	Service on Cloudrun is created using this information. 
 	Local proxy adding authentication is started. 
 	`,
@@ -89,26 +88,20 @@ func init() {
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "temp_dir", "t", "", "Temp dir for build")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.proxy.port, "proxy_port", 8081, "Local proxy port")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.serverPort, "server_port", 8080, "Cloudrun server port")
-	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.webUIDistrPath, "webui_distr_path", "a", "", "ADK Web UI base dir")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 }
 
 func (f *deployCloudRunFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags",
 		func(p util.Printer) error {
-			absp, err := filepath.Abs(flags.source.webUIDistrPath)
+			absp, err := filepath.Abs(flags.source.entryPointPath)
 			if err != nil {
-				return fmt.Errorf("cannot make an absolute path from '%v': %v", f.source.webUIDistrPath, err)
-			}
-			f.source.webUIDistrPath = path.Join(absp, "browser")
-			absp, err = filepath.Abs(flags.source.entryPointPath)
-			if err != nil {
-				return fmt.Errorf("cannot make an absolute path from '%v': %v", f.source.entryPointPath, err)
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.source.entryPointPath, err)
 			}
 			f.source.entryPointPath = absp
 			absp, err = filepath.Abs(flags.build.tempDir)
 			if err != nil {
-				return fmt.Errorf("cannot make an absolute path from '%v': %v", f.build.tempDir, err)
+				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.build.tempDir, err)
 			}
 			f.build.tempDir = absp
 
@@ -119,7 +112,7 @@ func (f *deployCloudRunFlags) computeFlags() error {
 			if f.build.execPath == "" {
 				exec, err := util.StripExtension(f.source.entryPointPath, ".go")
 				if err != nil {
-					return fmt.Errorf("cannot strip '.go' extension from entry point path '%v': %v", f.source.entryPointPath, err)
+					return fmt.Errorf("cannot strip '.go' extension from entry point path '%v': %w", f.source.entryPointPath, err)
 				}
 				f.build.execFile = exec
 				f.build.execPath = path.Join(f.build.tempDir, exec)
@@ -138,22 +131,13 @@ func (f *deployCloudRunFlags) cleanTemp() error {
 			p("Clean temp starting with", f.build.tempDir)
 			err := os.RemoveAll(f.build.tempDir)
 			if err != nil {
-				return fmt.Errorf("failed to clean temp directory %v: %v", f.build.tempDir, err)
+				return fmt.Errorf("failed to clean temp directory %v: %w", f.build.tempDir, err)
 			}
 			err = os.MkdirAll(f.build.tempDir, os.ModeDir|0700)
 			if err != nil {
-				return fmt.Errorf("failed to create the target directory %v: %v", f.build.tempDir, err)
+				return fmt.Errorf("failed to create the target directory %v: %w", f.build.tempDir, err)
 			}
 			return nil
-		})
-}
-
-func (f *deployCloudRunFlags) copyStaticADKWebUIFiles() error {
-	return util.LogStartStop("Copying static files for ADK Web UI",
-		func(p util.Printer) error {
-			p("Source: " + f.source.webUIDistrPath)
-			p("Destination: " + f.build.uiDistDir)
-			return os.CopyFS(f.build.uiDistDir, os.DirFS(f.source.webUIDistrPath))
 		})
 }
 
@@ -174,26 +158,12 @@ func (f *deployCloudRunFlags) prepareDockerfile() error {
 		func(p util.Printer) error {
 			p("Writing:", f.build.dockerfileBuildPath)
 			c := `
-FROM golang:1.22-alpine AS builder
-
-WORKDIR /app
-
-COPY ` + f.build.execFile + `  /app/` + f.build.execFile + `
-COPY webui_distr  /app/webui_distr
-
 FROM gcr.io/distroless/static-debian11
 
-# Set the working directory
-WORKDIR /app
-
-# Copy the built executable from the builder stage
-COPY --from=builder /app/` + f.build.execFile + ` /app/` + f.build.execFile + `
-COPY --from=builder /app/webui_distr /app/webui_distr
-
+COPY ` + f.build.execFile + `  /app/` + f.build.execFile + `
 EXPOSE ` + strconv.Itoa(flags.cloudRun.serverPort) + `
-
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "--front_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "--webui_distr_path", "/app/webui_distr",  "--backend_address", "http://localhost:` + strconv.Itoa(f.proxy.port) + `/api"]
+CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "--front_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "--backend_address", "http://localhost:` + strconv.Itoa(f.proxy.port) + `/api"]
  `
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(c), 0600)
 		})
@@ -244,10 +214,6 @@ func (f *deployCloudRunFlags) deployOnCloudRun() error {
 		return err
 	}
 	err = f.cleanTemp()
-	if err != nil {
-		return err
-	}
-	err = f.copyStaticADKWebUIFiles()
 	if err != nil {
 		return err
 	}
