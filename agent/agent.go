@@ -208,6 +208,8 @@ func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, ag
 	return agentEvent, agentError
 }
 
+// TODO: unify with internal/context.callbackContext
+
 type callbackContext struct {
 	context.Context
 	invocationContext InvocationContext
@@ -241,6 +243,28 @@ func (c *callbackContext) InvocationID() string {
 func (c *callbackContext) UserContent() *genai.Content {
 	return c.invocationContext.UserContent()
 }
+
+// AppName implements CallbackContext.
+func (c *callbackContext) AppName() string {
+	return c.invocationContext.Session().AppName()
+}
+
+// Branch implements CallbackContext.
+func (c *callbackContext) Branch() string {
+	return c.invocationContext.Branch()
+}
+
+// SessionID implements CallbackContext.
+func (c *callbackContext) SessionID() string {
+	return c.invocationContext.Session().ID()
+}
+
+// UserID implements CallbackContext.
+func (c *callbackContext) UserID() string {
+	return c.invocationContext.Session().UserID()
+}
+
+var _ CallbackContext = (*callbackContext)(nil)
 
 type invocationContext struct {
 	context.Context
