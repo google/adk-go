@@ -15,13 +15,13 @@
 package agenttool_test
 
 import (
-	"context"
 	"log"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
@@ -42,7 +42,7 @@ func TestAgentTool_Declaration(t *testing.T) {
 		Required: []string{"request"},
 	}
 	agent := createAgent(t, inputSchema, nil)
-	agentTool := agenttool.NewAgentToolDefault(agent)
+	agentTool := agenttool.NewDefault(agent)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
 		t.Fatal("agentTool does not implement FunctionTool")
@@ -68,7 +68,7 @@ func TestAgentTool_Declaration(t *testing.T) {
 
 func TestAgentTool_DeclarationWithoutSchema(t *testing.T) {
 	agent := createAgent(t, nil, nil)
-	agentTool := agenttool.NewAgentToolDefault(agent)
+	agentTool := agenttool.NewDefault(agent)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
 		t.Fatal("agentTool does not implement FunctionTool")
@@ -102,7 +102,7 @@ func TestAgentTool_Run_InputValidation(t *testing.T) {
 		Required: []string{"is_magic", "name"},
 	}
 	agent := createAgent(t, inputSchema, nil)
-	agentTool := agenttool.NewAgentToolDefault(agent)
+	agentTool := agenttool.NewDefault(agent)
 	toolCtx := createToolContext(t, agent)
 
 	tests := []struct {
@@ -155,7 +155,7 @@ func TestAgentTool_Run_OutputValidation(t *testing.T) {
 	}
 
 	agent := createAgentWithModel(t, nil, outputSchema, testLLM)
-	agentTool := agenttool.NewAgentToolDefault(agent)
+	agentTool := agenttool.NewDefault(agent)
 	toolCtx := createToolContext(t, agent)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
@@ -190,7 +190,7 @@ func TestAgentTool_Run_Successful(t *testing.T) {
 		},
 	}
 	agent := createAgentWithModel(t, inputSchema, outputSchema, testLLM)
-	agentTool := agenttool.NewAgentToolDefault(agent)
+	agentTool := agenttool.NewDefault(agent)
 	toolCtx := createToolContext(t, agent)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
@@ -222,7 +222,7 @@ func TestAgentTool_Run_WithoutSchema(t *testing.T) {
 	}
 
 	agent := createAgentWithModel(t, nil, nil, testLLM)
-	agentTool := agenttool.NewAgentToolDefault(agent)
+	agentTool := agenttool.NewDefault(agent)
 	toolCtx := createToolContext(t, agent)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
@@ -246,7 +246,7 @@ func TestAgentTool_Run_EmptyModelResponse(t *testing.T) {
 		},
 	}
 	agent := createAgentWithModel(t, nil, nil, testLLM)
-	agentTool := agenttool.NewAgentToolDefault(agent)
+	agentTool := agenttool.NewDefault(agent)
 	toolCtx := createToolContext(t, agent)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
@@ -273,14 +273,13 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 	toolCtx := createToolContext(t, agent)
 
 	// Test with skipSummarization = true
-	agentToolSkip := agenttool.NewAgentTool(agent, true)
-	actions := &session.EventActions{}
-	toolCtxWithActions := tool.NewContext(toolCtx, "testTool", actions)
+	agentToolSkip := agenttool.New(agent, true)
+	actions := toolCtx.Actions()
 	toolImpl, ok := agentToolSkip.(toolinternal.FunctionTool)
 	if !ok {
 		t.Fatal("agentToolSkip does not implement FunctionTool")
 	}
-	_, err := toolImpl.Run(toolCtxWithActions, map[string]any{"request": "magic"})
+	_, err := toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
 	if err != nil {
 		t.Fatalf("Run() with skipSummarization=true failed unexpectedly: %v", err)
 	}
@@ -289,7 +288,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 	}
 
 	// Test with skipSummarization = false
-	agentToolNoSkip := agenttool.NewAgentTool(agent, false)
+	agentToolNoSkip := agenttool.New(agent, false)
 	toolImpl, ok = agentToolNoSkip.(toolinternal.FunctionTool)
 	if !ok {
 		t.Fatal("agentToolNoSkip does not implement FunctionTool")
@@ -300,7 +299,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 		genai.NewContentFromText("test response", genai.RoleModel),
 	}
 	testLLM.Requests = nil
-	_, err = toolImpl.Run(toolCtxWithActions, map[string]any{"request": "magic"})
+	_, err = toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
 	if err != nil {
 		t.Fatalf("Run() with skipSummarization=false failed unexpectedly: %v", err)
 	}
@@ -363,7 +362,9 @@ func createToolContext(t *testing.T, testAgent agent.Agent) tool.Context {
 	s := createResponse.Session
 	sessionImpl := sessioninternal.NewMutableSession(sessionService, s)
 
-	aCtx := agent.NewContext(context.Background(), testAgent, nil, nil, sessionImpl, nil, "")
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Session: sessionImpl,
+	})
 
-	return tool.NewContext(aCtx, "", &session.EventActions{})
+	return toolinternal.NewToolContext(ctx, "", &session.EventActions{})
 }

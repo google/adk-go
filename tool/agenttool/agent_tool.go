@@ -25,7 +25,7 @@ import (
 	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
@@ -33,46 +33,42 @@ import (
 	"google.golang.org/genai"
 )
 
-// AgentTool implements a tool that allows an agent to call another agent.
-type AgentTool struct {
+// agentTool implements a tool that allows an agent to call another agent.
+type agentTool struct {
 	agent             agent.Agent
 	skipSummarization bool
-	name              string
-	description       string
 }
 
-// NewAgentTool creates a new AgentTool.
-func NewAgentTool(agent agent.Agent, skipSummarization bool) tool.Tool {
-	return &AgentTool{
+// New creates a new agentTool.
+func New(agent agent.Agent, skipSummarization bool) tool.Tool {
+	return &agentTool{
 		agent:             agent,
 		skipSummarization: skipSummarization,
-		name:              agent.Name(),
-		description:       agent.Description(),
 	}
 }
 
-// NewAgentToolDefault creates a new AgentTool with skipSummarization set to false.
-func NewAgentToolDefault(agent agent.Agent) tool.Tool {
-	return NewAgentTool(agent, false)
+// NewDefault creates a new agentTool with skipSummarization set to false.
+func NewDefault(agent agent.Agent) tool.Tool {
+	return New(agent, false)
 }
 
 // Name implements tool.Tool.
-func (t *AgentTool) Name() string {
-	return t.name
+func (t *agentTool) Name() string {
+	return t.agent.Name()
 }
 
 // Description implements tool.Tool.
-func (t *AgentTool) Description() string {
-	return t.description
+func (t *agentTool) Description() string {
+	return t.agent.Description()
 }
 
 // IsLongRunning implements tool.Tool.
-func (t *AgentTool) IsLongRunning() bool {
+func (t *agentTool) IsLongRunning() bool {
 	return false
 }
 
 // Declaration implements tool.Tool.
-func (t *AgentTool) Declaration() *genai.FunctionDeclaration {
+func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 	decl := &genai.FunctionDeclaration{
 		Name:        t.Name(),
 		Description: t.Description(),
@@ -109,14 +105,14 @@ func (t *AgentTool) Declaration() *genai.FunctionDeclaration {
 
 // Run implements tool.Tool.
 // It executes the wrapped agent.
-func (t *AgentTool) Run(toolCtx tool.Context, args any) (any, error) {
+func (t *agentTool) Run(toolCtx tool.Context, args any) (any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("AgentTool expects map[string]any arguments, got %T", args)
+		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
 	}
 
 	if t.skipSummarization {
-		if actions := toolCtx.EventActions(); actions != nil {
+		if actions := toolCtx.Actions(); actions != nil {
 			actions.SkipSummarization = true
 		}
 	}
@@ -163,12 +159,12 @@ func (t *AgentTool) Run(toolCtx tool.Context, args any) (any, error) {
 	sessionService := session.InMemoryService()
 
 	r, err := runner.New(runner.Config{
-		AppName:        toolCtx.Agent().Name(),
+		AppName:        t.agent.Name(),
 		Agent:          t.agent,
 		SessionService: sessionService,
 		// TODO - use forwarding_artifact_service as in python.
 		ArtifactService: artifact.InMemoryService(),
-		MemoryService:   memoryservice.Mem(),
+		MemoryService:   memory.InMemoryService(),
 	})
 
 	if err != nil {
@@ -177,7 +173,7 @@ func (t *AgentTool) Run(toolCtx tool.Context, args any) (any, error) {
 
 	stateMap := make(map[string]any)
 
-	for k, v := range toolCtx.Session().State().All() {
+	for k, v := range toolCtx.State().All() {
 		// Filter out adk internal states.
 		if !strings.HasPrefix(k, "_adk") {
 			stateMap[k] = v
@@ -185,16 +181,16 @@ func (t *AgentTool) Run(toolCtx tool.Context, args any) (any, error) {
 	}
 
 	subSession, err := sessionService.Create(toolCtx, &session.CreateRequest{
-		AppName: toolCtx.Agent().Name(),
-		UserID:  toolCtx.Session().UserID(),
+		AppName: t.agent.Name(),
+		UserID:  toolCtx.UserID(),
 		State:   stateMap,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session for sub-agent %s: %w", t.agent.Name(), err)
 	}
 
-	eventCh := r.Run(context.Background(), subSession.Session.UserID(), subSession.Session.ID(), content, &runner.RunConfig{
-		StreamingMode: runner.StreamingModeSSE,
+	eventCh := r.Run(context.Background(), subSession.Session.UserID(), subSession.Session.ID(), content, &agent.RunConfig{
+		StreamingMode: agent.StreamingModeSSE,
 	})
 
 	var lastEvent *session.Event
@@ -245,7 +241,7 @@ func (t *AgentTool) Run(toolCtx tool.Context, args any) (any, error) {
 }
 
 // ProcessRequest implements tool.Tool.
-func (t *AgentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *agentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	// TODO extract this function somewhere else, simillar operations are done for
 	// other tools with function declaration.
 	if req.Tools == nil {

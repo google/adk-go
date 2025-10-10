@@ -94,7 +94,7 @@ func main() {
 		Instruction: "Answer questions about weather based on google search unless asked for a poem," +
 			" for a poem generate it with a tool.",
 		Tools: []tool.Tool{
-			agenttool.NewAgentToolDefault(searchAgent), agenttool.NewAgentToolDefault(poemAgent),
+			agenttool.NewDefault(searchAgent), agenttool.NewDefault(poemAgent),
 		},
 	})
 	if err != nil {
