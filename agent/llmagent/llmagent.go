@@ -135,6 +135,11 @@ type Config struct {
 	// TODO: BeforeTool and AfterTool callbacks
 	Tools []tool.Tool
 
+	// OutputKey is an optional parameter to specify the key in session state for the agent output.
+	//
+	// Typical uses cases are:
+	// - Extracts agent reply for later use, such as in tools, callbacks, etc.
+	// - Connects agents to coordinate with each other.
 	OutputKey string
 	// Planner
 	// CodeExecutor
@@ -191,8 +196,8 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 	}
 }
 
-// saves the model output to state if needed. skip if the event was authored by some other agent
-// (e.g. current agent transferred to another agent)
+// maybeSaveOutputToState saves the model output to state if needed. skip if the event
+// was authored by some other agent (e.g. current agent transferred to another agent)
 func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 	if event == nil {
 		return
@@ -212,6 +217,9 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 
 		// TODO: add output schema validation and unmarshalling
 		if a.OutputSchema != nil {
+			// If the result from the final chunk is just whitespace or empty,
+			// it means this is an empty final chunk of a stream.
+			// Do not attempt to parse it as JSON.
 			if strings.TrimSpace(result) == "" {
 				return
 			}

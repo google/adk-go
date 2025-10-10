@@ -15,6 +15,7 @@
 package session
 
 import (
+	"errors"
 	"iter"
 	"time"
 
@@ -107,3 +108,5 @@ type EventActions struct {
 	// The agent is escalating to a higher level agent.
 	Escalate bool
 }
+
+var ErrStateKeyNotExist = errors.New("state key does not exist")

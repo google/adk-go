@@ -16,14 +16,14 @@ package llminternal
 
 import (
 	"context"
-	"fmt"
-	"iter"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/artifact"
+	artifactinternal "google.golang.org/adk/internal/artifact"
 	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -80,7 +80,7 @@ func TestInjectSessionState(t *testing.T) {
 				"my_file": {Text: "This is my artifact content."},
 			},
 			wantErr:    true,
-			wantErrMsg: "failed to load artifact missing_file: artifact not found missing_file",
+			wantErrMsg: "failed to load artifact missing_file: artifact not found: file does not exist",
 		},
 		// Corresponds to: test_inject_session_state_with_invalid_state_name_returns_original
 		{
@@ -133,7 +133,7 @@ func TestInjectSessionState(t *testing.T) {
 			template:   "The artifact content is: {artifact.}",
 			artifacts:  map[string]*genai.Part{},
 			wantErr:    true,
-			wantErrMsg: "failed to load artifact : artifact not found ",
+			wantErrMsg: "failed to load artifact : request validation failed: invalid load request: missing required fields: FileName",
 		},
 		// Corresponds to: test_inject_session_state_with_multiple_variables_and_artifacts
 		{
@@ -167,15 +167,38 @@ And another optional artifact:
 	for _, tc := range testCases {
 		// t.Run creates a sub-test, which makes test output cleaner and more organized.
 		t.Run(tc.name, func(t *testing.T) {
-			var artifacts agent.Artifacts = &fakeArtifacts{artifacts: tc.artifacts}
-			if tc.expectNilService {
-				artifacts = nil
+			// Setup, create inMemorySessionService, inMemoryArtifactService and wrappers.
+			sessionService := session.InMemoryService()
+			createResp, err := sessionService.Create(t.Context(), &session.CreateRequest{
+				AppName:   "testApp",
+				UserID:    "testUser",
+				SessionID: "testSession",
+				State:     tc.state,
+			})
+			if err != nil {
+				t.Fatalf("Failed to create session: %v", err)
 			}
+			sess := sessioninternal.NewMutableSession(sessionService, createResp.Session)
 
-			// --- Setup for each test case ---
+			// Setup Artifacts
+			var artifacts agent.Artifacts
+			if !tc.expectNilService {
+				artifacts = &artifactinternal.Artifacts{
+					Service:   artifact.InMemoryService(),
+					AppName:   "testApp",
+					UserID:    "testUser",
+					SessionID: "testSession",
+				}
+			}
+			for filename, part := range tc.artifacts {
+				if err := artifacts.Save(filename, *part); err != nil {
+					t.Fatalf("Failed to save artifact: %v", err)
+				}
+			}
+			// Create invocation context
 			ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
 				Artifacts: artifacts,
-				Session:   &fakeSession{state: tc.state},
+				Session:   sess,
 			})
 
 			// --- Execution ---
@@ -201,81 +224,3 @@ And another optional artifact:
 		})
 	}
 }
-
-type fakeSession struct {
-	state map[string]any
-}
-
-func (s *fakeSession) State() session.State {
-	return s
-}
-
-func (s *fakeSession) Events() session.Events {
-	return nil
-}
-
-func (s *fakeSession) ID() string {
-	return ""
-}
-
-func (s *fakeSession) AppName() string {
-	return ""
-}
-
-func (s *fakeSession) UserID() string {
-	return ""
-}
-
-func (s *fakeSession) LastUpdateTime() time.Time {
-	return time.Time{}
-}
-
-func (s *fakeSession) Set(key string, value any) error {
-	s.state[key] = value
-	return nil
-}
-
-func (s *fakeSession) Get(key string) (any, error) {
-	if val, ok := s.state[key]; ok {
-		return val, nil
-	}
-	return nil, fmt.Errorf("state not found %s", key)
-}
-
-func (s *fakeSession) All() iter.Seq2[string, any] {
-	return func(yield func(key string, val any) bool) {
-		for k, v := range s.state {
-			if !yield(k, v) {
-				return
-			}
-		}
-	}
-}
-
-var _ session.Session = (*fakeSession)(nil)
-var _ session.State = (*fakeSession)(nil)
-
-type fakeArtifacts struct {
-	artifacts map[string]*genai.Part
-}
-
-func (a *fakeArtifacts) Save(name string, data genai.Part) error {
-	return fmt.Errorf("not implemented in fakeArtifacts")
-}
-
-func (a *fakeArtifacts) Load(name string) (genai.Part, error) {
-	if val, ok := a.artifacts[name]; ok {
-		return *val, nil
-	}
-	return genai.Part{}, fmt.Errorf("artifact not found %s", name)
-}
-
-func (a *fakeArtifacts) LoadVersion(name string, version int) (genai.Part, error) {
-	return genai.Part{}, fmt.Errorf("not implemented in fakeArtifacts")
-}
-
-func (a *fakeArtifacts) List() ([]string, error) {
-	return nil, fmt.Errorf("not implemented in fakeArtifacts")
-}
-
-var _ agent.Artifacts = (*fakeArtifacts)(nil)
