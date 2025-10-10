@@ -31,7 +31,6 @@ type Agent interface {
 	Description() string
 	Run(InvocationContext) iter.Seq2[*session.Event, error]
 	SubAgents() []Agent
-	OutputKey() string
 
 	internal() *agent
 }
@@ -40,7 +39,6 @@ func New(cfg Config) (Agent, error) {
 	return &agent{
 		name:        cfg.Name,
 		description: cfg.Description,
-		outputKey:   cfg.OutputKey,
 		subAgents:   cfg.SubAgents,
 		beforeAgent: cfg.BeforeAgent,
 		run:         cfg.Run,
@@ -55,7 +53,6 @@ type Config struct {
 	Name        string
 	Description string
 	SubAgents   []Agent
-	OutputKey   string
 
 	BeforeAgent []BeforeAgentCallback
 	Run         func(InvocationContext) iter.Seq2[*session.Event, error]
@@ -80,8 +77,8 @@ type AfterAgentCallback func(CallbackContext, *session.Event, error) (*genai.Con
 type agent struct {
 	agentinternal.State
 
-	name, description, outputKey string
-	subAgents                    []Agent
+	name, description string
+	subAgents         []Agent
 
 	beforeAgent []BeforeAgentCallback
 	run         func(InvocationContext) iter.Seq2[*session.Event, error]
@@ -94,10 +91,6 @@ func (a *agent) Name() string {
 
 func (a *agent) Description() string {
 	return a.description
-}
-
-func (a *agent) OutputKey() string {
-	return a.outputKey
 }
 
 func (a *agent) SubAgents() []Agent {

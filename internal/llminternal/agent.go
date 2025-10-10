@@ -41,6 +41,8 @@ type State struct {
 	DisallowTransferToPeers  bool
 
 	OutputSchema *genai.Schema
+
+	OutputKey string
 }
 
 func (s *State) internal() *State { return s }

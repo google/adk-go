@@ -56,6 +56,7 @@ func New(cfg Config) (agent.Agent, error) {
 			IncludeContents:          cfg.IncludeContents,
 			Instruction:              cfg.Instruction,
 			GlobalInstruction:        cfg.GlobalInstruction,
+			OutputKey:                cfg.OutputKey,
 		},
 	}
 
@@ -66,7 +67,6 @@ func New(cfg Config) (agent.Agent, error) {
 		BeforeAgent: cfg.BeforeAgent,
 		Run:         a.run,
 		AfterAgent:  cfg.AfterAgent,
-		OutputKey:   cfg.OutputKey,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent: %w", err)
@@ -206,7 +206,7 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
 		return
 	}
-	if a.OutputKey() != "" && !event.Partial && event.Content != nil && len(event.Content.Parts) > 0 {
+	if a.OutputKey != "" && !event.Partial && event.Content != nil && len(event.Content.Parts) > 0 {
 		var sb strings.Builder
 		for _, part := range event.Content.Parts {
 			if part.Text != "" && !part.Thought {
@@ -229,6 +229,6 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 			event.Actions.StateDelta = make(map[string]any)
 		}
 
-		event.Actions.StateDelta[a.OutputKey()] = result
+		event.Actions.StateDelta[a.OutputKey] = result
 	}
 }
