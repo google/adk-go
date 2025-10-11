@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -25,7 +26,7 @@ type InvocationContext interface {
 	context.Context
 
 	Artifacts() Artifacts
-	Memory() Memory
+	Memory() memory.Memory
 	Session() session.Session
 
 	InvocationID() string
