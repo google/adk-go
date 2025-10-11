@@ -25,6 +25,11 @@ import (
 	"google.golang.org/genai"
 )
 
+type Memory interface {
+	AddSession(session session.Session) error
+	Search(query string) ([]Entry, error)
+}
+
 // InMemoryService returns a new in-memory implementation of the memory service. Thread-safe.
 func InMemoryService() Service {
 	return &inMemoryService{

@@ -116,7 +116,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		var memoryImpl agent.Memory = nil
+		var memoryImpl memory.Memory = nil
 		if r.memoryService != nil {
 			memoryImpl = &imemory.Memory{
 				Service:   r.memoryService,

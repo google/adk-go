@@ -66,11 +66,6 @@ type Artifacts interface {
 	List() ([]string, error)
 }
 
-type Memory interface {
-	AddSession(session session.Session) error
-	Search(query string) ([]memory.Entry, error)
-}
-
 type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)
 type AfterAgentCallback func(CallbackContext, *session.Event, error) (*genai.Content, error)
 
@@ -271,7 +266,7 @@ type invocationContext struct {
 
 	agent     Agent
 	artifacts Artifacts
-	memory    Memory
+	memory    memory.Memory
 	session   session.Session
 
 	invocationID string
@@ -288,7 +283,7 @@ func (c *invocationContext) Artifacts() Artifacts {
 	return c.artifacts
 }
 
-func (c *invocationContext) Memory() Memory {
+func (c *invocationContext) Memory() memory.Memory {
 	return c.memory
 }
 
