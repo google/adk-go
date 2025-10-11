@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -25,7 +26,7 @@ import (
 type InvocationContext interface {
 	context.Context
 
-	Artifacts() Artifacts
+	Artifacts() artifact.Artifacts
 	Memory() memory.Memory
 	Session() session.Session
 
@@ -56,7 +57,7 @@ type ReadonlyContext interface {
 type CallbackContext interface {
 	ReadonlyContext
 
-	Artifacts() Artifacts
+	Artifacts() artifact.Artifacts
 	State() session.State
 	Actions() *session.EventActions
 }

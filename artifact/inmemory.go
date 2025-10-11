@@ -29,6 +29,13 @@ import (
 	"rsc.io/ordered"
 )
 
+type Artifacts interface {
+	Save(name string, data genai.Part) error
+	Load(name string) (genai.Part, error)
+	LoadVersion(name string, version int) (genai.Part, error)
+	List() ([]string, error)
+}
+
 // inMemoryService is an in-memory implementation of the Service.
 // It is primarily for testing and demonstration purposes.
 type inMemoryService struct {

@@ -19,13 +19,14 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
 type InvocationContextParams struct {
-	Artifacts agent.Artifacts
+	Artifacts artifact.Artifacts
 	Memory    memory.Memory
 	Session   session.Session
 
@@ -51,7 +52,7 @@ type InvocationContext struct {
 	invocationID string
 }
 
-func (c *InvocationContext) Artifacts() agent.Artifacts {
+func (c *InvocationContext) Artifacts() artifact.Artifacts {
 	return c.params.Artifacts
 }
 

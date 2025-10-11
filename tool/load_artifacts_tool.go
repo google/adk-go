@@ -20,7 +20,7 @@ import (
 	"fmt"
 
 	"golang.org/x/sync/errgroup"
-	"google.golang.org/adk/agent"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -195,7 +195,7 @@ func (t *loadArtifactsTool) processLoadArtifactsFunctionCall(ctx Context, req *m
 	return nil
 }
 
-func (t *loadArtifactsTool) loadIndividualArtifact(_ context.Context, artifactsService agent.Artifacts, artifactName string) (*genai.Content, error) {
+func (t *loadArtifactsTool) loadIndividualArtifact(_ context.Context, artifactsService artifact.Artifacts, artifactName string) (*genai.Content, error) {
 	artifact, err := artifactsService.Load(artifactName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load artifact %s: %w", artifactName, err)

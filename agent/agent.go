@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 
+	"google.golang.org/adk/artifact"
 	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -57,13 +58,6 @@ type Config struct {
 	BeforeAgent []BeforeAgentCallback
 	Run         func(InvocationContext) iter.Seq2[*session.Event, error]
 	AfterAgent  []AfterAgentCallback
-}
-
-type Artifacts interface {
-	Save(name string, data genai.Part) error
-	Load(name string) (genai.Part, error)
-	LoadVersion(name string, version int) (genai.Part, error)
-	List() ([]string, error)
 }
 
 type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)
@@ -227,7 +221,7 @@ func (c *callbackContext) State() session.State {
 	return c.invocationContext.Session().State()
 }
 
-func (c *callbackContext) Artifacts() Artifacts {
+func (c *callbackContext) Artifacts() artifact.Artifacts {
 	return c.invocationContext.Artifacts()
 }
 
@@ -265,7 +259,7 @@ type invocationContext struct {
 	context.Context
 
 	agent     Agent
-	artifacts Artifacts
+	artifacts artifact.Artifacts
 	memory    memory.Memory
 	session   session.Session
 
@@ -279,7 +273,7 @@ func (c *invocationContext) Agent() Agent {
 	return c.agent
 }
 
-func (c *invocationContext) Artifacts() Artifacts {
+func (c *invocationContext) Artifacts() artifact.Artifacts {
 	return c.artifacts
 }
 

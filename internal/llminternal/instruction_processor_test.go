@@ -19,7 +19,6 @@ import (
 	"strings"
 	"testing"
 
-	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	artifactinternal "google.golang.org/adk/internal/artifact"
 	icontext "google.golang.org/adk/internal/context"
@@ -181,7 +180,7 @@ And another optional artifact:
 			sess := sessioninternal.NewMutableSession(sessionService, createResp.Session)
 
 			// Setup Artifacts
-			var artifacts agent.Artifacts
+			var artifacts artifact.Artifacts
 			if !tc.expectNilService {
 				artifacts = &artifactinternal.Artifacts{
 					Service:   artifact.InMemoryService(),
