@@ -106,7 +106,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 		})
 
-		var artifacts agent.Artifacts
+		var artifacts artifact.Artifacts
 		if r.artifactService != nil {
 			artifacts = &artifactinternal.Artifacts{
 				Service:   r.artifactService,

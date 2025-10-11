@@ -16,6 +16,7 @@ package context
 
 import (
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -57,7 +58,7 @@ func (c *callbackContext) State() session.State {
 	return c.invocationCtx.Session().State()
 }
 
-func (c *callbackContext) Artifacts() agent.Artifacts {
+func (c *callbackContext) Artifacts() artifact.Artifacts {
 	return c.invocationCtx.Artifacts()
 }
 

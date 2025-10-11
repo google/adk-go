@@ -17,12 +17,11 @@ package artifact
 import (
 	"context"
 
-	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/genai"
 )
 
-// Artifacts implements Artifacts
+// Artifacts implements artifact.Artifacts
 type Artifacts struct {
 	Service   artifact.Service
 	AppName   string
@@ -80,4 +79,4 @@ func (a *Artifacts) List() ([]string, error) {
 	return ListResponse.FileNames, nil
 }
 
-var _ agent.Artifacts = (*Artifacts)(nil)
+var _ artifact.Artifacts = (*Artifacts)(nil)
