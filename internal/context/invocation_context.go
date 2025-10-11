@@ -25,6 +25,7 @@ import (
 	"google.golang.org/genai"
 )
 
+// InvocationContextParams is the parameter for NewInvocationContext.
 type InvocationContextParams struct {
 	Artifacts artifact.Artifacts
 	Memory    memory.Memory
@@ -37,58 +38,59 @@ type InvocationContextParams struct {
 	RunConfig   *agent.RunConfig
 }
 
+// NewInvocationContext constructs a new agent.InvocationContext.
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
-	return &InvocationContext{
+	return &invocationContext{
 		Context:      ctx,
 		params:       params,
 		invocationID: "e-" + uuid.NewString(),
 	}
 }
 
-type InvocationContext struct {
+type invocationContext struct {
 	context.Context
 
 	params       InvocationContextParams
 	invocationID string
 }
 
-func (c *InvocationContext) Artifacts() artifact.Artifacts {
+func (c *invocationContext) Artifacts() artifact.Artifacts {
 	return c.params.Artifacts
 }
 
-func (c *InvocationContext) Agent() agent.Agent {
+func (c *invocationContext) Agent() agent.Agent {
 	return c.params.Agent
 }
 
-func (c *InvocationContext) Branch() string {
+func (c *invocationContext) Branch() string {
 	return c.params.Branch
 }
 
-func (c *InvocationContext) InvocationID() string {
+func (c *invocationContext) InvocationID() string {
 	return c.invocationID
 }
 
-func (c *InvocationContext) Memory() memory.Memory {
+func (c *invocationContext) Memory() memory.Memory {
 	return c.params.Memory
 }
 
-func (c *InvocationContext) Session() session.Session {
+func (c *invocationContext) Session() session.Session {
 	return c.params.Session
 }
 
-func (c *InvocationContext) UserContent() *genai.Content {
+func (c *invocationContext) UserContent() *genai.Content {
 	return c.params.UserContent
 }
 
-func (c *InvocationContext) RunConfig() *agent.RunConfig {
+func (c *invocationContext) RunConfig() *agent.RunConfig {
 	return c.params.RunConfig
 }
 
 // TODO: implement endInvocation
-func (c *InvocationContext) EndInvocation() {
+func (c *invocationContext) EndInvocation() {
 }
 
 // TODO: implement endInvocation
-func (c *InvocationContext) Ended() bool {
+func (c *invocationContext) Ended() bool {
 	return false
 }

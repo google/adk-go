@@ -14,7 +14,7 @@
 
 package agent
 
-// holds Agent internal state
+// Agent holds Agent internal state.
 type Agent interface {
 	internal() *State
 }
