@@ -19,9 +19,7 @@ import (
 	"fmt"
 	"iter"
 
-	"google.golang.org/adk/artifact"
 	agentinternal "google.golang.org/adk/internal/agent"
-	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -89,17 +87,9 @@ func (a *agent) SubAgents() []Agent {
 func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: verify&update the setup here. Should we branch etc.
-		ctx := &invocationContext{
-			Context:   ctx,
-			agent:     a,
-			artifacts: ctx.Artifacts(),
-			memory:    ctx.Memory(),
-			session:   ctx.Session(),
-
-			invocationID: ctx.InvocationID(),
-			branch:       ctx.Branch(),
-			userContent:  ctx.UserContent(),
-			runConfig:    ctx.RunConfig(),
+		ctx := &derivedInvocationContext{
+			InvocationContext: ctx,
+			agent:             a,
 		}
 
 		event, err := runBeforeAgentCallbacks(ctx)
@@ -140,12 +130,10 @@ func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
 func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
 
-	callbackCtx := &callbackContext{
-		Context:           ctx,
-		invocationContext: ctx,
-	}
+	// TODO(hyangah): verify if nil session.EventActions matches python's behavior.
+	callbackCtx := newCallbackContext(ctx, nil)
 
-	for _, callback := range ctx.Agent().internal().beforeAgent {
+	for _, callback := range agent.internal().beforeAgent {
 		content, err := callback(callbackCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run before agent callback: %w", err)
@@ -176,10 +164,8 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, agentError error) (*session.Event, error) {
 	agent := ctx.Agent()
 
-	callbackCtx := &callbackContext{
-		Context:           ctx,
-		invocationContext: ctx,
-	}
+	// TODO(hyangah): verify if nil session.EventActions matches python's behavior.
+	callbackCtx := newCallbackContext(ctx, nil)
 
 	for _, callback := range agent.internal().afterAgent {
 		newContent, err := callback(callbackCtx, agentEvent, agentError)
@@ -197,115 +183,28 @@ func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, ag
 	return agentEvent, agentError
 }
 
-// TODO: unify with internal/context.callbackContext
-
-type callbackContext struct {
-	context.Context
-	invocationContext InvocationContext
-	actions           *session.EventActions
+func newCallbackContext(ctx InvocationContext, actions *session.EventActions) CallbackContext {
+	return agentinternal.NewCallbackContext(contextAdapter{ctx}, actions)
 }
 
-func (c *callbackContext) Actions() *session.EventActions {
-	return c.actions
+type contextAdapter struct {
+	InvocationContext
 }
 
-func (c *callbackContext) AgentName() string {
-	return c.invocationContext.Agent().Name()
+func (adapter contextAdapter) AgentName() string {
+	return adapter.Agent().Name()
 }
 
-func (c *callbackContext) ReadonlyState() session.ReadonlyState {
-	return c.invocationContext.Session().State()
+func (w contextAdapter) Context() context.Context {
+	return w.InvocationContext
 }
 
-func (c *callbackContext) State() session.State {
-	return c.invocationContext.Session().State()
+type derivedInvocationContext struct {
+	InvocationContext
+
+	agent Agent
 }
 
-func (c *callbackContext) Artifacts() artifact.Artifacts {
-	return c.invocationContext.Artifacts()
-}
-
-func (c *callbackContext) InvocationID() string {
-	return c.invocationContext.InvocationID()
-}
-
-func (c *callbackContext) UserContent() *genai.Content {
-	return c.invocationContext.UserContent()
-}
-
-// AppName implements CallbackContext.
-func (c *callbackContext) AppName() string {
-	return c.invocationContext.Session().AppName()
-}
-
-// Branch implements CallbackContext.
-func (c *callbackContext) Branch() string {
-	return c.invocationContext.Branch()
-}
-
-// SessionID implements CallbackContext.
-func (c *callbackContext) SessionID() string {
-	return c.invocationContext.Session().ID()
-}
-
-// UserID implements CallbackContext.
-func (c *callbackContext) UserID() string {
-	return c.invocationContext.Session().UserID()
-}
-
-var _ CallbackContext = (*callbackContext)(nil)
-
-type invocationContext struct {
-	context.Context
-
-	agent     Agent
-	artifacts artifact.Artifacts
-	memory    memory.Memory
-	session   session.Session
-
-	invocationID string
-	branch       string
-	userContent  *genai.Content
-	runConfig    *RunConfig
-}
-
-func (c *invocationContext) Agent() Agent {
+func (c *derivedInvocationContext) Agent() Agent {
 	return c.agent
-}
-
-func (c *invocationContext) Artifacts() artifact.Artifacts {
-	return c.artifacts
-}
-
-func (c *invocationContext) Memory() memory.Memory {
-	return c.memory
-}
-
-func (c *invocationContext) Session() session.Session {
-	return c.session
-}
-
-func (c *invocationContext) InvocationID() string {
-	return c.invocationID
-}
-
-func (c *invocationContext) Branch() string {
-	return c.branch
-}
-
-func (c *invocationContext) UserContent() *genai.Content {
-	return c.userContent
-}
-
-func (c *invocationContext) RunConfig() *RunConfig {
-	return c.runConfig
-}
-
-// TODO: implement endInvocation
-func (c *invocationContext) EndInvocation() {
-}
-
-// TODO: implement endInvocation
-func (c *invocationContext) Ended() bool {
-	return false
 }

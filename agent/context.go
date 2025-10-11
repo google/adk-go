@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"google.golang.org/adk/artifact"
+	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -54,6 +55,8 @@ type ReadonlyContext interface {
 	Branch() string
 }
 
+var _ agentinternal.ReadonlyContext = ReadonlyContext(nil)
+
 type CallbackContext interface {
 	ReadonlyContext
 
@@ -61,3 +64,5 @@ type CallbackContext interface {
 	State() session.State
 	Actions() *session.EventActions
 }
+
+var _ agentinternal.CallbackContext = CallbackContext(nil)

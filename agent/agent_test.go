@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agent
+package agent_test
 
 import (
 	"iter"
@@ -20,6 +20,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/adk/agent"
+	contextinternal "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -30,15 +32,15 @@ func TestAgentCallbacks(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		beforeAgent  []BeforeAgentCallback
-		afterAgent   []AfterAgentCallback
+		beforeAgent  []agent.BeforeAgentCallback
+		afterAgent   []agent.AfterAgentCallback
 		wantLLMCalls int
 		wantEvents   []*session.Event
 	}{
 		{
 			name: "before agent callback runs, no llm calls",
-			beforeAgent: []BeforeAgentCallback{
-				func(ctx CallbackContext) (*genai.Content, error) {
+			beforeAgent: []agent.BeforeAgentCallback{
+				func(ctx agent.CallbackContext) (*genai.Content, error) {
 					return genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel), nil
 				},
 			},
@@ -53,13 +55,13 @@ func TestAgentCallbacks(t *testing.T) {
 		},
 		{
 			name: "no callback effect if callbacks return nil",
-			beforeAgent: []BeforeAgentCallback{
-				func(ctx CallbackContext) (*genai.Content, error) {
+			beforeAgent: []agent.BeforeAgentCallback{
+				func(ctx agent.CallbackContext) (*genai.Content, error) {
 					return nil, nil
 				},
 			},
-			afterAgent: []AfterAgentCallback{
-				func(CallbackContext, *session.Event, error) (*genai.Content, error) {
+			afterAgent: []agent.AfterAgentCallback{
+				func(agent.CallbackContext, *session.Event, error) (*genai.Content, error) {
 					return nil, nil
 				},
 			},
@@ -75,8 +77,8 @@ func TestAgentCallbacks(t *testing.T) {
 		},
 		{
 			name: "after agent callback replaces event content",
-			afterAgent: []AfterAgentCallback{
-				func(CallbackContext, *session.Event, error) (*genai.Content, error) {
+			afterAgent: []agent.AfterAgentCallback{
+				func(agent.CallbackContext, *session.Event, error) (*genai.Content, error) {
 					return genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel), nil
 				},
 			},
@@ -96,7 +98,7 @@ func TestAgentCallbacks(t *testing.T) {
 
 			custom := &customAgent{}
 
-			testAgent, err := New(Config{
+			testAgent, err := agent.New(agent.Config{
 				Name:        "test",
 				BeforeAgent: tt.beforeAgent,
 				Run:         custom.Run,
@@ -106,9 +108,7 @@ func TestAgentCallbacks(t *testing.T) {
 				t.Fatalf("failed to create agent: %v", err)
 			}
 
-			ctx := &invocationContext{
-				agent: testAgent,
-			}
+			ctx := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{Agent: testAgent})
 			var gotEvents []*session.Event
 			for event, err := range testAgent.Run(ctx) {
 				if err != nil {
@@ -140,7 +140,7 @@ type customAgent struct {
 	callCounter int
 }
 
-func (a *customAgent) Run(InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *customAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		a.callCounter++
 

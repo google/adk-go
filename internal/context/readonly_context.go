@@ -15,57 +15,10 @@
 package context
 
 import (
-	"context"
-
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
-	"google.golang.org/genai"
+	agentinternal "google.golang.org/adk/internal/agent"
 )
 
 func NewReadonlyContext(ctx agent.InvocationContext) agent.ReadonlyContext {
-	return &readonlyContext{
-		Context:           ctx,
-		invocationContext: ctx,
-	}
-}
-
-type readonlyContext struct {
-	context.Context
-	invocationContext agent.InvocationContext
-}
-
-// AppName implements agent.ReadonlyContext.
-func (c *readonlyContext) AppName() string {
-	return c.invocationContext.Session().AppName()
-}
-
-// Branch implements agent.ReadonlyContext.
-func (c *readonlyContext) Branch() string {
-	return c.invocationContext.Branch()
-}
-
-// SessionID implements agent.ReadonlyContext.
-func (c *readonlyContext) SessionID() string {
-	return c.invocationContext.Session().ID()
-}
-
-// UserID implements agent.ReadonlyContext.
-func (c *readonlyContext) UserID() string {
-	return c.invocationContext.Session().UserID()
-}
-
-func (c *readonlyContext) AgentName() string {
-	return c.invocationContext.Agent().Name()
-}
-
-func (c *readonlyContext) ReadonlyState() session.ReadonlyState {
-	return c.invocationContext.Session().State()
-}
-
-func (c *readonlyContext) InvocationID() string {
-	return c.invocationContext.InvocationID()
-}
-
-func (c *readonlyContext) UserContent() *genai.Content {
-	return c.invocationContext.UserContent()
+	return agentinternal.NewReadonlyContext(contextAdapter{ctx})
 }

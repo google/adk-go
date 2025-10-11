@@ -12,60 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package context provides helper functions for constructing ADK contexts.
 package context
 
 import (
+	"context"
+
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
+	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
+// NewCallbackContext returns a new agent.CallbackContext for callbacks
+// run in the context of the agent invocation.
 func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
-	return newCallbackContext(ctx)
+	return agentinternal.NewCallbackContext(contextAdapter{ctx}, &session.EventActions{})
 }
 
-func newCallbackContext(ctx agent.InvocationContext) *callbackContext {
-	rCtx := NewReadonlyContext(ctx)
-	return &callbackContext{
-		ReadonlyContext: rCtx,
-		invocationCtx:   ctx,
-		eventActions:    &session.EventActions{},
-	}
+// contextAdapter is an adapter that converts [agent.InvocationContext]
+// to [agentinternal.ContextBase].
+type contextAdapter struct {
+	agent.InvocationContext
 }
 
-// TODO: unify with agent.callbackContext
-
-type callbackContext struct {
-	agent.ReadonlyContext
-	invocationCtx agent.InvocationContext
-	eventActions  *session.EventActions
+func (a contextAdapter) AgentName() string {
+	return a.Agent().Name()
 }
 
-func (c *callbackContext) AgentName() string {
-	return c.invocationCtx.Agent().Name()
-}
-
-func (c *callbackContext) Actions() *session.EventActions {
-	return c.eventActions
-}
-
-func (c *callbackContext) ReadonlyState() session.ReadonlyState {
-	return c.invocationCtx.Session().State()
-}
-
-func (c *callbackContext) State() session.State {
-	return c.invocationCtx.Session().State()
-}
-
-func (c *callbackContext) Artifacts() artifact.Artifacts {
-	return c.invocationCtx.Artifacts()
-}
-
-func (c *callbackContext) InvocationID() string {
-	return c.invocationCtx.InvocationID()
-}
-
-func (c *callbackContext) UserContent() *genai.Content {
-	return c.invocationCtx.UserContent()
+func (a contextAdapter) Context() context.Context {
+	return a.InvocationContext
 }
