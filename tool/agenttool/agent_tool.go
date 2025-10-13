@@ -15,14 +15,12 @@
 package agenttool
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
-	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
@@ -39,17 +37,23 @@ type agentTool struct {
 	skipSummarization bool
 }
 
-// New creates a new agentTool.
-func New(agent agent.Agent, skipSummarization bool) tool.Tool {
+// New creates a new agent tool.
+// If cfg is nil, skipSummarization defaults to false.
+func New(agent agent.Agent, cfg *Config) tool.Tool {
+	if cfg == nil {
+		return &agentTool{
+			agent:             agent,
+			skipSummarization: false,
+		}
+	}
 	return &agentTool{
 		agent:             agent,
-		skipSummarization: skipSummarization,
+		skipSummarization: cfg.SkipSummarization,
 	}
 }
 
-// NewDefault creates a new agentTool with skipSummarization set to false.
-func NewDefault(agent agent.Agent) tool.Tool {
-	return New(agent, false)
+type Config struct {
+	SkipSummarization bool
 }
 
 // Name implements tool.Tool.
@@ -75,11 +79,8 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 	}
 
 	var agentInputSchema *genai.Schema
-	internalAgent, ok := t.agent.(agentinternal.Agent)
-	if !ok {
-		return nil
-	}
-	if agentinternal.Reveal(internalAgent).AgentType == agentinternal.TypeLLMAgent {
+	llmAgent, ok := t.agent.(llminternal.Agent)
+	if ok && llmAgent != nil {
 		// TODO - understand what build_function_declaration does in python and apply if needed.
 		internalLlmAgent, ok := t.agent.(llminternal.Agent)
 		if !ok {
@@ -118,12 +119,8 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (any, error) {
 	}
 
 	var agentInputSchema *genai.Schema
-	internalAgent, ok := t.agent.(agentinternal.Agent)
-	if !ok {
-		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
-	}
-	agentState := agentinternal.Reveal(internalAgent)
-	isLllmAgent := (agentState != nil && agentState.AgentType == agentinternal.TypeLLMAgent)
+	llmAgent, ok := t.agent.(llminternal.Agent)
+	isLllmAgent := (ok && llmAgent != nil)
 	if isLllmAgent {
 		internalLlmAgent, ok := t.agent.(llminternal.Agent)
 		if !ok {
@@ -189,7 +186,8 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (any, error) {
 		return nil, fmt.Errorf("failed to create session for sub-agent %s: %w", t.agent.Name(), err)
 	}
 
-	eventCh := r.Run(context.Background(), subSession.Session.UserID(), subSession.Session.ID(), content, &agent.RunConfig{
+	// TODO(dpasiukevich): verify agent loop termination.
+	eventCh := r.Run(toolCtx, subSession.Session.UserID(), subSession.Session.ID(), content, &agent.RunConfig{
 		StreamingMode: agent.StreamingModeSSE,
 	})
 
@@ -208,15 +206,13 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (any, error) {
 	}
 
 	lastContent := lastEvent.LLMResponse.Content
-	var outputText string
+	var textParts []string
 	for _, part := range lastContent.Parts {
 		if part != nil && part.Text != "" {
-			if outputText != "" {
-				outputText += "\n"
-			}
-			outputText += part.Text
+			textParts = append(textParts, part.Text)
 		}
 	}
+	outputText := strings.Join(textParts, "\n")
 
 	if outputText == "" {
 		return map[string]any{}, nil

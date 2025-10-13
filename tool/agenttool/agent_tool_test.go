@@ -42,7 +42,7 @@ func TestAgentTool_Declaration(t *testing.T) {
 		Required: []string{"request"},
 	}
 	agent := createAgent(t, inputSchema, nil)
-	agentTool := agenttool.NewDefault(agent)
+	agentTool := agenttool.New(agent, nil)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
 		t.Fatal("agentTool does not implement FunctionTool")
@@ -68,7 +68,7 @@ func TestAgentTool_Declaration(t *testing.T) {
 
 func TestAgentTool_DeclarationWithoutSchema(t *testing.T) {
 	agent := createAgent(t, nil, nil)
-	agentTool := agenttool.NewDefault(agent)
+	agentTool := agenttool.New(agent, nil)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
 		t.Fatal("agentTool does not implement FunctionTool")
@@ -102,7 +102,7 @@ func TestAgentTool_Run_InputValidation(t *testing.T) {
 		Required: []string{"is_magic", "name"},
 	}
 	agent := createAgent(t, inputSchema, nil)
-	agentTool := agenttool.NewDefault(agent)
+	agentTool := agenttool.New(agent, nil)
 	toolCtx := createToolContext(t, agent)
 
 	tests := []struct {
@@ -155,7 +155,7 @@ func TestAgentTool_Run_OutputValidation(t *testing.T) {
 	}
 
 	agent := createAgentWithModel(t, nil, outputSchema, testLLM)
-	agentTool := agenttool.NewDefault(agent)
+	agentTool := agenttool.New(agent, nil)
 	toolCtx := createToolContext(t, agent)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
@@ -190,7 +190,7 @@ func TestAgentTool_Run_Successful(t *testing.T) {
 		},
 	}
 	agent := createAgentWithModel(t, inputSchema, outputSchema, testLLM)
-	agentTool := agenttool.NewDefault(agent)
+	agentTool := agenttool.New(agent, nil)
 	toolCtx := createToolContext(t, agent)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
@@ -222,7 +222,7 @@ func TestAgentTool_Run_WithoutSchema(t *testing.T) {
 	}
 
 	agent := createAgentWithModel(t, nil, nil, testLLM)
-	agentTool := agenttool.NewDefault(agent)
+	agentTool := agenttool.New(agent, nil)
 	toolCtx := createToolContext(t, agent)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
@@ -246,7 +246,7 @@ func TestAgentTool_Run_EmptyModelResponse(t *testing.T) {
 		},
 	}
 	agent := createAgentWithModel(t, nil, nil, testLLM)
-	agentTool := agenttool.NewDefault(agent)
+	agentTool := agenttool.New(agent, nil)
 	toolCtx := createToolContext(t, agent)
 	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
 	if !ok {
@@ -273,7 +273,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 	toolCtx := createToolContext(t, agent)
 
 	// Test with skipSummarization = true
-	agentToolSkip := agenttool.New(agent, true)
+	agentToolSkip := agenttool.New(agent, &agenttool.Config{SkipSummarization: true})
 	actions := toolCtx.Actions()
 	toolImpl, ok := agentToolSkip.(toolinternal.FunctionTool)
 	if !ok {
@@ -288,7 +288,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 	}
 
 	// Test with skipSummarization = false
-	agentToolNoSkip := agenttool.New(agent, false)
+	agentToolNoSkip := agenttool.New(agent, &agenttool.Config{SkipSummarization: false})
 	toolImpl, ok = agentToolNoSkip.(toolinternal.FunctionTool)
 	if !ok {
 		t.Fatal("agentToolNoSkip does not implement FunctionTool")

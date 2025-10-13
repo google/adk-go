@@ -23,19 +23,6 @@ import (
 	"google.golang.org/genai"
 )
 
-// Type represents the data type in the schema.
-type Type string
-
-// Known schema types.
-const (
-	String  Type = "STRING"
-	Integer Type = "INTEGER"
-	Boolean Type = "BOOLEAN"
-	Number  Type = "NUMBER"
-	Array   Type = "ARRAY"
-	Object  Type = "OBJECT"
-)
-
 // matchType checks if the value matches the schema type.
 func matchType(value any, schema *genai.Schema, isInput bool) (bool, error) {
 	if schema == nil {
@@ -112,20 +99,20 @@ func ValidateMapOnSchema(args map[string]any, schema *genai.Schema, isInput bool
 		propSchema, exists := properties[key]
 		if !exists {
 			// Note: OpenAPI schemas can allow additional properties. This implementation assumes strictness.
-			return fmt.Errorf("%s arg: '%s' does not exist in schema properties", argType, key)
+			return fmt.Errorf("%s arg: '%q' does not exist in schema properties", argType, key)
 		}
 		ok, err := matchType(value, propSchema, isInput)
 		if err != nil {
-			return fmt.Errorf("%s arg: '%s' validation failed: %w", argType, key, err)
+			return fmt.Errorf("%s arg: '%q' validation failed: %w", argType, key, err)
 		}
 		if !ok {
-			return fmt.Errorf("%s arg: '%s' type mismatch, expected schema type %s, got value %v of type %T", argType, key, propSchema.Type, value, value)
+			return fmt.Errorf("%s arg: '%q' type mismatch, expected schema type %s, got value %v of type %T", argType, key, propSchema.Type, value, value)
 		}
 	}
 
 	for _, requiredKey := range schema.Required {
 		if _, exists := args[requiredKey]; !exists {
-			return fmt.Errorf("%s args does not contain required key: '%s'", argType, requiredKey)
+			return fmt.Errorf("%q args does not contain required key: '%q'", argType, requiredKey)
 		}
 	}
 	return nil

@@ -127,6 +127,7 @@ type Config struct {
 	// user messages, tool requests, etc.
 	IncludeContents string
 
+	// TODO(ngeorgy): consider to switch to jsonschema for input and output schema.
 	// The input schema when agent is used as a tool.
 	InputSchema *genai.Schema
 	// The output schema when agent replies.
