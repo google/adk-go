@@ -128,7 +128,7 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 	})
 
 	// serve web ui from the embedded resources
-	ui, err := fs.Sub(content, "distr/browser")
+	ui, err := fs.Sub(content, "distr")
 	if err != nil {
 		log.Fatalf("cannot prepare ADK Web UI files as embedded content: %v", err)
 	}
