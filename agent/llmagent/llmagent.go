@@ -40,10 +40,16 @@ func New(cfg Config) (agent.Agent, error) {
 		afterModelCallbacks = append(afterModelCallbacks, llminternal.AfterModelCallback(c))
 	}
 
+	beforeTool := make([]llminternal.BeforeToolCallback, 0, len(cfg.BeforeTool))
+	for _, c := range cfg.BeforeTool {
+		beforeTool = append(beforeTool, llminternal.BeforeToolCallback(c))
+	}
+
 	a := &llmAgent{
 		beforeModelCallbacks: beforeModelCallbacks,
 		model:                cfg.Model,
 		afterModelCallbacks:  afterModelCallbacks,
+		beforeTool:           beforeTool,
 		instruction:          cfg.Instruction,
 		inputSchema:          cfg.InputSchema,
 		outputSchema:         cfg.OutputSchema,
@@ -136,8 +142,9 @@ type Config struct {
 	// such as function tools, RAGs, agent transfer, etc.
 	OutputSchema *genai.Schema
 
-	// TODO: BeforeTool and AfterTool callbacks
-	Tools []tool.Tool
+	// TODO: AfterTool callbacks
+	BeforeTool []BeforeToolCallback
+	Tools      []tool.Tool
 	// Toolsets will be used by llmagent to extract tools and pass to the
 	// underlying LLM.
 	Toolsets []tool.Toolset
@@ -160,6 +167,8 @@ type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRe
 
 type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
+type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
+
 type llmAgent struct {
 	agent.Agent
 	llminternal.State
@@ -169,6 +178,8 @@ type llmAgent struct {
 	model                model.LLM
 	afterModelCallbacks  []llminternal.AfterModelCallback
 	instruction          string
+
+	beforeTool []llminternal.BeforeToolCallback
 
 	inputSchema  *genai.Schema
 	outputSchema *genai.Schema
@@ -194,6 +205,7 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		ResponseProcessors:   llminternal.DefaultResponseProcessors,
 		BeforeModelCallbacks: a.beforeModelCallbacks,
 		AfterModelCallbacks:  a.afterModelCallbacks,
+		BeforeToolCallback:   a.beforeTool,
 	}
 
 	return func(yield func(*session.Event, error) bool) {

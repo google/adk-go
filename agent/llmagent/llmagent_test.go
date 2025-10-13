@@ -303,6 +303,94 @@ func TestModelCallbacks(t *testing.T) {
 	}
 }
 
+func TestBeforeToolCallback(t *testing.T) {
+	model := newGeminiModel(t, modelName, nil)
+
+	type Args struct {
+		Seed int `json:"seed"`
+	}
+	type Result struct {
+		Number int `json:"number"`
+	}
+
+	handler := func(_ tool.Context, input Args) Result {
+		return Result{Number: 1}
+	}
+	rand, _ := tool.NewFunctionTool(tool.FunctionToolConfig{
+		Name:        "rand_number",
+		Description: "returns random number",
+	}, handler)
+
+	t.Run("callback_response_used", func(t *testing.T) {
+		agent, err := llmagent.New(llmagent.Config{
+			Name:                     "agent",
+			Description:              "random agent",
+			Model:                    model,
+			Instruction:              "output ONLY the result computed by the provided function",
+			DisallowTransferToParent: true,
+			DisallowTransferToPeers:  true,
+			Tools:                    []tool.Tool{rand},
+			BeforeTool: []llmagent.BeforeToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, nil
+				},
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return map[string]any{"number": "7"}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to create LLM Agent: %v", err)
+		}
+
+		runner := testutil.NewTestAgentRunner(t, agent)
+		stream := runner.Run(t, "session1", "Generate random number with 5 as a seed.")
+
+		ans, err := testutil.CollectTextParts(stream)
+		if err != nil || len(ans) == 0 {
+			t.Fatalf("agent returned (%v, %v), want result", ans, err)
+		}
+		if got, want := strings.TrimSpace(ans[len(ans)-1]), "7"; got != want {
+			t.Errorf("unexpected result from agent = (%v, %v), want ([%q], nil)", ans, err, want)
+		}
+	})
+
+	t.Run("extra_callback_skipped", func(t *testing.T) {
+		agent, err := llmagent.New(llmagent.Config{
+			Name:                     "agent",
+			Description:              "random agent",
+			Model:                    model,
+			Instruction:              "output ONLY the result computed by the provided function",
+			DisallowTransferToParent: true,
+			DisallowTransferToPeers:  true,
+			Tools:                    []tool.Tool{rand},
+			BeforeTool: []llmagent.BeforeToolCallback{
+				// Since it retursn non nil, the next callback won't be executed.
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return map[string]any{"number": "3"}, nil
+				},
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return map[string]any{"number": "7"}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to create LLM Agent: %v", err)
+		}
+
+		runner := testutil.NewTestAgentRunner(t, agent)
+		stream := runner.Run(t, "session1", "Generate random number with 5 as a seed.")
+
+		ans, err := testutil.CollectTextParts(stream)
+		if err != nil || len(ans) == 0 {
+			t.Fatalf("agent returned (%v, %v), want result", ans, err)
+		}
+		if got, want := strings.TrimSpace(ans[len(ans)-1]), "3"; got != want {
+			t.Errorf("unexpected result from agent = (%v, %v), want ([%q], nil)", ans, err, want)
+		}
+	})
+}
+
 func TestFunctionTool(t *testing.T) {
 	model := newGeminiModel(t, modelName, nil)
 

@@ -37,6 +37,8 @@ type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRe
 
 type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
+type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
+
 type Flow struct {
 	Model model.LLM
 
@@ -44,6 +46,7 @@ type Flow struct {
 	ResponseProcessors   []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error
 	BeforeModelCallbacks []BeforeModelCallback
 	AfterModelCallbacks  []AfterModelCallback
+	BeforeToolCallback   []BeforeToolCallback
 }
 
 var (
@@ -145,7 +148,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 
 			// Handle function calls.
 
-			ev, err := handleFunctionCalls(ctx, tools, resp)
+			ev, err := f.handleFunctionCalls(ctx, tools, resp)
 			if err != nil {
 				yield(nil, err)
 				return
@@ -342,7 +345,7 @@ func findLongRunningFunctionCallIDs(c *genai.Content, tools map[string]tool.Tool
 //
 // TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
-func handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse) (*session.Event, error) {
+func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse) (*session.Event, error) {
 	var fnResponseEvents []*session.Event
 
 	fnCalls := utils.FunctionCalls(resp.Content)
@@ -357,15 +360,21 @@ func handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.
 		}
 		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{})
 		//toolCtx := tool.
-		// TODO: agent.canonical_before_tool_callbacks
 		spans := telemetry.StartTrace(ctx, "execute_tool "+fnCall.Name)
-		result, err := funcTool.Run(toolCtx, fnCall.Args)
-		// genai.FunctionResponse expects to use "output" key to specify function output
-		// and "error" key to specify error details (if any). If "output" and "error" keys
-		// are not specified, then whole "response" is treated as function output.
-		// TODO(hakim): revisit the tool's function signature to handle error from user function better.
+
+		// If the result is present, it will be used instead of calling the actual tool.
+		result, err := f.invokeBeforeToolCallback(ctx, curTool, fnCall.Args, toolCtx)
 		if err != nil {
-			result = map[string]any{"error": fmt.Errorf("tool %q failed: %w", curTool.Name(), err)}
+			result = map[string]any{"error": fmt.Errorf("BeforeToolCallback failed: %w", err)}
+		} else if result == nil {
+			result, err = funcTool.Run(toolCtx, fnCall.Args)
+			// genai.FunctionResponse expects to use "output" key to specify function output
+			// and "error" key to specify error details (if any). If "output" and "error" keys
+			// are not specified, then whole "response" is treated as function output.
+			// TODO(hakim): revisit the tool's function signature to handle error from user function better.
+			if err != nil {
+				result = map[string]any{"error": fmt.Errorf("tool %q failed: %w", curTool.Name(), err)}
+			}
 		}
 
 		// TODO: agent.canonical_after_tool_callbacks
@@ -399,6 +408,27 @@ func handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.
 	spans := telemetry.StartTrace(ctx, "execute_tool (merged)")
 	telemetry.TraceMergedToolCalls(spans, mergedEvent)
 	return mergedEvent, nil
+}
+
+func (f *Flow) invokeBeforeToolCallback(ctx agent.InvocationContext, tool tool.Tool, fArgs map[string]any, toolCtx tool.Context) (any, error) {
+	llmAgent, ok := ctx.Agent().(Agent)
+	if !ok || llmAgent == nil {
+		return nil, nil
+	}
+	var result map[string]any
+	var err error
+	for _, callback := range f.BeforeToolCallback {
+		result, err = callback(toolCtx, tool, fArgs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute callback: %w", err)
+		}
+		// When a list of callbacks is provided, the callbacks will be called in the
+		// order they are listed while a callback returns nil.
+		if result != nil {
+			return result, err
+		}
+	}
+	return nil, nil
 }
 
 func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Event, error) {
