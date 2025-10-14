@@ -123,6 +123,7 @@ func (p *eventProcessor) makeTerminalEvents() []a2a.Event {
 	return result
 }
 
+//lint:ignore U1000
 func (p *eventProcessor) makeTaskFailedEvent(cause error, event *session.Event) *a2a.TaskStatusUpdateEvent {
 	meta := p.meta.eventMeta
 	if event != nil {

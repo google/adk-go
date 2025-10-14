@@ -25,11 +25,14 @@ import (
 type ExecutorConfig runner.Config
 
 type invocationMeta struct {
-	userID    string
+	//lint:ignore U1000
+	userID string
+	//lint:ignore U1000
 	sessionID string
 	eventMeta map[string]any
 }
 
+//lint:ignore U1000
 func toInvocationMeta(config *ExecutorConfig, reqCtx a2asrv.RequestContext) invocationMeta {
 	// TODO(yarolegovich): update once A2A provides auth data extraction from Context
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
