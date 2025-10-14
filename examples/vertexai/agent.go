@@ -33,6 +33,9 @@ import (
 
 const (
 	modelName = "gemini-2.5-flash"
+	projectID = "adk-go-samples-sandbox-390724"
+	location  = "us-central1"
+	engineId  = "5577659759986737152"
 )
 
 func main() {
@@ -42,7 +45,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
-	srvs, err := session.VertexAIService(ctx, modelName)
+	srvs, err := session.VertexAIService(location, projectID, engineId)
 	if err != nil {
 		log.Fatalf("Failed to create session service: %v", err)
 	}

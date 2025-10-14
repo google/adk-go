@@ -40,8 +40,8 @@ func InMemoryService() Service {
 }
 
 // VertexAIService returns VertextAiSessionService implementation.
-func VertexAIService(ctx context.Context, model string) (Service, error) {
-	return newVertexAiSessionService(ctx, model)
+func VertexAIService(location string, projectID string, resourceID string) (Service, error) {
+	return newVertexAiSessionService(location, projectID, resourceID)
 }
 
 // CreateRequest represents a request to create a session.
