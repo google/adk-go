@@ -31,11 +31,10 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/llm"
-	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptool"
 	"google.golang.org/genai"
@@ -56,6 +55,8 @@ func weatherFunc(ctx context.Context, req *mcp.CallToolRequest, input Input) (*m
 }
 
 const modelName = "gemini-2.5-flash"
+
+//go:generate go test -httprecord=.*
 
 func TestMCPToolSet(t *testing.T) {
 	const (
@@ -107,7 +108,7 @@ func TestMCPToolSet(t *testing.T) {
 	wantEvents := []*session.Event{
 		{
 			Author: "weather_time_agent",
-			LLMResponse: &llm.Response{
+			LLMResponse: &model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -123,7 +124,7 @@ func TestMCPToolSet(t *testing.T) {
 		},
 		{
 			Author: "weather_time_agent",
-			LLMResponse: &llm.Response{
+			LLMResponse: &model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -141,7 +142,7 @@ func TestMCPToolSet(t *testing.T) {
 		},
 		{
 			Author: "weather_time_agent",
-			LLMResponse: &llm.Response{
+			LLMResponse: &model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -155,7 +156,8 @@ func TestMCPToolSet(t *testing.T) {
 	}
 
 	if diff := cmp.Diff(wantEvents, gotEvents,
-		cmpopts.IgnoreFields(session.Event{}, "ID", "Time", "InvocationID"),
+		cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID"),
+		cmpopts.IgnoreFields(model.LLMResponse{}, "UsageMetadata", "AvgLogprobs", "FinishReason"),
 		cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
 		cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID"),
 		cmpopts.IgnoreFields(genai.Part{}, "ThoughtSignature")); diff != "" {
@@ -173,7 +175,7 @@ func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, 
 	return rr, recording
 }
 
-func newGeminiModel(t *testing.T, modelName string) *gemini.Model {
+func newGeminiModel(t *testing.T, modelName string) model.LLM {
 	apiKey := "fakeKey"
 	trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
 	recording := false
@@ -194,9 +196,9 @@ func newGeminiModel(t *testing.T, modelName string) *gemini.Model {
 
 func newTestAgentRunner(t *testing.T, agent agent.Agent) *testAgentRunner {
 	appName := "test_app"
-	sessionService := sessionservice.Mem()
+	sessionService := session.InMemoryService()
 
-	runner, err := runner.New(&runner.Config{
+	runner, err := runner.New(runner.Config{
 		AppName:        appName,
 		Agent:          agent,
 		SessionService: sessionService,
@@ -215,27 +217,25 @@ func newTestAgentRunner(t *testing.T, agent agent.Agent) *testAgentRunner {
 
 type testAgentRunner struct {
 	agent          agent.Agent
-	sessionService sessionservice.Service
-	lastSession    sessionservice.StoredSession
+	sessionService session.Service
+	lastSession    session.Session
 	appName        string
 	// TODO: move runner definition to the adk package and it's a part of public api, but the logic to the internal runner
 	runner *runner.Runner
 }
 
-func (r *testAgentRunner) session(t *testing.T, appName, userID, sessionID string) (sessionservice.StoredSession, error) {
+func (r *testAgentRunner) session(t *testing.T, appName, userID, sessionID string) (session.Session, error) {
 	ctx := t.Context()
-	if last := r.lastSession; last != nil && last.ID().SessionID == sessionID {
-		resp, err := r.sessionService.Get(ctx, &sessionservice.GetRequest{
-			ID: session.ID{
-				AppName:   "test_app",
-				UserID:    "test_user",
-				SessionID: sessionID,
-			},
+	if last := r.lastSession; last != nil && last.ID() == sessionID {
+		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
+			AppName:   "test_app",
+			UserID:    "test_user",
+			SessionID: sessionID,
 		})
 		r.lastSession = resp.Session
 		return resp.Session, err
 	}
-	resp, err := r.sessionService.Create(ctx, &sessionservice.CreateRequest{
+	resp, err := r.sessionService.Create(ctx, &session.CreateRequest{
 		AppName:   "test_app",
 		UserID:    "test_user",
 		SessionID: sessionID,
@@ -260,5 +260,5 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 		content = genai.NewContentFromText(newMessage, genai.RoleUser)
 	}
 
-	return r.runner.Run(ctx, userID, session.ID().SessionID, content, &runner.RunConfig{})
+	return r.runner.Run(ctx, userID, session.ID(), content, &agent.RunConfig{})
 }

@@ -15,29 +15,46 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/restapi/models"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
 )
 
 // DebugAPIController is the controller for the Debug API.
 type DebugAPIController struct {
-	sessionService sessionservice.Service
+	sessionService session.Service
 	agentloader    services.AgentLoader
+	spansExporter  *services.APIServerSpanExporter
 }
 
-func NewDebugAPIController(sessionService sessionservice.Service, agentLoader services.AgentLoader) *DebugAPIController {
-	return &DebugAPIController{sessionService: sessionService, agentloader: agentLoader}
+func NewDebugAPIController(sessionService session.Service, agentLoader services.AgentLoader, spansExporter *services.APIServerSpanExporter) *DebugAPIController {
+	return &DebugAPIController{
+		sessionService: sessionService,
+		agentloader:    agentLoader,
+		spansExporter:  spansExporter,
+	}
 }
 
 // TraceDict returns the debug information for the session in form of dictionary.
-func (*DebugAPIController) TraceDict(rw http.ResponseWriter, req *http.Request) {
-	unimplemented(rw, req)
+func (c *DebugAPIController) TraceDict(rw http.ResponseWriter, req *http.Request) {
+	params := mux.Vars(req)
+	eventID := params["event_id"]
+	if eventID == "" {
+		http.Error(rw, "event_id parameter is required", http.StatusBadRequest)
+		return
+	}
+	traceDict := c.spansExporter.GetTraceDict()
+	eventDict, ok := traceDict[eventID]
+	if !ok {
+		http.Error(rw, fmt.Sprintf("event not found: %s", eventID), http.StatusNotFound)
+		return
+	}
+	EncodeJSONResponse(eventDict, http.StatusOK, rw)
 }
 
 // EventGraph returns the debug information for the session and session events in form of graph.
@@ -48,12 +65,10 @@ func (c *DebugAPIController) EventGraph(rw http.ResponseWriter, req *http.Reques
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
-	resp, err := c.sessionService.Get(req.Context(), &sessionservice.GetRequest{
-		ID: session.ID{
-			AppName:   sessionID.AppName,
-			UserID:    sessionID.UserID,
-			SessionID: sessionID.ID,
-		},
+	resp, err := c.sessionService.Get(req.Context(), &session.GetRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
 	})
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusBadRequest)

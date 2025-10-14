@@ -80,7 +80,7 @@ func (*set) IsLongRunning() bool {
 }
 
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
-func (s *set) Tools(ctx agent.Context) ([]tool.Tool, error) {
+func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	session, err := s.getSession(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get MCP session: %w", err)

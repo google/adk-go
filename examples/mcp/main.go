@@ -19,15 +19,28 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/oauth2"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/examples"
-	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptool"
 	"google.golang.org/genai"
 )
+
+// This example demonstrates 2 ways to use MCP tools with ADK:
+// To select between two, set AGENT_MODE="local" or "github" ("local" is default).
+//
+// 1. in-memory MCP server:
+//   - define golang function (in this case -- GetWeather)
+//   - register it as MCP tool in the in-memory MCP server, using mcp.NewServer and mcp.Tool
+//
+// 2. GitHub's remote MCP server (https://github.com/github/github-mcp-server):
+//   - create http.Client with authenticated transport. In this case it's oauth2 transport with GitHub personal access token.
+//   - use `export GITHUB_PAT=...` to set GitHub personal access token.
 
 type Input struct {
 	City string `json:"city" jsonschema:"city name"`
@@ -43,18 +56,32 @@ func GetWeather(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mc
 	}, nil
 }
 
-func main() {
-	ctx := context.Background()
-
+func localMCPTransport() mcp.Transport {
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 
 	// Run in-memory MCP server.
 	server := mcp.NewServer(&mcp.Implementation{Name: "weather_server", Version: "v1.0.0"}, nil)
 	mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: "returns weather in the given city"}, GetWeather)
-	_, err := server.Connect(ctx, serverTransport, nil)
+	_, err := server.Connect(context.Background(), serverTransport, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	return clientTransport
+}
+
+func githubMCPTransport() mcp.Transport {
+	ts := oauth2.StaticTokenSource(
+		&oauth2.Token{AccessToken: os.Getenv("GITHUB_PAT")},
+	)
+	return &mcp.StreamableClientTransport{
+		Endpoint:   "https://api.githubcopilot.com/mcp/",
+		HTTPClient: oauth2.NewClient(context.Background(), ts),
+	}
+}
+
+func main() {
+	ctx := context.Background()
 
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
 		APIKey: os.Getenv("GEMINI_API_KEY"),
@@ -63,8 +90,15 @@ func main() {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
+	var transport mcp.Transport
+	if strings.ToLower(os.Getenv("AGENT_MODE")) == "github" {
+		transport = githubMCPTransport()
+	} else {
+		transport = localMCPTransport()
+	}
+
 	mcpToolSet, err := mcptool.NewSet(mcptool.SetConfig{
-		Transport: clientTransport,
+		Transport: transport,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create MCP tool set: %v", err)
@@ -72,10 +106,10 @@ func main() {
 
 	// Create LLMAgent with MCP tool set
 	agent, err := llmagent.New(llmagent.Config{
-		Name:        "weather_time_agent",
+		Name:        "helper_agent",
 		Model:       model,
-		Description: "Agent to answer questions about the time and weather in a city.",
-		Instruction: "I can answer your questions about the time and weather in a city. Call `get_weather` tool for all input even if it's an invalid city.",
+		Description: "Helper agent.",
+		Instruction: "You are a helpful assistant that helps users with various tasks.",
 		Tools: []tool.Tool{
 			mcpToolSet,
 		},
@@ -84,5 +118,5 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, agent)
+	examples.Run(ctx, agent, nil)
 }

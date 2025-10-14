@@ -17,10 +17,9 @@ package models
 import (
 	"fmt"
 	"maps"
-	"time"
 
 	"github.com/mitchellh/mapstructure"
-	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/session"
 )
 
 // Session represents an agent's session.
@@ -28,7 +27,7 @@ type Session struct {
 	ID        string         `json:"id"`
 	AppName   string         `json:"appName"`
 	UserID    string         `json:"userId"`
-	UpdatedAt time.Time      `json:"lastUpdateTime"`
+	UpdatedAt int64          `json:"lastUpdateTime"`
 	Events    []Event        `json:"events"`
 	State     map[string]any `json:"state"`
 }
@@ -66,8 +65,7 @@ func SessionIDFromHTTPParameters(vars map[string]string) (SessionID, error) {
 	return sessionID, nil
 }
 
-func FromSession(session sessionservice.StoredSession) (Session, error) {
-	id := session.ID()
+func FromSession(session session.Session) (Session, error) {
 	state := map[string]any{}
 	maps.Insert(state, session.State().All())
 	events := []Event{}
@@ -75,10 +73,10 @@ func FromSession(session sessionservice.StoredSession) (Session, error) {
 		events = append(events, FromSessionEvent(*event))
 	}
 	mappedSession := Session{
-		ID:        id.SessionID,
-		AppName:   id.AppName,
-		UserID:    id.UserID,
-		UpdatedAt: session.Updated(),
+		ID:        session.ID(),
+		AppName:   session.AppName(),
+		UserID:    session.UserID(),
+		UpdatedAt: session.LastUpdateTime().Unix(),
 		Events:    events,
 		State:     state,
 	}
@@ -95,7 +93,7 @@ func (s Session) Validate() error {
 	if s.ID == "" {
 		return fmt.Errorf("session_id is empty in received session")
 	}
-	if s.UpdatedAt.IsZero() {
+	if s.UpdatedAt == 0 {
 		return fmt.Errorf("updated_at is empty")
 	}
 	if s.State == nil {

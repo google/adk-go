@@ -21,8 +21,9 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
@@ -80,9 +81,24 @@ func (t *loadArtifactsTool) Run(ctx Context, args any) (any, error) {
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
 	}
-	artifactNames, ok := m["artifact_names"].([]string)
-	if !ok {
+	var artifactNames []string
+	artifactNamesRaw, exists := m["artifact_names"]
+	if !exists {
 		artifactNames = []string{}
+	} else {
+		// In order to cast properly from []any to []string we're gonna marshal and then
+		// unmarshal the artifact_names value.
+		artifactNamesJson, err := json.Marshal(artifactNamesRaw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal artifact_names to JSON: %w", err)
+		}
+		if err := json.Unmarshal(artifactNamesJson, &artifactNames); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal artifact_names from JSON to []string: %w", err)
+		}
+		// Ensure the slice is not nil if it's empty
+		if artifactNames == nil {
+			artifactNames = []string{}
+		}
 	}
 	result := map[string]any{
 		"artifact_names": artifactNames,
@@ -91,32 +107,17 @@ func (t *loadArtifactsTool) Run(ctx Context, args any) (any, error) {
 }
 
 // ProcessRequest implements tool.Tool.
-func (t *loadArtifactsTool) ProcessRequest(ctx Context, req *llm.Request) error {
-	if req.Tools == nil {
-		req.Tools = make(map[string]any)
+func (t *loadArtifactsTool) ProcessRequest(ctx Context, req *model.LLMRequest) error {
+	if err := toolutils.PackTool(req, t); err != nil {
+		return err
 	}
-	name := t.Name()
-	if _, ok := req.Tools[name]; ok {
-		return fmt.Errorf("duplicate tool: %q", name)
-	}
-	req.Tools[name] = t
-
-	if req.GenerateConfig == nil {
-		req.GenerateConfig = &genai.GenerateContentConfig{}
-	}
-	if decl := t.Declaration(); decl != nil {
-		req.GenerateConfig.Tools = append(req.GenerateConfig.Tools, &genai.Tool{
-			FunctionDeclarations: []*genai.FunctionDeclaration{decl},
-		})
-	}
-
 	if err := t.appendInitialInstructions(ctx, req); err != nil {
 		return err
 	}
 	return t.processLoadArtifactsFunctionCall(ctx, req)
 }
 
-func (t *loadArtifactsTool) appendInitialInstructions(ctx Context, req *llm.Request) error {
+func (t *loadArtifactsTool) appendInitialInstructions(ctx Context, req *model.LLMRequest) error {
 	artifactNames, err := ctx.Artifacts().List()
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", err)
@@ -132,13 +133,15 @@ func (t *loadArtifactsTool) appendInitialInstructions(ctx Context, req *llm.Requ
 		"You have a list of artifacts:\n  %s\n\nWhen the user asks questions about"+
 			" any of the artifacts, you should call the `load_artifacts` function"+
 			" to load the artifact. Do not generate any text other than the"+
-			" function call.", string(artifactNamesJSON))
+			" function call. Whenever you are asked about artifacts, you"+
+			" should first load it. You must always load an artifact to access its"+
+			" content, even if it has been loaded before.", string(artifactNamesJSON))
 
 	utils.AppendInstructions(req, instructions)
 	return nil
 }
 
-func (t *loadArtifactsTool) processLoadArtifactsFunctionCall(ctx Context, req *llm.Request) error {
+func (t *loadArtifactsTool) processLoadArtifactsFunctionCall(ctx Context, req *model.LLMRequest) error {
 	if len(req.Contents) == 0 {
 		return nil
 	}

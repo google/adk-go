@@ -24,7 +24,7 @@ import (
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -61,7 +61,7 @@ import (
 //
 // TODO: implement it in the runners package and update this doc.
 
-func AgentTransferRequestProcessor(ctx agent.Context, req *llm.Request) error {
+func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// TODO: support agent types other than LLMAgent, that have parent/subagents?
 	agent := ctx.Agent()
 	if !shouldUseAutoFlow(agent) {
@@ -122,7 +122,7 @@ func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
 }
 
 // ProcessRequest implements types.Tool.
-func (t *TransferToAgentTool) ProcessRequest(ctx tool.Context, req *llm.Request) error {
+func (t *TransferToAgentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return appendTools(req, t)
 }
 
@@ -139,7 +139,7 @@ func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (any, error) {
 	if !ok || agent == "" {
 		return nil, fmt.Errorf("empty agent_name: %v", args)
 	}
-	ctx.EventActions().TransferToAgent = agent
+	ctx.Actions().TransferToAgent = agent
 	return map[string]any{}, nil
 }
 
@@ -149,16 +149,20 @@ func transferTargets(agent, parent agent.Agent) []agent.Agent {
 	targets := slices.Clone(agent.SubAgents())
 
 	llmAgent := asLLMAgent(agent)
+	llmParent := asLLMAgent(parent)
 
-	if !llmAgent.internal().DisallowTransferToParent && parent != nil {
+	if llmParent == nil {
+		return targets
+	}
+
+	if !llmAgent.internal().DisallowTransferToParent {
 		targets = append(targets, parent)
 	}
 	// For peer-agent transfers, it's only enabled when all below conditions are met:
 	// - the parent agent is also of AutoFlow.
 	// - DisallowTransferToPeers is false.
 	if !llmAgent.internal().DisallowTransferToPeers {
-		llmParent := asLLMAgent(parent)
-		if llmParent != nil && shouldUseAutoFlow(parent) {
+		if shouldUseAutoFlow(parent) {
 			for _, peer := range parent.SubAgents() {
 				if peer.Name() != agent.Name() {
 					targets = append(targets, peer)
@@ -189,10 +193,12 @@ func shouldUseAutoFlow(agent agent.Agent) bool {
 
 // AppendTools appends the tools to the request.
 // Appending duplicate tools or nameless tools is an error.
-func appendTools(r *llm.Request, tools ...tool.Tool) error {
+func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 	if r.Tools == nil {
 		r.Tools = make(map[string]any)
 	}
+
+	var declarations []*genai.FunctionDeclaration
 
 	for i, tool := range tools {
 		if tool == nil || tool.Name() == "" {
@@ -204,18 +210,33 @@ func appendTools(r *llm.Request, tools ...tool.Tool) error {
 		}
 		r.Tools[name] = tool
 
-		// If the tool is a function tool, add its declaration to GenerateConfig.Tools.
 		if fnTool, ok := tool.(toolinternal.FunctionTool); ok {
-			if r.GenerateConfig == nil {
-				r.GenerateConfig = &genai.GenerateContentConfig{}
-			}
 			if decl := fnTool.Declaration(); decl != nil {
 				// TODO: verify for duplicates.
-				r.GenerateConfig.Tools = append(r.GenerateConfig.Tools, &genai.Tool{
-					FunctionDeclarations: []*genai.FunctionDeclaration{decl},
-				})
+				declarations = append(declarations, decl)
 			}
 		}
+	}
+	if len(declarations) == 0 {
+		return nil
+	}
+	if r.Config == nil {
+		r.Config = &genai.GenerateContentConfig{}
+	}
+	// Find an existing genai.Tool with FunctionDeclarations
+	var funcTool *genai.Tool
+	for _, gt := range r.Config.Tools {
+		if gt.FunctionDeclarations != nil {
+			funcTool = gt
+			break
+		}
+	}
+	if funcTool != nil {
+		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, declarations...)
+	} else {
+		r.Config.Tools = append(r.Config.Tools, &genai.Tool{
+			FunctionDeclarations: declarations,
+		})
 	}
 	return nil
 }

@@ -29,8 +29,8 @@ import (
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 
-	"google.golang.org/adk/llm"
-	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -86,6 +86,52 @@ func TestLLMAgent(t *testing.T) {
 	}
 }
 
+func TestLLMAgentStreamingModeSSE(t *testing.T) {
+	model := newGeminiModel(t, "gemini-2.5-flash", nil)
+	a, err := llmagent.New(llmagent.Config{
+		Name:                     "calculator",
+		Description:              "calculating agent",
+		Model:                    model,
+		Instruction:              "Think deep. Always double check the answer before making the conclusion.",
+		DisallowTransferToParent: true,
+		DisallowTransferToPeers:  true,
+		GenerateContentConfig: &genai.GenerateContentConfig{
+			ThinkingConfig: &genai.ThinkingConfig{
+				IncludeThoughts: true, // can trigger multiple message.
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLLMAgent failed: %v", err)
+	}
+	testRunner := testutil.NewTestAgentRunner(t, a)
+	stream := testRunner.RunContentWithConfig(t, "test_session", genai.NewContentFromText("What is the sum of the first 50 prime numbers?", "user"), &agent.RunConfig{StreamingMode: agent.StreamingModeSSE})
+	events, err := testutil.CollectEvents(stream)
+	gotThought := false
+	numContents := 0
+	for _, e := range events {
+		t.Logf("event: %v", e)
+		if e.LLMResponse == nil || e.LLMResponse.Content == nil {
+			continue
+		}
+		numContents++
+		for _, p := range e.LLMResponse.Content.Parts {
+			if p.Thought {
+				gotThought = true
+			}
+		}
+	}
+	if err != nil {
+		t.Fatalf("stream = (_, %v), want (_, nil)", err)
+	}
+	if numContents <= 1 {
+		t.Errorf("stream returned %d events with content, want more than 1 event", numContents)
+	}
+	if !gotThought {
+		t.Error("stream returned no thought, want thought")
+	}
+}
+
 func TestModelCallbacks(t *testing.T) {
 	t.Parallel()
 
@@ -100,7 +146,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback doesn't modify anything",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.Context, llmRequest *llm.Request) (*llm.Response, error) {
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return nil, nil
 				},
 			},
@@ -114,10 +160,10 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns an error",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.Context, llmRequest *llm.Request) (*llm.Response, error) {
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
 				},
-				func(ctx agent.Context, llmRequest *llm.Request) (*llm.Response, error) {
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrHijacked)
 				},
 			},
@@ -129,13 +175,13 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns new LLMResponse",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.Context, llmRequest *llm.Request) (*llm.Response, error) {
-					return &llm.Response{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
 					}, nil
 				},
-				func(ctx agent.Context, llmRequest *llm.Request) (*llm.Response, error) {
-					return &llm.Response{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
 						Content: genai.NewContentFromText("unexpected text", genai.RoleModel),
 					}, nil
 				},
@@ -150,8 +196,8 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns both new LLMResponse and error",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.Context, llmRequest *llm.Request) (*llm.Response, error) {
-					return &llm.Response{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
 					}, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
 				},
@@ -164,7 +210,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback doesn't modify anything",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
+				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return nil, nil
 				},
 			},
@@ -178,13 +224,13 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns new LLMResponse",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
-					return &llm.Response{
+				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
 					}, nil
 				},
-				func(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
-					return &llm.Response{
+				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
 						Content: genai.NewContentFromText("unexpected text", genai.RoleModel),
 					}, nil
 				},
@@ -199,10 +245,10 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns error",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
+				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrNoCookie)
 				},
-				func(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
+				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrHijacked)
 				},
 			},
@@ -214,8 +260,8 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns both new LLMResponse and error",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
-					return &llm.Response{
+				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
 					}, fmt.Errorf("error from after_model_callback: %w", http.ErrNoCookie)
 				},
@@ -227,12 +273,12 @@ func TestModelCallbacks(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			model := &testutil.MockModel{
+			testLLM := &testutil.MockModel{
 				Responses: tc.llmResponses,
 			}
 			a, err := llmagent.New(llmagent.Config{
 				Name:        "hello_world_agent",
-				Model:       model,
+				Model:       testLLM,
 				BeforeModel: tc.beforeModelCallbacks,
 				AfterModel:  tc.afterModelCallbacks,
 			})
@@ -325,7 +371,7 @@ func TestAgentTransfer(t *testing.T) {
 		)
 	}
 	// returns a model that returns the prepopulated resp one by one.
-	testModel := func(resp ...*genai.Content) llm.Model {
+	testModel := func(resp ...*genai.Content) model.LLM {
 		return &testutil.MockModel{Responses: resp}
 	}
 
@@ -503,7 +549,7 @@ func TestAgentTransfer(t *testing.T) {
 	//   - test_auto_to_loop
 }
 
-func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper) *gemini.Model {
+func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper) model.LLM {
 	apiKey := "fakeKey"
 	if transport == nil { // use httprr
 		trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))

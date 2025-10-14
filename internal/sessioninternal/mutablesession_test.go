@@ -24,13 +24,12 @@ import (
 
 	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 )
 
-func createMutableSession(ctx context.Context, t *testing.T, sessionID string, initialData map[string]any) (*sessioninternal.MutableSession, sessionservice.Service) {
+func createMutableSession(ctx context.Context, t *testing.T, sessionID string, initialData map[string]any) (*sessioninternal.MutableSession, session.Service) {
 	t.Helper()
-	service := sessionservice.Mem()
-	req := &sessionservice.CreateRequest{
+	service := session.InMemoryService()
+	req := &session.CreateRequest{
 		AppName:   "testApp",
 		UserID:    "testUser",
 		SessionID: sessionID,
@@ -92,7 +91,11 @@ func TestMutableSession_Set_Persistence(t *testing.T) {
 		t.Fatalf("Set(%q, %v) failed: %v", testKey, testValue, err)
 	}
 
-	req := &sessionservice.GetRequest{ID: ms.ID()}
+	req := &session.GetRequest{
+		AppName:   ms.AppName(),
+		UserID:    ms.UserID(),
+		SessionID: ms.ID(),
+	}
 	getResp, err := service.Get(ctx, req)
 	if err != nil {
 		t.Fatalf("service.Get failed: %v", err)
@@ -152,11 +155,10 @@ func TestMutableSession_All(t *testing.T) {
 
 func TestMutableSession_PassthroughMethods(t *testing.T) {
 	ctx := context.Background()
-	sessionID := "testPassthrough"
-	testID := session.ID{AppName: "testApp", UserID: "testUser", SessionID: sessionID}
+	appName, userID, sessionID := "testApp", "testUser", "testPassthrough"
 
-	service := sessionservice.Mem()
-	createReq := &sessionservice.CreateRequest{AppName: testID.AppName, UserID: testID.UserID, SessionID: sessionID}
+	service := session.InMemoryService()
+	createReq := &session.CreateRequest{AppName: appName, UserID: userID, SessionID: sessionID}
 	createResp, err := service.Create(ctx, createReq)
 	if err != nil {
 		t.Fatalf("Failed to create session: %v", err)
@@ -164,13 +166,21 @@ func TestMutableSession_PassthroughMethods(t *testing.T) {
 
 	ms := sessioninternal.NewMutableSession(service, createResp.Session)
 
-	if got := ms.ID(); !reflect.DeepEqual(got, testID) {
-		t.Errorf("ID() = %v, want %v", got, testID)
+	if got := ms.ID(); !reflect.DeepEqual(got, sessionID) {
+		t.Errorf("ID() = %v, want %v", got, sessionID)
 	}
 
-	wantUpdatedTime := createResp.Session.Updated()
-	if got := ms.Updated(); !got.Equal(wantUpdatedTime) || got.IsZero() {
-		t.Errorf("Updated() = %v, want %v (non-zero)", got, wantUpdatedTime)
+	if got := ms.AppName(); !reflect.DeepEqual(got, appName) {
+		t.Errorf("AppName() = %v, want %v", got, appName)
+	}
+
+	if got := ms.UserID(); !reflect.DeepEqual(got, userID) {
+		t.Errorf("UserID() = %v, want %v", got, userID)
+	}
+
+	wantUpdatedTime := createResp.Session.LastUpdateTime()
+	if got := ms.LastUpdateTime(); !got.Equal(wantUpdatedTime) || got.IsZero() {
+		t.Errorf("LastUpdateTime() = %v, want %v (non-zero)", got, wantUpdatedTime)
 	}
 
 	if ms.Events() == nil {

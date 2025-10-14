@@ -21,8 +21,8 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/llm"
-	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/genai"
 )
 
@@ -153,7 +153,7 @@ The sun is sphere-shaped and very hot.
 Here are the question-answer pair and the reviewer-provided findings:
 `
 
-func afterCritic(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
+func afterCritic(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 	if llmResponse == nil || llmResponse.Content == nil || llmResponse.Content.Parts == nil || llmResponse.GroundingMetadata == nil {
 		return llmResponse, nil
 	}
@@ -204,7 +204,7 @@ func afterCritic(ctx agent.Context, llmResponse *llm.Response, llmResponseError 
 	return llmResponse, nil
 }
 
-func afterReviser(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
+func afterReviser(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 	if llmResponse.Content == nil || llmResponse.Content.Parts == nil {
 		return llmResponse, nil
 	}

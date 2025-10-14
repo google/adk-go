@@ -19,26 +19,26 @@ import (
 	"reflect"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
 // basicRequestProcessor populates the LLMRequest
 // with the agent's LLM generation configs.
-func basicRequestProcessor(ctx agent.Context, req *llm.Request) error {
+func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// reference: adk-python src/google/adk/flows/llm_flows/basic.py
 
 	llmAgent := asLLMAgent(ctx.Agent())
 	if llmAgent == nil {
 		return nil // do nothing.
 	}
-	req.GenerateConfig = clone(llmAgent.internal().GenerateContentConfig)
-	if req.GenerateConfig == nil {
-		req.GenerateConfig = &genai.GenerateContentConfig{}
+	req.Config = clone(llmAgent.internal().GenerateContentConfig)
+	if req.Config == nil {
+		req.Config = &genai.GenerateContentConfig{}
 	}
 	if llmAgent.internal().OutputSchema != nil {
-		req.GenerateConfig.ResponseSchema = llmAgent.internal().OutputSchema
-		req.GenerateConfig.ResponseMIMEType = "application/json"
+		req.Config.ResponseSchema = llmAgent.internal().OutputSchema
+		req.Config.ResponseMIMEType = "application/json"
 	}
 	// TODO: missing features
 	//  populate LLMRequest LiveConnectConfig setting

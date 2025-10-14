@@ -16,35 +16,35 @@ package llminternal
 
 import (
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 )
 
-func identityRequestProcessor(ctx agent.Context, req *llm.Request) error {
+func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/identity.py)
 	return nil
 }
 
-func nlPlanningRequestProcessor(ctx agent.Context, req *llm.Request) error {
+func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_nl_plnning.py)
 	return nil
 }
 
-func codeExecutionRequestProcessor(ctx agent.Context, req *llm.Request) error {
+func codeExecutionRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_code_execution.py)
 	return nil
 }
 
-func authPreprocesssor(ctx agent.Context, req *llm.Request) error {
+func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// TODO: implement (adk-python src/google/adk/auth/auth_preprocessor.py)
 	return nil
 }
 
-func nlPlanningResponseProcessor(ctx agent.Context, req *llm.Request, resp *llm.Response) error {
+func nlPlanningResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
 	// TODO: implement (adk-python src/google/adk/_nl_planning.py)
 	return nil
 }
 
-func codeExecutionResponseProcessor(ctx agent.Context, req *llm.Request, resp *llm.Response) error {
+func codeExecutionResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
 	// TODO: implement (adk-python src/google/adk_code_execution.py)
 	return nil
 }

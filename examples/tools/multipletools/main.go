@@ -1,0 +1,105 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"strings"
+
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/examples"
+	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/agenttool"
+	"google.golang.org/adk/tool/geminitool"
+	"google.golang.org/genai"
+)
+
+// Package main demonstrates how to create an agent with multuple tools,
+// the current implementation allows agent to do a google search and use
+// other custom tool as well. This is a workaround for genai limitation
+// which doesn't allow to have different type of tools.
+func main() {
+	ctx := context.Background()
+
+	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+		APIKey: os.Getenv("GEMINI_API_KEY"),
+	})
+	if err != nil {
+		log.Fatalf("Failed to create model: %v", err)
+	}
+
+	searchAgent, err := llmagent.New(llmagent.Config{
+		Name:        "search_agent",
+		Model:       model,
+		Description: "Does google search.",
+		Instruction: "You're a specialist in Google Search.",
+		Tools: []tool.Tool{
+			geminitool.GoogleSearch{},
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	type Input struct {
+		LineCount int `json:"lineCount"`
+	}
+	type Output struct {
+		Poem string `json:"poem"`
+	}
+	handler := func(ctx tool.Context, input Input) Output {
+		return Output{
+			Poem: strings.Repeat("A line of a poem,", input.LineCount) + "\n",
+		}
+	}
+	poemTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+		Name:        "poem",
+		Description: "Returns poem",
+	}, handler)
+	if err != nil {
+		log.Fatalf("Failed to create tool: %v", err)
+	}
+	poemAgent, err := llmagent.New(llmagent.Config{
+		Name:        "poem_agent",
+		Model:       model,
+		Description: "returns poem",
+		Instruction: "You return poems.",
+		Tools: []tool.Tool{
+			poemTool,
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	agent, err := llmagent.New(llmagent.Config{
+		Name:        "root_agent",
+		Model:       model,
+		Description: "You can do a google search and generate poems.",
+		Instruction: "Answer questions about weather based on google search unless asked for a poem," +
+			" for a poem generate it with a tool.",
+		Tools: []tool.Tool{
+			agenttool.New(searchAgent, nil), agenttool.New(poemAgent, nil),
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+
+	examples.Run(ctx, agent, nil)
+}

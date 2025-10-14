@@ -23,19 +23,19 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/cmd/web"
 	"google.golang.org/adk/examples/web/agents"
-	"google.golang.org/adk/llm"
-	"google.golang.org/adk/llm/gemini"
-	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
 )
 
-func saveReportfunc(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error) {
+func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 	if llmResponse == nil || llmResponse.Content == nil || llmResponseError != nil {
 		return llmResponse, llmResponseError
 	}
@@ -58,7 +58,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
-	sessionService := sessionservice.Mem()
+	sessionService := session.InMemoryService()
 	rootAgent, err := llmagent.New(llmagent.Config{
 		Name:        "weather_time_agent",
 		Model:       model,
@@ -80,10 +80,10 @@ func main() {
 			"llm_auditor":        llmAuditor,
 		},
 	)
-	artifactservice := artifactservice.Mem()
+	artifactservice := artifact.InMemoryService()
 
 	config := web.ParseArgs()
-	fmt.Println(config)
+	fmt.Printf("%+v", config)
 	web.Serve(config, &web.ServeConfig{
 		SessionService:  sessionService,
 		AgentLoader:     agentLoader,

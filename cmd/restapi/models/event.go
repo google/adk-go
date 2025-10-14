@@ -17,7 +17,7 @@ package models
 import (
 	"time"
 
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -25,7 +25,7 @@ import (
 // Event represents a single event in a session.
 type Event struct {
 	ID                 string                   `json:"id"`
-	Time               time.Time                `json:"time"`
+	Time               int64                    `json:"time"`
 	InvocationID       string                   `json:"invocationId"`
 	Branch             string                   `json:"branch"`
 	Author             string                   `json:"author"`
@@ -35,20 +35,19 @@ type Event struct {
 	GroundingMetadata  *genai.GroundingMetadata `json:"groundingMetadata"`
 	TurnComplete       bool                     `json:"turnComplete"`
 	Interrupted        bool                     `json:"interrupted"`
-	ErrorCode          int                      `json:"errorCode"`
+	ErrorCode          string                   `json:"errorCode"`
 	ErrorMessage       string                   `json:"errorMessage"`
 }
 
 func ToSessionEvent(event Event) *session.Event {
 	return &session.Event{
 		ID:                 event.ID,
-		Time:               event.Time,
+		Timestamp:          time.Unix(event.Time, 0),
 		InvocationID:       event.InvocationID,
 		Branch:             event.Branch,
 		Author:             event.Author,
-		Partial:            event.Partial,
 		LongRunningToolIDs: event.LongRunningToolIDs,
-		LLMResponse: &llm.Response{
+		LLMResponse: &model.LLMResponse{
 			Content:           event.Content,
 			GroundingMetadata: event.GroundingMetadata,
 			Partial:           event.Partial,
@@ -63,7 +62,7 @@ func ToSessionEvent(event Event) *session.Event {
 func FromSessionEvent(event session.Event) Event {
 	return Event{
 		ID:                 event.ID,
-		Time:               event.Time,
+		Time:               event.Timestamp.Unix(),
 		InvocationID:       event.InvocationID,
 		Branch:             event.Branch,
 		Author:             event.Author,

@@ -24,7 +24,11 @@ var DeployCmd = &cobra.Command{
 	Use:   "deploy",
 	Short: "Makes deployment to various platforms easy",
 	Long:  `Please see subcommands for details`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return cmd.Help()
+		}
+		return nil
 	},
 }
 

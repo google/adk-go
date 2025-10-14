@@ -19,7 +19,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
 )
@@ -28,7 +28,7 @@ func TestGeminiTool_ProcessRequest(t *testing.T) {
 	testCases := []struct {
 		name      string
 		inputTool *genai.Tool
-		req       *llm.Request
+		req       *model.LLMRequest
 		wantTools []*genai.Tool
 		wantErr   bool
 	}{
@@ -37,7 +37,7 @@ func TestGeminiTool_ProcessRequest(t *testing.T) {
 			inputTool: &genai.Tool{
 				GoogleSearch: &genai.GoogleSearch{},
 			},
-			req: &llm.Request{},
+			req: &model.LLMRequest{},
 			wantTools: []*genai.Tool{
 				{GoogleSearch: &genai.GoogleSearch{}},
 			},
@@ -47,8 +47,8 @@ func TestGeminiTool_ProcessRequest(t *testing.T) {
 			inputTool: &genai.Tool{
 				GoogleSearch: &genai.GoogleSearch{},
 			},
-			req: &llm.Request{
-				GenerateConfig: &genai.GenerateContentConfig{
+			req: &model.LLMRequest{
+				Config: &genai.GenerateContentConfig{
 					Tools: []*genai.Tool{
 						{
 							GoogleMaps: &genai.GoogleMaps{},
@@ -84,7 +84,7 @@ func TestGeminiTool_ProcessRequest(t *testing.T) {
 				return
 			}
 
-			if diff := cmp.Diff(tt.wantTools, tt.req.GenerateConfig.Tools); diff != "" {
+			if diff := cmp.Diff(tt.wantTools, tt.req.Config.Tools); diff != "" {
 				t.Errorf("ProcessRequest returned unexpected tools (-want +got):\n%s", diff)
 			}
 		})

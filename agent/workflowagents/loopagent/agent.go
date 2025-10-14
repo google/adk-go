@@ -19,6 +19,7 @@ import (
 	"iter"
 
 	"google.golang.org/adk/agent"
+	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/session"
 )
 
@@ -43,19 +44,30 @@ func New(cfg Config) (agent.Agent, error) {
 		return nil, fmt.Errorf("LoopAgent doesn't allow custom Run implementations")
 	}
 
-	loopAgent := &loopAgent{
+	loopAgentImpl := &loopAgent{
 		maxIterations: cfg.MaxIterations,
 	}
-	cfg.AgentConfig.Run = loopAgent.Run
+	cfg.AgentConfig.Run = loopAgentImpl.Run
 
-	return agent.New(cfg.AgentConfig)
+	loopAgent, err := agent.New(cfg.AgentConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create base agent: %w", err)
+	}
+
+	internalAgent, ok := loopAgent.(agentinternal.Agent)
+	if !ok {
+		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
+	}
+	agentinternal.Reveal(internalAgent).AgentType = agentinternal.TypeLoopAgent
+
+	return loopAgent, nil
 }
 
 type loopAgent struct {
 	maxIterations uint
 }
 
-func (a *loopAgent) Run(ctx agent.Context) iter.Seq2[*session.Event, error] {
+func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	count := a.maxIterations
 
 	return func(yield func(*session.Event, error) bool) {

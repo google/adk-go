@@ -22,29 +22,29 @@ import (
 	"strings"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
-	"google.golang.org/adk/internal/artifactsinternal"
+	artifactinternal "google.golang.org/adk/internal/artifact"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/internal/memoryinternal"
+	imemory "google.golang.org/adk/internal/memory"
 	"google.golang.org/adk/internal/sessioninternal"
-	"google.golang.org/adk/llm"
-	"google.golang.org/adk/memoryservice"
+	"google.golang.org/adk/memory"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 	"google.golang.org/genai"
 )
 
 type Config struct {
 	AppName         string
 	Agent           agent.Agent
-	SessionService  sessionservice.Service
-	ArtifactService artifactservice.Service
-	MemoryService   memoryservice.Service
+	SessionService  session.Service
+	ArtifactService artifact.Service
+	MemoryService   memory.Service
 }
 
-func New(cfg *Config) (*Runner, error) {
+func New(cfg Config) (*Runner, error) {
 	parents, err := parentmap.New(cfg.Agent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)
@@ -63,25 +63,23 @@ func New(cfg *Config) (*Runner, error) {
 type Runner struct {
 	appName         string
 	rootAgent       agent.Agent
-	sessionService  sessionservice.Service
-	artifactService artifactservice.Service
-	memoryService   memoryservice.Service
+	sessionService  session.Service
+	artifactService artifact.Service
+	memoryService   memory.Service
 
 	parents parentmap.Map
 }
 
 // Run runs the agent.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *RunConfig) iter.Seq2[*session.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *agent.RunConfig) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
 	return func(yield func(*session.Event, error) bool) {
-		resp, err := r.sessionService.Get(ctx, &sessionservice.GetRequest{
-			ID: session.ID{
-				AppName:   r.appName,
-				UserID:    userID,
-				SessionID: sessionID,
-			},
+		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
+			AppName:   r.appName,
+			UserID:    userID,
+			SessionID: sessionID,
 		})
 		if err != nil {
 			yield(nil, err)
@@ -108,16 +106,33 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 		})
 
-		var artifactsImpl agent.Artifacts = nil
+		var artifacts agent.Artifacts
 		if r.artifactService != nil {
-			artifactsImpl = artifactsinternal.NewArtifacts(r.artifactService, session.ID())
-		}
-		var memoryImpl agent.Memory = nil
-		if r.memoryService != nil {
-			memoryImpl = memoryinternal.NewMemory(r.memoryService, session.ID())
+			artifacts = &artifactinternal.Artifacts{
+				Service:   r.artifactService,
+				SessionID: session.ID(),
+				AppName:   session.AppName(),
+				UserID:    session.UserID(),
+			}
 		}
 
-		ctx := agent.NewContext(ctx, agentToRun, msg, artifactsImpl, sessioninternal.NewMutableSession(r.sessionService, session), memoryImpl, "")
+		var memoryImpl agent.Memory = nil
+		if r.memoryService != nil {
+			memoryImpl = &imemory.Memory{
+				Service:   r.memoryService,
+				SessionID: session.ID(),
+				UserID:    session.UserID(),
+				AppName:   session.AppName(),
+			}
+		}
+
+		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+			Artifacts:   artifacts,
+			Memory:      memoryImpl,
+			Session:     sessioninternal.NewMutableSession(r.sessionService, session),
+			Agent:       agentToRun,
+			UserContent: msg,
+		})
 
 		if err := r.appendMessageToSession(ctx, session, msg, cfg.SaveInputBlobsAsArtifacts); err != nil {
 			yield(nil, err)
@@ -170,7 +185,7 @@ func (r *Runner) setupCFC(curAgent agent.Agent) error {
 	return nil
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession sessionservice.StoredSession, msg *genai.Content, saveInputBlobsAsArtifacts bool) error {
+func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool) error {
 	if msg == nil {
 		return nil
 	}
@@ -195,7 +210,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	event := session.NewEvent(ctx.InvocationID())
 
 	event.Author = "user"
-	event.LLMResponse = &llm.Response{
+	event.LLMResponse = &model.LLMResponse{
 		Content: msg,
 	}
 
@@ -207,7 +222,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 
 // findAgentToRun returns the agent that should handle the next request based on
 // session history.
-func (r *Runner) findAgentToRun(session sessionservice.StoredSession) (agent.Agent, error) {
+func (r *Runner) findAgentToRun(session session.Session) (agent.Agent, error) {
 	events := session.Events()
 	for i := events.Len() - 1; i >= 0; i-- {
 		event := events.At(i)

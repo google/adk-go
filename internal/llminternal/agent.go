@@ -15,7 +15,7 @@
 package llminternal
 
 import (
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
@@ -26,7 +26,7 @@ type Agent interface {
 }
 
 type State struct {
-	Model llm.Model
+	Model model.LLM
 
 	Tools []tool.Tool
 
@@ -40,7 +40,10 @@ type State struct {
 	DisallowTransferToParent bool
 	DisallowTransferToPeers  bool
 
+	InputSchema  *genai.Schema
 	OutputSchema *genai.Schema
+
+	OutputKey string
 }
 
 func (s *State) internal() *State { return s }

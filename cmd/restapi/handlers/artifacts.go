@@ -19,16 +19,16 @@ import (
 	"strconv"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/restapi/models"
 )
 
 // ArtifactsAPIController is the controller for the Artifacts API.
 type ArtifactsAPIController struct {
-	artifactService artifactservice.Service
+	artifactService artifact.Service
 }
 
-func NewArtifactsAPIController(artifactService artifactservice.Service) *ArtifactsAPIController {
+func NewArtifactsAPIController(artifactService artifact.Service) *ArtifactsAPIController {
 	return &ArtifactsAPIController{artifactService: artifactService}
 }
 
@@ -44,7 +44,7 @@ func (c *ArtifactsAPIController) ListArtifacts(rw http.ResponseWriter, req *http
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	resp, err := c.artifactService.List(req.Context(), &artifactservice.ListRequest{
+	resp, err := c.artifactService.List(req.Context(), &artifact.ListRequest{
 		AppName:   sessionID.AppName,
 		UserID:    sessionID.UserID,
 		SessionID: sessionID.ID,
@@ -77,7 +77,7 @@ func (c *ArtifactsAPIController) LoadArtifact(rw http.ResponseWriter, req *http.
 		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
 		return
 	}
-	loadReq := &artifactservice.LoadRequest{
+	loadReq := &artifact.LoadRequest{
 		AppName:   sessionID.AppName,
 		UserID:    sessionID.UserID,
 		SessionID: sessionID.ID,
@@ -120,7 +120,7 @@ func (c *ArtifactsAPIController) DeleteArtifact(rw http.ResponseWriter, req *htt
 		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
 		return
 	}
-	err = c.artifactService.Delete(req.Context(), &artifactservice.DeleteRequest{
+	err = c.artifactService.Delete(req.Context(), &artifact.DeleteRequest{
 		AppName:   sessionID.AppName,
 		UserID:    sessionID.UserID,
 		SessionID: sessionID.ID,

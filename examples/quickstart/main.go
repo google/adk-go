@@ -21,7 +21,7 @@ import (
 
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/examples"
-	"google.golang.org/adk/llm/gemini"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
@@ -50,5 +50,5 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, agent)
+	examples.Run(ctx, agent, nil)
 }

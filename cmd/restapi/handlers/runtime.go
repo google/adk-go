@@ -20,23 +20,23 @@ import (
 	"fmt"
 	"net/http"
 
-	"google.golang.org/adk/artifactservice"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/restapi/errors"
 	"google.golang.org/adk/cmd/restapi/models"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/sessionservice"
 )
 
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
-	sessionService  sessionservice.Service
-	artifactService artifactservice.Service
+	sessionService  session.Service
+	artifactService artifact.Service
 	agentLoader     services.AgentLoader
 }
 
-func NewRuntimeAPIRouter(sessionService sessionservice.Service, agentLoader services.AgentLoader, artifactService artifactservice.Service) *RuntimeAPIController {
+func NewRuntimeAPIRouter(sessionService session.Service, agentLoader services.AgentLoader, artifactService artifact.Service) *RuntimeAPIController {
 	return &RuntimeAPIController{sessionService: sessionService, agentLoader: agentLoader, artifactService: artifactService}
 }
 
@@ -146,12 +146,10 @@ func flashEvent(flusher http.Flusher, rw http.ResponseWriter, event session.Even
 }
 
 func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
-	_, err := c.sessionService.Get(ctx, &sessionservice.GetRequest{
-		ID: session.ID{
-			AppName:   appName,
-			UserID:    userID,
-			SessionID: sessionID,
-		},
+	_, err := c.sessionService.Get(ctx, &session.GetRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
 	})
 	if err != nil {
 		return errors.NewStatusError(fmt.Errorf("get session: %w", err), http.StatusNotFound)
@@ -159,31 +157,29 @@ func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appNam
 	return nil
 }
 
-func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Runner, *runner.RunConfig, error) {
-	agent, err := c.agentLoader.LoadAgent(req.AppName)
+func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Runner, *agent.RunConfig, error) {
+	curAgent, err := c.agentLoader.LoadAgent(req.AppName)
 	if err != nil {
 		return nil, nil, errors.NewStatusError(fmt.Errorf("load agent: %w", err), http.StatusInternalServerError)
 	}
 
-	r, err := runner.New(
-		&runner.Config{
-			AppName:         req.AppName,
-			Agent:           agent,
-			SessionService:  c.sessionService,
-			ArtifactService: c.artifactService,
-		},
+	r, err := runner.New(runner.Config{
+		AppName:         req.AppName,
+		Agent:           curAgent,
+		SessionService:  c.sessionService,
+		ArtifactService: c.artifactService,
+	},
 	)
 	if err != nil {
 		return nil, nil, errors.NewStatusError(fmt.Errorf("create runner: %w", err), http.StatusInternalServerError)
 	}
 
-	streamingMode := runner.StreamingModeNone
+	streamingMode := agent.StreamingModeNone
 	if req.Streaming {
-		streamingMode = runner.StreamingModeSSE
+		streamingMode = agent.StreamingModeSSE
 	}
-	return r, &runner.RunConfig{
-		StreamingMode:             streamingMode,
-		SaveInputBlobsAsArtifacts: true,
+	return r, &agent.RunConfig{
+		StreamingMode: streamingMode,
 	}, nil
 }
 

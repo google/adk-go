@@ -17,81 +17,45 @@ package agent
 import (
 	"context"
 
-	"github.com/google/uuid"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
-type agentContext struct {
+type InvocationContext interface {
 	context.Context
-	cancel context.CancelFunc
 
-	invocationID string
-	agent        Agent
-	session      session.Session
-	artifacts    Artifacts
-	memory       Memory
+	Artifacts() Artifacts
+	Memory() Memory
+	Session() session.Session
 
-	userContent *genai.Content
-	branch      string
+	InvocationID() string
+	Branch() string
+	Agent() Agent
+	UserContent() *genai.Content
+	RunConfig() *RunConfig
+
+	EndInvocation()
+	Ended() bool
 }
 
-// TODO: make internal and use params args
-func NewContext(ctx context.Context, agent Agent, userContent *genai.Content, artifacts Artifacts, session session.Session, memory Memory, branch string) *agentContext {
-	ctx, cancel := context.WithCancel(ctx)
+type ReadonlyContext interface {
+	context.Context
 
-	return &agentContext{
-		Context: ctx,
-		cancel:  cancel,
+	UserContent() *genai.Content
+	InvocationID() string
+	AgentName() string
+	ReadonlyState() session.ReadonlyState
 
-		invocationID: "e-" + uuid.NewString(),
-		agent:        agent,
-		artifacts:    artifacts,
-		session:      session,
-		memory:       memory,
-		userContent:  userContent,
-		branch:       branch,
-	}
+	UserID() string
+	AppName() string
+	SessionID() string
+	Branch() string
 }
 
-func (a *agentContext) UserContent() *genai.Content {
-	return a.userContent
+type CallbackContext interface {
+	ReadonlyContext
+
+	Artifacts() Artifacts
+	State() session.State
+	Actions() *session.EventActions
 }
-
-func (a *agentContext) InvocationID() string {
-	return a.invocationID
-}
-
-func (a *agentContext) Branch() string {
-	return a.branch
-}
-
-func (a *agentContext) Agent() Agent {
-	return a.agent
-}
-
-func (a *agentContext) Session() session.Session {
-	return a.session
-}
-
-func (a *agentContext) Artifacts() Artifacts {
-	return a.artifacts
-}
-
-func (a *agentContext) Memory() Memory {
-	return a.memory
-}
-
-func (*agentContext) Report(*session.Event) {
-
-}
-
-func (a *agentContext) End() {
-	a.cancel()
-}
-
-func (a *agentContext) Ended() bool {
-	return a.Context.Err() != nil
-}
-
-var _ Context = (*agentContext)(nil)

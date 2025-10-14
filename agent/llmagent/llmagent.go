@@ -17,10 +17,13 @@ package llmagent
 import (
 	"fmt"
 	"iter"
+	"strings"
 
 	"google.golang.org/adk/agent"
+	agentinternal "google.golang.org/adk/internal/agent"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -38,20 +41,25 @@ func New(cfg Config) (agent.Agent, error) {
 	}
 
 	a := &llmAgent{
-		beforeModel: beforeModel,
-		model:       cfg.Model,
-		afterModel:  afterModel,
-		instruction: cfg.Instruction,
+		beforeModel:  beforeModel,
+		model:        cfg.Model,
+		afterModel:   afterModel,
+		instruction:  cfg.Instruction,
+		inputSchema:  cfg.InputSchema,
+		outputSchema: cfg.OutputSchema,
 
 		State: llminternal.State{
 			Model:                    cfg.Model,
+			GenerateContentConfig:    cfg.GenerateContentConfig,
 			Tools:                    cfg.Tools,
 			DisallowTransferToParent: cfg.DisallowTransferToParent,
 			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
+			InputSchema:              cfg.InputSchema,
 			OutputSchema:             cfg.OutputSchema,
 			IncludeContents:          cfg.IncludeContents,
 			Instruction:              cfg.Instruction,
 			GlobalInstruction:        cfg.GlobalInstruction,
+			OutputKey:                cfg.OutputKey,
 		},
 	}
 
@@ -68,6 +76,8 @@ func New(cfg Config) (agent.Agent, error) {
 	}
 
 	a.Agent = baseAgent
+
+	a.AgentType = agentinternal.TypeLLMAgent
 
 	return a, nil
 }
@@ -93,7 +103,7 @@ type Config struct {
 	// object. It can also be used to implement caching by returning a cached
 	// `LLMResponse`, which would skip the actual model call.
 	BeforeModel []BeforeModelCallback
-	Model       llm.Model
+	Model       model.LLM
 	// AfterModel callbacks are executed sequentially right after a response is
 	// received from the model.
 	//
@@ -117,6 +127,7 @@ type Config struct {
 	// user messages, tool requests, etc.
 	IncludeContents string
 
+	// TODO(ngeorgy): consider to switch to jsonschema for input and output schema.
 	// The input schema when agent is used as a tool.
 	InputSchema *genai.Schema
 	// The output schema when agent replies.
@@ -128,7 +139,12 @@ type Config struct {
 	// TODO: BeforeTool and AfterTool callbacks
 	Tools []tool.Tool
 
-	// OutputKey
+	// OutputKey is an optional parameter to specify the key in session state for the agent output.
+	//
+	// Typical uses cases are:
+	// - Extracts agent reply for later use, such as in tools, callbacks, etc.
+	// - Connects agents to coordinate with each other.
+	OutputKey string
 	// Planner
 	// CodeExecutor
 	// Examples
@@ -137,23 +153,37 @@ type Config struct {
 	// AfterToolCallback
 }
 
-type BeforeModelCallback func(ctx agent.Context, llmRequest *llm.Request) (*llm.Response, error)
+type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
-type AfterModelCallback func(ctx agent.Context, llmResponse *llm.Response, llmResponseError error) (*llm.Response, error)
+type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 type llmAgent struct {
 	agent.Agent
 	llminternal.State
+	agentState
 
 	beforeModel []llminternal.BeforeModelCallback
-	model       llm.Model
+	model       model.LLM
 	afterModel  []llminternal.AfterModelCallback
 	instruction string
+
+	inputSchema  *genai.Schema
+	outputSchema *genai.Schema
 }
 
-func (a *llmAgent) run(ctx agent.Context) iter.Seq2[*session.Event, error] {
+type agentState = agentinternal.State
+
+func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	// TODO: branch context?
-	ctx = agent.NewContext(ctx, a, ctx.UserContent(), ctx.Artifacts(), ctx.Session(), ctx.Memory(), ctx.Branch())
+	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:   ctx.Artifacts(),
+		Memory:      ctx.Memory(),
+		Session:     ctx.Session(),
+		Branch:      ctx.Branch(),
+		Agent:       a,
+		UserContent: ctx.UserContent(),
+		RunConfig:   ctx.RunConfig(),
+	})
 
 	f := &llminternal.Flow{
 		Model:                a.model,
@@ -163,5 +193,49 @@ func (a *llmAgent) run(ctx agent.Context) iter.Seq2[*session.Event, error] {
 		AfterModelCallbacks:  a.afterModel,
 	}
 
-	return f.Run(ctx)
+	return func(yield func(*session.Event, error) bool) {
+		for ev, err := range f.Run(ctx) {
+			a.maybeSaveOutputToState(ev)
+			if !yield(ev, err) {
+				return
+			}
+		}
+	}
+}
+
+// maybeSaveOutputToState saves the model output to state if needed. skip if the event
+// was authored by some other agent (e.g. current agent transferred to another agent)
+func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
+	if event == nil {
+		return
+	}
+	if event.Author != a.Name() {
+		// TODO: log "Skipping output save for agent %s: event authored by %s"
+		return
+	}
+	if a.OutputKey != "" && !event.Partial && event.Content != nil && len(event.Content.Parts) > 0 {
+		var sb strings.Builder
+		for _, part := range event.Content.Parts {
+			if part.Text != "" && !part.Thought {
+				sb.WriteString(part.Text)
+			}
+		}
+		result := sb.String()
+
+		// TODO: add output schema validation and unmarshalling
+		if a.OutputSchema != nil {
+			// If the result from the final chunk is just whitespace or empty,
+			// it means this is an empty final chunk of a stream.
+			// Do not attempt to parse it as JSON.
+			if strings.TrimSpace(result) == "" {
+				return
+			}
+		}
+
+		if event.Actions.StateDelta == nil {
+			event.Actions.StateDelta = make(map[string]any)
+		}
+
+		event.Actions.StateDelta[a.OutputKey] = result
+	}
 }

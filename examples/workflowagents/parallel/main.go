@@ -25,7 +25,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/examples"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -62,18 +62,18 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, parallelAgent)
+	examples.Run(ctx, parallelAgent, nil)
 }
 
 type myAgent struct {
 	id int
 }
 
-func (a myAgent) Run(ctx agent.Context) iter.Seq2[*session.Event, error] {
+func (a myAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for i := 0; i < 3; i++ {
 			if !yield(&session.Event{
-				LLMResponse: &llm.Response{
+				LLMResponse: &model.LLMResponse{
 					Content: &genai.Content{
 						Parts: []*genai.Part{
 							{

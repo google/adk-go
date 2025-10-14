@@ -18,8 +18,9 @@ import (
 	"fmt"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/typeutil"
-	"google.golang.org/adk/llm"
+	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
@@ -105,26 +106,8 @@ func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
 }
 
 // ProcessRequest implements interfaces.Tool.
-func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *llm.Request) error {
-	if req.Tools == nil {
-		req.Tools = make(map[string]any)
-	}
-
-	name := f.Name()
-	if _, ok := req.Tools[name]; ok {
-		return fmt.Errorf("duplicate tool: %q", name)
-	}
-	req.Tools[name] = f
-
-	if req.GenerateConfig == nil {
-		req.GenerateConfig = &genai.GenerateContentConfig{}
-	}
-	if decl := f.Declaration(); decl != nil {
-		req.GenerateConfig.Tools = append(req.GenerateConfig.Tools, &genai.Tool{
-			FunctionDeclarations: []*genai.FunctionDeclaration{decl},
-		})
-	}
-	return nil
+func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *model.LLMRequest) error {
+	return toolutils.PackTool(req, f)
 }
 
 // FunctionDeclaration implements interfaces.FunctionTool.

@@ -22,17 +22,31 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/runner"
-	"google.golang.org/adk/sessionservice"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
-func Run(ctx context.Context, rootAgent agent.Agent) {
+type RunConfig struct {
+	SessionService  session.Service
+	ArtifactService artifact.Service
+	StreamingMode   agent.StreamingMode
+}
+
+func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
 	userID, appName := "test_user", "test_app"
 
-	sessionService := sessionservice.Mem()
+	if runConfig == nil {
+		runConfig = &RunConfig{}
+	}
 
-	resp, err := sessionService.Create(ctx, &sessionservice.CreateRequest{
+	sessionService := runConfig.SessionService
+	if sessionService == nil {
+		sessionService = session.InMemoryService()
+	}
+
+	resp, err := sessionService.Create(ctx, &session.CreateRequest{
 		AppName: appName,
 		UserID:  userID,
 	})
@@ -42,10 +56,11 @@ func Run(ctx context.Context, rootAgent agent.Agent) {
 
 	session := resp.Session
 
-	r, err := runner.New(&runner.Config{
-		AppName:        appName,
-		Agent:          rootAgent,
-		SessionService: sessionService,
+	r, err := runner.New(runner.Config{
+		AppName:         appName,
+		Agent:           rootAgent,
+		SessionService:  sessionService,
+		ArtifactService: runConfig.ArtifactService,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create runner: %v", err)
@@ -63,15 +78,22 @@ func Run(ctx context.Context, rootAgent agent.Agent) {
 
 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
+		streamingMode := runConfig.StreamingMode
+		if streamingMode == "" {
+			streamingMode = agent.StreamingModeSSE
+		}
 		fmt.Print("\nAgent -> ")
-		for event, err := range r.Run(ctx, userID, session.ID().SessionID, userMsg, &runner.RunConfig{
-			StreamingMode: runner.StreamingModeSSE,
+		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &agent.RunConfig{
+			StreamingMode: streamingMode,
 		}) {
 			if err != nil {
 				fmt.Printf("\nAGENT_ERROR: %v\n", err)
 			} else {
 				for _, p := range event.LLMResponse.Content.Parts {
-					fmt.Print(p.Text)
+					// if its running in streaming mode, don't print the non partial llmResponses
+					if streamingMode != agent.StreamingModeSSE || event.LLMResponse.Partial {
+						fmt.Print(p.Text)
+					}
 				}
 			}
 		}
