@@ -14,6 +14,26 @@
 
 package adka2a
 
+import (
+	"encoding/json"
+)
+
 func toMetaKey(key string) string {
 	return "adk_" + key
+}
+
+// We can't use mapstructure in a way compatible with ADK-python, because genai type fields
+// don't have proper field tags.
+// TODO(yarolegovich): field annotation PR for genai types.
+func toMapStructure(data any) (map[string]any, error) {
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(bytes, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }

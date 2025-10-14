@@ -151,6 +151,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	return a2a.DataPart{Data: map[string]any{}}, nil
 }
 
+//lint:ignore U1000
 func toGenAIContent(msg *a2a.Message) (*genai.Content, error) {
 	parts, err := toGenAIParts(msg.Parts)
 	if err != nil {
