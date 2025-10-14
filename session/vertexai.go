@@ -17,58 +17,73 @@ package session
 import (
 	"context"
 	"fmt"
-
-	"google.golang.org/genai"
 )
 
 // VertexAiSessionService
 type vertexAiService struct {
-	client *genai.Client
-	model  string
+	client *vertexAiClient
 }
 
-func newVertexAiSessionService(ctx context.Context, model string) (Service, error) {
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		Backend: genai.BackendVertexAI,
-	})
+func newVertexAiSessionService(location string, projectID string, resourceID string) (Service, error) {
+	client, err := newVertexAiClient(location, projectID, resourceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Vertex AI client: %w", err)
 	}
 
-	return &vertexAiService{client: client, model: model}, nil
+	return &vertexAiService{client: client}, nil
 }
 
 func (s *vertexAiService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
-	_, err := s.client.Chats.Create(ctx, s.model, nil, nil)
+	if req.AppName == "" || req.UserID == "" {
+		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
+	}
+	session, err := s.client.createSession(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
-
-	c := &CreateResponse{
-		Session: &session{
-			id: id{
-				appName:   req.AppName,
-				userID:    req.UserID,
-				sessionID: "test-id",
-			},
-		},
-	}
-
-	return c, nil
+	return &CreateResponse{Session: session}, nil
 }
 
 func (s *vertexAiService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
-	return nil, fmt.Errorf("session Get function not implemented")
+	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
+		return nil, fmt.Errorf("app_name, user_id and session_id are required, got app_name: %q, user_id: %q, session_id: %q", req.AppName, req.UserID, req.SessionID)
+	}
+	session, err := s.client.getSession(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session: %w", err)
+	}
+	return &GetResponse{Session: session}, nil
 }
 
 func (s *vertexAiService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
-	return nil, fmt.Errorf("session List function not implemented")
+	if req.AppName == "" || req.UserID == "" {
+		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
+	}
+	sessions, err := s.client.listSessions(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to request sessions list: %w", err)
+	}
+	return &ListResponse{Sessions: sessions}, nil
 }
 
 func (s *vertexAiService) Delete(ctx context.Context, req *DeleteRequest) error {
-	return fmt.Errorf("session Delete function not implemented")
+	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
+		return fmt.Errorf("app_name, user_id and session_id are required, got app_name: %q, user_id: %q, session_id: %q", req.AppName, req.UserID, req.SessionID)
+	}
+	err := s.client.deleteSession(ctx, req)
+	if err != nil {
+		return fmt.Errorf("failed to delete session: %w", err)
+	}
+	return nil
 }
 
 func (s *vertexAiService) AppendEvent(ctx context.Context, session Session, event *Event) error {
-	return fmt.Errorf("session AppendEvent function not implemented")
+	if session.ID() == "" || event == nil {
+		return fmt.Errorf("session_id and event are required, got session_id: %q, event_id: %t", session.ID(), event == nil)
+	}
+	err := s.client.appendEvent(ctx, session.ID(), event)
+	if err != nil {
+		return fmt.Errorf("failed to append event: %w", err)
+	}
+	return nil
 }
