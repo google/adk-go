@@ -122,7 +122,7 @@ func TestNewLoopAgent(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), &agent.RunConfig{}) {
+			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
 				if err != nil {
 					t.Errorf("got unexpected error: %v", err)
 				}

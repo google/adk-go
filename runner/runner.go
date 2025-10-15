@@ -71,7 +71,7 @@ type Runner struct {
 }
 
 // Run runs the agent.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *agent.RunConfig) iter.Seq2[*session.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
@@ -94,7 +94,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
-		if cfg != nil && cfg.SupportCFC {
+		if cfg.SupportCFC {
 			if err := r.setupCFC(agentToRun); err != nil {
 				yield(nil, fmt.Errorf("failed to setup CFC: %w", err))
 				return

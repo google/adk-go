@@ -123,7 +123,7 @@ func TestNewParallelAgent(t *testing.T) {
 				}()
 			}
 
-			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), &agent.RunConfig{}) {
+			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
 				if tt.wantErr != (err != nil) {
 					if tt.cancelContext && err == nil {
 						// In case of context cancellation some events can be processed before cancel is applied.
