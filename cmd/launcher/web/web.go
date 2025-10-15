@@ -15,6 +15,7 @@
 package web
 
 import (
+	"context"
 	"flag"
 	"fmt"
 
@@ -32,7 +33,7 @@ type WebLauncher struct {
 	Config *WebConfig
 }
 
-func (l WebLauncher) Run(config *adk.Config) error {
+func (l WebLauncher) Run(ctx context.Context, config *adk.Config) error {
 	Serve(l.Config, config)
 	return nil
 }
@@ -57,7 +58,7 @@ func ParseArgs(args []string) (*WebConfig, []string, error) {
 
 	err := fs.Parse(args)
 	if err != nil || !fs.Parsed() {
-		fs.Usage()
+		// fs.Usage()
 		return &(WebConfig{}), nil, fmt.Errorf("failed to parse flags: %v", err)
 	}
 	res := WebConfig{

@@ -23,15 +23,22 @@ import (
 type AgentLoader interface {
 	ListAgents() []string
 	LoadAgent(string) (agent.Agent, error)
+	RootAgent() agent.Agent
 }
 
 type StaticAgentLoader struct {
-	agents map[string]agent.Agent
+	agents    map[string]agent.Agent
+	rootAgent agent.Agent
 }
 
-func NewStaticAgentLoader(agents map[string]agent.Agent) *StaticAgentLoader {
+func NewStaticAgentLoader(agents map[string]agent.Agent, rootName string) *StaticAgentLoader {
+	root, ok := agents[rootName]
+	if !ok {
+		return nil
+	}
 	return &StaticAgentLoader{
-		agents: agents,
+		rootAgent: root,
+		agents:    agents,
 	}
 }
 
@@ -49,4 +56,8 @@ func (s *StaticAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 		return nil, fmt.Errorf("agent %s not found", name)
 	}
 	return agent, nil
+}
+
+func (s *StaticAgentLoader) RootAgent() agent.Agent {
+	return s.rootAgent
 }
