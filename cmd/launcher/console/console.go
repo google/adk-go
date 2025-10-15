@@ -52,7 +52,7 @@ func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 		UserID:  userID,
 	})
 	if err != nil {
-		return fmt.Errorf("Failed to create the session service: %v", err)
+		return fmt.Errorf("failed to create the session service: %v", err)
 	}
 
 	session := resp.Session
@@ -64,7 +64,7 @@ func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 		ArtifactService: config.ArtifactService,
 	})
 	if err != nil {
-		return fmt.Errorf("Failed to create runner: %v", err)
+		return fmt.Errorf("failed to create runner: %v", err)
 	}
 
 	reader := bufio.NewReader(os.Stdin)

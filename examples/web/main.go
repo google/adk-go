@@ -24,7 +24,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/cmd/launcher/builder"
+	"google.golang.org/adk/cmd/launcher/run"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/examples/web/agents"
 	"google.golang.org/adk/model"
@@ -89,13 +89,6 @@ func main() {
 		AgentLoader:     agentLoader,
 	}
 
-	l, _, err := builder.BuildLauncher()
-	if err != nil {
-		log.Fatalf("cannot build launcher: %v", err)
-	}
-	err = (*l).Run(ctx, config)
-	if err != nil {
-		log.Fatalf("run failed: %v", err)
-	}
+	run.Run(ctx, config)
 
 }

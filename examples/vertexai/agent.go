@@ -20,7 +20,9 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/examples"
+	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/run"
+	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -44,9 +46,11 @@ func main() {
 		log.Fatalf("Failed to create session service: %v", err)
 	}
 
-	examples.Run(ctx, rootAgent, &examples.RunConfig{
+	config := &adk.Config{
 		SessionService: srvs,
-	})
+		AgentLoader:    services.NewSingleAgentLoader(rootAgent),
+	}
+	run.Run(ctx, config)
 }
 
 func сreateAgent() (agent.Agent, error) {
