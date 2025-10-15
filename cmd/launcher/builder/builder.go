@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"google.golang.org/adk/cmd/launcher"
+	"google.golang.org/adk/cmd/launcher/console"
 	"google.golang.org/adk/cmd/launcher/web"
 )
 
@@ -13,5 +14,5 @@ func BuildLauncher() (*launcher.Launcher, []string, error) {
 	if len(args) > 0 && args[0] == "web" {
 		return web.BuildLauncher(args[1:])
 	}
-	return nil, nil, nil
+	return console.BuildLauncher(args[1:])
 }
