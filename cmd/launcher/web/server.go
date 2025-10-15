@@ -17,7 +17,6 @@ package web
 
 import (
 	"embed"
-	"flag"
 	"io/fs"
 	"log"
 	"net/http"
@@ -25,38 +24,11 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/restapi/config"
 	"google.golang.org/adk/cmd/restapi/handlers"
-	"google.golang.org/adk/cmd/restapi/services"
 	restapiweb "google.golang.org/adk/cmd/restapi/web"
-	"google.golang.org/adk/session"
 )
-
-// WebConfig is a struct with parameters to run a WebServer.
-type WebConfig struct {
-	LocalPort       int
-	FrontendAddress string
-	BackendAddress  string
-}
-
-// ParseArgs parses the arguments for the ADK API server.
-func ParseArgs() *WebConfig {
-	localPortFlag := flag.Int("port", 8080, "Localhost port for the server")
-	frontendAddressFlag := flag.String("front_address", "localhost:8080", "Front address to allow CORS requests from as seen from the user browser. Please specify only hostname and (optionally) port")
-	backendAddressFlag := flag.String("backend_address", "http://localhost:8080/api", "Backend server as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'. ")
-
-	flag.Parse()
-	if !flag.Parsed() {
-		flag.Usage()
-		panic("Failed to parse flags")
-	}
-	return &(WebConfig{
-		LocalPort:       *localPortFlag,
-		FrontendAddress: *frontendAddressFlag,
-		BackendAddress:  *backendAddressFlag,
-	})
-}
 
 func Logger(inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,12 +43,6 @@ func Logger(inner http.Handler) http.Handler {
 			time.Since(start),
 		)
 	})
-}
-
-type ServeConfig struct {
-	SessionService  session.Service
-	AgentLoader     services.AgentLoader
-	ArtifactService artifact.Service
 }
 
 func corsWithArgs(c *WebConfig) func(next http.Handler) http.Handler {
@@ -100,11 +66,11 @@ func corsWithArgs(c *WebConfig) func(next http.Handler) http.Handler {
 var content embed.FS
 
 // Serve initiates the http server and starts it according to WebConfig parameters
-func Serve(c *WebConfig, serveConfig *ServeConfig) {
+func Serve(c *WebConfig, adkConfig *adk.Config) {
 	serverConfig := config.ADKAPIRouterConfigs{
-		SessionService:  serveConfig.SessionService,
-		AgentLoader:     serveConfig.AgentLoader,
-		ArtifactService: serveConfig.ArtifactService,
+		SessionService:  adkConfig.SessionService,
+		AgentLoader:     adkConfig.AgentLoader,
+		ArtifactService: adkConfig.ArtifactService,
 	}
 
 	rBase := mux.NewRouter().StrictSlash(true)
