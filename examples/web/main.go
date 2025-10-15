@@ -79,6 +79,7 @@ func main() {
 			"weather_time_agent": rootAgent,
 			"llm_auditor":        llmAuditor,
 		},
+		"weather_time_agent",
 	)
 	artifactservice := artifact.InMemoryService()
 
@@ -87,7 +88,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("cannot build launcher: %v", err)
 	}
-	(*l).Run(config)
+	(*l).Run(ctx, config)
 
 	// config := web.ParseArgs()
 	// fmt.Printf("%+v", config)

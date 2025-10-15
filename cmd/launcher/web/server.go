@@ -105,5 +105,7 @@ func Serve(c *WebConfig, adkConfig *adk.Config) {
 	rApi.Use(corsWithArgs(c))
 	restapiweb.SetupRouter(rApi, &serverConfig)
 
+	log.Printf("Starting a web server: %+v", c)
+	log.Printf("Open %s", "http://localhost:"+strconv.Itoa(c.LocalPort))
 	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), rBase))
 }

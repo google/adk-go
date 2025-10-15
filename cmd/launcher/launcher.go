@@ -16,9 +16,11 @@
 package launcher
 
 import (
+	"context"
+
 	"google.golang.org/adk/cmd/launcher/adk"
 )
 
 type Launcher interface {
-	Run(config *adk.Config) error
+	Run(ctx context.Context, config *adk.Config) error
 }
