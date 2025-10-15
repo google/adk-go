@@ -83,19 +83,19 @@ func main() {
 	)
 	artifactservice := artifact.InMemoryService()
 
-	config := &adk.Config{ArtifactService: artifactservice, SessionService: sessionService, AgentLoader: agentLoader}
+	config := &adk.Config{
+		ArtifactService: artifactservice,
+		SessionService:  sessionService,
+		AgentLoader:     agentLoader,
+	}
+
 	l, _, err := builder.BuildLauncher()
 	if err != nil {
 		log.Fatalf("cannot build launcher: %v", err)
 	}
-	(*l).Run(ctx, config)
-
-	// config := web.ParseArgs()
-	// fmt.Printf("%+v", config)
-	// web.Serve(config, &web.ServeConfig{
-	// 	SessionService:  sessionService,
-	// 	AgentLoader:     agentLoader,
-	// 	ArtifactService: artifactservice,
-	// })
+	err = (*l).Run(ctx, config)
+	if err != nil {
+		log.Fatalf("run failed: %v", err)
+	}
 
 }
