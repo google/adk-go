@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// package console provides a simple way to test an agent from console application
 package console
 
 import (
