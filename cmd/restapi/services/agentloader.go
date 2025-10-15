@@ -31,6 +31,13 @@ type StaticAgentLoader struct {
 	rootAgent agent.Agent
 }
 
+func NewSingleAgentLoader(a agent.Agent) *StaticAgentLoader {
+	return &StaticAgentLoader{
+		rootAgent: a,
+		agents:    map[string]agent.Agent{a.Name(): a},
+	}
+}
+
 func NewStaticAgentLoader(agents map[string]agent.Agent, rootName string) *StaticAgentLoader {
 	root, ok := agents[rootName]
 	if !ok {
