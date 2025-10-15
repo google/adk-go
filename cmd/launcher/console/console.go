@@ -115,7 +115,7 @@ func BuildLauncher(args []string) (*launcher.Launcher, []string, error) {
 func ParseArgs(args []string) (*ConsoleConfig, []string, error) {
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 
-	var streaming string = ""
+	var streaming = ""
 	fs.StringVar(&streaming, "streaming_mode", "", fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
 
 	err := fs.Parse(args)
