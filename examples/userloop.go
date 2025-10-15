@@ -14,88 +14,74 @@
 
 package examples
 
-import (
-	"bufio"
-	"context"
-	"fmt"
-	"log"
-	"os"
+// type RunConfig struct {
+// 	SessionService  session.Service
+// 	ArtifactService artifact.Service
+// 	StreamingMode   agent.StreamingMode
+// }
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/genai"
-)
+// func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
+// 	userID, appName := "test_user", "test_app"
 
-type RunConfig struct {
-	SessionService  session.Service
-	ArtifactService artifact.Service
-	StreamingMode   agent.StreamingMode
-}
+// 	if runConfig == nil {
+// 		runConfig = &RunConfig{}
+// 	}
 
-func Run(ctx context.Context, rootAgent agent.Agent, runConfig *RunConfig) {
-	userID, appName := "test_user", "test_app"
+// 	sessionService := runConfig.SessionService
+// 	if sessionService == nil {
+// 		sessionService = session.InMemoryService()
+// 	}
 
-	if runConfig == nil {
-		runConfig = &RunConfig{}
-	}
+// 	resp, err := sessionService.Create(ctx, &session.CreateRequest{
+// 		AppName: appName,
+// 		UserID:  userID,
+// 	})
+// 	if err != nil {
+// 		log.Fatalf("Failed to create the session service: %v", err)
+// 	}
 
-	sessionService := runConfig.SessionService
-	if sessionService == nil {
-		sessionService = session.InMemoryService()
-	}
+// 	session := resp.Session
 
-	resp, err := sessionService.Create(ctx, &session.CreateRequest{
-		AppName: appName,
-		UserID:  userID,
-	})
-	if err != nil {
-		log.Fatalf("Failed to create the session service: %v", err)
-	}
+// 	r, err := runner.New(runner.Config{
+// 		AppName:         appName,
+// 		Agent:           rootAgent,
+// 		SessionService:  sessionService,
+// 		ArtifactService: runConfig.ArtifactService,
+// 	})
+// 	if err != nil {
+// 		log.Fatalf("Failed to create runner: %v", err)
+// 	}
 
-	session := resp.Session
+// 	reader := bufio.NewReader(os.Stdin)
 
-	r, err := runner.New(runner.Config{
-		AppName:         appName,
-		Agent:           rootAgent,
-		SessionService:  sessionService,
-		ArtifactService: runConfig.ArtifactService,
-	})
-	if err != nil {
-		log.Fatalf("Failed to create runner: %v", err)
-	}
+// 	for {
+// 		fmt.Print("\nUser -> ")
 
-	reader := bufio.NewReader(os.Stdin)
+// 		userInput, err := reader.ReadString('\n')
+// 		if err != nil {
+// 			log.Fatal(err)
+// 		}
 
-	for {
-		fmt.Print("\nUser -> ")
+// 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
-		userInput, err := reader.ReadString('\n')
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
-
-		streamingMode := runConfig.StreamingMode
-		if streamingMode == "" {
-			streamingMode = agent.StreamingModeSSE
-		}
-		fmt.Print("\nAgent -> ")
-		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &agent.RunConfig{
-			StreamingMode: streamingMode,
-		}) {
-			if err != nil {
-				fmt.Printf("\nAGENT_ERROR: %v\n", err)
-			} else {
-				for _, p := range event.LLMResponse.Content.Parts {
-					// if its running in streaming mode, don't print the non partial llmResponses
-					if streamingMode != agent.StreamingModeSSE || event.LLMResponse.Partial {
-						fmt.Print(p.Text)
-					}
-				}
-			}
-		}
-	}
-}
+// 		streamingMode := runConfig.StreamingMode
+// 		if streamingMode == "" {
+// 			streamingMode = agent.StreamingModeSSE
+// 		}
+// 		fmt.Print("\nAgent -> ")
+// 		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &agent.RunConfig{
+// 			StreamingMode: streamingMode,
+// 		}) {
+// 			if err != nil {
+// 				fmt.Printf("\nAGENT_ERROR: %v\n", err)
+// 			} else {
+// 				for _, p := range event.LLMResponse.Content.Parts {
+// 					// if its running in streaming mode, don't print the non partial llmResponses
+// 					if streamingMode != agent.StreamingModeSSE || event.LLMResponse.Partial {
+// 						fmt.Print(p.Text)
+// 					}
+// 				}
+// 			}
+// 		}
+// 	}
+// }
