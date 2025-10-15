@@ -70,7 +70,7 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 		return nil, err
 	}
 
-	resp := r.Run(ctx, runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, rCfg)
+	resp := r.Run(ctx, runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg)
 
 	var events []*session.Event
 	for event, err := range resp {
@@ -108,7 +108,7 @@ func (c *RuntimeAPIController) RunAgentSSE(rw http.ResponseWriter, req *http.Req
 		return err
 	}
 
-	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, rCfg)
+	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg)
 
 	rw.WriteHeader(http.StatusOK)
 	for event, err := range resp {
