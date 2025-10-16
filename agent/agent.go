@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 
+	artifactservice "google.golang.org/adk/artifact"
 	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -60,7 +61,7 @@ type Config struct {
 }
 
 type Artifacts interface {
-	Save(name string, data genai.Part) error
+	Save(name string, data genai.Part) (*artifactservice.SaveResponse, error)
 	Load(name string) (genai.Part, error)
 	LoadVersion(name string, version int) (genai.Part, error)
 	List() ([]string, error)

@@ -19,6 +19,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
+	artifactservice "google.golang.org/adk/artifact"
 	"google.golang.org/genai"
 )
 
@@ -30,15 +31,14 @@ type Artifacts struct {
 	SessionID string
 }
 
-func (a *Artifacts) Save(name string, data genai.Part) error {
-	_, err := a.Service.Save(context.Background(), &artifact.SaveRequest{
+func (a *Artifacts) Save(name string, data genai.Part) (*artifactservice.SaveResponse, error) {
+	return a.Service.Save(context.Background(), &artifact.SaveRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
 		Part:      &data,
 	})
-	return err
 }
 
 func (a *Artifacts) Load(name string) (genai.Part, error) {
