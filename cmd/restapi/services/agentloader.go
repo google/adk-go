@@ -23,7 +23,7 @@ import (
 type AgentLoader interface {
 	ListAgents() []string
 	LoadAgent(string) (agent.Agent, error)
-	RootAgent() agent.Agent
+	MatchingAgent(name string) (agent.Agent, error)
 }
 
 type StaticAgentLoader struct {
@@ -65,6 +65,15 @@ func (s *StaticAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 	return agent, nil
 }
 
-func (s *StaticAgentLoader) RootAgent() agent.Agent {
-	return s.rootAgent
+// MatchingAgent returns the only agent if there's only one. Otherwise searches by name
+func (s *StaticAgentLoader) MatchingAgent(name string) (agent.Agent, error) {
+	if len(s.agents) == 1 {
+		// return the only element
+		for _, v := range s.agents {
+			return v, nil
+		}
+		// just in case
+		return nil, fmt.Errorf("ooops, the only map element cannot be found")
+	}
+	return s.LoadAgent(name)
 }

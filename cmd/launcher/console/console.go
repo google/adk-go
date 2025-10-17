@@ -33,6 +33,7 @@ import (
 
 type ConsoleConfig struct {
 	streamingMode agent.StreamingMode
+	rootAgentName string
 }
 
 type ConsoleLauncher struct {
@@ -56,11 +57,16 @@ func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 		return fmt.Errorf("failed to create the session service: %v", err)
 	}
 
+	agent, err := config.AgentLoader.MatchingAgent(l.Config.rootAgentName)
+	if err != nil {
+		return fmt.Errorf("failed to find the matching agent: %v", err)
+	}
+
 	session := resp.Session
 
 	r, err := runner.New(runner.Config{
 		AppName:         appName,
-		Agent:           config.AgentLoader.RootAgent(),
+		Agent:           agent,
 		SessionService:  sessionService,
 		ArtifactService: config.ArtifactService,
 	})
@@ -116,7 +122,9 @@ func ParseArgs(args []string) (*ConsoleConfig, []string, error) {
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 
 	var streaming = ""
-	fs.StringVar(&streaming, "streaming_mode", "", fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
+	var rootAgentName = ""
+	fs.StringVar(&streaming, "streaming_mode", string(agent.StreamingModeNone), fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
+	fs.StringVar(&rootAgentName, "root_agent_name", "", "If you have multiple agents you should specify which one should be user for interactions. You can leave if empty if you have only one agent - it will be used by default")
 
 	err := fs.Parse(args)
 	if err != nil || !fs.Parsed() {
@@ -127,6 +135,7 @@ func ParseArgs(args []string) (*ConsoleConfig, []string, error) {
 	}
 	res := ConsoleConfig{
 		streamingMode: agent.StreamingMode(streaming),
+		rootAgentName: rootAgentName,
 	}
 	return &res, fs.Args(), nil
 }
