@@ -27,7 +27,7 @@ type invocationMeta struct {
 	eventMeta map[string]any
 }
 
-func toInvocationMeta(config *ExecutorConfig, reqCtx a2asrv.RequestContext) invocationMeta {
+func toInvocationMeta(config *ExecutorConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
 	// TODO(yarolegovich): update once A2A provides auth data extraction from Context
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 

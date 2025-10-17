@@ -220,7 +220,7 @@ func TestExecutor_Execute(t *testing.T) {
 			config := &ExecutorConfig{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
 			executor := NewExecutor(config)
 			queue := &testQueue{Queue: eventqueue.NewInMemoryQueue(10), writeErr: tc.queueWriteFails}
-			reqCtx := a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Request: tc.request}
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: tc.request.Message}
 			if tc.request.Message != nil && tc.request.Message.TaskID == task.ID {
 				reqCtx.Task = task
 			}
@@ -244,7 +244,7 @@ func TestExecutor_Execute(t *testing.T) {
 func TestExecutor_Cancel(t *testing.T) {
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
 	executor := NewExecutor(&ExecutorConfig{})
-	reqCtx := a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
+	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
 
 	queue := &testQueue{Queue: eventqueue.NewInMemoryQueue(10)}
 	err := executor.Cancel(t.Context(), reqCtx, queue)
@@ -276,7 +276,7 @@ func TestExecutor_SessionReuse(t *testing.T) {
 	sessionService := session.InMemoryService()
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
 	req := &a2a.MessageSendParams{Message: a2a.NewMessageForTask(a2a.MessageRoleUser, task)}
-	reqCtx := a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Request: req}
+	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: req.Message}
 	config := &ExecutorConfig{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
 	executor := NewExecutor(config)
 	queue := eventqueue.NewInMemoryQueue(100)

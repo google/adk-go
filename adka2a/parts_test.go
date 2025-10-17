@@ -149,21 +149,23 @@ func TestPartsTwoWayConversion(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		toA2A, err := toA2AParts([]*genai.Part{tc.genaiPart}, tc.longRunningFunctionIDs)
-		if err != nil {
-			t.Fatalf("toA2AParts() error = %v, want nil", err)
-		}
-		if diff := cmp.Diff([]a2a.Part{tc.a2aPart}, toA2A); diff != "" {
-			t.Fatalf("toA2AParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", toA2A, tc.a2aPart, diff)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			toA2A, err := ToA2AParts([]*genai.Part{tc.genaiPart}, tc.longRunningFunctionIDs)
+			if err != nil {
+				t.Errorf("toA2AParts() error = %v, want nil", err)
+			}
+			if diff := cmp.Diff([]a2a.Part{tc.a2aPart}, toA2A); diff != "" {
+				t.Errorf("toA2AParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", toA2A, tc.a2aPart, diff)
+			}
 
-		toGenAI, err := toGenAIParts([]a2a.Part{tc.a2aPart})
-		if err != nil {
-			t.Fatalf("toGenAIParts() error = %v, want nil", err)
-		}
-		if diff := cmp.Diff([]*genai.Part{tc.genaiPart}, toGenAI); diff != "" {
-			t.Fatalf("toGenAIParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", toA2A, tc.a2aPart, diff)
-		}
+			toGenAI, err := toGenAIParts([]a2a.Part{tc.a2aPart})
+			if err != nil {
+				t.Errorf("toGenAIParts() error = %v, want nil", err)
+			}
+			if diff := cmp.Diff([]*genai.Part{tc.genaiPart}, toGenAI); diff != "" {
+				t.Errorf("toGenAIParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", toA2A, tc.a2aPart, diff)
+			}
+		})
 	}
 }
 
@@ -180,7 +182,7 @@ func TestPartsOneWayConversion(t *testing.T) {
 	}
 
 	wantA2A := a2a.TextPart{Text: `{"arbitrary":"data"}`}
-	gotA2A, err := toA2AParts(gotGenAI, nil)
+	gotA2A, err := ToA2AParts(gotGenAI, nil)
 	if err != nil {
 		t.Fatalf("toA2AParts() error = %v, want nil", err)
 	}

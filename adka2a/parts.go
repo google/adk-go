@@ -36,7 +36,7 @@ const (
 	a2aDataPartTypeCodeExecutableCode = "executable_code"
 )
 
-func toA2AParts(parts []*genai.Part, longRunningToolIDs []string) ([]a2a.Part, error) {
+func ToA2AParts(parts []*genai.Part, longRunningToolIDs []string) ([]a2a.Part, error) {
 	result := make([]a2a.Part, len(parts))
 	for i, part := range parts {
 		if part.Text != "" {

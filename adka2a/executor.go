@@ -76,8 +76,8 @@ func NewExecutor(config *ExecutorConfig, opts ...ExecutorOption) *Executor {
 	return ae
 }
 
-func (e *Executor) Execute(ctx context.Context, reqCtx a2asrv.RequestContext, queue eventqueue.Queue) error {
-	msg := reqCtx.Request.Message
+func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+	msg := reqCtx.Message
 	if msg == nil {
 		return fmt.Errorf("message not provided")
 	}
@@ -124,7 +124,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx a2asrv.RequestContext, qu
 	return nil
 }
 
-func (e *Executor) Cancel(ctx context.Context, reqCtx a2asrv.RequestContext, queue eventqueue.Queue) error {
+func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
 	task := reqCtx.Task
 	if task == nil {
 		return fmt.Errorf("no task provided")

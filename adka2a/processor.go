@@ -29,7 +29,7 @@ import (
 
 type eventProcessor struct {
 	task   *a2a.Task
-	reqCtx a2asrv.RequestContext
+	reqCtx *a2asrv.RequestContext
 	meta   invocationMeta
 
 	// Created once the first TaskArtifactUpdateEvent is sent. Used for subsequent artifact updates.
@@ -43,7 +43,7 @@ type eventProcessor struct {
 	terminalEvents map[a2a.TaskState]*a2a.TaskStatusUpdateEvent
 }
 
-func newEventProcessor(task *a2a.Task, reqCtx a2asrv.RequestContext, meta invocationMeta) *eventProcessor {
+func newEventProcessor(task *a2a.Task, reqCtx *a2asrv.RequestContext, meta invocationMeta) *eventProcessor {
 	return &eventProcessor{
 		task: task, reqCtx: reqCtx, meta: meta,
 		terminalEvents: make(map[a2a.TaskState]*a2a.TaskStatusUpdateEvent),
@@ -81,7 +81,7 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		p.terminalEvents[a2a.TaskStateFailed] = ev
 	}
 
-	parts, err := toA2AParts(resp.Content.Parts, event.LongRunningToolIDs)
+	parts, err := ToA2AParts(resp.Content.Parts, event.LongRunningToolIDs)
 	if err != nil {
 		return nil, err
 	}
