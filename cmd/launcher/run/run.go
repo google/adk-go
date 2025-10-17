@@ -17,6 +17,7 @@ package run
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 
@@ -38,10 +39,18 @@ func Run(ctx context.Context, config *adk.Config) {
 }
 
 func BuildLauncher() (*launcher.Launcher, []string, error) {
-	args := os.Args[1:] // skip file name
+	args := os.Args[1:] // skip file name, safe
 
-	if len(args) > 0 && args[0] == "web" {
-		return web.BuildLauncher(args[1:])
+	if len(args) == 0 {
+		return console.BuildLauncher(args)
 	}
-	return console.BuildLauncher(args[1:])
+	// len(args) > 0
+	switch args[0] {
+	case "web":
+		return web.BuildLauncher(args[1:])
+	case "console":
+		return console.BuildLauncher(args[1:])
+	default:
+		return nil, nil, fmt.Errorf("for the first argument want 'web' or 'console', got: %s", args[0])
+	}
 }
