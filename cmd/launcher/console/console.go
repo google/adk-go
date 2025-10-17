@@ -57,7 +57,7 @@ func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 		return fmt.Errorf("failed to create the session service: %v", err)
 	}
 
-	agent, err := config.AgentLoader.MatchingAgent(l.Config.rootAgentName)
+	matchingAgent, err := config.AgentLoader.MatchingAgent(l.Config.rootAgentName)
 	if err != nil {
 		return fmt.Errorf("failed to find the matching agent: %v", err)
 	}
@@ -66,7 +66,7 @@ func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 
 	r, err := runner.New(runner.Config{
 		AppName:         appName,
-		Agent:           agent,
+		Agent:           matchingAgent,
 		SessionService:  sessionService,
 		ArtifactService: config.ArtifactService,
 	})
