@@ -79,7 +79,6 @@ func main() {
 			"weather_time_agent": rootAgent,
 			"llm_auditor":        llmAuditor,
 		},
-		"weather_time_agent",
 	)
 	artifactservice := artifact.InMemoryService()
 

@@ -23,33 +23,41 @@ import (
 type AgentLoader interface {
 	ListAgents() []string
 	LoadAgent(string) (agent.Agent, error)
-	MatchingAgent(name string) (agent.Agent, error)
 }
 
-type StaticAgentLoader struct {
-	agents    map[string]agent.Agent
-	rootAgent agent.Agent
+type SingleAgentLoader struct {
+	main agent.Agent
 }
 
-func NewSingleAgentLoader(a agent.Agent) *StaticAgentLoader {
-	return &StaticAgentLoader{
-		rootAgent: a,
-		agents:    map[string]agent.Agent{a.Name(): a},
+func NewSingleAgentLoader(a agent.Agent) *SingleAgentLoader {
+	return &SingleAgentLoader{main: a}
+}
+
+func (s *SingleAgentLoader) ListAgents() []string {
+	return []string{s.main.Name()}
+}
+
+func (s *SingleAgentLoader) LoadAgent(name string) (agent.Agent, error) {
+	if name == "" {
+		return s.main, nil
+	}
+	if name == s.main.Name() {
+		return s.main, nil
+	}
+	return nil, fmt.Errorf("cannot load agent '%s' - provide empty string or use '%s'", name, s.main.Name())
+}
+
+type MultiAgentLoader struct {
+	agents map[string]agent.Agent
+}
+
+func NewStaticAgentLoader(agents map[string]agent.Agent) *MultiAgentLoader {
+	return &MultiAgentLoader{
+		agents: agents,
 	}
 }
 
-func NewStaticAgentLoader(agents map[string]agent.Agent, rootName string) *StaticAgentLoader {
-	root, ok := agents[rootName]
-	if !ok {
-		return nil
-	}
-	return &StaticAgentLoader{
-		rootAgent: root,
-		agents:    agents,
-	}
-}
-
-func (s *StaticAgentLoader) ListAgents() []string {
+func (s *MultiAgentLoader) ListAgents() []string {
 	agents := make([]string, 0, len(s.agents))
 	for name := range s.agents {
 		agents = append(agents, name)
@@ -57,7 +65,7 @@ func (s *StaticAgentLoader) ListAgents() []string {
 	return agents
 }
 
-func (s *StaticAgentLoader) LoadAgent(name string) (agent.Agent, error) {
+func (s *MultiAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 	agent, ok := s.agents[name]
 	if !ok {
 		return nil, fmt.Errorf("agent %s not found", name)
@@ -65,18 +73,18 @@ func (s *StaticAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 	return agent, nil
 }
 
-// MatchingAgent returns the only agent if there's only one. Otherwise searches by name
-func (s *StaticAgentLoader) MatchingAgent(name string) (agent.Agent, error) {
-	if len(s.agents) == 1 {
-		// return the only element
-		for _, v := range s.agents {
-			return v, nil
-		}
-		// just in case
-		return nil, fmt.Errorf("ooops, the only map element cannot be found")
-	}
-	if name == "" {
-		return nil, fmt.Errorf("there's more than one agent and no agent's name was provided. Please specify it's name in command line")
-	}
-	return s.LoadAgent(name)
-}
+// // MatchingAgent returns the only agent if there's only one. Otherwise searches by name
+// func (s *MultiAgentLoader) MatchingAgent(name string) (agent.Agent, error) {
+// 	if len(s.agents) == 1 {
+// 		// return the only element
+// 		for _, v := range s.agents {
+// 			return v, nil
+// 		}
+// 		// just in case
+// 		return nil, fmt.Errorf("ooops, the only map element cannot be found")
+// 	}
+// 	if name == "" {
+// 		return nil, fmt.Errorf("there's more than one agent and no agent's name was provided. Please specify it's name in command line")
+// 	}
+// 	return s.LoadAgent(name)
+// }
