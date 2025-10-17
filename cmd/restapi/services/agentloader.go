@@ -75,5 +75,8 @@ func (s *StaticAgentLoader) MatchingAgent(name string) (agent.Agent, error) {
 		// just in case
 		return nil, fmt.Errorf("ooops, the only map element cannot be found")
 	}
+	if name == "" {
+		return nil, fmt.Errorf("there's more than one agent and no agent's name was provided. Please specify it's name in command line.")
+	}
 	return s.LoadAgent(name)
 }
