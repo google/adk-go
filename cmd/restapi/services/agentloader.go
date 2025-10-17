@@ -25,6 +25,7 @@ type AgentLoader interface {
 	LoadAgent(string) (agent.Agent, error)
 }
 
+// SingleAgentLoader should be used when you have only one agent
 type SingleAgentLoader struct {
 	main agent.Agent
 }
@@ -47,6 +48,7 @@ func (s *SingleAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 	return nil, fmt.Errorf("cannot load agent '%s' - provide empty string or use '%s'", name, s.main.Name())
 }
 
+// MultiAgentLoader should be used when you have more than one agent
 type MultiAgentLoader struct {
 	agents map[string]agent.Agent
 }
@@ -72,19 +74,3 @@ func (s *MultiAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 	}
 	return agent, nil
 }
-
-// // MatchingAgent returns the only agent if there's only one. Otherwise searches by name
-// func (s *MultiAgentLoader) MatchingAgent(name string) (agent.Agent, error) {
-// 	if len(s.agents) == 1 {
-// 		// return the only element
-// 		for _, v := range s.agents {
-// 			return v, nil
-// 		}
-// 		// just in case
-// 		return nil, fmt.Errorf("ooops, the only map element cannot be found")
-// 	}
-// 	if name == "" {
-// 		return nil, fmt.Errorf("there's more than one agent and no agent's name was provided. Please specify it's name in command line")
-// 	}
-// 	return s.LoadAgent(name)
-// }

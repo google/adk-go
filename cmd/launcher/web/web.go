@@ -23,21 +23,25 @@ import (
 	"google.golang.org/adk/cmd/launcher/adk"
 )
 
+// WebConfig contains command-line params for web launcher
 type WebConfig struct {
 	LocalPort       int
 	FrontendAddress string
 	BackendAddress  string
 }
 
+// WebLauncher allows to interact with an agent in browser (using ADK Web UI and ADK REST API)
 type WebLauncher struct {
 	Config *WebConfig
 }
 
+// Run starts web server, serving everything required for interaction via web browser
 func (l WebLauncher) Run(ctx context.Context, config *adk.Config) error {
 	Serve(l.Config, config)
 	return nil
 }
 
+// BuildLauncher parses command line args and returns ready-to-run web launcher.
 func BuildLauncher(args []string) (*launcher.Launcher, []string, error) {
 	webConfig, argsLeft, err := ParseArgs(args)
 	if err != nil {

@@ -16,15 +16,14 @@
 package adk
 
 import (
-	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/session"
 )
 
+// Config contains parameters for web & console execution: sessions, artifacts, agents etc
 type Config struct {
 	SessionService  session.Service
 	ArtifactService artifact.Service
 	AgentLoader     services.AgentLoader
-	StreamingMode   agent.StreamingMode
 }

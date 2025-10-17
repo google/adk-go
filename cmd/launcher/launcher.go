@@ -21,6 +21,7 @@ import (
 	"google.golang.org/adk/cmd/launcher/adk"
 )
 
+// Launcher allowes to launch console or web application
 type Launcher interface {
 	Run(ctx context.Context, config *adk.Config) error
 }

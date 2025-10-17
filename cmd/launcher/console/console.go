@@ -31,15 +31,18 @@ import (
 	"google.golang.org/genai"
 )
 
+// ConsoleConfig contains command-line params for console launcher
 type ConsoleConfig struct {
 	streamingMode agent.StreamingMode
 	rootAgentName string
 }
 
+// ConsoleLauncher allows to interact with an agent in console
 type ConsoleLauncher struct {
 	Config *ConsoleConfig
 }
 
+// Run starts console loop. User-provided text is fed to the chosen agent (the only one if there's only one, specified by name otherwise)
 func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 
 	userID, appName := "test_user", "test_app"
@@ -86,7 +89,7 @@ func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 
 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
-		streamingMode := config.StreamingMode
+		streamingMode := l.Config.streamingMode
 		if streamingMode == "" {
 			streamingMode = agent.StreamingModeSSE
 		}
@@ -108,6 +111,7 @@ func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 	}
 }
 
+// BuildLauncher parses command line args and returns ready-to-run console launcher.
 func BuildLauncher(args []string) (*launcher.Launcher, []string, error) {
 	consoleConfig, argsLeft, err := ParseArgs(args)
 	if err != nil {

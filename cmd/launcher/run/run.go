@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/cmd/launcher/web"
 )
 
+// Run builds the launcher according to command-line arguments and then executes it
 func Run(ctx context.Context, config *adk.Config) {
 	l, _, err := BuildLauncher()
 	if err != nil {
@@ -38,6 +39,7 @@ func Run(ctx context.Context, config *adk.Config) {
 	}
 }
 
+// BuildLauncher uses command line argument to choose an appropiate launcher type and then builds it
 func BuildLauncher() (*launcher.Launcher, []string, error) {
 	args := os.Args[1:] // skip file name, safe
 
@@ -51,6 +53,6 @@ func BuildLauncher() (*launcher.Launcher, []string, error) {
 	case "console":
 		return console.BuildLauncher(args[1:])
 	default:
-		return nil, nil, fmt.Errorf("for the first argument want 'web' or 'console', got: %s", args[0])
+		return nil, nil, fmt.Errorf("for the first argument want 'web', 'console' or nothing, got: %s", args[0])
 	}
 }
