@@ -36,7 +36,7 @@ func TestPartsTwoWayConversion(t *testing.T) {
 		},
 		{
 			name:      "thought",
-			a2aPart:   a2a.TextPart{Text: "Hello", Metadata: map[string]any{toA2AMetaKey("thought"): true}},
+			a2aPart:   a2a.TextPart{Text: "Hello", Metadata: map[string]any{ToA2AMetaKey("thought"): true}},
 			genaiPart: &genai.Part{Text: "Hello", Thought: true},
 		},
 		{
@@ -158,7 +158,7 @@ func TestPartsTwoWayConversion(t *testing.T) {
 				t.Errorf("toA2AParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", toA2A, tc.a2aPart, diff)
 			}
 
-			toGenAI, err := toGenAIParts([]a2a.Part{tc.a2aPart})
+			toGenAI, err := ToGenAIParts([]a2a.Part{tc.a2aPart})
 			if err != nil {
 				t.Errorf("toGenAIParts() error = %v, want nil", err)
 			}
@@ -173,7 +173,7 @@ func TestPartsOneWayConversion(t *testing.T) {
 	part := a2a.DataPart{Data: map[string]any{"arbitrary": "data"}}
 	wantGenAI := &genai.Part{Text: `{"arbitrary":"data"}`}
 
-	gotGenAI, err := toGenAIParts([]a2a.Part{part})
+	gotGenAI, err := ToGenAIParts([]a2a.Part{part})
 	if err != nil {
 		t.Fatalf("toGenAI() error = %v, want nil", err)
 	}
