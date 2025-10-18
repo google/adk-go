@@ -32,15 +32,15 @@ func toInvocationMeta(config *ExecutorConfig, reqCtx *a2asrv.RequestContext) inv
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 
 	m := map[string]any{
-		toMetaKey("app_name"):   config.AppName,
-		toMetaKey("user_id"):    userID,
-		toMetaKey("session_id"): sessionID,
+		toA2AMetaKey("app_name"):   config.AppName,
+		toA2AMetaKey("user_id"):    userID,
+		toA2AMetaKey("session_id"): sessionID,
 	}
 
 	return invocationMeta{userID: userID, sessionID: sessionID, eventMeta: m}
 }
 
-func toMetaKey(key string) string {
+func toA2AMetaKey(key string) string {
 	return "adk_" + key
 }
 
@@ -56,7 +56,7 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 		"branch":        event.Branch,
 	} {
 		if v != "" {
-			result[toMetaKey(k)] = v
+			result[toA2AMetaKey(k)] = v
 		}
 	}
 
@@ -66,7 +66,7 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 	}
 
 	if response.ErrorCode != "" {
-		result[toMetaKey("error_code")] = response.ErrorCode
+		result[toA2AMetaKey("error_code")] = response.ErrorCode
 	}
 
 	if response.GroundingMetadata != nil {
@@ -74,7 +74,7 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 		if err != nil {
 			return nil, err
 		}
-		result[toMetaKey("grounding_metadata")] = v
+		result[toA2AMetaKey("grounding_metadata")] = v
 	}
 
 	// TODO(yarolegovich): include custom and usage metadata when added to session.Event

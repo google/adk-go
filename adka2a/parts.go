@@ -25,8 +25,8 @@ import (
 )
 
 var (
-	a2aDataPartMetaTypeKey        = toMetaKey("type")
-	a2aDataPartMetaLongRunningKey = toMetaKey("is_long_running")
+	a2aDataPartMetaTypeKey        = ToA2AMetaKey("type")
+	a2aDataPartMetaLongRunningKey = ToA2AMetaKey("is_long_running")
 )
 
 const (
@@ -42,7 +42,7 @@ func ToA2AParts(parts []*genai.Part, longRunningToolIDs []string) ([]a2a.Part, e
 		if part.Text != "" {
 			r := a2a.TextPart{Text: part.Text}
 			if part.Thought {
-				r.Metadata = map[string]any{toMetaKey("thought"): true}
+				r.Metadata = map[string]any{toA2AMetaKey("thought"): true}
 			}
 			result[i] = r
 		} else if part.InlineData != nil || part.FileData != nil {
@@ -166,7 +166,7 @@ func toGenAIParts(parts []a2a.Part) ([]*genai.Part, error) {
 		case a2a.TextPart:
 			r := genai.NewPartFromText(v.Text)
 			if v.Metadata != nil {
-				if thought, ok := v.Metadata[toMetaKey("thought")].(bool); ok {
+				if thought, ok := v.Metadata[toA2AMetaKey("thought")].(bool); ok {
 					r.Thought = thought
 				}
 			}

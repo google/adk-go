@@ -36,7 +36,7 @@ func TestPartsTwoWayConversion(t *testing.T) {
 		},
 		{
 			name:      "thought",
-			a2aPart:   a2a.TextPart{Text: "Hello", Metadata: map[string]any{toMetaKey("thought"): true}},
+			a2aPart:   a2a.TextPart{Text: "Hello", Metadata: map[string]any{toA2AMetaKey("thought"): true}},
 			genaiPart: &genai.Part{Text: "Hello", Thought: true},
 		},
 		{
