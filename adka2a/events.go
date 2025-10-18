@@ -24,8 +24,10 @@ import (
 	"google.golang.org/genai"
 )
 
-const CustomMetaTaskIDKey = "a2a:task_id"
-const CustomMetaContextIDKey = "a2a:context_id"
+var (
+	customMetaTaskIDKey    = ToADKMetaKey("task_id")
+	customMetaContextIDKey = ToADKMetaKey("context_id")
+)
 
 func NewRemoteAgentEvent(ctx agent.InvocationContext) *session.Event {
 	event := session.NewEvent(ctx.InvocationID())
@@ -78,10 +80,7 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 			return nil, err
 		}
 		event.LongRunningToolIDs = getLongRunningToolIDs(v.Artifact.Parts, event.Content.Parts)
-		event.CustomMetadata = map[string]any{
-			CustomMetaTaskIDKey:    v.TaskID,
-			CustomMetaContextIDKey: v.ContextID,
-		}
+		event.CustomMetadata = ToCustomMetadata(v.TaskID, v.ContextID)
 		return event, nil
 
 	case *a2a.TaskStatusUpdateEvent:
@@ -92,10 +91,7 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 			return nil, nil
 		}
 		event, err := messageToEvent(ctx, v.Status.Message)
-		event.CustomMetadata = map[string]any{
-			CustomMetaTaskIDKey:    v.TaskID,
-			CustomMetaContextIDKey: v.ContextID,
-		}
+		event.CustomMetadata = ToCustomMetadata(v.TaskID, v.ContextID)
 		if err != nil {
 			return nil, err
 		}
@@ -112,6 +108,30 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 	}
 }
 
+func ToADKMetaKey(key string) string {
+	return "a2a:" + key
+}
+
+func ToCustomMetadata(tid a2a.TaskID, ctxID string) map[string]any {
+	return map[string]any{
+		customMetaTaskIDKey:    string(tid),
+		customMetaContextIDKey: ctxID,
+	}
+}
+
+func GetA2ATaskInfo(event *session.Event) (taskID a2a.TaskID, contextID string) {
+	if event == nil || event.CustomMetadata == nil {
+		return
+	}
+	if tid, ok := event.CustomMetadata[customMetaTaskIDKey].(string); ok {
+		taskID = a2a.TaskID(tid)
+	}
+	if ctxID, ok := event.CustomMetadata[customMetaContextIDKey].(string); ok {
+		contextID = ctxID
+	}
+	return
+}
+
 func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message) (*session.Event, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("InvocationContext not provided")
@@ -120,7 +140,7 @@ func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message) (*session.Eve
 		return nil, nil
 	}
 
-	parts, err := toGenAIParts(msg.Parts)
+	parts, err := ToGenAIParts(msg.Parts)
 	if err != nil {
 		return nil, err
 	}
@@ -130,10 +150,7 @@ func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message) (*session.Eve
 		event.Content = genai.NewContentFromParts(parts, toGenAIRole(msg.Role))
 	}
 	if msg.TaskID != "" || msg.ContextID != "" {
-		event.CustomMetadata = map[string]any{
-			CustomMetaTaskIDKey:    msg.TaskID,
-			CustomMetaContextIDKey: msg.ContextID,
-		}
+		event.CustomMetadata = ToCustomMetadata(msg.TaskID, msg.ContextID)
 	}
 	return event, nil
 }
@@ -143,7 +160,7 @@ func artifactToEvent(ctx agent.InvocationContext, artifact *a2a.Artifact) (*sess
 		return nil, fmt.Errorf("InvocationContext not provided")
 	}
 
-	parts, err := toGenAIParts(artifact.Parts)
+	parts, err := ToGenAIParts(artifact.Parts)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +178,7 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 	var parts []*genai.Part
 	var longRunningToolIDs []string
 	for _, artifact := range task.Artifacts {
-		artifactParts, err := toGenAIParts(artifact.Parts)
+		artifactParts, err := ToGenAIParts(artifact.Parts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert artifact parts: %w", err)
 		}
@@ -172,7 +189,7 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 	}
 
 	if task.Status.Message != nil {
-		msgParts, err := toGenAIParts(task.Status.Message.Parts)
+		msgParts, err := ToGenAIParts(task.Status.Message.Parts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert status message parts: %w", err)
 		}
@@ -186,10 +203,7 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 	if len(parts) > 0 {
 		event.Content = genai.NewContentFromParts(parts, genai.RoleModel)
 	}
-	event.CustomMetadata = map[string]any{
-		CustomMetaTaskIDKey:    task.ID,
-		CustomMetaContextIDKey: task.ContextID,
-	}
+	event.CustomMetadata = ToCustomMetadata(task.ID, task.ContextID)
 	if task.Status.State == a2a.TaskStateInputRequired {
 		event.LongRunningToolIDs = longRunningToolIDs
 	}
@@ -203,7 +217,7 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 
 	var parts []*genai.Part
 	if update.Status.Message != nil {
-		localParts, err := toGenAIParts(update.Status.Message.Parts)
+		localParts, err := ToGenAIParts(update.Status.Message.Parts)
 		if err != nil {
 			return nil, err
 		}
@@ -213,10 +227,7 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 	if len(parts) > 0 {
 		event.Content = genai.NewContentFromParts(parts, genai.RoleModel)
 	}
-	event.CustomMetadata = map[string]any{
-		CustomMetaTaskIDKey:    update.TaskID,
-		CustomMetaContextIDKey: update.ContextID,
-	}
+	event.CustomMetadata = ToCustomMetadata(update.TaskID, update.ContextID)
 	return event, nil
 }
 

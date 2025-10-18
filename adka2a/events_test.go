@@ -52,8 +52,8 @@ func TestToSessionEvent(t *testing.T) {
 				LLMResponse: &model.LLMResponse{
 					Content: genai.NewContentFromParts([]*genai.Part{{Text: "foo"}}, genai.RoleModel),
 					CustomMetadata: map[string]any{
-						CustomMetaTaskIDKey:    taskID,
-						CustomMetaContextIDKey: contextID,
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
 					},
 				},
 				Author: agentName,
@@ -69,8 +69,8 @@ func TestToSessionEvent(t *testing.T) {
 			want: &session.Event{
 				LLMResponse: &model.LLMResponse{
 					CustomMetadata: map[string]any{
-						CustomMetaTaskIDKey:    taskID,
-						CustomMetaContextIDKey: contextID,
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
 					},
 				},
 				Author: agentName,
@@ -115,8 +115,8 @@ func TestToSessionEvent(t *testing.T) {
 						{Text: "done"},
 					}, genai.RoleModel),
 					CustomMetadata: map[string]any{
-						CustomMetaTaskIDKey:    taskID,
-						CustomMetaContextIDKey: contextID,
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
 					},
 				},
 				Author: agentName,
@@ -133,8 +133,8 @@ func TestToSessionEvent(t *testing.T) {
 			want: &session.Event{
 				LLMResponse: &model.LLMResponse{
 					CustomMetadata: map[string]any{
-						CustomMetaTaskIDKey:    taskID,
-						CustomMetaContextIDKey: contextID,
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
 					},
 				},
 				Author: agentName,
@@ -171,8 +171,8 @@ func TestToSessionEvent(t *testing.T) {
 						},
 					}, genai.RoleModel),
 					CustomMetadata: map[string]any{
-						CustomMetaTaskIDKey:    taskID,
-						CustomMetaContextIDKey: contextID,
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
 					},
 				},
 				LongRunningToolIDs: []string{"get_weather"},
@@ -196,8 +196,8 @@ func TestToSessionEvent(t *testing.T) {
 						{Text: "bar"},
 					}, genai.RoleModel),
 					CustomMetadata: map[string]any{
-						CustomMetaTaskIDKey:    taskID,
-						CustomMetaContextIDKey: contextID,
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
 					},
 				},
 				Author: agentName,
@@ -243,8 +243,8 @@ func TestToSessionEvent(t *testing.T) {
 						},
 					}, genai.RoleModel),
 					CustomMetadata: map[string]any{
-						CustomMetaTaskIDKey:    taskID,
-						CustomMetaContextIDKey: contextID,
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
 					},
 				},
 				LongRunningToolIDs: []string{"get_weather"},
@@ -268,8 +268,8 @@ func TestToSessionEvent(t *testing.T) {
 				LLMResponse: &model.LLMResponse{
 					Content: genai.NewContentFromParts([]*genai.Part{{Text: "foo"}}, genai.RoleModel),
 					CustomMetadata: map[string]any{
-						CustomMetaTaskIDKey:    taskID,
-						CustomMetaContextIDKey: contextID,
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
 					},
 				},
 				Author: agentName,
@@ -282,8 +282,8 @@ func TestToSessionEvent(t *testing.T) {
 			want: &session.Event{
 				LLMResponse: &model.LLMResponse{
 					CustomMetadata: map[string]any{
-						CustomMetaTaskIDKey:    taskID,
-						CustomMetaContextIDKey: contextID,
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
 					},
 				},
 				Author: agentName,
@@ -306,8 +306,8 @@ func TestToSessionEvent(t *testing.T) {
 				LLMResponse: &model.LLMResponse{
 					Content: genai.NewContentFromParts([]*genai.Part{{Text: "foo", Thought: true}}, genai.RoleModel),
 					CustomMetadata: map[string]any{
-						CustomMetaTaskIDKey:    taskID,
-						CustomMetaContextIDKey: contextID,
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
 					},
 				},
 				Author: agentName,
