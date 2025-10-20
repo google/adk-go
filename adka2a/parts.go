@@ -21,6 +21,7 @@ import (
 	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/genai"
 )
 
@@ -90,7 +91,7 @@ func toA2AFilePart(v *genai.Part) (a2a.FilePart, error) {
 	}
 
 	if v.VideoMetadata != nil {
-		data, err := toMapStructure(v.VideoMetadata)
+		data, err := utils.ToMapStructure(v.VideoMetadata)
 		if err != nil {
 			return a2a.FilePart{}, err
 		}
@@ -102,7 +103,7 @@ func toA2AFilePart(v *genai.Part) (a2a.FilePart, error) {
 
 func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart, error) {
 	if part.CodeExecutionResult != nil {
-		data, err := toMapStructure(part.CodeExecutionResult)
+		data, err := utils.ToMapStructure(part.CodeExecutionResult)
 		if err != nil {
 			return a2a.DataPart{}, err
 		}
@@ -113,7 +114,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	}
 
 	if part.FunctionResponse != nil {
-		data, err := toMapStructure(part.FunctionResponse)
+		data, err := utils.ToMapStructure(part.FunctionResponse)
 		if err != nil {
 			return a2a.DataPart{}, err
 		}
@@ -124,7 +125,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	}
 
 	if part.ExecutableCode != nil {
-		data, err := toMapStructure(part.ExecutableCode)
+		data, err := utils.ToMapStructure(part.ExecutableCode)
 		if err != nil {
 			return a2a.DataPart{}, err
 		}
@@ -135,7 +136,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	}
 
 	if part.FunctionCall != nil {
-		data, err := toMapStructure(part.FunctionCall)
+		data, err := utils.ToMapStructure(part.FunctionCall)
 		if err != nil {
 			return a2a.DataPart{}, err
 		}

@@ -15,9 +15,8 @@
 package adka2a
 
 import (
-	"encoding/json"
-
 	"github.com/a2aproject/a2a-go/a2asrv"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/session"
 )
 
@@ -70,7 +69,7 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 	}
 
 	if response.GroundingMetadata != nil {
-		v, err := toMapStructure(response.GroundingMetadata)
+		v, err := utils.ToMapStructure(response.GroundingMetadata)
 		if err != nil {
 			return nil, err
 		}
@@ -79,21 +78,5 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 
 	// TODO(yarolegovich): include custom and usage metadata when added to session.Event
 
-	return result, nil
-}
-
-// We can't use mapstructure in a way compatible with ADK-python, because genai type fields
-// don't have proper field tags.
-// TODO(yarolegovich): field annotation PR for genai types.
-func toMapStructure(data any) (map[string]any, error) {
-	bytes, err := json.Marshal(data)
-	if err != nil {
-		return nil, err
-	}
-
-	var result map[string]any
-	if err := json.Unmarshal(bytes, &result); err != nil {
-		return nil, err
-	}
 	return result, nil
 }

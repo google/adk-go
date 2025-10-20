@@ -15,6 +15,7 @@
 package utils
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/google/uuid"
@@ -184,4 +185,21 @@ func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
 	}
 	lastPart := resp.Content.Parts[len(resp.Content.Parts)-1]
 	return lastPart.CodeExecutionResult != nil
+}
+
+// ToMapStructure converts any to map[string]any.
+// We can't use mapstructure library in a way compatible with ADK-python, because genai type fields
+// don't have proper field tags.
+// TODO(yarolegovich): field annotation PR for genai types.
+func ToMapStructure(data any) (map[string]any, error) {
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(bytes, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
