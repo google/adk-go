@@ -22,17 +22,17 @@ import (
 )
 
 type invocationMeta struct {
-	userID string
+	userID    string
 	sessionID string
 	eventMeta map[string]any
 }
 
-func toInvocationMeta(config *ExecutorConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
+func toInvocationMeta(config ExecutorConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
 	// TODO(yarolegovich): update once A2A provides auth data extraction from Context
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 
 	m := map[string]any{
-		toMetaKey("app_name"):   config.AppName,
+		toMetaKey("app_name"):   config.RunnerConfig.AppName,
 		toMetaKey("user_id"):    userID,
 		toMetaKey("session_id"): sessionID,
 	}
