@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 )
 
+// EventActions represent a data model for session.EventActions
 type EventActions struct {
 	StateDelta    map[string]any   `json:"stateDelta"`
 	ArtifactDelta map[string]int64 `json:"artifactDelta"`
@@ -45,6 +46,7 @@ type Event struct {
 	Actions            EventActions             `json:"actions"`
 }
 
+// ToSessionEvent maps Event data struct to session.Event
 func ToSessionEvent(event Event) *session.Event {
 	return &session.Event{
 		ID:                 event.ID,
@@ -69,6 +71,7 @@ func ToSessionEvent(event Event) *session.Event {
 	}
 }
 
+// FromSessionEvent maps session.Event to Event data struct
 func FromSessionEvent(event session.Event) Event {
 	return Event{
 		ID:                 event.ID,
