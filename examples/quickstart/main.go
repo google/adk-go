@@ -20,7 +20,9 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/examples"
+	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/run"
+	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
@@ -50,5 +52,8 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, agent, nil)
+	config := &adk.Config{
+		AgentLoader: services.NewSingleAgentLoader(agent),
+	}
+	run.Run(ctx, config)
 }

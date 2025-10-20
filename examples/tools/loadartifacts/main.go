@@ -124,7 +124,7 @@ func main() {
 
 		fmt.Print("\nAgent -> ")
 		streamingMode := agent.StreamingModeSSE
-		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, &agent.RunConfig{
+		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
 			StreamingMode: streamingMode,
 		}) {
 			if err != nil {
