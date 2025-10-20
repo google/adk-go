@@ -21,7 +21,6 @@ import (
 )
 
 type AgentLoader interface {
-	Root() agent.Agent
 	ListAgents() []string
 	LoadAgent(string) (agent.Agent, error)
 }
