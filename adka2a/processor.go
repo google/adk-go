@@ -81,7 +81,7 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		p.terminalEvents[a2a.TaskStateFailed] = ev
 	}
 
-	parts, err := toA2AParts(resp.Content.Parts, event.LongRunningToolIDs)
+	parts, err := ToA2AParts(resp.Content.Parts, event.LongRunningToolIDs)
 	if err != nil {
 		return nil, err
 	}

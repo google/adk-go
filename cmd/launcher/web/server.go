@@ -21,14 +21,8 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
-	"github.com/a2aproject/a2a-go/a2agrpc"
-	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/restapi/config"
