@@ -22,12 +22,12 @@ import (
 )
 
 type invocationMeta struct {
-	userID    string
+	userID string
 	sessionID string
 	eventMeta map[string]any
 }
 
-func toInvocationMeta(config *ExecutorConfig, reqCtx a2asrv.RequestContext) invocationMeta {
+func toInvocationMeta(config *ExecutorConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
 	// TODO(yarolegovich): update once A2A provides auth data extraction from Context
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 
@@ -45,7 +45,7 @@ func toMetaKey(key string) string {
 }
 
 func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, error) {
-	result := make(map[string]any, len(meta.eventMeta)+5)
+	result := make(map[string]any)
 	for k, v := range meta.eventMeta {
 		result[k] = v
 	}

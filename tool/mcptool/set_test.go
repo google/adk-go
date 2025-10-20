@@ -260,5 +260,5 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 		content = genai.NewContentFromText(newMessage, genai.RoleUser)
 	}
 
-	return r.runner.Run(ctx, userID, session.ID(), content, &agent.RunConfig{})
+	return r.runner.Run(ctx, userID, session.ID(), content, agent.RunConfig{})
 }

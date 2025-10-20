@@ -76,8 +76,8 @@ func NewExecutor(config *ExecutorConfig, opts ...ExecutorOption) *Executor {
 	return ae
 }
 
-func (e *Executor) Execute(ctx context.Context, reqCtx a2asrv.RequestContext, queue eventqueue.Queue) error {
-	msg := reqCtx.Request.Message
+func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+	msg := reqCtx.Message
 	if msg == nil {
 		return fmt.Errorf("message not provided")
 	}
@@ -124,7 +124,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx a2asrv.RequestContext, qu
 	return nil
 }
 
-func (e *Executor) Cancel(ctx context.Context, reqCtx a2asrv.RequestContext, queue eventqueue.Queue) error {
+func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
 	task := reqCtx.Task
 	if task == nil {
 		return fmt.Errorf("no task provided")
@@ -139,7 +139,7 @@ func (e *Executor) Cancel(ctx context.Context, reqCtx a2asrv.RequestContext, que
 // Processing failures should be delivered as Task failed events. An error is returned from this method if an event write fails.
 func (e *Executor) process(ctx context.Context, r *runner.Runner, processor *eventProcessor, content *genai.Content, q eventqueue.Queue) error {
 	meta := processor.meta
-	for event, err := range r.Run(ctx, meta.userID, meta.sessionID, content, e.runConfig) {
+	for event, err := range r.Run(ctx, meta.userID, meta.sessionID, content, *e.runConfig) {
 		if err != nil {
 			event := processor.makeTaskFailedEvent(fmt.Errorf("agent run failed: %w", err), nil)
 			if eventSendErr := q.Write(ctx, event); eventSendErr != nil {
