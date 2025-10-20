@@ -29,6 +29,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/model"
@@ -261,4 +262,46 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 	}
 
 	return r.runner.Run(ctx, userID, session.ID(), content, agent.RunConfig{})
+}
+
+func TestToolFilter(t *testing.T) {
+	const toolDescription = "returns weather in the given city"
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "weather_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: toolDescription}, weatherFunc)
+	mcp.AddTool(server, &mcp.Tool{Name: "get_weather1", Description: toolDescription}, weatherFunc)
+	_, err := server.Connect(t.Context(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ts, err := mcptool.NewSet(mcptool.SetConfig{
+		Transport:  clientTransport,
+		ToolFilter: tool.StringPredicate([]string{"get_weather"}),
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	tools, err := ts.Tools(icontext.NewReadonlyContext(
+		icontext.NewInvocationContext(
+			t.Context(),
+			icontext.InvocationContextParams{},
+		),
+	))
+	if err != nil {
+		t.Fatalf("Failed to get tools: %v", err)
+	}
+
+	gotToolNames := make([]string, len(tools))
+	for i, tool := range tools {
+		gotToolNames[i] = tool.Name()
+	}
+	wantToolNames := []string{"get_weather"}
+
+	if diff := cmp.Diff(wantToolNames, gotToolNames); diff != "" {
+		t.Errorf("tools mismatch (-want +got):\n%s", diff)
+	}
 }

@@ -49,19 +49,26 @@ import (
 //	})
 func NewSet(cfg SetConfig) (tool.Set, error) {
 	return &set{
-		client:    mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: "v1.0.0"}, nil),
-		transport: cfg.Transport,
+		client:     mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: "v1.0.0"}, nil),
+		transport:  cfg.Transport,
+		toolFilter: cfg.ToolFilter,
 	}, nil
 }
 
 // SetConfig provides initial configuration for the MCP ToolSet.
 type SetConfig struct {
+	// Transport that will be used to connect to MCP server.
 	Transport mcp.Transport
+	// ToolFilter selects tools for which tool.Predicate returns true.
+	// If ToolFilter is nil, then all tools are returned.
+	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.
+	ToolFilter tool.Predicate
 }
 
 type set struct {
-	client    *mcp.Client
-	transport mcp.Transport
+	client     *mcp.Client
+	transport  mcp.Transport
+	toolFilter tool.Predicate
 
 	mu      sync.Mutex
 	session *mcp.ClientSession
@@ -101,6 +108,10 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 			t, err := convertTool(mcpTool, s.getSession)
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
+			}
+
+			if s.toolFilter != nil && !s.toolFilter(ctx, t) {
+				continue
 			}
 
 			adkTools = append(adkTools, t)

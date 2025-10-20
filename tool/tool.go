@@ -45,3 +45,18 @@ type Set interface {
 	Tool // to allow passing a toolset to agent tools
 	Tools(ctx agent.ReadonlyContext) ([]Tool, error)
 }
+
+// Predicate is a function which decides whether a tool should be exposed to LLM.
+type Predicate func(ctx agent.ReadonlyContext, tool Tool) bool
+
+// StringPredicate is a helper that creates a Predicate from a string slice.
+func StringPredicate(allowedTools []string) Predicate {
+	m := make(map[string]bool)
+	for _, t := range allowedTools {
+		m[t] = true
+	}
+
+	return func(ctx agent.ReadonlyContext, tool Tool) bool {
+		return m[tool.Name()]
+	}
+}
