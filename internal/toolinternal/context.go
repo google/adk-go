@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
+	artifactinternal "google.golang.org/adk/internal/artifact"
 	contextinternal "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
@@ -30,6 +31,11 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 		functionCallID = uuid.NewString()
 	}
 	cbCtx := contextinternal.NewCallbackContext(ctx)
+	if cbCtx.Artifacts() != nil {
+		if a, ok := cbCtx.Artifacts().(*artifactinternal.Artifacts); ok {
+			a.SetEventActions(actions)
+		}
+	}
 	return &toolContext{
 		CallbackContext:   cbCtx,
 		invocationContext: ctx,
