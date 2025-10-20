@@ -29,18 +29,18 @@ import (
 
 // Run builds the launcher according to command-line arguments and then executes it
 func Run(ctx context.Context, config *adk.Config) {
-	l, _, err := BuildLauncher()
+	launcher, _, err := BuildLauncher()
 	if err != nil {
 		log.Fatalf("cannot build launcher: %v", err)
 	}
-	err = (*l).Run(ctx, config)
+	err = launcher.Run(ctx, config)
 	if err != nil {
 		log.Fatalf("run failed: %v", err)
 	}
 }
 
 // BuildLauncher uses command line argument to choose an appropiate launcher type and then builds it
-func BuildLauncher() (*launcher.Launcher, []string, error) {
+func BuildLauncher() (launcher.Launcher, []string, error) {
 	args := os.Args[1:] // skip file name, safe
 
 	if len(args) == 0 {

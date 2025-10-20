@@ -163,7 +163,7 @@ FROM gcr.io/distroless/static-debian11
 COPY ` + f.build.execFile + `  /app/` + f.build.execFile + `
 EXPOSE ` + strconv.Itoa(flags.cloudRun.serverPort) + `
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "--front_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "--backend_address", "http://localhost:` + strconv.Itoa(f.proxy.port) + `/api"]
+CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "--webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "--api_server_address", "http://localhost:` + strconv.Itoa(f.proxy.port) + `/api"]
  `
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(c), 0600)
 		})
