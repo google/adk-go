@@ -33,7 +33,7 @@ func TestArtifacts(t *testing.T) {
 
 	// Save
 	part := *genai.NewPartFromText("test data")
-	_, err := a.Save("testArtifact", part)
+	err := a.Save("testArtifact", part, nil)
 	if err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
@@ -69,12 +69,12 @@ func TestArtifacts_WithLoadVersion(t *testing.T) {
 	}
 
 	part := *genai.NewPartFromText("test data")
-	_, err := a.Save("testArtifact", part)
+	err := a.Save("testArtifact", part, nil)
 	if err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
 	part2 := *genai.NewPartFromText("test data 2")
-	_, err = a.Save("testArtifact", part2)
+	err = a.Save("testArtifact", part2, nil)
 	if err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestArtifacts_Errors(t *testing.T) {
 
 	// Save an artifact to test LoadVersion with an invalid version
 	part := *genai.NewPartFromText("test data")
-	if _, err := a.Save("existsArtifact", part); err != nil {
+	if err := a.Save("existsArtifact", part, nil); err != nil {
 		t.Fatalf("Save(\"existsArtifact\") failed: %v", err)
 	}
 

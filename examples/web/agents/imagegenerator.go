@@ -50,18 +50,12 @@ func generateImage(ctx tool.Context, input generateImageInput) generateImageResu
 		}
 	}
 
-	resp, err := ctx.Artifacts().Save(input.Filename, *genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
+	err = ctx.Artifacts().Save(input.Filename, *genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"), ctx.Actions())
 	if err != nil {
 		return generateImageResult{
 			Status: "fail",
 		}
 	}
-
-	if ctx.Actions().ArtifactDelta == nil {
-		ctx.Actions().ArtifactDelta = make(map[string]int64)
-	}
-
-	ctx.Actions().ArtifactDelta[input.Filename] = resp.Version
 
 	return generateImageResult{
 		Status:   "success",
