@@ -17,7 +17,6 @@ package web
 
 import (
 	"embed"
-	"flag"
 	"io/fs"
 	"log"
 	"net/http"
@@ -31,43 +30,11 @@ import (
 	"github.com/a2aproject/a2a-go/a2agrpc"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/adka2a"
-	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/restapi/config"
 	"google.golang.org/adk/cmd/restapi/handlers"
-	"google.golang.org/adk/cmd/restapi/services"
 	restapiweb "google.golang.org/adk/cmd/restapi/web"
-	"google.golang.org/adk/session"
-	"google.golang.org/grpc"
 )
-
-// WebConfig is a struct with parameters to run a WebServer.
-type WebConfig struct {
-	LocalPort       int
-	FrontendAddress string
-	BackendAddress  string
-	StartA2A        bool
-}
-
-// ParseArgs parses the arguments for the ADK API server.
-func ParseArgs() *WebConfig {
-	localPortFlag := flag.Int("port", 8080, "Localhost port for the server")
-	frontendAddressFlag := flag.String("front_address", "localhost:8080", "Front address to allow CORS requests from as seen from the user browser. Please specify only hostname and (optionally) port")
-	backendAddressFlag := flag.String("backend_address", "http://localhost:8080/api", "Backend server as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'. ")
-	startA2A := flag.Bool("a2a", true, "Start A2A gRPC server")
-
-	flag.Parse()
-	if !flag.Parsed() {
-		flag.Usage()
-		panic("Failed to parse flags")
-	}
-	return &(WebConfig{
-		LocalPort:       *localPortFlag,
-		FrontendAddress: *frontendAddressFlag,
-		BackendAddress:  *backendAddressFlag,
-		StartA2A:        *startA2A,
-	})
-}
 
 func Logger(inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,13 +49,6 @@ func Logger(inner http.Handler) http.Handler {
 			time.Since(start),
 		)
 	})
-}
-
-type ServeConfig struct {
-	SessionService  session.Service
-	AgentLoader     services.AgentLoader
-	ArtifactService artifact.Service
-	A2AOptions      []a2asrv.RequestHandlerOption
 }
 
 func corsWithArgs(c *WebConfig) func(next http.Handler) http.Handler {
@@ -112,11 +72,11 @@ func corsWithArgs(c *WebConfig) func(next http.Handler) http.Handler {
 var content embed.FS
 
 // Serve initiates the http server and starts it according to WebConfig parameters
-func Serve(c *WebConfig, serveConfig *ServeConfig) {
+func Serve(c *WebConfig, adkConfig *adk.Config) {
 	serverConfig := config.ADKAPIRouterConfigs{
-		SessionService:  serveConfig.SessionService,
-		AgentLoader:     serveConfig.AgentLoader,
-		ArtifactService: serveConfig.ArtifactService,
+		SessionService:  adkConfig.SessionService,
+		AgentLoader:     adkConfig.AgentLoader,
+		ArtifactService: adkConfig.ArtifactService,
 	}
 
 	rBase := mux.NewRouter().StrictSlash(true)
@@ -151,35 +111,7 @@ func Serve(c *WebConfig, serveConfig *ServeConfig) {
 	rApi.Use(corsWithArgs(c))
 	restapiweb.SetupRouter(rApi, &serverConfig)
 
-	var handler http.Handler
-	if c.StartA2A {
-		grpcSrv := grpc.NewServer()
-		newA2AHandler(serveConfig).RegisterWith(grpcSrv)
-		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
-				grpcSrv.ServeHTTP(w, r)
-			} else {
-				rBase.ServeHTTP(w, r)
-			}
-		})
-	} else {
-		handler = rBase
-	}
-
-	handler = h2c.NewHandler(handler, &http2.Server{})
-
-	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), handler))
-}
-
-func newA2AHandler(serveConfig *ServeConfig) *a2agrpc.GRPCHandler {
-	agent := serveConfig.AgentLoader.Root()
-	executor := adka2a.NewExecutor(&adka2a.ExecutorConfig{
-		AppName:         agent.Name(),
-		Agent:           agent,
-		SessionService:  serveConfig.SessionService,
-		ArtifactService: serveConfig.ArtifactService,
-	})
-	reqHandler := a2asrv.NewHandler(executor, serveConfig.A2AOptions...)
-	grpcHandler := a2agrpc.NewHandler(&adka2a.CardProducer{Agent: agent}, reqHandler)
-	return grpcHandler
+	log.Printf("Starting a web server: %+v", c)
+	log.Printf("Open %s", "http://localhost:"+strconv.Itoa(c.LocalPort))
+	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), rBase))
 }

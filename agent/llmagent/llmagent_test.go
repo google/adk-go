@@ -105,7 +105,7 @@ func TestLLMAgentStreamingModeSSE(t *testing.T) {
 		t.Fatalf("NewLLMAgent failed: %v", err)
 	}
 	testRunner := testutil.NewTestAgentRunner(t, a)
-	stream := testRunner.RunContentWithConfig(t, "test_session", genai.NewContentFromText("What is the sum of the first 50 prime numbers?", "user"), &agent.RunConfig{StreamingMode: agent.StreamingModeSSE})
+	stream := testRunner.RunContentWithConfig(t, "test_session", genai.NewContentFromText("What is the sum of the first 50 prime numbers?", "user"), agent.RunConfig{StreamingMode: agent.StreamingModeSSE})
 	events, err := testutil.CollectEvents(stream)
 	gotThought := false
 	numContents := 0

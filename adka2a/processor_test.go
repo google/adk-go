@@ -118,7 +118,7 @@ func TestEventProcessor_Process(t *testing.T) {
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
-					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					map[string]any{toMetaKey("error_code"): "1"},
 				),
 			},
 		},
@@ -131,7 +131,7 @@ func TestEventProcessor_Process(t *testing.T) {
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed 1"}),
-					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					map[string]any{toMetaKey("error_code"): "1"},
 				),
 			},
 		},
@@ -150,7 +150,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				newArtifactLastChunkEvent(task),
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
-					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					map[string]any{toMetaKey("error_code"): "1"},
 				),
 			},
 		},
@@ -169,7 +169,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				newArtifactLastChunkEvent(task),
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
-					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					map[string]any{toMetaKey("error_code"): "1"},
 				),
 			},
 		},
