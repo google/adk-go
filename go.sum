@@ -28,8 +28,6 @@ github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/cloudmock v0
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/cloudmock v0.53.0/go.mod h1:jUZ5LYlw40WMd07qxcQJD5M40aUxrfwqQX1g7zxYnrQ=
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.53.0 h1:Ron4zCA/yk6U7WOBXhTJcDpsUBG9npumK6xw2auFltQ=
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.53.0/go.mod h1:cSgYe11MCNYunTnRXrKiR/tHc0eoKjICUuWpNZoVCOo=
-github.com/a2aproject/a2a-go v0.0.0-20250929112340-7205dc695671 h1:KxlbVQpwyWjkyX+G97PnxT8ZkVXPp7hR51aimQW/4zE=
-github.com/a2aproject/a2a-go v0.0.0-20250929112340-7205dc695671/go.mod h1:8C0O6lsfR7zWFEqVZz/+zWCoxe8gSWpknEpqm/Vgj3E=
 github.com/a2aproject/a2a-go v0.0.0-20251019084948-b02378be636d h1:dVzrSa/TCg+ZIjQ7J5J00irIWxSdB0QXUQ5XlJ54IOE=
 github.com/a2aproject/a2a-go v0.0.0-20251019084948-b02378be636d/go.mod h1:8C0O6lsfR7zWFEqVZz/+zWCoxe8gSWpknEpqm/Vgj3E=
 github.com/awalterschulze/gographviz v2.0.3+incompatible h1:9sVEXJBJLwGX7EQVhLm2elIKCm7P2YHFC8v6096G09E=
