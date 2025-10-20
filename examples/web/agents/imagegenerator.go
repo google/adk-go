@@ -50,7 +50,7 @@ func generateImage(ctx tool.Context, input generateImageInput) generateImageResu
 		}
 	}
 
-	err = ctx.Artifacts().Save(input.Filename, *genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"), ctx.Actions())
+	err = ctx.Artifacts().Save(input.Filename, *genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
 	if err != nil {
 		return generateImageResult{
 			Status: "fail",

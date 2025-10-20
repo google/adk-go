@@ -197,7 +197,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 				continue
 			}
 			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
-			if err := artifactsService.Save(fileName, *part, nil); err != nil {
+			if err := artifactsService.Save(fileName, *part); err != nil {
 				return fmt.Errorf("failed to save artifact %s: %w", fileName, err)
 			}
 			// Replace the part with a text placeholder

@@ -40,7 +40,7 @@ func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, l
 		return llmResponse, llmResponseError
 	}
 	for _, part := range llmResponse.Content.Parts {
-		err := ctx.Artifacts().Save(uuid.NewString(), *part, ctx.Actions())
+		err := ctx.Artifacts().Save(uuid.NewString(), *part)
 		if err != nil {
 			return nil, err
 		}

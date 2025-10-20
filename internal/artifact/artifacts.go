@@ -25,13 +25,18 @@ import (
 
 // Artifacts implements Artifacts
 type Artifacts struct {
-	Service   artifact.Service
-	AppName   string
-	UserID    string
-	SessionID string
+	Service      artifact.Service
+	AppName      string
+	UserID       string
+	SessionID    string
+	eventActions *session.EventActions
 }
 
-func (a *Artifacts) Save(name string, data genai.Part, actions *session.EventActions) error {
+func (a *Artifacts) SetEventActions(actions *session.EventActions) {
+	a.eventActions = actions
+}
+
+func (a *Artifacts) Save(name string, data genai.Part) error {
 	resp, err := a.Service.Save(context.Background(), &artifact.SaveRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
@@ -42,11 +47,11 @@ func (a *Artifacts) Save(name string, data genai.Part, actions *session.EventAct
 	if err != nil {
 		return err
 	}
-	if actions != nil {
-		if actions.ArtifactDelta == nil {
-			actions.ArtifactDelta = make(map[string]int64)
+	if a.eventActions != nil {
+		if a.eventActions.ArtifactDelta == nil {
+			a.eventActions.ArtifactDelta = make(map[string]int64)
 		}
-		actions.ArtifactDelta[name] = resp.Version
+		a.eventActions.ArtifactDelta[name] = resp.Version
 	}
 	return nil
 }

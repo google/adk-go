@@ -16,6 +16,7 @@ package context
 
 import (
 	"google.golang.org/adk/agent"
+	artifactinternal "google.golang.org/adk/internal/artifact"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -26,10 +27,16 @@ func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
 
 func newCallbackContext(ctx agent.InvocationContext) *callbackContext {
 	rCtx := NewReadonlyContext(ctx)
+	eventActions := &session.EventActions{}
+	if ctx.Artifacts() != nil {
+		if a, ok := ctx.Artifacts().(*artifactinternal.Artifacts); ok {
+			a.SetEventActions(eventActions)
+		}
+	}
 	return &callbackContext{
 		ReadonlyContext: rCtx,
 		invocationCtx:   ctx,
-		eventActions:    &session.EventActions{},
+		eventActions:    eventActions,
 	}
 }
 
