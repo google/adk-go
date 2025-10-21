@@ -110,19 +110,21 @@ func highlighted(nodeName string, higlightedPairs [][]string) bool {
 	return false
 }
 
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 func edgeHighlighted(from string, to string, higlightedPairs [][]string) *bool {
-	highlighted := false
 	if len(higlightedPairs) == 0 {
 		return nil
 	}
 	for _, pair := range higlightedPairs {
 		if len(pair) == 2 {
 			if pair[0] == from && pair[1] == to {
-				highlighted = true
-				return &highlighted
+				return boolPtr(true)
 			}
 			if pair[0] == to && pair[1] == from {
-				return &highlighted
+				return boolPtr(false)
 			}
 		}
 	}
