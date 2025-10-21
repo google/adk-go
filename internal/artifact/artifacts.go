@@ -41,7 +41,7 @@ func (a *Artifacts) Save(ctx context.Context, name string, data *genai.Part) (*a
 }
 
 func (a *Artifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {
-	return a.Service.Load(context.Background(), &artifact.LoadRequest{
+	return a.Service.Load(ctx, &artifact.LoadRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
@@ -50,7 +50,7 @@ func (a *Artifacts) Load(ctx context.Context, name string) (*artifact.LoadRespon
 }
 
 func (a *Artifacts) LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error) {
-	return a.Service.Load(context.Background(), &artifact.LoadRequest{
+	return a.Service.Load(ctx, &artifact.LoadRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
@@ -60,7 +60,7 @@ func (a *Artifacts) LoadVersion(ctx context.Context, name string, version int) (
 }
 
 func (a *Artifacts) List(ctx context.Context) (*artifact.ListResponse, error) {
-	return a.Service.List(context.Background(), &artifact.ListRequest{
+	return a.Service.List(ctx, &artifact.ListRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
