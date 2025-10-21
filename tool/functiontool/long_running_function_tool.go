@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package tool
+package functiontool
 
 import (
 	"fmt"
 
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -42,7 +43,7 @@ func (f *longRunningFunctionTool[TArgs, TResults]) IsLongRunning() bool {
 }
 
 // ProcessRequest implements interfaces.RequestProcessor.
-func (f *longRunningFunctionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *model.LLMRequest) error {
+func (f *longRunningFunctionTool[TArgs, TResults]) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return f.functionTool.ProcessRequest(ctx, req)
 }
 
@@ -61,15 +62,15 @@ func (f *longRunningFunctionTool[TArgs, TResults]) Declaration() *genai.Function
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *longRunningFunctionTool[TArgs, TResults]) Run(ctx Context, args any) (any, error) {
+func (f *longRunningFunctionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (any, error) {
 	return f.functionTool.Run(ctx, args)
 }
 
 // NewLongRunningFunctionTool creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
-func NewLongRunningFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Function[TArgs, TResults]) (Tool, error) {
+func NewLongRunningFunctionTool[TArgs, TResults any](cfg Config, handler Function[TArgs, TResults]) (tool.Tool, error) {
 	cfg.isLongRunning = true
-	innerTool, err := NewFunctionTool(cfg, handler)
+	innerTool, err := New(cfg, handler)
 	if err != nil {
 		return nil, err
 	}
@@ -86,5 +87,3 @@ func NewLongRunningFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, han
 		functionTool: concreteTool,
 	}, nil
 }
-
-var _ Tool = (*longRunningFunctionTool[any, any])(nil)

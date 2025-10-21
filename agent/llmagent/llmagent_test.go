@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
+	"google.golang.org/adk/tool/functiontool"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
@@ -320,7 +321,7 @@ func TestFunctionTool(t *testing.T) {
 		}
 		return Result{Sum: input.A + input.B}
 	}
-	rand, _ := tool.NewFunctionTool(tool.FunctionToolConfig{
+	rand, _ := functiontool.New(functiontool.Config{
 		Name:        "sum",
 		Description: "computes the sum of two numbers",
 	}, handler)

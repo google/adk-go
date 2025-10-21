@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package tool_test
+package loadartifactstool_test
 
 import (
 	"strings"
@@ -23,6 +23,7 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool/loadartifactstool"
 
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/tool"
@@ -30,7 +31,7 @@ import (
 )
 
 func TestLoadArtifactsTool_Run(t *testing.T) {
-	loadArtifactsTool := tool.NewLoadArtifactsTool()
+	loadArtifactsTool := loadartifactstool.New()
 	tc := createToolContext(t)
 
 	toolImpl, ok := loadArtifactsTool.(toolinternal.FunctionTool)
@@ -135,7 +136,7 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 }
 
 func TestLoadArtifactsTool_ProcessRequest(t *testing.T) {
-	loadArtifactsTool := tool.NewLoadArtifactsTool()
+	loadArtifactsTool := loadartifactstool.New()
 
 	tc := createToolContext(t)
 	artifacts := map[string]*genai.Part{
@@ -174,7 +175,7 @@ func TestLoadArtifactsTool_ProcessRequest(t *testing.T) {
 }
 
 func TestLoadArtifactsTool_ProcessRequest_Artifacts_LoadArtifactsFunctionCall(t *testing.T) {
-	loadArtifactsTool := tool.NewLoadArtifactsTool()
+	loadArtifactsTool := loadartifactstool.New()
 
 	tc := createToolContext(t)
 	artifacts := map[string]*genai.Part{
@@ -234,7 +235,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_LoadArtifactsFunctionCall(t 
 }
 
 func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing.T) {
-	loadArtifactsTool := tool.NewLoadArtifactsTool()
+	loadArtifactsTool := loadartifactstool.New()
 
 	tc := createToolContext(t)
 	artifacts := map[string]*genai.Part{

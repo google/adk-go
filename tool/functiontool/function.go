@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package tool
+package functiontool
 
 import (
 	"fmt"
@@ -21,23 +21,14 @@ import (
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
 // FunctionTool: borrow implementation from MCP go.
-// transfer_to_agent ??
-// MCP Tool
-// LoadArtifactsTool
-// ExitLoopTool
-// AgentTool
-// LongRunningFunctionTool
 
-// BuiltinCodeExecutionTool
-// GoogeSearchTool
-// MCPTool
-
-// FunctionToolConfig is the input to the NewFunctionTool function.
-type FunctionToolConfig struct {
+// Config is the input to the NewFunctionTool function.
+type Config struct {
 	// The name of this tool.
 	Name string
 	// A human-readable description of the tool.
@@ -53,11 +44,11 @@ type FunctionToolConfig struct {
 }
 
 // Funtion represents a Go function.
-type Function[TArgs, TResults any] func(Context, TArgs) TResults
+type Function[TArgs, TResults any] func(tool.Context, TArgs) TResults
 
-// NewFunctionTool creates a new tool with a name, description, and the provided handler.
+// New creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
-func NewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Function[TArgs, TResults]) (Tool, error) {
+func New[TArgs, TResults any](cfg Config, handler Function[TArgs, TResults]) (tool.Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
 	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
@@ -79,7 +70,7 @@ func NewFunctionTool[TArgs, TResults any](cfg FunctionToolConfig, handler Functi
 
 // functionTool wraps a Go function.
 type functionTool[TArgs, TResults any] struct {
-	cfg FunctionToolConfig
+	cfg Config
 
 	// A JSON Schema object defining the expected parameters for the tool.
 	inputSchema *jsonschema.Resolved
@@ -106,7 +97,7 @@ func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
 }
 
 // ProcessRequest implements interfaces.Tool.
-func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx Context, req *model.LLMRequest) error {
+func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, f)
 }
 
@@ -126,7 +117,7 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *functionTool[TArgs, TResults]) Run(ctx Context, args any) (any, error) {
+func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (any, error) {
 	// TODO: Handle function call request from tc.InvocationContext.
 	// TODO: Handle panic -> convert to error.
 	m, ok := args.(map[string]any)

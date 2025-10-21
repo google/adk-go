@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/loadartifactstool"
 	"google.golang.org/genai"
 )
 
@@ -49,7 +50,7 @@ func main() {
 		Description: "Agent to answer questions about artifacts.",
 		Instruction: "When user asks about the artifact, load them and describe them.",
 		Tools: []tool.Tool{
-			tool.NewLoadArtifactsTool(),
+			loadartifactstool.New(),
 		},
 	})
 	if err != nil {

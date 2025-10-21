@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package tool_test
+package functiontool_test
 
 import (
 	"encoding/json"
@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
 
@@ -40,7 +41,7 @@ func TestNewLongRunningFunctionTool(t *testing.T) {
 	handler := func(ctx tool.Context, input SumArgs) SumResult {
 		return SumResult{Result: "Processing sum"}
 	}
-	sumTool, err := tool.NewLongRunningFunctionTool(tool.FunctionToolConfig{
+	sumTool, err := functiontool.NewLongRunningFunctionTool(functiontool.Config{
 		Name:        "sum",
 		Description: "sums two integers",
 	}, handler)
@@ -106,7 +107,7 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx t
 	}
 	mockModel := &testutil.MockModel{Responses: responses}
 
-	longRunningTool, err := tool.NewLongRunningFunctionTool(tool.FunctionToolConfig{
+	longRunningTool, err := functiontool.NewLongRunningFunctionTool(functiontool.Config{
 		Name:        "increaseByOne",
 		Description: "increaseByOne",
 	}, increaseByOne)
@@ -269,7 +270,7 @@ func TestLongRunningToolIDsAreSet(t *testing.T) {
 		return map[string]string{"status": "pending"}
 	}
 
-	longRunningTool, err := tool.NewLongRunningFunctionTool(tool.FunctionToolConfig{
+	longRunningTool, err := functiontool.NewLongRunningFunctionTool(functiontool.Config{
 		Name:        "increaseByOne",
 		Description: "increaseByOne",
 	}, increaseByOne)
