@@ -191,7 +191,7 @@ And another optional artifact:
 				}
 			}
 			for filename, part := range tc.artifacts {
-				if err := artifacts.Save(filename, *part); err != nil {
+				if _, err := artifacts.Save(t.Context(), filename, part); err != nil {
 					t.Fatalf("Failed to save artifact: %v", err)
 				}
 			}

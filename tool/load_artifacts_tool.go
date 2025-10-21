@@ -118,14 +118,14 @@ func (t *loadArtifactsTool) ProcessRequest(ctx Context, req *model.LLMRequest) e
 }
 
 func (t *loadArtifactsTool) appendInitialInstructions(ctx Context, req *model.LLMRequest) error {
-	artifactNames, err := ctx.Artifacts().List()
+	resp, err := ctx.Artifacts().List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", err)
 	}
-	if len(artifactNames) == 0 {
+	if len(resp.FileNames) == 0 {
 		return nil
 	}
-	artifactNamesJSON, err := json.Marshal(artifactNames)
+	artifactNamesJSON, err := json.Marshal(resp.FileNames)
 	if err != nil {
 		return fmt.Errorf("failed to marshal artifact names: %w", err)
 	}
@@ -195,15 +195,15 @@ func (t *loadArtifactsTool) processLoadArtifactsFunctionCall(ctx Context, req *m
 	return nil
 }
 
-func (t *loadArtifactsTool) loadIndividualArtifact(_ context.Context, artifactsService agent.Artifacts, artifactName string) (*genai.Content, error) {
-	artifact, err := artifactsService.Load(artifactName)
+func (t *loadArtifactsTool) loadIndividualArtifact(ctx context.Context, artifactsService agent.Artifacts, artifactName string) (*genai.Content, error) {
+	resp, err := artifactsService.Load(ctx, artifactName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load artifact %s: %w", artifactName, err)
 	}
 	return &genai.Content{
 		Parts: []*genai.Part{
 			genai.NewPartFromText("Artifact " + artifactName + " is:"),
-			&artifact,
+			resp.Part,
 		},
 		Role: genai.RoleUser,
 	}, nil

@@ -38,7 +38,7 @@ type Context interface {
 	FunctionCallID() string
 
 	Actions() *session.EventActions
-	SearchMemory(context.Context, string) ([]memory.Entry, error)
+	SearchMemory(context.Context, string) (*memory.SearchResponse, error)
 }
 
 type Set interface {

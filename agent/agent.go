@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 
+	"google.golang.org/adk/artifact"
 	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -60,15 +61,15 @@ type Config struct {
 }
 
 type Artifacts interface {
-	Save(name string, data genai.Part) error
-	Load(name string) (genai.Part, error)
-	LoadVersion(name string, version int) (genai.Part, error)
-	List() ([]string, error)
+	Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error)
+	List(context.Context) (*artifact.ListResponse, error)
+	Load(ctx context.Context, name string) (*artifact.LoadResponse, error)
+	LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error)
 }
 
 type Memory interface {
-	AddSession(session session.Session) error
-	Search(query string) ([]memory.Entry, error)
+	AddSession(context.Context, session.Session) error
+	Search(ctx context.Context, query string) (*memory.SearchResponse, error)
 }
 
 type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)

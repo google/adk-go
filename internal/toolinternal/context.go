@@ -57,6 +57,6 @@ func (c *toolContext) AgentName() string {
 	return c.invocationContext.Agent().Name()
 }
 
-func (c *toolContext) SearchMemory(ctx context.Context, query string) ([]memory.Entry, error) {
-	return c.invocationContext.Memory().Search(query)
+func (c *toolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	return c.invocationContext.Memory().Search(ctx, query)
 }
