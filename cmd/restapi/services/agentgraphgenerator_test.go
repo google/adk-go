@@ -54,7 +54,7 @@ func (d *dummyLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 }
 
 // Helper to create a generic agent.Agent
-func newTestAgent(t *testing.T, name, description string, agentType agentinternal.Type, subAgents []agent.Agent) agent.Agent {
+func newTestAgent(t *testing.T, name, description string, agentType agentinternal.Type, subAgents []agent.Agent, tools []tool.Tool) agent.Agent {
 	var a agent.Agent
 	var err error
 
@@ -84,27 +84,21 @@ func newTestAgent(t *testing.T, name, description string, agentType agentinterna
 				SubAgents:   subAgents,
 			},
 		})
+	case agentinternal.TypeCustomAgent, agentinternal.TypeLLMAgent:
+		a, err = llmagent.New(llmagent.Config{
+			Name:        name,
+			Description: description,
+			Model:       &dummyLLM{},
+			Tools:       tools,
+			SubAgents:   subAgents,
+		})
 	default:
-		// Fallback to a basic LLM agent for other types, as it's a concrete, non-cluster agent.
-		return newTestLLMAgent(name, description, nil, subAgents)
+		t.Fatalf("Unsupported agent type: %v", agentType)
 	}
 
 	if err != nil {
 		t.Fatalf("failed to create agent: %v", err)
 	}
-	return a
-}
-
-// Helper to create an LLM agent
-func newTestLLMAgent(name, description string, tools []tool.Tool, subAgents []agent.Agent) agent.Agent {
-	llm := &dummyLLM{}
-	a, _ := llmagent.New(llmagent.Config{
-		Name:        name,
-		Description: description,
-		Model:       llm,
-		Tools:       tools,
-		SubAgents:   subAgents,
-	})
 	return a
 }
 
@@ -123,7 +117,7 @@ func TestNodeName(t *testing.T) {
 		instance any
 		expected string
 	}{
-		{"agent", newTestAgent(t, "TestAgent", "", agentinternal.TypeCustomAgent, nil), "TestAgent"},
+		{"agent", newTestAgent(t, "TestAgent", "", agentinternal.TypeCustomAgent, nil, nil), "TestAgent"},
 		{"tool", &mockTool{name: "TestTool"}, "TestTool"},
 		{"unknown", "some string", "Unknown instance type"},
 	}
@@ -143,10 +137,10 @@ func TestNodeCaption(t *testing.T) {
 		instance any
 		expected string
 	}{
-		{"llm agent", newTestLLMAgent("LLMAgent", "", nil, nil), "\"🤖 LLMAgent\""},
-		{"sequential agent", newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, nil), "\"SeqAgent (SequentialAgent)\""},
-		{"loop agent", newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, nil), "\"LoopAgent (LoopAgent)\""},
-		{"parallel agent", newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, nil), "\"ParAgent (ParallelAgent)\""},
+		{"llm agent", newTestAgent(t, "LLMAgent", "", agentinternal.TypeLLMAgent, nil, nil), "\"🤖 LLMAgent\""},
+		{"sequential agent", newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, nil, nil), "\"SeqAgent (SequentialAgent)\""},
+		{"loop agent", newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, nil, nil), "\"LoopAgent (LoopAgent)\""},
+		{"parallel agent", newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, nil, nil), "\"ParAgent (ParallelAgent)\""},
 		{"tool", &mockTool{name: "TestTool"}, "\"🔧 TestTool\""},
 		{"unknown", "some string", "\"Unsupported agent or tool type\""},
 	}
@@ -166,7 +160,7 @@ func TestNodeShape(t *testing.T) {
 		instance any
 		expected string
 	}{
-		{"agent", newTestAgent(t, "TestAgent", "", agentinternal.TypeCustomAgent, nil), "ellipse"},
+		{"agent", newTestAgent(t, "TestAgent", "", agentinternal.TypeCustomAgent, nil, nil), "ellipse"},
 		{"tool", &mockTool{name: "TestTool"}, "box"},
 		{"unknown", "some string", "cylinder"},
 	}
@@ -186,10 +180,10 @@ func TestShouldBuildAgentCluster(t *testing.T) {
 		instance any
 		expected bool
 	}{
-		{"llm agent", newTestLLMAgent("LLMAgent", "", nil, nil), false},
-		{"sequential agent", newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, nil), true},
-		{"loop agent", newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, nil), true},
-		{"parallel agent", newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, nil), true},
+		{"llm agent", newTestAgent(t, "LLMAgent", "", agentinternal.TypeLLMAgent, nil, nil), false},
+		{"sequential agent", newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, nil, nil), true},
+		{"loop agent", newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, nil, nil), true},
+		{"parallel agent", newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, nil, nil), true},
 		{"tool", &mockTool{name: "TestTool"}, false},
 		{"unknown", "some string", false},
 	}
@@ -259,7 +253,7 @@ func TestDrawNode(t *testing.T) {
 	visitedNodes := make(map[string]bool)
 
 	t.Run("draw agent node", func(t *testing.T) {
-		agent := newTestAgent(t, "MyAgent", "", agentinternal.TypeCustomAgent, nil)
+		agent := newTestAgent(t, "MyAgent", "", agentinternal.TypeCustomAgent, nil, nil)
 		err := drawNode(graph, parentGraph, agent, [][]string{}, visitedNodes)
 		if err != nil {
 			t.Fatalf("drawNode failed: %v", err)
@@ -286,7 +280,7 @@ func TestDrawNode(t *testing.T) {
 	visitedNodes = make(map[string]bool)
 
 	t.Run("draw highlighted agent node", func(t *testing.T) {
-		agent := newTestAgent(t, "HighlightedAgent", "", agentinternal.TypeCustomAgent, nil)
+		agent := newTestAgent(t, "HighlightedAgent", "", agentinternal.TypeCustomAgent, nil, nil)
 		highlightedPairs := [][]string{{"HighlightedAgent", "Tool1"}}
 		err := drawNode(graph, parentGraph, agent, highlightedPairs, visitedNodes)
 		if err != nil {
@@ -335,7 +329,7 @@ func TestDrawNode(t *testing.T) {
 	visitedNodes = make(map[string]bool)
 
 	t.Run("draw cluster agent", func(t *testing.T) {
-		agent := newTestAgent(t, "MyClusterAgent", "", agentinternal.TypeSequentialAgent, nil)
+		agent := newTestAgent(t, "MyClusterAgent", "", agentinternal.TypeSequentialAgent, nil, nil)
 		err := drawNode(graph, parentGraph, agent, [][]string{}, visitedNodes)
 		if err != nil {
 			t.Fatalf("drawNode failed: %v", err)
@@ -448,9 +442,9 @@ func TestDrawCluster(t *testing.T) {
 	visitedNodes := make(map[string]bool)
 
 	t.Run("sequential agent cluster", func(t *testing.T) {
-		subAgent1 := newTestLLMAgent("SubAgent1", "", nil, nil)
-		subAgent2 := newTestLLMAgent("SubAgent2", "", nil, nil)
-		seqAgent := newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, []agent.Agent{subAgent1, subAgent2})
+		subAgent1 := newTestAgent(t, "SubAgent1", "", agentinternal.TypeLLMAgent, nil, nil)
+		subAgent2 := newTestAgent(t, "SubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
+		seqAgent := newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, []agent.Agent{subAgent1, subAgent2}, nil)
 
 		clusterGraph := gographviz.NewGraph()
 		clusterGraph.SetName("cluster_SeqAgent")
@@ -478,9 +472,9 @@ func TestDrawCluster(t *testing.T) {
 	visitedNodes = make(map[string]bool)
 
 	t.Run("loop agent cluster", func(t *testing.T) {
-		subAgent1 := newTestLLMAgent("LoopSubAgent1", "", nil, nil)
-		subAgent2 := newTestLLMAgent("LoopSubAgent2", "", nil, nil)
-		loopAgent := newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, []agent.Agent{subAgent1, subAgent2})
+		subAgent1 := newTestAgent(t, "LoopSubAgent1", "", agentinternal.TypeLLMAgent, nil, nil)
+		subAgent2 := newTestAgent(t, "LoopSubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
+		loopAgent := newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, []agent.Agent{subAgent1, subAgent2}, nil)
 
 		clusterGraph := gographviz.NewGraph()
 		clusterGraph.SetName("cluster_LoopAgent")
@@ -502,9 +496,9 @@ func TestDrawCluster(t *testing.T) {
 	visitedNodes = make(map[string]bool)
 
 	t.Run("parallel agent cluster", func(t *testing.T) {
-		subAgent1 := newTestLLMAgent("ParSubAgent1", "", nil, nil)
-		subAgent2 := newTestLLMAgent("ParSubAgent2", "", nil, nil)
-		parAgent := newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, []agent.Agent{subAgent1, subAgent2})
+		subAgent1 := newTestAgent(t, "ParSubAgent1", "", agentinternal.TypeLLMAgent, nil, nil)
+		subAgent2 := newTestAgent(t, "ParSubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
+		parAgent := newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, []agent.Agent{subAgent1, subAgent2}, nil)
 
 		clusterGraph := gographviz.NewGraph()
 		clusterGraph.SetName("cluster_ParAgent")
@@ -530,9 +524,9 @@ func TestBuildGraph(t *testing.T) {
 	tool1 := &mockTool{name: "Tool1"}
 	tool2 := &mockTool{name: "Tool2"}
 
-	subAgent1 := newTestLLMAgent("SubAgent1", "", []tool.Tool{tool1}, nil)
-	subAgent2 := newTestLLMAgent("SubAgent2", "", nil, nil)
-	mainAgent := newTestLLMAgent("MainAgent", "", []tool.Tool{tool2}, []agent.Agent{subAgent1, subAgent2})
+	subAgent1 := newTestAgent(t, "SubAgent1", "", agentinternal.TypeLLMAgent, nil, []tool.Tool{tool1})
+	subAgent2 := newTestAgent(t, "SubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
+	mainAgent := newTestAgent(t, "MainAgent", "", agentinternal.TypeLLMAgent, []agent.Agent{subAgent1, subAgent2}, []tool.Tool{tool2})
 
 	err := buildGraph(graph, parentGraph, mainAgent, [][]string{}, visitedNodes)
 	if err != nil {
