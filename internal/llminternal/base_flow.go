@@ -195,7 +195,7 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) er
 
 	// run processors for tools.
 	tools := Reveal(llmAgent).Tools
-	for _, toolSet := range Reveal(llmAgent).ToolSets {
+	for _, toolSet := range Reveal(llmAgent).Toolsets {
 		tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
 		if err != nil {
 			return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)

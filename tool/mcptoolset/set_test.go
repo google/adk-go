@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package mcptool_test
+package mcptoolset_test
 
 import (
 	"context"
@@ -37,7 +37,7 @@ import (
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/mcptool"
+	"google.golang.org/adk/tool/mcptoolset"
 	"google.golang.org/genai"
 )
 
@@ -75,7 +75,7 @@ func TestMCPToolSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ts, err := mcptool.NewSet(mcptool.SetConfig{
+	ts, err := mcptoolset.New(mcptoolset.Config{
 		Transport: clientTransport,
 	})
 	if err != nil {
@@ -87,7 +87,7 @@ func TestMCPToolSet(t *testing.T) {
 		Model:       newGeminiModel(t, modelName),
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
-		ToolSets: []tool.Set{
+		Toolsets: []tool.Set{
 			ts,
 		},
 	})
@@ -277,7 +277,7 @@ func TestToolFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ts, err := mcptool.NewSet(mcptool.SetConfig{
+	ts, err := mcptoolset.New(mcptoolset.Config{
 		Transport:  clientTransport,
 		ToolFilter: tool.StringPredicate([]string{"get_weather"}),
 	})

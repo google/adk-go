@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // mcptool package provides MCP adapter, allowing to add MCP tools to LLMAgent.
-package mcptool
+package mcptoolset
 
 import (
 	"context"
@@ -25,13 +25,13 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-// NewSet returns MCP ToolSet.
+// New returns MCP ToolSet.
 // MCP ToolSet connects to a MCP Server, retrieves MCP Tools into ADK Tools and
 // passes them to the LLM.
 // It uses https://github.com/modelcontextprotocol/go-sdk for MCP communication.
 // MCP session is created lazily on the first request to LLM.
 //
-// Usage: create MCP ToolSet with mcptool.NewSet() and provide it to the
+// Usage: create MCP ToolSet with mcptoolset.New() and provide it to the
 // LLMAgent in the llmagent.Config.
 //
 // Example:
@@ -41,13 +41,13 @@ import (
 //		Model:       model,
 //		Description: "...",
 //		Instruction: "...",
-//		Tools: []tool.Tool{
-//			mcptool.NewSet(mcptool.SetConfig{
+//		Toolsets: []tool.Set{
+//			mcptoolset.New(mcptoolset.Config{
 //				Transport: &mcp.CommandTransport{Command: exec.Command("myserver")}
 //			}),
 //		},
 //	})
-func NewSet(cfg SetConfig) (tool.Set, error) {
+func New(cfg Config) (tool.Set, error) {
 	return &set{
 		client:     mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: "v1.0.0"}, nil),
 		transport:  cfg.Transport,
@@ -55,8 +55,8 @@ func NewSet(cfg SetConfig) (tool.Set, error) {
 	}, nil
 }
 
-// SetConfig provides initial configuration for the MCP ToolSet.
-type SetConfig struct {
+// Config provides initial configuration for the MCP ToolSet.
+type Config struct {
 	// Transport that will be used to connect to MCP server.
 	Transport mcp.Transport
 	// ToolFilter selects tools for which tool.Predicate returns true.
