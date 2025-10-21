@@ -43,12 +43,12 @@ type Config struct {
 	OutputSchema *jsonschema.Schema
 }
 
-// Funtion represents a Go function.
-type Function[TArgs, TResults any] func(tool.Context, TArgs) TResults
+// Func represents a Go function.
+type Func[TArgs, TResults any] func(tool.Context, TArgs) TResults
 
 // New creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
-func New[TArgs, TResults any](cfg Config, handler Function[TArgs, TResults]) (tool.Tool, error) {
+func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
 	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
@@ -78,7 +78,7 @@ type functionTool[TArgs, TResults any] struct {
 	outputSchema *jsonschema.Resolved
 
 	// handler is the Go function.
-	handler Function[TArgs, TResults]
+	handler Func[TArgs, TResults]
 }
 
 // Description implements tool.Tool.

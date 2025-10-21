@@ -68,7 +68,7 @@ func (f *longRunningFunctionTool[TArgs, TResults]) Run(ctx tool.Context, args an
 
 // NewLongRunningFunctionTool creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
-func NewLongRunningFunctionTool[TArgs, TResults any](cfg Config, handler Function[TArgs, TResults]) (tool.Tool, error) {
+func NewLongRunningFunctionTool[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.Tool, error) {
 	cfg.isLongRunning = true
 	innerTool, err := New(cfg, handler)
 	if err != nil {
