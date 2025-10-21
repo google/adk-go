@@ -41,16 +41,11 @@ func (d *dummyLLM) Name() string {
 
 func (d *dummyLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		resp := model.CreateResponse(&genai.GenerateContentResponse{
-			Candidates: []*genai.Candidate{
-				{
-					Content: &genai.Content{
-						Parts: []*genai.Part{{Text: "Response from agentgrapgenerator test."}},
-					},
-				},
+		yield(&model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{{Text: "Response from agentgrapgenerator test."}},
 			},
-		})
-		yield(resp, nil)
+		}, nil)
 	}
 }
 
