@@ -87,7 +87,7 @@ func TestMCPToolSet(t *testing.T) {
 		Model:       newGeminiModel(t, modelName),
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
-		Tools: []tool.Tool{
+		ToolSets: []tool.Set{
 			ts,
 		},
 	})

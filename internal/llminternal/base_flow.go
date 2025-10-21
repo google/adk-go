@@ -192,8 +192,19 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) er
 			return err
 		}
 	}
+
 	// run processors for tools.
-	return toolPreprocess(ctx, req, Reveal(llmAgent).Tools)
+	tools := Reveal(llmAgent).Tools
+	for _, toolSet := range Reveal(llmAgent).ToolSets {
+		tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
+		if err != nil {
+			return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
+		}
+
+		tools = append(tools, tsTools...)
+	}
+
+	return toolPreprocess(ctx, req, tools)
 }
 
 // toolPreprocess runs tool preprocess on the given request
@@ -201,20 +212,6 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) er
 // TODO: check need/feasibility of running this concurrently.
 func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []tool.Tool) error {
 	for _, t := range tools {
-		toolSet, ok := t.(tool.Set)
-		if ok {
-			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
-			if err != nil {
-				return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
-			}
-
-			if err := toolPreprocess(ctx, req, tsTools); err != nil {
-				return fmt.Errorf("failed to tool preprocess for tool set %q: %w", toolSet.Name(), err)
-			}
-
-			continue
-		}
-
 		requestProcessor, ok := t.(toolinternal.RequestProcessor)
 		if !ok {
 			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())

@@ -42,7 +42,7 @@ type Context interface {
 }
 
 type Set interface {
-	Tool // to allow passing a toolset to agent tools
+	Name() string
 	Tools(ctx agent.ReadonlyContext) ([]Tool, error)
 }
 

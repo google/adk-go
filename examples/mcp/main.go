@@ -112,7 +112,7 @@ func main() {
 		Model:       model,
 		Description: "Helper agent.",
 		Instruction: "You are a helpful assistant that helps users with various tasks.",
-		Tools: []tool.Tool{
+		ToolSets: []tool.Set{
 			mcpToolSet,
 		},
 	})
