@@ -45,11 +45,17 @@ func New(cfg Config) (agent.Agent, error) {
 		beforeTool = append(beforeTool, llminternal.BeforeToolCallback(c))
 	}
 
+	afterTool := make([]llminternal.AfterToolCallback, 0, len(cfg.AfterTool))
+	for _, c := range cfg.AfterTool {
+		afterTool = append(afterTool, llminternal.AfterToolCallback(c))
+	}
+
 	a := &llmAgent{
 		beforeModelCallbacks: beforeModelCallbacks,
 		model:                cfg.Model,
 		afterModelCallbacks:  afterModelCallbacks,
 		beforeTool:           beforeTool,
+		afterTool:            afterTool,
 		instruction:          cfg.Instruction,
 		inputSchema:          cfg.InputSchema,
 		outputSchema:         cfg.OutputSchema,
@@ -142,9 +148,9 @@ type Config struct {
 	// such as function tools, RAGs, agent transfer, etc.
 	OutputSchema *genai.Schema
 
-	// TODO: AfterTool callbacks
 	BeforeTool []BeforeToolCallback
 	Tools      []tool.Tool
+	AfterTool  []AfterToolCallback
 	// Toolsets will be used by llmagent to extract tools and pass to the
 	// underlying LLM.
 	Toolsets []tool.Toolset
@@ -158,9 +164,6 @@ type Config struct {
 	// Planner
 	// CodeExecutor
 	// Examples
-
-	// BeforeToolCallback
-	// AfterToolCallback
 }
 
 type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
@@ -168,6 +171,8 @@ type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRe
 type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
+
+type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, result any, err error) (map[string]any, error)
 
 type llmAgent struct {
 	agent.Agent
@@ -180,6 +185,7 @@ type llmAgent struct {
 	instruction          string
 
 	beforeTool []llminternal.BeforeToolCallback
+	afterTool  []llminternal.AfterToolCallback
 
 	inputSchema  *genai.Schema
 	outputSchema *genai.Schema
@@ -206,6 +212,7 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		BeforeModelCallbacks: a.beforeModelCallbacks,
 		AfterModelCallbacks:  a.afterModelCallbacks,
 		BeforeToolCallback:   a.beforeTool,
+		AfterToolCallback:    a.afterTool,
 	}
 
 	return func(yield func(*session.Event, error) bool) {

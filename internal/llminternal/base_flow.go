@@ -39,6 +39,8 @@ type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMRe
 
 type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
+type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, result any, err error) (map[string]any, error)
+
 type Flow struct {
 	Model model.LLM
 
@@ -47,6 +49,7 @@ type Flow struct {
 	BeforeModelCallbacks []BeforeModelCallback
 	AfterModelCallbacks  []AfterModelCallback
 	BeforeToolCallback   []BeforeToolCallback
+	AfterToolCallback    []AfterToolCallback
 }
 
 var (
@@ -366,14 +369,23 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		result, err := f.invokeBeforeToolCallback(ctx, curTool, fnCall.Args, toolCtx)
 		if err != nil {
 			result = map[string]any{"error": fmt.Errorf("BeforeToolCallback failed: %w", err)}
-		} else if result == nil {
-			result, err = funcTool.Run(toolCtx, fnCall.Args)
-			// genai.FunctionResponse expects to use "output" key to specify function output
-			// and "error" key to specify error details (if any). If "output" and "error" keys
-			// are not specified, then whole "response" is treated as function output.
-			// TODO(hakim): revisit the tool's function signature to handle error from user function better.
+		} else {
+			if result == nil {
+				result, err = funcTool.Run(toolCtx, fnCall.Args)
+				// genai.FunctionResponse expects to use "output" key to specify function output
+				// and "error" key to specify error details (if any). If "output" and "error" keys
+				// are not specified, then whole "response" is treated as function output.
+				// TODO(hakim): revisit the tool's function signature to handle error from user function better.
+				if err != nil {
+					result = map[string]any{"error": fmt.Errorf("tool %q failed: %w", curTool.Name(), err)}
+				}
+			}
+
+			afterToolCallbackResult, err := f.invokeAfterToolCallback(ctx, curTool, fnCall.Args, toolCtx, result, err)
 			if err != nil {
-				result = map[string]any{"error": fmt.Errorf("tool %q failed: %w", curTool.Name(), err)}
+				result = map[string]any{"error": fmt.Errorf("AfterToolCallback failed: %w", err)}
+			} else if afterToolCallbackResult != nil {
+				result = afterToolCallbackResult
 			}
 		}
 
@@ -419,6 +431,27 @@ func (f *Flow) invokeBeforeToolCallback(ctx agent.InvocationContext, tool tool.T
 	var err error
 	for _, callback := range f.BeforeToolCallback {
 		result, err = callback(toolCtx, tool, fArgs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute callback: %w", err)
+		}
+		// When a list of callbacks is provided, the callbacks will be called in the
+		// order they are listed while a callback returns nil.
+		if result != nil {
+			return result, err
+		}
+	}
+	return nil, nil
+}
+
+func (f *Flow) invokeAfterToolCallback(ctx agent.InvocationContext, tool tool.Tool, fArgs map[string]any, toolCtx tool.Context, fResult any, fErr error) (any, error) {
+	llmAgent, ok := ctx.Agent().(Agent)
+	if !ok || llmAgent == nil {
+		return nil, nil
+	}
+	var result map[string]any
+	var err error
+	for _, callback := range f.AfterToolCallback {
+		result, err = callback(toolCtx, tool, fArgs, fResult, fErr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to execute callback: %w", err)
 		}
