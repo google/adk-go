@@ -244,7 +244,10 @@ func TestEdgeHighlighted(t *testing.T) {
 
 func TestDrawNode(t *testing.T) {
 	graph := gographviz.NewGraph()
-	graph.SetName("G")
+	err := graph.SetName("G")
+	if err != nil {
+		t.Fatalf("failed to set graph name: %v", err)
+	}
 	parentGraph := graph
 	visitedNodes := make(map[string]bool)
 
@@ -364,15 +367,26 @@ func lookupEdge(t *testing.T, graph *gographviz.Graph, src string, dst string) *
 
 func TestDrawEdge(t *testing.T) {
 	graph := gographviz.NewGraph()
-	graph.SetName("G")
+	err := graph.SetName("G")
+	if err != nil {
+		t.Fatalf("failed to set graph name: %v", err)
+	}
 
 	// Add nodes for edges to connect
-	graph.AddNode("G", "NodeA", nil)
-	graph.AddNode("G", "NodeB", nil)
-	graph.AddNode("G", "NodeC", nil)
-	graph.AddNode("G", "NodeD", nil)
-	graph.AddNode("G", "NodeE", nil)
-	graph.AddNode("G", "NodeF", nil)
+	nodes := []string{
+		"NodeA",
+		"NodeB",
+		"NodeC",
+		"NodeD",
+		"NodeE",
+		"NodeF",
+	}
+	for _, node := range nodes {
+		err := graph.AddNode("G", node, nil)
+		if err != nil {
+			t.Fatalf("failed to add node %s: %v", node, err)
+		}
+	}
 
 	t.Run("draw unhighlighted edge", func(t *testing.T) {
 		err := drawEdge(graph, "NodeA", "NodeB", [][]string{})
@@ -434,7 +448,11 @@ func TestDrawEdge(t *testing.T) {
 
 func TestDrawCluster(t *testing.T) {
 	parentGraph := gographviz.NewGraph()
-	parentGraph.SetName("ParentG")
+	err := parentGraph.SetName("ParentG")
+	if err != nil {
+		t.Fatalf("failed to set parent graph name: %v", err)
+	}
+
 	visitedNodes := make(map[string]bool)
 
 	t.Run("sequential agent cluster", func(t *testing.T) {
@@ -443,9 +461,12 @@ func TestDrawCluster(t *testing.T) {
 		seqAgent := newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, []agent.Agent{subAgent1, subAgent2}, nil)
 
 		clusterGraph := gographviz.NewGraph()
-		clusterGraph.SetName("cluster_SeqAgent")
+		err := clusterGraph.SetName("cluster_SeqAgent")
+		if err != nil {
+			t.Fatalf("failed to set parent graph name: %v", err)
+		}
 
-		err := drawCluster(parentGraph, clusterGraph, seqAgent, [][]string{}, visitedNodes)
+		err = drawCluster(parentGraph, clusterGraph, seqAgent, [][]string{}, visitedNodes)
 		if err != nil {
 			t.Fatalf("drawCluster failed: %v", err)
 		}
@@ -473,9 +494,12 @@ func TestDrawCluster(t *testing.T) {
 		loopAgent := newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, []agent.Agent{subAgent1, subAgent2}, nil)
 
 		clusterGraph := gographviz.NewGraph()
-		clusterGraph.SetName("cluster_LoopAgent")
+		err := clusterGraph.SetName("cluster_LoopAgent")
+		if err != nil {
+			t.Fatalf("failed to set parent graph name: %v", err)
+		}
 
-		err := drawCluster(parentGraph, clusterGraph, loopAgent, [][]string{}, visitedNodes)
+		err = drawCluster(parentGraph, clusterGraph, loopAgent, [][]string{}, visitedNodes)
 		if err != nil {
 			t.Fatalf("drawCluster failed: %v", err)
 		}
@@ -497,9 +521,12 @@ func TestDrawCluster(t *testing.T) {
 		parAgent := newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, []agent.Agent{subAgent1, subAgent2}, nil)
 
 		clusterGraph := gographviz.NewGraph()
-		clusterGraph.SetName("cluster_ParAgent")
+		err := clusterGraph.SetName("cluster_ParAgent")
+		if err != nil {
+			t.Fatalf("failed to set parent graph name: %v", err)
+		}
 
-		err := drawCluster(parentGraph, clusterGraph, parAgent, [][]string{}, visitedNodes)
+		err = drawCluster(parentGraph, clusterGraph, parAgent, [][]string{}, visitedNodes)
 		if err != nil {
 			t.Fatalf("drawCluster failed: %v", err)
 		}
@@ -513,7 +540,10 @@ func TestDrawCluster(t *testing.T) {
 
 func TestBuildGraph(t *testing.T) {
 	graph := gographviz.NewGraph()
-	graph.SetName("G")
+	err := graph.SetName("G")
+	if err != nil {
+		t.Fatalf("failed to set parent graph name: %v", err)
+	}
 	parentGraph := graph
 	visitedNodes := make(map[string]bool)
 
@@ -524,7 +554,7 @@ func TestBuildGraph(t *testing.T) {
 	subAgent2 := newTestAgent(t, "SubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
 	mainAgent := newTestAgent(t, "MainAgent", "", agentinternal.TypeLLMAgent, []agent.Agent{subAgent1, subAgent2}, []tool.Tool{tool2})
 
-	err := buildGraph(graph, parentGraph, mainAgent, [][]string{}, visitedNodes)
+	err = buildGraph(graph, parentGraph, mainAgent, [][]string{}, visitedNodes)
 	if err != nil {
 		t.Fatalf("buildGraph failed: %v", err)
 	}
