@@ -78,7 +78,7 @@ func (a myAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, erro
 	return func(yield func(*session.Event, error) bool) {
 		for i := 0; i < 3; i++ {
 			if !yield(&session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: &genai.Content{
 						Parts: []*genai.Part{
 							{

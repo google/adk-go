@@ -45,13 +45,13 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	helloAndGoodBye := []*session.Event{
 		{
 			Author: "user", // Not in the current turn in multi-agent scenario. See buildContentsCurrentTurnContextOnly.
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: genai.NewContentFromText("hello", "user"),
 			},
 		},
 		{
 			Author: "user",
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: genai.NewContentFromText("good bye", "user"),
 			},
 		},
@@ -59,25 +59,25 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	agentTransfer := []*session.Event{
 		{
 			Author: "anotherAgent", // History.
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: genai.NewContentFromFunctionCall("func1", nil, "model"),
 			},
 		},
 		{
 			Author: "anotherAgent",
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: genai.NewContentFromFunctionResponse("func1", nil, "user"),
 			},
 		},
 		{
 			Author: "anotherAgent", // Beginning of the current turn started by another agent.
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: genai.NewContentFromText("transfer to testAgent", "model"),
 			},
 		},
 		{
 			Author: agentName, // See python flows/llm_flows/base_llm_flow.py BaseLlmFlow._run_one_step_async.
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: genai.NewContentFromFunctionCall("func1", nil, "model"),
 			},
 		},
@@ -85,19 +85,19 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	robot := []*session.Event{
 		{
 			Author: agentName,
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: genai.NewContentFromText("do func1", "user"),
 			},
 		},
 		{
 			Author: agentName,
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: genai.NewContentFromFunctionCall("func1", nil, "model"),
 			},
 		},
 		{
 			Author: agentName,
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: genai.NewContentFromFunctionResponse("func1", nil, "user"),
 			},
 		},
@@ -266,13 +266,13 @@ func TestContentsRequestProcessor(t *testing.T) {
 			events: []*session.Event{
 				{
 					Author: "user",
-					LLMResponse: &model.LLMResponse{
+					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("Hello", "user"),
 					},
 				},
 				{
 					Author: "testAgent",
-					LLMResponse: &model.LLMResponse{
+					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("Hi there", "model"),
 					},
 				},
@@ -287,7 +287,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 			events: []*session.Event{
 				{
 					Author: "anotherAgent",
-					LLMResponse: &model.LLMResponse{
+					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("Foreign message", "model"),
 					},
 				},
@@ -309,28 +309,28 @@ func TestContentsRequestProcessor(t *testing.T) {
 				{
 					Author: "user",
 					Branch: "branch1",
-					LLMResponse: &model.LLMResponse{
+					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("In branch 1", "user"),
 					},
 				},
 				{
 					Author: "user",
 					Branch: "branch1.task1",
-					LLMResponse: &model.LLMResponse{
+					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("In branch 1 and task 1", "user"),
 					},
 				},
 				{
 					Author: "user",
 					Branch: "branch12",
-					LLMResponse: &model.LLMResponse{
+					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("In branch 12", "user"),
 					},
 				},
 				{
 					Author: "user",
 					Branch: "branch2",
-					LLMResponse: &model.LLMResponse{
+					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("In branch 2", "user"),
 					},
 				},
@@ -345,7 +345,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 			events: []*session.Event{
 				{
 					Author: agentName,
-					LLMResponse: &model.LLMResponse{
+					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{
 							Role: "model",
 							Parts: []*genai.Part{
@@ -406,7 +406,7 @@ func TestConvertForeignEvent(t *testing.T) {
 			event: &session.Event{
 				Timestamp: now,
 				Author:    "foreign",
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromText("hello", "model"),
 				},
 				Branch: "b",
@@ -414,7 +414,7 @@ func TestConvertForeignEvent(t *testing.T) {
 			want: &session.Event{
 				Timestamp: now,
 				Author:    "user",
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: &genai.Content{
 						Role: "user",
 						Parts: []*genai.Part{
@@ -431,7 +431,7 @@ func TestConvertForeignEvent(t *testing.T) {
 			event: &session.Event{
 				Timestamp: now,
 				Author:    "foreign",
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: &genai.Content{
 						Role: "model",
 						Parts: []*genai.Part{
@@ -444,7 +444,7 @@ func TestConvertForeignEvent(t *testing.T) {
 			want: &session.Event{
 				Timestamp: now,
 				Author:    "user",
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: &genai.Content{
 						Role: "user",
 						Parts: []*genai.Part{
@@ -461,7 +461,7 @@ func TestConvertForeignEvent(t *testing.T) {
 			event: &session.Event{
 				Timestamp: now,
 				Author:    "foreign",
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: &genai.Content{
 						Role: "model",
 						Parts: []*genai.Part{
@@ -474,7 +474,7 @@ func TestConvertForeignEvent(t *testing.T) {
 			want: &session.Event{
 				Timestamp: now,
 				Author:    "user",
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: &genai.Content{
 						Role: "user",
 						Parts: []*genai.Part{
@@ -674,9 +674,9 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		{
 			name: "Basic function call no rearrangement",
 			events: []*session.Event{
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Search for test", "user")}},
-				{Author: agentName, LLMResponse: &model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Search for test", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("Search for test", "user"),
@@ -687,11 +687,11 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		{
 			name: "Rearrangement with intermediate response",
 			events: []*session.Event{
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Run long process", "user")}},
-				{Author: agentName, LLMResponse: &model.LLMResponse{Content: NewContentFromFunctionCall(fcLRO, "model")}},
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: NewContentFromFunctionResponse(frLROInter, "user")}},
-				{Author: agentName, LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Still processing...", "model")}},
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinal, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run long process", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcLRO, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROInter, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Still processing...", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinal, "user")}},
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("Run long process", "user"),
@@ -702,21 +702,21 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		{
 			name: "Rearrangement with mixed LRO and normal calls",
 			events: []*session.Event{
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Analyze data and search for info", "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analyze data and search for info", "user")}},
 				{Author: agentName,
-					LLMResponse: &model.LLMResponse{Content: &genai.Content{
+					LLMResponse: model.LLMResponse{Content: &genai.Content{
 						Role:  "model",
 						Parts: []*genai.Part{{FunctionCall: fcLROMixed}, {FunctionCall: fcNormalMixed}}},
 					},
 				},
 				{Author: "user",
-					LLMResponse: &model.LLMResponse{Content: &genai.Content{
+					LLMResponse: model.LLMResponse{Content: &genai.Content{
 						Role:  "user",
 						Parts: []*genai.Part{{FunctionResponse: frLROInterMixed}, {FunctionResponse: frNormalMixed}}},
 					},
 				},
-				{Author: agentName, LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Analysis in progress, search completed", "model")}},
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinalMixed, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analysis in progress, search completed", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinalMixed, "user")}},
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("Analyze data and search for info", "user"),
@@ -727,13 +727,13 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		{
 			name: "Rearrangement in history (non-final event)",
 			events: []*session.Event{
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Start long process", "user")}},
-				{Author: agentName, LLMResponse: &model.LLMResponse{Content: NewContentFromFunctionCall(fcHistLRO, "model")}},
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: NewContentFromFunctionResponse(frHistLROInter, "user")}},
-				{Author: agentName, LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Still processing...", "model")}},
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: NewContentFromFunctionResponse(frHistLROFinal, "user")}},
-				{Author: agentName, LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Process completed successfully!", "model")}},
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Great! What's next?", "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Start long process", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcHistLRO, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHistLROInter, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Still processing...", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHistLROFinal, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Process completed successfully!", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Great! What's next?", "user")}},
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("Start long process", "user"),
@@ -747,23 +747,23 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		{
 			name: "Mixed rearrangement in history (non-final event)",
 			events: []*session.Event{
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Analyze and search simultaneously", "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analyze and search simultaneously", "user")}},
 				{Author: agentName,
-					LLMResponse: &model.LLMResponse{Content: &genai.Content{
+					LLMResponse: model.LLMResponse{Content: &genai.Content{
 						Role:  "model",
 						Parts: []*genai.Part{{FunctionCall: fcHistLROMixed}, {FunctionCall: fcHistNormalMixed}}},
 					},
 				},
 				{Author: "user",
-					LLMResponse: &model.LLMResponse{Content: &genai.Content{
+					LLMResponse: model.LLMResponse{Content: &genai.Content{
 						Role:  "user",
 						Parts: []*genai.Part{{FunctionResponse: frHistLROInterMixed}, {FunctionResponse: frHistNormalMixed}}},
 					},
 				},
-				{Author: agentName, LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Analysis continuing, search done", "model")}},
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: NewContentFromFunctionResponse(frHistLROFinalMixed, "user")}},
-				{Author: agentName, LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Both tasks completed successfully!", "model")}},
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Perfect! What should we do next?", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analysis continuing, search done", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHistLROFinalMixed, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Both tasks completed successfully!", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Perfect! What should we do next?", "user")}},
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("Analyze and search simultaneously", "user"),
@@ -777,22 +777,22 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		{
 			name: "Rearrangement preserves mixed text parts",
 			events: []*session.Event{
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Before function call", "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Before function call", "user")}},
 				{Author: agentName,
-					LLMResponse: &model.LLMResponse{Content: &genai.Content{
+					LLMResponse: model.LLMResponse{Content: &genai.Content{
 						Role:  "model",
 						Parts: []*genai.Part{{Text: "I'll process this for you"}, {FunctionCall: fcPreserve}}},
 					},
 				},
 				{Author: "user",
-					LLMResponse: &model.LLMResponse{Content: &genai.Content{
+					LLMResponse: model.LLMResponse{Content: &genai.Content{
 						Role:  "user",
 						Parts: []*genai.Part{{Text: "Intermediate prefix"}, {FunctionResponse: frPreserveInter}, {Text: "Processing..."}}},
 					},
 				},
-				{Author: agentName, LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("Still working on it...", "model")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Still working on it...", "model")}},
 				{Author: "user",
-					LLMResponse: &model.LLMResponse{Content: &genai.Content{
+					LLMResponse: model.LLMResponse{Content: &genai.Content{
 						Role:  "user",
 						Parts: []*genai.Part{{Text: "Final prefix"}, {FunctionResponse: frPreserveFinal}, {Text: "Final suffix"}}},
 					},
@@ -813,8 +813,8 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		{
 			name: "Error on function response without matching call",
 			events: []*session.Event{
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "Regular message"}}}}},
-				{Author: "user", LLMResponse: &model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: frOrphaned}}}}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "Regular message"}}}}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: frOrphaned}}}}},
 			},
 			want:    nil,
 			wantErr: "no function call event found",

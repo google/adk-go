@@ -139,7 +139,7 @@ func (a *agent) internal() *agent {
 var _ Agent = (*agent)(nil)
 
 func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
-	if event.LLMResponse != nil && event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
+	if event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
 		return genai.RoleUser
 	}
 
@@ -166,7 +166,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		}
 
 		event := session.NewEvent(ctx.InvocationID())
-		event.LLMResponse = &model.LLMResponse{
+		event.LLMResponse = model.LLMResponse{
 			Content: content,
 		}
 		event.Author = agent.Name()

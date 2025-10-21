@@ -182,7 +182,7 @@ func CollectEvents(stream iter.Seq2[*session.Event, error]) ([]*session.Event, e
 		if err != nil {
 			return events, err
 		}
-		if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+		if ev == nil || ev.LLMResponse.Content == nil {
 			return events, fmt.Errorf("unexpected empty event: %v", ev)
 		}
 		events = append(events, ev)
@@ -198,7 +198,7 @@ func CollectParts(stream iter.Seq2[*session.Event, error]) ([]*genai.Part, error
 		if err != nil {
 			return parts, err
 		}
-		if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+		if ev == nil || ev.LLMResponse.Content == nil {
 			return parts, fmt.Errorf("unexpected empty event: %v", ev)
 		}
 		parts = append(parts, ev.LLMResponse.Content.Parts...)
@@ -214,7 +214,7 @@ func CollectTextParts(stream iter.Seq2[*session.Event, error]) ([]string, error)
 		if err != nil {
 			return texts, err
 		}
-		if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+		if ev == nil || ev.LLMResponse.Content == nil {
 			return texts, fmt.Errorf("unexpected empty event: %v", ev)
 		}
 		for _, p := range ev.LLMResponse.Content.Parts {

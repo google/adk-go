@@ -45,14 +45,14 @@ func TestMemory_AddAndSearch(t *testing.T) {
 		{
 			Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 			Author:    "user1",
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: content1,
 			},
 		},
 		{
 			Timestamp: time.Date(2025, 1, 1, 10, 5, 0, 0, time.UTC),
 			Author:    "user1",
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: content2,
 			},
 		},
@@ -183,7 +183,7 @@ func TestMemory_Search_Isolation(t *testing.T) {
 	if err := sessionService.AppendEvent(t.Context(), storedSession, &session.Event{
 		Timestamp:   time.Now(),
 		Author:      "user1",
-		LLMResponse: &model.LLMResponse{Content: content1},
+		LLMResponse: model.LLMResponse{Content: content1},
 	}); err != nil {
 		t.Fatalf("Failed to append event: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestMemory_Search_Isolation(t *testing.T) {
 	if err := sessionService.AppendEvent(t.Context(), storedSession2, &session.Event{
 		Timestamp:   time.Now(),
 		Author:      "user2",
-		LLMResponse: &model.LLMResponse{Content: content2},
+		LLMResponse: model.LLMResponse{Content: content2},
 	}); err != nil {
 		t.Fatalf("Failed to append event: %v", err)
 	}

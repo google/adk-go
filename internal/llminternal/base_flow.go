@@ -318,7 +318,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *mod
 	ev := session.NewEvent(ctx.InvocationID())
 	ev.Author = ctx.Agent().Name()
 	ev.Branch = ctx.Branch()
-	ev.LLMResponse = resp
+	ev.LLMResponse = *resp
 
 	// Populate ev.LongRunningToolIDs
 	ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)
@@ -379,7 +379,7 @@ func handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.
 		// TODO: agent.canonical_after_tool_callbacks
 		// TODO: handle long-running tool.
 		ev := session.NewEvent(ctx.InvocationID())
-		ev.LLMResponse = &model.LLMResponse{
+		ev.LLMResponse = model.LLMResponse{
 			Content: &genai.Content{
 				Role: "user",
 				Parts: []*genai.Part{
@@ -419,7 +419,7 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 	var parts []*genai.Part
 	var actions *session.EventActions
 	for _, ev := range events {
-		if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+		if ev == nil || ev.LLMResponse.Content == nil {
 			continue
 		}
 		parts = append(parts, ev.LLMResponse.Content.Parts...)
@@ -427,7 +427,7 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 	}
 	// reuse events[0]
 	ev := events[0]
-	ev.LLMResponse = &model.LLMResponse{
+	ev.LLMResponse = model.LLMResponse{
 		Content: &genai.Content{
 			Role:  "user",
 			Parts: parts,

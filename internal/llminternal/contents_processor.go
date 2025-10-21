@@ -459,7 +459,7 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 	return &session.Event{ // made-up event. Don't go through types.NewEvent.
 		Timestamp:   ev.Timestamp,
 		Author:      "user",
-		LLMResponse: &model.LLMResponse{Content: converted},
+		LLMResponse: model.LLMResponse{Content: converted},
 		Branch:      ev.Branch,
 	}
 }
@@ -488,7 +488,7 @@ func isAuthEvent(ev *session.Event) bool {
 
 func listFunctionCallsFromEvent(e *session.Event) []*genai.FunctionCall {
 	funcCalls := make([]*genai.FunctionCall, 0)
-	if e.LLMResponse != nil && e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
+	if e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
 		for _, part := range e.LLMResponse.Content.Parts {
 			if part.FunctionCall != nil {
 				funcCalls = append(funcCalls, part.FunctionCall)
@@ -500,7 +500,7 @@ func listFunctionCallsFromEvent(e *session.Event) []*genai.FunctionCall {
 
 func listFunctionResponsesFromEvent(e *session.Event) []*genai.FunctionResponse {
 	funcResponses := make([]*genai.FunctionResponse, 0)
-	if e.LLMResponse != nil && e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
+	if e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
 		for _, part := range e.LLMResponse.Content.Parts {
 			if part.FunctionResponse != nil {
 				funcResponses = append(funcResponses, part.FunctionResponse)
@@ -533,15 +533,12 @@ func cloneEvent(e *session.Event) *session.Event {
 
 	// TODO check if copy parts is needed
 	// 3. Deep copy the LLMResponse pointer struct and content
-	if e.LLMResponse != nil {
-		newEvent.LLMResponse = &model.LLMResponse{}
-		if e.LLMResponse.Content != nil {
-			newEvent.LLMResponse.Content = &genai.Content{
-				Parts: make([]*genai.Part, len(e.LLMResponse.Content.Parts)),
-				Role:  e.LLMResponse.Content.Role,
-			}
-			copy(newEvent.LLMResponse.Content.Parts, e.LLMResponse.Content.Parts)
+	if e.LLMResponse.Content != nil {
+		newEvent.LLMResponse.Content = &genai.Content{
+			Parts: make([]*genai.Part, len(e.LLMResponse.Content.Parts)),
+			Role:  e.LLMResponse.Content.Role,
 		}
+		copy(newEvent.LLMResponse.Content.Parts, e.LLMResponse.Content.Parts)
 	}
 
 	return newEvent

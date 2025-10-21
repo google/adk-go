@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 
+	"google.golang.org/adk/internal/llminternal/converters"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -48,7 +49,7 @@ func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genRe
 			return
 		}
 		candidate := genResp.Candidates[0]
-		resp := model.CreateResponse(genResp)
+		resp := converters.Genai2LLMResponse(genResp)
 		resp.TurnComplete = candidate.FinishReason != ""
 		// Aggregate the response and check if an intermediate event to yield was created
 		if aggrResp := s.aggregateResponse(resp); aggrResp != nil {

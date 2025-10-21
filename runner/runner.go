@@ -148,7 +148,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			// only commit non-partial event to a session service
-			if !(event.LLMResponse != nil && event.LLMResponse.Partial) {
+			if !event.LLMResponse.Partial {
 
 				// TODO: update session state & delta
 
@@ -210,7 +210,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 	event := session.NewEvent(ctx.InvocationID())
 
 	event.Author = "user"
-	event.LLMResponse = &model.LLMResponse{
+	event.LLMResponse = model.LLMResponse{
 		Content: msg,
 	}
 
