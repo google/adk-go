@@ -20,9 +20,9 @@ require (
 	github.com/googleapis/go-gorm-spanner v1.9.0
 	github.com/googleapis/go-sql-spanner v1.19.0
 	github.com/modelcontextprotocol/go-sdk v0.7.0
+	golang.org/x/net v0.46.0
+	google.golang.org/grpc v1.76.0
 	gorm.io/gorm v1.31.0
-	golang.org/x/net v0.43.0
-	google.golang.org/grpc v1.75.0-dev
 )
 
 require (
@@ -82,15 +82,9 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/crypto v0.43.0 // indirect
-	golang.org/x/net v0.46.0 // indirect
 	golang.org/x/sys v0.37.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251014184007-4626949a642f // indirect
-	google.golang.org/grpc v1.76.0 // indirect
-	golang.org/x/crypto v0.41.0 // indirect
-	golang.org/x/sys v0.35.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250929231259-57b25ae835d4 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 	gorm.io/datatypes v1.2.7 // indirect
 	gorm.io/driver/mysql v1.6.0 // indirect
