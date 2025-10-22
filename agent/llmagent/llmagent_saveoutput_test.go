@@ -43,7 +43,7 @@ func createTestEvent(author, contentText string, isFinal bool) *session.Event {
 	return &session.Event{
 		InvocationID: "test_invocation",
 		Author:       author,
-		LLMResponse:  &model.LLMResponse{Content: content, Partial: !isFinal},
+		LLMResponse:  model.LLMResponse{Content: content, Partial: !isFinal},
 		Actions:      session.EventActions{StateDelta: make(map[string]interface{})},
 	}
 }

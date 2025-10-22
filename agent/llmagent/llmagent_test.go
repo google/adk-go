@@ -111,7 +111,7 @@ func TestLLMAgentStreamingModeSSE(t *testing.T) {
 	numContents := 0
 	for _, e := range events {
 		t.Logf("event: %v", e)
-		if e.LLMResponse == nil || e.LLMResponse.Content == nil {
+		if e.LLMResponse.Content == nil {
 			continue
 		}
 		numContents++
@@ -386,7 +386,7 @@ func TestAgentTransfer(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			if ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+			if ev.LLMResponse.Content == nil {
 				return nil, fmt.Errorf("unexpected event: %v", ev)
 			}
 			for _, p := range ev.LLMResponse.Content.Parts {

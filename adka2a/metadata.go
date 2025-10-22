@@ -61,9 +61,6 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 	}
 
 	response := event.LLMResponse
-	if response == nil {
-		return result, nil
-	}
 
 	if response.ErrorCode != "" {
 		result[toMetaKey("error_code")] = response.ErrorCode

@@ -143,7 +143,7 @@ func TestLoadArtifactsTool_ProcessRequest(t *testing.T) {
 		"file2.pdf": {Text: "content2"},
 	}
 	for name, part := range artifacts {
-		err := tc.Artifacts().Save(name, *part)
+		_, err := tc.Artifacts().Save(t.Context(), name, part)
 		if err != nil {
 			t.Fatalf("Failed to save artifact %s: %v", name, err)
 		}
@@ -181,7 +181,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_LoadArtifactsFunctionCall(t 
 		"doc1.txt": {Text: "This is the content of doc1.txt"},
 	}
 	for name, part := range artifacts {
-		err := tc.Artifacts().Save(name, *part)
+		_, err := tc.Artifacts().Save(t.Context(), name, part)
 		if err != nil {
 			t.Fatalf("Failed to save artifact %s: %v", name, err)
 		}
@@ -241,7 +241,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 		"doc1.txt": {Text: "content1"},
 	}
 	for name, part := range artifacts {
-		err := tc.Artifacts().Save(name, *part)
+		_, err := tc.Artifacts().Save(t.Context(), name, part)
 		if err != nil {
 			t.Fatalf("Failed to save artifact %s: %v", name, err)
 		}

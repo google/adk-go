@@ -58,7 +58,7 @@ type Events interface {
 // It is used to store the content of the conversation, as well as
 // the actions taken by the agents like function calls, etc.
 type Event struct {
-	*model.LLMResponse
+	model.LLMResponse
 
 	// Set by storage
 	ID        string

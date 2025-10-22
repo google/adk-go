@@ -129,8 +129,8 @@ func (f *runLocalFlags) runLocalServer() error {
 		func(p util.Printer) error {
 			cmd := exec.Command(f.build.execPath,
 				"--port", strconv.Itoa(f.server.port),
-				"--front_address", "localhost:"+strconv.Itoa(f.server.port),
-				"--backend_address", "http://localhost:"+strconv.Itoa(f.server.port)+"/api",
+				"--webui_address", "localhost:"+strconv.Itoa(f.server.port),
+				"--api_server_address", "http://localhost:"+strconv.Itoa(f.server.port)+"/api",
 			)
 
 			cmd.Dir = f.source.srcBasePath

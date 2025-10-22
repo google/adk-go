@@ -20,6 +20,7 @@ import (
 	"iter"
 
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/llminternal/converters"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -66,7 +67,7 @@ func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 		// shouldn't happen?
 		return nil, fmt.Errorf("empty response")
 	}
-	return model.CreateResponse(resp), nil
+	return converters.Genai2LLMResponse(resp), nil
 }
 
 // generateStream returns a stream of responses from the model.

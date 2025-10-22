@@ -36,16 +36,16 @@ func (a *Artifacts) SetEventActions(actions *session.EventActions) {
 	a.eventActions = actions
 }
 
-func (a *Artifacts) Save(name string, data genai.Part) error {
+func (a *Artifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
 	resp, err := a.Service.Save(context.Background(), &artifact.SaveRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
-		Part:      &data,
+		Part:      data,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if a.eventActions != nil {
 		if a.eventActions.ArtifactDelta == nil {
@@ -53,46 +53,34 @@ func (a *Artifacts) Save(name string, data genai.Part) error {
 		}
 		a.eventActions.ArtifactDelta[name] = resp.Version
 	}
-	return nil
+	return resp, nil
 }
 
-func (a *Artifacts) Load(name string) (genai.Part, error) {
-	loadResponse, err := a.Service.Load(context.Background(), &artifact.LoadRequest{
+func (a *Artifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {
+	return a.Service.Load(ctx, &artifact.LoadRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
 	})
-	if err != nil {
-		return genai.Part{}, err
-	}
-	return *loadResponse.Part, nil
 }
 
-func (a *Artifacts) LoadVersion(name string, version int) (genai.Part, error) {
-	loadResponse, err := a.Service.Load(context.Background(), &artifact.LoadRequest{
+func (a *Artifacts) LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error) {
+	return a.Service.Load(ctx, &artifact.LoadRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
 		Version:   int64(version),
 	})
-	if err != nil {
-		return genai.Part{}, err
-	}
-	return *loadResponse.Part, nil
 }
 
-func (a *Artifacts) List() ([]string, error) {
-	ListResponse, err := a.Service.List(context.Background(), &artifact.ListRequest{
+func (a *Artifacts) List(ctx context.Context) (*artifact.ListResponse, error) {
+	return a.Service.List(ctx, &artifact.ListRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 	})
-	if err != nil {
-		return nil, err
-	}
-	return ListResponse.FileNames, nil
 }
 
 var _ agent.Artifacts = (*Artifacts)(nil)
