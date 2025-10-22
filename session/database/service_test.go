@@ -178,7 +178,7 @@ func Test_databaseService_Get(t *testing.T) {
 		err = s.AppendEvent(t.Context(), session1.Session.(*localSession), &session.Event{
 			ID:     "event_for_user1",
 			Author: "user",
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Partial: false,
 			},
 		})
@@ -214,7 +214,7 @@ func Test_databaseService_Get(t *testing.T) {
 				ID:          strconv.Itoa(i),
 				Author:      "user",
 				Timestamp:   time.Time{}.Add(time.Duration(i)),
-				LLMResponse: &model.LLMResponse{},
+				LLMResponse: model.LLMResponse{},
 			}
 			if err := s.AppendEvent(ctx, created.Session.(*localSession), event); err != nil {
 				t.Fatalf("setupGetWithConfig failed to append event %d: %v", i, err)
@@ -292,11 +292,11 @@ func Test_databaseService_Get(t *testing.T) {
 				AppName: "my_app", UserID: "user", SessionID: "s1",
 			},
 			wantEvents: []*session.Event{
-				{ID: "1", Author: "user", Timestamp: time.Time{}.Add(1), LLMResponse: &model.LLMResponse{}},
-				{ID: "2", Author: "user", Timestamp: time.Time{}.Add(2), LLMResponse: &model.LLMResponse{}},
-				{ID: "3", Author: "user", Timestamp: time.Time{}.Add(3), LLMResponse: &model.LLMResponse{}},
-				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: &model.LLMResponse{}},
-				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: &model.LLMResponse{}},
+				{ID: "1", Author: "user", Timestamp: time.Time{}.Add(1), LLMResponse: model.LLMResponse{}},
+				{ID: "2", Author: "user", Timestamp: time.Time{}.Add(2), LLMResponse: model.LLMResponse{}},
+				{ID: "3", Author: "user", Timestamp: time.Time{}.Add(3), LLMResponse: model.LLMResponse{}},
+				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: model.LLMResponse{}},
+				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: model.LLMResponse{}},
 			},
 		},
 		{
@@ -307,9 +307,9 @@ func Test_databaseService_Get(t *testing.T) {
 				NumRecentEvents: 3,
 			},
 			wantEvents: []*session.Event{
-				{ID: "3", Author: "user", Timestamp: time.Time{}.Add(3), LLMResponse: &model.LLMResponse{}},
-				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: &model.LLMResponse{}},
-				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: &model.LLMResponse{}},
+				{ID: "3", Author: "user", Timestamp: time.Time{}.Add(3), LLMResponse: model.LLMResponse{}},
+				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: model.LLMResponse{}},
+				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: model.LLMResponse{}},
 			},
 		},
 		{
@@ -320,8 +320,8 @@ func Test_databaseService_Get(t *testing.T) {
 				After: time.Time{}.Add(4),
 			},
 			wantEvents: []*session.Event{
-				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: &model.LLMResponse{}},
-				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: &model.LLMResponse{}},
+				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: model.LLMResponse{}},
+				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: model.LLMResponse{}},
 			},
 		},
 		{
@@ -333,8 +333,8 @@ func Test_databaseService_Get(t *testing.T) {
 				After:           time.Time{}.Add(4),
 			},
 			wantEvents: []*session.Event{
-				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: &model.LLMResponse{}},
-				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: &model.LLMResponse{}},
+				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: model.LLMResponse{}},
+				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: model.LLMResponse{}},
 			},
 		},
 	}
@@ -502,7 +502,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			},
 			event: &session.Event{
 				ID: "new_event1",
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Partial: false,
 				},
 			},
@@ -513,7 +513,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 				events: []*session.Event{
 					{
 						ID: "new_event1",
-						LLMResponse: &model.LLMResponse{
+						LLMResponse: model.LLMResponse{
 							Partial: false,
 						},
 					},
@@ -534,7 +534,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			},
 			event: &session.Event{
 				ID: "new_event2",
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Partial: false,
 				},
 			},
@@ -552,7 +552,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			event: &session.Event{
 				ID:     "event_with_bytes",
 				Author: "user",
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromBytes([]byte("test_image_data"), "image/png", "user"),
 					GroundingMetadata: &genai.GroundingMetadata{
 						SearchEntryPoint: &genai.SearchEntryPoint{
@@ -569,7 +569,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 					{
 						ID:     "event_with_bytes",
 						Author: "user",
-						LLMResponse: &model.LLMResponse{
+						LLMResponse: model.LLMResponse{
 							Content: genai.NewContentFromBytes([]byte("test_image_data"), "image/png", "user"),
 							GroundingMetadata: &genai.GroundingMetadata{
 								SearchEntryPoint: &genai.SearchEntryPoint{
@@ -599,7 +599,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 				Author:             "user",
 				LongRunningToolIDs: []string{"tool123"},
 				Actions:            session.EventActions{StateDelta: map[string]any{"k2": "v2"}},
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content:      genai.NewContentFromText("test_text", "user"),
 					TurnComplete: true,
 					Partial:      false,
@@ -632,7 +632,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 						Author:             "user",
 						LongRunningToolIDs: []string{"tool123"},
 						Actions:            session.EventActions{StateDelta: map[string]any{"k2": "v2"}},
-						LLMResponse: &model.LLMResponse{
+						LLMResponse: model.LLMResponse{
 							Content:      genai.NewContentFromText("test_text", "user"),
 							TurnComplete: true,
 							Partial:      false,
@@ -675,7 +675,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			event: &session.Event{
 				ID:     "partial_event",
 				Author: "user",
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Partial: true, // This is the key field
 				},
 			},
@@ -751,7 +751,7 @@ func Test_databaseService_StateManagement(t *testing.T) {
 		_ = s.AppendEvent(ctx, s1.Session.(*localSession), &session.Event{
 			ID:          "event1",
 			Actions:     session.EventActions{StateDelta: map[string]any{"app:k2": "v2"}},
-			LLMResponse: &model.LLMResponse{},
+			LLMResponse: model.LLMResponse{},
 		})
 
 		s2, err := s.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u2", SessionID: "s2"})
@@ -773,7 +773,7 @@ func Test_databaseService_StateManagement(t *testing.T) {
 		_ = s.AppendEvent(ctx, s1.Session.(*localSession), &session.Event{
 			ID:          "event1",
 			Actions:     session.EventActions{StateDelta: map[string]any{"user:k2": "v2"}},
-			LLMResponse: &model.LLMResponse{},
+			LLMResponse: model.LLMResponse{},
 		})
 
 		s1b, _ := s.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1b"})
@@ -797,7 +797,7 @@ func Test_databaseService_StateManagement(t *testing.T) {
 		_ = s.AppendEvent(ctx, s1.Session.(*localSession), &session.Event{
 			ID:          "event1",
 			Actions:     session.EventActions{StateDelta: map[string]any{"sk2": "v2"}},
-			LLMResponse: &model.LLMResponse{},
+			LLMResponse: model.LLMResponse{},
 		})
 
 		s1_got, _ := s.Get(ctx, &session.GetRequest{AppName: appName, UserID: "u1", SessionID: "s1"})
@@ -821,7 +821,7 @@ func Test_databaseService_StateManagement(t *testing.T) {
 		event := &session.Event{
 			ID:          "event1",
 			Actions:     session.EventActions{StateDelta: map[string]any{"temp:k1": "v1", "sk": "v2"}},
-			LLMResponse: &model.LLMResponse{},
+			LLMResponse: model.LLMResponse{},
 		}
 		_ = s.AppendEvent(ctx, s1.Session.(*localSession), event)
 

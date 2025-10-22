@@ -270,7 +270,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		Actions:            actions,
 		LongRunningToolIDs: toolIDs,
 		Branch:             branch,
-		LLMResponse: &model.LLMResponse{
+		LLMResponse: model.LLMResponse{
 			Content:           content,
 			GroundingMetadata: groundingMetadata,
 			CustomMetadata:    customMetadata,
