@@ -22,11 +22,10 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	spannergorm "github.com/googleapis/go-gorm-spanner"
-	_ "github.com/googleapis/go-sql-spanner"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -906,17 +905,11 @@ func Test_s1(t *testing.T) {
 
 func emptyService(t *testing.T) *databaseService {
 	t.Helper()
-	dsn := "projects/adk-go-test/instances/adkgotest/databases/adkgotest"
 	gormConfig := &gorm.Config{
 		PrepareStmt: true,
 	}
 
-	spannerGormConfig := spannergorm.Config{
-		DriverName: "spanner",
-		DSN:        dsn,
-	}
-
-	service, err := NewSessionService(spannergorm.New(spannerGormConfig), gormConfig)
+	service, err := NewSessionService(sqlite.Open("file::memory:?cache=shared"), gormConfig)
 	dbservice := service.(*databaseService)
 	dbservice.db.AutoMigrate(&storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
 	if err != nil {
@@ -924,7 +917,7 @@ func emptyService(t *testing.T) *databaseService {
 	}
 
 	t.Cleanup(func() {
-		t.Log("CLEANUP: Deleting all rows from Spanner tables...")
+		t.Log("CLEANUP: Deleting all rows from tables...")
 
 		// Define models in Child-to-Parent order
 		modelsToDelete := []any{
