@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package tool_test
+package functiontool_test
 
 import (
 	"encoding/json"
@@ -32,10 +32,11 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
 
-func ExampleNewFunctionTool() {
+func ExampleNew() {
 	type SumArgs struct {
 		A int `json:"a"` // an integer to sum
 		B int `json:"b"` // another integer to sum
@@ -47,7 +48,7 @@ func ExampleNewFunctionTool() {
 	handler := func(ctx tool.Context, input SumArgs) SumResult {
 		return SumResult{Sum: input.A + input.B}
 	}
-	sumTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+	sumTool, err := functiontool.New(functiontool.Config{
 		Name:        "sum",
 		Description: "sums two integers",
 	}, handler)
@@ -99,8 +100,8 @@ func TestFunctionTool_Simple(t *testing.T) {
 		}
 	}
 
-	weatherReportTool, err := tool.NewFunctionTool(
-		tool.FunctionToolConfig{
+	weatherReportTool, err := functiontool.New(
+		functiontool.Config{
 			Name:        "get_weather_report",
 			Description: "Retrieves the current weather report for a specified city.",
 		},
@@ -186,7 +187,7 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	identityFunc := func(ctx tool.Context, x int) int {
 		return x
 	}
-	identityTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+	identityTool, err := functiontool.New(functiontool.Config{
 		Name:        "identity",
 		Description: "returns the input value",
 	}, identityFunc)
@@ -198,8 +199,8 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	stringIdentityFunc := func(ctx tool.Context, input string) string {
 		return input
 	}
-	stringIdentityTool, err := tool.NewFunctionTool(
-		tool.FunctionToolConfig{
+	stringIdentityTool, err := functiontool.New(
+		functiontool.Config{
 			Name:        "string_identity",
 			Description: "returns the input value",
 		},
@@ -249,8 +250,8 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 		return fmt.Sprintf("Weather information for %q is not available.", city)
 	}
 
-	weatherReportTool, err := tool.NewFunctionTool(
-		tool.FunctionToolConfig{
+	weatherReportTool, err := functiontool.New(
+		functiontool.Config{
 			Name:        "get_weather_report",
 			Description: "Retrieves the current weather report for a specified city.",
 		},
@@ -399,7 +400,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 	fruit.Description = "print the remaining quantity of the item."
 	fruit.Enum = []any{"mandarin", "kiwi"}
 
-	inventoryTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+	inventoryTool, err := functiontool.New(functiontool.Config{
 		Name:        "print_quantity",
 		Description: "print the remaining quantity of the given fruit.",
 		InputSchema: ischema,

@@ -158,6 +158,16 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("unexpected session type %T", sess)
 	}
 
+	if event.Actions.StateDelta != nil {
+		state := sess.State()
+		for key, value := range event.Actions.StateDelta {
+			err := state.Set(key, value)
+			if err != nil {
+				return fmt.Errorf("fail to set state on appendEvent: %w", err)
+			}
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -276,7 +286,12 @@ func (s *state) Get(key string) (any, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.state[key], nil
+	val, ok := s.state[key]
+	if !ok {
+		return nil, ErrStateKeyNotExist
+	}
+
+	return val, nil
 }
 
 func (s *state) All() iter.Seq2[string, any] {

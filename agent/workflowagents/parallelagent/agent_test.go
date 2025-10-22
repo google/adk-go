@@ -54,7 +54,7 @@ func TestNewParallelAgent(t *testing.T) {
 					for responseCount := 1; responseCount <= 2; responseCount++ {
 						res = append(res, &session.Event{
 							Author: fmt.Sprintf("sub%d", agentID),
-							LLMResponse: &model.LLMResponse{
+							LLMResponse: model.LLMResponse{
 								Content: &genai.Content{
 									Parts: []*genai.Part{
 										genai.NewPartFromText(fmt.Sprintf("hello %d", agentID)),
@@ -123,7 +123,7 @@ func TestNewParallelAgent(t *testing.T) {
 				}()
 			}
 
-			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), &agent.RunConfig{}) {
+			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
 				if tt.wantErr != (err != nil) {
 					if tt.cancelContext && err == nil {
 						// In case of context cancellation some events can be processed before cancel is applied.
@@ -217,7 +217,7 @@ func customRun(id int, agentErr error) func(agent.InvocationContext) iter.Seq2[*
 				return
 			}
 			yield(&session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromText(fmt.Sprintf("hello %v", id), genai.RoleModel),
 				},
 			}, nil)

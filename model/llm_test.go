@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"testing"
 
+	"google.golang.org/adk/internal/llminternal/converters"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -207,7 +208,7 @@ func TestCreateResponse(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := model.CreateResponse(&tc.input)
+			got := converters.Genai2LLMResponse(&tc.input)
 
 			if tc.want.AvgLogprobs != got.AvgLogprobs {
 				t.Errorf("AvgLogprobs mismatch: want %f, got %f", tc.want.AvgLogprobs, got.AvgLogprobs)

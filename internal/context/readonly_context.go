@@ -34,6 +34,26 @@ type readonlyContext struct {
 	invocationContext agent.InvocationContext
 }
 
+// AppName implements agent.ReadonlyContext.
+func (c *readonlyContext) AppName() string {
+	return c.invocationContext.Session().AppName()
+}
+
+// Branch implements agent.ReadonlyContext.
+func (c *readonlyContext) Branch() string {
+	return c.invocationContext.Branch()
+}
+
+// SessionID implements agent.ReadonlyContext.
+func (c *readonlyContext) SessionID() string {
+	return c.invocationContext.Session().ID()
+}
+
+// UserID implements agent.ReadonlyContext.
+func (c *readonlyContext) UserID() string {
+	return c.invocationContext.Session().UserID()
+}
+
 func (c *readonlyContext) AgentName() string {
 	return c.invocationContext.Agent().Name()
 }

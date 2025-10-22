@@ -45,6 +45,11 @@ type ReadonlyContext interface {
 	InvocationID() string
 	AgentName() string
 	ReadonlyState() session.ReadonlyState
+
+	UserID() string
+	AppName() string
+	SessionID() string
+	Branch() string
 }
 
 type CallbackContext interface {

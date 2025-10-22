@@ -15,23 +15,28 @@
 package context
 
 import (
-	"context"
-
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
 func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
+	return newCallbackContext(ctx)
+}
+
+func newCallbackContext(ctx agent.InvocationContext) *callbackContext {
+	rCtx := NewReadonlyContext(ctx)
 	return &callbackContext{
-		Context:       ctx,
-		invocationCtx: ctx,
-		eventActions:  &session.EventActions{},
+		ReadonlyContext: rCtx,
+		invocationCtx:   ctx,
+		eventActions:    &session.EventActions{},
 	}
 }
 
+// TODO: unify with agent.callbackContext
+
 type callbackContext struct {
-	context.Context
+	agent.ReadonlyContext
 	invocationCtx agent.InvocationContext
 	eventActions  *session.EventActions
 }

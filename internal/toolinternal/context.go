@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
+	contextinternal "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -28,17 +29,20 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 	if functionCallID == "" {
 		functionCallID = uuid.NewString()
 	}
+	cbCtx := contextinternal.NewCallbackContext(ctx)
 	return &toolContext{
-		InvocationContext: ctx,
+		CallbackContext:   cbCtx,
+		invocationContext: ctx,
 		functionCallID:    functionCallID,
 		eventActions:      actions,
 	}
 }
 
 type toolContext struct {
-	agent.InvocationContext
-	functionCallID string
-	eventActions   *session.EventActions
+	agent.CallbackContext
+	invocationContext agent.InvocationContext
+	functionCallID    string
+	eventActions      *session.EventActions
 }
 
 func (c *toolContext) FunctionCallID() string {
@@ -50,17 +54,9 @@ func (c *toolContext) Actions() *session.EventActions {
 }
 
 func (c *toolContext) AgentName() string {
-	return c.Agent().Name()
+	return c.invocationContext.Agent().Name()
 }
 
-func (c *toolContext) ReadonlyState() session.ReadonlyState {
-	return c.Session().State()
-}
-
-func (c *toolContext) SearchMemory(ctx context.Context, query string) ([]memory.Entry, error) {
-	return c.Memory().Search(query)
-}
-
-func (c *toolContext) State() session.State {
-	return c.Session().State()
+func (c *toolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	return c.invocationContext.Memory().Search(ctx, query)
 }

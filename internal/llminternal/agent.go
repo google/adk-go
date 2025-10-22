@@ -28,7 +28,8 @@ type Agent interface {
 type State struct {
 	Model model.LLM
 
-	Tools []tool.Tool
+	Tools    []tool.Tool
+	Toolsets []tool.Set
 
 	IncludeContents string
 
@@ -40,7 +41,10 @@ type State struct {
 	DisallowTransferToParent bool
 	DisallowTransferToPeers  bool
 
+	InputSchema  *genai.Schema
 	OutputSchema *genai.Schema
+
+	OutputKey string
 }
 
 func (s *State) internal() *State { return s }

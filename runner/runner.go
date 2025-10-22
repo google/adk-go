@@ -71,7 +71,7 @@ type Runner struct {
 }
 
 // Run runs the agent.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg *agent.RunConfig) iter.Seq2[*session.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
@@ -94,7 +94,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
-		if cfg != nil && cfg.SupportCFC {
+		if cfg.SupportCFC {
 			if err := r.setupCFC(agentToRun); err != nil {
 				yield(nil, fmt.Errorf("failed to setup CFC: %w", err))
 				return
@@ -148,7 +148,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			// only commit non-partial event to a session service
-			if !(event.LLMResponse != nil && event.LLMResponse.Partial) {
+			if !event.LLMResponse.Partial {
 
 				// TODO: update session state & delta
 
@@ -197,7 +197,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 				continue
 			}
 			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
-			if err := artifactsService.Save(fileName, *part); err != nil {
+			if _, err := artifactsService.Save(ctx, fileName, part); err != nil {
 				return fmt.Errorf("failed to save artifact %s: %w", fileName, err)
 			}
 			// Replace the part with a text placeholder
@@ -210,7 +210,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 	event := session.NewEvent(ctx.InvocationID())
 
 	event.Author = "user"
-	event.LLMResponse = &model.LLMResponse{
+	event.LLMResponse = model.LLMResponse{
 		Content: msg,
 	}
 

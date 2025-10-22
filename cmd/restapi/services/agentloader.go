@@ -25,17 +25,41 @@ type AgentLoader interface {
 	LoadAgent(string) (agent.Agent, error)
 }
 
-type StaticAgentLoader struct {
+// SingleAgentLoader should be used when you have only one agent
+type SingleAgentLoader struct {
+	main agent.Agent
+}
+
+func NewSingleAgentLoader(a agent.Agent) *SingleAgentLoader {
+	return &SingleAgentLoader{main: a}
+}
+
+func (s *SingleAgentLoader) ListAgents() []string {
+	return []string{s.main.Name()}
+}
+
+func (s *SingleAgentLoader) LoadAgent(name string) (agent.Agent, error) {
+	if name == "" {
+		return s.main, nil
+	}
+	if name == s.main.Name() {
+		return s.main, nil
+	}
+	return nil, fmt.Errorf("cannot load agent '%s' - provide empty string or use '%s'", name, s.main.Name())
+}
+
+// MultiAgentLoader should be used when you have more than one agent
+type MultiAgentLoader struct {
 	agents map[string]agent.Agent
 }
 
-func NewStaticAgentLoader(agents map[string]agent.Agent) *StaticAgentLoader {
-	return &StaticAgentLoader{
+func NewStaticAgentLoader(agents map[string]agent.Agent) *MultiAgentLoader {
+	return &MultiAgentLoader{
 		agents: agents,
 	}
 }
 
-func (s *StaticAgentLoader) ListAgents() []string {
+func (s *MultiAgentLoader) ListAgents() []string {
 	agents := make([]string, 0, len(s.agents))
 	for name := range s.agents {
 		agents = append(agents, name)
@@ -43,7 +67,7 @@ func (s *StaticAgentLoader) ListAgents() []string {
 	return agents
 }
 
-func (s *StaticAgentLoader) LoadAgent(name string) (agent.Agent, error) {
+func (s *MultiAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 	agent, ok := s.agents[name]
 	if !ok {
 		return nil, fmt.Errorf("agent %s not found", name)

@@ -1,6 +1,6 @@
 module google.golang.org/adk
 
-go 1.24.3
+go 1.24.4
 
 require (
 	cloud.google.com/go/storage v1.56.1
@@ -31,6 +31,7 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.30.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.53.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.53.0 // indirect
+	github.com/a2aproject/a2a-go v0.0.0-20251019084948-b02378be636d
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20251014123835-2ee22ca58382 // indirect

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // mcptool package provides MCP adapter, allowing to add MCP tools to LLMAgent.
-package mcptool
+package mcptoolset
 
 import (
 	"context"
@@ -25,13 +25,13 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-// NewSet returns MCP ToolSet.
+// New returns MCP ToolSet.
 // MCP ToolSet connects to a MCP Server, retrieves MCP Tools into ADK Tools and
 // passes them to the LLM.
 // It uses https://github.com/modelcontextprotocol/go-sdk for MCP communication.
 // MCP session is created lazily on the first request to LLM.
 //
-// Usage: create MCP ToolSet with mcptool.NewSet() and provide it to the
+// Usage: create MCP ToolSet with mcptoolset.New() and provide it to the
 // LLMAgent in the llmagent.Config.
 //
 // Example:
@@ -41,27 +41,34 @@ import (
 //		Model:       model,
 //		Description: "...",
 //		Instruction: "...",
-//		Tools: []tool.Tool{
-//			mcptool.NewSet(mcptool.SetConfig{
+//		Toolsets: []tool.Set{
+//			mcptoolset.New(mcptoolset.Config{
 //				Transport: &mcp.CommandTransport{Command: exec.Command("myserver")}
 //			}),
 //		},
 //	})
-func NewSet(cfg SetConfig) (tool.Set, error) {
+func New(cfg Config) (tool.Set, error) {
 	return &set{
-		client:    mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: "v1.0.0"}, nil),
-		transport: cfg.Transport,
+		client:     mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: "v1.0.0"}, nil),
+		transport:  cfg.Transport,
+		toolFilter: cfg.ToolFilter,
 	}, nil
 }
 
-// SetConfig provides initial configuration for the MCP ToolSet.
-type SetConfig struct {
+// Config provides initial configuration for the MCP ToolSet.
+type Config struct {
+	// Transport that will be used to connect to MCP server.
 	Transport mcp.Transport
+	// ToolFilter selects tools for which tool.Predicate returns true.
+	// If ToolFilter is nil, then all tools are returned.
+	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.
+	ToolFilter tool.Predicate
 }
 
 type set struct {
-	client    *mcp.Client
-	transport mcp.Transport
+	client     *mcp.Client
+	transport  mcp.Transport
+	toolFilter tool.Predicate
 
 	mu      sync.Mutex
 	session *mcp.ClientSession
@@ -101,6 +108,10 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 			t, err := convertTool(mcpTool, s.getSession)
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
+			}
+
+			if s.toolFilter != nil && !s.toolFilter(ctx, t) {
+				continue
 			}
 
 			adkTools = append(adkTools, t)

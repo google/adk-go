@@ -16,7 +16,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 
@@ -24,8 +23,9 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/run"
 	"google.golang.org/adk/cmd/restapi/services"
-	"google.golang.org/adk/cmd/web"
 	"google.golang.org/adk/examples/web/agents"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
@@ -40,7 +40,7 @@ func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, l
 		return llmResponse, llmResponseError
 	}
 	for _, part := range llmResponse.Content.Parts {
-		err := ctx.Artifacts().Save(uuid.NewString(), *part)
+		_, err := ctx.Artifacts().Save(ctx, uuid.NewString(), part)
 		if err != nil {
 			return nil, err
 		}
@@ -67,7 +67,7 @@ func main() {
 		Tools: []tool.Tool{
 			geminitool.GoogleSearch{},
 		},
-		AfterModel: []llmagent.AfterModelCallback{saveReportfunc},
+		AfterModelCallbacks: []llmagent.AfterModelCallback{saveReportfunc},
 	})
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
@@ -82,12 +82,12 @@ func main() {
 	)
 	artifactservice := artifact.InMemoryService()
 
-	config := web.ParseArgs()
-	fmt.Printf("%+v", config)
-	web.Serve(config, &web.ServeConfig{
+	config := &adk.Config{
+		ArtifactService: artifactservice,
 		SessionService:  sessionService,
 		AgentLoader:     agentLoader,
-		ArtifactService: artifactservice,
-	})
+	}
+
+	run.Run(ctx, config)
 
 }
