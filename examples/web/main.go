@@ -67,7 +67,7 @@ func main() {
 		Tools: []tool.Tool{
 			geminitool.GoogleSearch{},
 		},
-		AfterModel: []llmagent.AfterModelCallback{saveReportfunc},
+		AfterModelCallbacks: []llmagent.AfterModelCallback{saveReportfunc},
 	})
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)

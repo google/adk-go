@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
 )
@@ -69,7 +70,7 @@ func main() {
 			Poem: strings.Repeat("A line of a poem,", input.LineCount) + "\n",
 		}
 	}
-	poemTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+	poemTool, err := functiontool.New(functiontool.Config{
 		Name:        "poem",
 		Description: "Returns poem",
 	}, handler)

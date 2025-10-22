@@ -30,6 +30,8 @@ import (
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/tool/loadartifactstool"
 	"google.golang.org/genai"
 )
 
@@ -41,8 +43,8 @@ func main() {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
-	generateImageTool, err := tool.NewFunctionTool(
-		tool.FunctionToolConfig{
+	generateImageTool, err := functiontool.New(
+		functiontool.Config{
 			Name:        "generate_image",
 			Description: "Generates image and saves in artifact service.",
 		},
@@ -51,8 +53,8 @@ func main() {
 		log.Fatalf("Failed to create generate image tool: %v", err)
 	}
 
-	saveImageTool, err := tool.NewFunctionTool(
-		tool.FunctionToolConfig{
+	saveImageTool, err := functiontool.New(
+		functiontool.Config{
 			Name:        "save_image_locally",
 			Description: "Saves images locally based on the filename.",
 		},
@@ -69,7 +71,7 @@ func main() {
 			" Also user will provide the filename and you should save it in the artifacts with that filename." +
 			" When user ask to save image locally you can call save_image_locally to do it.",
 		Tools: []tool.Tool{
-			tool.NewLoadArtifactsTool(), generateImageTool, saveImageTool,
+			loadartifactstool.New(), generateImageTool, saveImageTool,
 		},
 	})
 	if err != nil {

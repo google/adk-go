@@ -97,10 +97,10 @@ func TestAgentCallbacks(t *testing.T) {
 			custom := &customAgent{}
 
 			testAgent, err := New(Config{
-				Name:        "test",
-				BeforeAgent: tt.beforeAgent,
-				Run:         custom.Run,
-				AfterAgent:  tt.afterAgent,
+				Name:                 "test",
+				BeforeAgentCallbacks: tt.beforeAgent,
+				Run:                  custom.Run,
+				AfterAgentCallbacks:  tt.afterAgent,
 			})
 			if err != nil {
 				t.Fatalf("failed to create agent: %v", err)
