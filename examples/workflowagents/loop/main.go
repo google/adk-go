@@ -21,7 +21,9 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
-	"google.golang.org/adk/examples"
+	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/run"
+	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -30,7 +32,7 @@ import (
 func CustomAgentRun(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -67,5 +69,9 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, loopAgent, nil)
+	config := &adk.Config{
+		AgentLoader: services.NewSingleAgentLoader(loopAgent),
+	}
+	run.Run(ctx, config)
+
 }

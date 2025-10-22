@@ -27,12 +27,12 @@ type invocationMeta struct {
 	eventMeta map[string]any
 }
 
-func toInvocationMeta(config *ExecutorConfig, reqCtx a2asrv.RequestContext) invocationMeta {
+func toInvocationMeta(config ExecutorConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
 	// TODO(yarolegovich): update once A2A provides auth data extraction from Context
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 
 	m := map[string]any{
-		toMetaKey("app_name"):   config.AppName,
+		toMetaKey("app_name"):   config.RunnerConfig.AppName,
 		toMetaKey("user_id"):    userID,
 		toMetaKey("session_id"): sessionID,
 	}
@@ -45,7 +45,7 @@ func toMetaKey(key string) string {
 }
 
 func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, error) {
-	result := make(map[string]any, len(meta.eventMeta)+5)
+	result := make(map[string]any)
 	for k, v := range meta.eventMeta {
 		result[k] = v
 	}
@@ -61,9 +61,6 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 	}
 
 	response := event.LLMResponse
-	if response == nil {
-		return result, nil
-	}
 
 	if response.ErrorCode != "" {
 		result[toMetaKey("error_code")] = response.ErrorCode

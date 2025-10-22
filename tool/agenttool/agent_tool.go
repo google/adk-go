@@ -187,7 +187,7 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (any, error) {
 	}
 
 	// TODO(dpasiukevich): verify agent loop termination.
-	eventCh := r.Run(toolCtx, subSession.Session.UserID(), subSession.Session.ID(), content, &agent.RunConfig{
+	eventCh := r.Run(toolCtx, subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
 		StreamingMode: agent.StreamingModeSSE,
 	})
 
@@ -196,7 +196,7 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error during execution of sub-agent %s: %w", t.agent.Name(), err)
 		}
-		if event.LLMResponse != nil && event.LLMResponse.Content != nil {
+		if event.LLMResponse.Content != nil {
 			lastEvent = event
 		}
 	}

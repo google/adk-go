@@ -57,7 +57,7 @@ func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Ses
 	var values []value
 
 	for event := range curSession.Events().All() {
-		if event.LLMResponse == nil || event.LLMResponse.Content == nil {
+		if event.LLMResponse.Content == nil {
 			continue
 		}
 

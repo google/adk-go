@@ -30,54 +30,41 @@ type Artifacts struct {
 	SessionID string
 }
 
-func (a *Artifacts) Save(name string, data genai.Part) error {
-	_, err := a.Service.Save(context.Background(), &artifact.SaveRequest{
+func (a *Artifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
+	return a.Service.Save(ctx, &artifact.SaveRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
-		Part:      &data,
+		Part:      data,
 	})
-	return err
 }
 
-func (a *Artifacts) Load(name string) (genai.Part, error) {
-	loadResponse, err := a.Service.Load(context.Background(), &artifact.LoadRequest{
+func (a *Artifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {
+	return a.Service.Load(ctx, &artifact.LoadRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
 	})
-	if err != nil {
-		return genai.Part{}, err
-	}
-	return *loadResponse.Part, nil
 }
 
-func (a *Artifacts) LoadVersion(name string, version int) (genai.Part, error) {
-	loadResponse, err := a.Service.Load(context.Background(), &artifact.LoadRequest{
+func (a *Artifacts) LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error) {
+	return a.Service.Load(ctx, &artifact.LoadRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
 		Version:   int64(version),
 	})
-	if err != nil {
-		return genai.Part{}, err
-	}
-	return *loadResponse.Part, nil
 }
 
-func (a *Artifacts) List() ([]string, error) {
-	ListResponse, err := a.Service.List(context.Background(), &artifact.ListRequest{
+func (a *Artifacts) List(ctx context.Context) (*artifact.ListResponse, error) {
+	return a.Service.List(ctx, &artifact.ListRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 	})
-	if err != nil {
-		return nil, err
-	}
-	return ListResponse.FileNames, nil
 }
 
 var _ agent.Artifacts = (*Artifacts)(nil)

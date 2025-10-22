@@ -28,7 +28,8 @@ type Agent interface {
 type State struct {
 	Model model.LLM
 
-	Tools []tool.Tool
+	Tools    []tool.Tool
+	Toolsets []tool.Set
 
 	IncludeContents string
 

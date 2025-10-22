@@ -21,10 +21,13 @@ import (
 	"strings"
 
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/examples"
+	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/run"
+	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
 )
@@ -67,7 +70,7 @@ func main() {
 			Poem: strings.Repeat("A line of a poem,", input.LineCount) + "\n",
 		}
 	}
-	poemTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+	poemTool, err := functiontool.New(functiontool.Config{
 		Name:        "poem",
 		Description: "Returns poem",
 	}, handler)
@@ -101,5 +104,8 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, agent, nil)
+	config := &adk.Config{
+		AgentLoader: services.NewSingleAgentLoader(agent),
+	}
+	run.Run(ctx, config)
 }

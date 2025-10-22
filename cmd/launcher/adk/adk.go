@@ -12,30 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package memory
+// package adk defines common config for all agents & ways of launching
+package adk
 
 import (
-	"context"
-
-	"google.golang.org/adk/memory"
+	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/session"
 )
 
-type Memory struct {
-	Service   memory.Service
-	SessionID string
-	UserID    string
-	AppName   string
-}
-
-func (a *Memory) AddSession(ctx context.Context, session session.Session) error {
-	return a.Service.AddSession(ctx, session)
-}
-
-func (a *Memory) Search(ctx context.Context, query string) (*memory.SearchResponse, error) {
-	return a.Service.Search(ctx, &memory.SearchRequest{
-		AppName: a.AppName,
-		UserID:  a.UserID,
-		Query:   query,
-	})
+// Config contains parameters for web & console execution: sessions, artifacts, agents etc
+type Config struct {
+	SessionService  session.Service
+	ArtifactService artifact.Service
+	AgentLoader     services.AgentLoader
 }

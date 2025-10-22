@@ -30,28 +30,29 @@ import (
 )
 
 func New(cfg Config) (agent.Agent, error) {
-	beforeModel := make([]llminternal.BeforeModelCallback, 0, len(cfg.BeforeModel))
-	for _, c := range cfg.BeforeModel {
-		beforeModel = append(beforeModel, llminternal.BeforeModelCallback(c))
+	beforeModelCallbacks := make([]llminternal.BeforeModelCallback, 0, len(cfg.BeforeModelCallbacks))
+	for _, c := range cfg.BeforeModelCallbacks {
+		beforeModelCallbacks = append(beforeModelCallbacks, llminternal.BeforeModelCallback(c))
 	}
 
-	afterModel := make([]llminternal.AfterModelCallback, 0, len(cfg.AfterModel))
-	for _, c := range cfg.AfterModel {
-		afterModel = append(afterModel, llminternal.AfterModelCallback(c))
+	afterModelCallbacks := make([]llminternal.AfterModelCallback, 0, len(cfg.AfterModelCallbacks))
+	for _, c := range cfg.AfterModelCallbacks {
+		afterModelCallbacks = append(afterModelCallbacks, llminternal.AfterModelCallback(c))
 	}
 
 	a := &llmAgent{
-		beforeModel:  beforeModel,
-		model:        cfg.Model,
-		afterModel:   afterModel,
-		instruction:  cfg.Instruction,
-		inputSchema:  cfg.InputSchema,
-		outputSchema: cfg.OutputSchema,
+		beforeModelCallbacks: beforeModelCallbacks,
+		model:                cfg.Model,
+		afterModelCallbacks:  afterModelCallbacks,
+		instruction:          cfg.Instruction,
+		inputSchema:          cfg.InputSchema,
+		outputSchema:         cfg.OutputSchema,
 
 		State: llminternal.State{
 			Model:                    cfg.Model,
 			GenerateContentConfig:    cfg.GenerateContentConfig,
 			Tools:                    cfg.Tools,
+			Toolsets:                 cfg.Toolsets,
 			DisallowTransferToParent: cfg.DisallowTransferToParent,
 			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
 			InputSchema:              cfg.InputSchema,
@@ -64,19 +65,18 @@ func New(cfg Config) (agent.Agent, error) {
 	}
 
 	baseAgent, err := agent.New(agent.Config{
-		Name:        cfg.Name,
-		Description: cfg.Description,
-		SubAgents:   cfg.SubAgents,
-		BeforeAgent: cfg.BeforeAgent,
-		Run:         a.run,
-		AfterAgent:  cfg.AfterAgent,
+		Name:                 cfg.Name,
+		Description:          cfg.Description,
+		SubAgents:            cfg.SubAgents,
+		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
+		Run:                  a.run,
+		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent: %w", err)
 	}
 
 	a.Agent = baseAgent
-
 	a.AgentType = agentinternal.TypeLLMAgent
 
 	return a, nil
@@ -87,12 +87,12 @@ type Config struct {
 	Description string
 	SubAgents   []agent.Agent
 
-	BeforeAgent []agent.BeforeAgentCallback
-	AfterAgent  []agent.AfterAgentCallback
+	BeforeAgentCallbacks []agent.BeforeAgentCallback
+	AfterAgentCallbacks  []agent.AfterAgentCallback
 
 	GenerateContentConfig *genai.GenerateContentConfig
 
-	// BeforeModel callbacks are executed sequentially right before a request is
+	// BeforeModelCallbacks are executed sequentially right before a request is
 	// sent to the model.
 	//
 	// The first callback that returns non-nil LLMResponse/error makes
@@ -102,9 +102,9 @@ type Config struct {
 	// This provides an opportunity to inspect, log, or modify the `LLMRequest`
 	// object. It can also be used to implement caching by returning a cached
 	// `LLMResponse`, which would skip the actual model call.
-	BeforeModel []BeforeModelCallback
-	Model       model.LLM
-	// AfterModel callbacks are executed sequentially right after a response is
+	BeforeModelCallbacks []BeforeModelCallback
+	Model                model.LLM
+	// AfterModelCallbacks are executed sequentially right after a response is
 	// received from the model.
 	//
 	// The first callback that returns non-nil LLMResponse/error **replaces**
@@ -113,7 +113,7 @@ type Config struct {
 	//
 	// This is the ideal place to log model responses, collect metrics on token
 	// usage, or perform post-processing on the raw `LLMResponse`.
-	AfterModel []AfterModelCallback
+	AfterModelCallbacks []AfterModelCallback
 
 	Instruction       string
 	GlobalInstruction string
@@ -138,6 +138,9 @@ type Config struct {
 
 	// TODO: BeforeTool and AfterTool callbacks
 	Tools []tool.Tool
+	// Toolsets will be used by llmagent to extract tools and pass to the
+	// underlying LLM.
+	Toolsets []tool.Set
 
 	// OutputKey is an optional parameter to specify the key in session state for the agent output.
 	//
@@ -162,10 +165,10 @@ type llmAgent struct {
 	llminternal.State
 	agentState
 
-	beforeModel []llminternal.BeforeModelCallback
-	model       model.LLM
-	afterModel  []llminternal.AfterModelCallback
-	instruction string
+	beforeModelCallbacks []llminternal.BeforeModelCallback
+	model                model.LLM
+	afterModelCallbacks  []llminternal.AfterModelCallback
+	instruction          string
 
 	inputSchema  *genai.Schema
 	outputSchema *genai.Schema
@@ -189,8 +192,8 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		Model:                a.model,
 		RequestProcessors:    llminternal.DefaultRequestProcessors,
 		ResponseProcessors:   llminternal.DefaultResponseProcessors,
-		BeforeModelCallbacks: a.beforeModel,
-		AfterModelCallbacks:  a.afterModel,
+		BeforeModelCallbacks: a.beforeModelCallbacks,
+		AfterModelCallbacks:  a.afterModelCallbacks,
 	}
 
 	return func(yield func(*session.Event, error) bool) {

@@ -28,24 +28,11 @@ import (
 )
 
 // ExecutorConfig represents mandatory Executor dependencies.
-type ExecutorConfig runner.Config
-
-// ExecutorOption is used for configuring an Executor.
-type ExecutorOption interface {
-	apply(ae *Executor)
-}
-
-type agentExecutorOptionFn func(ae *Executor)
-
-func (f agentExecutorOptionFn) apply(ae *Executor) {
-	f(ae)
-}
-
-// WithRunConfig allows to set a configuration that will be passed to runner.Runner.Run during A2A Execute invocation.
-func WithRunConfig(config *agent.RunConfig) ExecutorOption {
-	return agentExecutorOptionFn(func(ae *Executor) {
-		ae.runConfig = config
-	})
+type ExecutorConfig struct {
+	// RunnerConfig is the configuration which will be used for runner.New during A2A Execute invocation.
+	RunnerConfig runner.Config
+	// RunConfig is the configuration which will be passed to runner.Runner.Run during A2A Execute invocation.
+	RunConfig agent.RunConfig
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
@@ -60,24 +47,16 @@ var _ a2asrv.AgentExecutor = (*Executor)(nil)
 //     Else if there was an LLMResponse with long-running tool invocation, produce a TaskStatusUpdateEvent with TaskStateInputRequired.
 //     Else produce a TaskStatusUpdateEvent with TaskStateCompleted.
 type Executor struct {
-	config    *ExecutorConfig
-	runConfig *agent.RunConfig
+	config ExecutorConfig
 }
 
 // NewExecutor creates an initialized Executor instance.
-func NewExecutor(config *ExecutorConfig, opts ...ExecutorOption) *Executor {
-	ae := &Executor{
-		config:    config,
-		runConfig: &agent.RunConfig{},
-	}
-	for _, opt := range opts {
-		opt.apply(ae)
-	}
-	return ae
+func NewExecutor(config ExecutorConfig) *Executor {
+	return &Executor{config: config}
 }
 
-func (e *Executor) Execute(ctx context.Context, reqCtx a2asrv.RequestContext, queue eventqueue.Queue) error {
-	msg := reqCtx.Request.Message
+func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+	msg := reqCtx.Message
 	if msg == nil {
 		return fmt.Errorf("message not provided")
 	}
@@ -85,8 +64,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx a2asrv.RequestContext, qu
 	if err != nil {
 		return fmt.Errorf("a2a message conversion failed: %w", err)
 	}
-	cong := runner.Config(*e.config)
-	r, err := runner.New(cong)
+	r, err := runner.New(e.config.RunnerConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create a runner: %w", err)
 	}
@@ -124,7 +102,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx a2asrv.RequestContext, qu
 	return nil
 }
 
-func (e *Executor) Cancel(ctx context.Context, reqCtx a2asrv.RequestContext, queue eventqueue.Queue) error {
+func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
 	task := reqCtx.Task
 	if task == nil {
 		return fmt.Errorf("no task provided")
@@ -139,7 +117,7 @@ func (e *Executor) Cancel(ctx context.Context, reqCtx a2asrv.RequestContext, que
 // Processing failures should be delivered as Task failed events. An error is returned from this method if an event write fails.
 func (e *Executor) process(ctx context.Context, r *runner.Runner, processor *eventProcessor, content *genai.Content, q eventqueue.Queue) error {
 	meta := processor.meta
-	for event, err := range r.Run(ctx, meta.userID, meta.sessionID, content, e.runConfig) {
+	for event, err := range r.Run(ctx, meta.userID, meta.sessionID, content, e.config.RunConfig) {
 		if err != nil {
 			event := processor.makeTaskFailedEvent(fmt.Errorf("agent run failed: %w", err), nil)
 			if eventSendErr := q.Write(ctx, event); eventSendErr != nil {
@@ -174,8 +152,10 @@ func (e *Executor) process(ctx context.Context, r *runner.Runner, processor *eve
 }
 
 func (e *Executor) prepareSession(ctx context.Context, meta invocationMeta) error {
-	resp, err := e.config.SessionService.Get(ctx, &session.GetRequest{
-		AppName:   e.config.AppName,
+	service := e.config.RunnerConfig.SessionService
+
+	resp, err := service.Get(ctx, &session.GetRequest{
+		AppName:   e.config.RunnerConfig.AppName,
 		UserID:    meta.userID,
 		SessionID: meta.sessionID,
 	})
@@ -183,8 +163,8 @@ func (e *Executor) prepareSession(ctx context.Context, meta invocationMeta) erro
 		return nil
 	}
 
-	_, err = e.config.SessionService.Create(ctx, &session.CreateRequest{
-		AppName:   e.config.AppName,
+	_, err = service.Create(ctx, &session.CreateRequest{
+		AppName:   e.config.RunnerConfig.AppName,
 		UserID:    meta.userID,
 		SessionID: meta.sessionID,
 		State:     make(map[string]any),

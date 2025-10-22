@@ -45,7 +45,7 @@ func TestAgentCallbacks(t *testing.T) {
 			wantEvents: []*session.Event{
 				{
 					Author: "test",
-					LLMResponse: &model.LLMResponse{
+					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel),
 					},
 				},
@@ -67,7 +67,7 @@ func TestAgentCallbacks(t *testing.T) {
 			wantEvents: []*session.Event{
 				{
 					Author: "test",
-					LLMResponse: &model.LLMResponse{
+					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("hello", genai.RoleModel),
 					},
 				},
@@ -84,7 +84,7 @@ func TestAgentCallbacks(t *testing.T) {
 			wantEvents: []*session.Event{
 				{
 					Author: "test",
-					LLMResponse: &model.LLMResponse{
+					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel),
 					},
 				},
@@ -97,10 +97,10 @@ func TestAgentCallbacks(t *testing.T) {
 			custom := &customAgent{}
 
 			testAgent, err := New(Config{
-				Name:        "test",
-				BeforeAgent: tt.beforeAgent,
-				Run:         custom.Run,
-				AfterAgent:  tt.afterAgent,
+				Name:                 "test",
+				BeforeAgentCallbacks: tt.beforeAgent,
+				Run:                  custom.Run,
+				AfterAgentCallbacks:  tt.afterAgent,
 			})
 			if err != nil {
 				t.Fatalf("failed to create agent: %v", err)
@@ -145,7 +145,7 @@ func (a *customAgent) Run(InvocationContext) iter.Seq2[*session.Event, error] {
 		a.callCounter++
 
 		yield(&session.Event{
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: genai.NewContentFromText("hello", genai.RoleModel),
 			},
 		}, nil)

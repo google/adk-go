@@ -12,30 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package memory
+// package launcher provides ways to interact with agents
+package launcher
 
 import (
 	"context"
 
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/cmd/launcher/adk"
 )
 
-type Memory struct {
-	Service   memory.Service
-	SessionID string
-	UserID    string
-	AppName   string
-}
-
-func (a *Memory) AddSession(ctx context.Context, session session.Session) error {
-	return a.Service.AddSession(ctx, session)
-}
-
-func (a *Memory) Search(ctx context.Context, query string) (*memory.SearchResponse, error) {
-	return a.Service.Search(ctx, &memory.SearchRequest{
-		AppName: a.AppName,
-		UserID:  a.UserID,
-		Query:   query,
-	})
+// Launcher allowes to launch console or web application
+type Launcher interface {
+	Run(ctx context.Context, config *adk.Config) error
 }

@@ -24,10 +24,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/examples"
+	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/run"
+	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/mcptool"
+	"google.golang.org/adk/tool/mcptoolset"
 	"google.golang.org/genai"
 )
 
@@ -97,7 +99,7 @@ func main() {
 		transport = localMCPTransport()
 	}
 
-	mcpToolSet, err := mcptool.NewSet(mcptool.SetConfig{
+	mcpToolSet, err := mcptoolset.New(mcptoolset.Config{
 		Transport: transport,
 	})
 	if err != nil {
@@ -110,7 +112,7 @@ func main() {
 		Model:       model,
 		Description: "Helper agent.",
 		Instruction: "You are a helpful assistant that helps users with various tasks.",
-		Tools: []tool.Tool{
+		Toolsets: []tool.Set{
 			mcpToolSet,
 		},
 	})
@@ -118,5 +120,8 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	examples.Run(ctx, agent, nil)
+	config := &adk.Config{
+		AgentLoader: services.NewSingleAgentLoader(agent),
+	}
+	run.Run(ctx, config)
 }

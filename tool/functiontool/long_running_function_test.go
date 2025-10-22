@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package tool_test
+package functiontool_test
 
 import (
 	"encoding/json"
@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
 
@@ -40,9 +41,10 @@ func TestNewLongRunningFunctionTool(t *testing.T) {
 	handler := func(ctx tool.Context, input SumArgs) SumResult {
 		return SumResult{Result: "Processing sum"}
 	}
-	sumTool, err := tool.NewLongRunningFunctionTool(tool.FunctionToolConfig{
-		Name:        "sum",
-		Description: "sums two integers",
+	sumTool, err := functiontool.New(functiontool.Config{
+		Name:          "sum",
+		Description:   "sums two integers",
+		IsLongRunning: true,
 	}, handler)
 	if err != nil {
 		t.Fatalf("TestNewLongRunningFunctionTool failed: %v", err)
@@ -106,9 +108,10 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx t
 	}
 	mockModel := &testutil.MockModel{Responses: responses}
 
-	longRunningTool, err := tool.NewLongRunningFunctionTool(tool.FunctionToolConfig{
-		Name:        "increaseByOne",
-		Description: "increaseByOne",
+	longRunningTool, err := functiontool.New(functiontool.Config{
+		Name:          "increaseByOne",
+		Description:   "increaseByOne",
+		IsLongRunning: true,
 	}, increaseByOne)
 	if err != nil {
 		t.Fatalf("failed to create longRunningTool: %v", err)
@@ -269,9 +272,10 @@ func TestLongRunningToolIDsAreSet(t *testing.T) {
 		return map[string]string{"status": "pending"}
 	}
 
-	longRunningTool, err := tool.NewLongRunningFunctionTool(tool.FunctionToolConfig{
-		Name:        "increaseByOne",
-		Description: "increaseByOne",
+	longRunningTool, err := functiontool.New(functiontool.Config{
+		Name:          "increaseByOne",
+		Description:   "increaseByOne",
+		IsLongRunning: true,
 	}, increaseByOne)
 	if err != nil {
 		t.Fatalf("failed to create longRunningTool: %v", err)

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 
+	"google.golang.org/adk/artifact"
 	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -37,12 +38,12 @@ type Agent interface {
 
 func New(cfg Config) (Agent, error) {
 	return &agent{
-		name:        cfg.Name,
-		description: cfg.Description,
-		subAgents:   cfg.SubAgents,
-		beforeAgent: cfg.BeforeAgent,
-		run:         cfg.Run,
-		afterAgent:  cfg.AfterAgent,
+		name:                 cfg.Name,
+		description:          cfg.Description,
+		subAgents:            cfg.SubAgents,
+		beforeAgentCallbacks: cfg.BeforeAgentCallbacks,
+		run:                  cfg.Run,
+		afterAgentCallbacks:  cfg.AfterAgentCallbacks,
 		State: agentinternal.State{
 			AgentType: agentinternal.TypeCustomAgent,
 		},
@@ -54,21 +55,21 @@ type Config struct {
 	Description string
 	SubAgents   []Agent
 
-	BeforeAgent []BeforeAgentCallback
-	Run         func(InvocationContext) iter.Seq2[*session.Event, error]
-	AfterAgent  []AfterAgentCallback
+	BeforeAgentCallbacks []BeforeAgentCallback
+	Run                  func(InvocationContext) iter.Seq2[*session.Event, error]
+	AfterAgentCallbacks  []AfterAgentCallback
 }
 
 type Artifacts interface {
-	Save(name string, data genai.Part) error
-	Load(name string) (genai.Part, error)
-	LoadVersion(name string, version int) (genai.Part, error)
-	List() ([]string, error)
+	Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error)
+	List(context.Context) (*artifact.ListResponse, error)
+	Load(ctx context.Context, name string) (*artifact.LoadResponse, error)
+	LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error)
 }
 
 type Memory interface {
-	AddSession(session session.Session) error
-	Search(query string) ([]memory.Entry, error)
+	AddSession(context.Context, session.Session) error
+	Search(ctx context.Context, query string) (*memory.SearchResponse, error)
 }
 
 type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)
@@ -80,9 +81,9 @@ type agent struct {
 	name, description string
 	subAgents         []Agent
 
-	beforeAgent []BeforeAgentCallback
-	run         func(InvocationContext) iter.Seq2[*session.Event, error]
-	afterAgent  []AfterAgentCallback
+	beforeAgentCallbacks []BeforeAgentCallback
+	run                  func(InvocationContext) iter.Seq2[*session.Event, error]
+	afterAgentCallbacks  []AfterAgentCallback
 }
 
 func (a *agent) Name() string {
@@ -139,7 +140,7 @@ func (a *agent) internal() *agent {
 var _ Agent = (*agent)(nil)
 
 func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
-	if event.LLMResponse != nil && event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
+	if event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
 		return genai.RoleUser
 	}
 
@@ -156,7 +157,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		invocationContext: ctx,
 	}
 
-	for _, callback := range ctx.Agent().internal().beforeAgent {
+	for _, callback := range ctx.Agent().internal().beforeAgentCallbacks {
 		content, err := callback(callbackCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run before agent callback: %w", err)
@@ -166,7 +167,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		}
 
 		event := session.NewEvent(ctx.InvocationID())
-		event.LLMResponse = &model.LLMResponse{
+		event.LLMResponse = model.LLMResponse{
 			Content: content,
 		}
 		event.Author = agent.Name()
@@ -192,7 +193,7 @@ func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, ag
 		invocationContext: ctx,
 	}
 
-	for _, callback := range agent.internal().afterAgent {
+	for _, callback := range agent.internal().afterAgentCallbacks {
 		newContent, err := callback(callbackCtx, agentEvent, agentError)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run after agent callback: %w", err)

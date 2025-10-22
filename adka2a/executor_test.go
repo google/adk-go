@@ -27,6 +27,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -156,7 +157,7 @@ func TestExecutor_Execute(t *testing.T) {
 			request: &a2a.MessageSendParams{Message: hiMsgForTask},
 			events: []*session.Event{
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
-				{LLMResponse: &model.LLMResponse{ErrorCode: "418", ErrorMessage: "I'm a teapot"}},
+				{LLMResponse: model.LLMResponse{ErrorCode: "418", ErrorMessage: "I'm a teapot"}},
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
 			},
 			wantEvents: []a2a.Event{
@@ -217,10 +218,10 @@ func TestExecutor_Execute(t *testing.T) {
 				t.Fatalf("newEventReplayAgent() error = %v, want nil", err)
 			}
 			sessionService := &testSessionService{Service: session.InMemoryService(), createErr: tc.createSessionFails}
-			config := &ExecutorConfig{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
-			executor := NewExecutor(config)
+			runnerConfig := runner.Config{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
+			executor := NewExecutor(ExecutorConfig{RunnerConfig: runnerConfig})
 			queue := &testQueue{Queue: eventqueue.NewInMemoryQueue(10), writeErr: tc.queueWriteFails}
-			reqCtx := a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Request: tc.request}
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: tc.request.Message}
 			if tc.request.Message != nil && tc.request.Message.TaskID == task.ID {
 				reqCtx.Task = task
 			}
@@ -243,8 +244,8 @@ func TestExecutor_Execute(t *testing.T) {
 
 func TestExecutor_Cancel(t *testing.T) {
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
-	executor := NewExecutor(&ExecutorConfig{})
-	reqCtx := a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
+	executor := NewExecutor(ExecutorConfig{})
+	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
 
 	queue := &testQueue{Queue: eventqueue.NewInMemoryQueue(10)}
 	err := executor.Cancel(t.Context(), reqCtx, queue)
@@ -276,8 +277,9 @@ func TestExecutor_SessionReuse(t *testing.T) {
 	sessionService := session.InMemoryService()
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
 	req := &a2a.MessageSendParams{Message: a2a.NewMessageForTask(a2a.MessageRoleUser, task)}
-	reqCtx := a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Request: req}
-	config := &ExecutorConfig{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
+	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: req.Message}
+	runnerConfig := runner.Config{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
+	config := ExecutorConfig{RunnerConfig: runnerConfig}
 	executor := NewExecutor(config)
 	queue := eventqueue.NewInMemoryQueue(100)
 
@@ -291,7 +293,7 @@ func TestExecutor_SessionReuse(t *testing.T) {
 	}
 
 	meta := toInvocationMeta(config, reqCtx)
-	sessions, err := sessionService.List(ctx, &session.ListRequest{AppName: config.AppName, UserID: meta.userID})
+	sessions, err := sessionService.List(ctx, &session.ListRequest{AppName: runnerConfig.AppName, UserID: meta.userID})
 	if err != nil {
 		t.Fatalf("sessionService.List() error = %v, want nil", err)
 	}

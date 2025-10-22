@@ -19,7 +19,9 @@ import (
 
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/geminitool"
+	"google.golang.org/adk/tool/loadartifactstool"
 )
 
 func TestTypes(t *testing.T) {
@@ -36,7 +38,7 @@ func TestTypes(t *testing.T) {
 		{
 			name: "FunctionTool",
 			constructor: func() (tool.Tool, error) {
-				return tool.NewFunctionTool(tool.FunctionToolConfig{}, func(tool.Context, int) int { return 0 })
+				return functiontool.New(functiontool.Config{}, func(tool.Context, int) int { return 0 })
 			},
 			expectedTypes: []string{requestProc, functionTool},
 		},
@@ -52,7 +54,7 @@ func TestTypes(t *testing.T) {
 		},
 		{
 			name:          "LoadArtifactsTool",
-			constructor:   func() (tool.Tool, error) { return tool.NewLoadArtifactsTool(), nil },
+			constructor:   func() (tool.Tool, error) { return loadartifactstool.New(), nil },
 			expectedTypes: []string{requestProc, functionTool},
 		},
 	}

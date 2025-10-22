@@ -29,7 +29,7 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.29.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.53.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.53.0 // indirect
-	github.com/a2aproject/a2a-go v0.0.0-20250929112340-7205dc695671
+	github.com/a2aproject/a2a-go v0.0.0-20251019084948-b02378be636d
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20250501225837-2ac532fd4443 // indirect

@@ -238,7 +238,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 		Role: genai.RoleUser,
 	}
 
-	cfg := &agent.RunConfig{
+	cfg := agent.RunConfig{
 		SaveInputBlobsAsArtifacts: true,
 	}
 
