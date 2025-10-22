@@ -278,10 +278,10 @@ func TestModelCallbacks(t *testing.T) {
 				Responses: tc.llmResponses,
 			}
 			a, err := llmagent.New(llmagent.Config{
-				Name:        "hello_world_agent",
-				Model:       testLLM,
-				BeforeModel: tc.beforeModelCallbacks,
-				AfterModel:  tc.afterModelCallbacks,
+				Name:                 "hello_world_agent",
+				Model:                testLLM,
+				BeforeModelCallbacks: tc.beforeModelCallbacks,
+				AfterModelCallbacks:  tc.afterModelCallbacks,
 			})
 			if err != nil {
 				t.Fatalf("failed to create llm agent: %v", err)

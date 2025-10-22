@@ -230,7 +230,7 @@ func GetLLmAuditorAgent(ctx context.Context, apiKey string) agent.Agent {
 		Model:       model,
 		Name:        "critic_agent",
 		Instruction: CriticPrompt,
-		AfterModel: []llmagent.AfterModelCallback{
+		AfterModelCallbacks: []llmagent.AfterModelCallback{
 			afterCritic,
 		},
 	},
@@ -244,7 +244,7 @@ func GetLLmAuditorAgent(ctx context.Context, apiKey string) agent.Agent {
 		Model:       model,
 		Name:        "reviser_agent",
 		Instruction: ReviserPrompt,
-		AfterModel: []llmagent.AfterModelCallback{
+		AfterModelCallbacks: []llmagent.AfterModelCallback{
 			afterReviser,
 		},
 	},

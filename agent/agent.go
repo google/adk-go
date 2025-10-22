@@ -38,12 +38,12 @@ type Agent interface {
 
 func New(cfg Config) (Agent, error) {
 	return &agent{
-		name:        cfg.Name,
-		description: cfg.Description,
-		subAgents:   cfg.SubAgents,
-		beforeAgent: cfg.BeforeAgent,
-		run:         cfg.Run,
-		afterAgent:  cfg.AfterAgent,
+		name:                 cfg.Name,
+		description:          cfg.Description,
+		subAgents:            cfg.SubAgents,
+		beforeAgentCallbacks: cfg.BeforeAgentCallbacks,
+		run:                  cfg.Run,
+		afterAgentCallbacks:  cfg.AfterAgentCallbacks,
 		State: agentinternal.State{
 			AgentType: agentinternal.TypeCustomAgent,
 		},
@@ -55,9 +55,9 @@ type Config struct {
 	Description string
 	SubAgents   []Agent
 
-	BeforeAgent []BeforeAgentCallback
-	Run         func(InvocationContext) iter.Seq2[*session.Event, error]
-	AfterAgent  []AfterAgentCallback
+	BeforeAgentCallbacks []BeforeAgentCallback
+	Run                  func(InvocationContext) iter.Seq2[*session.Event, error]
+	AfterAgentCallbacks  []AfterAgentCallback
 }
 
 type Artifacts interface {
@@ -81,9 +81,9 @@ type agent struct {
 	name, description string
 	subAgents         []Agent
 
-	beforeAgent []BeforeAgentCallback
-	run         func(InvocationContext) iter.Seq2[*session.Event, error]
-	afterAgent  []AfterAgentCallback
+	beforeAgentCallbacks []BeforeAgentCallback
+	run                  func(InvocationContext) iter.Seq2[*session.Event, error]
+	afterAgentCallbacks  []AfterAgentCallback
 }
 
 func (a *agent) Name() string {
@@ -157,7 +157,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		invocationContext: ctx,
 	}
 
-	for _, callback := range ctx.Agent().internal().beforeAgent {
+	for _, callback := range ctx.Agent().internal().beforeAgentCallbacks {
 		content, err := callback(callbackCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run before agent callback: %w", err)
@@ -193,7 +193,7 @@ func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, ag
 		invocationContext: ctx,
 	}
 
-	for _, callback := range agent.internal().afterAgent {
+	for _, callback := range agent.internal().afterAgentCallbacks {
 		newContent, err := callback(callbackCtx, agentEvent, agentError)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run after agent callback: %w", err)
