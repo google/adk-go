@@ -148,9 +148,27 @@ type Config struct {
 	// such as function tools, RAGs, agent transfer, etc.
 	OutputSchema *genai.Schema
 
+	// Callbacks are executed in the order they are provided.
+	// The execution of the callback chain stops at the first callback that returns a non-nil
+	// response
+	//   - If a callback returns (map[string]any, nil), it will be used directly as the result of
+	//     the tool call. Subsequent BeforeToolCallbacks in the list are skipped.
+	//   - If a callback returns (nil, error), the tool execution is aborted, and the returned
+	//     error is propagated. Subsequent BeforeToolCallbacks are skipped.
+	//   - If a callback returns (nil, nil), the execution continues to the next BeforeToolCallback
+	//     in the sequence.
 	BeforeToolCallbacks []BeforeToolCallback
 	Tools               []tool.Tool
-	AfterToolCallbacks  []AfterToolCallback
+	// Callbacks are executed in the order they are provided.
+	// The execution of the callback chain stops at the first callback that returns a non-nil
+	// response.
+	//   - If a callback returns (map[string]any, nil), it will replace the result returned by
+	//     the tool's Run method. Subsequent AfterToolCallbacks in the list are skipped.
+	//   - If a callback returns (nil, error), this error indicates a failure within the
+	//     callback itself, and will be propagated. Subsequent AfterToolCallbacks are skipped.
+	//   - If a callback returns (nil, nil), the execution continues to the next AfterToolCallback
+	//     in the sequence.
+	AfterToolCallbacks []AfterToolCallback
 	// Toolsets will be used by llmagent to extract tools and pass to the
 	// underlying LLM.
 	Toolsets []tool.Toolset
@@ -172,16 +190,6 @@ type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMRe
 
 // BeforeToolCallback is a function type executed before a tool's Run method is invoked.
 //
-// Callbacks are executed in the order they are provided.
-// The execution of the callback chain stops at the first callback that returns a non-nil
-// response
-//   - If a callback returns (map[string]any, nil), it will be used directly as the result of
-//     the tool call. Subsequent BeforeToolCallbacks in the list are skipped.
-//   - If a callback returns (nil, error), the tool execution is aborted, and the returned
-//     error is propagated. Subsequent BeforeToolCallbacks are skipped.
-//   - If a callback returns (nil, nil), the execution continues to the next BeforeToolCallback
-//     in the sequence.
-//
 // Parameters:
 //   - ctx: The tool.Context for the current tool execution.
 //   - tool: The tool.Tool instance that is about to be executed.
@@ -191,23 +199,13 @@ type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]a
 // AfterToolCallback is a function type executed after a tool's Run method has completed,
 // regardless of whether the tool returned a result or an error.
 //
-// Callbacks are executed in the order they are provided.
-// The execution of the callback chain stops at the first callback that returns a non-nil
-// response.
-//   - If a callback returns (map[string]any, nil), it will replace the result returned by
-//     the tool's Run method. Subsequent AfterToolCallbacks in the list are skipped.
-//   - If a callback returns (nil, error), this error indicates a failure within the
-//     callback itself, and will be propagated. Subsequent AfterToolCallbacks are skipped.
-//   - If a callback returns (nil, nil), the execution continues to the next AfterToolCallback
-//     in the sequence.
-//
 // Parameters:
 //   - ctx:    The tool.Context for the tool execution.
 //   - tool:   The tool.Tool instance that was executed.
 //   - args:   The arguments originally passed to the tool.
 //   - result: The result returned by the tool's Run method.
 //   - err:    The error returned by the tool's Run method.
-type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, result any, err error) (map[string]any, error)
+type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error)
 
 type llmAgent struct {
 	agent.Agent

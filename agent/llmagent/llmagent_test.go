@@ -400,10 +400,10 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, result any, err error) (map[string]any, error) {
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
 					return nil, nil
 				},
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, result any, err error) (map[string]any, error) {
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -435,10 +435,10 @@ func TestToolCallback(t *testing.T) {
 			Tools:                    []tool.Tool{rand},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
 				// Since it retursn non nil, the next callback won't be executed.
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, result any, err error) (map[string]any, error) {
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "3"}, nil
 				},
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, result any, err error) (map[string]any, error) {
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -474,7 +474,7 @@ func TestToolCallback(t *testing.T) {
 				},
 			},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, result any, err error) (map[string]any, error) {
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -491,6 +491,42 @@ func TestToolCallback(t *testing.T) {
 			t.Fatalf("agent returned (%v, %v), want result", ans, err)
 		}
 		if got, want := strings.TrimSpace(ans[len(ans)-1]), "7"; got != want {
+			t.Errorf("unexpected result from agent = (%v, %v), want ([%q], nil)", ans, err, want)
+		}
+	})
+
+	t.Run("both_callbacks_return_nil_actual_tool_is_executed", func(t *testing.T) {
+		agent, err := llmagent.New(llmagent.Config{
+			Name:                     "agent",
+			Description:              "random agent",
+			Model:                    model,
+			Instruction:              "output ONLY the result computed by the provided function",
+			DisallowTransferToParent: true,
+			DisallowTransferToPeers:  true,
+			Tools:                    []tool.Tool{rand},
+			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, nil
+				},
+			},
+			AfterToolCallbacks: []llmagent.AfterToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to create LLM Agent: %v", err)
+		}
+
+		runner := testutil.NewTestAgentRunner(t, agent)
+		stream := runner.Run(t, "session1", "Generate random number with 5 as a seed.")
+
+		ans, err := testutil.CollectTextParts(stream)
+		if err != nil || len(ans) == 0 {
+			t.Fatalf("agent returned (%v, %v), want result", ans, err)
+		}
+		if got, want := strings.TrimSpace(ans[len(ans)-1]), "1"; got != want {
 			t.Errorf("unexpected result from agent = (%v, %v), want ([%q], nil)", ans, err, want)
 		}
 	})

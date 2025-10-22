@@ -1,5 +1,5 @@
 httprr trace v1
-822 1071
+822 1070
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
@@ -8,9 +8,9 @@ Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Wed, 22 Oct 2025 12:38:33 GMT
+Date: Wed, 22 Oct 2025 15:17:27 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1624
+Server-Timing: gfet4t7; dur=895
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -56,7 +56,7 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "SND4aIz2E8novdIPuOnfiQE"
+  "responseId": "hvX4aJWrKevWxN8Pqd_FgAI"
 }
 1003 950
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
@@ -67,9 +67,9 @@ Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"7"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Wed, 22 Oct 2025 12:38:34 GMT
+Date: Wed, 22 Oct 2025 15:17:28 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=673
+Server-Timing: gfet4t7; dur=781
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -110,7 +110,7 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "SdD4aK-4Of_ivdIPqfT6sAU"
+  "responseId": "h_X4aPHaIqfKvdIP1b-IyQY"
 }
 822 1070
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
@@ -121,9 +121,9 @@ Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Wed, 22 Oct 2025 12:38:35 GMT
+Date: Wed, 22 Oct 2025 15:17:28 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=779
+Server-Timing: gfet4t7; dur=639
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -169,9 +169,9 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "StD4aIy2JpnYvdIPh6XI4QM"
+  "responseId": "iPX4aNzMFdTivdIPgMv46AU"
 }
-1003 950
+1003 949
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
@@ -180,9 +180,9 @@ Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"3"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Wed, 22 Oct 2025 12:38:35 GMT
+Date: Wed, 22 Oct 2025 15:17:29 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=626
+Server-Timing: gfet4t7; dur=511
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -223,9 +223,9 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "S9D4aI7VGPPVvdIPibGr4Qc"
+  "responseId": "ifX4aM0FjZnE3w_Sk775AQ"
 }
-822 1068
+822 1069
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
@@ -234,9 +234,9 @@ Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Wed, 22 Oct 2025 12:38:36 GMT
+Date: Wed, 22 Oct 2025 15:17:30 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=719
+Server-Timing: gfet4t7; dur=623
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -261,7 +261,7 @@ X-Xss-Protection: 0
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": 6.03129155933857e-06
+      "avgLogprobs": 6.2888313550502064e-06
     }
   ],
   "usageMetadata": {
@@ -282,235 +282,9 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "TND4aJH-Aa2zvdIPhoGB2QY"
+  "responseId": "ifX4aJmHH4XmxN8PycikeA"
 }
-1001 1017
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
-Host: generativelanguage.googleapis.com
-User-Agent: Go-http-client/1.1
-Content-Length: 769
-Content-Type: application/json
-
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"error":{}}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Content-Type: application/json; charset=UTF-8
-Date: Wed, 22 Oct 2025 12:38:37 GMT
-Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=772
-Vary: Origin
-Vary: X-Origin
-Vary: Referer
-X-Content-Type-Options: nosniff
-X-Frame-Options: SAMEORIGIN
-X-Xss-Protection: 0
-
-{
-  "candidates": [
-    {
-      "content": {
-        "parts": [
-          {
-            "text": "I'm sorry, I wasn't able to retrieve a number using the available tools."
-          }
-        ],
-        "role": "model"
-      },
-      "finishReason": "STOP",
-      "avgLogprobs": -0.03308763315803126
-    }
-  ],
-  "usageMetadata": {
-    "promptTokenCount": 34,
-    "candidatesTokenCount": 19,
-    "totalTokenCount": 53,
-    "promptTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 34
-      }
-    ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 19
-      }
-    ]
-  },
-  "modelVersion": "gemini-2.0-flash",
-  "responseId": "TND4aNfnLfTCvdIP4qyyKQ"
-}
-822 1067
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
-Host: generativelanguage.googleapis.com
-User-Agent: Go-http-client/1.1
-Content-Length: 590
-Content-Type: application/json
-
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Content-Type: application/json; charset=UTF-8
-Date: Wed, 22 Oct 2025 12:38:38 GMT
-Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=629
-Vary: Origin
-Vary: X-Origin
-Vary: Referer
-X-Content-Type-Options: nosniff
-X-Frame-Options: SAMEORIGIN
-X-Xss-Protection: 0
-
-{
-  "candidates": [
-    {
-      "content": {
-        "parts": [
-          {
-            "functionCall": {
-              "name": "rand_number",
-              "args": {
-                "seed": 5
-              }
-            }
-          }
-        ],
-        "role": "model"
-      },
-      "finishReason": "STOP",
-      "avgLogprobs": 6.03129155933857e-06
-    }
-  ],
-  "usageMetadata": {
-    "promptTokenCount": 25,
-    "candidatesTokenCount": 5,
-    "totalTokenCount": 30,
-    "promptTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 25
-      }
-    ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 5
-      }
-    ]
-  },
-  "modelVersion": "gemini-2.0-flash",
-  "responseId": "TdD4aP3UH5mvxN8PsZ3uYQ"
-}
-1001 1010
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
-Host: generativelanguage.googleapis.com
-User-Agent: Go-http-client/1.1
-Content-Length: 769
-Content-Type: application/json
-
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"error":{}}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Content-Type: application/json; charset=UTF-8
-Date: Wed, 22 Oct 2025 12:38:38 GMT
-Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=727
-Vary: Origin
-Vary: X-Origin
-Vary: Referer
-X-Content-Type-Options: nosniff
-X-Frame-Options: SAMEORIGIN
-X-Xss-Protection: 0
-
-{
-  "candidates": [
-    {
-      "content": {
-        "parts": [
-          {
-            "text": "I was not able to retrieve a number. Can you please try again?\n"
-          }
-        ],
-        "role": "model"
-      },
-      "finishReason": "STOP",
-      "avgLogprobs": -0.14601436257362366
-    }
-  ],
-  "usageMetadata": {
-    "promptTokenCount": 34,
-    "candidatesTokenCount": 16,
-    "totalTokenCount": 50,
-    "promptTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 34
-      }
-    ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 16
-      }
-    ]
-  },
-  "modelVersion": "gemini-2.0-flash",
-  "responseId": "TtD4aIyZCfCEvdIPyZ3e0QM"
-}
-822 1068
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
-Host: generativelanguage.googleapis.com
-User-Agent: Go-http-client/1.1
-Content-Length: 590
-Content-Type: application/json
-
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Content-Type: application/json; charset=UTF-8
-Date: Wed, 22 Oct 2025 12:38:39 GMT
-Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=769
-Vary: Origin
-Vary: X-Origin
-Vary: Referer
-X-Content-Type-Options: nosniff
-X-Frame-Options: SAMEORIGIN
-X-Xss-Protection: 0
-
-{
-  "candidates": [
-    {
-      "content": {
-        "parts": [
-          {
-            "functionCall": {
-              "name": "rand_number",
-              "args": {
-                "seed": 5
-              }
-            }
-          }
-        ],
-        "role": "model"
-      },
-      "finishReason": "STOP",
-      "avgLogprobs": 6.03129155933857e-06
-    }
-  ],
-  "usageMetadata": {
-    "promptTokenCount": 25,
-    "candidatesTokenCount": 5,
-    "totalTokenCount": 30,
-    "promptTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 25
-      }
-    ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 5
-      }
-    ]
-  },
-  "modelVersion": "gemini-2.0-flash",
-  "responseId": "TtD4aLHUNa-JvdIP1bPT0QM"
-}
-1003 949
+1003 951
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
@@ -519,9 +293,235 @@ Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"7"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Wed, 22 Oct 2025 12:38:40 GMT
+Date: Wed, 22 Oct 2025 15:17:31 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=488
+Server-Timing: gfet4t7; dur=1132
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "7\n"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": -1.7837388440966606e-05
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 35,
+    "candidatesTokenCount": 2,
+    "totalTokenCount": 37,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 35
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 2
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "ivX4aLqwCLjUvdIPn6eOuQU"
+}
+822 1069
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 590
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 22 Oct 2025 15:17:32 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1359
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "rand_number",
+              "args": {
+                "seed": 5
+              }
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": 6.03129155933857e-06
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 25,
+    "candidatesTokenCount": 5,
+    "totalTokenCount": 30,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 25
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 5
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "i_X4aI2PENuFxN8PqvuKqAM"
+}
+1003 949
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 771
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"3"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 22 Oct 2025 15:17:33 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=561
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "3\n"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": -3.679376095533371e-05
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 35,
+    "candidatesTokenCount": 2,
+    "totalTokenCount": 37,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 35
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 2
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "jPX4aPqzJorLvdIP_rWq0Ak"
+}
+822 1068
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 590
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 22 Oct 2025 15:17:34 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1134
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "rand_number",
+              "args": {
+                "seed": 5
+              }
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": 6.03129155933857e-06
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 25,
+    "candidatesTokenCount": 5,
+    "totalTokenCount": 30,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 25
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 5
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "jfX4aLe4C_rDvdIP5oLnMQ"
+}
+1003 950
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 771
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"7"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 22 Oct 2025 15:17:35 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=731
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -562,5 +562,118 @@ X-Xss-Protection: 0
     ]
   },
   "modelVersion": "gemini-2.0-flash",
-  "responseId": "T9D4aIHqJ8jVxN8P6fOdIQ"
+  "responseId": "jvX4aJr5E8ajvdIPlIuO4AE"
+}
+822 1069
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 590
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 22 Oct 2025 15:17:37 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2082
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "rand_number",
+              "args": {
+                "seed": 5
+              }
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": 6.03129155933857e-06
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 25,
+    "candidatesTokenCount": 5,
+    "totalTokenCount": 30,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 25
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 5
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "j_X4aNHBA5Dzxs0P0ZOM8QY"
+}
+1001 949
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 769
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":1}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 22 Oct 2025 15:17:37 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=677
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "1\n"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": -1.1988915503025055e-05
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 35,
+    "candidatesTokenCount": 2,
+    "totalTokenCount": 37,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 35
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 2
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "kfX4aLTUCJmvxN8PsZ3uYQ"
 }
