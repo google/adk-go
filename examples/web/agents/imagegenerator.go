@@ -23,11 +23,12 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
+
+	adktool "google.golang.org/adk/tool"
 )
 
-func generateImage(ctx tool.Context, input generateImageInput) generateImageResult {
+func generateImage(ctx adktool.Context, input generateImageInput) generateImageResult {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
 		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
@@ -79,8 +80,8 @@ func GetImageGeneratorAgent(ctx context.Context, apiKey string) agent.Agent {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
-	generateImageTool, err := tool.NewFunctionTool(
-		tool.FunctionToolConfig{
+	generateImageTool, err := adktool.NewFunctionTool(
+		adktool.FunctionToolConfig{
 			Name:        "generate_image",
 			Description: "Generates image and saves in artifact service.",
 		},
@@ -93,8 +94,8 @@ func GetImageGeneratorAgent(ctx context.Context, apiKey string) agent.Agent {
 		Model:       model,
 		Description: "Agent to generate pictures, answers questions about it and saves it locally if asked.",
 		Instruction: "You are an agent whose job is to generate or edit an image based on the user's prompt.",
-		Tools: []tool.Tool{
-			generateImageTool, tool.NewLoadArtifactsTool(),
+		Tools: []adktool.Tool{
+			generateImageTool, adktool.NewLoadArtifactsTool(),
 		},
 	})
 	if err != nil {
