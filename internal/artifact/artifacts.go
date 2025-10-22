@@ -19,41 +19,25 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
 
 // Artifacts implements Artifacts
 type Artifacts struct {
-	Service      artifact.Service
-	AppName      string
-	UserID       string
-	SessionID    string
-	eventActions *session.EventActions
-}
-
-func (a *Artifacts) SetEventActions(actions *session.EventActions) {
-	a.eventActions = actions
+	Service   artifact.Service
+	AppName   string
+	UserID    string
+	SessionID string
 }
 
 func (a *Artifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
-	resp, err := a.Service.Save(context.Background(), &artifact.SaveRequest{
+	return a.Service.Save(context.Background(), &artifact.SaveRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
 		Part:      data,
 	})
-	if err != nil {
-		return nil, err
-	}
-	if a.eventActions != nil {
-		if a.eventActions.ArtifactDelta == nil {
-			a.eventActions.ArtifactDelta = make(map[string]int64)
-		}
-		a.eventActions.ArtifactDelta[name] = resp.Version
-	}
-	return resp, nil
 }
 
 func (a *Artifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {
