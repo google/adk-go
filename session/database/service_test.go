@@ -886,12 +886,15 @@ func serviceDbWithData(t *testing.T) *databaseService {
 		},
 	} {
 		//Find a better way to do this like sql insert
-		service.Create(t.Context(), &session.CreateRequest{
+		_, err := service.Create(t.Context(), &session.CreateRequest{
 			AppName:   storedSession.appName,
 			UserID:    storedSession.userID,
 			SessionID: storedSession.sessionID,
 			State:     storedSession.state,
 		})
+		if err != nil {
+			t.Fatalf("Failed to create sample sessions on db initialization: %v", err)
+		}
 	}
 
 	return service
@@ -916,6 +919,9 @@ func emptyService(t *testing.T) *databaseService {
 	service, err := NewSessionService(spannergorm.New(spannerGormConfig), gormConfig)
 	dbservice := service.(*databaseService)
 	dbservice.db.AutoMigrate(&storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
+	if err != nil {
+		t.Fatalf("Failed to AutoMigrate db: %v", err)
+	}
 
 	t.Cleanup(func() {
 		t.Log("CLEANUP: Deleting all rows from Spanner tables...")
