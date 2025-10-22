@@ -73,7 +73,7 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 	llmAuditor := agents.GetLLmAuditorAgent(ctx, apiKey)
-	imageGeneratorAgent := agents.GetImageGeneratorAgent(ctx, apiKey)
+	imageGeneratorAgent := GetImageGeneratorAgent(ctx, apiKey)
 
 	agentLoader := services.NewStaticAgentLoader(
 		map[string]agent.Agent{
@@ -92,4 +92,80 @@ func main() {
 
 	run.Run(ctx, config)
 
+}
+
+func generateImage(ctx tool.Context, input generateImageInput) generateImageResult {
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
+		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
+		Backend:  genai.BackendVertexAI,
+	})
+	if err != nil {
+		return generateImageResult{
+			Status: "fail",
+		}
+	}
+
+	response, err := client.Models.GenerateImages(
+		ctx,
+		"imagen-3.0-generate-002",
+		input.Prompt,
+		&genai.GenerateImagesConfig{NumberOfImages: 1})
+	if err != nil {
+		return generateImageResult{
+			Status: "fail",
+		}
+	}
+
+	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
+	if err != nil {
+		return generateImageResult{
+			Status: "fail",
+		}
+	}
+
+	return generateImageResult{
+		Status:   "success",
+		Filename: input.Filename,
+	}
+}
+
+type generateImageInput struct {
+	Prompt   string `json:"prompt"`
+	Filename string `json:"filename"`
+}
+
+type generateImageResult struct {
+	Filename string `json:"filename"`
+	Status   string `json:"Status"`
+}
+
+func GetImageGeneratorAgent(ctx context.Context, apiKey string) agent.Agent {
+	model, err := gemini.NewModel(ctx, "gemini-2.0-flash-001", nil)
+	if err != nil {
+		log.Fatalf("Failed to create model: %v", err)
+	}
+
+	generateImageTool, err := tool.NewFunctionTool(
+		tool.FunctionToolConfig{
+			Name:        "generate_image",
+			Description: "Generates image and saves in artifact service.",
+		},
+		generateImage)
+	if err != nil {
+		log.Fatalf("Failed to create generate image tool: %v", err)
+	}
+	imageGeneratorAgent, err := llmagent.New(llmagent.Config{
+		Name:        "image_generator",
+		Model:       model,
+		Description: "Agent to generate pictures, answers questions about it and saves it locally if asked.",
+		Instruction: "You are an agent whose job is to generate or edit an image based on the user's prompt.",
+		Tools: []tool.Tool{
+			generateImageTool, tool.NewLoadArtifactsTool(),
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
+	}
+	return imageGeneratorAgent
 }
