@@ -31,7 +31,7 @@ type Artifacts struct {
 }
 
 func (a *Artifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
-	return a.Service.Save(context.Background(), &artifact.SaveRequest{
+	return a.Service.Save(ctx, &artifact.SaveRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
