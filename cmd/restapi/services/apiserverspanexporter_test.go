@@ -129,7 +129,7 @@ func TestAPIServerSpanExporterExportSpans(t *testing.T) {
 
 			eventDict, ok := traceDict["event-id"]
 			if !ok {
-				t.Fatalf("traceDict should contain event ID event1")
+				t.Fatalf("traceDict should contain event ID event-id")
 			}
 
 			if _, ok := eventDict["span_id"]; !ok {
