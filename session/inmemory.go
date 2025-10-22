@@ -161,7 +161,10 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	sess.appendEvent(event)
+	err := sess.appendEvent(event)
+	if err != nil {
+		return err
+	}
 
 	s.sessions.Set(sess.id.Encode(), sess)
 
@@ -222,12 +225,23 @@ func (s *session) LastUpdateTime() time.Time {
 	return s.updatedAt
 }
 
-func (s *session) appendEvent(event *Event) {
+func (s *session) appendEvent(event *Event) error {
+	if event.Partial {
+		return nil
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// TODO: process event actions and state delta like so
+	// processedEvent := trimTempDeltaState(event)
+	// if err := updateSessionState(s, processedEvent); err != nil {
+	// 	return fmt.Errorf("failed to update session state: %w", err)
+	// }
+
 	s.events = append(s.events, event)
 	s.updatedAt = event.Timestamp
+	return nil
 }
 
 type events []*Event
