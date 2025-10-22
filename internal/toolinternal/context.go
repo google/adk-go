@@ -19,29 +19,48 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
-	artifactinternal "google.golang.org/adk/internal/artifact"
+	"google.golang.org/adk/artifact"
 	contextinternal "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
 )
+
+type internalArtifacts struct {
+	agent.Artifacts
+	ctx *toolContext
+}
+
+func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
+	resp, err := ia.Artifacts.Save(ctx, name, data)
+	if err != nil {
+		return resp, err
+	}
+	if ia.ctx.eventActions.ArtifactDelta == nil {
+		ia.ctx.eventActions.ArtifactDelta = make(map[string]int64)
+	}
+	ia.ctx.eventActions.ArtifactDelta[name] = resp.Version
+	return resp, err
+}
 
 func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions *session.EventActions) tool.Context {
 	if functionCallID == "" {
 		functionCallID = uuid.NewString()
 	}
 	cbCtx := contextinternal.NewCallbackContext(ctx)
-	if cbCtx.Artifacts() != nil {
-		if a, ok := cbCtx.Artifacts().(*artifactinternal.Artifacts); ok {
-			a.SetEventActions(actions)
-		}
-	}
-	return &toolContext{
+
+	tc := &toolContext{
 		CallbackContext:   cbCtx,
 		invocationContext: ctx,
 		functionCallID:    functionCallID,
 		eventActions:      actions,
 	}
+	tc.artifacts = &internalArtifacts{
+		Artifacts: ctx.Artifacts(),
+		ctx:       tc,
+	}
+	return tc
 }
 
 type toolContext struct {
@@ -49,6 +68,11 @@ type toolContext struct {
 	invocationContext agent.InvocationContext
 	functionCallID    string
 	eventActions      *session.EventActions
+	artifacts         agent.Artifacts
+}
+
+func (c *toolContext) Artifacts() agent.Artifacts {
+	return c.artifacts
 }
 
 func (c *toolContext) FunctionCallID() string {

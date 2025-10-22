@@ -15,11 +15,30 @@
 package context
 
 import (
+	"context"
+
 	"google.golang.org/adk/agent"
-	artifactinternal "google.golang.org/adk/internal/artifact"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
+
+type internalArtifacts struct {
+	agent.Artifacts
+	ctx *callbackContext
+}
+
+func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
+	resp, err := ia.Artifacts.Save(ctx, name, data)
+	if err != nil {
+		return resp, err
+	}
+	if ia.ctx.eventActions.ArtifactDelta == nil {
+		ia.ctx.eventActions.ArtifactDelta = make(map[string]int64)
+	}
+	ia.ctx.eventActions.ArtifactDelta[name] = resp.Version
+	return resp, err
+}
 
 func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
 	return newCallbackContext(ctx)
@@ -28,24 +47,29 @@ func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
 func newCallbackContext(ctx agent.InvocationContext) *callbackContext {
 	rCtx := NewReadonlyContext(ctx)
 	eventActions := &session.EventActions{}
-	if ctx.Artifacts() != nil {
-		if a, ok := ctx.Artifacts().(*artifactinternal.Artifacts); ok {
-			a.SetEventActions(eventActions)
-		}
-	}
-	return &callbackContext{
+	cbCtx := &callbackContext{
 		ReadonlyContext: rCtx,
 		invocationCtx:   ctx,
 		eventActions:    eventActions,
 	}
+	cbCtx.artifacts = &internalArtifacts{
+		Artifacts: ctx.Artifacts(),
+		ctx:       cbCtx,
+	}
+	return cbCtx
 }
 
 // TODO: unify with agent.callbackContext
 
 type callbackContext struct {
 	agent.ReadonlyContext
+	artifacts     agent.Artifacts
 	invocationCtx agent.InvocationContext
 	eventActions  *session.EventActions
+}
+
+func (c *callbackContext) Artifacts() agent.Artifacts {
+	return c.artifacts
 }
 
 func (c *callbackContext) AgentName() string {
@@ -62,10 +86,6 @@ func (c *callbackContext) ReadonlyState() session.ReadonlyState {
 
 func (c *callbackContext) State() session.State {
 	return c.invocationCtx.Session().State()
-}
-
-func (c *callbackContext) Artifacts() agent.Artifacts {
-	return c.invocationCtx.Artifacts()
 }
 
 func (c *callbackContext) InvocationID() string {
