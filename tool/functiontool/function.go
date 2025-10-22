@@ -33,14 +33,14 @@ type Config struct {
 	Name string
 	// A human-readable description of the tool.
 	Description string
-	// An internal flag marking if the function is long running
-	isLongRunning bool
 	// An optional JSON schema object defining the expected parameters for the tool.
 	// If it is nil, FunctionTool tries to infer the schema based on the handler type.
 	InputSchema *jsonschema.Schema
 	// An optional JSON schema object defining the structure of the tool's output.
 	// If it is nil, FunctionTool tries to infer the schema based on the handler type.
 	OutputSchema *jsonschema.Schema
+	// IsLongRunning makes a FunctionTool a long-running operation.
+	IsLongRunning bool
 }
 
 // Func represents a Go function.
@@ -93,7 +93,7 @@ func (f *functionTool[TArgs, TResults]) Name() string {
 
 // IsLongRunning implements tool.Tool.
 func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
-	return f.cfg.isLongRunning
+	return f.cfg.IsLongRunning
 }
 
 // ProcessRequest implements interfaces.Tool.
@@ -113,6 +113,16 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 	if f.outputSchema != nil {
 		decl.ResponseJsonSchema = f.outputSchema.Schema()
 	}
+
+	if f.cfg.IsLongRunning {
+		instruction := "NOTE: This is a long-running operation. Do not call this tool again if it has already returned some intermediate or pending status."
+		if decl.Description != "" {
+			decl.Description += "\n\n" + instruction
+		} else {
+			decl.Description = instruction
+		}
+	}
+
 	return decl
 }
 

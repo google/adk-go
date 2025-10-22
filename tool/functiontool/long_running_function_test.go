@@ -41,9 +41,10 @@ func TestNewLongRunningFunctionTool(t *testing.T) {
 	handler := func(ctx tool.Context, input SumArgs) SumResult {
 		return SumResult{Result: "Processing sum"}
 	}
-	sumTool, err := functiontool.NewLongRunningFunctionTool(functiontool.Config{
-		Name:        "sum",
-		Description: "sums two integers",
+	sumTool, err := functiontool.New(functiontool.Config{
+		Name:          "sum",
+		Description:   "sums two integers",
+		IsLongRunning: true,
 	}, handler)
 	if err != nil {
 		t.Fatalf("TestNewLongRunningFunctionTool failed: %v", err)
@@ -107,9 +108,10 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx t
 	}
 	mockModel := &testutil.MockModel{Responses: responses}
 
-	longRunningTool, err := functiontool.NewLongRunningFunctionTool(functiontool.Config{
-		Name:        "increaseByOne",
-		Description: "increaseByOne",
+	longRunningTool, err := functiontool.New(functiontool.Config{
+		Name:          "increaseByOne",
+		Description:   "increaseByOne",
+		IsLongRunning: true,
 	}, increaseByOne)
 	if err != nil {
 		t.Fatalf("failed to create longRunningTool: %v", err)
@@ -270,9 +272,10 @@ func TestLongRunningToolIDsAreSet(t *testing.T) {
 		return map[string]string{"status": "pending"}
 	}
 
-	longRunningTool, err := functiontool.NewLongRunningFunctionTool(functiontool.Config{
-		Name:        "increaseByOne",
-		Description: "increaseByOne",
+	longRunningTool, err := functiontool.New(functiontool.Config{
+		Name:          "increaseByOne",
+		Description:   "increaseByOne",
+		IsLongRunning: true,
 	}, increaseByOne)
 	if err != nil {
 		t.Fatalf("failed to create longRunningTool: %v", err)
