@@ -33,10 +33,12 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 	if err != nil {
 		return resp, err
 	}
-	if ia.ctx.eventActions.ArtifactDelta == nil {
-		ia.ctx.eventActions.ArtifactDelta = make(map[string]int64)
+	if ia.ctx.eventActions != nil {
+		if ia.ctx.eventActions.ArtifactDelta == nil {
+			ia.ctx.eventActions.ArtifactDelta = make(map[string]int64)
+		}
+		ia.ctx.eventActions.ArtifactDelta[name] = resp.Version
 	}
-	ia.ctx.eventActions.ArtifactDelta[name] = resp.Version
 	return resp, err
 }
 
