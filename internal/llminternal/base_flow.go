@@ -368,11 +368,6 @@ func handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.
 			result = map[string]any{"error": fmt.Errorf("tool %q failed: %w", curTool.Name(), err)}
 		}
 
-		m, ok := result.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("tool %q failed to convert results to a required type, got %T", curTool.Name(), result)
-		}
-
 		// TODO: agent.canonical_after_tool_callbacks
 		// TODO: handle long-running tool.
 		ev := session.NewEvent(ctx.InvocationID())
@@ -384,7 +379,7 @@ func handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.
 						FunctionResponse: &genai.FunctionResponse{
 							ID:       fnCall.ID,
 							Name:     fnCall.Name,
-							Response: m,
+							Response: result,
 						},
 					},
 				},
