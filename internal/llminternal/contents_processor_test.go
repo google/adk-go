@@ -106,7 +106,7 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
 		name            string
-		includeContents string
+		includeContents llmagent.IncludeContents
 		events          []*session.Event
 		want            []*genai.Content
 	}{
@@ -214,7 +214,7 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		t.Run(tc.name+"/include_contents="+tc.includeContents, func(t *testing.T) {
+		t.Run(tc.name+"/include_contents="+string(tc.includeContents), func(t *testing.T) {
 			testAgent := utils.Must(llmagent.New(llmagent.Config{
 				Name:            agentName,
 				Model:           testModel,
