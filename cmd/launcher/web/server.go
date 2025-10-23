@@ -21,13 +21,22 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+	"google.golang.org/grpc"
+
+	"github.com/a2aproject/a2a-go/a2agrpc"
+	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
+	"google.golang.org/adk/adka2a"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/restapi/config"
 	"google.golang.org/adk/cmd/restapi/handlers"
 	restapiweb "google.golang.org/adk/cmd/restapi/web"
+	"google.golang.org/adk/runner"
 )
 
 func Logger(inner http.Handler) http.Handler {
@@ -105,7 +114,38 @@ func Serve(c *WebConfig, adkConfig *adk.Config) {
 	rApi.Use(corsWithArgs(c))
 	restapiweb.SetupRouter(rApi, &serverConfig)
 
+	var handler http.Handler
+	if c.ServeA2A {
+		grpcSrv := grpc.NewServer()
+		newA2AHandler(adkConfig).RegisterWith(grpcSrv)
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+				grpcSrv.ServeHTTP(w, r)
+			} else {
+				rBase.ServeHTTP(w, r)
+			}
+		})
+		handler = h2c.NewHandler(handler, &http2.Server{})
+	} else {
+		handler = rBase
+	}
+
 	log.Printf("Starting a web server: %+v", c)
 	log.Printf("Open %s", "http://localhost:"+strconv.Itoa(c.LocalPort))
-	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), rBase))
+	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), handler))
+}
+
+func newA2AHandler(serveConfig *adk.Config) *a2agrpc.GRPCHandler {
+	agent := serveConfig.AgentLoader.Root()
+	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
+		RunnerConfig: runner.Config{
+			AppName:         agent.Name(),
+			Agent:           agent,
+			SessionService:  serveConfig.SessionService,
+			ArtifactService: serveConfig.ArtifactService,
+		},
+	})
+	reqHandler := a2asrv.NewHandler(executor, serveConfig.A2AOptions...)
+	grpcHandler := a2agrpc.NewHandler(&adka2a.CardProducer{Agent: agent}, reqHandler)
+	return grpcHandler
 }

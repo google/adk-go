@@ -140,7 +140,7 @@ type Config struct {
 	Tools []tool.Tool
 	// Toolsets will be used by llmagent to extract tools and pass to the
 	// underlying LLM.
-	Toolsets []tool.Set
+	Toolsets []tool.Toolset
 
 	// OutputKey is an optional parameter to specify the key in session state for the agent output.
 	//

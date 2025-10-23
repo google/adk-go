@@ -76,6 +76,7 @@ func main() {
 	imageGeneratorAgent := agents.GetImageGeneratorAgent(ctx, apiKey)
 
 	agentLoader := services.NewStaticAgentLoader(
+		rootAgent,
 		map[string]agent.Agent{
 			"weather_time_agent": rootAgent,
 			"llm_auditor":        llmAuditor,

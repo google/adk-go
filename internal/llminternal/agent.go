@@ -29,7 +29,7 @@ type State struct {
 	Model model.LLM
 
 	Tools    []tool.Tool
-	Toolsets []tool.Set
+	Toolsets []tool.Toolset
 
 	IncludeContents string
 

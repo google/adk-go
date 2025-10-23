@@ -47,7 +47,7 @@ import (
 //			}),
 //		},
 //	})
-func New(cfg Config) (tool.Set, error) {
+func New(cfg Config) (tool.Toolset, error) {
 	return &set{
 		client:     mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: "v1.0.0"}, nil),
 		transport:  cfg.Transport,

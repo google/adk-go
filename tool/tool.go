@@ -41,7 +41,7 @@ type Context interface {
 	SearchMemory(context.Context, string) (*memory.SearchResponse, error)
 }
 
-type Set interface {
+type Toolset interface {
 	Name() string
 	Tools(ctx agent.ReadonlyContext) ([]Tool, error)
 }
