@@ -37,6 +37,7 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 		if ia.ctx.eventActions.ArtifactDelta == nil {
 			ia.ctx.eventActions.ArtifactDelta = make(map[string]int64)
 		}
+		// TODO: RWLock, check the version stored is newer in case multiple tools save the same file.
 		ia.ctx.eventActions.ArtifactDelta[name] = resp.Version
 	}
 	return resp, err
