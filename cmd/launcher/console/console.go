@@ -42,6 +42,7 @@ type ConsoleLauncher struct {
 	config *ConsoleConfig
 }
 
+// ParseArgs returns a config from parsed arguments and the remaining un-parsed arguments
 func ParseArgs(args []string) (*ConsoleConfig, []string, error) {
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 

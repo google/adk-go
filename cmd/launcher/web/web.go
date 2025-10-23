@@ -12,51 +12,51 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// package web provides common web-related funcionalities
 package web
 
-// import (
-// 	"context"
-// 	"flag"
-// 	"fmt"
+import (
+	"log"
+	"net/http"
+	"time"
 
-// 	"google.golang.org/adk/cmd/launcher"
-// 	"google.golang.org/adk/cmd/launcher/adk"
-// )
+	"github.com/gorilla/mux"
+)
 
-// // WebLauncher allows to interact with an agent in browser (using ADK Web UI and ADK REST API)
-// type WebLauncher struct {
-// 	config *WebConfig
-// }
+func Logger(inner http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 
-// // Run starts web server, serving everything required for interaction via web browser
-// func (l WebLauncher) Run(ctx context.Context, config *adk.Config) {
-// 	Serve(l.Config, config)
-// }
+		inner.ServeHTTP(w, r)
 
-// // BuildLauncher parses command line args and returns ready-to-run web launcher.
-// func BuildLauncher(args []string) (launcher.Launcher, []string, error) {
-// 	webConfig, argsLeft, err := ParseArgs(args)
-// 	if err != nil {
-// 		return nil, nil, fmt.Errorf("cannot parse arguments for web: %v: %w", args, err)
-// 	}
-// 	return &WebLauncher{Config: webConfig}, argsLeft, nil
-// }
+		log.Printf(
+			"%s %s %s",
+			r.Method,
+			r.RequestURI,
+			time.Since(start),
+		)
+	})
+}
 
-// func ParseArgs(args []string) (*WebConfig, []string, error) {
-// 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
+// Adds CORS headers which allow calling ADK REST API from another web app (like ADK WebUI)
+func CorsWithArgs(frontendAddress string) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", frontendAddress)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
 
-// 	localPortFlag := fs.Int("port", 8080, "Localhost port for the server")
-// 	frontendAddressFlag := fs.String("webui_address", "localhost:8080", "ADK WebUI address as seen from the user browser. It's used to allow CORS requests. Please specify only hostname and (optionally) port.")
-// 	backendAddressFlag := fs.String("api_server_address", "http://localhost:8080/api", "ADK REST API server address as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'. ")
-
-// 	err := fs.Parse(args)
-// 	if err != nil || !fs.Parsed() {
-// 		return &(WebConfig{}), nil, fmt.Errorf("failed to parse flags: %v", err)
-// 	}
-// 	res := WebConfig{
-// 		LocalPort:       *localPortFlag,
-// 		FrontendAddress: *frontendAddressFlag,
-// 		BackendAddress:  *backendAddressFlag,
-// 	}
-// 	return &res, fs.Args(), nil
-// }
+// BuildBaseRouter returns the main router, which can be exteded by sub-routers
+func BuildBaseRouter() *mux.Router {
+	router := mux.NewRouter().StrictSlash(true)
+	router.Use(Logger)
+	return router
+}
