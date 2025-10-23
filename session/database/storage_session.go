@@ -19,9 +19,6 @@ import (
 	"fmt"
 	"time"
 
-	// Required for the Spanner-specific type
-
-	_ "github.com/googleapis/go-sql-spanner"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"

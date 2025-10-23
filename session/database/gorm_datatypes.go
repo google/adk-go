@@ -21,8 +21,6 @@ import (
 	"errors"
 	"fmt"
 
-	"cloud.google.com/go/spanner" // Required for the Spanner-specific type
-	_ "github.com/googleapis/go-sql-spanner"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
@@ -80,22 +78,6 @@ func (sm *StateMap) Scan(value any) error {
 		bytes = v
 	case string: // Some drivers
 		bytes = []byte(v)
-	case spanner.NullJSON: // Spanner
-		if !v.Valid {
-			*sm = make(map[string]any)
-			return nil
-		}
-		// v.Value is an any holding the deserialized map
-		if m, ok := v.Value.(map[string]any); ok {
-			*sm = m
-			return nil
-		}
-		// Fallback for other JSON types if necessary
-		b, err := json.Marshal(v.Value)
-		if err != nil {
-			return fmt.Errorf("failed to marshal spanner.NullJSON: %w", err)
-		}
-		bytes = b
 	default:
 		return fmt.Errorf("failed to unmarshal JSON value: %T", value)
 	}
