@@ -22,7 +22,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/cmd/launcher/run"
+	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/genai"
@@ -142,5 +142,9 @@ Do not add any other text before or after the code block.`,
 	config := &adk.Config{
 		AgentLoader: services.NewSingleAgentLoader(rootAgent),
 	}
-	run.Run(ctx, config)
+	err = universal.Run(ctx, config)
+	if err != nil {
+		log.Fatalf("run failed: %v", err)
+	}
+
 }

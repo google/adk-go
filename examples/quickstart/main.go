@@ -56,15 +56,7 @@ func main() {
 		AgentLoader: services.NewSingleAgentLoader(agent),
 	}
 
-	//  decide how you want to launch user interaction. You have following options:
-	//  	- universal - run all-in-one, depending on the first command-line argument. None runs console. You may specify api / apiweb / console - each with its own set of arguments
-	//		- api - run only ADK REST API server
-	//		- apiweb - run ADK REST API server together with ADK Web UI
-	//		- console - run simple console app
 	err = universal.Run(ctx, config)
-	// err= console.Run(ctx, config)
-	// err= api.Run(ctx, config)
-	// err= apiweb.Run(ctx, config)
 	if err != nil {
 		log.Fatalf("run failed: %v", err)
 	}
