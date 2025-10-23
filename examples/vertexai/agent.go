@@ -21,7 +21,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/cmd/launcher/run"
+	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/session"
@@ -50,7 +50,12 @@ func main() {
 		SessionService: srvs,
 		AgentLoader:    services.NewSingleAgentLoader(rootAgent),
 	}
-	run.Run(ctx, config)
+
+	err = universal.Run(ctx, config)
+
+	if err != nil {
+		log.Fatalf("run failed: %v", err)
+	}
 }
 
 func сreateAgent() (agent.Agent, error) {
