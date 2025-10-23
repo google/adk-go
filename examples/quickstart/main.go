@@ -21,7 +21,7 @@ import (
 
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/cmd/launcher/run"
+	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
@@ -55,5 +55,17 @@ func main() {
 	config := &adk.Config{
 		AgentLoader: services.NewSingleAgentLoader(agent),
 	}
-	run.Run(ctx, config)
+
+	//  decide how you want to launch user interaction. You have following options:
+	//  	- universal - run all-in-one, depending on the first command-line argument. None runs console. You may specify api / apiweb / console - each with its own set of arguments
+	//		- api - run only ADK REST API server
+	//		- apiweb - run ADK REST API server together with ADK Web UI
+	//		- console - run simple console app
+	err = universal.Run(ctx, config)
+	// err= console.Run(ctx, config)
+	// err= api.Run(ctx, config)
+	// err= apiweb.Run(ctx, config)
+	if err != nil {
+		log.Fatalf("run failed: %v", err)
+	}
 }
