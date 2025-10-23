@@ -29,7 +29,7 @@ import (
 
 type internalArtifacts struct {
 	agent.Artifacts
-	ctx *toolContext
+	eventActions *session.EventActions
 }
 
 func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
@@ -37,12 +37,12 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 	if err != nil {
 		return resp, err
 	}
-	if ia.ctx.eventActions != nil {
-		if ia.ctx.eventActions.ArtifactDelta == nil {
-			ia.ctx.eventActions.ArtifactDelta = make(map[string]int64)
+	if ia.eventActions != nil {
+		if ia.eventActions.ArtifactDelta == nil {
+			ia.eventActions.ArtifactDelta = make(map[string]int64)
 		}
 		// TODO: RWLock, check the version stored is newer in case multiple tools save the same file.
-		ia.ctx.eventActions.ArtifactDelta[name] = resp.Version
+		ia.eventActions.ArtifactDelta[name] = resp.Version
 	}
 	return resp, err
 }
@@ -53,17 +53,16 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 	}
 	cbCtx := contextinternal.NewCallbackContext(ctx)
 
-	tc := &toolContext{
+	return &toolContext{
 		CallbackContext:   cbCtx,
 		invocationContext: ctx,
 		functionCallID:    functionCallID,
 		eventActions:      actions,
+		artifacts: &internalArtifacts{
+			Artifacts:    ctx.Artifacts(),
+			eventActions: actions,
+		},
 	}
-	tc.artifacts = &internalArtifacts{
-		Artifacts: ctx.Artifacts(),
-		ctx:       tc,
-	}
-	return tc
 }
 
 type toolContext struct {

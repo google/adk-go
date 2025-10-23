@@ -25,7 +25,7 @@ import (
 
 type internalArtifacts struct {
 	agent.Artifacts
-	ctx *callbackContext
+	eventActions *session.EventActions
 }
 
 func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
@@ -33,12 +33,12 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 	if err != nil {
 		return resp, err
 	}
-	if ia.ctx.eventActions != nil {
-		if ia.ctx.eventActions.ArtifactDelta == nil {
-			ia.ctx.eventActions.ArtifactDelta = make(map[string]int64)
+	if ia.eventActions != nil {
+		if ia.eventActions.ArtifactDelta == nil {
+			ia.eventActions.ArtifactDelta = make(map[string]int64)
 		}
 		// TODO: RWLock, check the version stored is newer in case multiple tools save the same file.
-		ia.ctx.eventActions.ArtifactDelta[name] = resp.Version
+		ia.eventActions.ArtifactDelta[name] = resp.Version
 	}
 	return resp, err
 }
@@ -50,16 +50,15 @@ func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
 func newCallbackContext(ctx agent.InvocationContext) *callbackContext {
 	rCtx := NewReadonlyContext(ctx)
 	eventActions := &session.EventActions{}
-	cbCtx := &callbackContext{
+	return &callbackContext{
 		ReadonlyContext: rCtx,
 		invocationCtx:   ctx,
 		eventActions:    eventActions,
+		artifacts: &internalArtifacts{
+			Artifacts:    ctx.Artifacts(),
+			eventActions: eventActions,
+		},
 	}
-	cbCtx.artifacts = &internalArtifacts{
-		Artifacts: ctx.Artifacts(),
-		ctx:       cbCtx,
-	}
-	return cbCtx
 }
 
 // TODO: unify with agent.callbackContext
