@@ -155,6 +155,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
+		actions:           &session.EventActions{},
 	}
 
 	for _, callback := range ctx.Agent().internal().beforeAgentCallbacks {
@@ -191,6 +192,7 @@ func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, ag
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
+		actions:           &session.EventActions{},
 	}
 
 	for _, callback := range agent.internal().afterAgentCallbacks {
@@ -215,10 +217,6 @@ type callbackContext struct {
 	context.Context
 	invocationContext InvocationContext
 	actions           *session.EventActions
-}
-
-func (c *callbackContext) Actions() *session.EventActions {
-	return c.actions
 }
 
 func (c *callbackContext) AgentName() string {
