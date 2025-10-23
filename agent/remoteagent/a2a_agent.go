@@ -39,12 +39,12 @@ type A2AConfig struct {
 	// AgentCardSource can be either an http(s) URL or a local file path. If a2a.AgentCard
 	// is not provided, the source is used to resolve the card during the first agent invocation.
 	AgentCardSource string
-	// ClientFactory can be used to provide a set of a2aclient.Client configurations.
+	// CardResolveOptions can be used to provide a set of agencard.Resolver configurations.
 	CardResolveOptions []agentcard.ResolveOption
 
 	// ClientFactory can be used to provide a set of a2aclient.Client configurations.
 	ClientFactory *a2aclient.Factory
-	// MessageSendConfig is attached to a2a.MessageSendParams on every agent invocation.
+	// MessageSendConfig is attached to a2a.MessageSendParams sent on every agent invocation.
 	MessageSendConfig *a2a.MessageSendConfig
 }
 
