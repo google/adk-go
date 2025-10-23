@@ -78,10 +78,6 @@ func (c *callbackContext) AgentName() string {
 	return c.invocationCtx.Agent().Name()
 }
 
-func (c *callbackContext) Actions() *session.EventActions {
-	return c.eventActions
-}
-
 func (c *callbackContext) ReadonlyState() session.ReadonlyState {
 	return c.invocationCtx.Session().State()
 }
