@@ -17,7 +17,7 @@ package web
 
 import (
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/cmd/restapi/config"
+	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/restapi/handlers"
 	"google.golang.org/adk/cmd/restapi/routers"
 	"google.golang.org/adk/cmd/restapi/services"
@@ -27,7 +27,7 @@ import (
 )
 
 // SetupRouter initiates mux.Router with ADK REST API routers
-func SetupRouter(router *mux.Router, routerConfig *config.ADKAPIRouterConfigs) *mux.Router {
+func SetupRouter(router *mux.Router, routerConfig *adk.Config) *mux.Router {
 	adkExporter := services.NewAPIServerSpanExporter()
 	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
 	return setupRouter(router,
