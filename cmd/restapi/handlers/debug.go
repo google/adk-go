@@ -127,7 +127,7 @@ func (c *DebugAPIController) EventGraph(rw http.ResponseWriter, req *http.Reques
 }
 
 func functionalCalls(event *session.Event) []*genai.FunctionCall {
-	if event.LLMResponse == nil || event.LLMResponse.Content == nil || event.LLMResponse.Content.Parts == nil {
+	if event.LLMResponse.Content == nil || event.LLMResponse.Content.Parts == nil {
 		return nil
 	}
 	fc := []*genai.FunctionCall{}
@@ -140,7 +140,7 @@ func functionalCalls(event *session.Event) []*genai.FunctionCall {
 }
 
 func functionalResponses(event *session.Event) []*genai.FunctionResponse {
-	if event.LLMResponse == nil || event.LLMResponse.Content == nil || event.LLMResponse.Content.Parts == nil {
+	if event.LLMResponse.Content == nil || event.LLMResponse.Content.Parts == nil {
 		return nil
 	}
 	fr := []*genai.FunctionResponse{}

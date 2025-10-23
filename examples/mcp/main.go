@@ -29,7 +29,7 @@ import (
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/mcptool"
+	"google.golang.org/adk/tool/mcptoolset"
 	"google.golang.org/genai"
 )
 
@@ -99,7 +99,7 @@ func main() {
 		transport = localMCPTransport()
 	}
 
-	mcpToolSet, err := mcptool.NewSet(mcptool.SetConfig{
+	mcpToolSet, err := mcptoolset.New(mcptoolset.Config{
 		Transport: transport,
 	})
 	if err != nil {
@@ -112,7 +112,7 @@ func main() {
 		Model:       model,
 		Description: "Helper agent.",
 		Instruction: "You are a helpful assistant that helps users with various tasks.",
-		Tools: []tool.Tool{
+		Toolsets: []tool.Toolset{
 			mcpToolSet,
 		},
 	})

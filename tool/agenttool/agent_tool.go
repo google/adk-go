@@ -196,7 +196,7 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error during execution of sub-agent %s: %w", t.agent.Name(), err)
 		}
-		if event.LLMResponse != nil && event.LLMResponse.Content != nil {
+		if event.LLMResponse.Content != nil {
 			lastEvent = event
 		}
 	}

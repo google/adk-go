@@ -192,8 +192,19 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) er
 			return err
 		}
 	}
+
 	// run processors for tools.
-	return toolPreprocess(ctx, req, Reveal(llmAgent).Tools)
+	tools := Reveal(llmAgent).Tools
+	for _, toolSet := range Reveal(llmAgent).Toolsets {
+		tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
+		if err != nil {
+			return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
+		}
+
+		tools = append(tools, tsTools...)
+	}
+
+	return toolPreprocess(ctx, req, tools)
 }
 
 // toolPreprocess runs tool preprocess on the given request
@@ -201,20 +212,6 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) er
 // TODO: check need/feasibility of running this concurrently.
 func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []tool.Tool) error {
 	for _, t := range tools {
-		toolSet, ok := t.(tool.Set)
-		if ok {
-			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
-			if err != nil {
-				return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
-			}
-
-			if err := toolPreprocess(ctx, req, tsTools); err != nil {
-				return fmt.Errorf("failed to tool preprocess for tool set %q: %w", toolSet.Name(), err)
-			}
-
-			continue
-		}
-
 		requestProcessor, ok := t.(toolinternal.RequestProcessor)
 		if !ok {
 			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
@@ -318,7 +315,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *mod
 	ev := session.NewEvent(ctx.InvocationID())
 	ev.Author = ctx.Agent().Name()
 	ev.Branch = ctx.Branch()
-	ev.LLMResponse = resp
+	ev.LLMResponse = *resp
 
 	// Populate ev.LongRunningToolIDs
 	ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)
@@ -379,7 +376,7 @@ func handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.
 		// TODO: agent.canonical_after_tool_callbacks
 		// TODO: handle long-running tool.
 		ev := session.NewEvent(ctx.InvocationID())
-		ev.LLMResponse = &model.LLMResponse{
+		ev.LLMResponse = model.LLMResponse{
 			Content: &genai.Content{
 				Role: "user",
 				Parts: []*genai.Part{
@@ -419,7 +416,7 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 	var parts []*genai.Part
 	var actions *session.EventActions
 	for _, ev := range events {
-		if ev == nil || ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+		if ev == nil || ev.LLMResponse.Content == nil {
 			continue
 		}
 		parts = append(parts, ev.LLMResponse.Content.Parts...)
@@ -427,7 +424,7 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 	}
 	// reuse events[0]
 	ev := events[0]
-	ev.LLMResponse = &model.LLMResponse{
+	ev.LLMResponse = model.LLMResponse{
 		Content: &genai.Content{
 			Role:  "user",
 			Parts: parts,

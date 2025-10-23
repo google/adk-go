@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
+	"google.golang.org/adk/tool/functiontool"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
@@ -111,7 +112,7 @@ func TestLLMAgentStreamingModeSSE(t *testing.T) {
 	numContents := 0
 	for _, e := range events {
 		t.Logf("event: %v", e)
-		if e.LLMResponse == nil || e.LLMResponse.Content == nil {
+		if e.LLMResponse.Content == nil {
 			continue
 		}
 		numContents++
@@ -277,10 +278,10 @@ func TestModelCallbacks(t *testing.T) {
 				Responses: tc.llmResponses,
 			}
 			a, err := llmagent.New(llmagent.Config{
-				Name:        "hello_world_agent",
-				Model:       testLLM,
-				BeforeModel: tc.beforeModelCallbacks,
-				AfterModel:  tc.afterModelCallbacks,
+				Name:                 "hello_world_agent",
+				Model:                testLLM,
+				BeforeModelCallbacks: tc.beforeModelCallbacks,
+				AfterModelCallbacks:  tc.afterModelCallbacks,
 			})
 			if err != nil {
 				t.Fatalf("failed to create llm agent: %v", err)
@@ -320,7 +321,7 @@ func TestFunctionTool(t *testing.T) {
 		}
 		return Result{Sum: input.A + input.B}
 	}
-	rand, _ := tool.NewFunctionTool(tool.FunctionToolConfig{
+	rand, _ := functiontool.New(functiontool.Config{
 		Name:        "sum",
 		Description: "computes the sum of two numbers",
 	}, handler)
@@ -386,7 +387,7 @@ func TestAgentTransfer(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			if ev.LLMResponse == nil || ev.LLMResponse.Content == nil {
+			if ev.LLMResponse.Content == nil {
 				return nil, fmt.Errorf("unexpected event: %v", ev)
 			}
 			for _, p := range ev.LLMResponse.Content.Parts {

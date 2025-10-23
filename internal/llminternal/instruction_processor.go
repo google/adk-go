@@ -88,14 +88,14 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 		if ctx.Artifacts() == nil {
 			return "", fmt.Errorf("artifact service is not initialized")
 		}
-		artifact, err := ctx.Artifacts().Load(fileName)
+		resp, err := ctx.Artifacts().Load(ctx, fileName)
 		if err != nil {
 			if optional {
 				return "", nil
 			}
 			return "", fmt.Errorf("failed to load artifact %s: %w", fileName, err)
 		}
-		return artifact.Text, nil
+		return resp.Part.Text, nil
 	}
 
 	if !isValidStateName(varName) {

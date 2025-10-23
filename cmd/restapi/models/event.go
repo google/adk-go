@@ -22,6 +22,12 @@ import (
 	"google.golang.org/genai"
 )
 
+// EventActions represent a data model for session.EventActions
+type EventActions struct {
+	StateDelta    map[string]any   `json:"stateDelta"`
+	ArtifactDelta map[string]int64 `json:"artifactDelta"`
+}
+
 // Event represents a single event in a session.
 type Event struct {
 	ID                 string                   `json:"id"`
@@ -37,8 +43,10 @@ type Event struct {
 	Interrupted        bool                     `json:"interrupted"`
 	ErrorCode          string                   `json:"errorCode"`
 	ErrorMessage       string                   `json:"errorMessage"`
+	Actions            EventActions             `json:"actions"`
 }
 
+// ToSessionEvent maps Event data struct to session.Event
 func ToSessionEvent(event Event) *session.Event {
 	return &session.Event{
 		ID:                 event.ID,
@@ -47,7 +55,7 @@ func ToSessionEvent(event Event) *session.Event {
 		Branch:             event.Branch,
 		Author:             event.Author,
 		LongRunningToolIDs: event.LongRunningToolIDs,
-		LLMResponse: &model.LLMResponse{
+		LLMResponse: model.LLMResponse{
 			Content:           event.Content,
 			GroundingMetadata: event.GroundingMetadata,
 			Partial:           event.Partial,
@@ -56,9 +64,14 @@ func ToSessionEvent(event Event) *session.Event {
 			ErrorCode:         event.ErrorCode,
 			ErrorMessage:      event.ErrorMessage,
 		},
+		Actions: session.EventActions{
+			StateDelta:    event.Actions.StateDelta,
+			ArtifactDelta: event.Actions.ArtifactDelta,
+		},
 	}
 }
 
+// FromSessionEvent maps session.Event to Event data struct
 func FromSessionEvent(event session.Event) Event {
 	return Event{
 		ID:                 event.ID,
@@ -74,5 +87,9 @@ func FromSessionEvent(event session.Event) Event {
 		Interrupted:        event.LLMResponse.Interrupted,
 		ErrorCode:          event.LLMResponse.ErrorCode,
 		ErrorMessage:       event.LLMResponse.ErrorMessage,
+		Actions: EventActions{
+			StateDelta:    event.Actions.StateDelta,
+			ArtifactDelta: event.Actions.ArtifactDelta,
+		},
 	}
 }

@@ -44,7 +44,6 @@ type ConsoleLauncher struct {
 
 // Run starts console loop. User-provided text is fed to the chosen agent (the only one if there's only one, specified by name otherwise)
 func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
-
 	userID, appName := "test_user", "test_app"
 
 	sessionService := config.SessionService
@@ -112,14 +111,12 @@ func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 }
 
 // BuildLauncher parses command line args and returns ready-to-run console launcher.
-func BuildLauncher(args []string) (*launcher.Launcher, []string, error) {
+func BuildLauncher(args []string) (launcher.Launcher, []string, error) {
 	consoleConfig, argsLeft, err := ParseArgs(args)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot parse arguments for console: %v: %w", args, err)
 	}
-	result := ConsoleLauncher{Config: consoleConfig}
-	var launcher launcher.Launcher = result
-	return &launcher, argsLeft, nil
+	return &ConsoleLauncher{Config: consoleConfig}, argsLeft, nil
 }
 
 func ParseArgs(args []string) (*ConsoleConfig, []string, error) {
@@ -127,7 +124,7 @@ func ParseArgs(args []string) (*ConsoleConfig, []string, error) {
 
 	var streaming = ""
 	var rootAgentName = ""
-	fs.StringVar(&streaming, "streaming_mode", string(agent.StreamingModeNone), fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
+	fs.StringVar(&streaming, "streaming_mode", string(agent.StreamingModeSSE), fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
 	fs.StringVar(&rootAgentName, "root_agent_name", "", "If you have multiple agents you should specify which one should be user for interactions. You can leave if empty if you have only one agent - it will be used by default")
 
 	err := fs.Parse(args)
@@ -143,5 +140,3 @@ func ParseArgs(args []string) (*ConsoleConfig, []string, error) {
 	}
 	return &res, fs.Args(), nil
 }
-
-var _ launcher.Launcher = ConsoleLauncher{}

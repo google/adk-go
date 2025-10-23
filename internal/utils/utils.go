@@ -60,7 +60,7 @@ func RemoveClientFunctionCallID(c *genai.Content) {
 // Content is a convenience function that returns the genai.Content
 // in the event.
 func Content(ev *session.Event) *genai.Content {
-	if ev == nil || ev.LLMResponse == nil {
+	if ev == nil {
 		return nil
 	}
 	return ev.LLMResponse.Content
@@ -148,11 +148,7 @@ func IsFinalResponse(ev *session.Event) bool {
 	if (ev.Actions.SkipSummarization) || len(ev.LongRunningToolIDs) > 0 {
 		return true
 	}
-	// TODO: when will we see event without LLMResponse?
-	if ev.LLMResponse == nil {
-		return true
-	}
-	return !hasFunctionCalls(ev.LLMResponse) && !hasFunctionResponses(ev.LLMResponse) && !ev.LLMResponse.Partial && !hasTrailingCodeExecutionResult(ev.LLMResponse)
+	return !hasFunctionCalls(&ev.LLMResponse) && !hasFunctionResponses(&ev.LLMResponse) && !ev.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&ev.LLMResponse)
 }
 
 func hasFunctionCalls(resp *model.LLMResponse) bool {

@@ -33,6 +33,7 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
 
@@ -410,7 +411,7 @@ func TestAgentTransfer_ProcessRequest(t *testing.T) {
 	handler := func(ctx tool.Context, x int) int {
 		return x
 	}
-	identityTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+	identityTool, err := functiontool.New(functiontool.Config{
 		Name:        "identity",
 		Description: "returns the input value",
 	}, handler)

@@ -58,7 +58,7 @@ type Events interface {
 // It is used to store the content of the conversation, as well as
 // the actions taken by the agents like function calls, etc.
 type Event struct {
-	*model.LLMResponse
+	model.LLMResponse
 
 	// Set by storage
 	ID        string
@@ -97,6 +97,10 @@ func NewEvent(invocationID string) *Event {
 type EventActions struct {
 	// Set by agent.Context implementation.
 	StateDelta map[string]any
+
+	// Indicates that the event is updating an artifact. key is the filename,
+	// value is the version.
+	ArtifactDelta map[string]int64
 
 	// TODO: Set by clients?
 	//

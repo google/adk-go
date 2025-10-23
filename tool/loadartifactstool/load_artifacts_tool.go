@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package tool
+package loadartifactstool
 
 import (
 	"context"
@@ -24,40 +24,41 @@ import (
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
-// loadArtifactsTool is a tool that loads artifacts and adds them to the session.
-type loadArtifactsTool struct {
+// artifactsTool is a tool that loads artifacts and adds them to the session.
+type artifactsTool struct {
 	name        string
 	description string
 }
 
-// NewLoadArtifactsTool creates a new loadArtifactsTool.
-func NewLoadArtifactsTool() Tool {
-	return &loadArtifactsTool{
+// New creates a new loadArtifactsTool.
+func New() tool.Tool {
+	return &artifactsTool{
 		name:        "load_artifacts",
 		description: "Loads the artifacts and adds them to the session.",
 	}
 }
 
 // Name implements tool.Tool.
-func (t *loadArtifactsTool) Name() string {
+func (t *artifactsTool) Name() string {
 	return t.name
 }
 
 // Description implements tool.Tool.
-func (t *loadArtifactsTool) Description() string {
+func (t *artifactsTool) Description() string {
 	return t.description
 }
 
 // IsLongRunning implements tool.Tool.
-func (t *loadArtifactsTool) IsLongRunning() bool {
+func (t *artifactsTool) IsLongRunning() bool {
 	return false
 }
 
 // Declaration implements tool.Tool.
-func (t *loadArtifactsTool) Declaration() *genai.FunctionDeclaration {
+func (t *artifactsTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        t.name,
 		Description: t.description,
@@ -76,7 +77,7 @@ func (t *loadArtifactsTool) Declaration() *genai.FunctionDeclaration {
 }
 
 // Run implements tool.Tool.
-func (t *loadArtifactsTool) Run(ctx Context, args any) (any, error) {
+func (t *artifactsTool) Run(ctx tool.Context, args any) (any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
@@ -107,7 +108,7 @@ func (t *loadArtifactsTool) Run(ctx Context, args any) (any, error) {
 }
 
 // ProcessRequest implements tool.Tool.
-func (t *loadArtifactsTool) ProcessRequest(ctx Context, req *model.LLMRequest) error {
+func (t *artifactsTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}
@@ -117,15 +118,15 @@ func (t *loadArtifactsTool) ProcessRequest(ctx Context, req *model.LLMRequest) e
 	return t.processLoadArtifactsFunctionCall(ctx, req)
 }
 
-func (t *loadArtifactsTool) appendInitialInstructions(ctx Context, req *model.LLMRequest) error {
-	artifactNames, err := ctx.Artifacts().List()
+func (t *artifactsTool) appendInitialInstructions(ctx tool.Context, req *model.LLMRequest) error {
+	resp, err := ctx.Artifacts().List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", err)
 	}
-	if len(artifactNames) == 0 {
+	if len(resp.FileNames) == 0 {
 		return nil
 	}
-	artifactNamesJSON, err := json.Marshal(artifactNames)
+	artifactNamesJSON, err := json.Marshal(resp.FileNames)
 	if err != nil {
 		return fmt.Errorf("failed to marshal artifact names: %w", err)
 	}
@@ -141,7 +142,7 @@ func (t *loadArtifactsTool) appendInitialInstructions(ctx Context, req *model.LL
 	return nil
 }
 
-func (t *loadArtifactsTool) processLoadArtifactsFunctionCall(ctx Context, req *model.LLMRequest) error {
+func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx tool.Context, req *model.LLMRequest) error {
 	if len(req.Contents) == 0 {
 		return nil
 	}
@@ -195,15 +196,15 @@ func (t *loadArtifactsTool) processLoadArtifactsFunctionCall(ctx Context, req *m
 	return nil
 }
 
-func (t *loadArtifactsTool) loadIndividualArtifact(_ context.Context, artifactsService agent.Artifacts, artifactName string) (*genai.Content, error) {
-	artifact, err := artifactsService.Load(artifactName)
+func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsService agent.Artifacts, artifactName string) (*genai.Content, error) {
+	resp, err := artifactsService.Load(ctx, artifactName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load artifact %s: %w", artifactName, err)
 	}
 	return &genai.Content{
 		Parts: []*genai.Part{
 			genai.NewPartFromText("Artifact " + artifactName + " is:"),
-			&artifact,
+			resp.Part,
 		},
 		Role: genai.RoleUser,
 	}, nil

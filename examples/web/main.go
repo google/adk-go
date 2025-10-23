@@ -40,7 +40,7 @@ func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, l
 		return llmResponse, llmResponseError
 	}
 	for _, part := range llmResponse.Content.Parts {
-		err := ctx.Artifacts().Save(uuid.NewString(), *part)
+		_, err := ctx.Artifacts().Save(ctx, uuid.NewString(), part)
 		if err != nil {
 			return nil, err
 		}
@@ -67,17 +67,20 @@ func main() {
 		Tools: []tool.Tool{
 			geminitool.GoogleSearch{},
 		},
-		AfterModel: []llmagent.AfterModelCallback{saveReportfunc},
+		AfterModelCallbacks: []llmagent.AfterModelCallback{saveReportfunc},
 	})
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
-	llmAuditor := agents.GetLLmAuditorAgent(ctx, apiKey)
+	llmAuditor := agents.GetLLmAuditorAgent(ctx, model)
+	imageGeneratorAgent := agents.GetImageGeneratorAgent(ctx, model)
 
 	agentLoader := services.NewStaticAgentLoader(
+		rootAgent,
 		map[string]agent.Agent{
 			"weather_time_agent": rootAgent,
 			"llm_auditor":        llmAuditor,
+			"image_generator":    imageGeneratorAgent,
 		},
 	)
 	artifactservice := artifact.InMemoryService()

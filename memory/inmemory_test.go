@@ -41,13 +41,13 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 				makeSession(t, "app1", "user1", "sess1", []*session.Event{
 					{
 						Author: "user1",
-						LLMResponse: &model.LLMResponse{
+						LLMResponse: model.LLMResponse{
 							Content: genai.NewContentFromText("The Quick brown fox", genai.RoleUser),
 						},
 						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
 					},
 					{
-						LLMResponse: &model.LLMResponse{
+						LLMResponse: model.LLMResponse{
 							Content: genai.NewContentFromText("jumps over the lazy dog", genai.RoleModel),
 						},
 					},
@@ -55,12 +55,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 				makeSession(t, "app1", "user1", "sess2", []*session.Event{
 					{
 						Author:      "test-bot",
-						LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("hello world", genai.RoleModel)},
+						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello world", genai.RoleModel)},
 						Timestamp:   must(time.Parse(time.RFC3339, "2023-10-02T10:00:00Z")),
 					},
 				}),
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{
-					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
 			req: &memory.SearchRequest{
@@ -87,7 +87,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			name: "no leakage for different appName",
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{
-					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
 			req: &memory.SearchRequest{
@@ -101,7 +101,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			name: "no leakage for different user",
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{
-					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
 			req: &memory.SearchRequest{
@@ -115,7 +115,7 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			name: "no matches",
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{
-					{LLMResponse: &model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
 			req: &memory.SearchRequest{
