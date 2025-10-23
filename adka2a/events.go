@@ -19,7 +19,6 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
@@ -34,7 +33,6 @@ func NewRemoteAgentEvent(ctx agent.InvocationContext) *session.Event {
 	event := session.NewEvent(ctx.InvocationID())
 	event.Author = ctx.Agent().Name()
 	event.Branch = ctx.Branch()
-	event.LLMResponse = &model.LLMResponse{}
 	return event
 }
 
@@ -74,7 +72,7 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 		}
 		event, err := artifactToEvent(ctx, v.Artifact)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("artifact update event conversion failed: %w", err)
 		}
 		event.LongRunningToolIDs = getLongRunningToolIDs(v.Artifact.Parts, event.Content.Parts)
 		event.CustomMetadata = ToCustomMetadata(v.TaskID, v.ContextID)
@@ -90,7 +88,7 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 		event, err := messageToEvent(ctx, v.Status.Message)
 		event.CustomMetadata = ToCustomMetadata(v.TaskID, v.ContextID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("custom metadata conversion failed: %w", err)
 		}
 		if len(event.Content.Parts) == 0 {
 			return nil, nil
@@ -111,17 +109,19 @@ func ToADKMetaKey(key string) string {
 }
 
 // ToCustomMetadata creates a session event custom metadata with A2A task and context IDs in it.
-func ToCustomMetadata(tid a2a.TaskID, ctxID string) map[string]any {
+func ToCustomMetadata(taskID a2a.TaskID, ctxID string) map[string]any {
 	return map[string]any{
-		customMetaTaskIDKey:    string(tid),
+		customMetaTaskIDKey:    string(taskID),
 		customMetaContextIDKey: ctxID,
 	}
 }
 
 // GetA2ATaskInfo returns A2A task and context IDs if they are present in session event custom metadata.
-func GetA2ATaskInfo(event *session.Event) (taskID a2a.TaskID, contextID string) {
+func GetA2ATaskInfo(event *session.Event) (a2a.TaskID, string) {
+	var taskID a2a.TaskID
+	var contextID string
 	if event == nil || event.CustomMetadata == nil {
-		return
+		return taskID, contextID
 	}
 	if tid, ok := event.CustomMetadata[customMetaTaskIDKey].(string); ok {
 		taskID = a2a.TaskID(tid)
@@ -129,7 +129,7 @@ func GetA2ATaskInfo(event *session.Event) (taskID a2a.TaskID, contextID string) 
 	if ctxID, ok := event.CustomMetadata[customMetaContextIDKey].(string); ok {
 		contextID = ctxID
 	}
-	return
+	return taskID, contextID
 }
 
 func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message) (*session.Event, error) {
@@ -228,6 +228,7 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 		event.Content = genai.NewContentFromParts(parts, genai.RoleModel)
 	}
 	event.CustomMetadata = ToCustomMetadata(update.TaskID, update.ContextID)
+	event.TurnComplete = true
 	return event, nil
 }
 

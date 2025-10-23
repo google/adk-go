@@ -16,7 +16,7 @@ package adka2a
 
 import (
 	"github.com/a2aproject/a2a-go/a2asrv"
-	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/session"
 )
 
@@ -67,7 +67,7 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 	}
 
 	if response.GroundingMetadata != nil {
-		v, err := utils.ToMapStructure(response.GroundingMetadata)
+		v, err := converters.ToMapStructure(response.GroundingMetadata)
 		if err != nil {
 			return nil, err
 		}

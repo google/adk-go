@@ -49,7 +49,7 @@ func TestToSessionEvent(t *testing.T) {
 				ContextID: contextID,
 			},
 			want: &session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromParts([]*genai.Part{{Text: "foo"}}, genai.RoleModel),
 					CustomMetadata: map[string]any{
 						customMetaTaskIDKey:    string(taskID),
@@ -67,7 +67,7 @@ func TestToSessionEvent(t *testing.T) {
 				ContextID: contextID,
 			},
 			want: &session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					CustomMetadata: map[string]any{
 						customMetaTaskIDKey:    string(taskID),
 						customMetaContextIDKey: contextID,
@@ -101,7 +101,7 @@ func TestToSessionEvent(t *testing.T) {
 				},
 			},
 			want: &session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromParts([]*genai.Part{
 						{
 							FunctionCall: &genai.FunctionCall{
@@ -131,7 +131,7 @@ func TestToSessionEvent(t *testing.T) {
 				Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
 			},
 			want: &session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					CustomMetadata: map[string]any{
 						customMetaTaskIDKey:    string(taskID),
 						customMetaContextIDKey: contextID,
@@ -160,7 +160,7 @@ func TestToSessionEvent(t *testing.T) {
 				Status: a2a.TaskStatus{State: a2a.TaskStateInputRequired},
 			},
 			want: &session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromParts([]*genai.Part{
 						{
 							FunctionCall: &genai.FunctionCall{
@@ -190,7 +190,7 @@ func TestToSessionEvent(t *testing.T) {
 				},
 			},
 			want: &session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromParts([]*genai.Part{
 						{Text: "foo"},
 						{Text: "bar"},
@@ -232,7 +232,7 @@ func TestToSessionEvent(t *testing.T) {
 				},
 			},
 			want: &session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromParts([]*genai.Part{
 						{
 							FunctionCall: &genai.FunctionCall{
@@ -265,12 +265,13 @@ func TestToSessionEvent(t *testing.T) {
 				},
 			},
 			want: &session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromParts([]*genai.Part{{Text: "foo"}}, genai.RoleModel),
 					CustomMetadata: map[string]any{
 						customMetaTaskIDKey:    string(taskID),
 						customMetaContextIDKey: contextID,
 					},
+					TurnComplete: true,
 				},
 				Author: agentName,
 				Branch: branch,
@@ -280,11 +281,12 @@ func TestToSessionEvent(t *testing.T) {
 			name:  "final task status update without message",
 			input: &a2a.TaskStatusUpdateEvent{TaskID: taskID, ContextID: contextID, Final: true},
 			want: &session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					CustomMetadata: map[string]any{
 						customMetaTaskIDKey:    string(taskID),
 						customMetaContextIDKey: contextID,
 					},
+					TurnComplete: true,
 				},
 				Author: agentName,
 				Branch: branch,
@@ -303,7 +305,7 @@ func TestToSessionEvent(t *testing.T) {
 				},
 			},
 			want: &session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromParts([]*genai.Part{{Text: "foo", Thought: true}}, genai.RoleModel),
 					CustomMetadata: map[string]any{
 						customMetaTaskIDKey:    string(taskID),

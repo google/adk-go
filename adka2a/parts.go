@@ -21,7 +21,7 @@ import (
 	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
-	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/internal/converters"
 	"google.golang.org/genai"
 )
 
@@ -93,7 +93,7 @@ func toA2AFilePart(v *genai.Part) (a2a.FilePart, error) {
 	}
 
 	if v.VideoMetadata != nil {
-		data, err := utils.ToMapStructure(v.VideoMetadata)
+		data, err := converters.ToMapStructure(v.VideoMetadata)
 		if err != nil {
 			return a2a.FilePart{}, err
 		}
@@ -105,7 +105,7 @@ func toA2AFilePart(v *genai.Part) (a2a.FilePart, error) {
 
 func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart, error) {
 	if part.CodeExecutionResult != nil {
-		data, err := utils.ToMapStructure(part.CodeExecutionResult)
+		data, err := converters.ToMapStructure(part.CodeExecutionResult)
 		if err != nil {
 			return a2a.DataPart{}, err
 		}
@@ -116,7 +116,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	}
 
 	if part.FunctionResponse != nil {
-		data, err := utils.ToMapStructure(part.FunctionResponse)
+		data, err := converters.ToMapStructure(part.FunctionResponse)
 		if err != nil {
 			return a2a.DataPart{}, err
 		}
@@ -127,7 +127,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	}
 
 	if part.ExecutableCode != nil {
-		data, err := utils.ToMapStructure(part.ExecutableCode)
+		data, err := converters.ToMapStructure(part.ExecutableCode)
 		if err != nil {
 			return a2a.DataPart{}, err
 		}
@@ -138,7 +138,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	}
 
 	if part.FunctionCall != nil {
-		data, err := utils.ToMapStructure(part.FunctionCall)
+		data, err := converters.ToMapStructure(part.FunctionCall)
 		if err != nil {
 			return a2a.DataPart{}, err
 		}
@@ -162,6 +162,7 @@ func toGenAIContent(msg *a2a.Message) (*genai.Content, error) {
 	return &genai.Content{Role: genai.RoleUser, Parts: parts}, nil
 }
 
+// ToGenAIParts converts the provided A2A parts to genai equivalents.
 func ToGenAIParts(parts []a2a.Part) ([]*genai.Part, error) {
 	result := make([]*genai.Part, len(parts))
 	for i, part := range parts {
