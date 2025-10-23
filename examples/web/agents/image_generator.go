@@ -22,7 +22,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/loadartifactstool"
@@ -75,12 +75,7 @@ type generateImageResult struct {
 	Status   string `json:"Status"`
 }
 
-func GetImageGeneratorAgent(ctx context.Context, apiKey string) agent.Agent {
-	model, err := gemini.NewModel(ctx, "gemini-2.0-flash-001", nil)
-	if err != nil {
-		log.Fatalf("Failed to create model: %v", err)
-	}
-
+func GetImageGeneratorAgent(ctx context.Context, model model.LLM) agent.Agent {
 	generateImageTool, err := functiontool.New(
 		functiontool.Config{
 			Name:        "generate_image",

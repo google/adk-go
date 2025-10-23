@@ -44,7 +44,7 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 		// TODO: RWLock, check the version stored is newer in case multiple tools save the same file.
 		ia.eventActions.ArtifactDelta[name] = resp.Version
 	}
-	return resp, err
+	return resp, nil
 }
 
 func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions *session.EventActions) tool.Context {
@@ -70,7 +70,7 @@ type toolContext struct {
 	invocationContext agent.InvocationContext
 	functionCallID    string
 	eventActions      *session.EventActions
-	artifacts         agent.Artifacts
+	artifacts         *internalArtifacts
 }
 
 func (c *toolContext) Artifacts() agent.Artifacts {

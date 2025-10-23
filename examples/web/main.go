@@ -72,8 +72,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
-	llmAuditor := agents.GetLLmAuditorAgent(ctx, apiKey)
-	imageGeneratorAgent := agents.GetImageGeneratorAgent(ctx, apiKey)
+	llmAuditor := agents.GetLLmAuditorAgent(ctx, model)
+	imageGeneratorAgent := agents.GetImageGeneratorAgent(ctx, model)
 
 	agentLoader := services.NewStaticAgentLoader(
 		rootAgent,
