@@ -166,11 +166,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 			if err != nil {
 				t.Fatalf("weatherReportTool.Run failed: %v", err)
 			}
-			m, ok := callResult.(map[string]any)
-			if !ok {
-				t.Fatalf("unexpected type for callResult, got: %T", callResult)
-			}
-			got, err := typeutil.ConvertToWithJSONSchema[map[string]any, Result](m, nil)
+			got, err := typeutil.ConvertToWithJSONSchema[map[string]any, Result](callResult, nil)
 			if err != nil {
 				t.Fatalf("weatherReportTool.Run returned unexpected result of type %[1]T: %[1]v", callResult)
 			}
@@ -307,11 +303,7 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 			if err != nil {
 				t.Fatalf("weatherReportTool.Run failed: %v", err)
 			}
-			m, ok := callResult.(map[string]any)
-			if !ok {
-				t.Fatalf("unexpected type for callResult, got: %T", callResult)
-			}
-			got, err := typeutil.ConvertToWithJSONSchema[map[string]any, map[string]string](m, nil)
+			got, err := typeutil.ConvertToWithJSONSchema[map[string]any, map[string]string](callResult, nil)
 			if err != nil {
 				t.Fatalf("weatherReportTool.Run returned unexpected result of type %[1]T: %[1]v", callResult)
 			}
@@ -482,11 +474,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 				}
 				if !tc.wantErr && (err != nil || ret != nil) {
 					// TODO: fix, for "valid_item" case now it returns empty map instead of nil
-					m, ok := ret.(map[string]any)
-					if !ok {
-						t.Errorf("unexpected type got %T", ret)
-					}
-					if len(m) != 0 {
+					if len(ret) != 0 {
 						t.Errorf("inventoryTool.Run = (%v, %v), want (nil, nil)", ret, err)
 					}
 				}
