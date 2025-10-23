@@ -160,7 +160,7 @@ func Test_databaseService_Get(t *testing.T) {
 		s := serviceDbWithData(t) // Starts with the standard data
 
 		// Python logic: u1 creates s1 and adds an event.
-		// We assume 'serviceDbWithData' already created (app1, user1, session1).
+		// 'serviceDbWithData' already created (app1, user1, session1).
 		// We just need to add an event to it.
 		session1, err := s.Get(t.Context(), &session.GetRequest{
 			AppName:   "app1",
@@ -171,7 +171,7 @@ func Test_databaseService_Get(t *testing.T) {
 			t.Fatalf("setupGetRespectsUserID failed to get session1: %v", err)
 		}
 
-		// We must update 'updatedAt' to avoid stale errors on append
+		// Update 'updatedAt' to pass stale validation on append
 		session1.Session.(*localSession).updatedAt = time.Now()
 
 		err = s.AppendEvent(t.Context(), session1.Session.(*localSession), &session.Event{
@@ -189,7 +189,6 @@ func Test_databaseService_Get(t *testing.T) {
 		// This is already handled by 'serviceDbWithData', which creates:
 		// (app1, user1, session1)
 		// (app1, user2, session1)
-		// So, we are all set.
 		return s
 	}
 
@@ -379,9 +378,8 @@ func Test_databaseService_List(t *testing.T) {
 		wantResponse *session.ListResponse
 		wantErr      bool
 	}{
-		// --- Tests from your original file would be here ---
 		{
-			name:  "list for user1", // Renamed from "ok" for clarity
+			name:  "list for user1",
 			setup: serviceDbWithData,
 			req: &session.ListRequest{
 				AppName: "app1",
@@ -419,7 +417,6 @@ func Test_databaseService_List(t *testing.T) {
 				Sessions: []session.Session{},
 			},
 		},
-		// --- New test cases translated from Python ---
 		{
 			// This test replicates the user2-specific part of
 			// 'test_list_sessions_all_users'
@@ -445,7 +442,7 @@ func Test_databaseService_List(t *testing.T) {
 		{
 			name:  "list all users for app",
 			setup: serviceDbWithData,
-			req:   &session.ListRequest{AppName: "app1", UserID: ""}, // Assumes "" means all users
+			req:   &session.ListRequest{AppName: "app1", UserID: ""},
 			wantResponse: &session.ListResponse{
 				Sessions: []session.Session{
 					&localSession{appName: "app1", userID: "user1", sessionID: "session1", state: map[string]any{"k1": "v1"}},
@@ -487,7 +484,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 		setup             func(t *testing.T) *databaseService
 		session           *localSession
 		event             *session.Event
-		wantStoredSession *localSession // State of the session *after* Get
+		wantStoredSession *localSession // State of the session after Get
 		wantEventCount    int           // Expected event count in storage
 		wantErr           bool
 	}{
@@ -696,7 +693,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 
 			s := tt.setup(t)
 
-			tt.session.updatedAt = time.Now() // set updatedAt value to avoid stale error
+			tt.session.updatedAt = time.Now() // set updatedAt value to pass stale validation
 			err := s.AppendEvent(ctx, tt.session, tt.event)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("databaseService.AppendEvent() error = %v, wantErr %v", err, tt.wantErr)
@@ -884,7 +881,7 @@ func serviceDbWithData(t *testing.T) *databaseService {
 			},
 		},
 	} {
-		//Find a better way to do this like sql insert
+		// TODO: Consider changing to SQL insert
 		_, err := service.Create(t.Context(), &session.CreateRequest{
 			AppName:   storedSession.appName,
 			UserID:    storedSession.userID,
@@ -899,10 +896,6 @@ func serviceDbWithData(t *testing.T) *databaseService {
 	return service
 }
 
-func Test_s1(t *testing.T) {
-	emptyService(t)
-}
-
 func emptyService(t *testing.T) *databaseService {
 	t.Helper()
 	gormConfig := &gorm.Config{
@@ -910,8 +903,11 @@ func emptyService(t *testing.T) *databaseService {
 	}
 
 	service, err := NewSessionService(sqlite.Open("file::memory:?cache=shared"), gormConfig)
+	if err != nil {
+		t.Fatalf("Failed to create session service: %v", err)
+	}
 	dbservice := service.(*databaseService)
-	dbservice.db.AutoMigrate(&storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
+	err = dbservice.db.AutoMigrate(&storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
 	if err != nil {
 		t.Fatalf("Failed to AutoMigrate db: %v", err)
 	}
@@ -937,8 +933,8 @@ func emptyService(t *testing.T) *databaseService {
 			}
 			tableName := stmt.Table
 
-			// Use Exec with "WHERE true" instead of gorm.Delete()
-			// This satisfies Spanner's requirement for a WHERE clause.
+			// Exec with "WHERE true" instead of gorm.Delete()
+			// satisfies Spanner's requirement for a WHERE clause.
 			if err := dbservice.db.Exec(`DELETE FROM ` + tableName + ` WHERE true`).Error; err != nil {
 				t.Errorf("Failed to delete from table %s: %v", tableName, err)
 			}

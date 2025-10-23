@@ -176,12 +176,8 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	// We fetched in DESC order to get the most recent ones (due to LIMIT).
 	// Now we reverse them to be in chronological ASC order for the response.
 	// Convert storage events to response events
-	for i, j := 0, len(storageEvents)-1; i < j; i, j = i+1, j-1 {
-		storageEvents[i], storageEvents[j] = storageEvents[j], storageEvents[i]
-	}
-
 	responseEvents := make([]*session.Event, 0, len(storageEvents))
-	for i := range storageEvents {
+	for i := len(storageEvents) - 1; i >= 0; i-- {
 		evt, err := createEventFromStorageEvent(&storageEvents[i])
 		if err != nil {
 			return nil, fmt.Errorf("failed to map storage event: %w", err)
@@ -353,8 +349,8 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
-				time.Unix(0, sessionUpdateTime).Format(time.RFC3339),
-				time.Unix(0, storageUpdateTime).Format(time.RFC3339),
+				time.Unix(0, sessionUpdateTime).Format(time.RFC3339Nano),
+				time.Unix(0, storageUpdateTime).Format(time.RFC3339Nano),
 			)
 		}
 
@@ -398,7 +394,7 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 			return fmt.Errorf("failed to save event: %w", err)
 		}
 
-		storageSess.UpdateTime = time.Now()
+		storageSess.UpdateTime = event.Timestamp
 		// Save the session to update its state and UpdateTime.
 		if err := tx.Save(&storageSess).Error; err != nil {
 			return fmt.Errorf("failed to save session state: %w", err)

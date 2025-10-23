@@ -34,7 +34,7 @@ import (
 // dialect-specific JSON serialization by implementing gorm.Serializer.
 type StateMap map[string]any
 
-// --- 1. GormDataType / GormDBDataType (For Schema/Migrations) ---
+// GormDataType / GormDBDataType (For Schema/Migrations)
 
 func (StateMap) GormDataType() string {
 	return "text"
@@ -53,8 +53,6 @@ func (StateMap) GormDBDataType(db *gorm.DB, field *schema.Field) string {
 	}
 }
 
-// --- 2. Value (from gorm.Serializer - for Writing to DB) ---
-
 // Value implements the gorm.Serializer Value method.
 func (sm StateMap) Value() (driver.Value, error) {
 	if sm == nil {
@@ -68,9 +66,7 @@ func (sm StateMap) Value() (driver.Value, error) {
 	return string(b), nil
 }
 
-// --- 3. Scan (from gorm.Serializer - for Reading from DB) ---
 // Scan implements the gorm.Serializer Scan method.
-// This is the correct signature that was missing before.
 func (sm *StateMap) Scan(value any) error {
 	if value == nil {
 		*sm = make(map[string]any)
@@ -129,7 +125,8 @@ func (j DynamicJSON) Value() (driver.Value, error) {
 	return string(j), nil
 }
 
-// Scan scan value into Jsonb, implements sql.Scanner interface
+// Scan implements the gorm.Serializer Scan method.
+// scan value into Jsonb, implements sql.Scanner interface
 func (j *DynamicJSON) Scan(value any) error {
 	if value == nil {
 		*j = DynamicJSON("null")
