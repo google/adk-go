@@ -73,12 +73,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
-	llmAuditor := agents.GetLLmAuditorAgent(ctx, apiKey)
+	llmAuditor := agents.GetLLmAuditorAgent(ctx, model)
+	imageGeneratorAgent := agents.GetImageGeneratorAgent(ctx, model)
 
 	agentLoader := services.NewStaticAgentLoader(
 		map[string]agent.Agent{
 			"weather_time_agent": rootAgent,
 			"llm_auditor":        llmAuditor,
+			"image_generator":    imageGeneratorAgent,
 		},
 	)
 	artifactservice := artifact.InMemoryService()
