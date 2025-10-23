@@ -27,9 +27,7 @@ import (
 )
 
 // StateMap is a custom type for map[string]any that handles its own
-// JSON serialization and deserialization for the database.
-// StateMap is a custom type for map[string]any that handles
-// dialect-specific JSON serialization by implementing gorm.Serializer.
+// JSON serialization and deserialization for the database by implementing gorm.Serializer.
 type StateMap map[string]any
 
 // GormDataType / GormDBDataType (For Schema/Migrations)
@@ -92,7 +90,6 @@ func (sm *StateMap) Scan(value any) error {
 
 func (sm StateMap) GormValue(ctx context.Context, db *gorm.DB) clause.Expr {
 	data, _ := json.Marshal(sm)
-	//switch db.Dialector.Name() {
 	return gorm.Expr("?", string(data))
 }
 

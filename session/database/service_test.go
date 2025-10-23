@@ -159,8 +159,10 @@ func Test_databaseService_Get(t *testing.T) {
 		t.Helper()
 		s := serviceDbWithData(t) // Starts with the standard data
 
-		// Python logic: u1 creates s1 and adds an event.
-		// 'serviceDbWithData' already created (app1, user1, session1).
+		// u1 creates s1 and adds an event.
+		// 'serviceDbWithData' already created
+		// (app1, user1, session1)
+		// (app1, user2, session1)
 		// We just need to add an event to it.
 		session1, err := s.Get(t.Context(), &session.GetRequest{
 			AppName:   "app1",
@@ -184,11 +186,6 @@ func Test_databaseService_Get(t *testing.T) {
 		if err != nil {
 			t.Fatalf("setupGetRespectsUserID failed to append event: %v", err)
 		}
-
-		// Python logic: u2 creates a session with the same session_id 's1'.
-		// This is already handled by 'serviceDbWithData', which creates:
-		// (app1, user1, session1)
-		// (app1, user2, session1)
 		return s
 	}
 
@@ -260,7 +257,6 @@ func Test_databaseService_Get(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			// This test replicates 'test_get_session_respects_user_id'
 			name:  "get session respects user id",
 			setup: setupGetRespectsUserID,
 			req: &session.GetRequest{
@@ -418,8 +414,6 @@ func Test_databaseService_List(t *testing.T) {
 			},
 		},
 		{
-			// This test replicates the user2-specific part of
-			// 'test_list_sessions_all_users'
 			name:  "list for user2",
 			setup: serviceDbWithData,
 			req: &session.ListRequest{
@@ -537,7 +531,6 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			// This test replicates 'test_append_event_bytes'
 			name:  "append event with bytes content",
 			setup: serviceDbWithData,
 			session: &localSession{
@@ -582,7 +575,6 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			wantEventCount: 1,
 		},
 		{
-			// This test replicates 'test_append_event_complete'
 			name:  "append event with all fields",
 			setup: serviceDbWithData,
 			session: &localSession{
@@ -660,7 +652,6 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			wantEventCount: 1,
 		},
 		{
-			// This test replicates 'test_partial_events_are_not_persisted'
 			name:  "partial events are not persisted",
 			setup: serviceDbWithData,
 			session: &localSession{
