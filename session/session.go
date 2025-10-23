@@ -98,6 +98,10 @@ type EventActions struct {
 	// Set by agent.Context implementation.
 	StateDelta map[string]any
 
+	// Indicates that the event is updating an artifact. key is the filename,
+	// value is the version.
+	ArtifactDelta map[string]int64
+
 	// TODO: Set by clients?
 	//
 	// If true, it won't call model to summarize function response.
