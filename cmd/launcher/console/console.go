@@ -39,7 +39,38 @@ type ConsoleConfig struct {
 
 // ConsoleLauncher allows to interact with an agent in console
 type ConsoleLauncher struct {
-	Config *ConsoleConfig
+	config *ConsoleConfig
+}
+
+func ParseArgs(args []string) (*ConsoleConfig, []string, error) {
+	fs := flag.NewFlagSet("console", flag.ContinueOnError)
+
+	var streaming = ""
+	var rootAgentName = ""
+	fs.StringVar(&streaming, "streaming_mode", string(agent.StreamingModeSSE), fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
+	fs.StringVar(&rootAgentName, "root_agent_name", "", "If you have multiple agents you should specify which one should be user for interactions. You can leave if empty if you have only one agent - it will be used by default")
+
+	err := fs.Parse(args)
+	if err != nil || !fs.Parsed() {
+		return &(ConsoleConfig{}), nil, fmt.Errorf("failed to parse flags: %v", err)
+	}
+	if streaming != string(agent.StreamingModeNone) && streaming != string(agent.StreamingModeSSE) && streaming != string(agent.StreamingModeBidi) {
+		return &(ConsoleConfig{}), nil, fmt.Errorf("invalid streaming_mode: %v. Should be (%s|%s|%s)", streaming, agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi)
+	}
+	res := &ConsoleConfig{
+		streamingMode: agent.StreamingMode(streaming),
+		rootAgentName: rootAgentName,
+	}
+	return res, fs.Args(), nil
+}
+
+// BuildLauncher parses command line args and returns ready-to-run console launcher.
+func BuildLauncher(args []string) (launcher.Launcher, []string, error) {
+	consoleConfig, argsLeft, err := ParseArgs(args)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot parse arguments for console: %v: %w", args, err)
+	}
+	return &ConsoleLauncher{config: consoleConfig}, argsLeft, nil
 }
 
 // Run starts console loop. User-provided text is fed to the chosen agent (the only one if there's only one, specified by name otherwise)
@@ -59,7 +90,7 @@ func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 		return fmt.Errorf("failed to create the session service: %v", err)
 	}
 
-	matchingAgent, err := config.AgentLoader.LoadAgent(l.Config.rootAgentName)
+	matchingAgent, err := config.AgentLoader.LoadAgent(l.config.rootAgentName)
 	if err != nil {
 		return fmt.Errorf("failed to find the matching agent: %v", err)
 	}
@@ -88,7 +119,7 @@ func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 
 		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
-		streamingMode := l.Config.streamingMode
+		streamingMode := l.config.streamingMode
 		if streamingMode == "" {
 			streamingMode = agent.StreamingModeSSE
 		}
@@ -110,33 +141,17 @@ func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 	}
 }
 
-// BuildLauncher parses command line args and returns ready-to-run console launcher.
-func BuildLauncher(args []string) (launcher.Launcher, []string, error) {
-	consoleConfig, argsLeft, err := ParseArgs(args)
+// Run parses command line params, prepares console launcher and runs it
+func Run(ctx context.Context, config *adk.Config) error {
+	// skip args[0] - executable file name
+	// skip unparsed arguments returned by BuildLauncher
+	launcherToRun, _, err := BuildLauncher(os.Args[1:])
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot parse arguments for console: %v: %w", args, err)
+		log.Fatalf("cannot build console launcher: %v", err)
 	}
-	return &ConsoleLauncher{Config: consoleConfig}, argsLeft, nil
-}
-
-func ParseArgs(args []string) (*ConsoleConfig, []string, error) {
-	fs := flag.NewFlagSet("console", flag.ContinueOnError)
-
-	var streaming = ""
-	var rootAgentName = ""
-	fs.StringVar(&streaming, "streaming_mode", string(agent.StreamingModeSSE), fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
-	fs.StringVar(&rootAgentName, "root_agent_name", "", "If you have multiple agents you should specify which one should be user for interactions. You can leave if empty if you have only one agent - it will be used by default")
-
-	err := fs.Parse(args)
-	if err != nil || !fs.Parsed() {
-		return &(ConsoleConfig{}), nil, fmt.Errorf("failed to parse flags: %v", err)
+	err = launcherToRun.Run(ctx, config)
+	if err != nil {
+		log.Fatalf("run failed: %v", err)
 	}
-	if streaming != string(agent.StreamingModeNone) && streaming != string(agent.StreamingModeSSE) && streaming != string(agent.StreamingModeBidi) {
-		return &(ConsoleConfig{}), nil, fmt.Errorf("invalid streaming_mode: %v. Should be (%s|%s|%s)", streaming, agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi)
-	}
-	res := ConsoleConfig{
-		streamingMode: agent.StreamingMode(streaming),
-		rootAgentName: rootAgentName,
-	}
-	return &res, fs.Args(), nil
+	return nil
 }

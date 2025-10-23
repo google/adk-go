@@ -12,31 +12,52 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package run provides the functionality of launching an agent in different ways (defined in the command line)
-package run
+// package launcher provides ways to interact with agents
+package universal
 
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/api"
+	"google.golang.org/adk/cmd/launcher/apiweb"
 	"google.golang.org/adk/cmd/launcher/console"
-	"google.golang.org/adk/cmd/launcher/web"
 )
 
 // Run builds the launcher according to command-line arguments and then executes it
-func Run(ctx context.Context, config *adk.Config) {
-	launcher, _, err := BuildLauncher()
-	if err != nil {
-		log.Fatalf("cannot build launcher: %v", err)
+func Run(ctx context.Context, config *adk.Config) error {
+	args := os.Args[1:] // skip file name, safe
+
+	// if there are no arguments - run console
+	if len(args) == 0 {
+		return console.Run(ctx, config)
 	}
-	err = launcher.Run(ctx, config)
-	if err != nil {
-		log.Fatalf("run failed: %v", err)
+
+	var launcherToRun launcher.Launcher
+	var err error
+
+	switch args[0] {
+	case "api":
+		launcherToRun, _, err = api.BuildLauncher(args[1:])
+	case "apiweb":
+		launcherToRun, _, err = apiweb.BuildLauncher(args[1:])
+	case "console":
+		launcherToRun, _, err = console.BuildLauncher(args[1:])
+	default:
+		return fmt.Errorf("universal launcher requires either no arguments (which will run console version) or one of 'api', 'apiweb' or 'console', got: %s", args[0])
 	}
+	if err != nil {
+		return fmt.Errorf("cannot build launcher for %s: %v", args[0], err)
+	}
+
+	err = launcherToRun.Run(ctx, config)
+	if err != nil {
+		return fmt.Errorf("run failed for %s launcher: %v", args[0], err)
+	}
+	return nil
 }
 
 // BuildLauncher uses command line argument to choose an appropiate launcher type and then builds it
@@ -48,8 +69,10 @@ func BuildLauncher() (launcher.Launcher, []string, error) {
 	}
 	// len(args) > 0
 	switch args[0] {
-	case "web":
-		return web.BuildLauncher(args[1:])
+	case "api":
+		return api.BuildLauncher(args[1:])
+	case "apiweb":
+		return apiweb.BuildLauncher(args[1:])
 	case "console":
 		return console.BuildLauncher(args[1:])
 	default:
