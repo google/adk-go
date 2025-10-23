@@ -60,7 +60,7 @@ func Run(ctx context.Context, config *adk.Config) error {
 	return nil
 }
 
-// BuildLauncher uses command line argument to choose an appropiate launcher type and then builds it
+// BuildLauncher uses command line argument to choose an appropiate launcher type and then builds it, returning the remaining un-parsed arguments
 func BuildLauncher() (launcher.Launcher, []string, error) {
 	args := os.Args[1:] // skip file name, safe
 

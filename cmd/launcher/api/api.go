@@ -27,20 +27,23 @@ import (
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/cmd/launcher/web/base"
+	"google.golang.org/adk/cmd/launcher/web"
 	restapiweb "google.golang.org/adk/cmd/restapi/web"
 	"google.golang.org/adk/session"
 )
 
+// ApiConfig contains parametres for lauching ADK REST API
 type ApiConfig struct {
 	port            int
 	frontendAddress string
 }
 
+// ApiLauncher can launch ADK REST API
 type ApiLauncher struct {
 	config *ApiConfig
 }
 
+// ParseArgs returns a config from parsed arguments and the remaining un-parsed arguments
 func ParseArgs(args []string) (*ApiConfig, []string, error) {
 	fs := flag.NewFlagSet("api", flag.ContinueOnError)
 
@@ -80,11 +83,11 @@ func (l ApiLauncher) Run(ctx context.Context, config *adk.Config) error {
 		config.SessionService = session.InMemoryService()
 	}
 
-	router := base.BuildBaseRouter()
+	router := web.BuildBaseRouter()
 	rApi := addSubrouter(router, "/api/", config)
 
 	// Setup serving of ADK REST API
-	rApi.Use(base.CorsWithArgs(l.config.frontendAddress))
+	rApi.Use(web.CorsWithArgs(l.config.frontendAddress))
 
 	log.Printf("Starting the ADK REST API server: %+v", l.config)
 	log.Println()
