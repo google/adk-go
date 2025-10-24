@@ -69,10 +69,11 @@ func New(cfg Config) (agent.Agent, error) {
 			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
 			InputSchema:              cfg.InputSchema,
 			OutputSchema:             cfg.OutputSchema,
-			IncludeContents:          cfg.IncludeContents,
-			Instruction:              cfg.Instruction,
-			GlobalInstruction:        cfg.GlobalInstruction,
-			OutputKey:                cfg.OutputKey,
+			// TODO: internal type for includeContents
+			IncludeContents:   string(cfg.IncludeContents),
+			Instruction:       cfg.Instruction,
+			GlobalInstruction: cfg.GlobalInstruction,
+			OutputKey:         cfg.OutputKey,
 		},
 	}
 
@@ -134,10 +135,8 @@ type Config struct {
 	DisallowTransferToParent bool
 	DisallowTransferToPeers  bool
 
-	// Whether to include contents in the model request.
-	// When set to 'none', the model request will not include any contents, such as
-	// user messages, tool requests, etc.
-	IncludeContents string
+	// Whether to include contents (conversation history) in the model request.
+	IncludeContents IncludeContents
 
 	// TODO(ngeorgy): consider to switch to jsonschema for input and output schema.
 	// The input schema when agent is used as a tool.
@@ -206,6 +205,16 @@ type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]a
 //   - result: The result returned by the tool's Run method.
 //   - err:    The error returned by the tool's Run method.
 type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error)
+
+// IncludeContents controls what parts of prior conversation history is received by llmagent.
+type IncludeContents string
+
+const (
+	// IncludeContentsNone makes the llmagent operate solely on its current turn (latest user input + any following agent events).
+	IncludeContentsNone IncludeContents = "none"
+	// IncludeContentsDefault is enabled by default. The llmagent receives the relevant conversation history.
+	IncludeContentsDefault IncludeContents = "default"
+)
 
 type llmAgent struct {
 	agent.Agent
