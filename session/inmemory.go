@@ -18,10 +18,14 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/adk/internal/sessionutils"
 	"rsc.io/omap"
 	"rsc.io/ordered"
 )
@@ -29,8 +33,10 @@ import (
 // inMemoryService is an in-memory implementation of sessionService.Service.
 // Thread-safe.
 type inMemoryService struct {
-	mu       sync.RWMutex
-	sessions omap.Map[string, *session] // session.ID) -> storedSession
+	mu        sync.RWMutex
+	sessions  omap.Map[string, *session] // session.ID) -> storedSession
+	userState map[string]map[string]map[string]any
+	appState  map[string]map[string]any
 }
 
 func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
@@ -50,6 +56,10 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	}
 
 	encodedKey := key.Encode()
+	_, ok := s.sessions.Get(encodedKey)
+	if ok {
+		return nil, fmt.Errorf("session %s already exists", req.SessionID)
+	}
 
 	stateMap := req.State
 	if stateMap == nil {
@@ -65,6 +75,10 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	defer s.mu.Unlock()
 
 	s.sessions.Set(encodedKey, val)
+	appDelta, userDelta, _ := sessionutils.ExtractStateDeltas(req.State)
+	appState := s.updateAppState(appDelta, req.AppName)
+	userState := s.updateUserState(userDelta, req.AppName, req.UserID)
+	val.state = sessionutils.MergeStates(appState, userState, stateMap)
 
 	return &CreateResponse{
 		Session: val,
@@ -91,35 +105,63 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 		return nil, fmt.Errorf("session %+v not found", req.SessionID)
 	}
 
-	// TODO: handle req.NumRecentEvents and req.After
+	copiedSession := copySessionWithoutStateAndEvents(res)
+	copiedSession.state = s.mergeStates(res.state, appName, userID)
+
+	filteredEvents := res.events
+	if req.NumRecentEvents > 0 {
+		start := max(len(filteredEvents)-req.NumRecentEvents, 0)
+		// create a new slice header pointing to the same array
+		filteredEvents = filteredEvents[start:]
+	}
+	// apply timestamp filter, assuming list is sorted
+	if !req.After.IsZero() && len(filteredEvents) > 0 {
+		firstIndexToKeep := sort.Search(len(filteredEvents), func(i int) bool {
+			// Find the first event that is not before the timestamp
+			return !filteredEvents[i].Timestamp.Before(req.After)
+		})
+		filteredEvents = filteredEvents[firstIndexToKeep:]
+	}
+
+	copiedSession.events = make([]*Event, 0, len(filteredEvents))
+	copiedSession.events = append(copiedSession.events, filteredEvents...)
+
 	return &GetResponse{
-		Session: res,
+		Session: copiedSession,
 	}, nil
 }
 
 func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
-	if req.AppName == "" || req.UserID == "" {
-		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
+	appName, userID := req.AppName, req.UserID
+	if appName == "" {
+		return nil, fmt.Errorf("app_name is required, got app_name: %q", appName)
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	lo := id{appName: req.AppName, userID: req.UserID}.Encode()
-	hi := id{appName: req.AppName, userID: req.UserID + "\x00"}.Encode()
+	lo := id{appName: appName, userID: userID}.Encode()
 
-	var res []Session
+	var hi string
+	if userID == "" {
+		hi = id{appName: appName + "\x00"}.Encode()
+	} else {
+		hi = id{appName: appName, userID: userID + "\x00"}.Encode()
+	}
+
+	var res []Session = make([]Session, 0)
 	for k, storedSession := range s.sessions.Scan(lo, hi) {
 		var key id
 		if err := key.Decode(k); err != nil {
 			return nil, fmt.Errorf("failed to decode key: %w", err)
 		}
 
-		if key.appName != req.AppName && key.userID != req.UserID {
+		if key.appName != appName && key.userID != userID {
 			break
 		}
-
-		res = append(res, storedSession)
+		copiedSession := copySessionWithoutStateAndEvents(storedSession)
+		copiedSession.state = s.mergeStates(storedSession.state, appName, storedSession.UserID())
+		res = append(res, copiedSession)
 	}
 	return &ListResponse{
 		Sessions: res,
@@ -146,36 +188,76 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 }
 
 func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, event *Event) error {
-	if curSession == nil || event == nil {
-		return fmt.Errorf("session or event are nil")
+	if curSession == nil {
+		return fmt.Errorf("session is nil")
 	}
-
-	// TODO: no-op if event is partial.
-	// TODO: process event actions and state delta.
+	if event == nil {
+		return fmt.Errorf("event is nil")
+	}
+	if event.Partial {
+		return nil
+	}
 
 	sess, ok := curSession.(*session)
 	if !ok {
 		return fmt.Errorf("unexpected session type %T", sess)
 	}
 
-	if event.Actions.StateDelta != nil {
-		state := sess.State()
-		for key, value := range event.Actions.StateDelta {
-			err := state.Set(key, value)
-			if err != nil {
-				return fmt.Errorf("fail to set state on appendEvent: %w", err)
-			}
-		}
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	sess.appendEvent(event)
+	if _, ok := s.sessions.Get(sess.id.Encode()); !ok {
+		return fmt.Errorf("session not found, cannot apply event")
+	}
 
+	// update the in-memory session
+	if err := sess.appendEvent(event); err != nil {
+		return fmt.Errorf("fail to set state on appendEvent: %w", err)
+	}
+
+	// update the in-memory session service
 	s.sessions.Set(sess.id.Encode(), sess)
-
+	if len(event.Actions.StateDelta) > 0 {
+		appDelta, userDelta, _ := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
+		s.updateAppState(appDelta, curSession.AppName())
+		s.updateUserState(userDelta, curSession.AppName(), curSession.UserID())
+	}
 	return nil
+}
+
+func (s *inMemoryService) updateAppState(appDelta map[string]any, appName string) map[string]any {
+	innerMap, ok := s.appState[appName]
+	if !ok {
+		innerMap = make(map[string]any)
+		s.appState[appName] = innerMap
+	}
+	maps.Copy(innerMap, appDelta)
+	return innerMap
+}
+
+func (s *inMemoryService) updateUserState(userDelta map[string]any, appName, userID string) map[string]any {
+	innerUsersMap, ok := s.userState[appName]
+	if !ok {
+		innerUsersMap = make(map[string]map[string]any)
+		s.userState[appName] = innerUsersMap
+	}
+	innerMap, ok := innerUsersMap[userID]
+	if !ok {
+		innerMap = make(map[string]any)
+		innerUsersMap[userID] = innerMap
+	}
+	maps.Copy(innerMap, userDelta)
+	return innerMap
+}
+
+func (s *inMemoryService) mergeStates(state map[string]any, appName, userID string) map[string]any {
+	appState := s.appState[appName]
+	var userState map[string]any
+	userStateMap, ok := s.userState[appName]
+	if ok {
+		userState = userStateMap[userID]
+	}
+	return sessionutils.MergeStates(appState, userState, state)
 }
 
 func (id id) Encode() string {
@@ -232,12 +314,19 @@ func (s *session) LastUpdateTime() time.Time {
 	return s.updatedAt
 }
 
-func (s *session) appendEvent(event *Event) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *session) appendEvent(event *Event) error {
+	if event.Partial {
+		return nil
+	}
+
+	processedEvent := trimTempDeltaState(event)
+	if err := updateSessionState(s, processedEvent); err != nil {
+		return fmt.Errorf("error on appendEvent: %w", err)
+	}
 
 	s.events = append(s.events, event)
 	s.updatedAt = event.Timestamp
+	return nil
 }
 
 type events []*Event
@@ -302,6 +391,61 @@ func (s *state) Set(key string, value any) error {
 
 	s.state[key] = value
 	return nil
+}
+
+// trimTempDeltaState removes temporary state delta keys from the event.
+func trimTempDeltaState(event *Event) *Event {
+	if len(event.Actions.StateDelta) == 0 {
+		return event
+	}
+
+	// Iterate over the map and build a new one with the keys we want to keep.
+	filteredStateDelta := make(map[string]any)
+	for key, value := range event.Actions.StateDelta {
+		if !strings.HasPrefix(key, sessionutils.TempPrefix) {
+			filteredStateDelta[key] = value
+		}
+	}
+
+	// Replace the old map with the newly filtered one.
+	event.Actions.StateDelta = filteredStateDelta
+
+	return event
+}
+
+// updateSessionState updates the session state based on the event state delta.
+func updateSessionState(session *session, event *Event) error {
+	if event.Actions.StateDelta == nil {
+		return nil // Nothing to do
+	}
+
+	// ensure the session state map is initialized
+	if session.state == nil {
+		session.state = make(map[string]any)
+	}
+
+	state := session.State()
+	for key, value := range event.Actions.StateDelta {
+		if strings.HasPrefix(key, sessionutils.TempPrefix) {
+			continue
+		}
+		err := state.Set(key, value)
+		if err != nil {
+			return fmt.Errorf("error on updateSessionState state: %w", err)
+		}
+	}
+	return nil
+}
+
+func copySessionWithoutStateAndEvents(sess *session) *session {
+	return &session{
+		id: id{
+			appName:   sess.id.appName,
+			userID:    sess.id.userID,
+			sessionID: sess.id.sessionID,
+		},
+		updatedAt: sess.updatedAt,
+	}
 }
 
 var _ Service = (*inMemoryService)(nil)

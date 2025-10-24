@@ -33,7 +33,10 @@ type Service interface {
 
 // InMemoryService returns an in-memory implementation of the session service.
 func InMemoryService() Service {
-	return &inMemoryService{}
+	return &inMemoryService{
+		appState:  make(map[string]map[string]any),
+		userState: make(map[string]map[string]map[string]any),
+	}
 }
 
 // VertexAIService returns VertextAiSessionService implementation.
