@@ -106,7 +106,7 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 
 // Run implements tool.Tool.
 // It executes the wrapped agent.
-func (t *agentTool) Run(toolCtx tool.Context, args any) (any, error) {
+func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
@@ -196,7 +196,7 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error during execution of sub-agent %s: %w", t.agent.Name(), err)
 		}
-		if event.LLMResponse != nil && event.LLMResponse.Content != nil {
+		if event.LLMResponse.Content != nil {
 			lastEvent = event
 		}
 	}

@@ -45,14 +45,14 @@ func TestMemory_AddAndSearch(t *testing.T) {
 		{
 			Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 			Author:    "user1",
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: content1,
 			},
 		},
 		{
 			Timestamp: time.Date(2025, 1, 1, 10, 5, 0, 0, time.UTC),
 			Author:    "user1",
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: content2,
 			},
 		},
@@ -73,7 +73,7 @@ func TestMemory_AddAndSearch(t *testing.T) {
 		}
 	}
 
-	if err := memoryService.AddSession(sessioninternal.NewMutableSession(sessionService, session)); err != nil {
+	if err := memoryService.AddSession(t.Context(), sessioninternal.NewMutableSession(sessionService, session)); err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
 
@@ -92,43 +92,51 @@ func TestMemory_AddAndSearch(t *testing.T) {
 	tests := []struct {
 		name  string
 		query string
-		want  []memory.Entry
+		want  *memory.SearchResponse
 	}{
 		{
 			name:  "match first entry",
 			query: "fox",
-			want:  []memory.Entry{entry1},
+			want: &memory.SearchResponse{
+				Memories: []memory.Entry{entry1},
+			},
 		},
 		{
 			name:  "match second entry",
 			query: "DOG", // Search should be case-insensitive
-			want:  []memory.Entry{entry2},
+			want: &memory.SearchResponse{
+				Memories: []memory.Entry{entry2},
+			},
 		},
 		{
 			name:  "match both entries (any word)",
 			query: "quick dog",
-			want:  []memory.Entry{entry1, entry2},
+			want: &memory.SearchResponse{
+				Memories: []memory.Entry{entry1, entry2},
+			},
 		},
 		{
 			name:  "match word in both",
 			query: "the",
-			want:  []memory.Entry{entry1, entry2},
+			want: &memory.SearchResponse{
+				Memories: []memory.Entry{entry1, entry2},
+			},
 		},
 		{
 			name:  "no match",
 			query: "unrelated",
-			want:  nil,
+			want:  &memory.SearchResponse{},
 		},
 		{
 			name:  "empty query",
 			query: "",
-			want:  nil,
+			want:  &memory.SearchResponse{},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := memoryService.Search(tc.query)
+			got, err := memoryService.Search(t.Context(), tc.query)
 			if err != nil {
 				t.Fatalf("Search(%q) failed: %v", tc.query, err)
 			}
@@ -148,12 +156,12 @@ func TestMemory_Search_NoData(t *testing.T) {
 		SessionID: "sess2",
 	}
 
-	got, err := memory.Search("any query")
+	got, err := memory.Search(t.Context(), "any query")
 	if err != nil {
 		t.Fatalf("Search() failed: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("Search() on empty memory returned %d items, want 0", len(got))
+	if len(got.Memories) != 0 {
+		t.Errorf("Search() on empty memory returned %d items, want 0", len(got.Memories))
 	}
 }
 
@@ -183,12 +191,12 @@ func TestMemory_Search_Isolation(t *testing.T) {
 	if err := sessionService.AppendEvent(t.Context(), storedSession, &session.Event{
 		Timestamp:   time.Now(),
 		Author:      "user1",
-		LLMResponse: &model.LLMResponse{Content: content1},
+		LLMResponse: model.LLMResponse{Content: content1},
 	}); err != nil {
 		t.Fatalf("Failed to append event: %v", err)
 	}
 
-	if err := memory1.AddSession(sessioninternal.NewMutableSession(sessionService, storedSession)); err != nil {
+	if err := memory1.AddSession(t.Context(), sessioninternal.NewMutableSession(sessionService, storedSession)); err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
 
@@ -213,34 +221,34 @@ func TestMemory_Search_Isolation(t *testing.T) {
 	if err := sessionService.AppendEvent(t.Context(), storedSession2, &session.Event{
 		Timestamp:   time.Now(),
 		Author:      "user2",
-		LLMResponse: &model.LLMResponse{Content: content2},
+		LLMResponse: model.LLMResponse{Content: content2},
 	}); err != nil {
 		t.Fatalf("Failed to append event: %v", err)
 	}
 
-	if err := memory2.AddSession(sessioninternal.NewMutableSession(sessionService, storedSession2)); err != nil {
+	if err := memory2.AddSession(t.Context(), sessioninternal.NewMutableSession(sessionService, storedSession2)); err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
 
 	// User1 search should only find user1's content
-	got1, err := memory1.Search("Content")
+	got1, err := memory1.Search(t.Context(), "Content")
 	if err != nil {
 		t.Fatalf("memory1.Search failed: %v", err)
 	}
-	if len(got1) != 1 {
-		t.Errorf("memory1.Search returned %d items, want 1", len(got1))
-	} else if diff := cmp.Diff(content1, got1[0].Content); diff != "" {
+	if len(got1.Memories) != 1 {
+		t.Errorf("memory1.Search returned %d items, want 1", len(got1.Memories))
+	} else if diff := cmp.Diff(content1, got1.Memories[0].Content); diff != "" {
 		t.Errorf("memory1.Search returned diff (-want +got):\n%s", diff)
 	}
 
 	// User2 search should only find user2's content
-	got2, err := memory2.Search("Content")
+	got2, err := memory2.Search(t.Context(), "Content")
 	if err != nil {
 		t.Fatalf("memory2.Search failed: %v", err)
 	}
-	if len(got2) != 1 {
-		t.Errorf("memory2.Search returned %d items, want 1", len(got2))
-	} else if diff := cmp.Diff(content2, got2[0].Content); diff != "" {
+	if len(got2.Memories) != 1 {
+		t.Errorf("memory2.Search returned %d items, want 1", len(got2.Memories))
+	} else if diff := cmp.Diff(content2, got2.Memories[0].Content); diff != "" {
 		t.Errorf("memory2.Search returned diff (-want +got):\n%s", diff)
 	}
 }

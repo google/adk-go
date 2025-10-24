@@ -26,8 +26,8 @@ import (
 	"google.golang.org/genai"
 )
 
-func modelResponseFromParts(parts ...*genai.Part) *model.LLMResponse {
-	return &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: parts}}
+func modelResponseFromParts(parts ...*genai.Part) model.LLMResponse {
+	return model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: parts}}
 }
 
 func newArtifactLastChunkEvent(task *a2a.Task) *a2a.TaskArtifactUpdateEvent {
@@ -63,8 +63,8 @@ func TestEventProcessor_Process(t *testing.T) {
 		{
 			name: "skip if no content parts",
 			events: []*session.Event{
-				{LLMResponse: &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel}}},
-				{LLMResponse: &model.LLMResponse{Interrupted: true}},
+				{LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel}}},
+				{LLMResponse: model.LLMResponse{Interrupted: true}},
 			},
 			terminal: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil)},
 		},
@@ -113,25 +113,25 @@ func TestEventProcessor_Process(t *testing.T) {
 		{
 			name: "failed without artifacts",
 			events: []*session.Event{
-				{LLMResponse: &model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}},
+				{LLMResponse: model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}},
 			},
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
-					map[string]any{toMetaKey("error_code"): "1"},
+					map[string]any{ToA2AMetaKey("error_code"): "1"},
 				),
 			},
 		},
 		{
 			name: "the first failure is returned",
 			events: []*session.Event{
-				{LLMResponse: &model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed 1"}},
-				{LLMResponse: &model.LLMResponse{ErrorCode: "2", ErrorMessage: "failed 2"}},
+				{LLMResponse: model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed 1"}},
+				{LLMResponse: model.LLMResponse{ErrorCode: "2", ErrorMessage: "failed 2"}},
 			},
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed 1"}),
-					map[string]any{toMetaKey("error_code"): "1"},
+					map[string]any{ToA2AMetaKey("error_code"): "1"},
 				),
 			},
 		},
@@ -140,7 +140,7 @@ func TestEventProcessor_Process(t *testing.T) {
 			events: []*session.Event{
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("The answer is"))},
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("42"))},
-				{LLMResponse: &model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}},
+				{LLMResponse: model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
 				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "The answer is"}),
@@ -150,7 +150,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				newArtifactLastChunkEvent(task),
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
-					map[string]any{toMetaKey("error_code"): "1"},
+					map[string]any{ToA2AMetaKey("error_code"): "1"},
 				),
 			},
 		},
@@ -158,7 +158,7 @@ func TestEventProcessor_Process(t *testing.T) {
 			name: "failed before receiving all parts",
 			events: []*session.Event{
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("The answer is"))},
-				{LLMResponse: &model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}},
+				{LLMResponse: model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}},
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("42"))},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
@@ -169,7 +169,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				newArtifactLastChunkEvent(task),
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
-					map[string]any{toMetaKey("error_code"): "1"},
+					map[string]any{ToA2AMetaKey("error_code"): "1"},
 				),
 			},
 		},

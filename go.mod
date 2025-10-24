@@ -17,6 +17,8 @@ require (
 require (
 	github.com/google/jsonschema-go v0.3.0
 	github.com/modelcontextprotocol/go-sdk v0.7.0
+	golang.org/x/net v0.43.0
+	google.golang.org/grpc v1.75.0-dev
 )
 
 require (
@@ -27,7 +29,7 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.29.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.53.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.53.0 // indirect
-	github.com/a2aproject/a2a-go v0.0.0-20251019084948-b02378be636d
+	github.com/a2aproject/a2a-go v0.0.0-20251023091533-c732060cb007
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20250501225837-2ac532fd4443 // indirect
@@ -69,10 +71,8 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/crypto v0.41.0 // indirect
-	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
 	golang.org/x/text v0.29.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250929231259-57b25ae835d4 // indirect
-	google.golang.org/grpc v1.75.0-dev // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )

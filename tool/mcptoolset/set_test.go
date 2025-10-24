@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package mcptool_test
+package mcptoolset_test
 
 import (
 	"context"
@@ -37,7 +37,7 @@ import (
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/mcptool"
+	"google.golang.org/adk/tool/mcptoolset"
 	"google.golang.org/genai"
 )
 
@@ -75,7 +75,7 @@ func TestMCPToolSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ts, err := mcptool.NewSet(mcptool.SetConfig{
+	ts, err := mcptoolset.New(mcptoolset.Config{
 		Transport: clientTransport,
 	})
 	if err != nil {
@@ -87,7 +87,7 @@ func TestMCPToolSet(t *testing.T) {
 		Model:       newGeminiModel(t, modelName),
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
-		Tools: []tool.Tool{
+		Toolsets: []tool.Toolset{
 			ts,
 		},
 	})
@@ -109,7 +109,7 @@ func TestMCPToolSet(t *testing.T) {
 	wantEvents := []*session.Event{
 		{
 			Author: "weather_time_agent",
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -125,14 +125,14 @@ func TestMCPToolSet(t *testing.T) {
 		},
 		{
 			Author: "weather_time_agent",
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
 							FunctionResponse: &genai.FunctionResponse{
 								Name: "get_weather",
 								Response: map[string]any{
-									"weather_summary": `Today in "london" is sunny`,
+									"output": map[string]any{"weather_summary": string(`Today in "london" is sunny`)},
 								},
 							},
 						},
@@ -143,7 +143,7 @@ func TestMCPToolSet(t *testing.T) {
 		},
 		{
 			Author: "weather_time_agent",
-			LLMResponse: &model.LLMResponse{
+			LLMResponse: model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
@@ -277,7 +277,7 @@ func TestToolFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ts, err := mcptool.NewSet(mcptool.SetConfig{
+	ts, err := mcptoolset.New(mcptoolset.Config{
 		Transport:  clientTransport,
 		ToolFilter: tool.StringPredicate([]string{"get_weather"}),
 	})

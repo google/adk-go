@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 )
 
 type EmptyArgs struct{}
@@ -29,7 +30,7 @@ func exitLoop(ctx tool.Context, myArgs EmptyArgs) map[string]string {
 }
 
 func New() (tool.Tool, error) {
-	exitLoopTool, err := tool.NewFunctionTool(tool.FunctionToolConfig{
+	exitLoopTool, err := functiontool.New(functiontool.Config{
 		Name:        "exit_loop",
 		Description: "Exits the loop.\nCall this function only when you are instructed to do so.\n",
 	}, exitLoop)

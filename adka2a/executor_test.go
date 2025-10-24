@@ -157,7 +157,7 @@ func TestExecutor_Execute(t *testing.T) {
 			request: &a2a.MessageSendParams{Message: hiMsgForTask},
 			events: []*session.Event{
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
-				{LLMResponse: &model.LLMResponse{ErrorCode: "418", ErrorMessage: "I'm a teapot"}},
+				{LLMResponse: model.LLMResponse{ErrorCode: "418", ErrorMessage: "I'm a teapot"}},
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
 			},
 			wantEvents: []a2a.Event{
@@ -167,7 +167,7 @@ func TestExecutor_Execute(t *testing.T) {
 				newArtifactLastChunkEvent(task),
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "418", ErrorMessage: "I'm a teapot"}),
-					map[string]any{toMetaKey("error_code"): "418"},
+					map[string]any{ToA2AMetaKey("error_code"): "418"},
 				),
 			},
 		},

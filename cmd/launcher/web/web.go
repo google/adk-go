@@ -28,6 +28,7 @@ type WebConfig struct {
 	LocalPort       int
 	FrontendAddress string
 	BackendAddress  string
+	ServeA2A        bool
 }
 
 // WebLauncher allows to interact with an agent in browser (using ADK Web UI and ADK REST API)
@@ -56,6 +57,7 @@ func ParseArgs(args []string) (*WebConfig, []string, error) {
 	localPortFlag := fs.Int("port", 8080, "Localhost port for the server")
 	frontendAddressFlag := fs.String("webui_address", "localhost:8080", "ADK WebUI address as seen from the user browser. It's used to allow CORS requests. Please specify only hostname and (optionally) port.")
 	backendAddressFlag := fs.String("api_server_address", "http://localhost:8080/api", "ADK REST API server address as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'. ")
+	serveA2A := fs.Bool("serve_a2a", false, "Run a gRPC A2A (Agent-To-Agent) server on the provided address. Will use golang.org/x/net/http2 for HTTP/2 support. Protocol specification can be found at https://a2a-protocol.org.")
 
 	err := fs.Parse(args)
 	if err != nil || !fs.Parsed() {
@@ -65,6 +67,7 @@ func ParseArgs(args []string) (*WebConfig, []string, error) {
 		LocalPort:       *localPortFlag,
 		FrontendAddress: *frontendAddressFlag,
 		BackendAddress:  *backendAddressFlag,
+		ServeA2A:        *serveA2A,
 	}
 	return &res, fs.Args(), nil
 }

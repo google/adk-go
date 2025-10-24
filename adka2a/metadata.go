@@ -15,11 +15,15 @@
 package adka2a
 
 import (
-	"encoding/json"
-
 	"github.com/a2aproject/a2a-go/a2asrv"
+	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/session"
 )
+
+// ToA2AMetaKey adds a prefix used to differentiage ADK-related values stored in Metadata an A2A event.
+func ToA2AMetaKey(key string) string {
+	return "adk_" + key
+}
 
 type invocationMeta struct {
 	userID    string
@@ -32,16 +36,12 @@ func toInvocationMeta(config ExecutorConfig, reqCtx *a2asrv.RequestContext) invo
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 
 	m := map[string]any{
-		toMetaKey("app_name"):   config.RunnerConfig.AppName,
-		toMetaKey("user_id"):    userID,
-		toMetaKey("session_id"): sessionID,
+		ToA2AMetaKey("app_name"):   config.RunnerConfig.AppName,
+		ToA2AMetaKey("user_id"):    userID,
+		ToA2AMetaKey("session_id"): sessionID,
 	}
 
 	return invocationMeta{userID: userID, sessionID: sessionID, eventMeta: m}
-}
-
-func toMetaKey(key string) string {
-	return "adk_" + key
 }
 
 func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, error) {
@@ -56,44 +56,25 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 		"branch":        event.Branch,
 	} {
 		if v != "" {
-			result[toMetaKey(k)] = v
+			result[ToA2AMetaKey(k)] = v
 		}
 	}
 
 	response := event.LLMResponse
-	if response == nil {
-		return result, nil
-	}
 
 	if response.ErrorCode != "" {
-		result[toMetaKey("error_code")] = response.ErrorCode
+		result[ToA2AMetaKey("error_code")] = response.ErrorCode
 	}
 
 	if response.GroundingMetadata != nil {
-		v, err := toMapStructure(response.GroundingMetadata)
+		v, err := converters.ToMapStructure(response.GroundingMetadata)
 		if err != nil {
 			return nil, err
 		}
-		result[toMetaKey("grounding_metadata")] = v
+		result[ToA2AMetaKey("grounding_metadata")] = v
 	}
 
 	// TODO(yarolegovich): include custom and usage metadata when added to session.Event
 
-	return result, nil
-}
-
-// We can't use mapstructure in a way compatible with ADK-python, because genai type fields
-// don't have proper field tags.
-// TODO(yarolegovich): field annotation PR for genai types.
-func toMapStructure(data any) (map[string]any, error) {
-	bytes, err := json.Marshal(data)
-	if err != nil {
-		return nil, err
-	}
-
-	var result map[string]any
-	if err := json.Unmarshal(bytes, &result); err != nil {
-		return nil, err
-	}
 	return result, nil
 }

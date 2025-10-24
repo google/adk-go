@@ -22,7 +22,6 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
 	"google.golang.org/genai"
 )
 
@@ -218,19 +217,12 @@ func afterReviser(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llm
 	return llmResponse, nil
 }
 
-func GetLLmAuditorAgent(ctx context.Context, apiKey string) agent.Agent {
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
-		APIKey: apiKey,
-	})
-	if err != nil {
-		panic(err)
-	}
-
+func GetLLmAuditorAgent(ctx context.Context, model model.LLM) agent.Agent {
 	criticAgent, err := llmagent.New(llmagent.Config{
 		Model:       model,
 		Name:        "critic_agent",
 		Instruction: CriticPrompt,
-		AfterModel: []llmagent.AfterModelCallback{
+		AfterModelCallbacks: []llmagent.AfterModelCallback{
 			afterCritic,
 		},
 	},
@@ -244,7 +236,7 @@ func GetLLmAuditorAgent(ctx context.Context, apiKey string) agent.Agent {
 		Model:       model,
 		Name:        "reviser_agent",
 		Instruction: ReviserPrompt,
-		AfterModel: []llmagent.AfterModelCallback{
+		AfterModelCallbacks: []llmagent.AfterModelCallback{
 			afterReviser,
 		},
 	},

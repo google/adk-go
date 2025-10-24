@@ -54,10 +54,7 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 	if event == nil {
 		return nil, nil
 	}
-	if event.LLMResponse == nil {
-		// TODO(yarolegovich): log an ignored event
-		return nil, nil
-	}
+
 	eventMeta, err := toEventMeta(p.meta, event)
 	if err != nil {
 		return nil, err
@@ -67,7 +64,7 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 	if resp.ErrorCode != "" {
 		// TODO(yarolegovich): consider merging responses if multiple errors can be produced during an invocation
 		if _, ok := p.terminalEvents[a2a.TaskStateFailed]; !ok {
-			p.terminalEvents[a2a.TaskStateFailed] = toTaskFailedUpdateEvent(p.task, errorFromResponse(resp), eventMeta)
+			p.terminalEvents[a2a.TaskStateFailed] = toTaskFailedUpdateEvent(p.task, errorFromResponse(&resp), eventMeta)
 		}
 	}
 
@@ -81,7 +78,7 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		p.terminalEvents[a2a.TaskStateFailed] = ev
 	}
 
-	parts, err := toA2AParts(resp.Content.Parts, event.LongRunningToolIDs)
+	parts, err := ToA2AParts(resp.Content.Parts, event.LongRunningToolIDs)
 	if err != nil {
 		return nil, err
 	}

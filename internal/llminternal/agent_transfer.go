@@ -127,7 +127,7 @@ func (t *TransferToAgentTool) ProcessRequest(ctx tool.Context, req *model.LLMReq
 }
 
 // Run implements types.Tool.
-func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (any, error) {
+func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	if args == nil {
 		return nil, fmt.Errorf("missing argument")
 	}

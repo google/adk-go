@@ -148,7 +148,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			// only commit non-partial event to a session service
-			if !(event.LLMResponse != nil && event.LLMResponse.Partial) {
+			if !event.LLMResponse.Partial {
 
 				// TODO: update session state & delta
 
@@ -197,7 +197,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 				continue
 			}
 			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
-			if err := artifactsService.Save(fileName, *part); err != nil {
+			if _, err := artifactsService.Save(ctx, fileName, part); err != nil {
 				return fmt.Errorf("failed to save artifact %s: %w", fileName, err)
 			}
 			// Replace the part with a text placeholder
@@ -210,7 +210,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 	event := session.NewEvent(ctx.InvocationID())
 
 	event.Author = "user"
-	event.LLMResponse = &model.LLMResponse{
+	event.LLMResponse = model.LLMResponse{
 		Content: msg,
 	}
 

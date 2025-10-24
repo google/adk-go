@@ -16,7 +16,6 @@ package memory
 
 import (
 	"context"
-	"fmt"
 
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
@@ -29,22 +28,14 @@ type Memory struct {
 	AppName   string
 }
 
-func (a *Memory) AddSession(session session.Session) error {
-	err := a.Service.AddSession(context.Background(), session)
-	if err != nil {
-		return fmt.Errorf("could not add session to memory service: %w", err)
-	}
-	return nil
+func (a *Memory) AddSession(ctx context.Context, session session.Session) error {
+	return a.Service.AddSession(ctx, session)
 }
 
-func (a *Memory) Search(query string) ([]memory.Entry, error) {
-	searchResponse, err := a.Service.Search(context.Background(), &memory.SearchRequest{
+func (a *Memory) Search(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	return a.Service.Search(ctx, &memory.SearchRequest{
 		AppName: a.AppName,
 		UserID:  a.UserID,
 		Query:   query,
 	})
-	if err != nil {
-		return nil, err
-	}
-	return searchResponse.Memories, nil
 }

@@ -38,11 +38,11 @@ type Context interface {
 	FunctionCallID() string
 
 	Actions() *session.EventActions
-	SearchMemory(context.Context, string) ([]memory.Entry, error)
+	SearchMemory(context.Context, string) (*memory.SearchResponse, error)
 }
 
-type Set interface {
-	Tool // to allow passing a toolset to agent tools
+type Toolset interface {
+	Name() string
 	Tools(ctx agent.ReadonlyContext) ([]Tool, error)
 }
 

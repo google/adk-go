@@ -54,7 +54,7 @@ func TestNewParallelAgent(t *testing.T) {
 					for responseCount := 1; responseCount <= 2; responseCount++ {
 						res = append(res, &session.Event{
 							Author: fmt.Sprintf("sub%d", agentID),
-							LLMResponse: &model.LLMResponse{
+							LLMResponse: model.LLMResponse{
 								Content: &genai.Content{
 									Parts: []*genai.Part{
 										genai.NewPartFromText(fmt.Sprintf("hello %d", agentID)),
@@ -217,7 +217,7 @@ func customRun(id int, agentErr error) func(agent.InvocationContext) iter.Seq2[*
 				return
 			}
 			yield(&session.Event{
-				LLMResponse: &model.LLMResponse{
+				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromText(fmt.Sprintf("hello %v", id), genai.RoleModel),
 				},
 			}, nil)

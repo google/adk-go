@@ -22,8 +22,9 @@ import (
 )
 
 type FunctionTool interface {
+	tool.Tool
 	Declaration() *genai.FunctionDeclaration
-	Run(ctx tool.Context, args any) (result any, err error)
+	Run(ctx tool.Context, args any) (result map[string]any, err error)
 }
 
 type RequestProcessor interface {

@@ -30,6 +30,8 @@ import (
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/tool/loadartifactstool"
 	"google.golang.org/genai"
 )
 
@@ -41,8 +43,8 @@ func main() {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
-	generateImageTool, err := tool.NewFunctionTool(
-		tool.FunctionToolConfig{
+	generateImageTool, err := functiontool.New(
+		functiontool.Config{
 			Name:        "generate_image",
 			Description: "Generates image and saves in artifact service.",
 		},
@@ -51,8 +53,8 @@ func main() {
 		log.Fatalf("Failed to create generate image tool: %v", err)
 	}
 
-	saveImageTool, err := tool.NewFunctionTool(
-		tool.FunctionToolConfig{
+	saveImageTool, err := functiontool.New(
+		functiontool.Config{
 			Name:        "save_image_locally",
 			Description: "Saves images locally based on the filename.",
 		},
@@ -69,7 +71,7 @@ func main() {
 			" Also user will provide the filename and you should save it in the artifacts with that filename." +
 			" When user ask to save image locally you can call save_image_locally to do it.",
 		Tools: []tool.Tool{
-			tool.NewLoadArtifactsTool(), generateImageTool, saveImageTool,
+			loadartifactstool.New(), generateImageTool, saveImageTool,
 		},
 	})
 	if err != nil {
@@ -107,7 +109,8 @@ func generateImage(ctx tool.Context, input generateImageInput) generateImageResu
 		}
 	}
 
-	if err := ctx.Artifacts().Save(input.Filename, *genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png")); err != nil {
+	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
+	if err != nil {
 		return generateImageResult{
 			Status: "fail",
 		}
@@ -132,13 +135,13 @@ type generateImageResult struct {
 // saves is to the local filesystem.
 func saveImage(ctx tool.Context, input saveImageInput) saveImageResult {
 	filename := input.Filename
-	part, err := ctx.Artifacts().Load(filename)
+	resp, err := ctx.Artifacts().Load(ctx, filename)
 	if err != nil {
 		log.Printf("Failed to load artifact '%s': %v", filename, err)
 		return saveImageResult{Status: "fail"}
 	}
 
-	if part.InlineData == nil || len(part.InlineData.Data) == 0 {
+	if resp.Part.InlineData == nil || len(resp.Part.InlineData.Data) == 0 {
 		log.Printf("Artifact '%s' has no inline data", filename)
 		return saveImageResult{Status: "fail"}
 	}
@@ -157,7 +160,7 @@ func saveImage(ctx tool.Context, input saveImageInput) saveImageResult {
 	}
 
 	localPath := filepath.Join(outputDir, localFilename)
-	err = os.WriteFile(localPath, part.InlineData.Data, 0644)
+	err = os.WriteFile(localPath, resp.Part.InlineData.Data, 0644)
 	if err != nil {
 		log.Printf("Failed to write image to local file '%s': %v", localPath, err)
 		return saveImageResult{Status: "fail"}
