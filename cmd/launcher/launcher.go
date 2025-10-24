@@ -88,13 +88,13 @@ import (
 
 type Launcher interface {
 	Sublauncher
-	Keyword() string
 	Run(ctx context.Context, config *adk.Config) error
 	ParseAndRun(ctx context.Context, config *adk.Config, args []string, parseRemaining func([]string) error) error
 }
 
 type Sublauncher interface {
 	//Run(ctx context.Context, config *adk.Config) error
+	Keyword() string
 	Parse(args []string) ([]string, error)
 	FormatSyntax() string
 	SimpleDescription() string
