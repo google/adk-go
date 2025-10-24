@@ -71,10 +71,10 @@ func BuildLauncher(args []string) (launcher.Launcher, []string, error) {
 	return &ApiLauncher{config: apiConfig}, argsLeft, nil
 }
 
-func addSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config) *mux.Router {
+func AddSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config, frontendAddress string) {
 	rApi := router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix(pathPrefix).Subrouter()
 	restapiweb.SetupRouter(rApi, adkConfig)
-	return rApi
+	rApi.Use(web.CorsWithArgs(frontendAddress))
 }
 
 func (l ApiLauncher) Run(ctx context.Context, config *adk.Config) error {
@@ -84,10 +84,7 @@ func (l ApiLauncher) Run(ctx context.Context, config *adk.Config) error {
 	}
 
 	router := web.BuildBaseRouter()
-	rApi := addSubrouter(router, "/api/", config)
-
-	// Setup serving of ADK REST API
-	rApi.Use(web.CorsWithArgs(l.config.frontendAddress))
+	AddSubrouter(router, "/api/", config, l.config.frontendAddress)
 
 	log.Printf("Starting the ADK REST API server: %+v", l.config)
 	log.Println()

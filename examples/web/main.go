@@ -24,7 +24,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/cmd/launcher/universal"
+	"google.golang.org/adk/cmd/launcher/api"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/examples/web/agents"
 	"google.golang.org/adk/model"
@@ -75,7 +75,6 @@ func main() {
 	llmAuditor := agents.GetLLmAuditorAgent(ctx, apiKey)
 
 	agentLoader := services.NewStaticAgentLoader(
-		rootAgent,
 		map[string]agent.Agent{
 			"weather_time_agent": rootAgent,
 			"llm_auditor":        llmAuditor,
@@ -89,7 +88,8 @@ func main() {
 		AgentLoader:     agentLoader,
 	}
 
-	err = universal.Run(ctx, config)
+	// err = universal.Run(ctx, config)
+	err = api.Run(ctx, config)
 
 	if err != nil {
 		log.Fatalf("run failed: %v", err)
