@@ -50,8 +50,7 @@ type A2ALauncher struct {
 func ParseArgs(args []string) (*A2AConfig, []string, error) {
 	fs := flag.NewFlagSet("a2a", flag.ContinueOnError)
 
-	rootAgentName := fs.String("a2a_r
-	oot_agent_name", "", "If you have multiple agents you should specify which one should be user for interactions. You can leave if empty if you have only one agent - it will be used by default")
+	rootAgentName := fs.String("a2a_root_agent_name", "", "If you have multiple agents you should specify which one should be user for interactions. You can leave if empty if you have only one agent - it will be used by default")
 	localPortFlag := fs.Int("port", 8080, "Localhost port for the server")
 
 	err := fs.Parse(args)
