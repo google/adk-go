@@ -28,24 +28,15 @@ type LauncherConfig struct {
 }
 
 type Launcher struct {
-	chosenLauncher   launcher.Launcher
-	sublaunchers     []launcher.Launcher
-	keyToSublauncher map[string]launcher.Launcher
+	chosenLauncher launcher.Launcher
+	sublaunchers   []launcher.Launcher
 }
 
 // NewLauncher returns a new universal launcher. The first element on launcher list will be the default one if there are no arguments specified
-func NewLauncher(sublaunchers ...launcher.Launcher) (*Launcher, error) {
-	keyToSublauncher := make(map[string]launcher.Launcher)
-	for _, l := range sublaunchers {
-		if _, ok := keyToSublauncher[l.Keyword()]; ok {
-			return nil, fmt.Errorf("cannot create universal launcher. Keywords for sublaunchers should be unique and they are not: '%s'", l.Keyword())
-		}
-		keyToSublauncher[l.Keyword()] = l
-	}
+func NewLauncher(sublaunchers ...launcher.Launcher) *Launcher {
 	return &Launcher{
-		sublaunchers:     sublaunchers,
-		keyToSublauncher: keyToSublauncher,
-	}, nil
+		sublaunchers: sublaunchers,
+	}
 }
 
 func (l *Launcher) ParseAndRun(ctx context.Context, config *adk.Config, args []string, parseRemaining func([]string) error) error {
@@ -69,6 +60,14 @@ func (l *Launcher) Run(ctx context.Context, config *adk.Config) error {
 
 // Parse parses arguments and remembers which sublauncher should be run later
 func (l *Launcher) Parse(args []string) ([]string, error) {
+	keyToSublauncher := make(map[string]launcher.Launcher)
+	for _, l := range l.sublaunchers {
+		if _, ok := keyToSublauncher[l.Keyword()]; ok {
+			return nil, fmt.Errorf("cannot create universal launcher. Keywords for sublaunchers should be unique and they are not: '%s'", l.Keyword())
+		}
+		keyToSublauncher[l.Keyword()] = l
+	}
+
 	if len(l.sublaunchers) == 0 {
 		// no sub launchers
 		return args, fmt.Errorf("there are no sub launchers to parse the arguments")
@@ -82,7 +81,7 @@ func (l *Launcher) Parse(args []string) ([]string, error) {
 	}
 	// there are arguments
 	key := args[0]
-	if keyLauncher, ok := l.keyToSublauncher[key]; ok {
+	if keyLauncher, ok := keyToSublauncher[key]; ok {
 		// match found, use it, continue parsing without the matching keyword
 		l.chosenLauncher = keyLauncher
 		return l.chosenLauncher.Parse(args[1:])
