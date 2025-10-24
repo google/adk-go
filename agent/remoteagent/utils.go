@@ -60,7 +60,7 @@ func getUserFunctionCallAt(events session.Events, index int) *userFunctionCall {
 }
 
 func isFunctionCallEvent(event *session.Event, callID string) bool {
-	if event.Content == nil {
+	if event == nil || event.Content == nil {
 		return false
 	}
 	return slices.ContainsFunc(event.Content.Parts, func(part *genai.Part) bool {
@@ -86,6 +86,8 @@ func getFunctionResponseCallID(event *session.Event) (string, bool) {
 // and a2a contextID if it was found in a remote agent event metadata.
 // We iterate session events backward until all events are processed or an event authored by a remote agent is found.
 // Parts from all events we processed are returned as a single list.
+// The returned contextID might be an empty string. This means the current remote agent invocation is not associates with
+// any of the previous one. In this case a new contextID will be generated on the remote server.
 func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Events) ([]a2a.Part, string) {
 	partCount, contextID := 0, ""
 	// only events after this index are not in the remote session
