@@ -70,7 +70,7 @@ func (s *MultiAgentLoader) ListAgents() []string {
 func (s *MultiAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 	agent, ok := s.agents[name]
 	if !ok {
-		return nil, fmt.Errorf("agent %s not found", name)
+		return nil, fmt.Errorf("agent %s not found. Please specify one of those: %v", name, s.ListAgents())
 	}
 	return agent, nil
 }
