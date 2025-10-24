@@ -149,7 +149,7 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		hi = id{appName: appName, userID: userID + "\x00"}.Encode()
 	}
 
-	var res []Session = make([]Session, 0)
+	sessions := make([]Session, 0)
 	for k, storedSession := range s.sessions.Scan(lo, hi) {
 		var key id
 		if err := key.Decode(k); err != nil {
@@ -161,10 +161,10 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		}
 		copiedSession := copySessionWithoutStateAndEvents(storedSession)
 		copiedSession.state = s.mergeStates(storedSession.state, appName, storedSession.UserID())
-		res = append(res, copiedSession)
+		sessions = append(sessions, copiedSession)
 	}
 	return &ListResponse{
-		Sessions: res,
+		Sessions: sessions,
 	}, nil
 }
 

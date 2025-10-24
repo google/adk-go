@@ -219,7 +219,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 	}
 	r.artifactService = artifactService
 
-	createResp, err := sessionService.Create(ctx, &session.CreateRequest{
+	_, err = sessionService.Create(ctx, &session.CreateRequest{
 		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,
@@ -281,7 +281,16 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 		t.Errorf("loaded artifact data does not match original blob data")
 	}
 
-	events := createResp.Session.Events()
+	getResponse, err := sessionService.Get(ctx, &session.GetRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatalf("sessionService.Get() error = %v", err)
+	}
+
+	events := getResponse.Session.Events()
 	if events.Len() == 0 {
 		t.Fatal("no events in session")
 	}
