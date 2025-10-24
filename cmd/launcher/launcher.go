@@ -17,11 +17,94 @@ package launcher
 
 import (
 	"context"
+	"flag"
+	"strings"
 
 	"google.golang.org/adk/cmd/launcher/adk"
 )
 
+// execFile
+//
+//	launcher := universal.NewLauncher( console.NewLauncher())
+//
+// execFile console
+//
+//	launcher := universal.NewLauncher( console.NewLauncher())
+//
+// execFile console console-params
+//
+//	launcher := universal.NewLauncher( console.NewLauncher())
+//
+// execFile server sever-params api api-params
+//
+//	launcher := universal.NewLauncher( server.NewLauncher( api.NewLauncher() ) )
+//
+// execFile server sever-params webui webui-params
+//
+//	launcher := universal.NewLauncher( server.NewLauncher( webuil.NewLauncher() ) )
+//
+// execFile server sever-params a2a a2a-params
+//
+//	launcher := universal.NewLauncher( server.NewLauncher( a2a.NewLauncher() ))
+//
+// execFile server sever-params api api-params webui webui-params a2a a2a-params
+//
+//	   launcher := universal.NewLauncher( server.NewLauncher(api.NewLauncher(), webui.NewLauncher(), a2a.NewLauncher() ))
+//	   launcher := universal.NewLauncher( console.NewLaucher(), server.NewLauncher(api.NewLauncher(), webui.NewLauncher(), a2a.NewLauncher() ))
+//	   launcher := universal.NewLauncher( console.NewLaucher(), server.NewLauncher(api.NewLauncher(), a2a.NewLauncher() ))
+//	   launcher := universal.NewLauncher( server.NewLauncher( a2a.NewLauncher() ))
+//	   launcher := server.NewLauncher( a2a.NewLauncher() )
+//	   launcher := server.NewLauncher( api.NewLauncher() )
+//	   launcher := server.NewLauncher( api.NewLauncher(), webui.NewLauncher() )
+
+//     all / :
+//           func AllInServer() launcher.Launcher {
+//				universal.NewLauncher( console.NewLaucher(), server.NewLauncher(api.NewLauncher(), webui.NewLauncher(), a2a.NewLauncher() ))
+//           }
+//     prod:
+//           func ProdServer() launcher.Launcher {
+//				universal.NewLauncher( server.NewLauncher(api.NewLauncher(), a2a.NewLauncher() ))
+//           }
+//
+//
+//    options:
+//
+
+//     webui.New( server.New())
+//
+//     server := server.New()
+//     a2a.New(server)     ===   server.Extend(a2a.New())
+//     webui.New(server)
+
+//	args, err := launcher.Parse( os.Args() )
+
+//	launcher.Launch()
+//
 // Launcher allowes to launch console or web application
+//  execution:
+//    parse command line
+//    execute external parseRemaining
+//    run
+
 type Launcher interface {
+	Sublauncher
+	Keyword() string
 	Run(ctx context.Context, config *adk.Config) error
+	ParseAndRun(ctx context.Context, config *adk.Config, args []string, parseRemaining func([]string) error) error
+}
+
+type Sublauncher interface {
+	//Run(ctx context.Context, config *adk.Config) error
+	Parse(args []string) ([]string, error)
+	FormatSyntax() string
+	SimpleDescription() string
+}
+
+func FormatFlagUsage(fs *flag.FlagSet) string {
+	var b strings.Builder
+	o := fs.Output()
+	fs.SetOutput(&b)
+	fs.PrintDefaults()
+	fs.SetOutput(o)
+	return b.String()
 }
