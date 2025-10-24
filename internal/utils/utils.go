@@ -15,7 +15,6 @@
 package utils
 
 import (
-	"encoding/json"
 	"strings"
 
 	"github.com/google/uuid"
