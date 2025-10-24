@@ -15,28 +15,6 @@
 // package a2a allows to run A2A
 package a2a
 
-import (
-	"context"
-	"flag"
-	"fmt"
-	"log"
-	"net/http"
-	"strconv"
-	"strings"
-
-	"github.com/a2aproject/a2a-go/a2agrpc"
-	"github.com/a2aproject/a2a-go/a2asrv"
-	"github.com/gorilla/mux"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-	"google.golang.org/adk/adka2a"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/grpc"
-)
-
 type A2AConfig struct {
 	rootAgentName string
 	port          int
@@ -46,94 +24,94 @@ type A2ALauncher struct {
 	config *A2AConfig
 }
 
-// ParseArgs returns a config from parsed arguments and the remaining un-parsed arguments
-func ParseArgs(args []string) (*A2AConfig, []string, error) {
-	fs := flag.NewFlagSet("a2a", flag.ContinueOnError)
+// // ParseArgs returns a config from parsed arguments and the remaining un-parsed arguments
+// func ParseArgs(args []string) (*A2AConfig, []string, error) {
+// 	fs := flag.NewFlagSet("a2a", flag.ContinueOnError)
 
-	rootAgentName := fs.String("a2a_root_agent_name", "", "If you have multiple agents you should specify which one should be user for interactions. You can leave if empty if you have only one agent - it will be used by default")
-	localPortFlag := fs.Int("port", 8080, "Localhost port for the server")
+// 	rootAgentName := fs.String("a2a_root_agent_name", "", "If you have multiple agents you should specify which one should be user for interactions. You can leave if empty if you have only one agent - it will be used by default")
+// 	localPortFlag := fs.Int("port", 8080, "Localhost port for the server")
 
-	err := fs.Parse(args)
-	if err != nil || !fs.Parsed() {
-		return &A2AConfig{}, nil, fmt.Errorf("failed to parse flags: %v", err)
-	}
-	res := &A2AConfig{
-		rootAgentName: *rootAgentName,
-		port:          *localPortFlag,
-	}
-	return res, fs.Args(), nil
-}
-
-// BuildLauncher parses command line args and returns ready-to-run console launcher.
-func BuildLauncher(args []string) (launcher.Launcher, []string, error) {
-	a2aConfig, argsLeft, err := ParseArgs(args)
-	if err != nil {
-		return nil, nil, fmt.Errorf("cannot parse arguments for a2a: %v: %w", args, err)
-	}
-	return &A2ALauncher{config: a2aConfig}, argsLeft, nil
-}
-
-func newA2AHandler(serveConfig *adk.Config, agentName string) *a2agrpc.GRPCHandler {
-	agent, err := serveConfig.AgentLoader.LoadAgent(agentName)
-	if err != nil {
-		log.Fatalf("cannot load agent %s: %v", agentName, err)
-	}
-	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
-		RunnerConfig: runner.Config{
-			AppName:         agent.Name(),
-			Agent:           agent,
-			SessionService:  serveConfig.SessionService,
-			ArtifactService: serveConfig.ArtifactService,
-		},
-	})
-	reqHandler := a2asrv.NewHandler(executor, serveConfig.A2AOptions...)
-	grpcHandler := a2agrpc.NewHandler(&adka2a.CardProducer{Agent: agent}, reqHandler)
-	return grpcHandler
-}
-
-func WrapHandler(router *mux.Router, config *adk.Config, agentName string) http.Handler {
-	grpcSrv := grpc.NewServer()
-	newA2AHandler(config, agentName).RegisterWith(grpcSrv)
-	var handler http.Handler
-	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
-			grpcSrv.ServeHTTP(w, r)
-		} else {
-			router.ServeHTTP(w, r)
-		}
-	})
-	handler = h2c.NewHandler(handler, &http2.Server{})
-	return handler
-}
-
-func (l A2ALauncher) Run(ctx context.Context, config *adk.Config) error {
-	// we need some session service, add one if missing
-	if config.SessionService == nil {
-		config.SessionService = session.InMemoryService()
-	}
-
-	grpcSrv := grpc.NewServer()
-	newA2AHandler(config, l.config.rootAgentName).RegisterWith(grpcSrv)
-
-	log.Printf("Starting the ADK REST API server: %+v", l.config)
-	log.Println()
-	log.Printf("You can call A2A using grpc protocol: %s", "http://localhost:"+strconv.Itoa(l.config.port))
-	log.Println()
-	return http.ListenAndServe(":"+strconv.Itoa(l.config.port), grpcSrv)
-}
-
-// // Run parses command line params, prepares api launcher and runs it
-// func Run(ctx context.Context, config *adk.Config) error {
-// 	// skip args[0] - executable file name
-// 	// skip unparsed arguments returned by BuildLauncher
-// 	launcherToRun, _, err := BuildLauncher(os.Args[1:])
-// 	if err != nil {
-// 		log.Fatalf("cannot build api launcher: %v", err)
+// 	err := fs.Parse(args)
+// 	if err != nil || !fs.Parsed() {
+// 		return &A2AConfig{}, nil, fmt.Errorf("failed to parse flags: %v", err)
 // 	}
-
-// 	err = launcherToRun.Run(ctx, config)
-// 	if err != nil {
-// 		log.Fatalf("run failed: %v", err)
+// 	res := &A2AConfig{
+// 		rootAgentName: *rootAgentName,
+// 		port:          *localPortFlag,
 // 	}
-// 	return nil
+// 	return res, fs.Args(), nil
 // }
+
+// // BuildLauncher parses command line args and returns ready-to-run console launcher.
+// func BuildLauncher(args []string) (launcher.Launcher, []string, error) {
+// 	a2aConfig, argsLeft, err := ParseArgs(args)
+// 	if err != nil {
+// 		return nil, nil, fmt.Errorf("cannot parse arguments for a2a: %v: %w", args, err)
+// 	}
+// 	return &A2ALauncher{config: a2aConfig}, argsLeft, nil
+// }
+
+// func newA2AHandler(serveConfig *adk.Config, agentName string) *a2agrpc.GRPCHandler {
+// 	agent, err := serveConfig.AgentLoader.LoadAgent(agentName)
+// 	if err != nil {
+// 		log.Fatalf("cannot load agent %s: %v", agentName, err)
+// 	}
+// 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
+// 		RunnerConfig: runner.Config{
+// 			AppName:         agent.Name(),
+// 			Agent:           agent,
+// 			SessionService:  serveConfig.SessionService,
+// 			ArtifactService: serveConfig.ArtifactService,
+// 		},
+// 	})
+// 	reqHandler := a2asrv.NewHandler(executor, serveConfig.A2AOptions...)
+// 	grpcHandler := a2agrpc.NewHandler(&adka2a.CardProducer{Agent: agent}, reqHandler)
+// 	return grpcHandler
+// }
+
+// func WrapHandler(router *mux.Router, config *adk.Config, agentName string) http.Handler {
+// 	grpcSrv := grpc.NewServer()
+// 	newA2AHandler(config, agentName).RegisterWith(grpcSrv)
+// 	var handler http.Handler
+// 	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// 		if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+// 			grpcSrv.ServeHTTP(w, r)
+// 		} else {
+// 			router.ServeHTTP(w, r)
+// 		}
+// 	})
+// 	handler = h2c.NewHandler(handler, &http2.Server{})
+// 	return handler
+// }
+
+// func (l A2ALauncher) Run(ctx context.Context, config *adk.Config) error {
+// 	// we need some session service, add one if missing
+// 	if config.SessionService == nil {
+// 		config.SessionService = session.InMemoryService()
+// 	}
+
+// 	grpcSrv := grpc.NewServer()
+// 	newA2AHandler(config, l.config.rootAgentName).RegisterWith(grpcSrv)
+
+// 	log.Printf("Starting the ADK REST API server: %+v", l.config)
+// 	log.Println()
+// 	log.Printf("You can call A2A using grpc protocol: %s", "http://localhost:"+strconv.Itoa(l.config.port))
+// 	log.Println()
+// 	return http.ListenAndServe(":"+strconv.Itoa(l.config.port), grpcSrv)
+// }
+
+// // // Run parses command line params, prepares api launcher and runs it
+// // func Run(ctx context.Context, config *adk.Config) error {
+// // 	// skip args[0] - executable file name
+// // 	// skip unparsed arguments returned by BuildLauncher
+// // 	launcherToRun, _, err := BuildLauncher(os.Args[1:])
+// // 	if err != nil {
+// // 		log.Fatalf("cannot build api launcher: %v", err)
+// // 	}
+
+// // 	err = launcherToRun.Run(ctx, config)
+// // 	if err != nil {
+// // 		log.Fatalf("run failed: %v", err)
+// // 	}
+// // 	return nil
+// // }
