@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/api"
 	"google.golang.org/adk/cmd/launcher/apiweb"
+	"google.golang.org/adk/cmd/launcher/apiweba2a"
 	"google.golang.org/adk/cmd/launcher/console"
 )
 
@@ -36,19 +37,21 @@ func Run(ctx context.Context, config *adk.Config) error {
 		return console.Run(ctx, config)
 	}
 
-	var launcherToRun launcher.Launcher
-	var err error
+	// var launcherToRun launcher.Launcher
+	// var err error
 
-	switch args[0] {
-	case "api":
-		launcherToRun, _, err = api.BuildLauncher(args[1:])
-	case "apiweb":
-		launcherToRun, _, err = apiweb.BuildLauncher(args[1:])
-	case "console":
-		launcherToRun, _, err = console.BuildLauncher(args[1:])
-	default:
-		return fmt.Errorf("universal launcher requires either no arguments (which will run console version) or one of 'api', 'apiweb' or 'console', got: %s", args[0])
-	}
+	launcherToRun, _, err := BuildLauncher()
+
+	// switch args[0] {
+	// case "api":
+	// 	launcherToRun, _, err = api.BuildLauncher(args[1:])
+	// case "apiweb":
+	// 	launcherToRun, _, err = apiweb.BuildLauncher(args[1:])
+	// case "console":
+	// 	launcherToRun, _, err = console.BuildLauncher(args[1:])
+	// default:
+	// 	return fmt.Errorf("universal launcher requires either no arguments (which will run console version) or one of 'api', 'apiweb' or 'console', got: %s", args[0])
+	// }
 	if err != nil {
 		return fmt.Errorf("cannot build launcher for %s: %v", args[0], err)
 	}
@@ -73,9 +76,11 @@ func BuildLauncher() (launcher.Launcher, []string, error) {
 		return api.BuildLauncher(args[1:])
 	case "apiweb":
 		return apiweb.BuildLauncher(args[1:])
+	case "apiweba2a":
+		return apiweba2a.BuildLauncher(args[1:])
 	case "console":
 		return console.BuildLauncher(args[1:])
 	default:
-		return nil, nil, fmt.Errorf("for the first argument want 'web', 'console' or nothing, got: %s", args[0])
+		return nil, nil, fmt.Errorf("universal launcher requires either no arguments (which will run console version) or one of 'api', 'apiweb', 'apiweba2a' or 'console', got: %s", args[0])
 	}
 }

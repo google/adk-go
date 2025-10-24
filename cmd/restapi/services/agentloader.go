@@ -21,7 +21,6 @@ import (
 )
 
 type AgentLoader interface {
-	Root() agent.Agent
 	ListAgents() []string
 	LoadAgent(string) (agent.Agent, error)
 }
@@ -33,10 +32,6 @@ type SingleAgentLoader struct {
 
 func NewSingleAgentLoader(a agent.Agent) *SingleAgentLoader {
 	return &SingleAgentLoader{main: a}
-}
-
-func (s *SingleAgentLoader) Root() agent.Agent {
-	return s.main
 }
 
 func (s *SingleAgentLoader) ListAgents() []string {
@@ -55,19 +50,13 @@ func (s *SingleAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 
 // MultiAgentLoader should be used when you have more than one agent
 type MultiAgentLoader struct {
-	root   agent.Agent
 	agents map[string]agent.Agent
 }
 
-func NewStaticAgentLoader(root agent.Agent, agents map[string]agent.Agent) *MultiAgentLoader {
+func NewStaticAgentLoader(agents map[string]agent.Agent) *MultiAgentLoader {
 	return &MultiAgentLoader{
-		root:   root,
 		agents: agents,
 	}
-}
-
-func (s *MultiAgentLoader) Root() agent.Agent {
-	return s.root
 }
 
 func (s *MultiAgentLoader) ListAgents() []string {

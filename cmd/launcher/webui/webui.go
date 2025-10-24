@@ -30,7 +30,7 @@ import (
 //go:embed distr/*
 var content embed.FS
 
-func AddSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config, backendAddress string) *mux.Router {
+func AddSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config, backendAddress string) {
 	// Setup serving of ADK Web UI
 	rUi := router.Methods("GET").PathPrefix("/ui/").Subrouter()
 
@@ -55,5 +55,4 @@ func AddSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config, 
 	}
 	rUi.Methods("GET").Handler(http.StripPrefix("/ui/", http.FileServer(http.FS(ui))))
 
-	return rUi
 }

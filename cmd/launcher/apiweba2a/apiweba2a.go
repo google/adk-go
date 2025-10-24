@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package api allows to run ADK REST API and ADK Web UI
-package apiweb
+// package api allows to run ADK REST API and ADK Web UI and A2A
+package apiweba2a
 
 import (
 	"context"
@@ -25,6 +25,7 @@ import (
 	"strconv"
 
 	"google.golang.org/adk/cmd/launcher"
+	"google.golang.org/adk/cmd/launcher/a2a"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/api"
 	"google.golang.org/adk/cmd/launcher/web"
@@ -36,6 +37,7 @@ type ApiWebConfig struct {
 	port            int
 	frontendAddress string
 	backendAddress  string
+	rootAgentName   string
 }
 
 type ApiWebLauncher struct {
@@ -49,6 +51,7 @@ func ParseArgs(args []string) (*ApiWebConfig, []string, error) {
 	localPortFlag := fs.Int("port", 8080, "Localhost port for the server")
 	frontendAddressFlag := fs.String("webui_address", "localhost:8080", "ADK WebUI address as seen from the user browser. It's used to allow CORS requests. Please specify only hostname and (optionally) port.")
 	backendAddressFlag := fs.String("api_server_address", "http://localhost:8080/api", "ADK REST API server address as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'.")
+	rootAgentName := fs.String("a2a_root_agent_name", "", "If you have multiple agents you should specify which one should be user for interactions. You can leave if empty if you have only one agent - it will be used by default")
 
 	err := fs.Parse(args)
 	if err != nil || !fs.Parsed() {
@@ -59,6 +62,7 @@ func ParseArgs(args []string) (*ApiWebConfig, []string, error) {
 		port:            *localPortFlag,
 		frontendAddress: *frontendAddressFlag,
 		backendAddress:  *backendAddressFlag,
+		rootAgentName:   *rootAgentName,
 	}
 	return res, fs.Args(), nil
 }
@@ -81,12 +85,14 @@ func (l ApiWebLauncher) Run(ctx context.Context, config *adk.Config) error {
 	router := web.BuildBaseRouter()
 	api.AddSubrouter(router, "/api/", config, l.config.frontendAddress)
 	webui.AddSubrouter(router, "/ui/", config, l.config.backendAddress)
+	handler := a2a.WrapHandler(router, config, l.config.rootAgentName)
 
 	log.Printf("Starting the ADK REST API server: %+v", l.config)
 	log.Println()
 	log.Printf("Open %s", "http://localhost:"+strconv.Itoa(l.config.port))
+	log.Printf("You can call A2A using grpc protocol: %s", "http://localhost:"+strconv.Itoa(l.config.port))
 	log.Println()
-	return http.ListenAndServe(":"+strconv.Itoa(l.config.port), router)
+	return http.ListenAndServe(":"+strconv.Itoa(l.config.port), handler)
 }
 
 // Run parses command line params, prepares api launcher and runs it
