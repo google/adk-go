@@ -15,23 +15,6 @@
 // package api allows to run ADK REST API and ADK Web UI
 package apiweb
 
-import (
-	"context"
-	"flag"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"strconv"
-
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/cmd/launcher/api"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/cmd/launcher/webui"
-	"google.golang.org/adk/session"
-)
-
 type ApiWebConfig struct {
 	port            int
 	frontendAddress string
@@ -42,65 +25,65 @@ type ApiWebLauncher struct {
 	config *ApiWebConfig
 }
 
-// ParseArgs returns a config from parsed arguments and the remaining un-parsed arguments
-func ParseArgs(args []string) (*ApiWebConfig, []string, error) {
-	fs := flag.NewFlagSet("apiweb", flag.ContinueOnError)
+// // ParseArgs returns a config from parsed arguments and the remaining un-parsed arguments
+// func ParseArgs(args []string) (*ApiWebConfig, []string, error) {
+// 	fs := flag.NewFlagSet("apiweb", flag.ContinueOnError)
 
-	localPortFlag := fs.Int("port", 8080, "Localhost port for the server")
-	frontendAddressFlag := fs.String("webui_address", "localhost:8080", "ADK WebUI address as seen from the user browser. It's used to allow CORS requests. Please specify only hostname and (optionally) port.")
-	backendAddressFlag := fs.String("api_server_address", "http://localhost:8080/api", "ADK REST API server address as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'.")
+// 	localPortFlag := fs.Int("port", 8080, "Localhost port for the server")
+// 	frontendAddressFlag := fs.String("webui_address", "localhost:8080", "ADK WebUI address as seen from the user browser. It's used to allow CORS requests. Please specify only hostname and (optionally) port.")
+// 	backendAddressFlag := fs.String("api_server_address", "http://localhost:8080/api", "ADK REST API server address as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'.")
 
-	err := fs.Parse(args)
-	if err != nil || !fs.Parsed() {
-		return &(ApiWebConfig{}), nil, fmt.Errorf("failed to parse flags: %v", err)
-	}
+// 	err := fs.Parse(args)
+// 	if err != nil || !fs.Parsed() {
+// 		return &(ApiWebConfig{}), nil, fmt.Errorf("failed to parse flags: %v", err)
+// 	}
 
-	res := &ApiWebConfig{
-		port:            *localPortFlag,
-		frontendAddress: *frontendAddressFlag,
-		backendAddress:  *backendAddressFlag,
-	}
-	return res, fs.Args(), nil
-}
+// 	res := &ApiWebConfig{
+// 		port:            *localPortFlag,
+// 		frontendAddress: *frontendAddressFlag,
+// 		backendAddress:  *backendAddressFlag,
+// 	}
+// 	return res, fs.Args(), nil
+// }
 
-// BuildLauncher parses command line args and returns ready-to-run console launcher.
-func BuildLauncher(args []string) (launcher.Launcher, []string, error) {
-	apiConfig, argsLeft, err := ParseArgs(args)
-	if err != nil {
-		return nil, nil, fmt.Errorf("cannot parse arguments for apiweb: %v: %w", args, err)
-	}
-	return &ApiWebLauncher{config: apiConfig}, argsLeft, nil
-}
+// // BuildLauncher parses command line args and returns ready-to-run console launcher.
+// func BuildLauncher(args []string) (launcher.Launcher, []string, error) {
+// 	apiConfig, argsLeft, err := ParseArgs(args)
+// 	if err != nil {
+// 		return nil, nil, fmt.Errorf("cannot parse arguments for apiweb: %v: %w", args, err)
+// 	}
+// 	return &ApiWebLauncher{config: apiConfig}, argsLeft, nil
+// }
 
-func (l ApiWebLauncher) Run(ctx context.Context, config *adk.Config) error {
-	// we need some session service, add one if missing
-	if config.SessionService == nil {
-		config.SessionService = session.InMemoryService()
-	}
+// func (l ApiWebLauncher) Run(ctx context.Context, config *adk.Config) error {
+// 	// we need some session service, add one if missing
+// 	if config.SessionService == nil {
+// 		config.SessionService = session.InMemoryService()
+// 	}
 
-	router := web.BuildBaseRouter()
-	api.AddSubrouter(router, "/api/", config, l.config.frontendAddress)
-	webui.AddSubrouter(router, "/ui/", config, l.config.backendAddress)
+// 	router := web.BuildBaseRouter()
+// 	api.AddSubrouter(router, "/api/", config, l.config.frontendAddress)
+// 	webui.AddSubrouter(router, "/ui/", config, l.config.backendAddress)
 
-	log.Printf("Starting the ADK REST API server: %+v", l.config)
-	log.Println()
-	log.Printf("Open %s", "http://localhost:"+strconv.Itoa(l.config.port))
-	log.Println()
-	return http.ListenAndServe(":"+strconv.Itoa(l.config.port), router)
-}
+// 	log.Printf("Starting the ADK REST API server: %+v", l.config)
+// 	log.Println()
+// 	log.Printf("Open %s", "http://localhost:"+strconv.Itoa(l.config.port))
+// 	log.Println()
+// 	return http.ListenAndServe(":"+strconv.Itoa(l.config.port), router)
+// }
 
-// Run parses command line params, prepares api launcher and runs it
-func Run(ctx context.Context, config *adk.Config) error {
-	// skip args[0] - executable file name
-	// skip unparsed arguments returned by BuildLauncher
-	launcherToRun, _, err := BuildLauncher(os.Args[1:])
-	if err != nil {
-		log.Fatalf("cannot build api launcher: %v", err)
-	}
+// // Run parses command line params, prepares api launcher and runs it
+// func Run(ctx context.Context, config *adk.Config) error {
+// 	// skip args[0] - executable file name
+// 	// skip unparsed arguments returned by BuildLauncher
+// 	launcherToRun, _, err := BuildLauncher(os.Args[1:])
+// 	if err != nil {
+// 		log.Fatalf("cannot build api launcher: %v", err)
+// 	}
 
-	err = launcherToRun.Run(ctx, config)
-	if err != nil {
-		log.Fatalf("run failed: %v", err)
-	}
-	return nil
-}
+// 	err = launcherToRun.Run(ctx, config)
+// 	if err != nil {
+// 		log.Fatalf("run failed: %v", err)
+// 	}
+// 	return nil
+// }
