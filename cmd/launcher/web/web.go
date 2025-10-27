@@ -88,10 +88,7 @@ func (w *WebLauncher) Parse(args []string) ([]string, error) {
 	restArgs := w.flags.Args()
 	w.activeSublaunchers = make(map[string]WebSublauncher)
 
-	for {
-		if len(restArgs) == 0 {
-			break
-		}
+	for len(restArgs) > 0 {
 		keyword := restArgs[0]
 		if _, ok := w.activeSublaunchers[keyword]; ok {
 			// already processed
