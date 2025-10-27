@@ -158,8 +158,6 @@ func NewLauncher(rootAgentName string) *ConsoleLauncher {
 	return &ConsoleLauncher{config: config, flags: fs}
 }
 
-var _ launcher.Launcher = (*ConsoleLauncher)(nil)
-
 // // Run starts console loop. User-provided text is fed to the chosen agent (the only one if there's only one, specified by name otherwise)
 // func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 
