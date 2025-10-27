@@ -6,24 +6,28 @@ This folder hosts examples to test different features. The examples are usually 
 
 
 # Launcher
-In many examples you can see such a line:
+In many examples you can see such lines:
 ```go
-err = universal.Run(ctx, config)
-```
-it allows you to choose running mode using command line arguments:
- - empty argument list executes the application using console interface
- - optionally you may provide the mode in the first argument: 
-    - api - run only ADK REST API server
-    - apiweb - run ADK REST API server together with ADK Web UI  (embeds web UI static files)
-    - console - run simple console app
-
-You may also decide to run the application in one particular mode - uncomment the appropiate one:
-```go
-// err= universal.Run(ctx, config)
-// err= console.Run(ctx, config)
-// err= api.Run(ctx, config)
-err= apiweb.Run(ctx, config)
+l := full.NewLaucher("weather_time_agent")
+err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
 if err != nil {
-    log.Fatalf("run failed: %v", err)
+    log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())
 }
 ```
+
+it allows to to decide, which launching options are supported in the run-time. 
+`full.NewLaucher("weather_time_agent")`
+means
+`universal.NewLauncher(console.NewLauncher(rootAgentName), web.NewLauncher(api.NewLauncher(), a2a.NewLauncher(rootAgentName), webui.NewLauncher()))`
+ - in that case supported options are either console or web. For web you can enable independently api (ADK REST API), a2a and webui (ADK Web UI).
+
+Run `go run ./example/quickstart/main.go help` for details
+
+
+As an alternative, you may want to use `prod`
+`prod.NewLaucher("weather_time_agent")`
+meaning
+`universal.NewLauncher(web.NewLauncher(api.NewLauncher(), a2a.NewLauncher(rootAgentName)))`
+- the only supported options is web. For web you can enable independently api (ADK REST API) or a2a.
+
+
