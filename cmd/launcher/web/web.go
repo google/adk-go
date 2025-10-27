@@ -26,6 +26,7 @@ import (
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/session"
 )
 
 // WebConfig contains parametres for lauching web server
@@ -38,12 +39,14 @@ type WebLauncher struct {
 	flags        *flag.FlagSet
 	config       *WebConfig
 	sublaunchers []WebSublauncher
+	// maps keyword to sublauncher for the keywords parsed from command line
+	activeSublaunchers map[string]WebSublauncher
 }
 
 type WebSublauncher interface {
 	launcher.Sublauncher
 	SetupSubrouters(router *mux.Router, adkConfig *adk.Config)
-	ReplaceRouter(router *mux.Router, adkConfig *adk.Config) *mux.Router
+	SetupRoutes(router *mux.Router, adkConfig *adk.Config)
 	UserMessage(webUrl string, printer func(v ...any))
 }
 
@@ -58,7 +61,7 @@ func (w *WebLauncher) Keyword() string {
 // Parse processes its arguments, trying to find an appropiate sublauncher by keywords. Returns unprocessed arguments
 func (w *WebLauncher) Parse(args []string) ([]string, error) {
 
-	keyToSublauncher := make(map[string]launcher.Sublauncher)
+	keyToSublauncher := make(map[string]WebSublauncher)
 	for _, l := range w.sublaunchers {
 		if _, ok := keyToSublauncher[l.Keyword()]; ok {
 			return nil, fmt.Errorf("cannot create universal launcher. Keywords for sublaunchers should be unique and they are not: '%s'", l.Keyword())
@@ -72,14 +75,14 @@ func (w *WebLauncher) Parse(args []string) ([]string, error) {
 	}
 
 	restArgs := w.flags.Args()
-	processedKeywords := make(map[string]launcher.Sublauncher)
+	w.activeSublaunchers = make(map[string]WebSublauncher)
 
 	for {
 		if len(restArgs) == 0 {
 			break
 		}
 		keyword := restArgs[0]
-		if _, ok := processedKeywords[keyword]; ok {
+		if _, ok := w.activeSublaunchers[keyword]; ok {
 			// already processed
 			return restArgs, fmt.Errorf("the keyword %q is specified and processed more than once, which is not allowed", keyword)
 		}
@@ -90,7 +93,7 @@ func (w *WebLauncher) Parse(args []string) ([]string, error) {
 			if err != nil {
 				return nil, fmt.Errorf("tha %q launcher cannot parse arguments: %v", keyword, err)
 			}
-			processedKeywords[keyword] = sublauncher
+			w.activeSublaunchers[keyword] = sublauncher
 		} else {
 			// not known keyword, let it be processed elsewhere
 			break
@@ -104,26 +107,45 @@ func (w *WebLauncher) ParseAndRun(ctx context.Context, config *adk.Config, args 
 }
 
 func (w *WebLauncher) Run(ctx context.Context, config *adk.Config) error {
-	// Setup subrouters
-	router := BuildBaseRouter()
-	for _, l := range w.sublaunchers {
-		l.SetupSubrouters(router, config)
+	if config.SessionService == nil {
+		config.SessionService = session.InMemoryService()
 	}
 
-	// Allow to replace router
-	for _, l := range w.sublaunchers {
-		router = l.ReplaceRouter(router, config)
+	router := BuildBaseRouter()
+
+	// Setup general routes
+	for _, l := range w.activeSublaunchers {
+		l.SetupRoutes(router, config)
+	}
+
+	// Setup subrouters
+	for _, l := range w.activeSublaunchers {
+		l.SetupSubrouters(router, config)
 	}
 
 	log.Printf("Starting the web server: %+v", w.config)
 	log.Println()
 	webUrl := fmt.Sprintf("http://localhost:%v", fmt.Sprint(w.config.port))
 	log.Printf("Web servers starts on %s", webUrl)
-	for _, l := range w.sublaunchers {
+	for _, l := range w.activeSublaunchers {
 		l.UserMessage(webUrl, log.Println)
 	}
 	log.Println()
-	return http.ListenAndServe(":"+fmt.Sprint(w.config.port), router)
+
+	srv := http.Server{
+		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
+		WriteTimeout: time.Second * 15,
+		ReadTimeout:  time.Second * 15,
+		IdleTimeout:  time.Second * 60,
+		Handler:      router,
+	}
+
+	err := srv.ListenAndServe()
+	if err != nil {
+		return fmt.Errorf("server failed: %v", err)
+	}
+
+	return nil
 }
 
 func (w *WebLauncher) SimpleDescription() string {
