@@ -16,10 +16,10 @@
 package prod
 
 import (
-	"google.golang.org/adk/cmd/launcher/a2a"
-	"google.golang.org/adk/cmd/launcher/api"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/cmd/launcher/web"
+	"google.golang.org/adk/cmd/launcher/web/a2a"
+	"google.golang.org/adk/cmd/launcher/web/api"
 )
 
 // NewLaucher returnes the most versalite universal launcher with all options enabled

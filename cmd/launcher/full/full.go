@@ -16,12 +16,12 @@
 package full
 
 import (
-	"google.golang.org/adk/cmd/launcher/a2a"
-	"google.golang.org/adk/cmd/launcher/api"
 	"google.golang.org/adk/cmd/launcher/console"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/cmd/launcher/webui"
+	"google.golang.org/adk/cmd/launcher/web/a2a"
+	"google.golang.org/adk/cmd/launcher/web/api"
+	"google.golang.org/adk/cmd/launcher/web/webui"
 )
 
 // NewLaucher returnes the most versalite universal launcher with all options enabled
