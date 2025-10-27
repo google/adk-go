@@ -24,11 +24,8 @@ import (
 	"google.golang.org/adk/cmd/launcher/adk"
 )
 
-type LauncherConfig struct {
-}
-
 type Launcher struct {
-	chosenLauncher launcher.Launcher
+	chosenLauncher launcher.Launcher // the chosen launcher - after parsing command-line args
 	sublaunchers   []launcher.Launcher
 }
 
@@ -40,7 +37,7 @@ func NewLauncher(sublaunchers ...launcher.Launcher) *Launcher {
 }
 
 func (l *Launcher) ParseAndRun(ctx context.Context, config *adk.Config, args []string, parseRemaining func([]string) error) error {
-	remainingArgs, err := l.Parse(args)
+	remainingArgs, err := l.parse(args)
 	if err != nil {
 		return err
 	}
@@ -51,15 +48,15 @@ func (l *Launcher) ParseAndRun(ctx context.Context, config *adk.Config, args []s
 		}
 	}
 	// args are parsed
-	return l.Run(ctx, config)
+	return l.run(ctx, config)
 }
 
-func (l *Launcher) Run(ctx context.Context, config *adk.Config) error {
+func (l *Launcher) run(ctx context.Context, config *adk.Config) error {
 	return l.chosenLauncher.Run(ctx, config)
 }
 
 // Parse parses arguments and remembers which sublauncher should be run later
-func (l *Launcher) Parse(args []string) ([]string, error) {
+func (l *Launcher) parse(args []string) ([]string, error) {
 	keyToSublauncher := make(map[string]launcher.Launcher)
 	for _, l := range l.sublaunchers {
 		if _, ok := keyToSublauncher[l.Keyword()]; ok {
@@ -90,15 +87,10 @@ func (l *Launcher) Parse(args []string) ([]string, error) {
 	return l.chosenLauncher.Parse(args)
 }
 
-func (l *Launcher) Keyword() string {
-	// not important for universal launcher, it is not used
-	return ""
-}
-
 func (l *Launcher) FormatSyntax() string {
 	if len(l.sublaunchers) == 0 {
 		// no sub launchers
-		return l.SimpleDescription() + "\n\nThere are no sublaunchers to format syntax for."
+		return l.simpleDescription() + "\n\nThere are no sublaunchers to format syntax for."
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Arguments: Specify one of the following:\n")
@@ -113,65 +105,15 @@ func (l *Launcher) FormatSyntax() string {
 	return b.String()
 }
 
-func (l *Launcher) SimpleDescription() string {
+func (l *Launcher) simpleDescription() string {
 	return `Universal launcher acts as a router, routing command line arguments to one of it's sublaunchers. 
 	The sublauncher is chosen by the first argument - a keyword. 
 	If there are no arguments at all or the first one is not recognized by any of the sublaunchers, the first sublauncher is used.`
 }
 
-// // Run builds the launcher according to command-line arguments and then executes it
-// func Run(ctx context.Context, config *adk.Config) error {
-// 	args := os.Args[1:] // skip file name, safe
-
-// 	// if there are no arguments - run console
-// 	if len(args) == 0 {
-// 		return console.Run(ctx, config)
-// 	}
-
-// 	// var launcherToRun launcher.Launcher
-// 	// var err error
-
-// 	launcherToRun, _, err := BuildLauncher()
-
-// 	// switch args[0] {
-// 	// case "api":
-// 	// 	launcherToRun, _, err = api.BuildLauncher(args[1:])
-// 	// case "apiweb":
-// 	// 	launcherToRun, _, err = apiweb.BuildLauncher(args[1:])
-// 	// case "console":
-// 	// 	launcherToRun, _, err = console.BuildLauncher(args[1:])
-// 	// default:
-// 	// 	return fmt.Errorf("universal launcher requires either no arguments (which will run console version) or one of 'api', 'apiweb' or 'console', got: %s", args[0])
-// 	// }
-// 	if err != nil {
-// 		return fmt.Errorf("cannot build launcher for %s: %v", args[0], err)
-// 	}
-
-// 	err = launcherToRun.Run(ctx, config)
-// 	if err != nil {
-// 		return fmt.Errorf("run failed for %s launcher: %v", args[0], err)
-// 	}
-// 	return nil
-// }
-
-// // BuildLauncher uses command line argument to choose an appropiate launcher type and then builds it, returning the remaining un-parsed arguments
-// func BuildLauncher() (launcher.Launcher, []string, error) {
-// 	args := os.Args[1:] // skip file name, safe
-
-// 	if len(args) == 0 {
-// 		return console.BuildLauncher(args)
-// 	}
-// 	// len(args) > 0
-// 	switch args[0] {
-// 	case "api":
-// 		return api.BuildLauncher(args[1:])
-// 	case "apiweb":
-// 		return apiweb.BuildLauncher(args[1:])
-// 	case "apiweba2a":
-// 		return apiweba2a.BuildLauncher(args[1:])
-// 	case "console":
-// 		return console.BuildLauncher(args[1:])
-// 	default:
-// 		return nil, nil, fmt.Errorf("universal launcher requires either no arguments (which will run console version) or one of 'api', 'apiweb', 'apiweba2a' or 'console', got: %s", args[0])
-// 	}
-// }
+func ErrorOnUnparsedArgs(args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("cannot parse following arguments: %v", args)
+	}
+	return nil
+}

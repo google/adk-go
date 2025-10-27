@@ -28,8 +28,8 @@ import (
 	"google.golang.org/adk/cmd/restapi/handlers"
 )
 
-// WebUIConfig contains parametres for lauching ADK Web UI
-type WebUIConfig struct {
+// webUIConfig contains parametres for lauching ADK Web UI
+type webUIConfig struct {
 	backendAddress string
 	pathPrefix     string
 }
@@ -37,20 +37,17 @@ type WebUIConfig struct {
 // ApiLauncher can launch ADK Web UI
 type WebUILauncher struct {
 	flags  *flag.FlagSet
-	config *WebUIConfig
+	config *webUIConfig
 }
 
-// FormatSyntax implements web.WebSublauncher.
 func (w *WebUILauncher) FormatSyntax() string {
 	return launcher.FormatFlagUsage(w.flags)
 }
 
-// Keyword implements web.WebSublauncher.
 func (w *WebUILauncher) Keyword() string {
 	return "webui"
 }
 
-// Parse implements web.WebSublauncher.
 func (w *WebUILauncher) Parse(args []string) ([]string, error) {
 	err := w.flags.Parse(args)
 	if err != nil || !w.flags.Parsed() {
@@ -60,22 +57,18 @@ func (w *WebUILauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// SetupRoutes implements web.WebSublauncher.
 func (w *WebUILauncher) SetupRoutes(router *mux.Router, adkConfig *adk.Config) {
 	// no need to modify top level routes
 }
 
-// SetupSubrouters implements web.WebSublauncher.
 func (w *WebUILauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {
 	w.AddSubrouter(router, w.config.pathPrefix, adkConfig, w.config.backendAddress)
 }
 
-// SimpleDescription implements web.WebSublauncher.
 func (w *WebUILauncher) SimpleDescription() string {
 	return "starts ADK Web UI server which provides UI for interacting with ADK REST API"
 }
 
-// UserMessage implements web.WebSublauncher.
 func (w *WebUILauncher) UserMessage(webUrl string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       webui:  you can access API using %s%s", webUrl, w.config.pathPrefix))
 }
@@ -112,7 +105,7 @@ func (w *WebUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkC
 }
 
 func NewLauncher() *WebUILauncher {
-	config := &WebUIConfig{}
+	config := &webUIConfig{}
 
 	fs := flag.NewFlagSet("webui", flag.ContinueOnError)
 	fs.StringVar(&config.backendAddress, "api_server_address", "http://localhost:8080/api", "ADK REST API server address as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'.")

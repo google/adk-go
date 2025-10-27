@@ -89,7 +89,6 @@ import (
 type Launcher interface {
 	Sublauncher
 	Run(ctx context.Context, config *adk.Config) error
-	ParseAndRun(ctx context.Context, config *adk.Config, args []string, parseRemaining func([]string) error) error
 }
 
 type Sublauncher interface {
