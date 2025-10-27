@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package web provides common web-related funcionalities
+// package web provides a way to run ADK using web server (extended by sublaunchers)
 package web
 
 import (
@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -30,14 +31,14 @@ import (
 )
 
 // WebConfig contains parametres for lauching web server
-type WebConfig struct {
+type webConfig struct {
 	port int
 }
 
 // WebLauncher can launch web server
 type WebLauncher struct {
 	flags        *flag.FlagSet
-	config       *WebConfig
+	config       *webConfig
 	sublaunchers []WebSublauncher
 	// maps keyword to sublauncher for the keywords parsed from command line
 	activeSublaunchers map[string]WebSublauncher
@@ -51,7 +52,17 @@ type WebSublauncher interface {
 }
 
 func (w *WebLauncher) FormatSyntax() string {
-	return launcher.FormatFlagUsage(w.flags)
+	var b strings.Builder
+	fmt.Fprint(&b, launcher.FormatFlagUsage(w.flags))
+	fmt.Fprintf(&b, "  You may specify sublaunchers:\n")
+	for _, l := range w.sublaunchers {
+		fmt.Fprintf(&b, "    * %s - %s\n", l.Keyword(), l.SimpleDescription())
+	}
+	fmt.Fprintf(&b, "  Sublaunchers syntax:\n")
+	for _, l := range w.sublaunchers {
+		fmt.Fprintf(&b, "    %s\n  %s\n", l.Keyword(), l.FormatSyntax())
+	}
+	return b.String()
 }
 
 func (w *WebLauncher) Keyword() string {
@@ -102,16 +113,21 @@ func (w *WebLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-func (w *WebLauncher) ParseAndRun(ctx context.Context, config *adk.Config, args []string, parseRemaining func([]string) error) error {
-	panic("unimplemented")
-}
-
 func (w *WebLauncher) Run(ctx context.Context, config *adk.Config) error {
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
 	}
 
 	router := BuildBaseRouter()
+
+	// check if there are any active sublaunchers
+	if len(w.activeSublaunchers) == 0 {
+		availableSublaunchers := make([]string, len(w.sublaunchers))
+		for i, l := range w.sublaunchers {
+			availableSublaunchers[i] = l.Keyword()
+		}
+		return fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
+	}
 
 	// Setup general routes
 	for _, l := range w.activeSublaunchers {
@@ -155,7 +171,7 @@ func (w *WebLauncher) SimpleDescription() string {
 // NewLauncher creates new web launcher. Should be extended by sublaunchers providing real content
 func NewLauncher(sublaunchers ...WebSublauncher) *WebLauncher {
 
-	config := &WebConfig{}
+	config := &webConfig{}
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
 	fs.IntVar(&config.port, "port", 8080, "Localhost port for the server")
@@ -167,7 +183,7 @@ func NewLauncher(sublaunchers ...WebSublauncher) *WebLauncher {
 	}
 }
 
-func Logger(inner http.Handler) http.Handler {
+func logger(inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
@@ -185,6 +201,6 @@ func Logger(inner http.Handler) http.Handler {
 // BuildBaseRouter returns the main router, which can be exteded by sub-routers
 func BuildBaseRouter() *mux.Router {
 	router := mux.NewRouter().StrictSlash(true)
-	router.Use(Logger)
+	router.Use(logger)
 	return router
 }

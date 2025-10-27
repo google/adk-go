@@ -31,22 +31,17 @@ import (
 	"google.golang.org/genai"
 )
 
-// ConsoleConfig contains command-line params for console launcher
-type ConsoleConfig struct {
+// consoleConfig contains command-line params for console launcher
+type consoleConfig struct {
 	streamingMode       agent.StreamingMode
-	streamingModeString string
+	streamingModeString string // command-line param to be converted to agent.StremingMode
 	rootAgentName       string
 }
 
 // ConsoleLauncher allows to interact with an agent in console
 type ConsoleLauncher struct {
 	flags  *flag.FlagSet
-	config *ConsoleConfig
-}
-
-func (l *ConsoleLauncher) ParseAndRun(ctx context.Context, config *adk.Config, args []string, parseRemaining func([]string) error) error {
-	fmt.Printf("ParseAndRun unimplemented: %+v\n", l.config)
-	return nil
+	config *consoleConfig
 }
 
 func (l *ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
@@ -146,7 +141,7 @@ func (l *ConsoleLauncher) SimpleDescription() string {
 
 // NewLauncher creates new console launcher. You may provide the default rootAgentName. It can be overriden by command-line params
 func NewLauncher(rootAgentName string) *ConsoleLauncher {
-	config := &ConsoleConfig{rootAgentName: rootAgentName}
+	config := &consoleConfig{rootAgentName: rootAgentName}
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
@@ -157,23 +152,3 @@ func NewLauncher(rootAgentName string) *ConsoleLauncher {
 
 	return &ConsoleLauncher{config: config, flags: fs}
 }
-
-// // Run starts console loop. User-provided text is fed to the chosen agent (the only one if there's only one, specified by name otherwise)
-// func (l ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
-
-// }
-
-// // Run parses command line params, prepares console launcher and runs it
-// func Run(ctx context.Context, config *adk.Config) error {
-// 	// skip args[0] - executable file name
-// 	// skip unparsed arguments returned by BuildLauncher
-// 	launcherToRun, _, err := BuildLauncher(os.Args[1:])
-// 	if err != nil {
-// 		log.Fatalf("cannot build console launcher: %v", err)
-// 	}
-// 	err = launcherToRun.Run(ctx, config)
-// 	if err != nil {
-// 		log.Fatalf("run failed: %v", err)
-// 	}
-// 	return nil
-// }
