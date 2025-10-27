@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
@@ -107,8 +108,9 @@ func main() {
 	config := &adk.Config{
 		AgentLoader: services.NewSingleAgentLoader(agent),
 	}
-	err = universal.Run(ctx, config)
+	l := full.NewLaucher("root_agent")
+	err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
 	if err != nil {
-		log.Fatalf("run failed: %v", err)
+		log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())
 	}
 }
