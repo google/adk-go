@@ -40,7 +40,7 @@ func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.S
 	return &databaseService{db: db}, nil
 }
 
-// Create
+// Create generates a session and inserts it to the db, implements session.Service
 func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
 	if req.AppName == "" || req.UserID == "" {
 		return nil, fmt.Errorf("app_name and user_id are required")
@@ -211,12 +211,10 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 	}
 
 	err := listQuery.Find(&foundSessions).Error
-
 	if err != nil {
 		// Specifically check if the error is "record not found".
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// This is not a system failure. The record simply doesn't exist.
-			// Return nil for both response and error to indicate "not found".
 			return &session.ListResponse{
 				Sessions: make([]session.Session, 0),
 			}, nil
@@ -267,7 +265,7 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 	}, nil
 }
 
-// Delete
+// Delete, deletes a session given a specific id returning error on failure, implements session.Service
 func (s *databaseService) Delete(ctx context.Context, req *session.DeleteRequest) error {
 	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
 	if appName == "" || userID == "" || sessionID == "" {
@@ -318,12 +316,7 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	}
 
 	// append it to session
-	err = sess.appendEvent(event)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return sess.appendEvent(event)
 }
 
 // applyEvent fetches the session, validates it, applies state changes from an
@@ -412,7 +405,7 @@ func fetchStorageAppState(tx *gorm.DB, appName string) (*storageAppState, error)
 	var storageApp storageAppState
 	if err := tx.First(&storageApp, "app_name = ?", appName).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("failed to get app state: %w", err)
+			return nil, fmt.Errorf("failed to fetch app state: %w", err)
 		}
 		// If not found, initialize a new object to be created later.
 		storageApp = storageAppState{AppName: appName, State: make(map[string]any)}
@@ -424,7 +417,7 @@ func fetchStorageUserState(tx *gorm.DB, appName string, userID string) (*storage
 	var storageUser storageUserState
 	if err := tx.First(&storageUser, "app_name = ? AND user_id = ?", appName, userID).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("failed to get user state: %w", err)
+			return nil, fmt.Errorf("failed to fetch user state: %w", err)
 		}
 		// If not found, initialize a new object.
 		storageUser = storageUserState{AppName: appName, UserID: userID, State: make(map[string]any)}
@@ -437,7 +430,7 @@ func fetchAllAppStorageUserState(tx *gorm.DB, appName string) (map[string]*stora
 
 	if err := tx.Find(&storageUserStates, "app_name = ?", appName).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("failed to get user states: %w", err)
+			return nil, fmt.Errorf("failed to fetch user states: %w", err)
 		}
 		return make(map[string]*storageUserState), nil
 	}

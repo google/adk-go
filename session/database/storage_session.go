@@ -26,10 +26,10 @@ import (
 
 // storageSession corresponds to the 'sessions' table.
 type storageSession struct {
-	AppName    string   `gorm:"primaryKey;"`
-	UserID     string   `gorm:"primaryKey;"`
-	ID         string   `gorm:"primaryKey;"`
-	State      StateMap `gorm:"type:json"`
+	AppName    string `gorm:"primaryKey;"`
+	UserID     string `gorm:"primaryKey;"`
+	ID         string `gorm:"primaryKey;"`
+	State      stateMap
 	CreateTime time.Time
 	UpdateTime time.Time
 
@@ -77,16 +77,16 @@ type storageEvent struct {
 	// In Python, this is a pickled object. In Go, the raw bytes are the closest
 	// equivalent. Unpickling would require a custom library or service.
 	Actions                []byte
-	LongRunningToolIDsJSON DynamicJSON `gorm:"type:text"`
+	LongRunningToolIDsJSON dynamicJSON
 	Branch                 *string
 	Timestamp              time.Time
 
 	// Fields from llm_response
-	Content           DynamicJSON `gorm:"type:text"`
-	GroundingMetadata DynamicJSON `gorm:"type:text"`
-	CustomMetadata    DynamicJSON `gorm:"type:text"`
-	UsageMetadata     DynamicJSON `gorm:"type:text"`
-	CitationMetadata  DynamicJSON `gorm:"type:text"`
+	Content           dynamicJSON
+	GroundingMetadata dynamicJSON
+	CustomMetadata    dynamicJSON
+	UsageMetadata     dynamicJSON
+	CitationMetadata  dynamicJSON
 
 	Partial      *bool
 	TurnComplete *bool
@@ -207,35 +207,35 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 	}
 
 	var content *genai.Content
-	if len(se.Content) > 0 && string(se.Content) != "<null>" {
+	if len(se.Content) > 0 {
 		if err := json.Unmarshal(se.Content, &content); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal content: %w", err)
 		}
 	}
 
 	var groundingMetadata *genai.GroundingMetadata
-	if len(se.GroundingMetadata) > 0 && string(se.GroundingMetadata) != "<null>" {
+	if len(se.GroundingMetadata) > 0 {
 		if err := json.Unmarshal(se.GroundingMetadata, &groundingMetadata); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal grounding metadata: %w", err)
 		}
 	}
 
 	var customMetadata map[string]any
-	if len(se.CustomMetadata) > 0 && string(se.CustomMetadata) != "<null>" {
+	if len(se.CustomMetadata) > 0 {
 		if err := json.Unmarshal(se.CustomMetadata, &customMetadata); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal custom metadata: %w", err)
 		}
 	}
 
 	var usageMetadata *genai.GenerateContentResponseUsageMetadata
-	if len(se.UsageMetadata) > 0 && string(se.UsageMetadata) != "<null>" {
+	if len(se.UsageMetadata) > 0 {
 		if err := json.Unmarshal(se.UsageMetadata, &usageMetadata); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal usage metadata: %w", err)
 		}
 	}
 
 	var citationMetadata *genai.CitationMetadata
-	if len(se.CitationMetadata) > 0 && string(se.CitationMetadata) != "<null>" {
+	if len(se.CitationMetadata) > 0 {
 		if err := json.Unmarshal(se.CitationMetadata, &citationMetadata); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal citation metadata: %w", err)
 		}
@@ -243,7 +243,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 
 	// --- Handle JSON-encoded *string field ---
 	var toolIDs []string
-	if se.LongRunningToolIDsJSON != nil && string(se.LongRunningToolIDsJSON) != "<null>" {
+	if se.LongRunningToolIDsJSON != nil {
 		if err := json.Unmarshal([]byte(se.LongRunningToolIDsJSON), &toolIDs); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal long running tool IDs: %w", err)
 		}
@@ -287,7 +287,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 // AppState corresponds to the 'app_states' table.
 type storageAppState struct {
 	AppName    string `gorm:"primaryKey;"`
-	State      StateMap
+	State      stateMap
 	UpdateTime time.Time
 }
 
@@ -300,7 +300,7 @@ func (storageAppState) TableName() string {
 type storageUserState struct {
 	AppName    string `gorm:"primaryKey;"`
 	UserID     string `gorm:"primaryKey;"`
-	State      StateMap
+	State      stateMap
 	UpdateTime time.Time
 }
 

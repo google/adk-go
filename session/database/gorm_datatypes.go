@@ -26,17 +26,17 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// StateMap is a custom type for map[string]any that handles its own
+// stateMap is a custom type for map[string]any that handles its own
 // JSON serialization and deserialization for the database by implementing gorm.Serializer.
-type StateMap map[string]any
+type stateMap map[string]any
 
-// GormDataType / GormDBDataType (For Schema/Migrations)
-
-func (StateMap) GormDataType() string {
+// GormDataType defines the generic fallback data type, implements GormDataTypeInterface
+func (stateMap) GormDataType() string {
 	return "text"
 }
 
-func (StateMap) GormDBDataType(db *gorm.DB, field *schema.Field) string {
+// GormDBDataType defines database specific data types, implements GormDBDataTypeInterface
+func (stateMap) GormDBDataType(db *gorm.DB, field *schema.Field) string {
 	switch db.Dialector.Name() {
 	case "postgres":
 		return "JSONB"
@@ -50,7 +50,7 @@ func (StateMap) GormDBDataType(db *gorm.DB, field *schema.Field) string {
 }
 
 // Value implements the gorm.Serializer Value method.
-func (sm StateMap) Value() (driver.Value, error) {
+func (sm stateMap) Value() (driver.Value, error) {
 	if sm == nil {
 		sm = make(map[string]any) // Serialize as '{}' instead of NULL
 	}
@@ -63,7 +63,7 @@ func (sm StateMap) Value() (driver.Value, error) {
 }
 
 // Scan implements the gorm.Serializer Scan method.
-func (sm *StateMap) Scan(value any) error {
+func (sm *stateMap) Scan(value any) error {
 	if value == nil {
 		*sm = make(map[string]any)
 		return nil
@@ -88,16 +88,17 @@ func (sm *StateMap) Scan(value any) error {
 	return json.Unmarshal(bytes, sm)
 }
 
-func (sm StateMap) GormValue(ctx context.Context, db *gorm.DB) clause.Expr {
+func (sm stateMap) GormValue(ctx context.Context, db *gorm.DB) clause.Expr {
 	data, _ := json.Marshal(sm)
+	// TODO log the expression result
 	return gorm.Expr("?", string(data))
 }
 
-// DynamicJSON defined JSON data type, that implements driver.Valuer, sql.Scanner interface
-type DynamicJSON json.RawMessage
+// dynamicJSON defined JSON data type, that implements driver.Valuer, sql.Scanner interface
+type dynamicJSON json.RawMessage
 
 // Value return json value, implement driver.Valuer interface
-func (j DynamicJSON) Value() (driver.Value, error) {
+func (j dynamicJSON) Value() (driver.Value, error) {
 	if len(j) == 0 {
 		return nil, nil
 	}
@@ -105,58 +106,50 @@ func (j DynamicJSON) Value() (driver.Value, error) {
 }
 
 // Scan implements the gorm.Serializer Scan method.
-// scan value into Jsonb, implements sql.Scanner interface
-func (j *DynamicJSON) Scan(value any) error {
+func (j *dynamicJSON) Scan(value any) error {
 	if value == nil {
-		*j = DynamicJSON("null")
+		*j = dynamicJSON("null")
 		return nil
 	}
 	var bytes []byte
-	if s, ok := value.(fmt.Stringer); ok {
-		bytes = []byte(s.String())
-	} else {
-		switch v := value.(type) {
-		case []byte:
-			if len(v) > 0 {
-				bytes = make([]byte, len(v))
-				copy(bytes, v)
-			}
-		case string:
-			bytes = []byte(v)
-		default:
-			return errors.New(fmt.Sprint("Failed to unmarshal JSONB value:", value))
+	switch v := value.(type) {
+	case []byte:
+		if len(v) == 0 {
+			// Treat empty byte slice as JSON null
+			*j = dynamicJSON("null")
+			return nil
 		}
+		bytes = make([]byte, len(v))
+		copy(bytes, v)
+	case string:
+		if v == "" {
+			// Treat empty string as JSON null
+			*j = dynamicJSON("null")
+			return nil
+		}
+		bytes = []byte(v)
+	default:
+		return errors.New(fmt.Sprint("Failed to unmarshal JSONB value:", value))
 	}
 
-	result := json.RawMessage(bytes)
-	*j = DynamicJSON(result)
+	if !json.Valid(bytes) {
+		return fmt.Errorf("invalid JSON received from database: %s", string(bytes))
+	}
+	*j = dynamicJSON(bytes)
 	return nil
 }
 
-// MarshalJSON to output non base64 encoded []byte
-func (j DynamicJSON) MarshalJSON() ([]byte, error) {
-	return json.RawMessage(j).MarshalJSON()
-}
-
-// UnmarshalJSON to deserialize []byte
-func (j *DynamicJSON) UnmarshalJSON(b []byte) error {
-	result := json.RawMessage{}
-	err := result.UnmarshalJSON(b)
-	*j = DynamicJSON(result)
-	return err
-}
-
-func (j DynamicJSON) String() string {
+func (j dynamicJSON) String() string {
 	return string(j)
 }
 
-// GormDataType gorm common data type
-func (DynamicJSON) GormDataType() string {
+// GormDataType defines the generic fallback data type, implements GormDataTypeInterface
+func (dynamicJSON) GormDataType() string {
 	return "text"
 }
 
-// GormDBDataType gorm db data type
-func (DynamicJSON) GormDBDataType(db *gorm.DB, field *schema.Field) string {
+// GormDBDataType defines database specific data types, implements GormDBDataTypeInterface
+func (dynamicJSON) GormDBDataType(db *gorm.DB, field *schema.Field) string {
 	switch db.Dialector.Name() {
 	case "mysql":
 		return "LONGTEXT"
@@ -168,10 +161,10 @@ func (DynamicJSON) GormDBDataType(db *gorm.DB, field *schema.Field) string {
 	return ""
 }
 
-func (js DynamicJSON) GormValue(ctx context.Context, db *gorm.DB) clause.Expr {
+func (js dynamicJSON) GormValue(ctx context.Context, db *gorm.DB) clause.Expr {
 	if len(js) == 0 {
 		return gorm.Expr("NULL")
 	}
-	data, _ := js.MarshalJSON()
-	return gorm.Expr("?", string(data))
+	// TODO log the expression result
+	return gorm.Expr("?", string(js))
 }
