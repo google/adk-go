@@ -34,8 +34,8 @@ type Service interface {
 // InMemoryService returns an in-memory implementation of the session service.
 func InMemoryService() Service {
 	return &inMemoryService{
-		appState:  make(map[string]map[string]any),
-		userState: make(map[string]map[string]map[string]any),
+		appState:  make(map[string]stateMap),
+		userState: make(map[string]map[string]stateMap),
 	}
 }
 

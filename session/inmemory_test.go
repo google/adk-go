@@ -552,6 +552,48 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			wantEventCount: 1,
 		},
 		{
+			name:  "append event to the session with events and overwrite in storage",
+			setup: serviceDbWithData,
+			session: &session{
+				id: id{
+					appName:   "app2",
+					userID:    "user2",
+					sessionID: "session2",
+				},
+			},
+			event: &Event{
+				ID: "new_event1",
+				LLMResponse: model.LLMResponse{
+					Partial: false,
+				},
+			},
+			wantStoredSession: &session{
+				id: id{
+					appName:   "app2",
+					userID:    "user2",
+					sessionID: "session2",
+				},
+				events: []*Event{
+					{
+						ID: "existing_event1",
+						LLMResponse: model.LLMResponse{
+							Partial: false,
+						},
+					},
+					{
+						ID: "new_event1",
+						LLMResponse: model.LLMResponse{
+							Partial: false,
+						},
+					},
+				},
+				state: map[string]any{
+					"k2": "v2",
+				},
+			},
+			wantEventCount: 2,
+		},
+		{
 			name:  "append event when session not found should fail",
 			setup: serviceDbWithData,
 			session: &session{
@@ -935,6 +977,14 @@ func serviceDbWithData(t *testing.T) Service {
 			},
 			state: map[string]any{
 				"k2": "v2",
+			},
+			events: []*Event{
+				{
+					ID: "existing_event1",
+					LLMResponse: model.LLMResponse{
+						Partial: false,
+					},
+				},
 			},
 		},
 	} {

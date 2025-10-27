@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -30,13 +31,15 @@ import (
 	"rsc.io/ordered"
 )
 
+type stateMap map[string]any
+
 // inMemoryService is an in-memory implementation of sessionService.Service.
 // Thread-safe.
 type inMemoryService struct {
 	mu        sync.RWMutex
 	sessions  omap.Map[string, *session] // session.ID) -> storedSession
-	userState map[string]map[string]map[string]any
-	appState  map[string]map[string]any
+	userState map[string]map[string]stateMap
+	appState  map[string]stateMap
 }
 
 func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
@@ -61,13 +64,13 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 		return nil, fmt.Errorf("session %s already exists", req.SessionID)
 	}
 
-	stateMap := req.State
-	if stateMap == nil {
-		stateMap = make(map[string]any)
+	state := req.State
+	if state == nil {
+		state = make(stateMap)
 	}
 	val := &session{
 		id:        key,
-		state:     stateMap,
+		state:     state,
 		updatedAt: time.Now(),
 	}
 
@@ -78,10 +81,14 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	appDelta, userDelta, _ := sessionutils.ExtractStateDeltas(req.State)
 	appState := s.updateAppState(appDelta, req.AppName)
 	userState := s.updateUserState(userDelta, req.AppName, req.UserID)
-	val.state = sessionutils.MergeStates(appState, userState, stateMap)
+	val.state = sessionutils.MergeStates(appState, userState, state)
+
+	copiedSession := copySessionWithoutStateAndEvents(val)
+	copiedSession.state = maps.Clone(val.state)
+	copiedSession.events = slices.Clone(val.events)
 
 	return &CreateResponse{
-		Session: val,
+		Session: copiedSession,
 	}, nil
 }
 
@@ -206,7 +213,8 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.sessions.Get(sess.id.Encode()); !ok {
+	stored_session, ok := s.sessions.Get(sess.id.Encode())
+	if !ok {
 		return fmt.Errorf("session not found, cannot apply event")
 	}
 
@@ -216,43 +224,45 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 
 	// update the in-memory session service
-	s.sessions.Set(sess.id.Encode(), sess)
+	stored_session.events = append(stored_session.events, event)
+	stored_session.updatedAt = event.Timestamp
 	if len(event.Actions.StateDelta) > 0 {
-		appDelta, userDelta, _ := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
+		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
 		s.updateAppState(appDelta, curSession.AppName())
 		s.updateUserState(userDelta, curSession.AppName(), curSession.UserID())
+		maps.Copy(stored_session.state, sessionDelta)
 	}
 	return nil
 }
 
-func (s *inMemoryService) updateAppState(appDelta map[string]any, appName string) map[string]any {
+func (s *inMemoryService) updateAppState(appDelta stateMap, appName string) stateMap {
 	innerMap, ok := s.appState[appName]
 	if !ok {
-		innerMap = make(map[string]any)
+		innerMap = make(stateMap)
 		s.appState[appName] = innerMap
 	}
 	maps.Copy(innerMap, appDelta)
 	return innerMap
 }
 
-func (s *inMemoryService) updateUserState(userDelta map[string]any, appName, userID string) map[string]any {
+func (s *inMemoryService) updateUserState(userDelta stateMap, appName, userID string) stateMap {
 	innerUsersMap, ok := s.userState[appName]
 	if !ok {
-		innerUsersMap = make(map[string]map[string]any)
+		innerUsersMap = make(map[string]stateMap)
 		s.userState[appName] = innerUsersMap
 	}
 	innerMap, ok := innerUsersMap[userID]
 	if !ok {
-		innerMap = make(map[string]any)
+		innerMap = make(stateMap)
 		innerUsersMap[userID] = innerMap
 	}
 	maps.Copy(innerMap, userDelta)
 	return innerMap
 }
 
-func (s *inMemoryService) mergeStates(state map[string]any, appName, userID string) map[string]any {
+func (s *inMemoryService) mergeStates(state stateMap, appName, userID string) stateMap {
 	appState := s.appState[appName]
-	var userState map[string]any
+	var userState stateMap
 	userStateMap, ok := s.userState[appName]
 	if ok {
 		userState = userStateMap[userID]
