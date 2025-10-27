@@ -66,9 +66,8 @@ func (a *ApiLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config)
 }
 
 // ReplaceRouter replaces parent router
-func (a *ApiLauncher) ReplaceRouter(router *mux.Router, adkConfig *adk.Config) *mux.Router {
-	// api doesn't change the router itself
-	return router
+func (a *ApiLauncher) SetupRoutes(router *mux.Router, adkConfig *adk.Config) {
+	// api doesn't change the top level routes
 }
 
 func (a *ApiLauncher) FormatSyntax() string {
