@@ -515,6 +515,44 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			wantEventCount: 1,
 		},
 		{
+			name:  "append event to the session with events and overwrite in storage",
+			setup: serviceDbWithData,
+			session: &localSession{
+				appName:   "app2",
+				userID:    "user2",
+				sessionID: "session2",
+			},
+			event: &session.Event{
+				ID: "new_event1",
+				LLMResponse: model.LLMResponse{
+					Partial: false,
+				},
+			},
+			wantStoredSession: &localSession{
+				appName:   "app2",
+				userID:    "user2",
+				sessionID: "session2",
+				events: []*session.Event{
+					{
+						ID: "existing_event1",
+						LLMResponse: model.LLMResponse{
+							Partial: false,
+						},
+					},
+					{
+						ID: "new_event1",
+						LLMResponse: model.LLMResponse{
+							Partial: false,
+						},
+					},
+				},
+				state: map[string]any{
+					"k2": "v2",
+				},
+			},
+			wantEventCount: 2,
+		},
+		{
 			name:  "append event when session not found should fail",
 			setup: serviceDbWithData,
 			session: &localSession{
@@ -735,11 +773,14 @@ func Test_databaseService_StateManagement(t *testing.T) {
 		s := emptyService(t)
 		s1, _ := s.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1", State: map[string]any{"app:k1": "v1"}})
 		s1.Session.(*localSession).updatedAt = time.Now()
-		_ = s.AppendEvent(ctx, s1.Session.(*localSession), &session.Event{
+		err := s.AppendEvent(ctx, s1.Session.(*localSession), &session.Event{
 			ID:          "event1",
 			Actions:     session.EventActions{StateDelta: map[string]any{"app:k2": "v2"}},
 			LLMResponse: model.LLMResponse{},
 		})
+		if err != nil {
+			t.Fatalf("Failed to appendEvent: %v", err)
+		}
 
 		s2, err := s.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u2", SessionID: "s2"})
 		if err != nil {
@@ -757,11 +798,14 @@ func Test_databaseService_StateManagement(t *testing.T) {
 		s := emptyService(t)
 		s1, _ := s.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1", State: map[string]any{"user:k1": "v1"}})
 		s1.Session.(*localSession).updatedAt = time.Now()
-		_ = s.AppendEvent(ctx, s1.Session.(*localSession), &session.Event{
+		err := s.AppendEvent(ctx, s1.Session.(*localSession), &session.Event{
 			ID:          "event1",
 			Actions:     session.EventActions{StateDelta: map[string]any{"user:k2": "v2"}},
 			LLMResponse: model.LLMResponse{},
 		})
+		if err != nil {
+			t.Fatalf("Failed to appendEvent: %v", err)
+		}
 
 		s1b, _ := s.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1b"})
 		wantStateU1 := map[string]any{"user:k1": "v1", "user:k2": "v2"}
@@ -781,11 +825,14 @@ func Test_databaseService_StateManagement(t *testing.T) {
 		s := emptyService(t)
 		s1, _ := s.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1", State: map[string]any{"sk1": "v1"}})
 		s1.Session.(*localSession).updatedAt = time.Now()
-		_ = s.AppendEvent(ctx, s1.Session.(*localSession), &session.Event{
+		err := s.AppendEvent(ctx, s1.Session.(*localSession), &session.Event{
 			ID:          "event1",
 			Actions:     session.EventActions{StateDelta: map[string]any{"sk2": "v2"}},
 			LLMResponse: model.LLMResponse{},
 		})
+		if err != nil {
+			t.Fatalf("Failed to appendEvent: %v", err)
+		}
 
 		s1_got, _ := s.Get(ctx, &session.GetRequest{AppName: appName, UserID: "u1", SessionID: "s1"})
 		wantState := map[string]any{"sk1": "v1", "sk2": "v2"}
@@ -810,7 +857,10 @@ func Test_databaseService_StateManagement(t *testing.T) {
 			Actions:     session.EventActions{StateDelta: map[string]any{"temp:k1": "v1", "sk": "v2"}},
 			LLMResponse: model.LLMResponse{},
 		}
-		_ = s.AppendEvent(ctx, s1.Session.(*localSession), event)
+		err := s.AppendEvent(ctx, s1.Session.(*localSession), event)
+		if err != nil {
+			t.Fatalf("Failed to appendEvent: %v", err)
+		}
 
 		s1_got, _ := s.Get(ctx, &session.GetRequest{AppName: appName, UserID: "u1", SessionID: "s1"})
 		wantState := map[string]any{"sk": "v2"}
@@ -870,10 +920,18 @@ func serviceDbWithData(t *testing.T) *databaseService {
 			state: map[string]any{
 				"k2": "v2",
 			},
+			events: []*session.Event{
+				{
+					ID: "existing_event1",
+					LLMResponse: model.LLMResponse{
+						Partial: false,
+					},
+				},
+			},
 		},
 	} {
 		// TODO: Consider changing to SQL insert
-		_, err := service.Create(t.Context(), &session.CreateRequest{
+		resp, err := service.Create(t.Context(), &session.CreateRequest{
 			AppName:   storedSession.appName,
 			UserID:    storedSession.userID,
 			SessionID: storedSession.sessionID,
@@ -881,6 +939,13 @@ func serviceDbWithData(t *testing.T) *databaseService {
 		})
 		if err != nil {
 			t.Fatalf("Failed to create sample sessions on db initialization: %v", err)
+		}
+
+		for _, ev := range storedSession.events {
+			err = service.AppendEvent(t.Context(), resp.Session, ev)
+			if err != nil {
+				t.Fatalf("Failed to append event to session on db initialization: %v", err)
+			}
 		}
 	}
 
