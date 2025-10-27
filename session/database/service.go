@@ -70,11 +70,11 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		storageApp, err := fetchStorageAppState(tx, req.AppName)
 		if err != nil {
-			return err
+			return fmt.Errorf("error on create session: %w", err)
 		}
 		storageUser, err := fetchStorageUserState(tx, req.AppName, req.UserID)
 		if err != nil {
-			return err
+			return fmt.Errorf("error on create session: %w", err)
 		}
 
 		appDelta, userDelta, sessionState := extractStateDeltas(req.State)
@@ -160,11 +160,11 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	// fetch app and user states
 	storageApp, err := fetchStorageAppState(s.db.WithContext(ctx), appName)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error on get session: %w", err)
 	}
 	storageUser, err := fetchStorageUserState(s.db.WithContext(ctx), appName, userID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error on get session: %w", err)
 	}
 
 	responseSession, err := createSessionFromStorageSession(&foundSession)
@@ -225,20 +225,20 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 
 	storageApp, err := fetchStorageAppState(s.db.WithContext(ctx), appName)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error on list sessions: %w", err)
 	}
 
 	var userStates map[string]*storageUserState
 	if userID != "" {
 		userState, err := fetchStorageUserState(s.db.WithContext(ctx), appName, userID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error on list sessions: %w", err)
 		}
 		userStates = map[string]*storageUserState{userID: userState}
 	} else {
 		userStates, err = fetchAllAppStorageUserState(s.db.WithContext(ctx), appName)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error on list sessions: %w", err)
 		}
 	}
 

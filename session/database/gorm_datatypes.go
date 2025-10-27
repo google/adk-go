@@ -108,23 +108,21 @@ func (j dynamicJSON) Value() (driver.Value, error) {
 // Scan implements the gorm.Serializer Scan method.
 func (j *dynamicJSON) Scan(value any) error {
 	if value == nil {
-		*j = dynamicJSON("null")
+		*j = nil
 		return nil
 	}
 	var bytes []byte
 	switch v := value.(type) {
 	case []byte:
 		if len(v) == 0 {
-			// Treat empty byte slice as JSON null
-			*j = dynamicJSON("null")
+			*j = nil
 			return nil
 		}
 		bytes = make([]byte, len(v))
 		copy(bytes, v)
 	case string:
 		if v == "" {
-			// Treat empty string as JSON null
-			*j = dynamicJSON("null")
+			*j = nil
 			return nil
 		}
 		bytes = []byte(v)
