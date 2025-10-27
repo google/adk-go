@@ -32,6 +32,7 @@ import (
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/runner"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
 type a2aConfig struct {
@@ -68,6 +69,7 @@ func (a *A2ALauncher) Parse(args []string) ([]string, error) {
 func (a *A2ALauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
 	grpcSrv := grpc.NewServer()
 	newA2AHandler(adkConfig, a.config.rootAgentName).RegisterWith(grpcSrv)
+	reflection.Register(grpcSrv)
 	var result http.Handler
 	result = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
