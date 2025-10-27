@@ -47,7 +47,7 @@ type WebLauncher struct {
 type WebSublauncher interface {
 	launcher.Sublauncher
 	SetupSubrouters(router *mux.Router, adkConfig *adk.Config)
-	SetupRoutes(router *mux.Router, adkConfig *adk.Config)
+	WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler
 	UserMessage(webUrl string, printer func(v ...any))
 }
 
@@ -126,14 +126,15 @@ func (w *WebLauncher) Run(ctx context.Context, config *adk.Config) error {
 		return fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
 	}
 
-	// Setup general routes
-	for _, l := range w.activeSublaunchers {
-		l.SetupRoutes(router, config)
-	}
-
 	// Setup subrouters
 	for _, l := range w.activeSublaunchers {
 		l.SetupSubrouters(router, config)
+	}
+
+	// allow sublaunchers to modify top level handler (needed by a2a)
+	var handler http.Handler = router
+	for _, l := range w.activeSublaunchers {
+		handler = l.WrapHandlers(handler, config)
 	}
 
 	log.Printf("Starting the web server: %+v", w.config)
@@ -150,7 +151,7 @@ func (w *WebLauncher) Run(ctx context.Context, config *adk.Config) error {
 		WriteTimeout: time.Second * 15,
 		ReadTimeout:  time.Second * 15,
 		IdleTimeout:  time.Second * 60,
-		Handler:      router,
+		Handler:      handler,
 	}
 
 	err := srv.ListenAndServe()

@@ -19,10 +19,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
+	"strings"
 
 	"github.com/a2aproject/a2a-go/a2agrpc"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/adk/adka2a"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/adk"
@@ -61,10 +65,19 @@ func (a *A2ALauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-func (a *A2ALauncher) SetupRoutes(router *mux.Router, adkConfig *adk.Config) {
+func (a *A2ALauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
 	grpcSrv := grpc.NewServer()
 	newA2AHandler(adkConfig, a.config.rootAgentName).RegisterWith(grpcSrv)
-	router.Headers("Content-Type", "application/grpc").Handler(grpcSrv)
+	var result http.Handler
+	result = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+			grpcSrv.ServeHTTP(w, r)
+		} else {
+			handler.ServeHTTP(w, r)
+		}
+	})
+	result = h2c.NewHandler(result, &http2.Server{})
+	return result
 }
 
 func (a *A2ALauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {

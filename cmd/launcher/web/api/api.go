@@ -65,8 +65,9 @@ func (a *ApiLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config)
 	rApi.Use(CorsWithArgs(a.config.frontendAddress))
 }
 
-func (a *ApiLauncher) SetupRoutes(router *mux.Router, adkConfig *adk.Config) {
+func (a *ApiLauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
 	// api doesn't change the top level routes
+	return handler
 }
 
 func (a *ApiLauncher) FormatSyntax() string {

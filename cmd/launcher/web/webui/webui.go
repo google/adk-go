@@ -57,8 +57,9 @@ func (w *WebUILauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-func (w *WebUILauncher) SetupRoutes(router *mux.Router, adkConfig *adk.Config) {
-	// no need to modify top level routes
+func (a *WebUILauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
+	// api doesn't change the top level routes
+	return handler
 }
 
 func (w *WebUILauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {
