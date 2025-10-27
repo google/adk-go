@@ -20,13 +20,9 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher/a2a"
 	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/cmd/launcher/api"
-	"google.golang.org/adk/cmd/launcher/console"
+	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/cmd/launcher/universal"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/cmd/launcher/webui"
 	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
@@ -61,13 +57,8 @@ func main() {
 		AgentLoader: services.NewSingleAgentLoader(agent),
 	}
 
-	l := universal.NewLauncher(console.NewLauncher(""), web.NewLauncher(api.NewLauncher(), a2a.NewLauncher("aaa"), webui.NewLauncher()))
-	err = l.ParseAndRun(ctx, config, os.Args[1:], func(args []string) error {
-		for _, s := range args {
-			log.Println(s)
-		}
-		return nil
-	})
+	l := full.NewLaucher("weather_time_agent")
+	err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
 	if err != nil {
 		log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())
 	}
