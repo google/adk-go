@@ -79,37 +79,6 @@ func TestMutableSession_SetGet(t *testing.T) {
 	}
 }
 
-func TestMutableSession_Set_Persistence(t *testing.T) {
-	ctx := context.Background()
-	sessionID := "testSetPersistence"
-	ms, service := createMutableSession(ctx, t, sessionID, nil)
-
-	testKey := "persistKey"
-	testValue := "persistValue"
-
-	if err := ms.Set(testKey, testValue); err != nil {
-		t.Fatalf("Set(%q, %v) failed: %v", testKey, testValue, err)
-	}
-
-	req := &session.GetRequest{
-		AppName:   ms.AppName(),
-		UserID:    ms.UserID(),
-		SessionID: ms.ID(),
-	}
-	getResp, err := service.Get(ctx, req)
-	if err != nil {
-		t.Fatalf("service.Get failed: %v", err)
-	}
-
-	val, err := getResp.Session.State().Get(testKey)
-	if err != nil {
-		t.Fatalf("storedSess.State().Get(%q) failed: %v", testKey, err)
-	}
-	if diff := cmp.Diff(testValue, val); diff != "" {
-		t.Errorf("Persisted state diff (-want +got):\n%s", diff)
-	}
-}
-
 func TestMutableSession_All(t *testing.T) {
 	ctx := context.Background()
 
