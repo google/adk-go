@@ -27,7 +27,7 @@ type Service interface {
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	List(context.Context, *ListRequest) (*ListResponse, error)
 	Delete(context.Context, *DeleteRequest) error
-	// AppendEvent is used to append an event to a session.
+	// AppendEvent is used to append an event to a session, and remove temporary state keys from event.
 	AppendEvent(context.Context, Session, *Event) error
 }
 
