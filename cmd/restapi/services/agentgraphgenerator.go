@@ -114,6 +114,12 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
+// Function returns whether the edge should be highlighted.
+// The graph could have the pairs highlighted in different directions.
+// If nil is returned, means the nodes aren't highlithed.
+// Otherwise, pointer to bool type is returned, where true
+// means the directed connection between nodes, while false means
+// there is a reversed order between nodes.
 func edgeHighlighted(from string, to string, higlightedPairs [][]string) *bool {
 	if len(higlightedPairs) == 0 {
 		return nil

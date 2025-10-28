@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/awalterschulze/gographviz"
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
@@ -113,9 +114,21 @@ func TestNodeName(t *testing.T) {
 		instance any
 		expected string
 	}{
-		{"agent", newTestAgent(t, "TestAgent", "", agentinternal.TypeCustomAgent, nil, nil), "TestAgent"},
-		{"tool", &mockTool{name: "TestTool"}, "TestTool"},
-		{"unknown", "some string", "Unknown instance type"},
+		{
+			name:     "agent",
+			instance: newTestAgent(t, "TestAgent", "", agentinternal.TypeCustomAgent, nil, nil),
+			expected: "TestAgent",
+		},
+		{
+			name:     "tool",
+			instance: &mockTool{name: "TestTool"},
+			expected: "TestTool",
+		},
+		{
+			name:     "unknown",
+			instance: "some string",
+			expected: "Unknown instance type",
+		},
 	}
 
 	for _, tt := range tests {
@@ -133,12 +146,36 @@ func TestNodeCaption(t *testing.T) {
 		instance any
 		expected string
 	}{
-		{"llm agent", newTestAgent(t, "LLMAgent", "", agentinternal.TypeLLMAgent, nil, nil), "\"🤖 LLMAgent\""},
-		{"sequential agent", newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, nil, nil), "\"SeqAgent (SequentialAgent)\""},
-		{"loop agent", newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, nil, nil), "\"LoopAgent (LoopAgent)\""},
-		{"parallel agent", newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, nil, nil), "\"ParAgent (ParallelAgent)\""},
-		{"tool", &mockTool{name: "TestTool"}, "\"🔧 TestTool\""},
-		{"unknown", "some string", "\"Unsupported agent or tool type\""},
+		{
+			name:     "llm agent",
+			instance: newTestAgent(t, "LLMAgent", "", agentinternal.TypeLLMAgent, nil, nil),
+			expected: "\"🤖 LLMAgent\"",
+		},
+		{
+			name:     "sequential agent",
+			instance: newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, nil, nil),
+			expected: "\"SeqAgent (SequentialAgent)\"",
+		},
+		{
+			name:     "loop agent",
+			instance: newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, nil, nil),
+			expected: "\"LoopAgent (LoopAgent)\"",
+		},
+		{
+			name:     "parallel agent",
+			instance: newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, nil, nil),
+			expected: "\"ParAgent (ParallelAgent)\"",
+		},
+		{
+			name:     "tool",
+			instance: &mockTool{name: "TestTool"},
+			expected: "\"🔧 TestTool\"",
+		},
+		{
+			name:     "unknown",
+			instance: "some string",
+			expected: "\"Unsupported agent or tool type\"",
+		},
 	}
 
 	for _, tt := range tests {
@@ -156,9 +193,21 @@ func TestNodeShape(t *testing.T) {
 		instance any
 		expected string
 	}{
-		{"agent", newTestAgent(t, "TestAgent", "", agentinternal.TypeCustomAgent, nil, nil), "ellipse"},
-		{"tool", &mockTool{name: "TestTool"}, "box"},
-		{"unknown", "some string", "cylinder"},
+		{
+			name:     "agent",
+			instance: newTestAgent(t, "TestAgent", "", agentinternal.TypeCustomAgent, nil, nil),
+			expected: "ellipse",
+		},
+		{
+			name:     "tool",
+			instance: &mockTool{name: "TestTool"},
+			expected: "box",
+		},
+		{
+			name:     "unknown",
+			instance: "some string",
+			expected: "cylinder",
+		},
 	}
 
 	for _, tt := range tests {
@@ -176,12 +225,36 @@ func TestShouldBuildAgentCluster(t *testing.T) {
 		instance any
 		expected bool
 	}{
-		{"llm agent", newTestAgent(t, "LLMAgent", "", agentinternal.TypeLLMAgent, nil, nil), false},
-		{"sequential agent", newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, nil, nil), true},
-		{"loop agent", newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, nil, nil), true},
-		{"parallel agent", newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, nil, nil), true},
-		{"tool", &mockTool{name: "TestTool"}, false},
-		{"unknown", "some string", false},
+		{
+			name:     "llm agent",
+			instance: newTestAgent(t, "LLMAgent", "", agentinternal.TypeLLMAgent, nil, nil),
+			expected: false,
+		},
+		{
+			name:     "sequential agent",
+			instance: newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, nil, nil),
+			expected: true,
+		},
+		{
+			name:     "loop agent",
+			instance: newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, nil, nil),
+			expected: true,
+		},
+		{
+			name:     "parallel agent",
+			instance: newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, nil, nil),
+			expected: true,
+		},
+		{
+			name:     "tool",
+			instance: &mockTool{name: "TestTool"},
+			expected: false,
+		},
+		{
+			name:     "unknown",
+			instance: "some string",
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -200,10 +273,28 @@ func TestHighlighted(t *testing.T) {
 		highlightedPairs [][]string
 		expected         bool
 	}{
-		{name: "no highlight", nodeName: "NodeA", highlightedPairs: [][]string{}, expected: false},
-		{name: "node in pair", nodeName: "NodeA", highlightedPairs: [][]string{{"NodeA", "NodeB"}}, expected: true},
-		{name: "node not in pair", nodeName: "NodeC", highlightedPairs: [][]string{{"NodeA", "NodeB"}}, expected: false},
-		{name: "multiple pairs", nodeName: "NodeB", highlightedPairs: [][]string{{"NodeA", "NodeB"}, {"NodeC", "NodeD"}}, expected: true},
+		{
+			name:     "no highlight",
+			nodeName: "NodeA", highlightedPairs: [][]string{},
+			expected: false,
+		},
+		{
+			name:     "node in pair",
+			nodeName: "NodeA", highlightedPairs: [][]string{{"NodeA", "NodeB"}},
+			expected: true,
+		},
+		{
+			name:             "node not in pair",
+			nodeName:         "NodeC",
+			highlightedPairs: [][]string{{"NodeA", "NodeB"}},
+			expected:         false,
+		},
+		{
+			name:             "multiple pairs",
+			nodeName:         "NodeB",
+			highlightedPairs: [][]string{{"NodeA", "NodeB"}, {"NodeC", "NodeD"}},
+			expected:         true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -223,11 +314,40 @@ func TestEdgeHighlighted(t *testing.T) {
 		highlightedPairs [][]string
 		expected         *bool // Use pointer to distinguish nil from false
 	}{
-		{name: "no highlight pairs", from: "A", to: "B", highlightedPairs: [][]string{}, expected: nil},
-		{name: "matching forward", from: "A", to: "B", highlightedPairs: [][]string{{"A", "B"}}, expected: boolPtr(true)},
-		{name: "matching backward", from: "B", to: "A", highlightedPairs: [][]string{{"A", "B"}}, expected: boolPtr(false)},
-		{name: "no match", from: "C", to: "D", highlightedPairs: [][]string{{"A", "B"}}, expected: nil},
-		{name: "partial match", from: "A", to: "C", highlightedPairs: [][]string{{"A", "B"}}, expected: nil},
+		{
+			name:             "no highlight pairs",
+			from:             "A",
+			to:               "B",
+			highlightedPairs: [][]string{},
+			expected:         nil,
+		},
+		{
+			name:             "matching forward",
+			from:             "A",
+			to:               "B",
+			highlightedPairs: [][]string{{"A", "B"}},
+			expected:         boolPtr(true),
+		},
+		{
+			name:             "matching backward",
+			from:             "B",
+			to:               "A",
+			highlightedPairs: [][]string{{"A", "B"}},
+			expected:         boolPtr(false),
+		},
+		{
+			name: "no match",
+			from: "C",
+			to:   "D", highlightedPairs: [][]string{{"A", "B"}},
+			expected: nil,
+		},
+		{
+			name:             "partial match",
+			from:             "A",
+			to:               "C",
+			highlightedPairs: [][]string{{"A", "B"}},
+			expected:         nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -243,6 +363,96 @@ func TestEdgeHighlighted(t *testing.T) {
 }
 
 func TestDrawNode(t *testing.T) {
+
+	tests := []struct {
+		name             string
+		agent            agent.Agent
+		tool             tool.Tool
+		highlightedPairs [][]string
+		expected         gographviz.Attrs
+	}{
+		{
+			name:             "draw agent node",
+			agent:            newTestAgent(t, "MyAgent", "", agentinternal.TypeCustomAgent, nil, nil),
+			highlightedPairs: [][]string{},
+			expected: gographviz.Attrs{
+				"color":     LightGray,
+				"label":     "\"🤖 MyAgent\"",
+				"shape":     "ellipse",
+				"fontcolor": LightGray,
+				"style":     "rounded",
+			},
+		},
+		{
+			name:             "draw agent node highlighted",
+			agent:            newTestAgent(t, "HighlightedAgent", "", agentinternal.TypeCustomAgent, nil, nil),
+			highlightedPairs: [][]string{{"HighlightedAgent", "Tool1"}},
+			expected: gographviz.Attrs{
+				"color":     DarkGreen,
+				"label":     "\"🤖 HighlightedAgent\"",
+				"shape":     "ellipse",
+				"fontcolor": LightGray,
+				"style":     "filled",
+			},
+		},
+		{
+			name:             "draw tool node",
+			tool:             &mockTool{name: "MyTool"},
+			highlightedPairs: [][]string{},
+			expected: gographviz.Attrs{
+				"color":     LightGray,
+				"label":     "\"🔧 MyTool\"",
+				"shape":     "box",
+				"fontcolor": LightGray,
+				"style":     "rounded",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			graph := gographviz.NewGraph()
+			err := graph.SetName("G")
+			if err != nil {
+				t.Fatalf("failed to set graph name: %v", err)
+			}
+			parentGraph := graph
+			visitedNodes := make(map[string]bool)
+			nodeName := ""
+			if tt.agent != nil {
+				err = drawNode(graph, parentGraph, tt.agent, tt.highlightedPairs, visitedNodes)
+				if err != nil {
+					t.Fatalf("drawNode failed: %v", err)
+				}
+				nodeName = tt.agent.Name()
+			}
+			if tt.tool != nil {
+				err = drawNode(graph, parentGraph, tt.tool, tt.highlightedPairs, visitedNodes)
+				if err != nil {
+					t.Fatalf("drawNode failed: %v", err)
+				}
+				nodeName = tt.tool.Name()
+			}
+			if nodeName == "" {
+				t.Fatalf("No node name found: %v", nodeName)
+			}
+			node := graph.Nodes.Lookup[nodeName]
+			if node == nil {
+				t.Fatal("Agent node not found in graph")
+			}
+			if diff := cmp.Diff(tt.expected, node.Attrs); diff != "" {
+				t.Fatalf("drawNode mismatch (-want +got):\n%s", diff)
+			}
+			if !visitedNodes[nodeName] {
+				t.Error("Agent node not marked as visited")
+			}
+
+		})
+	}
+}
+
+func TestDrawClusterNode(t *testing.T) {
 	graph := gographviz.NewGraph()
 	err := graph.SetName("G")
 	if err != nil {
@@ -250,106 +460,26 @@ func TestDrawNode(t *testing.T) {
 	}
 	parentGraph := graph
 	visitedNodes := make(map[string]bool)
-
-	t.Run("draw agent node", func(t *testing.T) {
-		agent := newTestAgent(t, "MyAgent", "", agentinternal.TypeCustomAgent, nil, nil)
-		err := drawNode(graph, parentGraph, agent, [][]string{}, visitedNodes)
-		if err != nil {
-			t.Fatalf("drawNode failed: %v", err)
-		}
-		node := graph.Nodes.Lookup["MyAgent"]
-		if node == nil {
-			t.Fatal("Agent node not found in graph")
-		}
-		if node.Attrs["label"] != "\"🤖 MyAgent\"" {
-			t.Errorf("Agent node label mismatch: got %s", node.Attrs["label"])
-		}
-		if node.Attrs["shape"] != "ellipse" {
-			t.Errorf("Agent node shape mismatch: got %s", node.Attrs["shape"])
-		}
-		if node.Attrs["color"] != LightGray {
-			t.Errorf("Agent node color mismatch: got %s", node.Attrs["color"])
-		}
-		if !visitedNodes["MyAgent"] {
-			t.Error("Agent node not marked as visited")
-		}
-	})
-
-	// Reset visitedNodes for the next test case
-	visitedNodes = make(map[string]bool)
-
-	t.Run("draw highlighted agent node", func(t *testing.T) {
-		agent := newTestAgent(t, "HighlightedAgent", "", agentinternal.TypeCustomAgent, nil, nil)
-		highlightedPairs := [][]string{{"HighlightedAgent", "Tool1"}}
-		err := drawNode(graph, parentGraph, agent, highlightedPairs, visitedNodes)
-		if err != nil {
-			t.Fatalf("drawNode failed: %v", err)
-		}
-		node := graph.Nodes.Lookup["HighlightedAgent"]
-		if node == nil {
-			t.Fatal("Highlighted agent node not found in graph")
-		}
-		if node.Attrs["color"] != DarkGreen {
-			t.Errorf("Highlighted agent node color mismatch: got %s", node.Attrs["color"])
-		}
-		if node.Attrs["style"] != "filled" {
-			t.Errorf("Highlighted agent node style mismatch: got %s", node.Attrs["style"])
-		}
-	})
-
-	// Reset visitedNodes for the next test case
-	visitedNodes = make(map[string]bool)
-
-	t.Run("draw tool node", func(t *testing.T) {
-		tool := &mockTool{name: "MyTool"}
-		err := drawNode(graph, parentGraph, tool, [][]string{}, visitedNodes)
-		if err != nil {
-			t.Fatalf("drawNode failed: %v", err)
-		}
-		node := graph.Nodes.Lookup["MyTool"]
-		if node == nil {
-			t.Fatal("Tool node not found in graph")
-		}
-		if node.Attrs["label"] != "\"🔧 MyTool\"" {
-			t.Errorf("Tool node label mismatch: got %s", node.Attrs["label"])
-		}
-		if node.Attrs["shape"] != "box" {
-			t.Errorf("Tool node shape mismatch: got %s", node.Attrs["shape"])
-		}
-		if node.Attrs["color"] != LightGray {
-			t.Errorf("Tool node color mismatch: got %s", node.Attrs["color"])
-		}
-		if !visitedNodes["MyTool"] {
-			t.Error("Tool node not marked as visited")
-		}
-	})
-
-	// Reset visitedNodes for the next test case
-	visitedNodes = make(map[string]bool)
-
-	t.Run("draw cluster agent", func(t *testing.T) {
-		agent := newTestAgent(t, "MyClusterAgent", "", agentinternal.TypeSequentialAgent, nil, nil)
-		err := drawNode(graph, parentGraph, agent, [][]string{}, visitedNodes)
-		if err != nil {
-			t.Fatalf("drawNode failed: %v", err)
-		}
-		clusterName := "cluster_MyClusterAgent"
-		cluster := graph.SubGraphs.SubGraphs[clusterName]
-		if cluster == nil {
-			t.Fatal("Cluster not found in graph")
-		}
-		if cluster.Attrs["label"] != "\"MyClusterAgent (SequentialAgent)\"" {
-			t.Errorf("Cluster label mismatch: got %s", cluster.Attrs["label"])
-		}
-		if cluster.Attrs["style"] != "rounded" {
-			t.Errorf("Cluster style mismatch: got %s", cluster.Attrs["style"])
-		}
-		if !visitedNodes["MyClusterAgent"] {
-			t.Error("Cluster agent not marked as visited")
-		}
-	})
+	agent := newTestAgent(t, "MyClusterAgent", "", agentinternal.TypeSequentialAgent, nil, nil)
+	err = drawNode(graph, parentGraph, agent, [][]string{}, visitedNodes)
+	if err != nil {
+		t.Fatalf("drawNode failed: %v", err)
+	}
+	clusterName := "cluster_MyClusterAgent"
+	cluster := graph.SubGraphs.SubGraphs[clusterName]
+	if cluster == nil {
+		t.Fatal("Cluster not found in graph")
+	}
+	if cluster.Attrs["label"] != "\"MyClusterAgent (SequentialAgent)\"" {
+		t.Errorf("Cluster label mismatch: got %s", cluster.Attrs["label"])
+	}
+	if cluster.Attrs["style"] != "rounded" {
+		t.Errorf("Cluster style mismatch: got %s", cluster.Attrs["style"])
+	}
+	if !visitedNodes["MyClusterAgent"] {
+		t.Error("Cluster agent not marked as visited")
+	}
 }
-
 func lookupEdge(t *testing.T, graph *gographviz.Graph, src string, dst string) *gographviz.Edge {
 	node := graph.Edges.SrcToDsts[src]
 	if node == nil {
@@ -366,176 +496,148 @@ func lookupEdge(t *testing.T, graph *gographviz.Graph, src string, dst string) *
 }
 
 func TestDrawEdge(t *testing.T) {
-	graph := gographviz.NewGraph()
-	err := graph.SetName("G")
-	if err != nil {
-		t.Fatalf("failed to set graph name: %v", err)
+	tests := []struct {
+		name             string
+		from             string
+		to               string
+		highlightedPairs [][]string
+		expected         gographviz.Attrs
+	}{
+		{
+			name:             "draw unhighlighted edge",
+			from:             "NodeA",
+			to:               "NodeB",
+			highlightedPairs: [][]string{},
+			expected: gographviz.Attrs{
+				"color":     LightGray,
+				"arrowhead": "none",
+			},
+		},
+		{
+			name:             "draw highlighted edge",
+			from:             "NodeC",
+			to:               "NodeD",
+			highlightedPairs: [][]string{{"NodeC", "NodeD"}},
+			expected: gographviz.Attrs{
+				"color":     LightGreen,
+				"arrowhead": "normal",
+			},
+		},
+		{
+			name:             "draw highlighted backward edge",
+			from:             "NodeE",
+			to:               "NodeF",
+			highlightedPairs: [][]string{{"NodeF", "NodeE"}},
+			expected: gographviz.Attrs{
+				"color":     LightGreen,
+				"arrowhead": "normal",
+				"dir":       "back",
+			},
+		},
 	}
 
-	// Add nodes for edges to connect
-	nodes := []string{
-		"NodeA",
-		"NodeB",
-		"NodeC",
-		"NodeD",
-		"NodeE",
-		"NodeF",
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			graph := gographviz.NewGraph()
+			err := graph.SetName("G")
+			if err != nil {
+				t.Fatalf("failed to set graph name: %v", err)
+			}
+
+			for _, node := range []string{tt.from, tt.to} {
+				err := graph.AddNode("G", node, nil)
+				if err != nil {
+					t.Fatalf("failed to add node %s: %v", node, err)
+				}
+			}
+
+			err = drawEdge(graph, tt.from, tt.to, tt.highlightedPairs)
+			if err != nil {
+				t.Fatalf("drawEdge failed: %v", err)
+			}
+			edge := lookupEdge(t, graph, tt.from, tt.to)
+			if edge == nil {
+				t.Fatalf("Edge between %v and %v not found", tt.from, tt.to)
+			}
+
+			if diff := cmp.Diff(tt.expected, edge.Attrs); diff != "" {
+				t.Fatalf("drawEdge mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
-	for _, node := range nodes {
-		err := graph.AddNode("G", node, nil)
-		if err != nil {
-			t.Fatalf("failed to add node %s: %v", node, err)
-		}
-	}
-
-	t.Run("draw unhighlighted edge", func(t *testing.T) {
-		err := drawEdge(graph, "NodeA", "NodeB", [][]string{})
-		if err != nil {
-			t.Fatalf("drawEdge failed: %v", err)
-		}
-		edge := lookupEdge(t, graph, "NodeA", "NodeB")
-		if edge == nil {
-			t.Fatalf("Edge between NodeA and NodeB not found")
-		}
-		if edge.Attrs["color"] != LightGray {
-			t.Errorf("Edge color mismatch: got %s", edge.Attrs["color"])
-		}
-		if edge.Attrs["arrowhead"] != "none" {
-			t.Errorf("Edge arrowhead mismatch: got %s", edge.Attrs["arrowhead"])
-		}
-	})
-
-	t.Run("draw highlighted forward edge", func(t *testing.T) {
-		err := drawEdge(graph, "NodeC", "NodeD", [][]string{{"NodeC", "NodeD"}})
-		if err != nil {
-			t.Fatalf("drawEdge failed: %v", err)
-		}
-		edge := lookupEdge(t, graph, "NodeC", "NodeD")
-		if edge == nil {
-			t.Fatalf("Edge between NodeC and NodeD not found")
-		}
-		if edge.Attrs["color"] != LightGreen {
-			t.Errorf("Highlighted edge color mismatch: got %s", edge.Attrs["color"])
-		}
-		if edge.Attrs["arrowhead"] != "normal" {
-			t.Errorf("Highlighted edge arrowhead mismatch: got %s", edge.Attrs["arrowhead"])
-		}
-		if edge.Attrs["dir"] != "" {
-			t.Errorf("Highlighted edge dir mismatch: got %s", edge.Attrs["dir"])
-		}
-	})
-
-	t.Run("draw highlighted backward edge", func(t *testing.T) {
-		err := drawEdge(graph, "NodeE", "NodeF", [][]string{{"NodeF", "NodeE"}})
-		if err != nil {
-			t.Fatalf("drawEdge failed: %v", err)
-		}
-		edge := lookupEdge(t, graph, "NodeE", "NodeF")
-		if edge == nil {
-			t.Fatal("Highlighted backward edge not found in graph")
-		}
-		if edge.Attrs["color"] != LightGreen {
-			t.Errorf("Highlighted backward edge color mismatch: got %s", edge.Attrs["color"])
-		}
-		if edge.Attrs["arrowhead"] != "normal" {
-			t.Errorf("Highlighted backward edge arrowhead mismatch: got %s", edge.Attrs["arrowhead"])
-		}
-		if edge.Attrs["dir"] != "back" {
-			t.Errorf("Highlighted backward edge dir mismatch: got %s", edge.Attrs["dir"])
-		}
-	})
 }
 
 func TestDrawCluster(t *testing.T) {
-	parentGraph := gographviz.NewGraph()
-	err := parentGraph.SetName("ParentG")
-	if err != nil {
-		t.Fatalf("failed to set parent graph name: %v", err)
+	tests := []struct {
+		name      string
+		agentType agentinternal.Type
+	}{
+		{
+			name:      "sequential agent cluster",
+			agentType: agentinternal.TypeSequentialAgent,
+		},
+		{
+			name:      "parallel agent cluster",
+			agentType: agentinternal.TypeParallelAgent,
+		},
+		{
+			name:      "loop agent cluster",
+			agentType: agentinternal.TypeLoopAgent,
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parentGraph := gographviz.NewGraph()
+			err := parentGraph.SetName("ParentG")
+			if err != nil {
+				t.Fatalf("failed to set parent graph name: %v", err)
+			}
 
-	visitedNodes := make(map[string]bool)
+			visitedNodes := make(map[string]bool)
+			subAgent1 := newTestAgent(t, "SubAgent1", "", agentinternal.TypeLLMAgent, nil, nil)
+			subAgent2 := newTestAgent(t, "SubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
+			parentAgent := newTestAgent(t, "ParentAgent", "", tt.agentType, []agent.Agent{subAgent1, subAgent2}, nil)
 
-	t.Run("sequential agent cluster", func(t *testing.T) {
-		subAgent1 := newTestAgent(t, "SubAgent1", "", agentinternal.TypeLLMAgent, nil, nil)
-		subAgent2 := newTestAgent(t, "SubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
-		seqAgent := newTestAgent(t, "SeqAgent", "", agentinternal.TypeSequentialAgent, []agent.Agent{subAgent1, subAgent2}, nil)
+			clusterGraph := gographviz.NewGraph()
+			err = drawCluster(parentGraph, clusterGraph, parentAgent, [][]string{}, visitedNodes)
+			if err != nil {
+				t.Fatalf("drawCluster failed: %v", err)
+			}
 
-		clusterGraph := gographviz.NewGraph()
-		err := clusterGraph.SetName("cluster_SeqAgent")
-		if err != nil {
-			t.Fatalf("failed to set parent graph name: %v", err)
-		}
+			if parentGraph.Nodes.Lookup["SubAgent1"] == nil || parentGraph.Nodes.Lookup["SubAgent2"] == nil {
+				t.Error("Sub-agents not drawn as nodes in parent graph")
+			}
 
-		err = drawCluster(parentGraph, clusterGraph, seqAgent, [][]string{}, visitedNodes)
-		if err != nil {
-			t.Fatalf("drawCluster failed: %v", err)
-		}
-
-		// Check if sub-agents are drawn as nodes in the parent graph (since drawNode adds to parentGraph)
-		if parentGraph.Nodes.Lookup["SubAgent1"] == nil || parentGraph.Nodes.Lookup["SubAgent2"] == nil {
-			t.Error("Sub-agents not drawn as nodes in parent graph")
-		}
-		edge := lookupEdge(t, parentGraph, "SubAgent1", "SubAgent2")
-
-		// Check if edge exists between sub-agents
-		if edge == nil {
-			t.Fatalf("Edge between SubAgent1 and SubAgent2 not found")
-		}
-		if edge.Attrs["arrowhead"] != "none" {
-			t.Errorf("Sequential agent edge arrowhead mismatch: got %s", edge.Attrs["arrowhead"])
-		}
-	})
-
-	visitedNodes = make(map[string]bool)
-
-	t.Run("loop agent cluster", func(t *testing.T) {
-		subAgent1 := newTestAgent(t, "LoopSubAgent1", "", agentinternal.TypeLLMAgent, nil, nil)
-		subAgent2 := newTestAgent(t, "LoopSubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
-		loopAgent := newTestAgent(t, "LoopAgent", "", agentinternal.TypeLoopAgent, []agent.Agent{subAgent1, subAgent2}, nil)
-
-		clusterGraph := gographviz.NewGraph()
-		err := clusterGraph.SetName("cluster_LoopAgent")
-		if err != nil {
-			t.Fatalf("failed to set parent graph name: %v", err)
-		}
-
-		err = drawCluster(parentGraph, clusterGraph, loopAgent, [][]string{}, visitedNodes)
-		if err != nil {
-			t.Fatalf("drawCluster failed: %v", err)
-		}
-
-		// Check if edges exist between sub-agents and back to the first
-		if lookupEdge(t, parentGraph, "LoopSubAgent1", "LoopSubAgent2") == nil {
-			t.Error("Edge between LoopSubAgent1 and LoopSubAgent2 not found")
-		}
-		if lookupEdge(t, parentGraph, "LoopSubAgent2", "LoopSubAgent1") == nil {
-			t.Error("Edge between LoopSubAgent2 and LoopSubAgent1 not found")
-		}
-	})
-
-	visitedNodes = make(map[string]bool)
-
-	t.Run("parallel agent cluster", func(t *testing.T) {
-		subAgent1 := newTestAgent(t, "ParSubAgent1", "", agentinternal.TypeLLMAgent, nil, nil)
-		subAgent2 := newTestAgent(t, "ParSubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
-		parAgent := newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, []agent.Agent{subAgent1, subAgent2}, nil)
-
-		clusterGraph := gographviz.NewGraph()
-		err := clusterGraph.SetName("cluster_ParAgent")
-		if err != nil {
-			t.Fatalf("failed to set parent graph name: %v", err)
-		}
-
-		err = drawCluster(parentGraph, clusterGraph, parAgent, [][]string{}, visitedNodes)
-		if err != nil {
-			t.Fatalf("drawCluster failed: %v", err)
-		}
-
-		// Check that no edges exist between parallel sub-agents
-		if lookupEdge(t, parentGraph, "ParSubAgent1", "ParSubAgent2") != nil || lookupEdge(t, parentGraph, "ParSubAgent2", "ParSubAgent1") != nil {
-			t.Error("Unexpected edge found between parallel sub-agents")
-		}
-	})
+			switch tt.agentType {
+			case agentinternal.TypeSequentialAgent:
+				// Check if sub-agents are drawn as nodes in the parent graph (since drawNode adds to parentGraph)
+				edge := lookupEdge(t, parentGraph, "SubAgent1", "SubAgent2")
+				// Check if edge exists between sub-agents
+				if edge == nil {
+					t.Fatalf("Edge between SubAgent1 and SubAgent2 not found")
+				}
+				if edge.Attrs["arrowhead"] != "none" {
+					t.Errorf("Sequential agent edge arrowhead mismatch: got %s", edge.Attrs["arrowhead"])
+				}
+			case agentinternal.TypeParallelAgent:
+				// Check that no edges exist between parallel sub-agents
+				if lookupEdge(t, parentGraph, "SubAgent1", "SubAgent2") != nil || lookupEdge(t, parentGraph, "ParSubAgent2", "ParSubAgent1") != nil {
+					t.Error("Unexpected edge found between parallel sub-agents")
+				}
+			case agentinternal.TypeLoopAgent:
+				// Check if edges exist between sub-agents and back to the first
+				if lookupEdge(t, parentGraph, "SubAgent1", "SubAgent2") == nil {
+					t.Error("Edge between SubAgent1 and SubAgent2 not found")
+				}
+				if lookupEdge(t, parentGraph, "SubAgent1", "SubAgent2") == nil {
+					t.Error("Edge between SubAgent1 and LoopSubAgent1 not found")
+				}
+			default:
+				t.Fatalf("Wrong agent type provided: %v", tt.agentType)
+			}
+		})
+	}
 }
 
 func TestBuildGraph(t *testing.T) {
