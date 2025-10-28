@@ -21,6 +21,7 @@ type Agent interface {
 
 type State struct {
 	AgentType Type
+	Config    any
 }
 
 type Type string

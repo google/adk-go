@@ -41,7 +41,9 @@ func New(cfg Config) (agent.Agent, error) {
 	if !ok {
 		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
 	}
-	agentinternal.Reveal(internalAgent).AgentType = agentinternal.TypeSequentialAgent
+	state := agentinternal.Reveal(internalAgent)
+	state.AgentType = agentinternal.TypeSequentialAgent
+	state.Config = cfg
 
 	return sequentialAgent, nil
 }

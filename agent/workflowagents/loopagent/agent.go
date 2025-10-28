@@ -58,7 +58,9 @@ func New(cfg Config) (agent.Agent, error) {
 	if !ok {
 		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
 	}
-	agentinternal.Reveal(internalAgent).AgentType = agentinternal.TypeLoopAgent
+	state := agentinternal.Reveal(internalAgent)
+	state.AgentType = agentinternal.TypeLoopAgent
+	state.Config = cfg
 
 	return loopAgent, nil
 }

@@ -54,7 +54,9 @@ func New(cfg Config) (agent.Agent, error) {
 	if !ok {
 		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
 	}
-	agentinternal.Reveal(internalAgent).AgentType = agentinternal.TypeParallelAgent
+	state := agentinternal.Reveal(internalAgent)
+	state.AgentType = agentinternal.TypeParallelAgent
+	state.Config = cfg
 
 	return parallelAgent, nil
 }
