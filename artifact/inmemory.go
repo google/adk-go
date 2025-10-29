@@ -22,6 +22,8 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"sort"
+	"strings"
 	"sync"
 
 	"google.golang.org/genai"
@@ -40,6 +42,14 @@ type inMemoryService struct {
 func InMemoryService() Service {
 	return &inMemoryService{}
 }
+
+// fileHasUserNamespace checks if a filename indicates a user scoped artifact.
+func fileHasUserNamespace(filename string) bool {
+	return strings.HasPrefix(filename, "user:")
+}
+
+// userPathPart defines the stirng for the part of the path used by user scope files
+const userPathPart = "user"
 
 type artifactKey struct {
 	AppName   string
@@ -131,6 +141,10 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	artifact := req.Part
+	// If file is user scoped, store it under user scope path
+	if fileHasUserNamespace(fileName) {
+		sessionID = userPathPart
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -150,6 +164,10 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
+	// If file is user scoped, adjust artifactKey part
+	if fileHasUserNamespace(fileName) {
+		sessionID = userPathPart
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -173,6 +191,10 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
+	// If file is user scoped, adjust artifactKey part
+	if fileHasUserNamespace(fileName) {
+		sessionID = userPathPart
+	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -211,7 +233,21 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		}
 		files[key.FileName] = true
 	}
-	return &ListResponse{FileNames: slices.Collect(maps.Keys(files))}, nil
+
+	// Besides the session specific artifacts, also retrieve user scoped artifacts.
+	userScopeLo := artifactKey{AppName: appName, UserID: userID, SessionID: userPathPart}.Encode()
+	userScopeHi := artifactKey{AppName: appName, UserID: userID, SessionID: userPathPart + "\x00"}.Encode()
+	// TODO: extend omap to search key only and skip value decoding.
+	for key := range s.scan(userScopeLo, userScopeHi) {
+		if key.SessionID != userPathPart { // scan includes key matching `userScopeHi`
+			continue
+		}
+		files[key.FileName] = true
+	}
+
+	filenames := slices.Collect(maps.Keys(files))
+	sort.Strings(filenames)
+	return &ListResponse{FileNames: filenames}, nil
 }
 
 // Versions implements types.ArtifactService.
@@ -221,6 +257,10 @@ func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
+	if fileHasUserNamespace(fileName) {
+		sessionID = userPathPart
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
