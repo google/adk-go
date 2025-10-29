@@ -16,6 +16,7 @@ package context
 
 import (
 	"context"
+	"iter"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
@@ -44,12 +45,16 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 }
 
 func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
-	return newCallbackContext(ctx)
+	return newCallbackContext(ctx, make(map[string]any))
 }
 
-func newCallbackContext(ctx agent.InvocationContext) *callbackContext {
+func NewCallbackContextWithDelta(ctx agent.InvocationContext, stateDelta map[string]any) agent.CallbackContext {
+	return newCallbackContext(ctx, stateDelta)
+}
+
+func newCallbackContext(ctx agent.InvocationContext, stateDelta map[string]any) *callbackContext {
 	rCtx := NewReadonlyContext(ctx)
-	eventActions := &session.EventActions{}
+	eventActions := &session.EventActions{StateDelta: stateDelta}
 	return &callbackContext{
 		ReadonlyContext: rCtx,
 		invocationCtx:   ctx,
@@ -83,7 +88,7 @@ func (c *callbackContext) ReadonlyState() session.ReadonlyState {
 }
 
 func (c *callbackContext) State() session.State {
-	return c.invocationCtx.Session().State()
+	return &callbackContextState{ctx: c}
 }
 
 func (c *callbackContext) InvocationID() string {
@@ -93,3 +98,25 @@ func (c *callbackContext) InvocationID() string {
 func (c *callbackContext) UserContent() *genai.Content {
 	return c.invocationCtx.UserContent()
 }
+
+type callbackContextState struct {
+	ctx *callbackContext
+}
+
+func (c *callbackContextState) Get(key string) (any, error) {
+	if val, ok := c.ctx.eventActions.StateDelta[key]; ok {
+		return val, nil
+	}
+	return c.ctx.invocationCtx.Session().State().Get(key)
+}
+
+func (c *callbackContextState) Set(key string, val any) error {
+	c.ctx.eventActions.StateDelta[key] = val
+	return c.ctx.invocationCtx.Session().State().Set(key, val)
+}
+
+func (c *callbackContextState) All() iter.Seq2[string, any] {
+	return c.ctx.invocationCtx.Session().State().All()
+}
+
+var _ session.State = (*callbackContextState)(nil)

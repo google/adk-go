@@ -112,8 +112,12 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			return
 		}
 		spans := telemetry.StartTrace(ctx, "call_llm")
+		// Create event to pass to callback state delta
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Author = ctx.Agent().Name()
+		ev.Branch = ctx.Branch()
 		// Calls the LLM.
-		for resp, err := range f.callLLM(ctx, req) {
+		for resp, err := range f.callLLM(ctx, req, ev) {
 			if err != nil {
 				yield(nil, err)
 				return
@@ -142,7 +146,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			// Build the event and yield.
-			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools)
+			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, ev)
 			telemetry.TraceLLMCall(spans, ctx, req, modelResponseEvent)
 			if !yield(modelResponseEvent, nil) {
 				return
@@ -231,10 +235,11 @@ func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []
 	return nil
 }
 
-func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
+func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, ev *session.Event) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		for _, callback := range f.BeforeModelCallbacks {
-			callbackResponse, callbackErr := callback(icontext.NewCallbackContext(ctx), req)
+			cctx := icontext.NewCallbackContextWithDelta(ctx, ev.Actions.StateDelta)
+			callbackResponse, callbackErr := callback(cctx, req)
 
 			if callbackResponse != nil || callbackErr != nil {
 				yield(callbackResponse, callbackErr)
@@ -249,7 +254,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest) iter.
 		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
 
 		for resp, err := range f.Model.GenerateContent(ctx, req, useStream) {
-			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp, err)
+			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp, ev, err)
 			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
 			if callbackErr != nil {
 				yield(nil, callbackErr)
@@ -276,9 +281,10 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest) iter.
 	}
 }
 
-func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, llmErr error) (*model.LLMResponse, error) {
+func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, ev *session.Event, llmErr error) (*model.LLMResponse, error) {
 	for _, callback := range f.AfterModelCallbacks {
-		callbackResponse, callbackErr := callback(icontext.NewCallbackContext(ctx), llmResp, llmErr)
+		cctx := icontext.NewCallbackContextWithDelta(ctx, ev.Actions.StateDelta)
+		callbackResponse, callbackErr := callback(cctx, llmResp, llmErr)
 
 		if callbackResponse != nil || callbackErr != nil {
 			return callbackResponse, callbackErr
@@ -312,7 +318,7 @@ func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.A
 	return nil
 }
 
-func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *model.LLMResponse, tools map[string]tool.Tool) *session.Event {
+func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *model.LLMResponse, tools map[string]tool.Tool, mutable_ev *session.Event) *session.Event {
 	// FunctionCall & FunctionResponse matching algorithm assumes non-empty function call IDs
 	// but function call ID is optional in genai API and some models do not use the field.
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
@@ -322,6 +328,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *mod
 	ev.Author = ctx.Agent().Name()
 	ev.Branch = ctx.Branch()
 	ev.LLMResponse = *resp
+	ev.Actions.StateDelta = mutable_ev.Actions.StateDelta
 
 	// Populate ev.LongRunningToolIDs
 	ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)

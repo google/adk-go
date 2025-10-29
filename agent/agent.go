@@ -108,27 +108,38 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			memory:    ctx.Memory(),
 			session:   ctx.Session(),
 
-			invocationID: ctx.InvocationID(),
-			branch:       ctx.Branch(),
-			userContent:  ctx.UserContent(),
-			runConfig:    ctx.RunConfig(),
+			invocationID:  ctx.InvocationID(),
+			branch:        ctx.Branch(),
+			userContent:   ctx.UserContent(),
+			runConfig:     ctx.RunConfig(),
+			endInvocation: false,
 		}
 
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
-			yield(event, err)
-			return
+			if !yield(event, err) {
+				return
+			}
+			// TODO replace with "if ctx.EndInvocation()" { once setter method is defined
+			if event.LLMResponse.Content != nil {
+				return
+			}
 		}
 
 		for event, err := range a.run(ctx) {
 			if event != nil && event.Author == "" {
 				event.Author = getAuthorForEvent(ctx, event)
 			}
-
-			event, err := runAfterAgentCallbacks(ctx, event, err)
 			if !yield(event, err) {
 				return
 			}
+		}
+
+		// TODO confirm this should only run on last event
+		// https://github.com/google/adk-python/blob/9ab17f2afd7ae427f5ea49639394cbcaa6c3cc40/src/google/adk/agents/base_agent.py#L300
+		event, err = runAfterAgentCallbacks(ctx, event, err)
+		if !yield(event, err) {
+			return
 		}
 	}
 }
@@ -155,7 +166,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{},
+		actions:           &session.EventActions{StateDelta: make(map[string]any)},
 	}
 
 	for _, callback := range ctx.Agent().internal().beforeAgentCallbacks {
@@ -173,11 +184,18 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		}
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		// TODO: how to set it. Should it be a part of Context?
-		// event.Actions = callbackContext.EventActions
+		event.Actions = *callbackCtx.actions
+		// TODO set context invocation ended
+		// ctx.invocationEnded = true
+		return event, nil
+	}
 
-		// TODO: set ictx.end_invocation
-
+	// check if has delta create event with it
+	if len(callbackCtx.actions.StateDelta) > 0 {
+		event := session.NewEvent(ctx.InvocationID())
+		event.Author = agent.Name()
+		event.Branch = ctx.Branch()
+		event.Actions = *callbackCtx.actions
 		return event, nil
 	}
 
@@ -189,10 +207,14 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, agentError error) (*session.Event, error) {
 	agent := ctx.Agent()
 
+	if agentEvent.Actions.StateDelta == nil {
+		agentEvent.Actions.StateDelta = make(map[string]any)
+	}
+
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{},
+		actions:           &session.EventActions{StateDelta: agentEvent.Actions.StateDelta},
 	}
 
 	for _, callback := range agent.internal().afterAgentCallbacks {
@@ -228,7 +250,7 @@ func (c *callbackContext) ReadonlyState() session.ReadonlyState {
 }
 
 func (c *callbackContext) State() session.State {
-	return c.invocationContext.Session().State()
+	return &callbackContextState{ctx: c}
 }
 
 func (c *callbackContext) Artifacts() Artifacts {
@@ -265,6 +287,28 @@ func (c *callbackContext) UserID() string {
 
 var _ CallbackContext = (*callbackContext)(nil)
 
+type callbackContextState struct {
+	ctx *callbackContext
+}
+
+func (c *callbackContextState) Get(key string) (any, error) {
+	if val, ok := c.ctx.actions.StateDelta[key]; ok {
+		return val, nil
+	}
+	return c.ctx.invocationContext.Session().State().Get(key)
+}
+
+func (c *callbackContextState) Set(key string, val any) error {
+	c.ctx.actions.StateDelta[key] = val
+	return c.ctx.invocationContext.Session().State().Set(key, val)
+}
+
+func (c *callbackContextState) All() iter.Seq2[string, any] {
+	return c.ctx.invocationContext.Session().State().All()
+}
+
+var _ session.State = (*callbackContextState)(nil)
+
 type invocationContext struct {
 	context.Context
 
@@ -277,6 +321,8 @@ type invocationContext struct {
 	branch       string
 	userContent  *genai.Content
 	runConfig    *RunConfig
+
+	endInvocation bool
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -311,8 +357,8 @@ func (c *invocationContext) RunConfig() *RunConfig {
 	return c.runConfig
 }
 
-// TODO: implement endInvocation
-func (c *invocationContext) EndInvocation() {
+func (c *invocationContext) EndInvocation() bool {
+	return c.endInvocation
 }
 
 // TODO: implement endInvocation

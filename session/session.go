@@ -90,6 +90,7 @@ func NewEvent(invocationID string) *Event {
 		ID:           uuid.NewString(),
 		InvocationID: invocationID,
 		Timestamp:    time.Now(),
+		Actions:      EventActions{StateDelta: make(map[string]any)},
 	}
 }
 
