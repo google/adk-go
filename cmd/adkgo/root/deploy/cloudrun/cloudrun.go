@@ -38,6 +38,9 @@ type gCloudFlags struct {
 type cloudRunServiceFlags struct {
 	serviceName string
 	serverPort  int
+	a2a         bool // enable a2a or not
+	api         bool // enable api or not
+	webui       bool // enable webui or not
 }
 
 type localProxyFlags struct {
@@ -90,6 +93,9 @@ func init() {
 	cloudrunCmd.PersistentFlags().IntVar(&flags.proxy.port, "proxy_port", 8081, "Local proxy port")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.serverPort, "server_port", 8080, "Cloudrun server port")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
+	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.a2a, "a2a", true, "Enable A2A")
+	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.api, "api", true, "Enable API")
+	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.webui, "webui", true, "Enable Web UI")
 }
 
 func (f *deployCloudRunFlags) computeFlags() error {
@@ -167,30 +173,45 @@ func (f *deployCloudRunFlags) prepareDockerfile() error {
 	return util.LogStartStop("Preparing Dockerfile",
 		func(p util.Printer) error {
 			p("Writing:", f.build.dockerfileBuildPath)
-			c := `
+
+			var b strings.Builder
+			b.WriteString(`
 FROM gcr.io/distroless/static-debian11
 
 COPY ` + f.build.execFile + `  /app/` + f.build.execFile + `
 EXPOSE ` + strconv.Itoa(flags.cloudRun.serverPort) + `
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "api", "-webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "a2a", "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"]
- `
-			// CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "--webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "--api_server_address", "http://localhost:` + strconv.Itoa(f.proxy.port) + `/api"]
+CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", `)
 
-			return os.WriteFile(f.build.dockerfileBuildPath, []byte(c), 0600)
+			if flags.cloudRun.api {
+				b.WriteString(`"api", "-webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", `)
+			}
+			if flags.cloudRun.a2a {
+				b.WriteString(`"a2a", `)
+			}
+			if flags.cloudRun.webui {
+				b.WriteString(` "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"]
+				`)
+			}
+			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0600)
 		})
 }
 
 func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
 	return util.LogStartStop("Deploying to Cloud Run",
 		func(p util.Printer) error {
-			cmd := exec.Command("gcloud", "run", "deploy", f.cloudRun.serviceName,
+			params := []string{"run", "deploy", f.cloudRun.serviceName,
 				"--source", ".",
 				"--set-secrets=GOOGLE_API_KEY=GOOGLE_API_KEY:latest",
 				"--region", f.gcloud.region,
 				"--project", f.gcloud.projectName,
 				"--ingress", "all",
-				"--no-allow-unauthenticated")
+				"--no-allow-unauthenticated"}
+			if f.cloudRun.a2a {
+				params = append(params, "--use-http2")
+			}
+
+			cmd := exec.Command("gcloud", params...)
 
 			cmd.Dir = f.build.tempDir
 			return util.LogCommand(cmd, p)
@@ -204,8 +225,8 @@ func (f *deployCloudRunFlags) runGcloudProxy() error {
 
 			p(strings.Repeat("-", targetWidth))
 			p(util.CenterString("", targetWidth))
-			p(util.CenterString("Running ADK Web UI on http://localhost:"+strconv.Itoa(f.proxy.port)+"/ui/    <-- open this", targetWidth))
-			p(util.CenterString("ADK REST API on http://localhost:"+strconv.Itoa(f.proxy.port)+"/api/         ", targetWidth))
+			p(util.CenterString("Running ADK Web UI on http://127.0.0.1:"+strconv.Itoa(f.proxy.port)+"/ui/    <-- open this", targetWidth))
+			p(util.CenterString("ADK REST API on http://127.0.0.1:"+strconv.Itoa(f.proxy.port)+"/api/         ", targetWidth))
 			p(util.CenterString("", targetWidth))
 			p(util.CenterString("Press Ctrl-C to stop", targetWidth))
 			p(util.CenterString("", targetWidth))
