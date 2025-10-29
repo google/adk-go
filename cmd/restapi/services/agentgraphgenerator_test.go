@@ -440,6 +440,8 @@ func TestDrawNode(t *testing.T) {
 			node := graph.Nodes.Lookup[nodeName]
 			if node == nil {
 				t.Fatal("Agent node not found in graph")
+				// to prevent SA5011: possible nil pointer dereference (staticcheck)
+				t.FailNow()
 			}
 			if diff := cmp.Diff(tt.expected, node.Attrs); diff != "" {
 				t.Fatalf("drawNode mismatch (-want +got):\n%s", diff)
@@ -468,6 +470,8 @@ func TestDrawClusterNode(t *testing.T) {
 	clusterName := "cluster_MyClusterAgent"
 	cluster := graph.SubGraphs.SubGraphs[clusterName]
 	if cluster == nil {
+		// to prevent SA5011: possible nil pointer dereference (staticcheck)
+		t.FailNow()
 		t.Fatal("Cluster not found in graph")
 	}
 	if cluster.Attrs["label"] != "\"MyClusterAgent (SequentialAgent)\"" {
@@ -559,6 +563,8 @@ func TestDrawEdge(t *testing.T) {
 			edge := lookupEdge(t, graph, tt.from, tt.to)
 			if edge == nil {
 				t.Fatalf("Edge between %v and %v not found", tt.from, tt.to)
+				// to prevent SA5011: possible nil pointer dereference (staticcheck)
+				t.FailNow()
 			}
 
 			if diff := cmp.Diff(tt.expected, edge.Attrs); diff != "" {
