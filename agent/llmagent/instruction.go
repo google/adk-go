@@ -24,11 +24,12 @@ import (
 
 // InjectSessionState populates values in the instruction template, e.g. state,
 // artifact, etc.
-//
-// {var} is used to insert the value of the state variable named var.
-// {artifact.var} is used to insert the text content of the artifact named var.
-// State key identifier should be match "^[a-zA-Z_][a-zA-Z0-9_]*$".
-// Otherwise it will be treated as a literal.
+//   - There can be placeholders like {key_name} that will be resolved by ADK
+//     at runtime using session state and context.
+//   - key_name must match "^[a-zA-Z_][a-zA-Z0-9_]*$", otherwise it will be
+//     treated as a literal.
+//   - {artifact.key_name} can be used to insert the text content of the
+//     artifact named key_name.
 //
 // If the state variable or artifact does not exist, the agent will raise an
 // error. If you want to ignore the error, you can append a ? to the

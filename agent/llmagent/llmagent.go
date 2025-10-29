@@ -132,22 +132,23 @@ type Config struct {
 
 	// Instruction is set for the LLM model guiding the agent's behavior.
 	//
-	// These instructions can contain placeholders like {variable_name} that
-	// will be resolved at runtime using session state and context.
-	//
-	// {var} is used to insert the value of the state variable named var.
-	// {artifact.var} is used to insert the text content of the artifact named var.
-	// State key identifier should be match "^[a-zA-Z_][a-zA-Z0-9_]*$".
-	// Otherwise it will be treated as a literal.
+	// The string is treated as a template:
+	//  - There can be placeholders like {key_name} that will be resolved by ADK
+	//    at runtime using session state and context.
+	//  - key_name must match "^[a-zA-Z_][a-zA-Z0-9_]*$", otherwise it will be
+	//    treated as a literal.
+	//  - {artifact.key_name} can be used to insert the text content of the
+	//    artifact named key_name.
 	//
 	// If the state variable or artifact does not exist, the agent will raise an
 	// error. If you want to ignore the error, you can append a ? to the
-	// variable name as in {var?}.
+	// variable name as in {var?} to make it optional.
+	//
 	Instruction string
 	// InstructionProvider allows to create instructions dynamically based on
 	// the agent context.
 	//
-	// It takes precedence over the Instruction field if both are set.
+	// It takes over the Instruction field if both are set.
 	//
 	// When InstructionProvider is used, ADK will NOT inject session state
 	// placeholders into the instruction. You can use
@@ -157,27 +158,27 @@ type Config struct {
 	// GlobalInstruction is the instruction for all agents in the entire
 	// agent tree.
 	//
+	// The string is treated as a template:
+	//  - There can be placeholders like {key_name} that will be resolved by ADK
+	//    at runtime using session state and context.
+	//  - key_name must match "^[a-zA-Z_][a-zA-Z0-9_]*$", otherwise it will be
+	//    treated as a literal.
+	//  - {artifact.key_name} can be used to insert the text content of the
+	//    artifact named key_name.
+	//
+	// If the state variable or artifact does not exist, the agent will raise an
+	// error. If you want to ignore the error, you can append a ? to the
+	// variable name as in {var?} to make it optional.
+	//
 	// ONLY the GlobalInstruction in the root agent will take effect.
 	//
 	// For example: GlobalInstruction can make all agents have a stable identity
 	// or personality.
-	//
-	// The instructions can contain placeholders like {variable_name} that
-	// will be resolved at runtime using session state and context.
-	//
-	// {var} is used to insert the value of the state variable named var.
-	// {artifact.var} is used to insert the text content of the artifact named var.
-	// State key identifier should be match "^[a-zA-Z_][a-zA-Z0-9_]*$".
-	// Otherwise it will be treated as a literal.
-	//
-	// If the state variable or artifact does not exist, the agent will raise an
-	// error. If you want to ignore the error, you can append a ? to the
-	// variable name as in {var?}.
 	GlobalInstruction string
 	// GlobalInstructionProvider allows to create global instructions
 	// dynamically based on the agent context.
 	//
-	// It takes precedence over the GlobalInstruction field if both are set.
+	// It takes over the GlobalInstruction field if both are set.
 	//
 	// When InstructionProvider is used, ADK will NOT inject session state
 	// placeholders into the instruction. You can use
