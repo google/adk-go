@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/adk/cmd/adkgo/root/deploy"
@@ -44,8 +45,8 @@ type localProxyFlags struct {
 }
 
 type buildFlags struct {
-	tempDir             string
-	uiDistDir           string
+	tempDir string
+	// uiDistDir           string
 	execPath            string
 	execFile            string
 	dockerfileBuildPath string
@@ -85,25 +86,33 @@ func init() {
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.gcloud.region, "region", "r", "", "GCP Region")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.gcloud.projectName, "project_name", "p", "", "GCP Project Name")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.serviceName, "service_name", "s", "", "Cloud Run Service name")
-	cloudrunCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "temp_dir", "t", "", "Temp dir for build")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "temp_dir", "t", "", "Temp dir for build, defaults to os.TempDir() if not specified")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.proxy.port, "proxy_port", 8081, "Local proxy port")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.serverPort, "server_port", 8080, "Cloudrun server port")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 }
 
 func (f *deployCloudRunFlags) computeFlags() error {
-	return util.LogStartStop("Computing flags",
+	return util.LogStartStop("Computing flags & preparing temp",
 		func(p util.Printer) error {
 			absp, err := filepath.Abs(flags.source.entryPointPath)
 			if err != nil {
 				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.source.entryPointPath, err)
 			}
 			f.source.entryPointPath = absp
+
+			if flags.build.tempDir == "" {
+				flags.build.tempDir = os.TempDir()
+			}
 			absp, err = filepath.Abs(flags.build.tempDir)
 			if err != nil {
 				return fmt.Errorf("cannot make an absolute path from '%v': %w", f.build.tempDir, err)
 			}
-			f.build.tempDir = absp
+			f.build.tempDir, err = os.MkdirTemp(absp, "cloudrun_"+time.Now().Format("20060102_150405__")+"*")
+			if err != nil {
+				return fmt.Errorf("cannot create a temporary sub directory in '%v': %w", absp, err)
+			}
+			p("Using temp dir:", f.build.tempDir)
 
 			// come up with a executable name based on entry point path
 			dir, file := path.Split(f.source.entryPointPath)
@@ -118,7 +127,7 @@ func (f *deployCloudRunFlags) computeFlags() error {
 				f.build.execPath = path.Join(f.build.tempDir, exec)
 			}
 
-			f.build.uiDistDir = path.Join(f.build.tempDir, "webui_distr")
+			// f.build.uiDistDir = path.Join(f.build.tempDir, "webui_distr")
 			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
 
 			return nil
@@ -133,10 +142,6 @@ func (f *deployCloudRunFlags) cleanTemp() error {
 			if err != nil {
 				return fmt.Errorf("failed to clean temp directory %v: %w", f.build.tempDir, err)
 			}
-			err = os.MkdirAll(f.build.tempDir, os.ModeDir|0700)
-			if err != nil {
-				return fmt.Errorf("failed to create the target directory %v: %w", f.build.tempDir, err)
-			}
 			return nil
 		})
 }
@@ -145,10 +150,15 @@ func (f *deployCloudRunFlags) compileEntryPoint() error {
 	return util.LogStartStop("Compiling server",
 		func(p util.Printer) error {
 			p("Using", f.source.entryPointPath, "as entry point")
-			cmd := exec.Command("go", "build", "-o", f.build.execPath, f.source.entryPointPath)
+			// for help on ldflags you can run go build -ldflags="--help" ./examples/quickstart/main.go
+			//    -s    disable symbol table
+			//    -w    disable DWARF generation
+			//   using those flags reduces the size of an executable
+			cmd := exec.Command("go", "build", "-ldflags", "-s -w", "-o", f.build.execPath, f.source.entryPointPath)
 
 			cmd.Dir = f.source.srcBasePath
-			cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
+			// build using staticallly linked libs, for linux/amd64
+			cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
 			return util.LogCommand(cmd, p)
 		})
 }
@@ -163,8 +173,10 @@ FROM gcr.io/distroless/static-debian11
 COPY ` + f.build.execFile + `  /app/` + f.build.execFile + `
 EXPOSE ` + strconv.Itoa(flags.cloudRun.serverPort) + `
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "--webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "--api_server_address", "http://localhost:` + strconv.Itoa(f.proxy.port) + `/api"]
+CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "api", "-webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "a2a", "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"]
  `
+			// CMD ["/app/` + f.build.execFile + `", "--port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", "--webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", "--api_server_address", "http://localhost:` + strconv.Itoa(f.proxy.port) + `/api"]
+
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(c), 0600)
 		})
 }
@@ -200,8 +212,6 @@ func (f *deployCloudRunFlags) runGcloudProxy() error {
 			p(strings.Repeat("-", targetWidth))
 
 			cmd := exec.Command("gcloud", "run", "services", "proxy", f.cloudRun.serviceName, "--project", f.gcloud.projectName, "--port", strconv.Itoa(f.proxy.port))
-
-			cmd.Dir = f.build.tempDir
 			return util.LogCommand(cmd, p)
 		})
 }
@@ -213,10 +223,6 @@ func (f *deployCloudRunFlags) deployOnCloudRun() error {
 	if err != nil {
 		return err
 	}
-	err = f.cleanTemp()
-	if err != nil {
-		return err
-	}
 	err = f.compileEntryPoint()
 	if err != nil {
 		return err
@@ -225,7 +231,13 @@ func (f *deployCloudRunFlags) deployOnCloudRun() error {
 	if err != nil {
 		return err
 	}
+	// return nil
+
 	err = f.gcloudDeployToCloudRun()
+	if err != nil {
+		return err
+	}
+	err = f.cleanTemp()
 	if err != nil {
 		return err
 	}
