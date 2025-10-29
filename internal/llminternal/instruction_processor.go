@@ -15,7 +15,6 @@
 package llminternal
 
 import (
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -109,27 +108,6 @@ func appendGlobalInstructions(ctx agent.InvocationContext, req *model.LLMRequest
 	return nil
 }
 
-// InjectSessionState populates values in the instruction template, e.g. state, artifact, etc.
-// This function is intended to be used in InstructionProvider based instruction
-// and global_instruction which are called with ReadonlyContext.
-func InjectSessionState(ctx agent.InvocationContext, template string) (string, error) {
-	var errs []error
-	result := placeholderRegex.ReplaceAllStringFunc(template, func(match string) string {
-		replacement, err := replaceMatch(ctx, match)
-		if err != nil {
-			errs = append(errs, err)
-			return "" // Return empty string on error
-		}
-		return replacement
-	})
-
-	if len(errs) > 0 {
-		return "", errors.Join(errs...)
-	}
-
-	return result, nil
-}
-
 // replaceMatch is the Go equivalent of the _replace_match async function in the Python code.
 func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 	// Trim curly braces: "{var_name}" -> "var_name"
@@ -215,8 +193,8 @@ func isValidStateName(varName string) bool {
 	return false
 }
 
-// injectSessionState populates values in an instruction template from a context.
-func injectSessionState(ctx agent.InvocationContext, template string) (string, error) {
+// InjectSessionState populates values in an instruction template from a context.
+func InjectSessionState(ctx agent.InvocationContext, template string) (string, error) {
 	// Find all matches, then iterate through them, building the result string.
 	var result strings.Builder
 	lastIndex := 0

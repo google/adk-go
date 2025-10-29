@@ -202,7 +202,7 @@ And another optional artifact:
 			})
 
 			// --- Execution ---
-			got, err := injectSessionState(ctx, tc.template)
+			got, err := InjectSessionState(ctx, tc.template)
 
 			// --- Assertion ---
 			if tc.wantErr {
