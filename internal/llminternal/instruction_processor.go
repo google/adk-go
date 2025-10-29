@@ -26,7 +26,6 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
 )
 
 // TODO: Remove this once state keywords are implemented and replace with those consts
@@ -164,8 +163,7 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 	value, err := ctx.Session().State().Get(varName)
 	if err != nil {
 		if optional {
-			if !errors.Is(err, session.ErrStateKeyNotExist) {
-			}
+			// TODO: log error when !errors.Is(err, session.ErrStateKeyNotExist)
 			return "", nil
 		}
 		return "", err

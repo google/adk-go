@@ -23,49 +23,49 @@ import (
 )
 
 func NewReadonlyContext(ctx agent.InvocationContext) agent.ReadonlyContext {
-	return &readonlyContext{
+	return &ReadonlyContext{
 		Context:           ctx,
-		invocationContext: ctx,
+		InvocationContext: ctx,
 	}
 }
 
-type readonlyContext struct {
+type ReadonlyContext struct {
 	context.Context
-	invocationContext agent.InvocationContext
+	InvocationContext agent.InvocationContext
 }
 
 // AppName implements agent.ReadonlyContext.
-func (c *readonlyContext) AppName() string {
-	return c.invocationContext.Session().AppName()
+func (c *ReadonlyContext) AppName() string {
+	return c.InvocationContext.Session().AppName()
 }
 
 // Branch implements agent.ReadonlyContext.
-func (c *readonlyContext) Branch() string {
-	return c.invocationContext.Branch()
+func (c *ReadonlyContext) Branch() string {
+	return c.InvocationContext.Branch()
 }
 
 // SessionID implements agent.ReadonlyContext.
-func (c *readonlyContext) SessionID() string {
-	return c.invocationContext.Session().ID()
+func (c *ReadonlyContext) SessionID() string {
+	return c.InvocationContext.Session().ID()
 }
 
 // UserID implements agent.ReadonlyContext.
-func (c *readonlyContext) UserID() string {
-	return c.invocationContext.Session().UserID()
+func (c *ReadonlyContext) UserID() string {
+	return c.InvocationContext.Session().UserID()
 }
 
-func (c *readonlyContext) AgentName() string {
-	return c.invocationContext.Agent().Name()
+func (c *ReadonlyContext) AgentName() string {
+	return c.InvocationContext.Agent().Name()
 }
 
-func (c *readonlyContext) ReadonlyState() session.ReadonlyState {
-	return c.invocationContext.Session().State()
+func (c *ReadonlyContext) ReadonlyState() session.ReadonlyState {
+	return c.InvocationContext.Session().State()
 }
 
-func (c *readonlyContext) InvocationID() string {
-	return c.invocationContext.InvocationID()
+func (c *ReadonlyContext) InvocationID() string {
+	return c.InvocationContext.InvocationID()
 }
 
-func (c *readonlyContext) UserContent() *genai.Content {
-	return c.invocationContext.UserContent()
+func (c *ReadonlyContext) UserContent() *genai.Content {
+	return c.InvocationContext.UserContent()
 }

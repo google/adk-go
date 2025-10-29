@@ -15,7 +15,10 @@
 package llmagent
 
 import (
+	"fmt"
+
 	"google.golang.org/adk/agent"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 )
 
@@ -33,6 +36,10 @@ import (
 //
 // This method is intended to be used in InstructionProvider based Instruction
 // and GlobalInstruction which are called with ReadonlyContext.
-func InjectSessionState(ctx agent.InvocationContext, template string) (string, error) {
-	return llminternal.InjectSessionState(ctx, template)
+func InjectSessionState(ctx agent.ReadonlyContext, template string) (string, error) {
+	ictx, ok := ctx.(*icontext.ReadonlyContext)
+	if !ok {
+		return "", fmt.Errorf("unexpected context type: %T", ctx)
+	}
+	return llminternal.InjectSessionState(ictx.InvocationContext, template)
 }
