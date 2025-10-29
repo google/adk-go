@@ -622,6 +622,8 @@ func TestDrawCluster(t *testing.T) {
 				// Check if edge exists between sub-agents
 				if edge == nil {
 					t.Fatalf("Edge between SubAgent1 and SubAgent2 not found")
+					// to prevent SA5011: possible nil pointer dereference (staticcheck)
+					return
 				}
 				if edge.Attrs["arrowhead"] != "none" {
 					t.Errorf("Sequential agent edge arrowhead mismatch: got %s", edge.Attrs["arrowhead"])

@@ -419,6 +419,8 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		decl := toolDeclaration(req.Config)
 		if decl == nil {
 			t.Fatalf("inventoryTool.ProcessRequest did not configure function declaration: %v", req)
+			// to prevent SA5011: possible nil pointer dereference (staticcheck)
+			return
 		}
 		if got, want := decl.Name, inventoryTool.Name(); got != want {
 			t.Errorf("inventoryTool function declaration name = %q, want %q", got, want)
