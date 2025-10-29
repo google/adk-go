@@ -96,7 +96,7 @@ func (a *A2ALauncher) UserMessage(webUrl string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       a2a:  you can access A2A using grpc protocol: %s", webUrl))
 }
 
-func newA2AHandler(serveConfig *adk.Config, agentName string) *a2agrpc.GRPCHandler {
+func newA2AHandler(serveConfig *adk.Config, agentName string) *a2agrpc.Handler {
 	agent, err := serveConfig.AgentLoader.LoadAgent(agentName)
 	if err != nil {
 		log.Fatalf("cannot load agent %s: %v", agentName, err)
@@ -110,7 +110,7 @@ func newA2AHandler(serveConfig *adk.Config, agentName string) *a2agrpc.GRPCHandl
 		},
 	})
 	reqHandler := a2asrv.NewHandler(executor, serveConfig.A2AOptions...)
-	grpcHandler := a2agrpc.NewHandler(&adka2a.CardProducer{Agent: agent}, reqHandler)
+	grpcHandler := a2agrpc.NewHandler(reqHandler)
 	return grpcHandler
 }
 
