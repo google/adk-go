@@ -532,6 +532,159 @@ func TestToolCallback(t *testing.T) {
 	})
 }
 
+func TestInstructionProvider(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name              string
+		llmagentFunc      func(model.LLM) (agent.Agent, error)
+		wantLLMRequests   []*model.LLMRequest
+		wantAgentResponse []string
+		wantErr           error
+	}{
+		{
+			name: "instruction is evaluated",
+			llmagentFunc: func(model model.LLM) (agent.Agent, error) {
+				return llmagent.New(llmagent.Config{
+					Name:        "test_agent",
+					Model:       model,
+					Instruction: "instruction {var} test",
+				})
+			},
+			wantLLMRequests: []*model.LLMRequest{
+				{
+					Contents: []*genai.Content{
+						genai.NewContentFromText("user input", genai.RoleUser),
+					},
+					Config: &genai.GenerateContentConfig{
+						SystemInstruction: genai.NewContentFromText("instruction custom_value test", genai.RoleUser),
+					},
+				},
+			},
+			wantAgentResponse: []string{
+				"llm resp stub",
+			},
+		},
+		{
+			name: "instruction provider overrides instruction",
+			llmagentFunc: func(model model.LLM) (agent.Agent, error) {
+				return llmagent.New(llmagent.Config{
+					Name:        "test_agent",
+					Model:       model,
+					Instruction: "instruction",
+					InstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
+						return "instruction provider template {var} not evaluated", nil
+					},
+				})
+			},
+			wantLLMRequests: []*model.LLMRequest{
+				{
+					Contents: []*genai.Content{
+						genai.NewContentFromText("user input", genai.RoleUser),
+					},
+					Config: &genai.GenerateContentConfig{
+						SystemInstruction: genai.NewContentFromText("instruction provider template {var} not evaluated", genai.RoleUser),
+					},
+				},
+			},
+			wantAgentResponse: []string{
+				"llm resp stub",
+			},
+		},
+		{
+			name: "global instruction provider overrides global instruction",
+			llmagentFunc: func(model model.LLM) (agent.Agent, error) {
+				return llmagent.New(llmagent.Config{
+					Name:              "test_agent",
+					Model:             model,
+					GlobalInstruction: "instruction",
+					GlobalInstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
+						return "global instruction provider template {var} not evaluated", nil
+					},
+				})
+			},
+			wantLLMRequests: []*model.LLMRequest{
+				{
+					Contents: []*genai.Content{
+						genai.NewContentFromText("user input", genai.RoleUser),
+					},
+					Config: &genai.GenerateContentConfig{
+						SystemInstruction: genai.NewContentFromText("global instruction provider template {var} not evaluated", genai.RoleUser),
+					},
+				},
+			},
+			wantAgentResponse: []string{
+				"llm resp stub",
+			},
+		},
+		{
+			name: "global instruction provider merged with instruction provider",
+			llmagentFunc: func(model model.LLM) (agent.Agent, error) {
+				return llmagent.New(llmagent.Config{
+					Name:  "test_agent",
+					Model: model,
+					InstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
+						return "instruction provider {var}", nil
+					},
+					GlobalInstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
+						return "global instruction provider {var}", nil
+					},
+				})
+			},
+			wantLLMRequests: []*model.LLMRequest{
+				{
+					Contents: []*genai.Content{
+						genai.NewContentFromText("user input", genai.RoleUser),
+					},
+					Config: &genai.GenerateContentConfig{
+						SystemInstruction: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("global instruction provider {var}"),
+								genai.NewPartFromText("instruction provider {var}"),
+							},
+							Role: genai.RoleUser,
+						},
+					},
+				},
+			},
+			wantAgentResponse: []string{
+				"llm resp stub",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &testutil.MockModel{
+				Responses: []*genai.Content{
+					genai.NewContentFromText("llm resp stub", genai.RoleModel),
+				},
+			}
+
+			agent, err := tc.llmagentFunc(model)
+			if err != nil {
+				t.Fatalf("failed to create LLM Agent: %v", err)
+			}
+
+			testRunner := testutil.NewTestAgentRunner(t, agent)
+			testRunner.SetInitSessionState(map[string]any{"var": "custom_value"})
+
+			stream := testRunner.Run(t, "session", "user input")
+
+			gotResp, err := testutil.CollectTextParts(stream)
+			if err != nil {
+				t.Fatalf("agent returned (%v, %v), want result", gotResp, err)
+			}
+
+			if diff := cmp.Diff(tc.wantLLMRequests, model.Requests); diff != "" {
+				t.Errorf("unexpected LLM requests, want: %v, got: %v, diff: %v", tc.wantLLMRequests, model.Requests, diff)
+			}
+
+			if diff := cmp.Diff(tc.wantAgentResponse, gotResp); diff != "" {
+				t.Errorf("unexpected agent response, want: %v, got: %v, diff: %v", tc.wantAgentResponse, gotResp, diff)
+			}
+		})
+	}
+}
+
 func TestFunctionTool(t *testing.T) {
 	model := newGeminiModel(t, modelName, nil)
 

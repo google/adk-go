@@ -66,10 +66,12 @@ var placeholderRegex = regexp.MustCompile(`{+[^{}]*}+`)
 
 func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agentState *State) error {
 	if agentState.InstructionProvider != nil {
-		if _, err := agentState.InstructionProvider(icontext.NewReadonlyContext(ctx)); err != nil {
+		instruction, err := agentState.InstructionProvider(icontext.NewReadonlyContext(ctx))
+		if err != nil {
 			return fmt.Errorf("failed to evaluate global instruction provider: %w", err)
 		}
 
+		utils.AppendInstructions(req, instruction)
 		return nil
 	}
 
@@ -88,10 +90,12 @@ func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agen
 
 func appendGlobalInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agentState *State) error {
 	if agentState.GlobalInstructionProvider != nil {
-		if _, err := agentState.GlobalInstructionProvider(icontext.NewReadonlyContext(ctx)); err != nil {
+		instruction, err := agentState.GlobalInstructionProvider(icontext.NewReadonlyContext(ctx))
+		if err != nil {
 			return fmt.Errorf("failed to evaluate global instruction provider: %w", err)
 		}
 
+		utils.AppendInstructions(req, instruction)
 		return nil
 	}
 
