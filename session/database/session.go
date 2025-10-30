@@ -24,13 +24,6 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// TODO consider change with enums or move to session package
-const (
-	appPrefix  = "app:"
-	userPrefix = "user:"
-	tempPrefix = "temp:"
-)
-
 // TODO localSession is identical to session.session. Move to sessioninternal
 type localSession struct {
 	appName   string
@@ -160,8 +153,7 @@ func trimTempDeltaState(event *session.Event) *session.Event {
 	// Iterate over the map and build a new one with the keys we want to keep.
 	filteredStateDelta := make(map[string]any)
 	for key, value := range event.Actions.StateDelta {
-		// TODO: Replace temp with session named const
-		if !strings.HasPrefix(key, tempPrefix) {
+		if !strings.HasPrefix(key, session.KeyPrefixTemp) {
 			filteredStateDelta[key] = value
 		}
 	}
@@ -173,22 +165,21 @@ func trimTempDeltaState(event *session.Event) *session.Event {
 }
 
 // updateSessionState updates the session state based on the event state delta.
-func updateSessionState(session *localSession, event *session.Event) error {
+func updateSessionState(sess *localSession, event *session.Event) error {
 	if event.Actions.StateDelta == nil {
 		return nil // Nothing to do
 	}
 
 	// Ensure the session state map is initialized
-	if session.state == nil {
-		session.state = make(map[string]any)
+	if sess.state == nil {
+		sess.state = make(map[string]any)
 	}
 
 	for key, value := range event.Actions.StateDelta {
-		//TODO replace tempPrefix with session named const
-		if strings.HasPrefix(key, tempPrefix) {
+		if strings.HasPrefix(key, session.KeyPrefixTemp) {
 			continue
 		}
-		session.state[key] = value
+		sess.state[key] = value
 	}
 
 	return nil

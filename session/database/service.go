@@ -32,6 +32,14 @@ type databaseService struct {
 	db *gorm.DB
 }
 
+// NewSessionService creates a new session.Service implementation that uses a
+// relational database (e.g., PostgreSQL, Spanner, SQLite) via the GORM library.
+//
+// It requires a gorm.Dialector to specify the database connection and
+// accepts optional gorm.Option values for further GORM configuration.
+//
+// It returns the new session.Service or an error if the database connection
+// (gorm.Open) fails.
 func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.Service, error) {
 	db, err := gorm.Open(dialector, opts...)
 	if err != nil {
@@ -455,13 +463,12 @@ func extractStateDeltas(delta map[string]any) (
 		return
 	}
 
-	// TODO: Replace temp, app and user: with session named const
 	for key, value := range delta {
-		if cleanKey, found := strings.CutPrefix(key, appPrefix); found {
+		if cleanKey, found := strings.CutPrefix(key, session.KeyPrefixApp); found {
 			appStateDelta[cleanKey] = value
-		} else if cleanKey, found := strings.CutPrefix(key, userPrefix); found {
+		} else if cleanKey, found := strings.CutPrefix(key, session.KeyPrefixUser); found {
 			userStateDelta[cleanKey] = value
-		} else if !strings.HasPrefix(key, tempPrefix) {
+		} else if !strings.HasPrefix(key, session.KeyPrefixTemp) {
 			// This key belongs to the session state, as long as it's not temporary.
 			sessionStateDelta[key] = value
 		}
@@ -481,13 +488,12 @@ func mergeStates(appState, userState, sessionState map[string]any) map[string]an
 	// avoid modifying the original sessionState map.
 	maps.Copy(mergedState, sessionState)
 
-	// TODO: Replace app and user: with session named const
 	for key, value := range appState {
-		mergedState[appPrefix+key] = value
+		mergedState[session.KeyPrefixApp+key] = value
 	}
 
 	for key, value := range userState {
-		mergedState[userPrefix+key] = value
+		mergedState[session.KeyPrefixUser+key] = value
 	}
 
 	return mergedState
