@@ -38,7 +38,7 @@ func main() {
 	ctx := context.Background()
 
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
-		APIKey: os.Getenv("GEMINI_API_KEY"),
+		APIKey: os.Getenv("GOOGLE_API_KEY"),
 	})
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
