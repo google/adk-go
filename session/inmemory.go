@@ -412,7 +412,7 @@ func trimTempDeltaState(event *Event) *Event {
 	// Iterate over the map and build a new one with the keys we want to keep.
 	filteredStateDelta := make(map[string]any)
 	for key, value := range event.Actions.StateDelta {
-		if !strings.HasPrefix(key, sessionutils.TempPrefix) {
+		if !strings.HasPrefix(key, KeyPrefixTemp) {
 			filteredStateDelta[key] = value
 		}
 	}
@@ -436,7 +436,7 @@ func updateSessionState(session *session, event *Event) error {
 
 	state := session.State()
 	for key, value := range event.Actions.StateDelta {
-		if strings.HasPrefix(key, sessionutils.TempPrefix) {
+		if strings.HasPrefix(key, KeyPrefixTemp) {
 			continue
 		}
 		err := state.Set(key, value)

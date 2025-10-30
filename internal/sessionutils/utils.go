@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	AppPrefix  = "app:"
-	UserPrefix = "user:"
-	TempPrefix = "temp:"
+	appPrefix  = "app:"
+	userPrefix = "user:"
+	tempPrefix = "temp:"
 )
 
 // ExtractStateDeltas splits a single state delta map into three separate maps
@@ -40,11 +40,11 @@ func ExtractStateDeltas(delta map[string]any) (
 	}
 
 	for key, value := range delta {
-		if cleanKey, found := strings.CutPrefix(key, AppPrefix); found {
+		if cleanKey, found := strings.CutPrefix(key, appPrefix); found {
 			appStateDelta[cleanKey] = value
-		} else if cleanKey, found := strings.CutPrefix(key, UserPrefix); found {
+		} else if cleanKey, found := strings.CutPrefix(key, userPrefix); found {
 			userStateDelta[cleanKey] = value
-		} else if !strings.HasPrefix(key, TempPrefix) {
+		} else if !strings.HasPrefix(key, tempPrefix) {
 			// This key belongs to the session state, as long as it's not temporary.
 			sessionStateDelta[key] = value
 		}
@@ -62,11 +62,11 @@ func MergeStates(appState, userState, sessionState map[string]any) map[string]an
 	maps.Copy(mergedState, sessionState)
 
 	for key, value := range appState {
-		mergedState[AppPrefix+key] = value
+		mergedState[appPrefix+key] = value
 	}
 
 	for key, value := range userState {
-		mergedState[UserPrefix+key] = value
+		mergedState[userPrefix+key] = value
 	}
 
 	return mergedState
