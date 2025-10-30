@@ -34,7 +34,7 @@ import (
 // consoleConfig contains command-line params for console launcher
 type consoleConfig struct {
 	streamingMode       agent.StreamingMode
-	streamingModeString string // command-line param to be converted to agent.StremingMode
+	streamingModeString string // command-line param to be converted to agent.StreamingMode
 	rootAgentName       string
 }
 

@@ -144,7 +144,7 @@ Do not add any other text before or after the code block.`,
 	config := &adk.Config{
 		AgentLoader: services.NewSingleAgentLoader(rootAgent),
 	}
-	l := full.NewLaucher("CodePipelineAgent")
+	l := full.NewLauncher("CodePipelineAgent")
 	err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
 	if err != nil {
 		log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())

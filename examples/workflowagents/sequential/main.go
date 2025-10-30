@@ -88,7 +88,7 @@ func main() {
 		AgentLoader: services.NewSingleAgentLoader(sequentialAgent),
 	}
 
-	l := full.NewLaucher("sequential_agent")
+	l := full.NewLauncher("sequential_agent")
 	err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
 	if err != nil {
 		log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())

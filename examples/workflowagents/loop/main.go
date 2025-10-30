@@ -75,7 +75,7 @@ func main() {
 		AgentLoader: services.NewSingleAgentLoader(loopAgent),
 	}
 
-	l := full.NewLaucher("loop_agent")
+	l := full.NewLauncher("loop_agent")
 	err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
 	if err != nil {
 		log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())

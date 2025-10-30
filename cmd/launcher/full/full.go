@@ -24,7 +24,7 @@ import (
 	"google.golang.org/adk/cmd/launcher/web/webui"
 )
 
-// NewLaucher returnes the most versalite universal launcher with all options enabled
-func NewLaucher(rootAgentName string) *universal.Launcher {
+// NewLauncher returnes the most versatile universal launcher with all options built-in
+func NewLauncher(rootAgentName string) *universal.Launcher {
 	return universal.NewLauncher(console.NewLauncher(rootAgentName), web.NewLauncher(api.NewLauncher(), a2a.NewLauncher(rootAgentName), webui.NewLauncher()))
 }

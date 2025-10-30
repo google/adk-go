@@ -84,7 +84,7 @@ func main() {
 		AgentLoader:     services.NewSingleAgentLoader(agent),
 	}
 
-	l := full.NewLaucher("image_generator")
+	l := full.NewLauncher("image_generator")
 	err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
 	if err != nil {
 		log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())

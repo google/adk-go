@@ -70,7 +70,7 @@ func main() {
 		AgentLoader: services.NewSingleAgentLoader(parallelAgent),
 	}
 
-	l := full.NewLaucher("parallel_agent")
+	l := full.NewLauncher("parallel_agent")
 	err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
 	if err != nil {
 		log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())

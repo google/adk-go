@@ -124,7 +124,7 @@ func main() {
 	config := &adk.Config{
 		AgentLoader: services.NewSingleAgentLoader(agent),
 	}
-	l := full.NewLaucher("helper_agent")
+	l := full.NewLauncher("helper_agent")
 	err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
 	if err != nil {
 		log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())
