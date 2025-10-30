@@ -103,6 +103,52 @@ func (c *ArtifactsAPIController) LoadArtifact(rw http.ResponseWriter, req *http.
 	EncodeJSONResponse(resp.Part, http.StatusOK, rw)
 }
 
+// LoadArtifactVersion gets an artifact from the artifact service storage with specified version.
+func (c *ArtifactsAPIController) LoadArtifactVersion(rw http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	sessionID, err := models.SessionIDFromHTTPParameters(vars)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if sessionID.ID == "" {
+		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+	artifactName := vars["artifact_name"]
+	if artifactName == "" {
+		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
+		return
+	}
+	version := vars["version"]
+
+	if version == "" {
+		http.Error(rw, "version parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	versionInt, err := strconv.Atoi(version)
+	if err != nil {
+		http.Error(rw, "version parameter must be an integer", http.StatusBadRequest)
+		return
+	}
+
+	loadReq := &artifact.LoadRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
+		FileName:  artifactName,
+		Version:   int64(versionInt),
+	}
+
+	resp, err := c.artifactService.Load(req.Context(), loadReq)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	EncodeJSONResponse(resp.Part, http.StatusOK, rw)
+}
+
 // DeleteArtifact handles deleting an artifact.
 func (c *ArtifactsAPIController) DeleteArtifact(rw http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)

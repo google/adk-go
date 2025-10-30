@@ -87,7 +87,7 @@ func TestMCPToolSet(t *testing.T) {
 		Model:       newGeminiModel(t, modelName),
 		Description: "Agent to answer questions about the time and weather in a city.",
 		Instruction: "I can answer your questions about the time and weather in a city.",
-		Toolsets: []tool.Set{
+		Toolsets: []tool.Toolset{
 			ts,
 		},
 	})
@@ -132,7 +132,7 @@ func TestMCPToolSet(t *testing.T) {
 							FunctionResponse: &genai.FunctionResponse{
 								Name: "get_weather",
 								Response: map[string]any{
-									"weather_summary": `Today in "london" is sunny`,
+									"output": map[string]any{"weather_summary": string(`Today in "london" is sunny`)},
 								},
 							},
 						},

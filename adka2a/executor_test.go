@@ -167,7 +167,7 @@ func TestExecutor_Execute(t *testing.T) {
 				newArtifactLastChunkEvent(task),
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "418", ErrorMessage: "I'm a teapot"}),
-					map[string]any{toMetaKey("error_code"): "418"},
+					map[string]any{ToA2AMetaKey("error_code"): "418"},
 				),
 			},
 		},

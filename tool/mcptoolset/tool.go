@@ -72,7 +72,7 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 	return t.funcDeclaration
 }
 
-func (t *mcpTool) Run(ctx tool.Context, args any) (any, error) {
+func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	session, err := t.getSessionFunc(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session: %w", err)
@@ -108,7 +108,9 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (any, error) {
 	}
 
 	if res.StructuredContent != nil {
-		return res.StructuredContent, nil
+		return map[string]any{
+			"output": res.StructuredContent,
+		}, nil
 	}
 
 	textResponse := strings.Builder{}

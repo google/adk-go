@@ -303,6 +303,388 @@ func TestModelCallbacks(t *testing.T) {
 	}
 }
 
+func TestToolCallback(t *testing.T) {
+	model := newGeminiModel(t, modelName, nil)
+
+	type Args struct {
+		Seed int `json:"seed"`
+	}
+	type Result struct {
+		Number int `json:"number"`
+	}
+
+	handler := func(_ tool.Context, input Args) Result {
+		return Result{Number: 1}
+	}
+	rand, _ := functiontool.New(functiontool.Config{
+		Name:        "rand_number",
+		Description: "returns random number",
+	}, handler)
+
+	t.Run("before_callback_response_used", func(t *testing.T) {
+		agent, err := llmagent.New(llmagent.Config{
+			Name:                     "agent",
+			Description:              "random agent",
+			Model:                    model,
+			Instruction:              "output ONLY the result computed by the provided function",
+			DisallowTransferToParent: true,
+			DisallowTransferToPeers:  true,
+			Tools:                    []tool.Tool{rand},
+			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, nil
+				},
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return map[string]any{"number": "7"}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to create LLM Agent: %v", err)
+		}
+
+		runner := testutil.NewTestAgentRunner(t, agent)
+		stream := runner.Run(t, "session1", "Generate random number with 5 as a seed.")
+
+		ans, err := testutil.CollectTextParts(stream)
+		if err != nil || len(ans) == 0 {
+			t.Fatalf("agent returned (%v, %v), want result", ans, err)
+		}
+		if got, want := strings.TrimSpace(ans[len(ans)-1]), "7"; got != want {
+			t.Errorf("unexpected result from agent = (%v, %v), want ([%q], nil)", ans, err, want)
+		}
+	})
+
+	t.Run("extra_before_callback_skipped", func(t *testing.T) {
+		agent, err := llmagent.New(llmagent.Config{
+			Name:                     "agent",
+			Description:              "random agent",
+			Model:                    model,
+			Instruction:              "output ONLY the result computed by the provided function",
+			DisallowTransferToParent: true,
+			DisallowTransferToPeers:  true,
+			Tools:                    []tool.Tool{rand},
+			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+				// Since it retursn non nil, the next callback won't be executed.
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return map[string]any{"number": "3"}, nil
+				},
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return map[string]any{"number": "7"}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to create LLM Agent: %v", err)
+		}
+
+		runner := testutil.NewTestAgentRunner(t, agent)
+		stream := runner.Run(t, "session1", "Generate random number with 5 as a seed.")
+
+		ans, err := testutil.CollectTextParts(stream)
+		if err != nil || len(ans) == 0 {
+			t.Fatalf("agent returned (%v, %v), want result", ans, err)
+		}
+		if got, want := strings.TrimSpace(ans[len(ans)-1]), "3"; got != want {
+			t.Errorf("unexpected result from agent = (%v, %v), want ([%q], nil)", ans, err, want)
+		}
+	})
+
+	t.Run("after_callback_response_used", func(t *testing.T) {
+		agent, err := llmagent.New(llmagent.Config{
+			Name:                     "agent",
+			Description:              "random agent",
+			Model:                    model,
+			Instruction:              "output ONLY the result computed by the provided function",
+			DisallowTransferToParent: true,
+			DisallowTransferToPeers:  true,
+			Tools:                    []tool.Tool{rand},
+			AfterToolCallbacks: []llmagent.AfterToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+					return nil, nil
+				},
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+					return map[string]any{"number": "7"}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to create LLM Agent: %v", err)
+		}
+
+		runner := testutil.NewTestAgentRunner(t, agent)
+		stream := runner.Run(t, "session1", "Generate random number with 5 as a seed.")
+
+		ans, err := testutil.CollectTextParts(stream)
+		if err != nil || len(ans) == 0 {
+			t.Fatalf("agent returned (%v, %v), want result", ans, err)
+		}
+		if got, want := strings.TrimSpace(ans[len(ans)-1]), "7"; got != want {
+			t.Errorf("unexpected result from agent = (%v, %v), want ([%q], nil)", ans, err, want)
+		}
+	})
+
+	t.Run("extra_after_callback_skipped", func(t *testing.T) {
+		agent, err := llmagent.New(llmagent.Config{
+			Name:                     "agent",
+			Description:              "random agent",
+			Model:                    model,
+			Instruction:              "output ONLY the result computed by the provided function",
+			DisallowTransferToParent: true,
+			DisallowTransferToPeers:  true,
+			Tools:                    []tool.Tool{rand},
+			AfterToolCallbacks: []llmagent.AfterToolCallback{
+				// Since it retursn non nil, the next callback won't be executed.
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+					return map[string]any{"number": "3"}, nil
+				},
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+					return map[string]any{"number": "7"}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to create LLM Agent: %v", err)
+		}
+
+		runner := testutil.NewTestAgentRunner(t, agent)
+		stream := runner.Run(t, "session1", "Generate random number with 5 as a seed.")
+
+		ans, err := testutil.CollectTextParts(stream)
+		if err != nil || len(ans) == 0 {
+			t.Fatalf("agent returned (%v, %v), want result", ans, err)
+		}
+		if got, want := strings.TrimSpace(ans[len(ans)-1]), "3"; got != want {
+			t.Errorf("unexpected result from agent = (%v, %v), want ([%q], nil)", ans, err, want)
+		}
+	})
+
+	t.Run("after_callback_returned_when_used_with_before_callback", func(t *testing.T) {
+		agent, err := llmagent.New(llmagent.Config{
+			Name:                     "agent",
+			Description:              "random agent",
+			Model:                    model,
+			Instruction:              "output ONLY the result computed by the provided function",
+			DisallowTransferToParent: true,
+			DisallowTransferToPeers:  true,
+			Tools:                    []tool.Tool{rand},
+			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return map[string]any{"number": "3"}, nil
+				},
+			},
+			AfterToolCallbacks: []llmagent.AfterToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+					return map[string]any{"number": "7"}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to create LLM Agent: %v", err)
+		}
+
+		runner := testutil.NewTestAgentRunner(t, agent)
+		stream := runner.Run(t, "session1", "Generate random number with 5 as a seed.")
+
+		ans, err := testutil.CollectTextParts(stream)
+		if err != nil || len(ans) == 0 {
+			t.Fatalf("agent returned (%v, %v), want result", ans, err)
+		}
+		if got, want := strings.TrimSpace(ans[len(ans)-1]), "7"; got != want {
+			t.Errorf("unexpected result from agent = (%v, %v), want ([%q], nil)", ans, err, want)
+		}
+	})
+
+	t.Run("both_callbacks_return_nil_actual_tool_is_executed", func(t *testing.T) {
+		agent, err := llmagent.New(llmagent.Config{
+			Name:                     "agent",
+			Description:              "random agent",
+			Model:                    model,
+			Instruction:              "output ONLY the result computed by the provided function",
+			DisallowTransferToParent: true,
+			DisallowTransferToPeers:  true,
+			Tools:                    []tool.Tool{rand},
+			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, nil
+				},
+			},
+			AfterToolCallbacks: []llmagent.AfterToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed to create LLM Agent: %v", err)
+		}
+
+		runner := testutil.NewTestAgentRunner(t, agent)
+		stream := runner.Run(t, "session1", "Generate random number with 5 as a seed.")
+
+		ans, err := testutil.CollectTextParts(stream)
+		if err != nil || len(ans) == 0 {
+			t.Fatalf("agent returned (%v, %v), want result", ans, err)
+		}
+		if got, want := strings.TrimSpace(ans[len(ans)-1]), "1"; got != want {
+			t.Errorf("unexpected result from agent = (%v, %v), want ([%q], nil)", ans, err, want)
+		}
+	})
+}
+
+func TestInstructionProvider(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name              string
+		llmagentFunc      func(model.LLM) (agent.Agent, error)
+		wantLLMRequests   []*model.LLMRequest
+		wantAgentResponse []string
+		wantErr           error
+	}{
+		{
+			name: "instruction is evaluated",
+			llmagentFunc: func(model model.LLM) (agent.Agent, error) {
+				return llmagent.New(llmagent.Config{
+					Name:        "test_agent",
+					Model:       model,
+					Instruction: "instruction {var} test",
+				})
+			},
+			wantLLMRequests: []*model.LLMRequest{
+				{
+					Contents: []*genai.Content{
+						genai.NewContentFromText("user input", genai.RoleUser),
+					},
+					Config: &genai.GenerateContentConfig{
+						SystemInstruction: genai.NewContentFromText("instruction custom_value test", genai.RoleUser),
+					},
+				},
+			},
+			wantAgentResponse: []string{
+				"llm resp stub",
+			},
+		},
+		{
+			name: "instruction provider overrides instruction",
+			llmagentFunc: func(model model.LLM) (agent.Agent, error) {
+				return llmagent.New(llmagent.Config{
+					Name:        "test_agent",
+					Model:       model,
+					Instruction: "instruction",
+					InstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
+						return "instruction provider template {var} not evaluated", nil
+					},
+				})
+			},
+			wantLLMRequests: []*model.LLMRequest{
+				{
+					Contents: []*genai.Content{
+						genai.NewContentFromText("user input", genai.RoleUser),
+					},
+					Config: &genai.GenerateContentConfig{
+						SystemInstruction: genai.NewContentFromText("instruction provider template {var} not evaluated", genai.RoleUser),
+					},
+				},
+			},
+			wantAgentResponse: []string{
+				"llm resp stub",
+			},
+		},
+		{
+			name: "global instruction provider overrides global instruction",
+			llmagentFunc: func(model model.LLM) (agent.Agent, error) {
+				return llmagent.New(llmagent.Config{
+					Name:              "test_agent",
+					Model:             model,
+					GlobalInstruction: "instruction",
+					GlobalInstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
+						return "global instruction provider template {var} not evaluated", nil
+					},
+				})
+			},
+			wantLLMRequests: []*model.LLMRequest{
+				{
+					Contents: []*genai.Content{
+						genai.NewContentFromText("user input", genai.RoleUser),
+					},
+					Config: &genai.GenerateContentConfig{
+						SystemInstruction: genai.NewContentFromText("global instruction provider template {var} not evaluated", genai.RoleUser),
+					},
+				},
+			},
+			wantAgentResponse: []string{
+				"llm resp stub",
+			},
+		},
+		{
+			name: "global instruction provider merged with instruction provider",
+			llmagentFunc: func(model model.LLM) (agent.Agent, error) {
+				return llmagent.New(llmagent.Config{
+					Name:  "test_agent",
+					Model: model,
+					InstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
+						return "instruction provider {var}", nil
+					},
+					GlobalInstructionProvider: func(ctx agent.ReadonlyContext) (string, error) {
+						return "global instruction provider {var}", nil
+					},
+				})
+			},
+			wantLLMRequests: []*model.LLMRequest{
+				{
+					Contents: []*genai.Content{
+						genai.NewContentFromText("user input", genai.RoleUser),
+					},
+					Config: &genai.GenerateContentConfig{
+						SystemInstruction: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("global instruction provider {var}"),
+								genai.NewPartFromText("instruction provider {var}"),
+							},
+							Role: genai.RoleUser,
+						},
+					},
+				},
+			},
+			wantAgentResponse: []string{
+				"llm resp stub",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &testutil.MockModel{
+				Responses: []*genai.Content{
+					genai.NewContentFromText("llm resp stub", genai.RoleModel),
+				},
+			}
+
+			agent, err := tc.llmagentFunc(model)
+			if err != nil {
+				t.Fatalf("failed to create LLM Agent: %v", err)
+			}
+
+			testRunner := testutil.NewTestAgentRunner(t, agent)
+			testRunner.SetInitSessionState(map[string]any{"var": "custom_value"})
+
+			stream := testRunner.Run(t, "session", "user input")
+
+			gotResp, err := testutil.CollectTextParts(stream)
+			if err != nil {
+				t.Fatalf("agent returned (%v, %v), want result", gotResp, err)
+			}
+
+			if diff := cmp.Diff(tc.wantLLMRequests, model.Requests); diff != "" {
+				t.Errorf("unexpected LLM requests, want: %v, got: %v, diff: %v", tc.wantLLMRequests, model.Requests, diff)
+			}
+
+			if diff := cmp.Diff(tc.wantAgentResponse, gotResp); diff != "" {
+				t.Errorf("unexpected agent response, want: %v, got: %v, diff: %v", tc.wantAgentResponse, gotResp, diff)
+			}
+		})
+	}
+}
+
 func TestFunctionTool(t *testing.T) {
 	model := newGeminiModel(t, modelName, nil)
 

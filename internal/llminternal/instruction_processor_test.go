@@ -70,7 +70,7 @@ func TestInjectSessionState(t *testing.T) {
 			template:   "Hello {missing_key}!",
 			state:      map[string]interface{}{"user_name": "Foo"},
 			wantErr:    true,
-			wantErrMsg: "context variable not found: `missing_key`",
+			wantErrMsg: "failed to get key \"missing_key\" from state: state key does not exist",
 		},
 		// Corresponds to: test_inject_session_state_with_missing_artifact_raises_key_error
 		{
@@ -202,7 +202,7 @@ And another optional artifact:
 			})
 
 			// --- Execution ---
-			got, err := injectSessionState(ctx, tc.template)
+			got, err := InjectSessionState(ctx, tc.template)
 
 			// --- Assertion ---
 			if tc.wantErr {

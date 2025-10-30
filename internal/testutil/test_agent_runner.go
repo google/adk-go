@@ -30,10 +30,11 @@ import (
 )
 
 type TestAgentRunner struct {
-	agent          agent.Agent
-	sessionService session.Service
-	lastSession    session.Session
-	appName        string
+	agent            agent.Agent
+	sessionService   session.Service
+	lastSession      session.Session
+	initSessionState map[string]any
+	appName          string
 	// TODO: move runner definition to the adk package and it's a part of public api, but the logic to the internal runner
 	runner *runner.Runner
 }
@@ -53,9 +54,14 @@ func (r *TestAgentRunner) session(t *testing.T, appName, userID, sessionID strin
 		AppName:   "test_app",
 		UserID:    "test_user",
 		SessionID: sessionID,
+		State:     r.initSessionState,
 	})
 	r.lastSession = resp.Session
 	return resp.Session, err
+}
+
+func (r *TestAgentRunner) SetInitSessionState(state map[string]any) {
+	r.initSessionState = state
 }
 
 func (r *TestAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.Seq2[*session.Event, error] {
@@ -87,6 +93,8 @@ func (r *TestAgentRunner) RunContentWithConfig(t *testing.T, sessionID string, c
 	return r.runner.Run(ctx, userID, session.ID(), content, cfg)
 }
 
+// NewTestAgentRunner creates a new TestAgentRunner for the given agent as root
+// initSessionState will be used to init all sessions created by this runner.
 func NewTestAgentRunner(t *testing.T, agent agent.Agent) *TestAgentRunner {
 	appName := "test_app"
 	sessionService := session.InMemoryService()

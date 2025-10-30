@@ -15,6 +15,8 @@
 package adka2a
 
 import (
+	"context"
+
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"google.golang.org/adk/agent"
@@ -26,7 +28,7 @@ type CardProducer struct {
 	Agent agent.Agent
 }
 
-func (cp *CardProducer) Card() *a2a.AgentCard {
+func (cp *CardProducer) Card(ctx context.Context) (*a2a.AgentCard, error) {
 	// TODO(yarolegovich): implement
-	return &a2a.AgentCard{}
+	return &a2a.AgentCard{}, nil
 }

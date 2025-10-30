@@ -98,6 +98,10 @@ type EventActions struct {
 	// Set by agent.Context implementation.
 	StateDelta map[string]any
 
+	// Indicates that the event is updating an artifact. key is the filename,
+	// value is the version.
+	ArtifactDelta map[string]int64
+
 	// TODO: Set by clients?
 	//
 	// If true, it won't call model to summarize function response.
@@ -108,5 +112,11 @@ type EventActions struct {
 	// The agent is escalating to a higher level agent.
 	Escalate bool
 }
+
+const (
+	KeyPrefixApp  string = "app:"
+	KeyPrefixTemp string = "temp:"
+	KeyPrefixUser string = "user:"
+)
 
 var ErrStateKeyNotExist = errors.New("state key does not exist")

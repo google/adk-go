@@ -12,21 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package tool defines internal-only interfaces and logic for tools.
-package toolinternal
+package converters
 
 import (
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
+	"encoding/json"
 )
 
-type FunctionTool interface {
-	tool.Tool
-	Declaration() *genai.FunctionDeclaration
-	Run(ctx tool.Context, args any) (result map[string]any, err error)
-}
+// ToMapStructure converts any to map[string]any.
+// We can't use mapstructure library in a way compatible with ADK-python, because genai type fields
+// don't have proper field tags.
+// TODO(yarolegovich): field annotation PR for genai types.
+func ToMapStructure(data any) (map[string]any, error) {
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
 
-type RequestProcessor interface {
-	ProcessRequest(ctx tool.Context, req *model.LLMRequest) error
+	var result map[string]any
+	if err := json.Unmarshal(bytes, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }

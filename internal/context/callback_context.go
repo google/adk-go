@@ -15,10 +15,33 @@
 package context
 
 import (
+	"context"
+
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
+
+type internalArtifacts struct {
+	agent.Artifacts
+	eventActions *session.EventActions
+}
+
+func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
+	resp, err := ia.Artifacts.Save(ctx, name, data)
+	if err != nil {
+		return resp, err
+	}
+	if ia.eventActions != nil {
+		if ia.eventActions.ArtifactDelta == nil {
+			ia.eventActions.ArtifactDelta = make(map[string]int64)
+		}
+		// TODO: RWLock, check the version stored is newer in case multiple tools save the same file.
+		ia.eventActions.ArtifactDelta[name] = resp.Version
+	}
+	return resp, nil
+}
 
 func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
 	return newCallbackContext(ctx)
@@ -26,10 +49,15 @@ func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
 
 func newCallbackContext(ctx agent.InvocationContext) *callbackContext {
 	rCtx := NewReadonlyContext(ctx)
+	eventActions := &session.EventActions{}
 	return &callbackContext{
 		ReadonlyContext: rCtx,
 		invocationCtx:   ctx,
-		eventActions:    &session.EventActions{},
+		eventActions:    eventActions,
+		artifacts: &internalArtifacts{
+			Artifacts:    ctx.Artifacts(),
+			eventActions: eventActions,
+		},
 	}
 }
 
@@ -37,16 +65,17 @@ func newCallbackContext(ctx agent.InvocationContext) *callbackContext {
 
 type callbackContext struct {
 	agent.ReadonlyContext
+	artifacts     *internalArtifacts
 	invocationCtx agent.InvocationContext
 	eventActions  *session.EventActions
 }
 
-func (c *callbackContext) AgentName() string {
-	return c.invocationCtx.Agent().Name()
+func (c *callbackContext) Artifacts() agent.Artifacts {
+	return c.artifacts
 }
 
-func (c *callbackContext) Actions() *session.EventActions {
-	return c.eventActions
+func (c *callbackContext) AgentName() string {
+	return c.invocationCtx.Agent().Name()
 }
 
 func (c *callbackContext) ReadonlyState() session.ReadonlyState {
@@ -55,10 +84,6 @@ func (c *callbackContext) ReadonlyState() session.ReadonlyState {
 
 func (c *callbackContext) State() session.State {
 	return c.invocationCtx.Session().State()
-}
-
-func (c *callbackContext) Artifacts() agent.Artifacts {
-	return c.invocationCtx.Artifacts()
 }
 
 func (c *callbackContext) InvocationID() string {

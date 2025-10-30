@@ -57,5 +57,4 @@ type CallbackContext interface {
 
 	Artifacts() Artifacts
 	State() session.State
-	Actions() *session.EventActions
 }

@@ -52,3 +52,8 @@ func FromErrorHandler(fn errorHandler) http.HandlerFunc {
 		}
 	}
 }
+
+// Unimplemented returns 501 - Status Not Implemented error
+func Unimplemented(rw http.ResponseWriter, req *http.Request) {
+	rw.WriteHeader(http.StatusNotImplemented)
+}
