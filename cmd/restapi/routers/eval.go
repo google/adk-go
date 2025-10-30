@@ -13,3 +13,36 @@
 // limitations under the License.
 
 package routers
+
+import (
+	"net/http"
+
+	"google.golang.org/adk/cmd/restapi/handlers"
+)
+
+// EvalAPIRouter defines the routes for the Eval API.
+type EvalAPIRouter struct{}
+
+// Routes returns the routes for the Apps API.
+func (r *EvalAPIRouter) Routes() Routes {
+	return Routes{
+		Route{
+			Name:        "ListEvalSets",
+			Methods:     []string{http.MethodGet},
+			Pattern:     "/apps/{app_name}/eval_sets",
+			HandlerFunc: handlers.Unimplemented,
+		},
+		Route{
+			Name:        "ListEvalSets",
+			Methods:     []string{http.MethodPost, http.MethodOptions},
+			Pattern:     "/apps/{app_name}/eval_sets/{eval_set_name}",
+			HandlerFunc: handlers.Unimplemented,
+		},
+		Route{
+			Name:        "ListEvalResults",
+			Methods:     []string{http.MethodGet},
+			Pattern:     "/apps/{app_name}/eval_results",
+			HandlerFunc: handlers.Unimplemented,
+		},
+	}
+}

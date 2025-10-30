@@ -77,7 +77,7 @@ func (t *artifactsTool) Declaration() *genai.FunctionDeclaration {
 }
 
 // Run implements tool.Tool.
-func (t *artifactsTool) Run(ctx tool.Context, args any) (any, error) {
+func (t *artifactsTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)

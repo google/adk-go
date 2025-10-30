@@ -40,10 +40,22 @@ func New(cfg Config) (agent.Agent, error) {
 		afterModelCallbacks = append(afterModelCallbacks, llminternal.AfterModelCallback(c))
 	}
 
+	beforeToolCallbacks := make([]llminternal.BeforeToolCallback, 0, len(cfg.BeforeToolCallbacks))
+	for _, c := range cfg.BeforeToolCallbacks {
+		beforeToolCallbacks = append(beforeToolCallbacks, llminternal.BeforeToolCallback(c))
+	}
+
+	afterToolCallbacks := make([]llminternal.AfterToolCallback, 0, len(cfg.AfterToolCallbacks))
+	for _, c := range cfg.AfterToolCallbacks {
+		afterToolCallbacks = append(afterToolCallbacks, llminternal.AfterToolCallback(c))
+	}
+
 	a := &llmAgent{
 		beforeModelCallbacks: beforeModelCallbacks,
 		model:                cfg.Model,
 		afterModelCallbacks:  afterModelCallbacks,
+		beforeToolCallbacks:  beforeToolCallbacks,
+		afterToolCallbacks:   afterToolCallbacks,
 		instruction:          cfg.Instruction,
 		inputSchema:          cfg.InputSchema,
 		outputSchema:         cfg.OutputSchema,
@@ -57,10 +69,13 @@ func New(cfg Config) (agent.Agent, error) {
 			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
 			InputSchema:              cfg.InputSchema,
 			OutputSchema:             cfg.OutputSchema,
-			IncludeContents:          cfg.IncludeContents,
-			Instruction:              cfg.Instruction,
-			GlobalInstruction:        cfg.GlobalInstruction,
-			OutputKey:                cfg.OutputKey,
+			// TODO: internal type for includeContents
+			IncludeContents:           string(cfg.IncludeContents),
+			Instruction:               cfg.Instruction,
+			InstructionProvider:       llminternal.InstructionProvider(cfg.InstructionProvider),
+			GlobalInstruction:         cfg.GlobalInstruction,
+			GlobalInstructionProvider: llminternal.InstructionProvider(cfg.GlobalInstructionProvider),
+			OutputKey:                 cfg.OutputKey,
 		},
 	}
 
@@ -115,17 +130,59 @@ type Config struct {
 	// usage, or perform post-processing on the raw `LLMResponse`.
 	AfterModelCallbacks []AfterModelCallback
 
-	Instruction       string
+	// Instruction is set for the LLM model guiding the agent's behavior.
+	//
+	// The string is treated as a template:
+	//  - There can be placeholders like {key_name} that will be resolved by ADK
+	//    at runtime using session state and context.
+	//  - key_name must match "^[a-zA-Z_][a-zA-Z0-9_]*$", otherwise it will be
+	//    treated as a literal.
+	//  - {artifact.key_name} can be used to insert the text content of the
+	//    artifact named key_name.
+	//
+	// If the state variable or artifact does not exist, the agent will raise an
+	// error. If you want to ignore the error, you can append a ? to the
+	// variable name as in {var?} to make it optional.
+	//
+	Instruction string
+	// InstructionProvider allows to create instructions dynamically based on
+	// the agent context.
+	//
+	// It takes over the Instruction field if both are set.
+	InstructionProvider InstructionProvider
+
+	// GlobalInstruction is the instruction for all agents in the entire
+	// agent tree.
+	//
+	// The string is treated as a template:
+	//  - There can be placeholders like {key_name} that will be resolved by ADK
+	//    at runtime using session state and context.
+	//  - key_name must match "^[a-zA-Z_][a-zA-Z0-9_]*$", otherwise it will be
+	//    treated as a literal.
+	//  - {artifact.key_name} can be used to insert the text content of the
+	//    artifact named key_name.
+	//
+	// If the state variable or artifact does not exist, the agent will raise an
+	// error. If you want to ignore the error, you can append a ? to the
+	// variable name as in {var?} to make it optional.
+	//
+	// ONLY the GlobalInstruction in the root agent will take effect.
+	//
+	// For example: GlobalInstruction can make all agents have a stable identity
+	// or personality.
 	GlobalInstruction string
+	// GlobalInstructionProvider allows to create global instructions
+	// dynamically based on the agent context.
+	//
+	// It takes over the GlobalInstruction field if both are set.
+	GlobalInstructionProvider InstructionProvider
 
 	// LLM-based agent transfer configs.
 	DisallowTransferToParent bool
 	DisallowTransferToPeers  bool
 
-	// Whether to include contents in the model request.
-	// When set to 'none', the model request will not include any contents, such as
-	// user messages, tool requests, etc.
-	IncludeContents string
+	// Whether to include contents (conversation history) in the model request.
+	IncludeContents IncludeContents
 
 	// TODO(ngeorgy): consider to switch to jsonschema for input and output schema.
 	// The input schema when agent is used as a tool.
@@ -136,8 +193,27 @@ type Config struct {
 	// such as function tools, RAGs, agent transfer, etc.
 	OutputSchema *genai.Schema
 
-	// TODO: BeforeTool and AfterTool callbacks
-	Tools []tool.Tool
+	// Callbacks are executed in the order they are provided.
+	// The execution of the callback chain stops at the first callback that returns a non-nil
+	// response
+	//   - If a callback returns (map[string]any, nil), it will be used directly as the result of
+	//     the tool call. Subsequent BeforeToolCallbacks in the list are skipped.
+	//   - If a callback returns (nil, error), the tool execution is aborted, and the returned
+	//     error is propagated. Subsequent BeforeToolCallbacks are skipped.
+	//   - If a callback returns (nil, nil), the execution continues to the next BeforeToolCallback
+	//     in the sequence.
+	BeforeToolCallbacks []BeforeToolCallback
+	Tools               []tool.Tool
+	// Callbacks are executed in the order they are provided.
+	// The execution of the callback chain stops at the first callback that returns a non-nil
+	// response.
+	//   - If a callback returns (map[string]any, nil), it will replace the result returned by
+	//     the tool's Run method. Subsequent AfterToolCallbacks in the list are skipped.
+	//   - If a callback returns (nil, error), this error indicates a failure within the
+	//     callback itself, and will be propagated. Subsequent AfterToolCallbacks are skipped.
+	//   - If a callback returns (nil, nil), the execution continues to the next AfterToolCallback
+	//     in the sequence.
+	AfterToolCallbacks []AfterToolCallback
 	// Toolsets will be used by llmagent to extract tools and pass to the
 	// underlying LLM.
 	Toolsets []tool.Toolset
@@ -151,14 +227,40 @@ type Config struct {
 	// Planner
 	// CodeExecutor
 	// Examples
-
-	// BeforeToolCallback
-	// AfterToolCallback
 }
 
 type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
 type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+
+// BeforeToolCallback is a function type executed before a tool's Run method is invoked.
+//
+// Parameters:
+//   - ctx: The tool.Context for the current tool execution.
+//   - tool: The tool.Tool instance that is about to be executed.
+//   - args: The original arguments provided to the tool.
+type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
+
+// AfterToolCallback is a function type executed after a tool's Run method has completed,
+// regardless of whether the tool returned a result or an error.
+//
+// Parameters:
+//   - ctx:    The tool.Context for the tool execution.
+//   - tool:   The tool.Tool instance that was executed.
+//   - args:   The arguments originally passed to the tool.
+//   - result: The result returned by the tool's Run method.
+//   - err:    The error returned by the tool's Run method.
+type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error)
+
+// IncludeContents controls what parts of prior conversation history is received by llmagent.
+type IncludeContents string
+
+const (
+	// IncludeContentsNone makes the llmagent operate solely on its current turn (latest user input + any following agent events).
+	IncludeContentsNone IncludeContents = "none"
+	// IncludeContentsDefault is enabled by default. The llmagent receives the relevant conversation history.
+	IncludeContentsDefault IncludeContents = "default"
+)
 
 type llmAgent struct {
 	agent.Agent
@@ -169,6 +271,9 @@ type llmAgent struct {
 	model                model.LLM
 	afterModelCallbacks  []llminternal.AfterModelCallback
 	instruction          string
+
+	beforeToolCallbacks []llminternal.BeforeToolCallback
+	afterToolCallbacks  []llminternal.AfterToolCallback
 
 	inputSchema  *genai.Schema
 	outputSchema *genai.Schema
@@ -194,6 +299,8 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		ResponseProcessors:   llminternal.DefaultResponseProcessors,
 		BeforeModelCallbacks: a.beforeModelCallbacks,
 		AfterModelCallbacks:  a.afterModelCallbacks,
+		BeforeToolCallbacks:  a.beforeToolCallbacks,
+		AfterToolCallbacks:   a.afterToolCallbacks,
 	}
 
 	return func(yield func(*session.Event, error) bool) {
@@ -242,3 +349,11 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		event.Actions.StateDelta[a.OutputKey] = result
 	}
 }
+
+// InstructionProvider allows to create instructions dynamically. It is called
+// on each agent invocation.
+//
+// NOTE: when InstructionProvider is used, ADK will NOT inject session state
+// placeholders into the instruction. You can use
+// util/instructionutil.InjectSessionState() helper if this functionality is needed.
+type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)

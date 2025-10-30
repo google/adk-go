@@ -123,12 +123,7 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 				return
 			}
 
-			resultMap, ok := result.(map[string]any)
-			if !ok {
-				t.Fatalf("Run() returned type %T, want map[string]any", result)
-			}
-
-			if diff := cmp.Diff(tt.want, resultMap); diff != "" {
+			if diff := cmp.Diff(tt.want, result); diff != "" {
 				t.Errorf("Run() result diff (-want +got):\n%s", diff)
 			}
 		})

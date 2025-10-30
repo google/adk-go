@@ -135,7 +135,7 @@ func Serve(c *WebConfig, adkConfig *adk.Config) {
 	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(c.LocalPort), handler))
 }
 
-func newA2AHandler(serveConfig *adk.Config) *a2agrpc.GRPCHandler {
+func newA2AHandler(serveConfig *adk.Config) *a2agrpc.Handler {
 	agent := serveConfig.AgentLoader.Root()
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
@@ -146,6 +146,6 @@ func newA2AHandler(serveConfig *adk.Config) *a2agrpc.GRPCHandler {
 		},
 	})
 	reqHandler := a2asrv.NewHandler(executor, serveConfig.A2AOptions...)
-	grpcHandler := a2agrpc.NewHandler(&adka2a.CardProducer{Agent: agent}, reqHandler)
+	grpcHandler := a2agrpc.NewHandler(reqHandler)
 	return grpcHandler
 }

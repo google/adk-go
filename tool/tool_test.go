@@ -19,6 +19,7 @@ import (
 
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/agenttool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/adk/tool/loadartifactstool"
@@ -51,6 +52,16 @@ func TestTypes(t *testing.T) {
 			name:          "geminitool.GoogleSearch{}",
 			constructor:   func() (tool.Tool, error) { return geminitool.GoogleSearch{}, nil },
 			expectedTypes: []string{requestProc},
+		},
+		{
+			name:          "LoadArtifactsTool",
+			constructor:   func() (tool.Tool, error) { return loadartifactstool.New(), nil },
+			expectedTypes: []string{requestProc, functionTool},
+		},
+		{
+			name:          "AgentTool",
+			constructor:   func() (tool.Tool, error) { return agenttool.New(nil, nil), nil },
+			expectedTypes: []string{requestProc, functionTool},
 		},
 		{
 			name:          "LoadArtifactsTool",

@@ -36,6 +36,7 @@ func SetupRouter(router *mux.Router, routerConfig *config.ADKAPIRouterConfigs) *
 		routers.NewAppsAPIRouter(handlers.NewAppsAPIController(routerConfig.AgentLoader)),
 		routers.NewDebugAPIRouter(handlers.NewDebugAPIController(routerConfig.SessionService, routerConfig.AgentLoader, adkExporter)),
 		routers.NewArtifactsAPIRouter(handlers.NewArtifactsAPIController(routerConfig.ArtifactService)),
+		&routers.EvalAPIRouter{},
 	)
 }
 

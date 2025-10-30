@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
@@ -35,8 +36,10 @@ type State struct {
 
 	GenerateContentConfig *genai.GenerateContentConfig
 
-	Instruction       string
-	GlobalInstruction string
+	Instruction               string
+	InstructionProvider       InstructionProvider
+	GlobalInstruction         string
+	GlobalInstructionProvider InstructionProvider
 
 	DisallowTransferToParent bool
 	DisallowTransferToPeers  bool
@@ -46,6 +49,8 @@ type State struct {
 
 	OutputKey string
 }
+
+type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
 
 func (s *State) internal() *State { return s }
 

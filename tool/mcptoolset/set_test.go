@@ -132,7 +132,7 @@ func TestMCPToolSet(t *testing.T) {
 							FunctionResponse: &genai.FunctionResponse{
 								Name: "get_weather",
 								Response: map[string]any{
-									"weather_summary": `Today in "london" is sunny`,
+									"output": map[string]any{"weather_summary": string(`Today in "london" is sunny`)},
 								},
 							},
 						},

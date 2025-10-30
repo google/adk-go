@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 )
@@ -35,8 +36,6 @@ const (
 
 // instructionsRequestProcessor configures req's instructions and global instructions for LLM flow.
 func instructionsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	// reference: adk-python src/google/adk/flows/llm_flows/instructions.py
-
 	llmAgent := asLLMAgent(ctx.Agent())
 	if llmAgent == nil {
 		return nil // do nothing.
@@ -49,22 +48,14 @@ func instructionsRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 		rootAgent = llmAgent
 	}
 
-	// Append global instructions if set.
-	if rootAgent != nil && rootAgent.internal().GlobalInstruction != "" {
-		instructions, err := injectSessionState(ctx, llmAgent.internal().GlobalInstruction)
-		if err != nil {
-			return fmt.Errorf("error injecting state in global instruction: `%w`", err)
-		}
-		utils.AppendInstructions(req, instructions)
+	// Append global instructions.
+	if err := appendGlobalInstructions(ctx, req, rootAgent.internal()); err != nil {
+		return fmt.Errorf("failed to append global instructions: %w", err)
 	}
 
 	// Append agent's instruction
-	if llmAgent.internal().Instruction != "" {
-		instructions, err := injectSessionState(ctx, llmAgent.internal().Instruction)
-		if err != nil {
-			return fmt.Errorf("error injecting state in global instruction: `%w`", err)
-		}
-		utils.AppendInstructions(req, instructions)
+	if err := appendInstructions(ctx, req, llmAgent.internal()); err != nil {
+		return fmt.Errorf("failed to append instructions: %w", err)
 	}
 
 	return nil
@@ -73,7 +64,55 @@ func instructionsRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 // The regex to find placeholders like {variable} or {artifact.file_name}.
 var placeholderRegex = regexp.MustCompile(`{+[^{}]*}+`)
 
-// replaceMatch tries to retrieve the match from the state map
+func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agentState *State) error {
+	if agentState.InstructionProvider != nil {
+		instruction, err := agentState.InstructionProvider(icontext.NewReadonlyContext(ctx))
+		if err != nil {
+			return fmt.Errorf("failed to evaluate global instruction provider: %w", err)
+		}
+
+		utils.AppendInstructions(req, instruction)
+		return nil
+	}
+
+	if agentState.Instruction == "" {
+		return nil
+	}
+
+	inst, err := InjectSessionState(ctx, agentState.Instruction)
+	if err != nil {
+		return fmt.Errorf("failed to inject session state into instruction: %w", err)
+	}
+
+	utils.AppendInstructions(req, inst)
+	return nil
+}
+
+func appendGlobalInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agentState *State) error {
+	if agentState.GlobalInstructionProvider != nil {
+		instruction, err := agentState.GlobalInstructionProvider(icontext.NewReadonlyContext(ctx))
+		if err != nil {
+			return fmt.Errorf("failed to evaluate global instruction provider: %w", err)
+		}
+
+		utils.AppendInstructions(req, instruction)
+		return nil
+	}
+
+	if agentState.GlobalInstruction == "" {
+		return nil
+	}
+
+	inst, err := InjectSessionState(ctx, agentState.GlobalInstruction)
+	if err != nil {
+		return fmt.Errorf("failed to inject session state into global instruction: %w", err)
+	}
+
+	utils.AppendInstructions(req, inst)
+	return nil
+}
+
+// replaceMatch is the Go equivalent of the _replace_match async function in the Python code.
 func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 	// Trim curly braces: "{var_name}" -> "var_name"
 	varName := strings.TrimSpace(strings.Trim(match, "{}"))
@@ -91,6 +130,7 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 		resp, err := ctx.Artifacts().Load(ctx, fileName)
 		if err != nil {
 			if optional {
+				// TODO: consistent logging approach in adk-go
 				return "", nil
 			}
 			return "", fmt.Errorf("failed to load artifact %s: %w", fileName, err)
@@ -105,9 +145,10 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 	value, err := ctx.Session().State().Get(varName)
 	if err != nil {
 		if optional {
+			// TODO: log error when !errors.Is(err, session.ErrStateKeyNotExist)
 			return "", nil
 		}
-		return "", fmt.Errorf("context variable not found: `%s`", varName)
+		return "", err
 	}
 
 	if value == nil {
@@ -156,8 +197,8 @@ func isValidStateName(varName string) bool {
 	return false
 }
 
-// injectSessionState populates values in an instruction template from a context.
-func injectSessionState(ctx agent.InvocationContext, template string) (string, error) {
+// InjectSessionState populates values in an instruction template from a context.
+func InjectSessionState(ctx agent.InvocationContext, template string) (string, error) {
 	// Find all matches, then iterate through them, building the result string.
 	var result strings.Builder
 	lastIndex := 0
