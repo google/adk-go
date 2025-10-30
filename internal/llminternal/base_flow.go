@@ -368,7 +368,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		if !ok {
 			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
 		}
-		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{})
+		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)})
 		//toolCtx := tool.
 		spans := telemetry.StartTrace(ctx, "execute_tool "+fnCall.Name)
 

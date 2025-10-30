@@ -51,7 +51,13 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 	if functionCallID == "" {
 		functionCallID = uuid.NewString()
 	}
-	cbCtx := contextinternal.NewCallbackContext(ctx)
+	if actions == nil {
+		actions = &session.EventActions{StateDelta: make(map[string]any)}
+	}
+	if actions.StateDelta == nil {
+		actions.StateDelta = make(map[string]any)
+	}
+	cbCtx := contextinternal.NewCallbackContextWithDelta(ctx, actions.StateDelta)
 
 	return &toolContext{
 		CallbackContext:   cbCtx,
