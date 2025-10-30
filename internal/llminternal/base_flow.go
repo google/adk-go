@@ -111,6 +111,9 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			yield(nil, err)
 			return
 		}
+		if ctx.EndInvocation() {
+			return
+		}
 		spans := telemetry.StartTrace(ctx, "call_llm")
 		// Create event to pass to callback state delta
 		stateDelta := make(map[string]any)

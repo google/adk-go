@@ -34,8 +34,8 @@ type InvocationContext interface {
 	UserContent() *genai.Content
 	RunConfig() *RunConfig
 
-	EndInvocation()
-	Ended() bool
+	EndInvocation() bool
+	SetEndInvocation(endInvocation bool)
 }
 
 type ReadonlyContext interface {

@@ -142,6 +142,39 @@ func TestAgentCallbacks(t *testing.T) {
 	}
 }
 
+func TestEndInvocation(t *testing.T) {
+	custom := &customAgent{}
+
+	testAgent, err := New(Config{
+		Name: "test",
+		BeforeAgentCallbacks: []BeforeAgentCallback{
+			func(ctx CallbackContext) (*genai.Content, error) {
+				return nil, nil
+			},
+		},
+		Run: custom.Run,
+	})
+	if err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	ctx := &invocationContext{
+		agent:         testAgent,
+		endInvocation: true,
+	}
+	for _, err := range testAgent.Run(ctx) {
+		if err != nil {
+			t.Fatalf("unexpected error from the agent: %v", err)
+		}
+	}
+
+	// Even though beforeAgentCallback returns nil, it stil doesn't call llm because
+	// endInvocation is true.
+	if custom.callCounter != 0 {
+		t.Errorf("unexpected want_llm_calls, got: %v, want: %v", custom.callCounter, 0)
+	}
+}
+
 // TODO: create test util allowing to create custom agents, agent trees for test etc.
 type customAgent struct {
 	callCounter int

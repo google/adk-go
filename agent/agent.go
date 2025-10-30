@@ -115,10 +115,11 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			memory:    ctx.Memory(),
 			session:   ctx.Session(),
 
-			invocationID: ctx.InvocationID(),
-			branch:       ctx.Branch(),
-			userContent:  ctx.UserContent(),
-			runConfig:    ctx.RunConfig(),
+			invocationID:  ctx.InvocationID(),
+			branch:        ctx.Branch(),
+			userContent:   ctx.UserContent(),
+			runConfig:     ctx.RunConfig(),
+			endInvocation: ctx.EndInvocation(),
 		}
 
 		event, err := runBeforeAgentCallbacks(ctx)
@@ -126,10 +127,10 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			if !yield(event, err) {
 				return
 			}
-			// TODO replace with "if ctx.EndInvocation()" { once setter method is defined
-			if event.LLMResponse.Content != nil {
-				return
-			}
+		}
+
+		if ctx.EndInvocation() {
+			return
 		}
 
 		for event, err := range a.run(ctx) {
@@ -139,6 +140,10 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			if !yield(event, err) {
 				return
 			}
+		}
+
+		if ctx.EndInvocation() {
+			return
 		}
 
 		event, err = runAfterAgentCallbacks(ctx)
@@ -189,8 +194,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
 		event.Actions = *callbackCtx.actions
-		// TODO set context invocation ended
-		// ctx.invocationEnded = true
+		ctx.SetEndInvocation(true)
 		return event, nil
 	}
 
@@ -335,10 +339,11 @@ type invocationContext struct {
 	memory    Memory
 	session   session.Session
 
-	invocationID string
-	branch       string
-	userContent  *genai.Content
-	runConfig    *RunConfig
+	invocationID  string
+	branch        string
+	userContent   *genai.Content
+	runConfig     *RunConfig
+	endInvocation bool
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -373,11 +378,10 @@ func (c *invocationContext) RunConfig() *RunConfig {
 	return c.runConfig
 }
 
-// TODO: implement endInvocation
-func (c *invocationContext) EndInvocation() {
+func (c *invocationContext) EndInvocation() bool {
+	return c.endInvocation
 }
 
-// TODO: implement endInvocation
-func (c *invocationContext) Ended() bool {
-	return false
+func (c *invocationContext) SetEndInvocation(endInvocation bool) {
+	c.endInvocation = endInvocation
 }
