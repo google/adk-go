@@ -73,7 +73,7 @@ type Memory interface {
 }
 
 type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)
-type AfterAgentCallback func(CallbackContext, *session.Event, error) (*genai.Content, error)
+type AfterAgentCallback func(CallbackContext) (*genai.Content, error)
 
 type agent struct {
 	agentinternal.State
@@ -136,9 +136,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 
 		// TODO confirm this should only run on last event
 		// https://github.com/google/adk-python/blob/9ab17f2afd7ae427f5ea49639394cbcaa6c3cc40/src/google/adk/agents/base_agent.py#L300
-		event, err = runAfterAgentCallbacks(ctx, event, err)
-		if !yield(event, err) {
-			return
+		event, err = runAfterAgentCallbacks(ctx)
+		if event != nil || err != nil {
+			yield(event, err)
 		}
 	}
 }
@@ -203,21 +203,17 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 
 // runAfterAgentCallbacks checks if any afterAgentCallback returns non-nil content
 // then it replaces the event content with a value from the callback.
-func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, agentError error) (*session.Event, error) {
+func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
-
-	if agentEvent.Actions.StateDelta == nil {
-		agentEvent.Actions.StateDelta = make(map[string]any)
-	}
 
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: agentEvent.Actions.StateDelta},
+		actions:           &session.EventActions{StateDelta: make(map[string]any)},
 	}
 
 	for _, callback := range agent.internal().afterAgentCallbacks {
-		newContent, err := callback(callbackCtx, agentEvent, agentError)
+		newContent, err := callback(callbackCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run after agent callback: %w", err)
 		}
@@ -225,11 +221,27 @@ func runAfterAgentCallbacks(ctx InvocationContext, agentEvent *session.Event, ag
 			continue
 		}
 
-		agentEvent.LLMResponse.Content = newContent
-		return agentEvent, nil
+		event := session.NewEvent(ctx.InvocationID())
+		event.LLMResponse = model.LLMResponse{
+			Content: newContent,
+		}
+		event.Author = agent.Name()
+		event.Branch = ctx.Branch()
+		event.Actions = *callbackCtx.actions
+		// TODO set context invocation ended
+		// ctx.invocationEnded = true
+		return event, nil
 	}
 
-	return agentEvent, agentError
+	// check if has delta create event with it
+	if len(callbackCtx.actions.StateDelta) > 0 {
+		event := session.NewEvent(ctx.InvocationID())
+		event.Author = agent.Name()
+		event.Branch = ctx.Branch()
+		event.Actions = *callbackCtx.actions
+		return event, nil
+	}
+	return nil, nil
 }
 
 // TODO: unify with internal/context.callbackContext

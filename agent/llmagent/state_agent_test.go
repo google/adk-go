@@ -18,13 +18,19 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"math"
+	"math/rand"
+	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/genai"
 )
 
@@ -138,7 +144,7 @@ func afterModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmRespons
 }
 
 func afterAgentCallback(t *testing.T) agent.AfterAgentCallback {
-	return func(cctx agent.CallbackContext, event *session.Event, err error) (*genai.Content, error) {
+	return func(cctx agent.CallbackContext) (*genai.Content, error) {
 		if err := cctx.State().Set("after_agent_callback_state_key", "after_agent_callback_state_value"); err != nil {
 			return nil, fmt.Errorf("failed to set state: %w", err)
 		}
@@ -222,5 +228,414 @@ func TestAgentSessionLifecycle(t *testing.T) {
 		if _, err := finalState.Get(key); err != nil {
 			t.Errorf("Key %s not found in final session state: %v", key, err)
 		}
+	}
+}
+
+// --- Tool Implementations ---
+
+type WeatherArgs struct {
+	Location string `json:"location"`
+}
+
+type WeatherResult struct {
+	Location    string    `json:"location"`
+	Temperature int       `json:"temperature"`
+	Condition   string    `json:"condition"`
+	Humidity    int       `json:"humidity"`
+	Timestamp   time.Time `json:"timestamp"`
+}
+
+func GetWeather(ctx tool.Context, args WeatherArgs) WeatherResult {
+	// Simulate weather data
+	temperatures := []int{-10, -5, 0, 5, 10, 15, 20, 25, 30, 35}
+	conditions := []string{"sunny", "cloudy", "rainy", "snowy", "windy"}
+
+	return WeatherResult{
+		Location:    args.Location,
+		Temperature: temperatures[rand.Intn(len(temperatures))],
+		Condition:   conditions[rand.Intn(len(conditions))],
+		Humidity:    rand.Intn(61) + 30, // 30-90
+		Timestamp:   time.Now(),
+	}
+}
+
+type CalculationArgs struct {
+	Operation string  `json:"operation"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+}
+
+type CalculationResult struct {
+	Operation string    `json:"operation"`
+	X         float64   `json:"x"`
+	Y         float64   `json:"y"`
+	Result    any       `json:"result"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+func Calculate(ctx tool.Context, args CalculationArgs) CalculationResult {
+	operations := map[string]float64{
+		"add":      args.X + args.Y,
+		"subtract": args.X - args.Y,
+		"multiply": args.X * args.Y,
+	}
+	if args.Operation == "divide" {
+		if args.Y != 0 {
+			operations["divide"] = args.X / args.Y
+		} else {
+			operations["divide"] = math.Inf(int(args.X))
+		}
+	}
+
+	result, ok := operations[strings.ToLower(args.Operation)]
+	if !ok {
+		return CalculationResult{
+			Operation: args.Operation,
+			X:         args.X,
+			Y:         args.Y,
+			Result:    "Unknown operation",
+			Timestamp: time.Now(),
+		}
+	}
+
+	return CalculationResult{
+		Operation: args.Operation,
+		X:         args.X,
+		Y:         args.Y,
+		Result:    result,
+		Timestamp: time.Now(),
+	}
+}
+
+type LogActivityParams struct {
+	Message string `json:"message"`
+}
+
+type LogEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Message   string    `json:"message"`
+}
+
+type LogActivityResult struct {
+	Status       string   `json:"status"`
+	Entry        LogEntry `json:"entry"`
+	TotalEntries int      `json:"total_entries"`
+	err          error
+}
+
+func LogActivity(ctx tool.Context, params LogActivityParams) LogActivityResult {
+	var activityLog []LogEntry
+	val, err := ctx.State().Get("activity_log")
+	if err == nil {
+		activityLog, _ = val.([]LogEntry)
+	}
+
+	logEntry := LogEntry{Timestamp: time.Now(), Message: params.Message}
+	activityLog = append(activityLog, logEntry)
+	if err := ctx.State().Set("activity_log", activityLog); err != nil {
+		return LogActivityResult{
+			err: err,
+		}
+	}
+
+	return LogActivityResult{
+		Status:       "logged",
+		Entry:        logEntry,
+		TotalEntries: len(activityLog),
+		err:          nil,
+	}
+}
+
+// --- Before Tool Callbacks ---
+
+func beforeToolAuditCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+	fmt.Printf("🔍 AUDIT: About to call tool '%s' with args: %v\n", t.Name(), args)
+
+	var auditLog []map[string]any
+	val, err := ctx.State().Get("audit_log")
+	if err == nil {
+		auditLog, _ = val.([]map[string]any)
+	}
+
+	auditLog = append(auditLog, map[string]any{
+		"type":      "before_call",
+		"tool_name": t.Name(),
+		"args":      args,
+		"timestamp": time.Now(),
+	})
+	if err := ctx.State().Set("audit_log", auditLog); err != nil {
+		return nil, err
+	}
+	return nil, nil // Continue execution
+}
+
+func beforeToolSecurityCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+	if t.Name() == "get_weather" {
+		location := ""
+		if loc, ok := args["location"].(string); ok {
+			location = loc
+		}
+		restricted := []string{"classified", "secret"}
+		for _, r := range restricted {
+			if strings.ToLower(location) == r {
+				fmt.Printf("🚫 SECURITY: Blocked weather request for restricted location: %s\n", location)
+				if err := ctx.State().Set("security_log", "example"); err != nil {
+					return nil, err
+				}
+				return map[string]any{
+					"error":              "Access denied",
+					"reason":             "Location access is restricted",
+					"requested_location": location,
+				}, nil // Block execution
+			}
+		}
+	}
+	return nil, nil // Continue execution
+}
+
+func beforeToolValidationCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+	if t.Name() == "calculate" {
+		operation, _ := args["operation"].(string)
+		y, yOK := args["y"].(float64)
+		if strings.ToLower(operation) == "divide" && yOK && y == 0 {
+			fmt.Println("🚫 VALIDATION: Prevented division by zero")
+			return map[string]any{
+				"error":     "Division by zero",
+				"operation": operation,
+				"x":         args["x"],
+				"y":         args["y"],
+			}, nil // Block execution
+		}
+	}
+	return nil, nil // Continue execution
+}
+
+// --- After Tool Callbacks ---
+
+func afterToolEnhancementCallback(ctx tool.Context, t tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+	if err != nil {
+		return result, err // Don't enhance if there was an error
+	}
+	fmt.Printf("✨ ENHANCE: Adding metadata to response from '%s'\n", t.Name())
+	enhancedResponse := make(map[string]any)
+	for k, v := range result {
+		enhancedResponse[k] = v
+	}
+	enhancedResponse["enhanced"] = true
+	enhancedResponse["enhancement_timestamp"] = time.Now()
+	enhancedResponse["tool_name"] = t.Name()
+	enhancedResponse["execution_context"] = "live_streaming"
+	return enhancedResponse, nil
+}
+
+func afterToolAsyncCallback(ctx tool.Context, t tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+	if err != nil {
+		return result, err
+	}
+	fmt.Printf("🔄 ASYNC AFTER: Post-processing response from '%s'\n", t.Name())
+	processedResponse := make(map[string]any)
+	for k, v := range result {
+		processedResponse[k] = v
+	}
+	processedResponse["async_processed"] = true
+	processedResponse["processor"] = "async_after_callback"
+	return processedResponse, nil
+}
+
+// --- Test Function ---
+
+// --- Helper function to collect tool results ---
+func collectToolResults(t *testing.T, stream iter.Seq2[*session.Event, error]) []map[string]any {
+	t.Helper()
+	var results []map[string]any
+	for event, err := range stream {
+		if err != nil {
+			t.Fatalf("Error iterating through event stream: %v", err)
+		}
+		if event == nil || event.Content == nil {
+			continue
+		}
+
+		for _, part := range event.Content.Parts {
+			if part.FunctionResponse != nil {
+				if part.FunctionResponse.Response != nil {
+					results = append(results, part.FunctionResponse.Response)
+				}
+			}
+		}
+	}
+	return results
+}
+
+func TestToolCallbacksAgent(t *testing.T) {
+	// Fake LLM to control tool calls
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	fakeLLM := &FakeLLM{
+		GenerateContentFunc: func(ctx context.Context, req *model.LLMRequest, stream bool) (model.LLMResponse, error) {
+			var userText string
+			if len(req.Contents) == 1 && len(req.Contents[0].Parts) > 0 {
+				userText = string(req.Contents[0].Parts[0].Text)
+			} else if len(req.Contents) > 1 {
+				userText = "after func"
+			}
+
+			var name string
+			var args map[string]any
+			switch userText {
+			case "weather in London":
+				name, args = "get_weather", map[string]any{"location": "London"}
+			case "weather in secret":
+				name, args = "get_weather", map[string]any{"location": "secret"}
+			case "calculate 5 plus 3":
+				name, args = "calculate", map[string]any{"operation": "add", "x": 5.0, "y": 3.0}
+			case "calculate 5 divide by 0":
+				name, args = "calculate", map[string]any{"operation": "divide", "x": 5.0, "y": 0.0}
+			case "log this message":
+				name, args = "log_activity", map[string]any{"message": "test log"}
+			case "after func":
+				return model.LLMResponse{
+					Content: genai.NewContentFromText("Function Ended", genai.RoleModel),
+				}, nil
+			default:
+				return model.LLMResponse{
+					Content: genai.NewContentFromText("I'm not sure how to respond to that.", genai.RoleModel),
+				}, nil
+			}
+
+			return model.LLMResponse{
+				Content: genai.NewContentFromFunctionCall(name, args, genai.RoleModel),
+			}, nil
+		},
+	}
+
+	// Create tools
+	getWeatherTool, _ := functiontool.New(functiontool.Config{Name: "get_weather", Description: "Get weather information"}, GetWeather)
+	calculateTool, _ := functiontool.New(functiontool.Config{Name: "calculate", Description: "Perform mathematical calculations"}, Calculate)
+	logActivityTool, _ := functiontool.New(functiontool.Config{Name: "log_activity", Description: "Log an activity message"}, LogActivity)
+
+	agentConfig := llmagent.Config{
+		Name:        "tool_callbacks_agent",
+		Description: "Agent to test tool callbacks",
+		Model:       fakeLLM,
+		Instruction: "Follow user instructions to call tools.",
+		Tools:       []tool.Tool{getWeatherTool, calculateTool, logActivityTool},
+		BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+			beforeToolAuditCallback,
+			beforeToolSecurityCallback,
+			beforeToolValidationCallback,
+		},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			afterToolEnhancementCallback,
+			afterToolAsyncCallback,
+		},
+	}
+	rootAgent, err := llmagent.New(agentConfig)
+	if err != nil {
+		t.Fatalf("Failed to create LLM Agent: %v", err)
+	}
+
+	// Setup Runner
+	// Note: This Runner setup is a simplified guess. Actual implementation might need more services.
+	r, err := runner.New(runner.Config{
+		AppName:        "test_app",
+		Agent:          rootAgent,
+		SessionService: service,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create runner: %v", err)
+	}
+
+	tests := []struct {
+		name            string
+		query           string
+		wantContent     []string // Substrings to check in the final response
+		dontWantContent []string
+		wantStateKeys   []string
+	}{
+		{
+			name:            "Weather London - success",
+			query:           "weather in London",
+			wantContent:     []string{"London", "temperature", "enhanced:true"},
+			dontWantContent: []string{"async_processed"},
+		},
+		{
+			name:          "Weather Secret - blocked",
+			query:         "weather in secret",
+			wantContent:   []string{"Access denied", "Location access is restricted", "enhanced:true"}, // Callbacks still run on the error result
+			wantStateKeys: []string{"security_log"},
+		},
+		{
+			name:        "Calculate Add - success",
+			query:       "calculate 5 plus 3",
+			wantContent: []string{"operation:add", "result:8", "enhanced:true"},
+		},
+		{
+			name:        "Calculate Divide by Zero - blocked",
+			query:       "calculate 5 divide by 0",
+			wantContent: []string{"Division by zero", "enhanced:true"}, // Callbacks still run
+		},
+		{
+			name:          "Log Activity - success",
+			query:         "log this message",
+			wantContent:   []string{"status:logged", "total_entries:1", "enhanced:true"},
+			wantStateKeys: []string{"activity_log"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create a session
+			createReq := &session.CreateRequest{AppName: "test_app", UserID: "test_user"}
+			createResp, err := service.Create(ctx, createReq)
+			if err != nil {
+				t.Fatalf("Failed to create session: %v", err)
+			}
+			sessionID := createResp.Session.ID()
+
+			userContent := genai.NewContentFromText(tc.query, genai.RoleUser) // Session ID based on test name
+			eventStream := r.Run(ctx, "test_user", sessionID, userContent, agent.RunConfig{})
+
+			toolResults := collectToolResults(t, eventStream)
+			if err != nil {
+				t.Fatalf("Agent run failed: %v", err)
+			}
+
+			if len(toolResults) == 0 {
+				t.Fatalf("Expected tool results, got none")
+			}
+			lastResult := toolResults[len(toolResults)-1]
+
+			// Check for expected content in the string representation of the result
+			resultStr := fmt.Sprintf("%v", lastResult)
+			for _, want := range tc.wantContent {
+				if !strings.Contains(resultStr, want) {
+					t.Errorf("Expected content %q not found in tool result: %s", want, resultStr)
+				}
+			}
+			for _, dontWant := range tc.dontWantContent {
+				if strings.Contains(resultStr, dontWant) {
+					t.Errorf("Unexpected content %q found in tool result: %s", dontWant, resultStr)
+				}
+			}
+
+			// Check state for log activity
+			if len(tc.wantStateKeys) > 0 {
+				currentSession, err := service.Get(context.Background(), &session.GetRequest{
+					AppName:   "test_app",
+					UserID:    "test_user",
+					SessionID: sessionID,
+				})
+				if err != nil {
+					t.Fatalf("Failed to get session: %v", err)
+				}
+				for _, key := range tc.wantStateKeys {
+					if _, err := currentSession.Session.State().Get(key); err != nil {
+						t.Errorf("Expected key %q not found in session state", key)
+					}
+				}
+			}
+		})
 	}
 }

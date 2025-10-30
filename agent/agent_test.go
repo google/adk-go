@@ -59,7 +59,7 @@ func TestAgentCallbacks(t *testing.T) {
 				},
 			},
 			afterAgent: []AfterAgentCallback{
-				func(CallbackContext, *session.Event, error) (*genai.Content, error) {
+				func(CallbackContext) (*genai.Content, error) {
 					return nil, nil
 				},
 			},
@@ -76,7 +76,7 @@ func TestAgentCallbacks(t *testing.T) {
 		{
 			name: "after agent callback replaces event content",
 			afterAgent: []AfterAgentCallback{
-				func(CallbackContext, *session.Event, error) (*genai.Content, error) {
+				func(CallbackContext) (*genai.Content, error) {
 					return genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel), nil
 				},
 			},
