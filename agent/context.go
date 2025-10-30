@@ -34,7 +34,7 @@ type InvocationContext interface {
 	UserContent() *genai.Content
 	RunConfig() *RunConfig
 
-	EndInvocation() bool
+	EndInvocation()
 	Ended() bool
 }
 

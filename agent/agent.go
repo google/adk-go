@@ -108,11 +108,10 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			memory:    ctx.Memory(),
 			session:   ctx.Session(),
 
-			invocationID:  ctx.InvocationID(),
-			branch:        ctx.Branch(),
-			userContent:   ctx.UserContent(),
-			runConfig:     ctx.RunConfig(),
-			endInvocation: false,
+			invocationID: ctx.InvocationID(),
+			branch:       ctx.Branch(),
+			userContent:  ctx.UserContent(),
+			runConfig:    ctx.RunConfig(),
 		}
 
 		event, err := runBeforeAgentCallbacks(ctx)
@@ -321,8 +320,6 @@ type invocationContext struct {
 	branch       string
 	userContent  *genai.Content
 	runConfig    *RunConfig
-
-	endInvocation bool
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -357,8 +354,8 @@ func (c *invocationContext) RunConfig() *RunConfig {
 	return c.runConfig
 }
 
-func (c *invocationContext) EndInvocation() bool {
-	return c.endInvocation
+// TODO: implement endInvocation
+func (c *invocationContext) EndInvocation() {
 }
 
 // TODO: implement endInvocation
