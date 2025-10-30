@@ -149,10 +149,6 @@ type Config struct {
 	// the agent context.
 	//
 	// It takes over the Instruction field if both are set.
-	//
-	// When InstructionProvider is used, ADK will NOT inject session state
-	// placeholders into the instruction. You can use
-	// llmagent.InjectSessionState() helper for that.
 	InstructionProvider InstructionProvider
 
 	// GlobalInstruction is the instruction for all agents in the entire
@@ -179,10 +175,6 @@ type Config struct {
 	// dynamically based on the agent context.
 	//
 	// It takes over the GlobalInstruction field if both are set.
-	//
-	// When InstructionProvider is used, ADK will NOT inject session state
-	// placeholders into the instruction. You can use
-	// llmagent.InjectSessionState() helper for that.
 	GlobalInstructionProvider InstructionProvider
 
 	// LLM-based agent transfer configs.
@@ -358,4 +350,10 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 	}
 }
 
+// InstructionProvider allows to create instructions dynamically. It is called
+// on each agent invocation.
+//
+// NOTE: when InstructionProvider is used, ADK will NOT inject session state
+// placeholders into the instruction. You can use
+// util/instructionutil.InjectSessionState() helper if this functionality is needed.
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
