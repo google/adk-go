@@ -45,7 +45,7 @@ type ConsoleLauncher struct {
 }
 
 func (l *ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
-	userID, appName := "test_user", "test_app"
+	userID, appName := "console_user", "console_app"
 
 	sessionService := config.SessionService
 	if sessionService == nil {
@@ -62,7 +62,7 @@ func (l *ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 
 	matchingAgent, err := config.AgentLoader.LoadAgent(l.config.rootAgentName)
 	if err != nil {
-		return fmt.Errorf("failed to find the matching agent: %v. Please specify a valid value for 'root_agent_name' parameter", err)
+		return fmt.Errorf("failed to load root agent: %w", err)
 	}
 
 	session := resp.Session
