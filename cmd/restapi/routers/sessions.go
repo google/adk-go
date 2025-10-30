@@ -53,7 +53,7 @@ func (r *SessionsAPIRouter) Routes() Routes {
 		},
 		Route{
 			Name:        "DeleteSession",
-			Methods:     []string{http.MethodDelete},
+			Methods:     []string{http.MethodDelete, http.MethodOptions},
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}",
 			HandlerFunc: r.sessionController.DeleteSessionHTTP,
 		},
