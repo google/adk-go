@@ -35,7 +35,6 @@ import (
 type consoleConfig struct {
 	streamingMode       agent.StreamingMode
 	streamingModeString string // command-line param to be converted to agent.StreamingMode
-	rootAgentName       string
 }
 
 // ConsoleLauncher allows to interact with an agent in console
@@ -60,16 +59,13 @@ func (l *ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 		return fmt.Errorf("failed to create the session service: %v", err)
 	}
 
-	matchingAgent, err := config.AgentLoader.LoadAgent(l.config.rootAgentName)
-	if err != nil {
-		return fmt.Errorf("failed to load root agent: %w", err)
-	}
+	rootAgent := config.AgentLoader.RootAgent()
 
 	session := resp.Session
 
 	r, err := runner.New(runner.Config{
 		AppName:         appName,
-		Agent:           matchingAgent,
+		Agent:           rootAgent,
 		SessionService:  sessionService,
 		ArtifactService: config.ArtifactService,
 	})
@@ -141,14 +137,11 @@ func (l *ConsoleLauncher) SimpleDescription() string {
 
 // NewLauncher creates new console launcher. You may provide the default rootAgentName. It can be overriden by command-line params
 func NewLauncher(rootAgentName string) *ConsoleLauncher {
-	config := &consoleConfig{rootAgentName: rootAgentName}
+	config := &consoleConfig{}
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
 		fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
-
-	fs.StringVar(&config.rootAgentName, "root_agent_name", config.rootAgentName,
-		"If you have multiple agents you should specify which one should be user for interactions. You can leave if empty if you have only one agent - it will be used by default")
 
 	return &ConsoleLauncher{config: config, flags: fs}
 }

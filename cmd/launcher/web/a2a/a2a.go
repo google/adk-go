@@ -18,7 +18,6 @@ package a2a
 import (
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
@@ -36,8 +35,6 @@ import (
 )
 
 type a2aConfig struct {
-	rootAgentName        string
-	defaultRootAgentName string
 }
 
 type A2ALauncher struct {
@@ -58,17 +55,13 @@ func (a *A2ALauncher) Parse(args []string) ([]string, error) {
 	if err != nil || !a.flags.Parsed() {
 		return nil, fmt.Errorf("failed to parse a2a flags: %v", err)
 	}
-	// override missing rootAgentName with the default
-	if a.config.rootAgentName == "" {
-		a.config.rootAgentName = a.config.defaultRootAgentName
-	}
 	restArgs := a.flags.Args()
 	return restArgs, nil
 }
 
 func (a *A2ALauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
 	grpcSrv := grpc.NewServer()
-	newA2AHandler(adkConfig, a.config.rootAgentName).RegisterWith(grpcSrv)
+	newA2AHandler(adkConfig).RegisterWith(grpcSrv)
 	reflection.Register(grpcSrv)
 	var result http.Handler
 	result = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -96,11 +89,8 @@ func (a *A2ALauncher) UserMessage(webUrl string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       a2a:  you can access A2A using grpc protocol: %s", webUrl))
 }
 
-func newA2AHandler(serveConfig *adk.Config, agentName string) *a2agrpc.Handler {
-	agent, err := serveConfig.AgentLoader.LoadAgent(agentName)
-	if err != nil {
-		log.Fatalf("cannot load agent %s: %v", agentName, err)
-	}
+func newA2AHandler(serveConfig *adk.Config) *a2agrpc.Handler {
+	agent := serveConfig.AgentLoader.RootAgent()
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
 			AppName:         agent.Name(),
@@ -118,8 +108,7 @@ func newA2AHandler(serveConfig *adk.Config, agentName string) *a2agrpc.Handler {
 func NewLauncher(rootAgentName string) *A2ALauncher {
 	config := &a2aConfig{}
 
-	fs := flag.NewFlagSet("web", flag.ContinueOnError)
-	fs.StringVar(&config.rootAgentName, "root_agent_name", "", "If you have multiple agents you should specify which one should be user for interactions. You can leave if empty if you have only one agent - it will be used by default")
+	fs := flag.NewFlagSet("a2a", flag.ContinueOnError)
 
 	return &A2ALauncher{
 		config: config,
