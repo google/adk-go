@@ -76,13 +76,15 @@ func main() {
 	llmAuditor := agents.GetLLmAuditorAgent(ctx, model)
 	imageGeneratorAgent := agents.GetImageGeneratorAgent(ctx, model)
 
-	agentLoader := services.NewStaticAgentLoader(
-		map[string]agent.Agent{
-			"weather_time_agent": rootAgent,
-			"llm_auditor":        llmAuditor,
-			"image_generator":    imageGeneratorAgent,
-		},
+	agentLoader, err := services.NewMultiAgentLoader(
+		rootAgent,
+		llmAuditor,
+		imageGeneratorAgent,
 	)
+	if err != nil {
+		log.Fatalf("Failed to create agent loader: %v", err)
+	}
+
 	artifactservice := artifact.InMemoryService()
 
 	config := &adk.Config{
