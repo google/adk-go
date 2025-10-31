@@ -113,11 +113,11 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		}
 		spans := telemetry.StartTrace(ctx, "call_llm")
 		// Create event to pass to callback state delta
-		ev := session.NewEvent(ctx.InvocationID())
-		ev.Author = ctx.Agent().Name()
-		ev.Branch = ctx.Branch()
+		tmpEv := session.NewEvent(ctx.InvocationID())
+		tmpEv.Author = ctx.Agent().Name()
+		tmpEv.Branch = ctx.Branch()
 		// Calls the LLM.
-		for resp, err := range f.callLLM(ctx, req, ev) {
+		for resp, err := range f.callLLM(ctx, req, tmpEv) {
 			if err != nil {
 				yield(nil, err)
 				return
@@ -146,7 +146,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			// Build the event and yield.
-			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, ev)
+			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, tmpEv)
 			telemetry.TraceLLMCall(spans, ctx, req, modelResponseEvent)
 			if !yield(modelResponseEvent, nil) {
 				return
@@ -318,7 +318,7 @@ func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.A
 	return nil
 }
 
-func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *model.LLMResponse, tools map[string]tool.Tool, mutable_ev *session.Event) *session.Event {
+func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *model.LLMResponse, tools map[string]tool.Tool, mutableEv *session.Event) *session.Event {
 	// FunctionCall & FunctionResponse matching algorithm assumes non-empty function call IDs
 	// but function call ID is optional in genai API and some models do not use the field.
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
@@ -328,7 +328,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *mod
 	ev.Author = ctx.Agent().Name()
 	ev.Branch = ctx.Branch()
 	ev.LLMResponse = *resp
-	ev.Actions.StateDelta = mutable_ev.Actions.StateDelta
+	ev.Actions.StateDelta = mutableEv.Actions.StateDelta
 
 	// Populate ev.LongRunningToolIDs
 	ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)

@@ -104,14 +104,18 @@ type callbackContextState struct {
 }
 
 func (c *callbackContextState) Get(key string) (any, error) {
-	if val, ok := c.ctx.eventActions.StateDelta[key]; ok {
-		return val, nil
+	if c.ctx.eventActions != nil && c.ctx.eventActions.StateDelta != nil {
+		if val, ok := c.ctx.eventActions.StateDelta[key]; ok {
+			return val, nil
+		}
 	}
 	return c.ctx.invocationCtx.Session().State().Get(key)
 }
 
 func (c *callbackContextState) Set(key string, val any) error {
-	c.ctx.eventActions.StateDelta[key] = val
+	if c.ctx.eventActions != nil && c.ctx.eventActions.StateDelta != nil {
+		c.ctx.eventActions.StateDelta[key] = val
+	}
 	return c.ctx.invocationCtx.Session().State().Set(key, val)
 }
 

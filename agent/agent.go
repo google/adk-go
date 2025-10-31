@@ -134,8 +134,6 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			}
 		}
 
-		// TODO confirm this should only run on last event
-		// https://github.com/google/adk-python/blob/9ab17f2afd7ae427f5ea49639394cbcaa6c3cc40/src/google/adk/agents/base_agent.py#L300
 		event, err = runAfterAgentCallbacks(ctx)
 		if event != nil || err != nil {
 			yield(event, err)
@@ -303,14 +301,18 @@ type callbackContextState struct {
 }
 
 func (c *callbackContextState) Get(key string) (any, error) {
-	if val, ok := c.ctx.actions.StateDelta[key]; ok {
-		return val, nil
+	if c.ctx.actions != nil && c.ctx.actions.StateDelta != nil {
+		if val, ok := c.ctx.actions.StateDelta[key]; ok {
+			return val, nil
+		}
 	}
 	return c.ctx.invocationContext.Session().State().Get(key)
 }
 
 func (c *callbackContextState) Set(key string, val any) error {
-	c.ctx.actions.StateDelta[key] = val
+	if c.ctx.actions != nil && c.ctx.actions.StateDelta != nil {
+		c.ctx.actions.StateDelta[key] = val
+	}
 	return c.ctx.invocationContext.Session().State().Set(key, val)
 }
 
