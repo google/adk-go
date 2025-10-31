@@ -59,14 +59,17 @@ func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 
 var testSessionService session.Service
 
+type assertSessionParams struct {
+	title                   string
+	keysInCtxSession        []string
+	keysInServiceSession    []string
+	keysNotInServiceSession []string
+}
+
 func assertSessionValues(
 	t *testing.T,
-	ctx context.Context,
 	cctx agent.CallbackContext,
-	title string,
-	keysInCtxSession []string,
-	keysInServiceSession []string,
-	keysNotInServiceSession []string,
+	params *assertSessionParams,
 ) {
 	t.Helper()
 
@@ -75,27 +78,27 @@ func assertSessionValues(
 		UserID:    cctx.UserID(),
 		SessionID: cctx.SessionID(),
 	}
-	getResponse, err := testSessionService.Get(ctx, getRequest)
+	getResponse, err := testSessionService.Get(cctx, getRequest)
 	if err != nil {
-		t.Fatalf("[%s] Failed to get session from service: %v", title, err)
+		t.Fatalf("[%s] Failed to get session from service: %v", params.title, err)
 	}
 	sessionInService := getResponse.Session
 
-	for _, key := range keysInCtxSession {
+	for _, key := range params.keysInCtxSession {
 		if _, err := cctx.State().Get(key); err != nil {
-			t.Errorf("[%s] Key %s not found in context session state: %v", title, key, err)
+			t.Errorf("[%s] Key %s not found in context session state: %v", params.title, key, err)
 		}
 	}
 
-	for _, key := range keysInServiceSession {
+	for _, key := range params.keysInServiceSession {
 		if _, err := sessionInService.State().Get(key); err != nil {
-			t.Errorf("[%s] Key %s not found in service session state: %v", title, key, err)
+			t.Errorf("[%s] Key %s not found in service session state: %v", params.title, key, err)
 		}
 	}
 
-	for _, key := range keysNotInServiceSession {
+	for _, key := range params.keysNotInServiceSession {
 		if val, err := sessionInService.State().Get(key); err == nil {
-			t.Errorf("[%s] Key %s unexpectedly found in service session state with value: %v", title, key, val)
+			t.Errorf("[%s] Key %s unexpectedly found in service session state with value: %v", params.title, key, val)
 		}
 	}
 }
@@ -109,10 +112,12 @@ func beforeAgentCallback(t *testing.T) agent.BeforeAgentCallback {
 		if err := cctx.State().Set("before_agent_callback_state_key", "before_agent_callback_state_value"); err != nil {
 			return nil, fmt.Errorf("failed to set state: %w", err)
 		}
-		assertSessionValues(t, cctx, cctx, "In before_agent_callback",
-			[]string{"before_agent_callback_state_key"},
-			[]string{},
-			[]string{"before_agent_callback_state_key"})
+		assertSessionValues(t, cctx, &assertSessionParams{
+			title:                   "In before_agent_callback",
+			keysInCtxSession:        []string{"before_agent_callback_state_key"},
+			keysInServiceSession:    []string{},
+			keysNotInServiceSession: []string{"before_agent_callback_state_key"}},
+		)
 		return nil, nil
 	}
 }
@@ -122,10 +127,12 @@ func beforeModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmReques
 		if err := cctx.State().Set("before_model_callback_state_key", "before_model_callback_state_value"); err != nil {
 			return nil, fmt.Errorf("failed to set state: %w", err)
 		}
-		assertSessionValues(t, cctx, cctx, "In before_model_callback",
-			[]string{"before_agent_callback_state_key", "before_model_callback_state_key"},
-			[]string{"before_agent_callback_state_key"},
-			[]string{"before_model_callback_state_key"})
+		assertSessionValues(t, cctx, &assertSessionParams{
+			title:                   "In before_model_callback",
+			keysInCtxSession:        []string{"before_agent_callback_state_key", "before_model_callback_state_key"},
+			keysInServiceSession:    []string{"before_agent_callback_state_key"},
+			keysNotInServiceSession: []string{"before_model_callback_state_key"}},
+		)
 		return nil, nil
 	}
 }
@@ -135,10 +142,12 @@ func afterModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmRespons
 		if err := cctx.State().Set("after_model_callback_state_key", "after_model_callback_state_value"); err != nil {
 			return nil, fmt.Errorf("failed to set state: %w", err)
 		}
-		assertSessionValues(t, cctx, cctx, "In after_model_callback",
-			[]string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key"},
-			[]string{"before_agent_callback_state_key"},
-			[]string{"before_model_callback_state_key", "after_model_callback_state_key"})
+		assertSessionValues(t, cctx, &assertSessionParams{
+			title:                   "In after_model_callback",
+			keysInCtxSession:        []string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key"},
+			keysInServiceSession:    []string{"before_agent_callback_state_key"},
+			keysNotInServiceSession: []string{"before_model_callback_state_key", "after_model_callback_state_key"}},
+		)
 		return nil, nil
 	}
 }
@@ -148,10 +157,12 @@ func afterAgentCallback(t *testing.T) agent.AfterAgentCallback {
 		if err := cctx.State().Set("after_agent_callback_state_key", "after_agent_callback_state_value"); err != nil {
 			return nil, fmt.Errorf("failed to set state: %w", err)
 		}
-		assertSessionValues(t, cctx, cctx, "In after_agent_callback",
-			[]string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key", "after_agent_callback_state_key"},
-			[]string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key"},
-			[]string{"after_agent_callback_state_key"})
+		assertSessionValues(t, cctx, &assertSessionParams{
+			title:                   "In after_agent_callback",
+			keysInCtxSession:        []string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key", "after_agent_callback_state_key"},
+			keysInServiceSession:    []string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key"},
+			keysNotInServiceSession: []string{"after_agent_callback_state_key"}},
+		)
 		return nil, nil
 	}
 }

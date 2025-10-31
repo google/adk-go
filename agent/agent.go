@@ -199,8 +199,8 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	return nil, nil
 }
 
-// runAfterAgentCallbacks checks if any afterAgentCallback returns non-nil content
-// then it replaces the event content with a value from the callback.
+// runAfterAgentCallbacks checks if any afterAgentCallback returns non-nil content or a state modification
+// then it create a new event with the new content and state delta.
 func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
 
@@ -319,8 +319,6 @@ func (c *callbackContextState) Set(key string, val any) error {
 func (c *callbackContextState) All() iter.Seq2[string, any] {
 	return c.ctx.invocationContext.Session().State().All()
 }
-
-var _ session.State = (*callbackContextState)(nil)
 
 type invocationContext struct {
 	context.Context

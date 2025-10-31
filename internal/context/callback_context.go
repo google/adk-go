@@ -122,5 +122,3 @@ func (c *callbackContextState) Set(key string, val any) error {
 func (c *callbackContextState) All() iter.Seq2[string, any] {
 	return c.ctx.invocationCtx.Session().State().All()
 }
-
-var _ session.State = (*callbackContextState)(nil)
