@@ -252,7 +252,7 @@ func (r *Runner) findAgentToRun(session session.Session) (agent.Agent, error) {
 // checks if the agent and its parent chain allow transfer up the tree.
 func (r *Runner) isTransferableAcrossAgentTree(agentToRun agent.Agent) bool {
 	for curAgent := agentToRun; curAgent != nil; curAgent = r.parents[curAgent.Name()] {
-		llmAgent, ok := agentToRun.(llminternal.Agent)
+		llmAgent, ok := curAgent.(llminternal.Agent)
 		if !ok {
 			return false
 		}

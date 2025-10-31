@@ -15,12 +15,15 @@
 package sequentialagent_test
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
@@ -129,7 +132,32 @@ func TestNewSequentialAgent(t *testing.T) {
 
 			for i, gotEvent := range gotEvents {
 				tt.wantEvents[i].Timestamp = gotEvent.Timestamp
-				if diff := cmp.Diff(tt.wantEvents[i], gotEvent); diff != "" {
+				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID")); diff != "" {
+					t.Errorf("event[i] mismatch (-want +got):\n%s", diff)
+				}
+			}
+
+			// run again, this time it will need to determine which agent to use, and we want to get the same result
+			gotEvents = make([]*session.Event, 0)
+			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					t.Errorf("got unexpected error: %v", err)
+				}
+
+				if tt.args.maxIterations == 0 && len(gotEvents) == len(tt.wantEvents) {
+					break
+				}
+
+				gotEvents = append(gotEvents, event)
+			}
+
+			if len(tt.wantEvents) != len(gotEvents) {
+				t.Fatalf("Unexpected event length, got: %v, want: %v", len(gotEvents), len(tt.wantEvents))
+			}
+
+			for i, gotEvent := range gotEvents {
+				tt.wantEvents[i].Timestamp = gotEvent.Timestamp
+				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID")); diff != "" {
 					t.Errorf("event[i] mismatch (-want +got):\n%s", diff)
 				}
 			}
@@ -140,13 +168,9 @@ func TestNewSequentialAgent(t *testing.T) {
 func newCustomAgent(t *testing.T, id int) agent.Agent {
 	t.Helper()
 
-	customAgent := &customAgent{
-		id: id,
-	}
-
-	a, err := agent.New(agent.Config{
-		Name: fmt.Sprintf("custom_agent_%v", id),
-		Run:  customAgent.Run,
+	a, err := llmagent.New(llmagent.Config{
+		Name:  fmt.Sprintf("custom_agent_%v", id),
+		Model: &FakeLLM{id: id, callCounter: 0},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -155,20 +179,22 @@ func newCustomAgent(t *testing.T, id int) agent.Agent {
 	return a
 }
 
-// TODO: create test util allowing to create custom agents, agent trees for
-type customAgent struct {
+// FakeLLM is a mock implementation of model.LLM for testing.
+type FakeLLM struct {
 	id          int
 	callCounter int
 }
 
-func (a *customAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		a.callCounter++
+func (f *FakeLLM) Name() string {
+	return "fake-llm"
+}
 
-		yield(&session.Event{
-			LLMResponse: model.LLMResponse{
-				Content: genai.NewContentFromText(fmt.Sprintf("hello %v", a.id), genai.RoleModel),
-			},
+func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		f.callCounter++
+
+		yield(&model.LLMResponse{
+			Content: genai.NewContentFromText(fmt.Sprintf("hello %v", f.id), genai.RoleModel),
 		}, nil)
 	}
 }
