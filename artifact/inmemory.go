@@ -48,8 +48,8 @@ func fileHasUserNamespace(filename string) bool {
 	return strings.HasPrefix(filename, "user:")
 }
 
-// userPathPart defines the stirng for the part of the path used by user scope files
-const userPathPart = "user"
+// userScopedArtifactKey defines the string for the part of the path used by user scope files
+const userScopedArtifactKey = "user"
 
 type artifactKey struct {
 	AppName   string
@@ -143,7 +143,7 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	artifact := req.Part
 	// If file is user scoped, store it under user scope path
 	if fileHasUserNamespace(fileName) {
-		sessionID = userPathPart
+		sessionID = userScopedArtifactKey
 	}
 
 	s.mu.Lock()
@@ -166,7 +166,7 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 	version := req.Version
 	// If file is user scoped, adjust artifactKey part
 	if fileHasUserNamespace(fileName) {
-		sessionID = userPathPart
+		sessionID = userScopedArtifactKey
 	}
 
 	s.mu.Lock()
@@ -193,7 +193,7 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	version := req.Version
 	// If file is user scoped, adjust artifactKey part
 	if fileHasUserNamespace(fileName) {
-		sessionID = userPathPart
+		sessionID = userScopedArtifactKey
 	}
 
 	s.mu.RLock()
@@ -235,11 +235,11 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 	}
 
 	// Besides the session specific artifacts, also retrieve user scoped artifacts.
-	userScopeLo := artifactKey{AppName: appName, UserID: userID, SessionID: userPathPart}.Encode()
-	userScopeHi := artifactKey{AppName: appName, UserID: userID, SessionID: userPathPart + "\x00"}.Encode()
+	userScopeLo := artifactKey{AppName: appName, UserID: userID, SessionID: userScopedArtifactKey}.Encode()
+	userScopeHi := artifactKey{AppName: appName, UserID: userID, SessionID: userScopedArtifactKey + "\x00"}.Encode()
 	// TODO: extend omap to search key only and skip value decoding.
 	for key := range s.scan(userScopeLo, userScopeHi) {
-		if key.SessionID != userPathPart { // scan includes key matching `userScopeHi`
+		if key.SessionID != userScopedArtifactKey { // scan includes key matching `userScopeHi`
 			continue
 		}
 		files[key.FileName] = true
@@ -258,7 +258,7 @@ func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	if fileHasUserNamespace(fileName) {
-		sessionID = userPathPart
+		sessionID = userScopedArtifactKey
 	}
 
 	s.mu.RLock()
