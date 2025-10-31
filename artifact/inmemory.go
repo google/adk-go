@@ -49,6 +49,7 @@ func fileHasUserNamespace(filename string) bool {
 }
 
 // userScopedArtifactKey defines the string for the part of the path used by user scope files
+// this key is used to store user artifacts within user namespace (available to all sessions for given app+user_id)
 const userScopedArtifactKey = "user"
 
 type artifactKey struct {
