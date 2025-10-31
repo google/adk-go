@@ -62,23 +62,26 @@ func (w *WebUILauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// WrapHandlers implements web.WebSublauncher.
+// WrapHandlers implements the web.WebSublauncher interface. It does not change
+// the top-level routes for the WebUI.
 func (a *WebUILauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
 	// webui doesn't change the top level routes
 	return handler
 }
 
-// SetupSubrouters implements web.WebSublauncher.
+// SetupSubrouters implements the web.WebSublauncher interface. It adds the
+// WebUI subrouter to the main router.
 func (w *WebUILauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {
 	w.AddSubrouter(router, w.config.pathPrefix, adkConfig, w.config.backendAddress)
 }
 
-// SimpleDescription implements web.WebSublauncher.
+// SimpleDescription returns a simple description of the WebUI launcher.
 func (w *WebUILauncher) SimpleDescription() string {
 	return "starts ADK Web UI server which provides UI for interacting with ADK REST API"
 }
 
-// UserMessage implements web.WebSublauncher.
+// UserMessage implements the web.WebSublauncher interface. It prints a message
+// to the user with the URL to access the WebUI.
 func (w *WebUILauncher) UserMessage(webUrl string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       webui:  you can access API using %s%s", webUrl, w.config.pathPrefix))
 }
@@ -88,7 +91,7 @@ func (w *WebUILauncher) UserMessage(webUrl string, printer func(v ...any)) {
 //go:embed distr/*
 var content embed.FS
 
-// AddSubrouter adds a subrouter for the Web UI to the provided router.
+// AddSubrouter adds a subrouter to serve the ADK Web UI.
 func (w *WebUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config, backendAddress string) {
 	// Setup serving of ADK Web UI
 	rUi := router.Methods("GET").PathPrefix(pathPrefix).Subrouter()
@@ -115,7 +118,7 @@ func (w *WebUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkC
 	rUi.Methods("GET").Handler(http.StripPrefix(pathPrefix, http.FileServer(http.FS(ui))))
 }
 
-// NewLauncher creates a new WebUILauncher.
+// NewLauncher creates a new WebSublauncher for the ADK Web UI.
 func NewLauncher() weblauncher.WebSublauncher {
 	config := &webUIConfig{}
 
