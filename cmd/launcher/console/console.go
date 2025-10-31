@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package console provides a simple way to test an agent from console application
+// package console provides a simple way to interact with an agent from console application
 package console
 
 import (
@@ -24,7 +24,6 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
@@ -121,7 +120,8 @@ func (l *ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 	}
 }
 
-// Parse implements launcher.SubLauncher. After parsing console-specific arguments returns remaining un-parsed arguments.
+// Parse implements launcher.SubLauncher. After parsing console-specific
+// arguments returns remaining un-parsed arguments
 func (l *ConsoleLauncher) Parse(args []string) ([]string, error) {
 	err := l.flags.Parse(args)
 	if err != nil || !l.flags.Parsed() {
@@ -152,7 +152,7 @@ func (l *ConsoleLauncher) SimpleDescription() string {
 	return "runs an agent in console mode."
 }
 
-// Execute implements launcher.TopLevelLauncher. It parses arguments and runs the launcher.
+// Execute implements launcher.Launcher. It parses arguments and runs the launcher.
 func (l *ConsoleLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
 	remainingArgs, err := l.Parse(args)
 	if err != nil {
@@ -165,6 +165,3 @@ func (l *ConsoleLauncher) Execute(ctx context.Context, config *adk.Config, args 
 	}
 	return l.Run(ctx, config)
 }
-
-var _ launcher.SubLauncher = (*ConsoleLauncher)(nil)
-var _ launcher.TopLevelLauncher = (*ConsoleLauncher)(nil)

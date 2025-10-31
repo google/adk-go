@@ -32,14 +32,14 @@ type apiConfig struct {
 	frontendAddress string
 }
 
-// ApiLauncher can launch ADK REST API
-type ApiLauncher struct {
+// apiLauncher can launch ADK REST API
+type apiLauncher struct {
 	flags  *flag.FlagSet
 	config *apiConfig
 }
 
-// CommandLineSyntax implements web.WebSublauncher.
-func (a *ApiLauncher) CommandLineSyntax() string {
+// CommandLineSyntax returns the command-line syntax for the API launcher.
+func (a *apiLauncher) CommandLineSyntax() string {
 	return util.FormatFlagUsage(a.flags)
 }
 
@@ -59,28 +59,32 @@ func corsWithArgs(frontendAddress string) func(next http.Handler) http.Handler {
 	}
 }
 
-func (a *ApiLauncher) UserMessage(webUrl string, printer func(v ...any)) {
+// UserMessage implements web.WebSublauncher. Prints message to the user
+func (a *apiLauncher) UserMessage(webUrl string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       api:  you can access API using %s/api", webUrl))
 	printer(fmt.Sprintf("       api:      for instance: %s/api/list-apps", webUrl))
 }
 
-// SetupSubrouters adds api router to the parent router
-func (a *ApiLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {
+// SetupSubrouters adds the API router to the parent router.
+func (a *apiLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {
 	rApi := router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
 	restapiweb.SetupRouter(rApi, adkConfig)
 	rApi.Use(corsWithArgs(a.config.frontendAddress))
 }
 
-func (a *ApiLauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
+// WrapHandlers implements web.WebSublauncher. For API, it doesn't change the top-level routes.
+func (a *apiLauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
 	// api doesn't change the top level routes
 	return handler
 }
 
-func (a *ApiLauncher) Keyword() string {
+// Keyword returns the keyword for the API launcher.
+func (a *apiLauncher) Keyword() string {
 	return "api"
 }
 
-func (a *ApiLauncher) Parse(args []string) ([]string, error) {
+// Parse parses the command-line arguments for the API launcher.
+func (a *apiLauncher) Parse(args []string) ([]string, error) {
 	err := a.flags.Parse(args)
 	if err != nil || !a.flags.Parsed() {
 		return nil, fmt.Errorf("failed to parse api flags: %v", err)
@@ -89,7 +93,8 @@ func (a *ApiLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-func (a *ApiLauncher) SimpleDescription() string {
+// SimpleDescription returns a simple description of the API launcher.
+func (a *apiLauncher) SimpleDescription() string {
 	return "starts ADK REST API server, accepting origins specified by webui_address (CORS)"
 }
 
@@ -100,7 +105,7 @@ func NewLauncher() weblauncher.WebSublauncher {
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
 	fs.StringVar(&config.frontendAddress, "webui_address", "localhost:8080", "ADK WebUI address as seen from the user browser. It's used to allow CORS requests. Please specify only hostname and (optionally) port.")
 
-	return &ApiLauncher{
+	return &apiLauncher{
 		config: config,
 		flags:  fs,
 	}

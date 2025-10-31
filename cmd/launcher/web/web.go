@@ -45,7 +45,7 @@ type WebLauncher struct {
 	activeSublaunchers map[string]WebSublauncher
 }
 
-// Execute implements launcher.TopLevelLauncher.
+// Execute implements launcher.Launcher.
 func (w *WebLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
 	remainingArgs, err := w.Parse(args)
 	if err != nil {
@@ -75,7 +75,7 @@ type WebSublauncher interface {
 	UserMessage(webUrl string, printer func(v ...any))
 }
 
-// CommandLineSyntax implements launcher.TopLevelLauncher.
+// CommandLineSyntax implements launcher.Launcher.
 func (w *WebLauncher) CommandLineSyntax() string {
 	var b strings.Builder
 	fmt.Fprint(&b, util.FormatFlagUsage(w.flags))

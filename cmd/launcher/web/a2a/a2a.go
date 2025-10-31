@@ -16,7 +16,6 @@
 package a2a
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -44,16 +43,13 @@ type A2ALauncher struct {
 	config *a2aConfig
 }
 
-// Run implements web.WebSublauncher.
-func (a *A2ALauncher) Run(ctx context.Context, config *adk.Config) error {
-	panic("unimplemented")
-}
-
 // NewLauncher creates new a2a launcher. It extends Web launcher
 func NewLauncher() web.WebSublauncher {
 	config := &a2aConfig{}
 
 	fs := flag.NewFlagSet("a2a", flag.ContinueOnError)
+
+	// no flags at the moment
 
 	return &A2ALauncher{
 		config: config,
@@ -78,6 +74,8 @@ func (a *A2ALauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
+// WrapHandlers implements web.WebSublauncher. Returns http handler which basing on content-type
+// chooses between a2a grpc handler and provided handler
 func (a *A2ALauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
 	grpcSrv := grpc.NewServer()
 	newA2AHandler(adkConfig).RegisterWith(grpcSrv)
@@ -94,11 +92,12 @@ func (a *A2ALauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) 
 	return result
 }
 
+// SimpleDescription implements web.WebSublauncher. For A2A no subrouter definition is needed
 func (a *A2ALauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {
 	// no need to setup subrouters, just return
 }
 
-// SimpleDescription implements web.WebSublauncher.
+// SimpleDescription implements web.WebSublauncher
 func (a *A2ALauncher) SimpleDescription() string {
 	return "starts A2A server which handles grpc traffic"
 }
@@ -108,6 +107,7 @@ func (a *A2ALauncher) UserMessage(webUrl string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       a2a:  you can access A2A using grpc protocol: %s", webUrl))
 }
 
+// newA2AHandler creates a new A2A handler from the provided ADK configuration.
 func newA2AHandler(serveConfig *adk.Config) *a2agrpc.Handler {
 	agent := serveConfig.AgentLoader.RootAgent()
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
@@ -122,5 +122,3 @@ func newA2AHandler(serveConfig *adk.Config) *a2agrpc.Handler {
 	grpcHandler := a2agrpc.NewHandler(reqHandler)
 	return grpcHandler
 }
-
-var _ web.WebSublauncher = (*A2ALauncher)(nil)

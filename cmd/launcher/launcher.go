@@ -21,7 +21,7 @@ import (
 	"google.golang.org/adk/cmd/launcher/adk"
 )
 
-type TopLevelLauncher interface {
+type Launcher interface {
 	Execute(ctx context.Context, config *adk.Config, args []string) error
 	CommandLineSyntax() string
 }

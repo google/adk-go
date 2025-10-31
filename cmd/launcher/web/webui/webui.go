@@ -22,6 +22,8 @@ import (
 	"log"
 	"net/http"
 
+	weblauncher "google.golang.org/adk/cmd/launcher/web"
+
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/restapi/handlers"
@@ -45,10 +47,12 @@ func (w *WebUILauncher) CommandLineSyntax() string {
 	return util.FormatFlagUsage(w.flags)
 }
 
+// Keyword implements web.WebSublauncher.
 func (w *WebUILauncher) Keyword() string {
 	return "webui"
 }
 
+// Parse implements web.WebSublauncher.
 func (w *WebUILauncher) Parse(args []string) ([]string, error) {
 	err := w.flags.Parse(args)
 	if err != nil || !w.flags.Parsed() {
@@ -58,19 +62,23 @@ func (w *WebUILauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
+// WrapHandlers implements web.WebSublauncher.
 func (a *WebUILauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
 	// webui doesn't change the top level routes
 	return handler
 }
 
+// SetupSubrouters implements web.WebSublauncher.
 func (w *WebUILauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {
 	w.AddSubrouter(router, w.config.pathPrefix, adkConfig, w.config.backendAddress)
 }
 
+// SimpleDescription implements web.WebSublauncher.
 func (w *WebUILauncher) SimpleDescription() string {
 	return "starts ADK Web UI server which provides UI for interacting with ADK REST API"
 }
 
+// UserMessage implements web.WebSublauncher.
 func (w *WebUILauncher) UserMessage(webUrl string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       webui:  you can access API using %s%s", webUrl, w.config.pathPrefix))
 }
@@ -80,6 +88,7 @@ func (w *WebUILauncher) UserMessage(webUrl string, printer func(v ...any)) {
 //go:embed distr/*
 var content embed.FS
 
+// AddSubrouter adds a subrouter for the Web UI to the provided router.
 func (w *WebUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config, backendAddress string) {
 	// Setup serving of ADK Web UI
 	rUi := router.Methods("GET").PathPrefix(pathPrefix).Subrouter()
@@ -106,7 +115,8 @@ func (w *WebUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkC
 	rUi.Methods("GET").Handler(http.StripPrefix(pathPrefix, http.FileServer(http.FS(ui))))
 }
 
-func NewLauncher() *WebUILauncher {
+// NewLauncher creates a new WebUILauncher.
+func NewLauncher() weblauncher.WebSublauncher {
 	config := &webUIConfig{}
 
 	fs := flag.NewFlagSet("webui", flag.ContinueOnError)

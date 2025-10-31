@@ -24,6 +24,6 @@ import (
 )
 
 // NewLaucher returnes universal launcher capable of serving api and a2a
-func NewLaucher() launcher.TopLevelLauncher {
+func NewLaucher() launcher.Launcher {
 	return universal.NewLauncher(web.NewLauncher(api.NewLauncher(), a2a.NewLauncher()))
 }
