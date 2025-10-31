@@ -38,25 +38,25 @@ type consoleConfig struct {
 	streamingModeString string // command-line param to be converted to agent.StreamingMode
 }
 
-// ConsoleLauncher allows to interact with an agent in console
-type ConsoleLauncher struct {
+// Launcher allows to interact with an agent in console
+type Launcher struct {
 	flags  *flag.FlagSet
 	config *consoleConfig
 }
 
 // NewLauncher creates new console launcher
-func NewLauncher() *ConsoleLauncher {
+func NewLauncher() *Launcher {
 	config := &consoleConfig{}
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
 		fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
 
-	return &ConsoleLauncher{config: config, flags: fs}
+	return &Launcher{config: config, flags: fs}
 }
 
 // Run implements launcher.SubLauncher. It starts the console interaction loop.
-func (l *ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
+func (l *Launcher) Run(ctx context.Context, config *adk.Config) error {
 	userID, appName := "console_user", "console_app"
 
 	sessionService := config.SessionService
@@ -122,7 +122,7 @@ func (l *ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 
 // Parse implements launcher.SubLauncher. After parsing console-specific
 // arguments returns remaining un-parsed arguments
-func (l *ConsoleLauncher) Parse(args []string) ([]string, error) {
+func (l *Launcher) Parse(args []string) ([]string, error) {
 	err := l.flags.Parse(args)
 	if err != nil || !l.flags.Parsed() {
 		return nil, fmt.Errorf("failed to parse flags: %v", err)
@@ -138,22 +138,22 @@ func (l *ConsoleLauncher) Parse(args []string) ([]string, error) {
 }
 
 // Keyword implements launcher.SubLauncher.
-func (l *ConsoleLauncher) Keyword() string {
+func (l *Launcher) Keyword() string {
 	return "console"
 }
 
 // CommandLineSyntax implements launcher.SubLauncher.
-func (l *ConsoleLauncher) CommandLineSyntax() string {
+func (l *Launcher) CommandLineSyntax() string {
 	return util.FormatFlagUsage(l.flags)
 }
 
 // SimpleDescription implements launcher.SubLauncher.
-func (l *ConsoleLauncher) SimpleDescription() string {
+func (l *Launcher) SimpleDescription() string {
 	return "runs an agent in console mode."
 }
 
 // Execute implements launcher.Launcher. It parses arguments and runs the launcher.
-func (l *ConsoleLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
+func (l *Launcher) Execute(ctx context.Context, config *adk.Config, args []string) error {
 	remainingArgs, err := l.Parse(args)
 	if err != nil {
 		return fmt.Errorf("cannot parse args: %w", err)

@@ -37,23 +37,23 @@ type webUIConfig struct {
 }
 
 // ApiLauncher can launch ADK Web UI
-type WebUILauncher struct {
+type webUILauncher struct {
 	flags  *flag.FlagSet
 	config *webUIConfig
 }
 
 // CommandLineSyntax implements web.WebSublauncher.
-func (w *WebUILauncher) CommandLineSyntax() string {
+func (w *webUILauncher) CommandLineSyntax() string {
 	return util.FormatFlagUsage(w.flags)
 }
 
 // Keyword implements web.WebSublauncher.
-func (w *WebUILauncher) Keyword() string {
+func (w *webUILauncher) Keyword() string {
 	return "webui"
 }
 
 // Parse implements web.WebSublauncher.
-func (w *WebUILauncher) Parse(args []string) ([]string, error) {
+func (w *webUILauncher) Parse(args []string) ([]string, error) {
 	err := w.flags.Parse(args)
 	if err != nil || !w.flags.Parsed() {
 		return nil, fmt.Errorf("failed to parse webui flags: %v", err)
@@ -64,25 +64,25 @@ func (w *WebUILauncher) Parse(args []string) ([]string, error) {
 
 // WrapHandlers implements the web.WebSublauncher interface. It does not change
 // the top-level routes for the WebUI.
-func (a *WebUILauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
+func (a *webUILauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
 	// webui doesn't change the top level routes
 	return handler
 }
 
 // SetupSubrouters implements the web.WebSublauncher interface. It adds the
 // WebUI subrouter to the main router.
-func (w *WebUILauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {
+func (w *webUILauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {
 	w.AddSubrouter(router, w.config.pathPrefix, adkConfig, w.config.backendAddress)
 }
 
 // SimpleDescription returns a simple description of the WebUI launcher.
-func (w *WebUILauncher) SimpleDescription() string {
+func (w *webUILauncher) SimpleDescription() string {
 	return "starts ADK Web UI server which provides UI for interacting with ADK REST API"
 }
 
 // UserMessage implements the web.WebSublauncher interface. It prints a message
 // to the user with the URL to access the WebUI.
-func (w *WebUILauncher) UserMessage(webUrl string, printer func(v ...any)) {
+func (w *webUILauncher) UserMessage(webUrl string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       webui:  you can access API using %s%s", webUrl, w.config.pathPrefix))
 }
 
@@ -92,7 +92,7 @@ func (w *WebUILauncher) UserMessage(webUrl string, printer func(v ...any)) {
 var content embed.FS
 
 // AddSubrouter adds a subrouter to serve the ADK Web UI.
-func (w *WebUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config, backendAddress string) {
+func (w *webUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config, backendAddress string) {
 	// Setup serving of ADK Web UI
 	rUi := router.Methods("GET").PathPrefix(pathPrefix).Subrouter()
 
@@ -126,7 +126,7 @@ func NewLauncher() weblauncher.WebSublauncher {
 	fs.StringVar(&config.backendAddress, "api_server_address", "http://localhost:8080/api", "ADK REST API server address as seen from the user browser. Please specify the whole URL, i.e. 'http://localhost:8080/api'.")
 	config.pathPrefix = "/ui/"
 
-	return &WebUILauncher{
+	return &webUILauncher{
 		config: config,
 		flags:  fs,
 	}
