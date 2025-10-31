@@ -22,8 +22,11 @@ import (
 
 // AgentLoader allows to load a particular agent by name and get the root agent
 type AgentLoader interface {
+	// ListAgents returns a list of names of all agents
 	ListAgents() []string
-	LoadAgent(string) (agent.Agent, error)
+	// LoadAgent returns an agent by its name. Returns error if there is no agent with such a name.
+	LoadAgent(name string) (agent.Agent, error)
+	// RootAgent returns the root agent
 	RootAgent() agent.Agent
 }
 
@@ -38,14 +41,17 @@ type singleAgentLoader struct {
 	root agent.Agent
 }
 
+// NewSingleAgentLoader returns a loader with only one agent, which becomes the root agent
 func NewSingleAgentLoader(a agent.Agent) AgentLoader {
 	return &singleAgentLoader{root: a}
 }
 
+// singleAgentLoader implements AgentLoader. Returns root agent's name
 func (s *singleAgentLoader) ListAgents() []string {
 	return []string{s.root.Name()}
 }
 
+// singleAgentLoader implements AgentLoader. Returns root for empty name and for root.Name(), error otherwise.
 func (s *singleAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 	if name == "" {
 		return s.root, nil
@@ -56,10 +62,13 @@ func (s *singleAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 	return nil, fmt.Errorf("cannot load agent '%s' - provide an empty string or use '%s'", name, s.root.Name())
 }
 
+// singleAgentLoader implements AgentLoader. Returns the root agent.
 func (s *singleAgentLoader) RootAgent() agent.Agent {
 	return s.root
 }
 
+// NewMultiAgentLoader returns a new AgentLoader with the given root Agent and other agents.
+// Returns an error if more than one agent (including root) shares the same name
 func NewMultiAgentLoader(root agent.Agent, agents ...agent.Agent) (AgentLoader, error) {
 	m := make(map[string]agent.Agent)
 	m[root.Name()] = root
@@ -76,6 +85,7 @@ func NewMultiAgentLoader(root agent.Agent, agents ...agent.Agent) (AgentLoader, 
 	}, nil
 }
 
+// multiAgentLoader implements AgentLoader. Returns the list of all agents' names (including root agent)
 func (m *multiAgentLoader) ListAgents() []string {
 	agents := make([]string, 0, len(m.agentMap))
 	for name := range m.agentMap {
@@ -84,6 +94,7 @@ func (m *multiAgentLoader) ListAgents() []string {
 	return agents
 }
 
+// multiAgentLoader implements LoadAgent. Returns an agent with given name or error if no such an agent is found
 func (m *multiAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 	agent, ok := m.agentMap[name]
 	if !ok {
@@ -92,6 +103,7 @@ func (m *multiAgentLoader) LoadAgent(name string) (agent.Agent, error) {
 	return agent, nil
 }
 
+// multiAgentLoader implements LoadAgent.
 func (m *multiAgentLoader) RootAgent() agent.Agent {
 	return m.root
 }
