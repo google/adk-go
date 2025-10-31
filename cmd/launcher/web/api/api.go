@@ -21,9 +21,10 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/adk"
+	weblauncher "google.golang.org/adk/cmd/launcher/web"
 	restapiweb "google.golang.org/adk/cmd/restapi/web"
+	"google.golang.org/adk/internal/cli/util"
 )
 
 // apiConfig contains parametres for lauching ADK REST API
@@ -37,8 +38,13 @@ type ApiLauncher struct {
 	config *apiConfig
 }
 
+// CommandLineSyntax implements web.WebSublauncher.
+func (a *ApiLauncher) CommandLineSyntax() string {
+	return util.FormatFlagUsage(a.flags)
+}
+
 // Adds CORS headers which allow calling ADK REST API from another web app (like ADK WebUI)
-func CorsWithArgs(frontendAddress string) func(next http.Handler) http.Handler {
+func corsWithArgs(frontendAddress string) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", frontendAddress)
@@ -62,16 +68,12 @@ func (a *ApiLauncher) UserMessage(webUrl string, printer func(v ...any)) {
 func (a *ApiLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {
 	rApi := router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
 	restapiweb.SetupRouter(rApi, adkConfig)
-	rApi.Use(CorsWithArgs(a.config.frontendAddress))
+	rApi.Use(corsWithArgs(a.config.frontendAddress))
 }
 
 func (a *ApiLauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
 	// api doesn't change the top level routes
 	return handler
-}
-
-func (a *ApiLauncher) FormatSyntax() string {
-	return launcher.FormatFlagUsage(a.flags)
 }
 
 func (a *ApiLauncher) Keyword() string {
@@ -92,7 +94,7 @@ func (a *ApiLauncher) SimpleDescription() string {
 }
 
 // NewLauncher creates new api launcher. It extends Web launcher
-func NewLauncher() *ApiLauncher {
+func NewLauncher() weblauncher.WebSublauncher {
 	config := &apiConfig{}
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)

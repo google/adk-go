@@ -24,19 +24,26 @@ import (
 	"google.golang.org/adk/cmd/launcher/adk"
 )
 
-type Launcher struct {
-	chosenLauncher launcher.Launcher // the chosen launcher - after parsing command-line args
-	sublaunchers   []launcher.Launcher
+type uniLauncher struct {
+	chosenLauncher launcher.SubLauncher // the chosen launcher - after parsing command-line args
+	sublaunchers   []launcher.SubLauncher
+}
+
+// Execute implements launcher.TopLevelLauncher.
+func (l *uniLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
+	return l.ParseAndRun(ctx, config, args, ErrorOnUnparsedArgs)
 }
 
 // NewLauncher returns a new universal launcher. The first element on launcher list will be the default one if there are no arguments specified
-func NewLauncher(sublaunchers ...launcher.Launcher) *Launcher {
-	return &Launcher{
+func NewLauncher(sublaunchers ...launcher.SubLauncher) launcher.TopLevelLauncher {
+	return &uniLauncher{
 		sublaunchers: sublaunchers,
 	}
 }
 
-func (l *Launcher) ParseAndRun(ctx context.Context, config *adk.Config, args []string, parseRemaining func([]string) error) error {
+// ParseAndRun parses arguments and runs the chosen sublauncher. It provides a
+// hook for processing any remaining arguments.
+func (l *uniLauncher) ParseAndRun(ctx context.Context, config *adk.Config, args []string, parseRemaining func([]string) error) error {
 	remainingArgs, err := l.parse(args)
 	if err != nil {
 		return err
@@ -51,13 +58,14 @@ func (l *Launcher) ParseAndRun(ctx context.Context, config *adk.Config, args []s
 	return l.run(ctx, config)
 }
 
-func (l *Launcher) run(ctx context.Context, config *adk.Config) error {
+// run executes the chosen sublauncher.
+func (l *uniLauncher) run(ctx context.Context, config *adk.Config) error {
 	return l.chosenLauncher.Run(ctx, config)
 }
 
 // Parse parses arguments and remembers which sublauncher should be run later
-func (l *Launcher) parse(args []string) ([]string, error) {
-	keyToSublauncher := make(map[string]launcher.Launcher)
+func (l *uniLauncher) parse(args []string) ([]string, error) {
+	keyToSublauncher := make(map[string]launcher.SubLauncher)
 	for _, l := range l.sublaunchers {
 		if _, ok := keyToSublauncher[l.Keyword()]; ok {
 			return nil, fmt.Errorf("cannot create universal launcher. Keywords for sublaunchers should be unique and they are not: '%s'", l.Keyword())
@@ -87,7 +95,8 @@ func (l *Launcher) parse(args []string) ([]string, error) {
 	return l.chosenLauncher.Parse(args)
 }
 
-func (l *Launcher) FormatSyntax() string {
+// CommandLineSyntax implements launcher.TopLevelLauncher.
+func (l *uniLauncher) CommandLineSyntax() string {
 	if len(l.sublaunchers) == 0 {
 		// no sub launchers
 		return l.simpleDescription() + "\n\nThere are no sublaunchers to format syntax for."
@@ -99,18 +108,20 @@ func (l *Launcher) FormatSyntax() string {
 	}
 	fmt.Fprintf(&b, "Details:\n")
 	for _, l := range l.sublaunchers {
-		fmt.Fprintf(&b, "  %s\n%s\n", l.Keyword(), l.FormatSyntax())
+		fmt.Fprintf(&b, "  %s\n%s\n", l.Keyword(), l.CommandLineSyntax())
 	}
 
 	return b.String()
 }
 
-func (l *Launcher) simpleDescription() string {
+// simpleDescription provides a brief explanation of the universal launcher.
+func (l *uniLauncher) simpleDescription() string {
 	return `Universal launcher acts as a router, routing command line arguments to one of it's sublaunchers. 
 	The sublauncher is chosen by the first argument - a keyword. 
 	If there are no arguments at all or the first one is not recognized by any of the sublaunchers, the first sublauncher is used.`
 }
 
+// ErrorOnUnparsedArgs returns an error if there are any unparsed arguments left.
 func ErrorOnUnparsedArgs(args []string) error {
 	if len(args) > 0 {
 		return fmt.Errorf("cannot parse following arguments: %v", args)

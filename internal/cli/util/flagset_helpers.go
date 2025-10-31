@@ -12,18 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package prod provides easy way to play with ADK with all available options without development support (no console, no ADK Web UI )
-package prod
+// package util provides helper functions for execution of commands and presenting their stderr and stdout in uniform way
+package util
 
 import (
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/universal"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/cmd/launcher/web/a2a"
-	"google.golang.org/adk/cmd/launcher/web/api"
+	"flag"
+	"strings"
 )
 
-// NewLaucher returnes universal launcher capable of serving api and a2a
-func NewLaucher() launcher.TopLevelLauncher {
-	return universal.NewLauncher(web.NewLauncher(api.NewLauncher(), a2a.NewLauncher()))
+// FormatFlagUsage returns a string containing the usage information for the given FlagSet.
+func FormatFlagUsage(fs *flag.FlagSet) string {
+	var b strings.Builder
+	o := fs.Output()
+	fs.SetOutput(&b)
+	fs.PrintDefaults()
+	fs.SetOutput(o)
+	return b.String()
 }

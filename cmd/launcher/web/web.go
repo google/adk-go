@@ -25,8 +25,9 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/universal"
+	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/session"
 )
 
@@ -44,32 +45,59 @@ type WebLauncher struct {
 	activeSublaunchers map[string]WebSublauncher
 }
 
+// Execute implements launcher.TopLevelLauncher.
+func (w *WebLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
+	remainingArgs, err := w.Parse(args)
+	if err != nil {
+		return fmt.Errorf("cannot parse args: %w", err)
+	}
+	// do not accept additional arguments
+	err = universal.ErrorOnUnparsedArgs(remainingArgs)
+	if err != nil {
+		return fmt.Errorf("cannot parse all the arguments: %w", err)
+	}
+	return w.Run(ctx, config)
+}
+
+// WebSublauncher defines an interface for extending the WebLauncher.
+// Each sublauncher can add its own routes, wrap existing handlers, and parse its own command-line flags.
 type WebSublauncher interface {
-	launcher.Sublauncher
+	Keyword() string
+	Parse(args []string) ([]string, error)
+	CommandLineSyntax() string
+	SimpleDescription() string
+
+	// SetupSubrouters adds sublauncher-specific routes to the router.
 	SetupSubrouters(router *mux.Router, adkConfig *adk.Config)
+	// WrapHandlers allows a sublauncher to wrap the main HTTP handler, for example to add middleware.
 	WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler
+	// UserMessage is a hook for sublaunchers to print a message to the user when the web server starts.
 	UserMessage(webUrl string, printer func(v ...any))
 }
 
-func (w *WebLauncher) FormatSyntax() string {
+// CommandLineSyntax implements launcher.TopLevelLauncher.
+func (w *WebLauncher) CommandLineSyntax() string {
 	var b strings.Builder
-	fmt.Fprint(&b, launcher.FormatFlagUsage(w.flags))
+	fmt.Fprint(&b, util.FormatFlagUsage(w.flags))
 	fmt.Fprintf(&b, "  You may specify sublaunchers:\n")
 	for _, l := range w.sublaunchers {
 		fmt.Fprintf(&b, "    * %s - %s\n", l.Keyword(), l.SimpleDescription())
 	}
 	fmt.Fprintf(&b, "  Sublaunchers syntax:\n")
 	for _, l := range w.sublaunchers {
-		fmt.Fprintf(&b, "    %s\n  %s\n", l.Keyword(), l.FormatSyntax())
+		fmt.Fprintf(&b, "    %s\n  %s\n", l.Keyword(), l.CommandLineSyntax())
 	}
 	return b.String()
 }
 
+// Keyword implements launcher.SubLauncher.
 func (w *WebLauncher) Keyword() string {
 	return "web"
 }
 
-// Parse processes its arguments, trying to find an appropiate sublauncher by keywords. Returns unprocessed arguments
+// Parse implements launcher.SubLauncher. It parses the web launcher's flags
+// and then iterates through the remaining arguments to find and parse arguments
+// for any specified sublaunchers. It returns any arguments that are not processed.
 func (w *WebLauncher) Parse(args []string) ([]string, error) {
 
 	keyToSublauncher := make(map[string]WebSublauncher)
@@ -110,6 +138,7 @@ func (w *WebLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
+// Run implements launcher.SubLauncher.
 func (w *WebLauncher) Run(ctx context.Context, config *adk.Config) error {
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
@@ -162,11 +191,13 @@ func (w *WebLauncher) Run(ctx context.Context, config *adk.Config) error {
 	return nil
 }
 
+// SimpleDescription implements launcher.SubLauncher.
 func (w *WebLauncher) SimpleDescription() string {
 	return "starts web server with additional sub-servers specified by sublaunchers"
 }
 
-// NewLauncher creates new web launcher. Should be extended by sublaunchers providing real content
+// NewLauncher creates a new WebLauncher. It should be extended by providing
+// one or more WebSublaunchers that add the actual content and functionality.
 func NewLauncher(sublaunchers ...WebSublauncher) *WebLauncher {
 
 	config := &webConfig{}
@@ -181,6 +212,7 @@ func NewLauncher(sublaunchers ...WebSublauncher) *WebLauncher {
 	}
 }
 
+// logger is a middleware that logs the HTTP method, request URI, and the time taken to process the request.
 func logger(inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -196,7 +228,7 @@ func logger(inner http.Handler) http.Handler {
 	})
 }
 
-// BuildBaseRouter returns the main router, which can be exteded by sub-routers
+// BuildBaseRouter returns the main router, which can be extended by sub-routers.
 func BuildBaseRouter() *mux.Router {
 	router := mux.NewRouter().StrictSlash(true)
 	router.Use(logger)

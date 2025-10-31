@@ -16,6 +16,7 @@
 package a2a
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -27,8 +28,9 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/adk/adka2a"
-	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/web"
+	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/runner"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
@@ -42,8 +44,25 @@ type A2ALauncher struct {
 	config *a2aConfig
 }
 
-func (a *A2ALauncher) FormatSyntax() string {
-	return launcher.FormatFlagUsage(a.flags)
+// Run implements web.WebSublauncher.
+func (a *A2ALauncher) Run(ctx context.Context, config *adk.Config) error {
+	panic("unimplemented")
+}
+
+// NewLauncher creates new a2a launcher. It extends Web launcher
+func NewLauncher() web.WebSublauncher {
+	config := &a2aConfig{}
+
+	fs := flag.NewFlagSet("a2a", flag.ContinueOnError)
+
+	return &A2ALauncher{
+		config: config,
+		flags:  fs,
+	}
+}
+
+func (a *A2ALauncher) CommandLineSyntax() string {
+	return util.FormatFlagUsage(a.flags)
 }
 
 func (a *A2ALauncher) Keyword() string {
@@ -104,14 +123,4 @@ func newA2AHandler(serveConfig *adk.Config) *a2agrpc.Handler {
 	return grpcHandler
 }
 
-// NewLauncher creates new a2a launcher. It extends Web launcher
-func NewLauncher(rootAgentName string) *A2ALauncher {
-	config := &a2aConfig{}
-
-	fs := flag.NewFlagSet("a2a", flag.ContinueOnError)
-
-	return &A2ALauncher{
-		config: config,
-		flags:  fs,
-	}
-}
+var _ web.WebSublauncher = (*A2ALauncher)(nil)

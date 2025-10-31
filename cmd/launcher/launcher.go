@@ -17,30 +17,19 @@ package launcher
 
 import (
 	"context"
-	"flag"
-	"strings"
 
 	"google.golang.org/adk/cmd/launcher/adk"
 )
 
-type Launcher interface {
-	Sublauncher
-	Run(ctx context.Context, config *adk.Config) error
+type TopLevelLauncher interface {
+	Execute(ctx context.Context, config *adk.Config, args []string) error
+	CommandLineSyntax() string
 }
 
-type Sublauncher interface {
-	//Run(ctx context.Context, config *adk.Config) error
+type SubLauncher interface {
 	Keyword() string
 	Parse(args []string) ([]string, error)
-	FormatSyntax() string
+	CommandLineSyntax() string
 	SimpleDescription() string
-}
-
-func FormatFlagUsage(fs *flag.FlagSet) string {
-	var b strings.Builder
-	o := fs.Output()
-	fs.SetOutput(&b)
-	fs.PrintDefaults()
-	fs.SetOutput(o)
-	return b.String()
+	Run(ctx context.Context, config *adk.Config) error
 }

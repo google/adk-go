@@ -23,9 +23,9 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/restapi/handlers"
+	"google.golang.org/adk/internal/cli/util"
 )
 
 // webUIConfig contains parametres for lauching ADK Web UI
@@ -40,8 +40,9 @@ type WebUILauncher struct {
 	config *webUIConfig
 }
 
-func (w *WebUILauncher) FormatSyntax() string {
-	return launcher.FormatFlagUsage(w.flags)
+// CommandLineSyntax implements web.WebSublauncher.
+func (w *WebUILauncher) CommandLineSyntax() string {
+	return util.FormatFlagUsage(w.flags)
 }
 
 func (w *WebUILauncher) Keyword() string {
@@ -58,7 +59,7 @@ func (w *WebUILauncher) Parse(args []string) ([]string, error) {
 }
 
 func (a *WebUILauncher) WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler {
-	// api doesn't change the top level routes
+	// webui doesn't change the top level routes
 	return handler
 }
 

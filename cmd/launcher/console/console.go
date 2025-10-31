@@ -26,6 +26,8 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher/universal"
+	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -43,6 +45,18 @@ type ConsoleLauncher struct {
 	config *consoleConfig
 }
 
+// NewLauncher creates new console launcher
+func NewLauncher() *ConsoleLauncher {
+	config := &consoleConfig{}
+
+	fs := flag.NewFlagSet("console", flag.ContinueOnError)
+	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
+		fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
+
+	return &ConsoleLauncher{config: config, flags: fs}
+}
+
+// Run implements launcher.SubLauncher. It starts the console interaction loop.
 func (l *ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 	userID, appName := "console_user", "console_app"
 
@@ -107,7 +121,7 @@ func (l *ConsoleLauncher) Run(ctx context.Context, config *adk.Config) error {
 	}
 }
 
-// Parse returns remaining un-parsed arguments
+// Parse implements launcher.SubLauncher. After parsing console-specific arguments returns remaining un-parsed arguments.
 func (l *ConsoleLauncher) Parse(args []string) ([]string, error) {
 	err := l.flags.Parse(args)
 	if err != nil || !l.flags.Parsed() {
@@ -123,25 +137,34 @@ func (l *ConsoleLauncher) Parse(args []string) ([]string, error) {
 	return l.flags.Args(), nil
 }
 
+// Keyword implements launcher.SubLauncher.
 func (l *ConsoleLauncher) Keyword() string {
 	return "console"
 }
 
-func (l *ConsoleLauncher) FormatSyntax() string {
-	return launcher.FormatFlagUsage(l.flags)
+// CommandLineSyntax implements launcher.SubLauncher.
+func (l *ConsoleLauncher) CommandLineSyntax() string {
+	return util.FormatFlagUsage(l.flags)
 }
 
+// SimpleDescription implements launcher.SubLauncher.
 func (l *ConsoleLauncher) SimpleDescription() string {
 	return "runs an agent in console mode."
 }
 
-// NewLauncher creates new console launcher. You may provide the default rootAgentName. It can be overriden by command-line params
-func NewLauncher(rootAgentName string) *ConsoleLauncher {
-	config := &consoleConfig{}
-
-	fs := flag.NewFlagSet("console", flag.ContinueOnError)
-	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
-		fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
-
-	return &ConsoleLauncher{config: config, flags: fs}
+// Execute implements launcher.TopLevelLauncher. It parses arguments and runs the launcher.
+func (l *ConsoleLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
+	remainingArgs, err := l.Parse(args)
+	if err != nil {
+		return fmt.Errorf("cannot parse args: %w", err)
+	}
+	// do not accept additional arguments
+	err = universal.ErrorOnUnparsedArgs(remainingArgs)
+	if err != nil {
+		return fmt.Errorf("cannot parse all the arguments: %w", err)
+	}
+	return l.Run(ctx, config)
 }
+
+var _ launcher.SubLauncher = (*ConsoleLauncher)(nil)
+var _ launcher.TopLevelLauncher = (*ConsoleLauncher)(nil)

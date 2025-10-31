@@ -16,6 +16,7 @@
 package full
 
 import (
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/console"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/cmd/launcher/web"
@@ -25,6 +26,6 @@ import (
 )
 
 // NewLauncher returnes the most versatile universal launcher with all options built-in
-func NewLauncher(rootAgentName string) *universal.Launcher {
-	return universal.NewLauncher(console.NewLauncher(rootAgentName), web.NewLauncher(api.NewLauncher(), a2a.NewLauncher(rootAgentName), webui.NewLauncher()))
+func NewLauncher() launcher.TopLevelLauncher {
+	return universal.NewLauncher(console.NewLauncher(), web.NewLauncher(api.NewLauncher(), a2a.NewLauncher(), webui.NewLauncher()))
 }
