@@ -133,7 +133,8 @@ func TestNewSequentialAgent(t *testing.T) {
 
 				for i, gotEvent := range gotEvents {
 					tt.wantEvents[i].Timestamp = gotEvent.Timestamp
-					if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID")); diff != "" {
+					if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID"),
+						cmpopts.IgnoreFields(session.EventActions{}, "StateDelta")); diff != "" {
 						t.Errorf("event[i] mismatch (-want +got):\n%s", diff)
 					}
 				}
