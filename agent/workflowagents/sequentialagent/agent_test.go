@@ -38,10 +38,11 @@ func TestNewSequentialAgent(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		args       args
-		wantEvents []*session.Event
-		wantErr    bool
+		name           string
+		args           args
+		wantEvents     []*session.Event
+		wantErr        bool
+		wantErrMessage string
 	}{
 		{
 			name: "ok",
@@ -74,6 +75,88 @@ func TestNewSequentialAgent(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "ok with inner sequential",
+			args: args{
+				maxIterations: 0,
+				subAgents:     []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1"), newCustomAgent(t, 3)},
+			},
+			wantEvents: []*session.Event{
+				{
+					Author: "custom_agent_0",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("hello 0"),
+							},
+							Role: genai.RoleModel,
+						},
+					},
+				},
+				{
+					Author: "custom_agent_1",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("hello 1"),
+							},
+							Role: genai.RoleModel,
+						},
+					},
+				},
+				{
+					Author: "custom_agent_2",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("hello 2"),
+							},
+							Role: genai.RoleModel,
+						},
+					},
+				},
+				{
+					Author: "custom_agent_3",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("hello 3"),
+							},
+							Role: genai.RoleModel,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "err with inner sequential with same name as root",
+			args: args{
+				maxIterations: 0,
+				subAgents:     []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1"), newCustomAgent(t, 3)},
+			},
+			wantErr:        true,
+			wantErrMessage: `failed to create agent tree: "test_agent" sub agent cannot have same name as root agent, found: "test_agent", "test_agent"`,
+		},
+		{
+			name: "err with 2 levels of inner sequential with same name as root ",
+			args: args{
+				maxIterations: 0,
+				subAgents: []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{
+					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1")}, "test_agent"), newCustomAgent(t, 3)},
+			},
+			wantErr:        true,
+			wantErrMessage: `failed to create agent tree: "test_agent" sub agent cannot have same name as root agent, found: "test_agent", "test_agent"`,
+		},
+		{
+			name: "err with 2 levels of inner sequential with same name as parent ",
+			args: args{
+				maxIterations: 0,
+				subAgents: []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{
+					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1")}, "test_agent1"), newCustomAgent(t, 3)},
+			},
+			wantErr:        true,
+			wantErrMessage: `failed to create agent tree: "test_agent1" agent cannot have >1 parents, found: "test_agent", "test_agent1"`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -85,8 +168,13 @@ func TestNewSequentialAgent(t *testing.T) {
 					SubAgents: tt.args.subAgents,
 				},
 			})
-			if (err != nil) != tt.wantErr {
-				t.Errorf("NewSequentialAgent() error = %v, wantErr %v", err, tt.wantErr)
+			if err != nil {
+				if !tt.wantErr {
+					t.Errorf("NewSequentialAgent() error = %v, wantErr %v", err, tt.wantErr)
+				}
+				if diff := cmp.Diff(tt.wantErrMessage, err.Error()); diff != "" {
+					t.Errorf("err message mismatch (-want +got):\n%s", diff)
+				}
 				return
 			}
 
@@ -100,7 +188,13 @@ func TestNewSequentialAgent(t *testing.T) {
 				SessionService: sessionService,
 			})
 			if err != nil {
-				t.Fatal(err)
+				if !tt.wantErr {
+					t.Fatalf("NewSequentialAgent() error = %v, wantErr %v", err, tt.wantErr)
+				}
+				if diff := cmp.Diff(tt.wantErrMessage, err.Error()); diff != "" {
+					t.Fatalf("err message mismatch (-want +got):\n%s", diff)
+				}
+				return
 			}
 
 			_, err = sessionService.Create(ctx, &session.CreateRequest{
@@ -155,6 +249,22 @@ func newCustomAgent(t *testing.T, id int) agent.Agent {
 	}
 
 	return a
+}
+
+func newSequentialAgent(t *testing.T, subAgents []agent.Agent, name string) agent.Agent {
+	t.Helper()
+
+	sequentialAgent, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      name,
+			SubAgents: subAgents,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSequentialAgent() error = %v", err)
+	}
+
+	return sequentialAgent
 }
 
 // FakeLLM is a mock implementation of model.LLM for testing.
