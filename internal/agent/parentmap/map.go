@@ -38,7 +38,7 @@ func New(root agent.Agent) (Map, error) {
 				return fmt.Errorf("%q agent cannot have >1 parents, found: %q, %q", subAgent.Name(), p, cur.Name())
 			}
 			if _, ok := res[subAgent.Name()]; ok || subAgent.Name() == rootName {
-				return fmt.Errorf("%q agent cannot have the same name as an existing agent", subAgent.Name())
+				return fmt.Errorf("agent names must be unique in the agent tree, found duplicate: %q", subAgent.Name())
 			}
 			res[subAgent.Name()] = cur
 			pointerMap[subAgent] = cur.Name()

@@ -37,6 +37,8 @@ func TestNewSequentialAgent(t *testing.T) {
 		subAgents     []agent.Agent
 	}
 
+	sameAgent := newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "same_agent")
+
 	tests := []struct {
 		name           string
 		args           args
@@ -135,7 +137,7 @@ func TestNewSequentialAgent(t *testing.T) {
 				subAgents:     []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1"), newCustomAgent(t, 3)},
 			},
 			wantErr:        true,
-			wantErrMessage: `failed to create agent tree: "test_agent" agent cannot have the same name as an existing agent`,
+			wantErrMessage: `failed to create agent tree: agent names must be unique in the agent tree, found duplicate: "test_agent"`,
 		},
 		{
 			name: "err with 2 levels of inner sequential with same name as root ",
@@ -145,7 +147,7 @@ func TestNewSequentialAgent(t *testing.T) {
 					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1")}, "test_agent"), newCustomAgent(t, 3)},
 			},
 			wantErr:        true,
-			wantErrMessage: `failed to create agent tree: "test_agent" agent cannot have the same name as an existing agent`,
+			wantErrMessage: `failed to create agent tree: agent names must be unique in the agent tree, found duplicate: "test_agent"`,
 		},
 		{
 			name: "err with 2 levels of inner sequential with same name as parent ",
@@ -155,13 +157,13 @@ func TestNewSequentialAgent(t *testing.T) {
 					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1")}, "test_agent1"), newCustomAgent(t, 3)},
 			},
 			wantErr:        true,
-			wantErrMessage: `failed to create agent tree: "test_agent1" agent cannot have the same name as an existing agent`,
+			wantErrMessage: `failed to create agent tree: agent names must be unique in the agent tree, found duplicate: "test_agent1"`,
 		},
 		{
 			name: "err with repeated inner sequential",
 			args: args{
 				maxIterations: 0,
-				subAgents:     []agent.Agent{newCustomAgent(t, 0), sameSequentialAgent(t), sameSequentialAgent(t), newCustomAgent(t, 3)},
+				subAgents:     []agent.Agent{newCustomAgent(t, 0), sameAgent, sameAgent, newCustomAgent(t, 3)},
 			},
 			wantErr:        true,
 			wantErrMessage: `failed to create base agent: error creating agent: subagent "same_agent" appears multiple times in subAgents`,
@@ -170,8 +172,8 @@ func TestNewSequentialAgent(t *testing.T) {
 			name: "err with repeated inner sequential in two levels",
 			args: args{
 				maxIterations: 0,
-				subAgents: []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{sameSequentialAgent(t)}, "test_agent1"),
-					sameSequentialAgent(t), newCustomAgent(t, 3)},
+				subAgents: []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{sameAgent}, "test_agent1"),
+					sameAgent, newCustomAgent(t, 3)},
 			},
 			wantErr:        true,
 			wantErrMessage: `failed to create agent tree: "same_agent" agent cannot have >1 parents, found: "test_agent1", "test_agent"`,
@@ -284,15 +286,6 @@ func newSequentialAgent(t *testing.T, subAgents []agent.Agent, name string) agen
 	}
 
 	return sequentialAgent
-}
-
-var temp agent.Agent
-
-func sameSequentialAgent(t *testing.T) agent.Agent {
-	if temp == nil {
-		temp = newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "same_agent")
-	}
-	return temp
 }
 
 // FakeLLM is a mock implementation of model.LLM for testing.
