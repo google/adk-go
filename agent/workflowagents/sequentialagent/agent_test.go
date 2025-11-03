@@ -77,8 +77,6 @@ func TestNewSequentialAgent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
 			ctx := t.Context()
 
 			sequentialAgent, err := sequentialagent.New(sequentialagent.Config{
@@ -114,51 +112,30 @@ func TestNewSequentialAgent(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
-				if err != nil {
-					t.Errorf("got unexpected error: %v", err)
-				}
-
-				if tt.args.maxIterations == 0 && len(gotEvents) == len(tt.wantEvents) {
-					break
-				}
-
-				gotEvents = append(gotEvents, event)
-			}
-
-			if len(tt.wantEvents) != len(gotEvents) {
-				t.Fatalf("Unexpected event length, got: %v, want: %v", len(gotEvents), len(tt.wantEvents))
-			}
-
-			for i, gotEvent := range gotEvents {
-				tt.wantEvents[i].Timestamp = gotEvent.Timestamp
-				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID")); diff != "" {
-					t.Errorf("event[i] mismatch (-want +got):\n%s", diff)
-				}
-			}
-
-			// run again, this time it will need to determine which agent to use, and we want to get the same result
+			// run twice, the second time it will need to determine which agent to use, and we want to get the same result
 			gotEvents = make([]*session.Event, 0)
-			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
-				if err != nil {
-					t.Errorf("got unexpected error: %v", err)
+			for i := 0; i < 2; i++ {
+				for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
+					if err != nil {
+						t.Errorf("got unexpected error: %v", err)
+					}
+
+					if tt.args.maxIterations == 0 && len(gotEvents) == len(tt.wantEvents) {
+						break
+					}
+
+					gotEvents = append(gotEvents, event)
 				}
 
-				if tt.args.maxIterations == 0 && len(gotEvents) == len(tt.wantEvents) {
-					break
+				if len(tt.wantEvents) != len(gotEvents) {
+					t.Fatalf("Unexpected event length, got: %v, want: %v", len(gotEvents), len(tt.wantEvents))
 				}
 
-				gotEvents = append(gotEvents, event)
-			}
-
-			if len(tt.wantEvents) != len(gotEvents) {
-				t.Fatalf("Unexpected event length, got: %v, want: %v", len(gotEvents), len(tt.wantEvents))
-			}
-
-			for i, gotEvent := range gotEvents {
-				tt.wantEvents[i].Timestamp = gotEvent.Timestamp
-				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID")); diff != "" {
-					t.Errorf("event[i] mismatch (-want +got):\n%s", diff)
+				for i, gotEvent := range gotEvents {
+					tt.wantEvents[i].Timestamp = gotEvent.Timestamp
+					if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID")); diff != "" {
+						t.Errorf("event[i] mismatch (-want +got):\n%s", diff)
+					}
 				}
 			}
 		})
