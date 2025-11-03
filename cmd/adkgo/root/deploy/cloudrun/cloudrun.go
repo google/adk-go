@@ -48,8 +48,7 @@ type localProxyFlags struct {
 }
 
 type buildFlags struct {
-	tempDir string
-	// uiDistDir           string
+	tempDir             string
 	execPath            string
 	execFile            string
 	dockerfileBuildPath string
@@ -132,8 +131,6 @@ func (f *deployCloudRunFlags) computeFlags() error {
 				f.build.execFile = exec
 				f.build.execPath = path.Join(f.build.tempDir, exec)
 			}
-
-			// f.build.uiDistDir = path.Join(f.build.tempDir, "webui_distr")
 			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
 
 			return nil
@@ -252,8 +249,6 @@ func (f *deployCloudRunFlags) deployOnCloudRun() error {
 	if err != nil {
 		return err
 	}
-	// return nil
-
 	err = f.gcloudDeployToCloudRun()
 	if err != nil {
 		return err
