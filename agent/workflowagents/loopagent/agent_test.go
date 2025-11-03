@@ -15,16 +15,22 @@
 package loopagent_test
 
 import (
+	"context"
 	"fmt"
 	"iter"
+	"log"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 
 	"google.golang.org/genai"
 )
@@ -81,10 +87,100 @@ func TestNewLoopAgent(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "loop agent with max iterations and 2 sub agents",
+			args: args{
+				maxIterations: 1,
+				subAgents:     []agent.Agent{newCustomAgent(t, 0), newCustomAgent(t, 1)},
+			},
+			wantEvents: []*session.Event{
+				{
+					Author: "custom_agent_0",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("hello 0"),
+							},
+							Role: genai.RoleModel,
+						},
+					},
+				},
+				{
+					Author: "custom_agent_1",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("hello 1"),
+							},
+							Role: genai.RoleModel,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "loop with escalate function returns sumarization",
+			args: args{
+				maxIterations: 2,
+				subAgents:     []agent.Agent{newLmmAgentWithFunctionCall(t, 0, false), newCustomAgent(t, 1)},
+			},
+			wantEvents: []*session.Event{
+				{
+					Author: "custom_agent_0",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromFunctionCall("exampleFunction", make(map[string]any), genai.RoleModel),
+					},
+				},
+				{
+					Author: "custom_agent_0",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromFunctionResponse("exampleFunction", make(map[string]any), genai.RoleUser),
+					},
+					Actions: session.EventActions{
+						Escalate: true,
+					},
+				},
+				{
+					Author: "custom_agent_0",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("hello 0"),
+							},
+							Role: genai.RoleModel,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "loop with escalate function returns sumarization",
+			args: args{
+				maxIterations: 2,
+				subAgents:     []agent.Agent{newLmmAgentWithFunctionCall(t, 0, true), newCustomAgent(t, 1)},
+			},
+			wantEvents: []*session.Event{
+				{
+					Author: "custom_agent_0",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromFunctionCall("exampleFunction", make(map[string]any), genai.RoleModel),
+					},
+				},
+				{
+					Author: "custom_agent_0",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromFunctionResponse("exampleFunction", make(map[string]any), genai.RoleUser),
+					},
+					Actions: session.EventActions{
+						Escalate:          true,
+						SkipSummarization: true,
+					},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 
 			ctx := t.Context()
 
@@ -138,9 +234,16 @@ func TestNewLoopAgent(t *testing.T) {
 				t.Fatalf("Unexpected event length, got: %v, want: %v", len(gotEvents), len(tt.wantEvents))
 			}
 
+			ignoreFields := []cmp.Option{
+				cmpopts.IgnoreFields(session.Event{}, "ID", "InvocationID", "Timestamp"),
+				cmpopts.IgnoreFields(session.EventActions{}, "StateDelta"),
+				cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
+				cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID"),
+			}
+
 			for i, gotEvent := range gotEvents {
 				tt.wantEvents[i].Timestamp = gotEvent.Timestamp
-				if diff := cmp.Diff(tt.wantEvents[i], gotEvent); diff != "" {
+				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, ignoreFields...); diff != "" {
 					t.Errorf("event[%v] mismatch (-want +got):\n%s", i, diff)
 				}
 			}
@@ -181,5 +284,78 @@ func (a *customAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, err
 				Content: genai.NewContentFromText(fmt.Sprintf("hello %v", a.id), genai.RoleModel),
 			},
 		}, nil)
+	}
+}
+
+type EmptyArgs struct{}
+
+func exampleFunctionThatEscalates(ctx tool.Context, myArgs EmptyArgs) map[string]string {
+	ctx.Actions().Escalate = true
+	ctx.Actions().SkipSummarization = false
+	return map[string]string{}
+}
+
+func exampleFunctionThatEscalatesAndSkips(ctx tool.Context, myArgs EmptyArgs) map[string]string {
+	ctx.Actions().Escalate = true
+	ctx.Actions().SkipSummarization = true
+	return map[string]string{}
+}
+
+func newLmmAgentWithFunctionCall(t *testing.T, id int, skipSummarization bool) agent.Agent {
+	t.Helper()
+
+	exampleFunction := exampleFunctionThatEscalates
+	if skipSummarization {
+		exampleFunction = exampleFunctionThatEscalatesAndSkips
+	}
+
+	exampleFunctionThatEscalatesTool, err := functiontool.New(functiontool.Config{
+		Name:        "exampleFunction",
+		Description: "Call this function to escalate\n",
+	}, exampleFunction)
+	if err != nil {
+		log.Fatalf("error creating exampleFunction tool: %s", err)
+	}
+
+	customAgent, err := llmagent.New(llmagent.Config{
+		Name:  fmt.Sprintf("custom_agent_%v", id),
+		Model: &FakeLLM{id: id, callCounter: 0, skipSummarization: skipSummarization},
+		Tools: []tool.Tool{exampleFunctionThatEscalatesTool},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return customAgent
+}
+
+// FakeLLM is a mock implementation of model.LLM for testing.
+type FakeLLM struct {
+	id                int
+	callCounter       int
+	skipSummarization bool
+}
+
+func (f *FakeLLM) Name() string {
+	return "fake-llm"
+}
+
+func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		f.callCounter++
+
+		if len(req.Contents) == 1 {
+			if !yield(&model.LLMResponse{
+				Content: genai.NewContentFromFunctionCall("exampleFunction", make(map[string]any), genai.RoleModel),
+			}, nil) {
+				return
+			}
+		} else {
+			if !yield(&model.LLMResponse{
+				Content: genai.NewContentFromText(fmt.Sprintf("hello %v", f.id), genai.RoleModel),
+			}, nil) {
+				return
+			}
+		}
 	}
 }

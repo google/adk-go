@@ -74,6 +74,7 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 	return func(yield func(*session.Event, error) bool) {
 		for {
+			shouldExit := false
 			for _, subAgent := range ctx.Agent().SubAgents() {
 				for event, err := range subAgent.Run(ctx) {
 					// TODO: ensure consistency -- if there's an error, return and close iterator, verify everywhere in ADK.
@@ -82,8 +83,11 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 					}
 
 					if event.Actions.Escalate {
-						return
+						shouldExit = true
 					}
+				}
+				if shouldExit {
+					return
 				}
 			}
 
