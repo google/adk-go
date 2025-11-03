@@ -37,6 +37,13 @@ type Agent interface {
 }
 
 func New(cfg Config) (Agent, error) {
+	subAgentSet := make(map[Agent]bool)
+	for _, subAgent := range cfg.SubAgents {
+		if _, ok := subAgentSet[subAgent]; ok {
+			return nil, fmt.Errorf("error creating agent: subagent %q appears multiple times in subAgents", subAgent.Name())
+		}
+		subAgentSet[subAgent] = true
+	}
 	return &agent{
 		name:                 cfg.Name,
 		description:          cfg.Description,

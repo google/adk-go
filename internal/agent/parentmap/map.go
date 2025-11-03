@@ -29,17 +29,19 @@ type Map map[string]agent.Agent
 func New(root agent.Agent) (Map, error) {
 	res := make(map[string]agent.Agent)
 	rootName := root.Name()
+	pointerMap := map[agent.Agent]string{root: "is root agent"}
 
 	var f func(cur agent.Agent) error
 	f = func(cur agent.Agent) error {
 		for _, subAgent := range cur.SubAgents() {
-			if subAgent.Name() == rootName {
-				return fmt.Errorf("%q sub agent cannot have same name as root agent, found: %q, %q", subAgent.Name(), rootName, cur.Name())
+			if p, ok := pointerMap[subAgent]; ok {
+				return fmt.Errorf("%q agent cannot have >1 parents, found: %q, %q", subAgent.Name(), p, cur.Name())
 			}
-			if p, ok := res[subAgent.Name()]; ok {
-				return fmt.Errorf("%q agent cannot have >1 parents, found: %q, %q", subAgent.Name(), p.Name(), cur.Name())
+			if _, ok := res[subAgent.Name()]; ok || subAgent.Name() == rootName {
+				return fmt.Errorf("%q agent cannot have the same name as an existing agent", subAgent.Name())
 			}
 			res[subAgent.Name()] = cur
+			pointerMap[subAgent] = cur.Name()
 
 			if err := f(subAgent); err != nil {
 				return err
