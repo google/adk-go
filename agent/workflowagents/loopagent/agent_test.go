@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"log"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -314,7 +313,7 @@ func newLmmAgentWithFunctionCall(t *testing.T, id int, skipSummarization bool) a
 		Description: "Call this function to escalate\n",
 	}, exampleFunction)
 	if err != nil {
-		log.Fatalf("error creating exampleFunction tool: %s", err)
+		t.Fatalf("error creating exampleFunction tool: %s", err)
 	}
 
 	customAgent, err := llmagent.New(llmagent.Config{
