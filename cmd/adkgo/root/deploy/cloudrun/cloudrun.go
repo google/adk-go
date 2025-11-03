@@ -229,7 +229,7 @@ func (f *deployCloudRunFlags) runGcloudProxy() error {
 			p(util.CenterString("", targetWidth))
 			p(strings.Repeat("-", targetWidth))
 
-			cmd := exec.Command("gcloud", "run", "services", "proxy", f.cloudRun.serviceName, "--project", f.gcloud.projectName, "--port", strconv.Itoa(f.proxy.port))
+			cmd := exec.Command("gcloud", "run", "services", "proxy", f.cloudRun.serviceName, "--project", f.gcloud.projectName, "--port", strconv.Itoa(f.proxy.port), "--region", f.gcloud.region)
 			return util.LogCommand(cmd, p)
 		})
 }
