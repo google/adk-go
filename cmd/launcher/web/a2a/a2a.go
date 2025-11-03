@@ -51,7 +51,7 @@ func NewLauncher() web.WebSublauncher {
 
 	fs := flag.NewFlagSet("a2a", flag.ContinueOnError)
 
-	fs.StringVar(&config.agentURL, "a2a_agent_url", "localhost:8080", "A2A gRPC host URL as advertized in the public agent card. It is used by A2A clients as a connection endpoint.")
+	fs.StringVar(&config.agentURL, "a2a_agent_url", "localhost:8080", "A2A gRPC host URL as advertised in the public agent card. It is used by A2A clients as a connection endpoint.")
 
 	return &A2ALauncher{
 		config: config,
