@@ -209,9 +209,6 @@ func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
 				"--project", f.gcloud.projectName,
 				"--ingress", "all",
 				"--no-allow-unauthenticated"}
-			if f.cloudRun.a2a {
-				params = append(params, "--use-http2")
-			}
 
 			cmd := exec.Command("gcloud", params...)
 
