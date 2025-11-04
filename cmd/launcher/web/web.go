@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package web provides a way to run ADK using web server (extended by sublaunchers)
+// Package web provides a way to run ADK using web server (extended by sublaunchers)
 package web
 
 import (
@@ -62,9 +62,13 @@ func (w *Launcher) Execute(ctx context.Context, config *adk.Config, args []strin
 // WebSublauncher defines an interface for extending the WebLauncher.
 // Each sublauncher can add its own routes, wrap existing handlers, and parse its own command-line flags.
 type WebSublauncher interface {
+	// Keyword is used to request usage of the WebSublauncher from command-line
 	Keyword() string
+	// Parse after parsing command line args returnes the remaining un-parsed arguments or error
 	Parse(args []string) ([]string, error)
+	// CommandLineSyntax returns a formatted string explaing command line syntax to end user
 	CommandLineSyntax() string
+	// SimpleDescription returns a short explanatory test displayed to end user
 	SimpleDescription() string
 
 	// SetupSubrouters adds sublauncher-specific routes to the router.

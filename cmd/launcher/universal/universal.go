@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package launcher provides ways to interact with agents
+// Package universal provides an umbrella over launchers (console and web).
+// It allowes to choose one launcher by command-line parameters and uses it to parse the rest of arguments and then execute the launcher
 package universal
 
 import (

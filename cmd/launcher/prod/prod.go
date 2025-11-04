@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package prod provides easy way to play with ADK with all available options without development support (no console, no ADK Web UI )
+// Package prod provides easy way to play with ADK with all available options without development support (no console, no ADK Web UI, just API and A2A )
 package prod
 
 import (

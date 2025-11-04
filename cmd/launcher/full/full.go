@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package full provides easy way to play with ADK with all available options
+// Package full provides easy way to play with ADK with all available options
 package full
 
 import (

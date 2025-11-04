@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package webui allows to run ADK Web UI within the web server (using url /ui/)
 package webui
 
 import (
