@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package cloudrun handles command line parameters and execution logic for cloudrun deployment
+// Package cloudrun handles command line parameters and execution logic for cloudrun deployment
 package cloudrun
 
 import (
@@ -82,6 +82,7 @@ var cloudrunCmd = &cobra.Command{
 	},
 }
 
+// init creates flags and adds subcommand to parent
 func init() {
 	deploy.DeployCmd.AddCommand(cloudrunCmd)
 
@@ -97,6 +98,7 @@ func init() {
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.webui, "webui", true, "Enable Web UI")
 }
 
+// computeFlags uses command line arguments to create a full config
 func (f *deployCloudRunFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags & preparing temp",
 		func(p util.Printer) error {
@@ -149,6 +151,7 @@ func (f *deployCloudRunFlags) cleanTemp() error {
 		})
 }
 
+// compileEntryPoint builds locally the server using flags and environment variables in order to be run in CloudRun containter
 func (f *deployCloudRunFlags) compileEntryPoint() error {
 	return util.LogStartStop("Compiling server",
 		func(p util.Printer) error {
@@ -166,6 +169,7 @@ func (f *deployCloudRunFlags) compileEntryPoint() error {
 		})
 }
 
+// prepareDockerfile creates a temporary Dockerfile which will be executed by CloudRun
 func (f *deployCloudRunFlags) prepareDockerfile() error {
 	return util.LogStartStop("Preparing Dockerfile",
 		func(p util.Printer) error {
@@ -194,6 +198,7 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cl
 		})
 }
 
+// gcloudDeployToCloudRun invokes gcloud to deploy source on CloudRun
 func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
 	return util.LogStartStop("Deploying to Cloud Run",
 		func(p util.Printer) error {
@@ -215,6 +220,7 @@ func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
 		})
 }
 
+// runGcloudProxy invokes gcloud to create a proxy which will add authentication headers to requests
 func (f *deployCloudRunFlags) runGcloudProxy() error {
 	return util.LogStartStop("Running local gcloud authenticating proxy",
 		func(p util.Printer) error {
@@ -234,6 +240,7 @@ func (f *deployCloudRunFlags) runGcloudProxy() error {
 		})
 }
 
+// deployOnCloudRun executes the sequence of actions preparing and deploying the agent to CloudRun. Then runs authenticating proxy to newly deployed service
 func (f *deployCloudRunFlags) deployOnCloudRun() error {
 	fmt.Println(flags)
 
