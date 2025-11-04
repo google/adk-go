@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package util provides helper functions for execution of commands and presenting their stderr and stdout in uniform way
 package util
 
 import (
