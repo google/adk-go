@@ -14,8 +14,6 @@
 
 package agent
 
-import "google.golang.org/genai"
-
 type StreamingMode string
 
 const (
@@ -26,12 +24,6 @@ const (
 
 // RunConfig controls runtime behavior.
 type RunConfig struct {
-	// Speech configuration for the live agent.
-	SpeechConfig *genai.SpeechConfig
-	// Output transcription for live agents with audio response.
-	OutputAudioTranscriptionConfig *genai.AudioTranscriptionConfig
-	// The output modalities. If not set, it defaults to AUDIO.
-	ResponseModalities []string
 	// Streaming mode, None or StreamingMode.SSE or StreamingMode.BIDI.
 	StreamingMode StreamingMode
 	// Whether or not to save the input blobs as artifacts
@@ -45,12 +37,4 @@ type RunConfig struct {
 	//      This feature is **experimental** and its API or behavior may change
 	//     in future releases.
 	SupportCFC bool
-
-	// A limit on the total number of llm calls for a given run.
-	//
-	// Valid Values:
-	//  - More than 0 and less than sys.maxsize: The bound on the number of llm
-	//    calls is enforced, if the value is set in this range.
-	//  - Less than or equal to 0: This allows for unbounded number of llm calls.
-	MaxLLMCalls int
 }
