@@ -27,9 +27,9 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/cmd/restapi/fakes"
-	"google.golang.org/adk/cmd/restapi/handlers"
-	"google.golang.org/adk/cmd/restapi/models"
+	"google.golang.org/adk/server/restapi/fakes"
+	"google.golang.org/adk/server/restapi/handlers"
+	"google.golang.org/adk/server/restapi/models"
 )
 
 func TestGetSession(t *testing.T) {

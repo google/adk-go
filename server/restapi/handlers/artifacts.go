@@ -20,7 +20,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/cmd/restapi/models"
+	"google.golang.org/adk/server/restapi/models"
 )
 
 // ArtifactsAPIController is the controller for the Artifacts API.

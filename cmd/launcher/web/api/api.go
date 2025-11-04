@@ -23,8 +23,8 @@ import (
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/launcher/adk"
 	weblauncher "google.golang.org/adk/cmd/launcher/web"
-	restapiweb "google.golang.org/adk/cmd/restapi/web"
 	"google.golang.org/adk/internal/cli/util"
+	restapiweb "google.golang.org/adk/server/restapi/web"
 )
 
 // apiConfig contains parametres for lauching ADK REST API

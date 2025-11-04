@@ -17,7 +17,7 @@ package handlers
 import (
 	"net/http"
 
-	"google.golang.org/adk/cmd/restapi/services"
+	"google.golang.org/adk/server/restapi/services"
 )
 
 // AppsAPIController is the controller for the Apps API.

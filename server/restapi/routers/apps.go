@@ -17,32 +17,28 @@ package routers
 import (
 	"net/http"
 
-	"google.golang.org/adk/cmd/restapi/handlers"
+	"google.golang.org/adk/server/restapi/handlers"
 )
 
-// EvalAPIRouter defines the routes for the Eval API.
-type EvalAPIRouter struct{}
+// AppsAPIRouter defines the routes for the Apps API.
+type AppsAPIRouter struct {
+	appsController *handlers.AppsAPIController
+}
+
+// NewAppsAPIRouter creates a new AppsAPIRouter.
+func NewAppsAPIRouter(controller *handlers.AppsAPIController) *AppsAPIRouter {
+	return &AppsAPIRouter{appsController: controller}
+
+}
 
 // Routes returns the routes for the Apps API.
-func (r *EvalAPIRouter) Routes() Routes {
+func (r *AppsAPIRouter) Routes() Routes {
 	return Routes{
 		Route{
-			Name:        "ListEvalSets",
+			Name:        "ListApps",
 			Methods:     []string{http.MethodGet},
-			Pattern:     "/apps/{app_name}/eval_sets",
-			HandlerFunc: handlers.Unimplemented,
-		},
-		Route{
-			Name:        "ListEvalSets",
-			Methods:     []string{http.MethodPost, http.MethodOptions},
-			Pattern:     "/apps/{app_name}/eval_sets/{eval_set_name}",
-			HandlerFunc: handlers.Unimplemented,
-		},
-		Route{
-			Name:        "ListEvalResults",
-			Methods:     []string{http.MethodGet},
-			Pattern:     "/apps/{app_name}/eval_results",
-			HandlerFunc: handlers.Unimplemented,
+			Pattern:     "/list-apps",
+			HandlerFunc: r.appsController.ListApps,
 		},
 	}
 }

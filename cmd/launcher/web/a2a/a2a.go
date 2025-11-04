@@ -23,11 +23,11 @@ import (
 	a2acore "github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/adka2a"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/server/adka2a"
 )
 
 const apiPath = "/a2a/invoke"

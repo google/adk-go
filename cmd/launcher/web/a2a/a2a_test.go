@@ -27,7 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/cmd/restapi/services"
+	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )

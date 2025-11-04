@@ -23,12 +23,11 @@ import (
 	"log"
 	"net/http"
 
-	weblauncher "google.golang.org/adk/cmd/launcher/web"
-
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/cmd/restapi/handlers"
+	weblauncher "google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/internal/cli/util"
+	"google.golang.org/adk/server/restapi/handlers"
 )
 
 // webUIConfig contains parametres for lauching ADK Web UI

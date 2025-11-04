@@ -24,8 +24,8 @@ import (
 	"google.golang.org/adk/agent/workflowagents/loopagent"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/full"
-	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )

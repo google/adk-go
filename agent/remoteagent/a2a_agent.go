@@ -24,9 +24,9 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
-	"google.golang.org/adk/adka2a"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/converters"
+	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
 )
 

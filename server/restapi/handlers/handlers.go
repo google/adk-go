@@ -19,7 +19,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"google.golang.org/adk/cmd/restapi/errors"
+	"google.golang.org/adk/server/restapi/errors"
 )
 
 // EncodeJSONResponse uses the json encoder to write an interface to the http response with an optional status code

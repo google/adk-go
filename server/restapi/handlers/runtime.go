@@ -22,10 +22,10 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/cmd/restapi/errors"
-	"google.golang.org/adk/cmd/restapi/models"
-	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/server/restapi/errors"
+	"google.golang.org/adk/server/restapi/models"
+	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/session"
 )
 

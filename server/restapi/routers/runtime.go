@@ -17,7 +17,7 @@ package routers
 import (
 	"net/http"
 
-	"google.golang.org/adk/cmd/restapi/handlers"
+	"google.golang.org/adk/server/restapi/handlers"
 )
 
 // RuntimeAPIRouter defines the routes for the Runtime API.

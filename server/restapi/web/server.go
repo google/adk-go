@@ -18,10 +18,10 @@ package web
 import (
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/cmd/restapi/handlers"
-	"google.golang.org/adk/cmd/restapi/routers"
-	"google.golang.org/adk/cmd/restapi/services"
 	"google.golang.org/adk/internal/telemetry"
+	"google.golang.org/adk/server/restapi/handlers"
+	"google.golang.org/adk/server/restapi/routers"
+	"google.golang.org/adk/server/restapi/services"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )

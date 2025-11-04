@@ -20,7 +20,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/cmd/restapi/models"
+	"google.golang.org/adk/server/restapi/models"
 	"google.golang.org/adk/session"
 )
 

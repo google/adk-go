@@ -19,8 +19,8 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/cmd/restapi/models"
-	"google.golang.org/adk/cmd/restapi/services"
+	"google.golang.org/adk/server/restapi/models"
+	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 )
