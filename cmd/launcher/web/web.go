@@ -76,7 +76,7 @@ type WebSublauncher interface {
 	// WrapHandlers allows a sublauncher to wrap the main HTTP handler, for example to add middleware.
 	WrapHandlers(handler http.Handler, adkConfig *adk.Config) http.Handler
 	// UserMessage is a hook for sublaunchers to print a message to the user when the web server starts.
-	UserMessage(webUrl string, printer func(v ...any))
+	UserMessage(webURL string, printer func(v ...any))
 }
 
 // CommandLineSyntax implements launcher.Launcher.

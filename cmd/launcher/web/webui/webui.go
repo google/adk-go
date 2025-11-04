@@ -83,8 +83,8 @@ func (w *webUILauncher) SimpleDescription() string {
 
 // UserMessage implements the web.WebSublauncher interface. It prints a message
 // to the user with the URL to access the WebUI.
-func (w *webUILauncher) UserMessage(webUrl string, printer func(v ...any)) {
-	printer(fmt.Sprintf("       webui:  you can access API using %s%s", webUrl, w.config.pathPrefix))
+func (w *webUILauncher) UserMessage(webURL string, printer func(v ...any)) {
+	printer(fmt.Sprintf("       webui:  you can access API using %s%s", webURL, w.config.pathPrefix))
 }
 
 // embed web UI files into the executable
@@ -95,14 +95,14 @@ var content embed.FS
 // AddSubrouter adds a subrouter to serve the ADK Web UI.
 func (w *webUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config, backendAddress string) {
 	// Setup serving of ADK Web UI
-	rUi := router.Methods("GET").PathPrefix(pathPrefix).Subrouter()
+	rUI := router.Methods("GET").PathPrefix(pathPrefix).Subrouter()
 
 	//   generate /assets/config/runtime-config.json in the runtime.
 	//   It removes the need to prepare this file during deployment and update the distribution files.
 	runtimeConfigResponse := struct {
 		BackendUrl string `json:"backendUrl"`
 	}{BackendUrl: backendAddress}
-	rUi.Methods("GET").Path("/assets/config/runtime-config.json").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	rUI.Methods("GET").Path("/assets/config/runtime-config.json").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlers.EncodeJSONResponse(runtimeConfigResponse, http.StatusOK, w)
 	})
 
@@ -116,7 +116,7 @@ func (w *webUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkC
 	if err != nil {
 		log.Fatalf("cannot prepare ADK Web UI files as embedded content: %v", err)
 	}
-	rUi.Methods("GET").Handler(http.StripPrefix(pathPrefix, http.FileServer(http.FS(ui))))
+	rUI.Methods("GET").Handler(http.StripPrefix(pathPrefix, http.FileServer(http.FS(ui))))
 }
 
 // NewLauncher creates a new WebSublauncher for the ADK Web UI.

@@ -60,16 +60,16 @@ func corsWithArgs(frontendAddress string) func(next http.Handler) http.Handler {
 }
 
 // UserMessage implements web.WebSublauncher. Prints message to the user
-func (a *apiLauncher) UserMessage(webUrl string, printer func(v ...any)) {
-	printer(fmt.Sprintf("       api:  you can access API using %s/api", webUrl))
-	printer(fmt.Sprintf("       api:      for instance: %s/api/list-apps", webUrl))
+func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
+	printer(fmt.Sprintf("       api:  you can access API using %s/api", webURL))
+	printer(fmt.Sprintf("       api:      for instance: %s/api/list-apps", webURL))
 }
 
 // SetupSubrouters adds the API router to the parent router.
 func (a *apiLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) {
-	rApi := router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
-	restapiweb.SetupRouter(rApi, adkConfig)
-	rApi.Use(corsWithArgs(a.config.frontendAddress))
+	rAPI := router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
+	restapiweb.SetupRouter(rAPI, adkConfig)
+	rAPI.Use(corsWithArgs(a.config.frontendAddress))
 }
 
 // WrapHandlers implements web.WebSublauncher. For API, it doesn't change the top-level routes.
