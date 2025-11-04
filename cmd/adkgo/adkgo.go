@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package main is an entry point for CLI.
+// Package main is an entry point for CLI.
 package main
 
 import (
