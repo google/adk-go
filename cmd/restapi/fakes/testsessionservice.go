@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package fakes contains a fake implementation of different ADK services used for testing
+// Package fakes contains a fake implementation of different ADK services used for testing
 
 package fakes
 

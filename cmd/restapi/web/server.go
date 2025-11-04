@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package web prepeares router dedicated to ADK REST API for http web server
+// Package web prepares router dedicated to ADK REST API for http web server
 package web
 
 import (

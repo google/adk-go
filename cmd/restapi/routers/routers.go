@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package routers defines the HTTP routes for the ADK-Web REST API.
+// Package routers defines the HTTP routes for the ADK-Web REST API.
 package routers
 
 import (
@@ -44,6 +44,7 @@ func NewRouter(routers ...Router) *mux.Router {
 	return router
 }
 
+// SetupSubRouters adds routes from subrouter to the naub router
 func SetupSubRouters(router *mux.Router, subrouters ...Router) {
 	for _, api := range subrouters {
 		for _, route := range api.Routes() {

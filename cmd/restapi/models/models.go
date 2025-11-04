@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package models defines the data structures for the REST API.
+// Package models defines the data structures for the REST API.
 package models
 
 import "reflect"

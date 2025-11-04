@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package handlers contains the controllers for the ADK-Web REST API.
+// Package handlers contains the controllers for the ADK-Web REST API.
 package handlers
 
 import (
