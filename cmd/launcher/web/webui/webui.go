@@ -120,7 +120,7 @@ func (w *webUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkC
 }
 
 // NewLauncher creates a new WebSublauncher for the ADK Web UI.
-func NewLauncher() weblauncher.WebSublauncher {
+func NewLauncher() weblauncher.Sublauncher {
 	config := &webUIConfig{}
 
 	fs := flag.NewFlagSet("webui", flag.ContinueOnError)

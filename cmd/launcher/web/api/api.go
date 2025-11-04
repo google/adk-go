@@ -99,7 +99,7 @@ func (a *apiLauncher) SimpleDescription() string {
 }
 
 // NewLauncher creates new api launcher. It extends Web launcher
-func NewLauncher() weblauncher.WebSublauncher {
+func NewLauncher() weblauncher.Sublauncher {
 	config := &apiConfig{}
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
