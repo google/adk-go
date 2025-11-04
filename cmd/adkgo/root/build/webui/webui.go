@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package webui handles command line parameters and execution logic for build webui
+// Package webui handles command line parameters and execution logic for build webui
 package webui
 
 import (

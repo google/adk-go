@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package build handles command line parameters for command build
+// Package build handles command line parameters for command build
 package build
 
 import (
