@@ -1,7 +1,7 @@
 # Agent Development Kit (ADK) for Go
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Go Doc](https://img.shields.io/badge/Go%20Package-Doc-blue.svg)](https://pkg.go.dev/google.golang.org/adk-go)
+[![Go Doc](https://img.shields.io/badge/Go%20Package-Doc-blue.svg)](https://pkg.go.dev/google.golang.org/adk)
 
 <html>
     <h2 align="center">
@@ -49,6 +49,6 @@ go get google.golang.org/adk
 ## 📄 License
 
 This project is licensed under the Apache 2.0 License - see the
-[LICENSE.Apache](LICENSE.Apache) file for details.
+[LICENSE](LICENSE) file for details.
 
-The exception is internal/httprr - see [internal/httprr/LICENSE](internal/httprr/LICENCE)
+The exception is internal/httprr - see [internal/httprr/LICENSE](internal/httprr/LICENSE)
