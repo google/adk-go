@@ -33,13 +33,23 @@ import (
 
 const (
 	modelName = "gemini-2.5-flash"
-	projectID = "adk-go-samples-sandbox-390724"
-	location  = "us-central1"
-	engineId  = "5577659759986737152"
 )
 
 func main() {
 	ctx := context.Background()
+
+	projectID := os.Getenv("CLOUD_PROJECT_ID")
+	if projectID == "" {
+		log.Fatalf("Env var CLOUD_PROJECT_ID is not set")
+	}
+	location := os.Getenv("CLOUD_LOCATION")
+	if location == "" {
+		log.Fatalf("Env var CLOUD_LOCATION is not set")
+	}
+	engineId := os.Getenv("VERTEX_ENGINE_ID")
+	if engineId == "" {
+		log.Fatalf("Env var VERTEX_ENGINE_ID is not set")
+	}
 
 	rootAgent, err := сreateAgent()
 	if err != nil {

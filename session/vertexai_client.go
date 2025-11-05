@@ -27,25 +27,25 @@ import (
 )
 
 const (
-	EngineResourceMatcher  = "projects/%s/locations/%s/reasoningEngines/%s"
-	SessionResourceMatcher = EngineResourceMatcher + "/sessions/%s"
-	ConnectionErrorMatcher = "could not establish connection to the aiplatform server: %s"
+	engineResourceTemplate  = "projects/%s/locations/%s/reasoningEngines/%s"
+	sessionResourceTemplate = engineResourceTemplate + "/sessions/%s"
+	connectionErrorTemplate = "could not establish connection to the aiplatform server: %s"
 )
 
 type vertexAiClient struct {
-	location   string
-	projectID  string
-	resourceID string
+	location        string
+	projectID       string
+	reasoningEngine string
 }
 
-func newVertexAiClient(location string, projectID string, resourceID string) (*vertexAiClient, error) {
-	return &vertexAiClient{location, projectID, resourceID}, nil
+func newVertexAiClient(location string, projectID string, reasoningEngine string) (*vertexAiClient, error) {
+	return &vertexAiClient{location, projectID, reasoningEngine}, nil
 }
 
 func (c *vertexAiClient) createSession(ctx context.Context, req *CreateRequest) (Session, error) {
 	rpcClient, err := aiplatform.NewSessionClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf(ConnectionErrorMatcher, err.Error())
+		return nil, fmt.Errorf(connectionErrorTemplate, err.Error())
 	}
 	defer func() { _ = rpcClient.Close() }()
 
@@ -53,7 +53,7 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *CreateRequest) 
 		UserId: req.UserID,
 	}
 	rpcReq := &aiplatformpb.CreateSessionRequest{
-		Parent:  fmt.Sprintf(EngineResourceMatcher, c.projectID, c.location, c.resourceID),
+		Parent:  fmt.Sprintf(engineResourceTemplate, c.projectID, c.location, c.reasoningEngine),
 		Session: pbSession,
 	}
 	lro, err := rpcClient.CreateSession(ctx, rpcReq)
@@ -95,13 +95,13 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *GetRequest) (Sessi
 func (c *vertexAiClient) listSessions(ctx context.Context, req *ListRequest) ([]Session, error) {
 	rpcClient, err := aiplatform.NewSessionClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf(ConnectionErrorMatcher, err.Error())
+		return nil, fmt.Errorf(connectionErrorTemplate, err.Error())
 	}
 	defer func() { _ = rpcClient.Close() }()
 
 	sessions := make([]Session, 0)
 	rpcReq := &aiplatformpb.ListSessionsRequest{
-		Parent: fmt.Sprintf(EngineResourceMatcher, c.projectID, c.location, c.resourceID),
+		Parent: fmt.Sprintf(engineResourceTemplate, c.projectID, c.location, c.reasoningEngine),
 	}
 	it := rpcClient.ListSessions(ctx, rpcReq)
 	for {
@@ -127,7 +127,7 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *ListRequest) ([]
 func (c *vertexAiClient) deleteSession(ctx context.Context, req *DeleteRequest) error {
 	rpcClient, err := aiplatform.NewSessionClient(ctx)
 	if err != nil {
-		return fmt.Errorf(ConnectionErrorMatcher, err.Error())
+		return fmt.Errorf(connectionErrorTemplate, err.Error())
 	}
 	defer func() { _ = rpcClient.Close() }()
 
@@ -137,17 +137,13 @@ func (c *vertexAiClient) deleteSession(ctx context.Context, req *DeleteRequest) 
 	if err != nil {
 		return err
 	}
-	err = lro.Wait(ctx)
-	if err != nil {
-		return err
-	}
-	return nil
+	return lro.Wait(ctx)
 }
 
 func (c *vertexAiClient) appendEvent(ctx context.Context, sessionID string, event *Event) error {
 	rpcClient, err := aiplatform.NewSessionClient(ctx)
 	if err != nil {
-		return fmt.Errorf(ConnectionErrorMatcher, err.Error())
+		return fmt.Errorf(connectionErrorTemplate, err.Error())
 	}
 	defer func() { _ = rpcClient.Close() }()
 
@@ -178,5 +174,5 @@ func sessionIDByOperationName(on string) string {
 }
 
 func sessionNameByID(id string, c *vertexAiClient) string {
-	return fmt.Sprintf(SessionResourceMatcher, c.projectID, c.location, c.resourceID, id)
+	return fmt.Sprintf(sessionResourceTemplate, c.projectID, c.location, c.reasoningEngine, id)
 }
