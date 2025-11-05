@@ -93,9 +93,9 @@ func init() {
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "temp_dir", "t", "", "Temp dir for build, defaults to os.TempDir() if not specified")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.proxy.port, "proxy_port", 8081, "Local proxy port")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.serverPort, "server_port", 8080, "Cloudrun server port")
-	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.a2aAgentCardURL, "a2a_agent_url", "a", "http://127.0.0.1:8081", "A2A agent card URL as advertised in the public agent card")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.a2a, "a2a", true, "Enable A2A")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.a2aAgentCardURL, "a2a_agent_url", "a", "http://127.0.0.1:8081", "A2A agent card URL as advertised in the public agent card")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.api, "api", true, "Enable API")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.webui, "webui", true, "Enable Web UI")
 }
