@@ -36,11 +36,12 @@ type gCloudFlags struct {
 }
 
 type cloudRunServiceFlags struct {
-	serviceName string
-	serverPort  int
-	a2a         bool // enable a2a or not
-	api         bool // enable api or not
-	webui       bool // enable webui or not
+	serviceName     string
+	serverPort      int
+	a2aAgentCardURL string
+	a2a             bool // enable a2a or not
+	api             bool // enable api or not
+	webui           bool // enable webui or not
 }
 
 type localProxyFlags struct {
@@ -92,6 +93,7 @@ func init() {
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "temp_dir", "t", "", "Temp dir for build, defaults to os.TempDir() if not specified")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.proxy.port, "proxy_port", 8081, "Local proxy port")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.serverPort, "server_port", 8080, "Cloudrun server port")
+	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.a2aAgentCardURL, "a2a_agent_url", "a", "http://127.0.0.1:8081", "A2A agent card URL as advertised in the public agent card")
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.a2a, "a2a", true, "Enable A2A")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.api, "api", true, "Enable API")
@@ -182,16 +184,16 @@ FROM gcr.io/distroless/static-debian11
 COPY ` + f.build.execFile + `  /app/` + f.build.execFile + `
 EXPOSE ` + strconv.Itoa(flags.cloudRun.serverPort) + `
 # Command to run the executable when the container starts
-CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `", `)
+CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cloudRun.serverPort) + `"`)
 
 			if flags.cloudRun.api {
-				b.WriteString(`"api", "-webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `", `)
+				b.WriteString(`, "api", "-webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `"`)
 			}
 			if flags.cloudRun.a2a {
-				b.WriteString(`"a2a", `)
+				b.WriteString(`, "a2a", "--a2a_agent_url", "` + flags.cloudRun.a2aAgentCardURL + `"`)
 			}
 			if flags.cloudRun.webui {
-				b.WriteString(` "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"]
+				b.WriteString(`, "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"]
 				`)
 			}
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0600)
