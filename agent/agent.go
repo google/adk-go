@@ -119,7 +119,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			branch:        ctx.Branch(),
 			userContent:   ctx.UserContent(),
 			runConfig:     ctx.RunConfig(),
-			endInvocation: ctx.EndInvocation(),
+			endInvocation: ctx.Ended(),
 		}
 
 		event, err := runBeforeAgentCallbacks(ctx)
@@ -129,7 +129,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			}
 		}
 
-		if ctx.EndInvocation() {
+		if ctx.Ended() {
 			return
 		}
 
@@ -142,7 +142,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			}
 		}
 
-		if ctx.EndInvocation() {
+		if ctx.Ended() {
 			return
 		}
 
@@ -194,7 +194,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
 		event.Actions = *callbackCtx.actions
-		ctx.SetEndInvocation(true)
+		ctx.EndInvocation()
 		return event, nil
 	}
 
@@ -378,10 +378,10 @@ func (c *invocationContext) RunConfig() *RunConfig {
 	return c.runConfig
 }
 
-func (c *invocationContext) EndInvocation() bool {
-	return c.endInvocation
+func (c *invocationContext) EndInvocation() {
+	c.endInvocation = true
 }
 
-func (c *invocationContext) SetEndInvocation(endInvocation bool) {
-	c.endInvocation = endInvocation
+func (c *invocationContext) Ended() bool {
+	return c.endInvocation
 }

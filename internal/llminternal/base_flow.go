@@ -111,7 +111,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			yield(nil, err)
 			return
 		}
-		if ctx.EndInvocation() {
+		if ctx.Ended() {
 			return
 		}
 		spans := telemetry.StartTrace(ctx, "call_llm")
