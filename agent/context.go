@@ -40,16 +40,16 @@ An agent call can contain one or multiple steps.
 For example, LLM agent runs steps in a loop until:
  1. A final response is generated.
  2. The agent transfers to another agent.
- 3. The end_invocation is set to true by any callbacks or tools.
+ 3. EndInvocation() was called by the invocation context.
 
 A step:
  1. Calls the LLM only once and yields its response.
  2. Calls the tools and yields their responses if requested.
 
 The summarization of the function response is considered another step, since
-it is another llm call.
-A step ends when it's done calling llm and tools, or if the end_invocation
-is set to true at any time.
+it is another LLM call.
+A step ends when it's done calling LLM and tools, or if the EndInvocation() was
+called by invocation context at any time.
 
 	┌─────────────────────── invocation ──────────────────────────┐
 	┌──────────── llm_agent_call_1 ────────────┐ ┌─ agent_call_2 ─┐
@@ -90,7 +90,7 @@ type InvocationContext interface {
 	RunConfig() *RunConfig
 
 	// EndInvocation ends the current invocation. This stops any planned agent
-	// calls. This only
+	// calls.
 	EndInvocation()
 	// Ended returns whether the invocation has ended.
 	Ended() bool

@@ -34,8 +34,8 @@ import (
 // The constructors are available in this package and its subpackages.
 // For example: llmagent.New, workflow agents, remote agent or
 // agent.New.
-// NOTE: in future releases we'd allow just implementing this interface. For now,
-// agent.New is a correct solution to create custom agents.
+// NOTE: in future releases we will allow just implementing this interface.
+// For now agent.New is a correct solution to create custom agents.
 type Agent interface {
 	Name() string
 	Description() string
@@ -72,7 +72,7 @@ type Config struct {
 	// Name must be a non-empty string, unique within the agent tree.
 	// Agent name cannot be "user", since it's reserved for end-user's input.
 	Name string
-	// Description about the agent's capability.
+	// Description of the agent's capability.
 	//
 	// LLM uses this to determine whether to delegate control to the agent.
 	// One-line description is enough and preferred.
@@ -107,7 +107,7 @@ type Artifacts interface {
 	LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error)
 }
 
-// Artifacts interface provides methods to access agent memory across the
+// Memory interface provides methods to access agent memory across the
 // sessions of the current user_id.
 type Memory interface {
 	AddSession(context.Context, session.Session) error
@@ -123,6 +123,9 @@ type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)
 // AfterAgentCallback is a function that is called after the agent has completed
 // its run.
 // If it returns non-nil content or error, a new event will be created.
+//
+// The callback will be skipped also if EndInvocation was called before or
+// BeforeAgentCallbacks returned non-nil results.
 type AfterAgentCallback func(CallbackContext) (*genai.Content, error)
 
 type agent struct {
