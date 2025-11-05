@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
-	"os"
 	"runtime"
 	"strings"
 
@@ -32,8 +31,9 @@ import (
 
 // TODO: test coverage
 type geminiModel struct {
-	client *genai.Client
-	name   string
+	client             *genai.Client
+	name               string
+	versionHeaderValue string
 }
 
 // NewModel creates and initializes a new model instance that satisfies the
@@ -51,12 +51,22 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 	if cfg.HTTPOptions.Headers == nil {
 		cfg.HTTPOptions.Headers = make(http.Header)
 	}
-	addTrackingHeaders(cfg.HTTPOptions.Headers)
+	m := &geminiModel{name: modelName}
+
+	// Create header value once, when the model is created
+	var b strings.Builder
+	fmt.Fprintf(&b, "google-adk/%s", version.Version)
+	b.WriteString(" ")
+	fmt.Fprintf(&b, "gl-go/%s", strings.TrimPrefix(runtime.Version(), "go"))
+	m.versionHeaderValue = b.String()
+
+	m.addTrackingHeaders(cfg.HTTPOptions.Headers)
 	client, err := genai.NewClient(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &geminiModel{name: modelName, client: client}, nil
+	m.client = client
+	return m, nil
 }
 
 func (m *geminiModel) Name() string {
@@ -75,7 +85,7 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	if req.Config.HTTPOptions.Headers == nil {
 		req.Config.HTTPOptions.Headers = make(http.Header)
 	}
-	addTrackingHeaders(req.Config.HTTPOptions.Headers)
+	m.addTrackingHeaders(req.Config.HTTPOptions.Headers)
 
 	if stream {
 		return m.generateStream(ctx, req)
@@ -87,32 +97,12 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	}
 }
 
-const (
-	agentEngineTelemetryEnvVariableName = "GOOGLE_CLOUD_AGENT_ENGINE_ID"
-	agentEngineTelemetryTag             = "remote_reasoning_engine"
-)
-
 // addTrackingHeaders sets the x-goog-api-client and user-agent headers
 // for telemetry and tracking.
-func addTrackingHeaders(headers http.Header) {
-	// Build the base framework label
-	frameworkLabel := fmt.Sprintf("google-adk/%s", version.Version)
-
-	// Append the agent engine tag if the environment variable is set
-	if os.Getenv(agentEngineTelemetryEnvVariableName) != "" {
-		frameworkLabel = fmt.Sprintf("%s+%s", frameworkLabel, agentEngineTelemetryTag)
-	}
-
-	// Build the language label (e.T., "gl-go/1.21.5")
-	goVersion := strings.TrimPrefix(runtime.Version(), "go")
-	languageLabel := fmt.Sprintf("gl-go/%s", goVersion)
-
-	// Combine labels for the final header value
-	versionHeaderValue := fmt.Sprintf("%s %s", frameworkLabel, languageLabel)
-
+func (m *geminiModel) addTrackingHeaders(headers http.Header) {
 	// Set the headers
-	headers.Set("x-goog-api-client", versionHeaderValue)
-	headers.Set("user-agent", versionHeaderValue)
+	headers.Set("x-goog-api-client", m.versionHeaderValue)
+	headers.Set("user-agent", m.versionHeaderValue)
 }
 
 // generate calls the model synchronously returning result from the first candidate.
