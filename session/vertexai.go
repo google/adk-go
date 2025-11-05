@@ -24,8 +24,8 @@ type vertexAiService struct {
 	client *vertexAiClient
 }
 
-func newVertexAiSessionService(location string, projectID string, resourceID string) (Service, error) {
-	client, err := newVertexAiClient(location, projectID, resourceID)
+func newVertexAiSessionService(location string, projectID string, reasoningEngine string) (Service, error) {
+	client, err := newVertexAiClient(location, projectID, reasoningEngine)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Vertex AI client: %w", err)
 	}
