@@ -50,7 +50,7 @@ func NewLauncher() *Launcher {
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
-		fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
+		fmt.Sprintf("defines streaming mode (%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE))
 
 	return &Launcher{config: config, flags: fs}
 }
@@ -128,10 +128,9 @@ func (l *Launcher) Parse(args []string) ([]string, error) {
 		return nil, fmt.Errorf("failed to parse flags: %v", err)
 	}
 	if l.config.streamingModeString != string(agent.StreamingModeNone) &&
-		l.config.streamingModeString != string(agent.StreamingModeSSE) &&
-		l.config.streamingModeString != string(agent.StreamingModeBidi) {
-		return nil, fmt.Errorf("invalid streaming_mode: %v. Should be (%s|%s|%s)", l.config.streamingModeString,
-			agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi)
+		l.config.streamingModeString != string(agent.StreamingModeSSE) {
+		return nil, fmt.Errorf("invalid streaming_mode: %v. Should be (%s|%s)", l.config.streamingModeString,
+			agent.StreamingModeNone, agent.StreamingModeSSE)
 	}
 	l.config.streamingMode = agent.StreamingMode(l.config.streamingModeString)
 	return l.flags.Args(), nil

@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"iter"
 	"log"
-	"strings"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
@@ -94,13 +93,6 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
-		if cfg.SupportCFC {
-			if err := r.setupCFC(agentToRun); err != nil {
-				yield(nil, fmt.Errorf("failed to setup CFC: %w", err))
-				return
-			}
-		}
-
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
@@ -163,26 +155,6 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 	}
-}
-
-func (r *Runner) setupCFC(curAgent agent.Agent) error {
-	llmAgent, ok := curAgent.(llminternal.Agent)
-	if !ok {
-		return fmt.Errorf("agent %v is not an LLMAgent", curAgent.Name())
-	}
-
-	model := llminternal.Reveal(llmAgent).Model
-
-	if model == nil {
-		return fmt.Errorf("LLMAgent has no model")
-	}
-
-	if !strings.HasPrefix(model.Name(), "gemini-2") {
-		return fmt.Errorf("CFC is not supported for model: %v", model.Name())
-	}
-
-	// TODO: handle CFC setup for LLMAgent, e.g. setting code_executor
-	return nil
 }
 
 func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool) error {

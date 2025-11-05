@@ -14,27 +14,22 @@
 
 package agent
 
+// StreamingMode defines the streaming mode for agent execution.
 type StreamingMode string
 
 const (
+	// StreamingModeNone indicates no streaming.
 	StreamingModeNone StreamingMode = "none"
-	StreamingModeSSE  StreamingMode = "sse"
-	StreamingModeBidi StreamingMode = "bidi"
+	// StreamingModeSSE enables server-sent events streaming, one-way, where
+	// LLM response parts are streamed immediately as they are generated.
+	StreamingModeSSE StreamingMode = "sse"
 )
 
-// RunConfig controls runtime behavior.
+// RunConfig controls runtime behavior of an agent.
 type RunConfig struct {
-	// Streaming mode, None or StreamingMode.SSE or StreamingMode.BIDI.
+	// StreamingMode defines the streaming mode for an agent.
 	StreamingMode StreamingMode
-	// Whether or not to save the input blobs as artifacts
+	// If true, ADK runner will save each part of the user input that is a blob
+	// (e.g., images, files) as an artifact.
 	SaveInputBlobsAsArtifacts bool
-
-	// Whether to support CFC (Compositional Function Calling). Only applicable for
-	// StreamingModeSSE. If it's true. the LIVE API will be invoked since only LIVE
-	// API supports CFC.
-	//
-	// .. warning::
-	//      This feature is **experimental** and its API or behavior may change
-	//     in future releases.
-	SupportCFC bool
 }
