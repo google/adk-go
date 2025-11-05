@@ -51,4 +51,4 @@ go get google.golang.org/adk
 This project is licensed under the Apache 2.0 License - see the
 [LICENSE](LICENSE) file for details.
 
-The exception is internal/httprr - see [internal/httprr/LICENSE](internal/httprr/LICENSE)
+The exception is internal/httprr - see its [LICENSE file](internal/httprr/LICENSE).
