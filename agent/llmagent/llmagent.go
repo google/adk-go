@@ -151,7 +151,7 @@ type Config struct {
 	Model model.LLM
 	// AfterModelCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil LLMResponse or error. Then
-	// actual LLM response is replace with the returned response/error.
+	// actual LLM response is replaced with the returned response/error.
 	//
 	// This is the ideal place to log model responses, collect metrics on token
 	// usage, or perform post-processing on the raw `LLMResponse`.
@@ -207,7 +207,7 @@ type Config struct {
 	// DisallowTransferToParent prevents transferring to parent agent if LLM
 	// decides to.
 	DisallowTransferToParent bool
-	// DisallowTransferToParent prevents
+	// DisallowTransferToPeers prevents transferring to peer agents.
 	DisallowTransferToPeers bool
 
 	// Whether to include contents (conversation history) in the model request.
