@@ -2,6 +2,8 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Go Doc](https://img.shields.io/badge/Go%20Package-Doc-blue.svg)](https://pkg.go.dev/google.golang.org/adk)
+[![Nightly Check](https://github.com/google/adk-go/actions/workflows/nightly.yml/badge.svg)](https://github.com/google/adk-go/actions/workflows/nightly.yaml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/google/adk-go)
 
 <html>
     <h2 align="center">
@@ -19,10 +21,6 @@
       <a href="https://github.com/google/adk-web">ADK Web</a>.
     </h3>
 </html>
-
-# Agent Development Kit (ADK) for Go
-
-An open-source, code-first Go framework for building, evaluating, and deploying sophisticated AI agents with flexibility and control.
 
 Agent Development Kit (ADK) is a flexible and modular framework that applies software development principles to AI agent creation. It is designed to simplify building, deploying, and orchestrating agent workflows, from simple tasks to complex systems. While optimized for Gemini, ADK is model-agnostic, deployment-agnostic, and compatible with other frameworks.
 
