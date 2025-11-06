@@ -150,16 +150,18 @@ func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fn
 		toolCallID := "<not specified>"
 		toolResponse := "<not specified>"
 
-		responseParts := fnResponseEvent.LLMResponse.Content.Parts
+		if fnResponseEvent.LLMResponse.Content != nil {
+			responseParts := fnResponseEvent.LLMResponse.Content.Parts
 
-		if len(responseParts) > 0 {
-			functionResponse := responseParts[0].FunctionResponse
-			if functionResponse != nil {
-				if functionResponse.ID != "" {
-					toolCallID = functionResponse.ID
-				}
-				if functionResponse.Response != nil {
-					toolResponse = safeSerialize(functionResponse.Response)
+			if len(responseParts) > 0 {
+				functionResponse := responseParts[0].FunctionResponse
+				if functionResponse != nil {
+					if functionResponse.ID != "" {
+						toolCallID = functionResponse.ID
+					}
+					if functionResponse.Response != nil {
+						toolResponse = safeSerialize(functionResponse.Response)
+					}
 				}
 			}
 		}

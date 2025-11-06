@@ -109,6 +109,9 @@ func (l *Launcher) Run(ctx context.Context, config *adk.Config) error {
 			if err != nil {
 				fmt.Printf("\nAGENT_ERROR: %v\n", err)
 			} else {
+				if event.LLMResponse.Content == nil {
+					continue
+				}
 				for _, p := range event.LLMResponse.Content.Parts {
 					// if its running in streaming mode, don't print the non partial llmResponses
 					if streamingMode != agent.StreamingModeSSE || event.LLMResponse.Partial {
