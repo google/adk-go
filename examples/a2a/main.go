@@ -16,7 +16,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -72,17 +71,13 @@ func startWeatherAgentServer(addressChan chan string) {
 		log.Fatalf("Failed to bind to a port: %v", err)
 	}
 
+	baseURL := &url.URL{Scheme: "http", Host: listener.Addr().String()}
 	agentPath := "/invoke"
-	agentUrl, err := url.JoinPath("http://", listener.Addr().String(), agentPath)
-	if err != nil {
-		log.Fatalf("failed to join %s with agent path", listener.Addr().String())
-	}
-
 	agentCard := &a2a.AgentCard{
 		Name:               agent.Name(),
 		Skills:             adka2a.BuildAgentSkills(agent),
 		PreferredTransport: a2a.TransportProtocolJSONRPC,
-		URL:                agentUrl,
+		URL:                baseURL.JoinPath(agentPath).String(),
 		Capabilities:       a2a.AgentCapabilities{Streaming: true},
 	}
 
@@ -99,7 +94,9 @@ func startWeatherAgentServer(addressChan chan string) {
 	requestHandler := a2asrv.NewHandler(executor)
 	mux.Handle(agentPath, a2asrv.NewJSONRPCHandler(requestHandler))
 
-	addressChan <- fmt.Sprintf("http://%s", listener.Addr().String())
+	addressChan <- baseURL.String()
+
+	log.Printf("Starting A2A server on %s", agentCard.URL)
 
 	err = http.Serve(listener, mux)
 
