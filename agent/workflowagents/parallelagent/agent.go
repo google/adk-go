@@ -26,7 +26,7 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// Config of the parallelagent.
+// Config defines the configuration for a ParallelAgent.
 type Config struct {
 	// Basic agent setup.
 	AgentConfig agent.Config
