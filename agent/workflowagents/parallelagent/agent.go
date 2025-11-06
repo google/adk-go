@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package parallelagent provides an agent that runs its sub-agents in parallel.
 package parallelagent
 
 import (
@@ -25,6 +26,7 @@ import (
 	"google.golang.org/adk/session"
 )
 
+// Config of the parallelagent.
 type Config struct {
 	// Basic agent setup.
 	AgentConfig agent.Config
