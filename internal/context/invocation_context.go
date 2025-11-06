@@ -31,8 +31,9 @@ type InvocationContextParams struct {
 	Branch string
 	Agent  agent.Agent
 
-	UserContent *genai.Content
-	RunConfig   *agent.RunConfig
+	UserContent   *genai.Content
+	RunConfig     *agent.RunConfig
+	EndInvocation bool
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
@@ -82,11 +83,9 @@ func (c *InvocationContext) RunConfig() *agent.RunConfig {
 	return c.params.RunConfig
 }
 
-// TODO: implement endInvocation
 func (c *InvocationContext) EndInvocation() {
+	c.params.EndInvocation = true
 }
-
-// TODO: implement endInvocation
 func (c *InvocationContext) Ended() bool {
-	return false
+	return c.params.EndInvocation
 }

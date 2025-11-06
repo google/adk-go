@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package webui allows to run ADK Web UI within the web server (using url /ui/)
+// Package webui provides a sublauncher that adds ADK Web UI to the web server (using url /ui/)
 package webui
 
 import (
@@ -36,23 +36,23 @@ type webUIConfig struct {
 	pathPrefix     string
 }
 
-// ApiLauncher can launch ADK Web UI
+// webUILauncher can launch ADK Web UI
 type webUILauncher struct {
 	flags  *flag.FlagSet
 	config *webUIConfig
 }
 
-// CommandLineSyntax implements web.WebSublauncher.
+// CommandLineSyntax implements web.Sublauncher. Returns the command-line syntax for the WebUI launcher.
 func (w *webUILauncher) CommandLineSyntax() string {
 	return util.FormatFlagUsage(w.flags)
 }
 
-// Keyword implements web.WebSublauncher.
+// Keyword implements web.Sublauncher. Returns the command-line keyword for WebUI launcher.
 func (w *webUILauncher) Keyword() string {
 	return "webui"
 }
 
-// Parse implements web.WebSublauncher.
+// Parse implements web.Sublauncher. After parsing webui-specific arguments returns remaining un-parsed arguments
 func (w *webUILauncher) Parse(args []string) ([]string, error) {
 	err := w.flags.Parse(args)
 	if err != nil || !w.flags.Parsed() {
@@ -62,7 +62,7 @@ func (w *webUILauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// SetupSubrouters implements the web.WebSublauncher interface. It adds the
+// SetupSubrouters implements the web.Sublauncher interface. It adds the
 // WebUI subrouter to the main router.
 func (w *webUILauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) error {
 	w.AddSubrouter(router, w.config.pathPrefix, adkConfig, w.config.backendAddress)
@@ -74,7 +74,7 @@ func (w *webUILauncher) SimpleDescription() string {
 	return "starts ADK Web UI server which provides UI for interacting with ADK REST API"
 }
 
-// UserMessage implements the web.WebSublauncher interface. It prints a message
+// UserMessage implements the web.Sublauncher interface. It prints a message
 // to the user with the URL to access the WebUI.
 func (w *webUILauncher) UserMessage(webURL string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       webui:  you can access API using %s%s", webURL, w.config.pathPrefix))
@@ -112,7 +112,7 @@ func (w *webUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkC
 	rUI.Methods("GET").Handler(http.StripPrefix(pathPrefix, http.FileServer(http.FS(ui))))
 }
 
-// NewLauncher creates a new WebSublauncher for the ADK Web UI.
+// NewLauncher creates a new Sublauncher for the ADK Web UI.
 func NewLauncher() weblauncher.Sublauncher {
 	config := &webUIConfig{}
 

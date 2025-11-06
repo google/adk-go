@@ -27,6 +27,15 @@ import (
 	"google.golang.org/genai"
 )
 
+// Agent is the base interface which all agents must implement.
+//
+// Agents are created with ADK constructors to ensure correct
+// init & configuration.
+// The constructors are available in this package and its subpackages.
+// For example: llmagent.New, workflow agents, remote agent or
+// agent.New.
+// NOTE: in future releases we will allow just implementing this interface.
+// For now agent.New is a correct solution to create custom agents.
 type Agent interface {
 	Name() string
 	Description() string
@@ -36,6 +45,7 @@ type Agent interface {
 	internal() *agent
 }
 
+// New creates an Agent with a custom logic defined by Run function.
 func New(cfg Config) (Agent, error) {
 	subAgentSet := make(map[Agent]bool)
 	for _, subAgent := range cfg.SubAgents {
@@ -57,16 +67,41 @@ func New(cfg Config) (Agent, error) {
 	}, nil
 }
 
+// Config is the configuration for creating a new Agent.
 type Config struct {
-	Name        string
+	// Name must be a non-empty string, unique within the agent tree.
+	// Agent name cannot be "user", since it's reserved for end-user's input.
+	Name string
+	// Description of the agent's capability.
+	//
+	// LLM uses this to determine whether to delegate control to the agent.
+	// One-line description is enough and preferred.
 	Description string
-	SubAgents   []Agent
+	// SubAgents are the child agents that this agent can delegate tasks to.
+	// ADK will automatically set a parent of each sub-agent to this agent to
+	// allow agent transferring across the tree.
+	SubAgents []Agent
 
+	// BeforeAgentCallbacks is a list of callbacks that are called sequentially
+	// before the agent starts its run.
+	//
+	// If any callback returns non-nil content or error, then the agent run and
+	// the remaining callbacks will be skipped, and a new event will be created
+	// from the content or error of that callback.
 	BeforeAgentCallbacks []BeforeAgentCallback
-	Run                  func(InvocationContext) iter.Seq2[*session.Event, error]
-	AfterAgentCallbacks  []AfterAgentCallback
+	// Run is the function that defines the agent's behavior.
+	Run func(InvocationContext) iter.Seq2[*session.Event, error]
+	// AfterAgentCallbacks is a list of callbacks that are called sequentially
+	// after the agent has completed its run.
+	//
+	// If any callback returns non-nil content or error, then a new event will be
+	// created from the content or error of that callback and the remaining
+	// callbacks will be skipped.
+	AfterAgentCallbacks []AfterAgentCallback
 }
 
+// Artifacts interface provides methods to work with artifacts of the current
+// session.
 type Artifacts interface {
 	Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error)
 	List(context.Context) (*artifact.ListResponse, error)
@@ -74,12 +109,25 @@ type Artifacts interface {
 	LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error)
 }
 
+// Memory interface provides methods to access agent memory across the
+// sessions of the current user_id.
 type Memory interface {
 	AddSession(context.Context, session.Session) error
 	Search(ctx context.Context, query string) (*memory.SearchResponse, error)
 }
 
+// BeforeAgentCallback is a function that is called before the agent starts
+// its run.
+// If it returns non-nil content or error, the agent run will be skipped and a
+// new event will be created.
 type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)
+
+// AfterAgentCallback is a function that is called after the agent has completed
+// its run.
+// If it returns non-nil content or error, a new event will be created.
+//
+// The callback will be skipped also if EndInvocation was called before or
+// BeforeAgentCallbacks returned non-nil results.
 type AfterAgentCallback func(CallbackContext) (*genai.Content, error)
 
 type agent struct {
@@ -115,10 +163,11 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			memory:    ctx.Memory(),
 			session:   ctx.Session(),
 
-			invocationID: ctx.InvocationID(),
-			branch:       ctx.Branch(),
-			userContent:  ctx.UserContent(),
-			runConfig:    ctx.RunConfig(),
+			invocationID:  ctx.InvocationID(),
+			branch:        ctx.Branch(),
+			userContent:   ctx.UserContent(),
+			runConfig:     ctx.RunConfig(),
+			endInvocation: ctx.Ended(),
 		}
 
 		event, err := runBeforeAgentCallbacks(ctx)
@@ -126,10 +175,10 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			if !yield(event, err) {
 				return
 			}
-			// TODO replace with "if ctx.EndInvocation()" { once setter method is defined
-			if event.LLMResponse.Content != nil {
-				return
-			}
+		}
+
+		if ctx.Ended() {
+			return
 		}
 
 		for event, err := range a.run(ctx) {
@@ -139,6 +188,10 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			if !yield(event, err) {
 				return
 			}
+		}
+
+		if ctx.Ended() {
+			return
 		}
 
 		event, err = runAfterAgentCallbacks(ctx)
@@ -151,8 +204,6 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 func (a *agent) internal() *agent {
 	return a
 }
-
-var _ Agent = (*agent)(nil)
 
 func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
 	if event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
@@ -189,8 +240,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
 		event.Actions = *callbackCtx.actions
-		// TODO set context invocation ended
-		// ctx.invocationEnded = true
+		ctx.EndInvocation()
 		return event, nil
 	}
 
@@ -335,10 +385,11 @@ type invocationContext struct {
 	memory    Memory
 	session   session.Session
 
-	invocationID string
-	branch       string
-	userContent  *genai.Content
-	runConfig    *RunConfig
+	invocationID  string
+	branch        string
+	userContent   *genai.Content
+	runConfig     *RunConfig
+	endInvocation bool
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -373,11 +424,10 @@ func (c *invocationContext) RunConfig() *RunConfig {
 	return c.runConfig
 }
 
-// TODO: implement endInvocation
 func (c *invocationContext) EndInvocation() {
+	c.endInvocation = true
 }
 
-// TODO: implement endInvocation
 func (c *invocationContext) Ended() bool {
-	return false
+	return c.endInvocation
 }

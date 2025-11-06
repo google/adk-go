@@ -117,7 +117,12 @@ func (s *state) Get(key string) (any, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.state[key], nil
+	val, ok := s.state[key]
+	if !ok {
+		return nil, session.ErrStateKeyNotExist
+	}
+
+	return val, nil
 }
 
 func (s *state) All() iter.Seq2[string, any] {

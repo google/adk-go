@@ -24,6 +24,7 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
@@ -38,25 +39,26 @@ type consoleConfig struct {
 	streamingModeString string // command-line param to be converted to agent.StreamingMode
 }
 
-// Launcher allows to interact with an agent in console
-type Launcher struct {
-	flags  *flag.FlagSet
-	config *consoleConfig
+// consoleLauncher allows to interact with an agent in console
+type consoleLauncher struct {
+	flags  *flag.FlagSet  // flags are used to parse command-line arguments
+	config *consoleConfig // config contains parsed command-line parameters
 }
 
 // NewLauncher creates new console launcher
-func NewLauncher() *Launcher {
+func NewLauncher() launcher.SubLauncher {
 	config := &consoleConfig{}
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
-		fmt.Sprintf("defines streaming mode (%s|%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi))
+		fmt.Sprintf("defines streaming mode (%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE))
 
-	return &Launcher{config: config, flags: fs}
+	return &consoleLauncher{config: config, flags: fs}
 }
 
 // Run implements launcher.SubLauncher. It starts the console interaction loop.
-func (l *Launcher) Run(ctx context.Context, config *adk.Config) error {
+func (l *consoleLauncher) Run(ctx context.Context, config *adk.Config) error {
+	// userID and appName are not important at this moment, we can just use any
 	userID, appName := "console_user", "console_app"
 
 	sessionService := config.SessionService
@@ -103,21 +105,40 @@ func (l *Launcher) Run(ctx context.Context, config *adk.Config) error {
 			streamingMode = agent.StreamingModeSSE
 		}
 		fmt.Print("\nAgent -> ")
+		prevText := ""
 		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
 			StreamingMode: streamingMode,
 		}) {
 			if err != nil {
 				fmt.Printf("\nAGENT_ERROR: %v\n", err)
-				continue
-			}
-			if event.LLMResponse.Content == nil {
-				continue
-			}
-			for _, p := range event.LLMResponse.Content.Parts {
-				// if its running in streaming mode, don't print the non partial llmResponses
-				if streamingMode != agent.StreamingModeSSE || event.LLMResponse.Partial {
-					fmt.Print(p.Text)
+			} else {
+				if event.LLMResponse.Content == nil {
+					continue
 				}
+
+				text := ""
+				for _, p := range event.LLMResponse.Content.Parts {
+					text += p.Text
+				}
+
+				if streamingMode != agent.StreamingModeSSE {
+					fmt.Print(text)
+					continue
+				}
+
+				// In SSE mode, always print partial responses and capture them.
+				if !event.IsFinalResponse() {
+					fmt.Print(text)
+					prevText += text
+					continue
+				}
+
+				// Only print final response if it doesn't match previously captured text.
+				if text != prevText {
+					fmt.Print(text)
+				}
+
+				prevText = ""
 			}
 		}
 	}
@@ -125,38 +146,37 @@ func (l *Launcher) Run(ctx context.Context, config *adk.Config) error {
 
 // Parse implements launcher.SubLauncher. After parsing console-specific
 // arguments returns remaining un-parsed arguments
-func (l *Launcher) Parse(args []string) ([]string, error) {
+func (l *consoleLauncher) Parse(args []string) ([]string, error) {
 	err := l.flags.Parse(args)
 	if err != nil || !l.flags.Parsed() {
 		return nil, fmt.Errorf("failed to parse flags: %v", err)
 	}
 	if l.config.streamingModeString != string(agent.StreamingModeNone) &&
-		l.config.streamingModeString != string(agent.StreamingModeSSE) &&
-		l.config.streamingModeString != string(agent.StreamingModeBidi) {
-		return nil, fmt.Errorf("invalid streaming_mode: %v. Should be (%s|%s|%s)", l.config.streamingModeString,
-			agent.StreamingModeNone, agent.StreamingModeSSE, agent.StreamingModeBidi)
+		l.config.streamingModeString != string(agent.StreamingModeSSE) {
+		return nil, fmt.Errorf("invalid streaming_mode: %v. Should be (%s|%s)", l.config.streamingModeString,
+			agent.StreamingModeNone, agent.StreamingModeSSE)
 	}
 	l.config.streamingMode = agent.StreamingMode(l.config.streamingModeString)
 	return l.flags.Args(), nil
 }
 
-// Keyword implements launcher.SubLauncher.
-func (l *Launcher) Keyword() string {
+// Keyword implements launcher.SubLauncher. Returns the command-line keyword for this launcher.
+func (l *consoleLauncher) Keyword() string {
 	return "console"
 }
 
-// CommandLineSyntax implements launcher.SubLauncher.
-func (l *Launcher) CommandLineSyntax() string {
+// CommandLineSyntax implements launcher.SubLauncher. Returns the command-line syntax for the console launcher.
+func (l *consoleLauncher) CommandLineSyntax() string {
 	return util.FormatFlagUsage(l.flags)
 }
 
-// SimpleDescription implements launcher.SubLauncher.
-func (l *Launcher) SimpleDescription() string {
+// SimpleDescription implements launcher.SubLauncher. Returns a simple description of the console launcher.
+func (l *consoleLauncher) SimpleDescription() string {
 	return "runs an agent in console mode."
 }
 
 // Execute implements launcher.Launcher. It parses arguments and runs the launcher.
-func (l *Launcher) Execute(ctx context.Context, config *adk.Config, args []string) error {
+func (l *consoleLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
 	remainingArgs, err := l.Parse(args)
 	if err != nil {
 		return fmt.Errorf("cannot parse args: %w", err)

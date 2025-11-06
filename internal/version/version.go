@@ -12,27 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package deploy allows to run deployment-related subcommands
-package deploy
+package version
 
-import (
-	"github.com/spf13/cobra"
-	"google.golang.org/adk/cmd/adkgo/root"
-)
-
-// deployCmd represents the deploy command
-var DeployCmd = &cobra.Command{
-	Use:   "deploy",
-	Short: "Makes deployment to various platforms easy",
-	Long:  `Please see subcommands for details`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if len(args) == 0 {
-			return cmd.Help()
-		}
-		return nil
-	},
-}
-
-func init() {
-	root.RootCmd.AddCommand(DeployCmd)
-}
+// Version exposes the current ADK Go version, used for llm request tagging
+const Version string = "0.1.0"

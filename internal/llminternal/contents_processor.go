@@ -68,6 +68,7 @@ func buildContentsDefault(agentName, branch string, events []*session.Event) ([]
 		// by model.
 		// e.g. events purely for mutating session states.
 		if content == nil || content.Role == "" || len(content.Parts) == 0 {
+			// TODO: log a bad event with content but no Role is skipped
 			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
 			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
 			continue
@@ -352,6 +353,12 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 
 	// 1. Use the first event as the base
 	mergedEvent := cloneEvent(functionResponseEvents[0])
+	if mergedEvent == nil {
+		return nil, fmt.Errorf("mergedEvent based on the first event should not be nil")
+	}
+	if mergedEvent.Content == nil {
+		return nil, fmt.Errorf("content for the first event should not be nil")
+	}
 	partsInMergedEvent := mergedEvent.LLMResponse.Content.Parts
 
 	if len(partsInMergedEvent) == 0 {
@@ -429,7 +436,7 @@ func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 // a user-content event.
 // This is to provide another aget's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
-// previous agent's reply, etc.
+// the previous agent's reply, etc.
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
@@ -475,6 +482,9 @@ const requestEUCFunctionCallName = "adk_request_credential"
 
 func isAuthEvent(ev *session.Event) bool {
 	c := utils.Content(ev)
+	if c == nil {
+		return false
+	}
 	for _, p := range c.Parts {
 		if p.FunctionCall != nil && p.FunctionCall.Name == requestEUCFunctionCallName {
 			return true

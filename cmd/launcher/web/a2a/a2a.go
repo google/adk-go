@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package a2a allows to run A2A
+// Package a2a provides a sublauncher that adds A2A capabilities to the web server
 package a2a
 
 import (
@@ -30,14 +30,16 @@ import (
 	"google.golang.org/adk/server/adka2a"
 )
 
+// apiPath is a suffix used to build an A2A invocation URL
 const apiPath = "/a2a/invoke"
 
+// a2aConfig contains parameters for launching ADK A2A server
 type a2aConfig struct {
-	agentURL string
+	agentURL string // user-provided url which will be used in the agent card to specify url for invoking A2A
 }
 
 type a2aLauncher struct {
-	flags  *flag.FlagSet
+	flags  *flag.FlagSet // flags are used to parse command-line arguments
 	config *a2aConfig
 }
 
@@ -55,10 +57,12 @@ func NewLauncher() web.Sublauncher {
 	}
 }
 
+// CommandLineSyntax implements web.Sublauncher. Returns the command-line syntax for the A2A launcher.
 func (a *a2aLauncher) CommandLineSyntax() string {
 	return util.FormatFlagUsage(a.flags)
 }
 
+// Keyword implements web.Sublauncher. Returns the command-line keyword for A2A launcher.
 func (a *a2aLauncher) Keyword() string {
 	return "a2a"
 }
@@ -72,7 +76,7 @@ func (a *a2aLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// SetupSubrouters implements the web.WebSublauncher interface. It adds A2A paths to the main router.
+// SetupSubrouters implements the web.Sublauncher interface. It adds A2A paths to the main router.
 func (a *a2aLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) error {
 	publicURL, err := url.JoinPath(a.config.agentURL, apiPath)
 	if err != nil {
@@ -107,12 +111,12 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config)
 	return nil
 }
 
-// SimpleDescription implements web.WebSublauncher
+// SimpleDescription implements web.Sublauncher
 func (a *a2aLauncher) SimpleDescription() string {
 	return fmt.Sprintf("starts A2A server which handles jsonrpc requests on %s path", apiPath)
 }
 
-// UserMessage implements web.WebSublauncher.
+// UserMessage implements web.Sublauncher.
 func (a *a2aLauncher) UserMessage(webUrl string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       a2a:  you can access A2A using jsonrpc protocol: %s", webUrl))
 }

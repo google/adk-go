@@ -89,7 +89,7 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				lastEvent = ev
 			}
-			if lastEvent == nil || utils.IsFinalResponse(lastEvent) {
+			if lastEvent == nil || lastEvent.IsFinalResponse() {
 				return
 			}
 			if lastEvent.LLMResponse.Partial {
@@ -109,6 +109,9 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		// Preprocess before calling the LLM.
 		if err := f.preprocess(ctx, req); err != nil {
 			yield(nil, err)
+			return
+		}
+		if ctx.Ended() {
 			return
 		}
 		spans := telemetry.StartTrace(ctx, "call_llm")

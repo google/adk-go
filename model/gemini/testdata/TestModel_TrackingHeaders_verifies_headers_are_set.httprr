@@ -1,0 +1,55 @@
+httprr trace v1
+309 994
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 78
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"ping"}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Thu, 06 Nov 2025 11:23:18 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=585
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Pong! \n\nIs there anything I can help you with?\n"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": -0.35232135227748324
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 1,
+    "candidatesTokenCount": 14,
+    "totalTokenCount": 15,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 1
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 14
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "JYUMaciaHZ7hnsEP9amb6Qg"
+}

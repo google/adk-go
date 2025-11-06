@@ -70,14 +70,14 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		resultsChan           = make(chan result)
 	)
 
-	for _, subAgent := range ctx.Agent().SubAgents() {
-		branch := fmt.Sprintf("%s.%s", curAgent.Name(), subAgent.Name())
+	for _, sa := range ctx.Agent().SubAgents() {
+		branch := fmt.Sprintf("%s.%s", curAgent.Name(), sa.Name())
 		if ctx.Branch() != "" {
 			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
 		}
-
+		subAgent := sa
 		errGroup.Go(func() error {
-			ctx = icontext.NewInvocationContext(errGroupCtx, icontext.InvocationContextParams{
+			subCtx := icontext.NewInvocationContext(errGroupCtx, icontext.InvocationContextParams{
 				Artifacts:   ctx.Artifacts(),
 				Memory:      ctx.Memory(),
 				Session:     ctx.Session(),
@@ -87,7 +87,7 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				RunConfig:   ctx.RunConfig(),
 			})
 
-			if err := runSubAgent(ctx, subAgent, resultsChan, doneChan); err != nil {
+			if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan); err != nil {
 				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)
 			}
 

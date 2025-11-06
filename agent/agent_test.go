@@ -142,14 +142,98 @@ func TestAgentCallbacks(t *testing.T) {
 	}
 }
 
-// TODO: create test util allowing to create custom agents, agent trees for test etc.
-type customAgent struct {
-	callCounter int
+func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
+	custom := &customAgent{}
+
+	testAgent, err := New(Config{
+		Name: "test",
+		BeforeAgentCallbacks: []BeforeAgentCallback{
+			func(ctx CallbackContext) (*genai.Content, error) {
+				return nil, nil
+			},
+		},
+		Run: custom.Run,
+	})
+	if err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	ctx := &invocationContext{
+		agent:         testAgent,
+		endInvocation: true,
+	}
+	for _, err := range testAgent.Run(ctx) {
+		if err != nil {
+			t.Fatalf("unexpected error from the agent: %v", err)
+		}
+	}
+
+	// Even though beforeAgentCallback returns nil, it stil doesn't call llm because
+	// endInvocation is true.
+	if custom.callCounter != 0 {
+		t.Errorf("unexpected want_llm_calls, got: %v, want: %v", custom.callCounter, 0)
+	}
 }
 
-func (a *customAgent) Run(InvocationContext) iter.Seq2[*session.Event, error] {
+func TestEndInvocation_EndsAfterMainCall(t *testing.T) {
+	custom := &customAgent{endInvocation: true}
+
+	testAgent, err := New(Config{
+		Name: "test",
+		AfterAgentCallbacks: []AfterAgentCallback{
+			func(CallbackContext) (*genai.Content, error) {
+				return genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel), nil
+			},
+		},
+		Run: custom.Run,
+	})
+	if err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	ctx := &invocationContext{
+		agent: testAgent,
+	}
+	var gotEvents []*session.Event
+	for event, err := range testAgent.Run(ctx) {
+		if err != nil {
+			t.Fatalf("unexpected error from the agent: %v", err)
+		}
+		gotEvents = append(gotEvents, event)
+	}
+
+	if custom.callCounter != 1 {
+		t.Errorf("unexpected want_llm_calls, got: %v, want: %v", custom.callCounter, 0)
+	}
+	// Even though AfterAgentCallbacks is present, it's not returned because EndInvocation is set to true
+	wantEvent := &session.Event{
+		Author: "test",
+		LLMResponse: model.LLMResponse{
+			Content: genai.NewContentFromText("hello", genai.RoleModel),
+		},
+	}
+	if len(gotEvents) != 1 {
+		t.Errorf("unexpected number of events, got: %v, want: %v", len(gotEvents), 1)
+	}
+	if diff := cmp.Diff(wantEvent, gotEvents[0], cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID"),
+		cmpopts.IgnoreFields(session.EventActions{}, "StateDelta")); diff != "" {
+		t.Errorf("unexpected event, got: %v, want: %v, diff: %v", gotEvents[0], wantEvent, diff)
+	}
+}
+
+// TODO: create test util allowing to create custom agents, agent trees for test etc.
+type customAgent struct {
+	callCounter   int
+	endInvocation bool
+}
+
+func (a *customAgent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		a.callCounter++
+
+		if a.endInvocation {
+			ctx.EndInvocation()
+		}
 
 		yield(&session.Event{
 			LLMResponse: model.LLMResponse{
