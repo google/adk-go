@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package api allows to run ADK REST API within the web server (using url /api/)
+// Package api provides a sublauncher that adds ADK REST API to the web server (using url /api/)
 package api
 
 import (
@@ -59,7 +59,7 @@ func corsWithArgs(frontendAddress string) func(next http.Handler) http.Handler {
 	}
 }
 
-// UserMessage implements web.WebSublauncher. Prints message to the user
+// UserMessage implements web.Sublauncher. Prints message to the user
 func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 	printer(fmt.Sprintf("       api:  you can access API using %s/api", webURL))
 	printer(fmt.Sprintf("       api:      for instance: %s/api/list-apps", webURL))
@@ -73,7 +73,7 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config)
 	return nil
 }
 
-// Keyword returns the keyword for the API launcher.
+// Keyword implements web.Sublauncher. Returns the command-line keyword for API launcher.
 func (a *apiLauncher) Keyword() string {
 	return "api"
 }
@@ -88,7 +88,7 @@ func (a *apiLauncher) Parse(args []string) ([]string, error) {
 	return restArgs, nil
 }
 
-// SimpleDescription returns a simple description of the API launcher.
+// SimpleDescription implements web.Sublauncher. Returns a simple description of the API launcher.
 func (a *apiLauncher) SimpleDescription() string {
 	return "starts ADK REST API server, accepting origins specified by webui_address (CORS)"
 }

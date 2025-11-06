@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package web provides a way to run ADK using web server (extended by sublaunchers)
+// Package web provides a way to run ADK using a web server (extended by sublaunchers)
 package web
 
 import (
@@ -31,7 +31,7 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// WebConfig contains parametres for lauching web server
+// webConfig contains parametres for lauching web server
 type webConfig struct {
 	port int
 }
@@ -62,7 +62,7 @@ func (w *Launcher) Execute(ctx context.Context, config *adk.Config, args []strin
 // Sublauncher defines an interface for extending the WebLauncher.
 // Each sublauncher can add its own routes, wrap existing handlers, and parse its own command-line flags.
 type Sublauncher interface {
-	// Keyword is used to request usage of the WebSublauncher from command-line
+	// Keyword is used to request usage of the Sublauncher from command-line
 	Keyword() string
 	// Parse after parsing command line args returnes the remaining un-parsed arguments or error
 	Parse(args []string) ([]string, error)
@@ -195,7 +195,7 @@ func (w *Launcher) SimpleDescription() string {
 }
 
 // NewLauncher creates a new WebLauncher. It should be extended by providing
-// one or more WebSublaunchers that add the actual content and functionality.
+// one or more Sublaunchers that add the actual content and functionality.
 func NewLauncher(sublaunchers ...Sublauncher) *Launcher {
 
 	config := &webConfig{}

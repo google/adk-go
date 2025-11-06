@@ -40,8 +40,8 @@ type consoleConfig struct {
 
 // Launcher allows to interact with an agent in console
 type Launcher struct {
-	flags  *flag.FlagSet
-	config *consoleConfig
+	flags  *flag.FlagSet  // flags are used to parse command-line arguments
+	config *consoleConfig // config contains parsed command-line parameters
 }
 
 // NewLauncher creates new console launcher
@@ -57,6 +57,7 @@ func NewLauncher() *Launcher {
 
 // Run implements launcher.SubLauncher. It starts the console interaction loop.
 func (l *Launcher) Run(ctx context.Context, config *adk.Config) error {
+	// userID and appName are not important at this moment, we can just use any
 	userID, appName := "console_user", "console_app"
 
 	sessionService := config.SessionService
@@ -158,17 +159,17 @@ func (l *Launcher) Parse(args []string) ([]string, error) {
 	return l.flags.Args(), nil
 }
 
-// Keyword implements launcher.SubLauncher.
+// Keyword implements launcher.SubLauncher. Returns the command-line keyword for this launcher.
 func (l *Launcher) Keyword() string {
 	return "console"
 }
 
-// CommandLineSyntax implements launcher.SubLauncher.
+// CommandLineSyntax implements launcher.SubLauncher. Returns the command-line syntax for the console launcher.
 func (l *Launcher) CommandLineSyntax() string {
 	return util.FormatFlagUsage(l.flags)
 }
 
-// SimpleDescription implements launcher.SubLauncher.
+// SimpleDescription implements launcher.SubLauncher. Returns a simple description of the console launcher.
 func (l *Launcher) SimpleDescription() string {
 	return "runs an agent in console mode."
 }

@@ -31,7 +31,7 @@ type uniLauncher struct {
 	sublaunchers   []launcher.SubLauncher
 }
 
-// Execute implements launcher.Launcher.
+// Execute implements launcher.Launcher. Parses args and runs the chosen launcher. Returns error if there are non-parsed arguments.
 func (l *uniLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
 	return l.ParseAndRun(ctx, config, args, ErrorOnUnparsedArgs)
 }
@@ -43,7 +43,7 @@ func NewLauncher(sublaunchers ...launcher.SubLauncher) launcher.Launcher {
 	}
 }
 
-// ParseAndRun parses arguments and runs the chosen sublauncher. It provides a
+// ParseAndRun parses arguments and runs the chosen sublauncher. It allows to provide a
 // hook for processing any remaining arguments.
 func (l *uniLauncher) ParseAndRun(ctx context.Context, config *adk.Config, args []string, parseRemaining func([]string) error) error {
 	remainingArgs, err := l.parse(args)
