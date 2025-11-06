@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package gemini implements the model.LLM interface for Gemini models.
 package gemini
 
 import (
@@ -36,8 +37,7 @@ type geminiModel struct {
 	versionHeaderValue string
 }
 
-// NewModel creates and initializes a new model instance that satisfies the
-// model.LLM interface, backed by the Gemini API.
+// NewModel returns [model.LLM], backed by the Gemini API.
 //
 // It uses the provided context and configuration to initialize the underlying
 // genai.Client. The modelName specifies which Gemini model to target
