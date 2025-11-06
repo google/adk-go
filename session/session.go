@@ -24,6 +24,9 @@ import (
 )
 
 // Session represents a series of interactions between a user and agents.
+//
+// When a user starts interacting with your agent, session holds everything
+// related to that one specific chat thread.
 type Session interface {
 	// ID returns the unique identifier of the session.
 	ID() string
@@ -68,7 +71,7 @@ type ReadonlyState interface {
 	All() iter.Seq2[string, any]
 }
 
-// Events defines a standard interface for an Event list.
+// Events define a standard interface for an Event list.
 // It provides methods for iterating over the sequence and accessing
 // individual events by their index.
 type Events interface {
@@ -80,10 +83,6 @@ type Events interface {
 	// At returns the event at the specified index i.
 	At(i int) *Event
 }
-
-// TODO: Clarify what fields should be set when Event is created/processed.
-// TODO: Verify if we can hide Event completely; how Agents work with events.
-// TODO: Potentially expose as user-visible event or layer.
 
 // Event represents an interaction in a conversation between agents and users.
 // It is used to store the content of the conversation, as well as
@@ -116,6 +115,18 @@ type Event struct {
 	LongRunningToolIDs []string
 }
 
+// IsFinalResponse returns whether the event is the final response of an agent.
+//
+// Note: when multiple agents participate in one invocation, there could be one
+// event has `IsFinalResponse()` as True for each participating agent.
+func (e *Event) IsFinalResponse() bool {
+	if (e.Actions.SkipSummarization) || len(e.LongRunningToolIDs) > 0 {
+		return true
+	}
+
+	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
+}
+
 // NewEvent creates a new event defining now as the timestamp.
 func NewEvent(invocationID string) *Event {
 	return &Event{
@@ -126,9 +137,7 @@ func NewEvent(invocationID string) *Event {
 	}
 }
 
-// TODO: Set by clients?
-
-// EventActions represents the actions attached to an event.
+// EventActions represent the actions attached to an event.
 type EventActions struct {
 	// Set by agent.Context implementation.
 	StateDelta map[string]any
@@ -148,10 +157,52 @@ type EventActions struct {
 
 // Prefixes for defining session's state scopes
 const (
-	KeyPrefixApp  string = "app:"
+	// KeyPrefixApp is the prefix for app-level state keys.
+	// They are shared across all users and sessions for that application.
+	KeyPrefixApp string = "app:"
+	// KeyPrefixTemp is the prefix for temporary state keys.
+	// Such entries are specific to the current invocation (the entire process
+	// from an agent receiving user input to generating the final output for
+	// that input. Discarded after the invocation completes.
 	KeyPrefixTemp string = "temp:"
+	// KeyPrefixUser is the prefix for user-level state keys.
+	// They are tied to the user_id, shared across all sessions for that user
+	// (within the same app_name).
 	KeyPrefixUser string = "user:"
 )
 
-// ErrStateKeyNotExist defines the error thrown by State Get when key does not exist
+// ErrStateKeyNotExist is the error thrown when key does not exist.
 var ErrStateKeyNotExist = errors.New("state key does not exist")
+
+func hasFunctionCalls(resp *model.LLMResponse) bool {
+	if resp == nil || resp.Content == nil {
+		return false
+	}
+	for _, part := range resp.Content.Parts {
+		if part.FunctionCall != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFunctionResponses(resp *model.LLMResponse) bool {
+	if resp == nil || resp.Content == nil {
+		return false
+	}
+	for _, part := range resp.Content.Parts {
+		if part.FunctionResponse != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// Returns whether the event has a trailing code execution result.
+func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
+	if resp == nil || resp.Content == nil || len(resp.Content.Parts) == 0 {
+		return false
+	}
+	lastPart := resp.Content.Parts[len(resp.Content.Parts)-1]
+	return lastPart.CodeExecutionResult != nil
+}

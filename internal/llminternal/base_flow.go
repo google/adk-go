@@ -89,7 +89,7 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				lastEvent = ev
 			}
-			if lastEvent == nil || utils.IsFinalResponse(lastEvent) {
+			if lastEvent == nil || lastEvent.IsFinalResponse() {
 				return
 			}
 			if lastEvent.LLMResponse.Partial {

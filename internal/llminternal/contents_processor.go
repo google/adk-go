@@ -68,6 +68,7 @@ func buildContentsDefault(agentName, branch string, events []*session.Event) ([]
 		// by model.
 		// e.g. events purely for mutating session states.
 		if content == nil || content.Role == "" || len(content.Parts) == 0 {
+			// TODO: log a bad event with content but no Role is skipped
 			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
 			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
 			continue
