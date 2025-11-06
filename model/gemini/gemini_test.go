@@ -148,11 +148,11 @@ func TestModel_TrackingHeaders(t *testing.T) {
 				// Verify that standard tracking headers are present.
 				// The exact expected values for these may need adjustment based on
 				// the specific implementation of the tracking logic.
-				if ua := req.Header.Get("User-Agent"); !strings.Contains(ua, "google-adk/") && !strings.Contains(ua, "gl-go/") {
-					t.Errorf("User-Agent header missing 'adk-go/' identifier, got: %q", ua)
+				if ua := req.Header.Get("User-Agent"); !strings.Contains(ua, "google-adk/") || !strings.Contains(ua, "gl-go/") {
+					t.Errorf("User-Agent header should contain both 'google-adk/' and 'gl-go/', but got: %q", ua)
 				}
-				if xgac := req.Header.Get("x-goog-api-client"); !strings.Contains(xgac, "google-adk/") && !strings.Contains(xgac, "gl-go/") {
-					t.Errorf("x-goog-api-client header missing 'adk-go/' identifier, got: %q", xgac)
+				if xgac := req.Header.Get("x-goog-api-client"); !strings.Contains(xgac, "google-adk/") || !strings.Contains(xgac, "gl-go/") {
+					t.Errorf("x-goog-api-client header should contain both 'google-adk/' and 'gl-go/', but got: %q", xgac)
 				}
 			},
 		}
