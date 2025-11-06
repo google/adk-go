@@ -25,7 +25,7 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// Config of the loopagent.
+// Config defines the configuration for a LoopAgent.
 type Config struct {
 	// Basic agent setup.
 	AgentConfig agent.Config
