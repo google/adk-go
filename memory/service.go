@@ -25,7 +25,7 @@ import (
 
 // Service is a definition of the memory service.
 //
-// The service ingest sessions into memory so that it can be used for
+// The service ingests sessions into memory so that it can be used for
 // user queries across user-scoped sessions.
 type Service interface {
 	// AddSession adds a session to the memory service.
