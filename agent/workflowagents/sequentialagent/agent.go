@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package sequentialagent provides an agent that runs its sub-agents in a sequence.
+// Package sequentialagent provides an agent that runs its sub-agents in a sequence.
 package sequentialagent
 
 import (
