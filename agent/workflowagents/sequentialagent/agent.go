@@ -49,7 +49,7 @@ func New(cfg Config) (agent.Agent, error) {
 	return sequentialAgent, nil
 }
 
-// Config of the sequentialagent.
+// Config defines the configuration for a SequentialAgent.
 type Config struct {
 	// Basic agent setup.
 	AgentConfig agent.Config
