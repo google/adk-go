@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package memory defines the entities to interact with agent memory (long-term knowledge).
 package memory
 
 import (
@@ -24,8 +25,8 @@ import (
 
 // Service is a definition of the memory service.
 //
-// The service provides functionalities to ingest sessions into memory so that
-// the memory can be used for user queries.
+// The service ingest sessions into memory so that it can be used for
+// user queries across user-scoped sessions.
 type Service interface {
 	// AddSession adds a session to the memory service.
 	//
