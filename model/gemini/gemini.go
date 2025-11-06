@@ -77,7 +77,7 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	if req.Config.HTTPOptions.Headers == nil {
 		req.Config.HTTPOptions.Headers = make(http.Header)
 	}
-	m.addTrackingHeaders(req.Config.HTTPOptions.Headers)
+	m.addHeaders(req.Config.HTTPOptions.Headers)
 
 	if stream {
 		return m.generateStream(ctx, req)
@@ -89,10 +89,8 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	}
 }
 
-// addTrackingHeaders sets the x-goog-api-client and user-agent headers
-// for telemetry and tracking.
-func (m *geminiModel) addTrackingHeaders(headers http.Header) {
-	// Set the headers
+// addHeaders sets the x-goog-api-client and user-agent headers
+func (m *geminiModel) addHeaders(headers http.Header) {
 	headers.Set("x-goog-api-client", m.versionHeaderValue)
 	headers.Set("user-agent", m.versionHeaderValue)
 }
