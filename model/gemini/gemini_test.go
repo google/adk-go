@@ -131,6 +131,62 @@ func TestModel_GenerateStream(t *testing.T) {
 	}
 }
 
+func TestModel_TrackingHeaders(t *testing.T) {
+	t.Run("verifies_headers_are_set", func(t *testing.T) {
+		httpRecordFilename := filepath.Join("testdata", strings.ReplaceAll(t.Name(), "/", "_")+".httprr")
+
+		baseTransport, err := testutil.NewGeminiTransport(httpRecordFilename)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		headersChecked := false
+		interceptor := &headerInterceptor{
+			base: baseTransport,
+			check: func(req *http.Request) {
+				headersChecked = true
+				// Verify that standard tracking headers are present.
+				// The exact expected values for these may need adjustment based on
+				// the specific implementation of the tracking logic.
+				if ua := req.Header.Get("User-Agent"); !strings.Contains(ua, "google-adk/") && !strings.Contains(ua, "gl-go/") {
+					t.Errorf("User-Agent header missing 'adk-go/' identifier, got: %q", ua)
+				}
+				if xgac := req.Header.Get("x-goog-api-client"); !strings.Contains(xgac, "google-adk/") && !strings.Contains(xgac, "gl-go/") {
+					t.Errorf("x-goog-api-client header missing 'adk-go/' identifier, got: %q", xgac)
+				}
+			},
+		}
+
+		apiKey := ""
+		if recording, _ := httprr.Recording(httpRecordFilename); !recording {
+			apiKey = "fakekey"
+		}
+
+		cfg := &genai.ClientConfig{
+			HTTPClient: &http.Client{Transport: interceptor},
+			APIKey:     apiKey,
+		}
+
+		geminiModel, err := NewModel(t.Context(), "gemini-2.0-flash", cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Trigger a request to fire the interceptor.
+		// We don't strictly care about the success of the call, only that it was attempted with headers.
+		req := &model.LLMRequest{Contents: genai.Text("ping")}
+		for _, err := range geminiModel.GenerateContent(t.Context(), req, false) {
+			if err != nil {
+				t.Logf("GenerateContent finished with error (expected if no recording exists): %v", err)
+			}
+		}
+
+		if !headersChecked {
+			t.Error("HTTP request was not intercepted; headers not verified")
+		}
+	})
+}
+
 // newGeminiTestClientConfig returns the genai.ClientConfig configured for record and replay.
 func newGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig {
 	t.Helper()
@@ -185,4 +241,21 @@ func readResponse(s iter.Seq2[*model.LLMResponse, error]) (TextResponse, error) 
 	result.PartialText = partialBuilder.String()
 	result.FinalText = finalBuilder.String()
 	return result, nil
+}
+
+// headerInterceptor is a http.RoundTripper that executes a check function on the request
+// before delegating to the base transport.
+type headerInterceptor struct {
+	base  http.RoundTripper
+	check func(*http.Request)
+}
+
+func (h *headerInterceptor) RoundTrip(req *http.Request) (*http.Response, error) {
+	if h.check != nil {
+		h.check(req)
+	}
+	if h.base == nil {
+		return http.DefaultTransport.RoundTrip(req)
+	}
+	return h.base.RoundTrip(req)
 }

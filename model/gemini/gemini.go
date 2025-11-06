@@ -45,18 +45,20 @@ type geminiModel struct {
 //
 // An error is returned if the genai.Client fails to initialize.
 func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (model.LLM, error) {
-	m := &geminiModel{name: modelName}
-
-	// Create header value once, when the model is created
-	m.versionHeaderValue = fmt.Sprintf("google-adk/%s gl-go/%s", version.Version,
-		strings.TrimPrefix(runtime.Version(), "go"))
-
 	client, err := genai.NewClient(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	m.client = client
-	return m, nil
+
+	// Create header value once, when the model is created
+	headerValue := fmt.Sprintf("google-adk/%s gl-go/%s", version.Version,
+		strings.TrimPrefix(runtime.Version(), "go"))
+
+	return &geminiModel{
+		name:               modelName,
+		client:             client,
+		versionHeaderValue: headerValue,
+	}, nil
 }
 
 func (m *geminiModel) Name() string {
