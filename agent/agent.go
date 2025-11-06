@@ -78,6 +78,8 @@ type Config struct {
 	// One-line description is enough and preferred.
 	Description string
 	// SubAgents are the child agents that this agent can delegate tasks to.
+	// ADK will automatically set a parent of each sub-agent to this agent to
+	// allow agent transferring across the tree.
 	SubAgents []Agent
 
 	// BeforeAgentCallbacks is a list of callbacks that are called sequentially

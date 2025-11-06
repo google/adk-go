@@ -29,6 +29,7 @@ import (
 	"google.golang.org/genai"
 )
 
+// New is a constructor for LLMAgent.
 func New(cfg Config) (agent.Agent, error) {
 	beforeModelCallbacks := make([]llminternal.BeforeModelCallback, 0, len(cfg.BeforeModelCallbacks))
 	for _, c := range cfg.BeforeModelCallbacks {
@@ -98,34 +99,59 @@ func New(cfg Config) (agent.Agent, error) {
 	return a, nil
 }
 
+// Config of the LLMAgent.
 type Config struct {
-	Name        string
+	// Name must be a non-empty string, unique within the agent tree.
+	// Agent name cannot be "user", since it's reserved for end-user's input.
+	Name string
+	// Description of the agent's capability.
+	//
+	// LLM uses this to determine whether to delegate control to the agent.
+	// One-line description is enough and preferred.
 	Description string
-	SubAgents   []agent.Agent
+	// SubAgents are the child agents that this agent can delegate tasks to.
+	// ADK will automatically set a parent of each sub-agent to this agent to
+	// allow agent transferring across the tree.
+	SubAgents []agent.Agent
 
+	// BeforeAgentCallbacks is a list of callbacks that are called sequentially
+	// before the agent starts its run.
+	//
+	// If any callback returns non-nil content or error, then the agent run and
+	// the remaining callbacks will be skipped, and a new event will be created
+	// from the content or error of that callback.
 	BeforeAgentCallbacks []agent.BeforeAgentCallback
-	AfterAgentCallbacks  []agent.AfterAgentCallback
+	// AfterAgentCallbacks is a list of callbacks that are called sequentially
+	// after the agent has completed its run.
+	//
+	// If any callback returns non-nil content or error, then a new event will be
+	// created from the content or error of that callback and the remaining
+	// callbacks will be skipped.
+	AfterAgentCallbacks []agent.AfterAgentCallback
 
+	// GenerateContentConfig is for the additional content generation
+	// configuration.
+	//
+	// NOTE: not all fields are usable, e.g. tools must be configured via
+	// `tools`.
+	//
+	// For example: use this config to adjust model temperature, configure
+	// safety settings, etc.
 	GenerateContentConfig *genai.GenerateContentConfig
 
-	// BeforeModelCallbacks are executed sequentially right before a request is
-	// sent to the model.
-	//
-	// The first callback that returns non-nil LLMResponse/error makes
-	// LLMAgent **skip** the actual model call and yields the callback result
-	// instead.
+	// BeforeModelCallbacks will be called in the order they are provided until
+	// there's a callback that returns a non-nil LLMResponse or error. Then
+	// actual LLM call is skipped, and the returned response/error is used.
 	//
 	// This provides an opportunity to inspect, log, or modify the `LLMRequest`
 	// object. It can also be used to implement caching by returning a cached
 	// `LLMResponse`, which would skip the actual model call.
 	BeforeModelCallbacks []BeforeModelCallback
-	Model                model.LLM
-	// AfterModelCallbacks are executed sequentially right after a response is
-	// received from the model.
-	//
-	// The first callback that returns non-nil LLMResponse/error **replaces**
-	// the actual model response/error and stops execution of the remaining
-	// callbacks.
+	// Model that is used by the agent.
+	Model model.LLM
+	// AfterModelCallbacks will be called in the order they are provided until
+	// there's a callback that returns a non-nil LLMResponse or error. Then
+	// actual LLM response is replace with the returned response/error.
 	//
 	// This is the ideal place to log model responses, collect metrics on token
 	// usage, or perform post-processing on the raw `LLMResponse`.
@@ -178,9 +204,11 @@ type Config struct {
 	// It takes over the GlobalInstruction field if both are set.
 	GlobalInstructionProvider InstructionProvider
 
-	// LLM-based agent transfer configs.
+	// DisallowTransferToParent prevents transferring to parent agent if LLM
+	// decides to.
 	DisallowTransferToParent bool
-	DisallowTransferToPeers  bool
+	// DisallowTransferToParent prevents
+	DisallowTransferToPeers bool
 
 	// Whether to include contents (conversation history) in the model request.
 	IncludeContents IncludeContents
@@ -198,21 +226,22 @@ type Config struct {
 	// The execution of the callback chain stops at the first callback that returns a non-nil
 	// response
 	//   - If a callback returns (map[string]any, nil), it will be used directly as the result of
-	//     the tool call. Subsequent BeforeToolCallbacks in the list are skipped.
+	//     the tool call. Subsequent [BeforeToolCallback]s in the list are skipped.
 	//   - If a callback returns (nil, error), the tool execution is aborted, and the returned
-	//     error is propagated. Subsequent BeforeToolCallbacks are skipped.
-	//   - If a callback returns (nil, nil), the execution continues to the next BeforeToolCallback
+	//     error is propagated. Subsequent [BeforeToolCallback]s are skipped.
+	//   - If a callback returns (nil, nil), the execution continues to the next [BeforeToolCallback]
 	//     in the sequence.
 	BeforeToolCallbacks []BeforeToolCallback
-	Tools               []tool.Tool
+	// Tools available to the agent.
+	Tools []tool.Tool
 	// Callbacks are executed in the order they are provided.
 	// The execution of the callback chain stops at the first callback that returns a non-nil
 	// response.
 	//   - If a callback returns (map[string]any, nil), it will replace the result returned by
-	//     the tool's Run method. Subsequent AfterToolCallbacks in the list are skipped.
+	//     the tool's Run method. Subsequent [AfterToolCallback]s in the list are skipped.
 	//   - If a callback returns (nil, error), this error indicates a failure within the
-	//     callback itself, and will be propagated. Subsequent AfterToolCallbacks are skipped.
-	//   - If a callback returns (nil, nil), the execution continues to the next AfterToolCallback
+	//     callback itself, and will be propagated. Subsequent [AfterToolCallback]s are skipped.
+	//   - If a callback returns (nil, nil), the execution continues to the next [AfterToolCallback]
 	//     in the sequence.
 	AfterToolCallbacks []AfterToolCallback
 	// Toolsets will be used by llmagent to extract tools and pass to the
@@ -225,13 +254,18 @@ type Config struct {
 	// - Extracts agent reply for later use, such as in tools, callbacks, etc.
 	// - Connects agents to coordinate with each other.
 	OutputKey string
-	// Planner
-	// CodeExecutor
-	// Examples
 }
 
+// BeforeModelCallback that is called before sending a request to the model.
+//
+// If it returns non-nil LLMResponse or error, the actual model call is skipped
+// and the returned response/error is used.
 type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
+// AfterModelCallback that is called after receiving a response from the model.
+//
+// If it returns non-nil LLMResponse or error, the actual model response/error
+// is replaced with the returned response/error.
 type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 // BeforeToolCallback is a function type executed before a tool's Run method is invoked.
