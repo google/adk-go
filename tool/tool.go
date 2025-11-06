@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package tool defines the interfaces for tools that can be called by an agent.
+// A tool is a piece of code that performs a specific task. You can either define
+// your own custom tools or use built-in ones, for example, GoogleSearch.
 package tool
 
 import (
@@ -33,16 +36,31 @@ type Tool interface {
 	IsLongRunning() bool
 }
 
+// Context defines the interface for the context passed to a tool when it's
+// called. It provides access to invocation-specific information and allows
+// the tool to interact with the agent's state and memory.
 type Context interface {
 	agent.CallbackContext
+	// FunctionCallID returns the unique identifier of the function call
+	// that triggered this tool execution.
 	FunctionCallID() string
 
+	// Actions returns the EventActions for the current event. This can be
+	// used by the tool to modify the agent's state, transfer to another
+	// agent, or perform other actions.
 	Actions() *session.EventActions
+	// SearchMemory performs a semantic search on the agent's memory.
 	SearchMemory(context.Context, string) (*memory.SearchResponse, error)
 }
 
+// Toolset is an interface for a collection of tools. It allows grouping
+// related tools together and providing them to an agent.
 type Toolset interface {
+	// Name returns the name of the toolset.
 	Name() string
+	// Tools returns a list of tools in the toolset. The provided
+	// ReadonlyContext can be used to dynamically determine which tools
+	// to return based on the current invocation state.
 	Tools(ctx agent.ReadonlyContext) ([]Tool, error)
 }
 

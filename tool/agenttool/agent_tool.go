@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package agenttool provides a tool that allows an agent to call another agent.
+// This enables composition of agents, which can be useful for scenarios where
+// different types of `genai` tools cannot be used together.
 package agenttool
 
 import (
@@ -37,6 +40,13 @@ type agentTool struct {
 	skipSummarization bool
 }
 
+// Config holds the configuration for an agent tool.
+type Config struct {
+	// SkipSummarization, if true, will cause the agent to skip summarization
+	// after the sub-agent finishes execution.
+	SkipSummarization bool
+}
+
 // New creates a new agent tool.
 // If cfg is nil, skipSummarization defaults to false.
 func New(agent agent.Agent, cfg *Config) tool.Tool {
@@ -50,10 +60,6 @@ func New(agent agent.Agent, cfg *Config) tool.Tool {
 		agent:             agent,
 		skipSummarization: cfg.SkipSummarization,
 	}
-}
-
-type Config struct {
-	SkipSummarization bool
 }
 
 // Name implements tool.Tool.
@@ -71,7 +77,10 @@ func (t *agentTool) IsLongRunning() bool {
 	return false
 }
 
-// Declaration implements tool.Tool.
+// Declaration returns the function declaration for the wrapped agent.
+// It generates a function declaration based on the agent's input schema.
+// If the agent does not have an input schema, a default schema with a
+// "request" string parameter is used.
 func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 	decl := &genai.FunctionDeclaration{
 		Name:        t.Name(),
@@ -104,8 +113,9 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 	return decl
 }
 
-// Run implements tool.Tool.
-// It executes the wrapped agent.
+// Run executes the wrapped agent with the provided arguments.
+// It creates a new session for the sub-agent, runs the agent, and returns
+// the final result.
 func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
@@ -236,7 +246,7 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 	return map[string]any{"result": outputText}, nil
 }
 
-// ProcessRequest implements tool.Tool.
+// ProcessRequest adds the agent tool's function declaration to the LLM request.
 func (t *agentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	// TODO extract this function somewhere else, simillar operations are done for
 	// other tools with function declaration.

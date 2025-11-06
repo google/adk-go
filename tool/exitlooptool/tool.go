@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package exitlooptool provides a tool that allows an agent to exit a loop.
 package exitlooptool
 
 import (
@@ -21,6 +22,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
+// EmptyArgs is an empty struct used as an argument for the exitLoop tool.
 type EmptyArgs struct{}
 
 func exitLoop(ctx tool.Context, myArgs EmptyArgs) map[string]string {
@@ -29,6 +31,7 @@ func exitLoop(ctx tool.Context, myArgs EmptyArgs) map[string]string {
 	return map[string]string{}
 }
 
+// New creates an instance of an exitLoop tool.
 func New() (tool.Tool, error) {
 	exitLoopTool, err := functiontool.New(functiontool.Config{
 		Name:        "exit_loop",

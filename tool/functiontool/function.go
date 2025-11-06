@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package functiontool provides a tool that wraps a Go function.
 package functiontool
 
 import (
@@ -43,7 +44,8 @@ type Config struct {
 	IsLongRunning bool
 }
 
-// Func represents a Go function.
+// Func represents a Go function that can be wrapped in a tool.
+// It takes a tool.Context and a generic argument type, and returns a generic result type.
 type Func[TArgs, TResults any] func(tool.Context, TArgs) TResults
 
 // New creates a new tool with a name, description, and the provided handler.
@@ -96,7 +98,7 @@ func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
 	return f.cfg.IsLongRunning
 }
 
-// ProcessRequest implements interfaces.Tool.
+// ProcessRequest packs the function tool's declaration into the LLM request.
 func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, f)
 }

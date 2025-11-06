@@ -52,14 +52,17 @@ type mcpTool struct {
 	getSessionFunc getSessionFunc
 }
 
+// Name implements the tool.Tool.
 func (t *mcpTool) Name() string {
 	return t.name
 }
 
+// Description implements the tool.Tool.
 func (t *mcpTool) Description() string {
 	return t.description
 }
 
+// IsLongRunning implements the tool.Tool.
 func (t *mcpTool) IsLongRunning() bool {
 	return false
 }
