@@ -62,53 +62,54 @@ func newWeatherAgent(ctx context.Context) agent.Agent {
 }
 
 // startWeatherAgentServer starts an HTTP server which exposes a weather agent using A2A (Agent-To-Agent) protocol.
-func startWeatherAgentServer(addressChan chan string) {
-	ctx := context.Background()
-	agent := newWeatherAgent(ctx)
-
+func startWeatherAgentServer() string {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		log.Fatalf("Failed to bind to a port: %v", err)
 	}
 
 	baseURL := &url.URL{Scheme: "http", Host: listener.Addr().String()}
-	agentPath := "/invoke"
-	agentCard := &a2a.AgentCard{
-		Name:               agent.Name(),
-		Skills:             adka2a.BuildAgentSkills(agent),
-		PreferredTransport: a2a.TransportProtocolJSONRPC,
-		URL:                baseURL.JoinPath(agentPath).String(),
-		Capabilities:       a2a.AgentCapabilities{Streaming: true},
-	}
 
-	mux := http.NewServeMux()
-	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
+	log.Printf("Starting A2A server on %s", baseURL.String())
 
-	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
-		RunnerConfig: runner.Config{
-			AppName:        agent.Name(),
-			Agent:          agent,
-			SessionService: session.InMemoryService(),
-		},
-	})
-	requestHandler := a2asrv.NewHandler(executor)
-	mux.Handle(agentPath, a2asrv.NewJSONRPCHandler(requestHandler))
+	go func() {
+		ctx := context.Background()
+		agent := newWeatherAgent(ctx)
 
-	addressChan <- baseURL.String()
+		agentPath := "/invoke"
+		agentCard := &a2a.AgentCard{
+			Name:               agent.Name(),
+			Skills:             adka2a.BuildAgentSkills(agent),
+			PreferredTransport: a2a.TransportProtocolJSONRPC,
+			URL:                baseURL.JoinPath(agentPath).String(),
+			Capabilities:       a2a.AgentCapabilities{Streaming: true},
+		}
 
-	log.Printf("Starting A2A server on %s", agentCard.URL)
+		mux := http.NewServeMux()
+		mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
 
-	err = http.Serve(listener, mux)
+		executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
+			RunnerConfig: runner.Config{
+				AppName:        agent.Name(),
+				Agent:          agent,
+				SessionService: session.InMemoryService(),
+			},
+		})
+		requestHandler := a2asrv.NewHandler(executor)
+		mux.Handle(agentPath, a2asrv.NewJSONRPCHandler(requestHandler))
 
-	log.Printf("A2A server stopped: %v", err)
+		err = http.Serve(listener, mux)
+
+		log.Printf("A2A server stopped: %v", err)
+	}()
+
+	return baseURL.String()
 }
 
 func main() {
 	ctx := context.Background()
 
-	addressChan := make(chan string)
-	go startWeatherAgentServer(addressChan)
-	a2aServerAddress := <-addressChan
+	a2aServerAddress := startWeatherAgentServer()
 
 	remoteAgent, err := remoteagent.New(remoteagent.A2AConfig{
 		Name:            "A2A Weather agent",
