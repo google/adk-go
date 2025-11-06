@@ -352,8 +352,11 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 
 	// 1. Use the first event as the base
 	mergedEvent := cloneEvent(functionResponseEvents[0])
+	if mergedEvent == nil {
+		return nil, fmt.Errorf("mergedEvent based on the first event should not be nil")
+	}
 	if mergedEvent.Content == nil {
-		return nil, fmt.Errorf("content should not be nil")
+		return nil, fmt.Errorf("content for the first event should not be nil")
 	}
 	partsInMergedEvent := mergedEvent.LLMResponse.Content.Parts
 
