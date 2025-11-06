@@ -103,6 +103,7 @@ func (l *Launcher) Run(ctx context.Context, config *adk.Config) error {
 			streamingMode = agent.StreamingModeSSE
 		}
 		fmt.Print("\nAgent -> ")
+		prevText := ""
 		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
 			StreamingMode: streamingMode,
 		}) {
@@ -112,12 +113,30 @@ func (l *Launcher) Run(ctx context.Context, config *adk.Config) error {
 				if event.LLMResponse.Content == nil {
 					continue
 				}
+
+				text := ""
 				for _, p := range event.LLMResponse.Content.Parts {
-					// if its running in streaming mode, don't print the non partial llmResponses
-					if streamingMode != agent.StreamingModeSSE || event.LLMResponse.Partial {
-						fmt.Print(p.Text)
-					}
+					text += p.Text
 				}
+
+				if streamingMode != agent.StreamingModeSSE {
+					fmt.Print(text)
+					continue
+				}
+
+				// In SSE mode, always print partial responses and capture them.
+				if !event.IsFinalResponse() {
+					fmt.Print(text)
+					prevText += text
+					continue
+				}
+
+				// Only print final response if it doesn't match previously captured text.
+				if text != prevText {
+					fmt.Print(text)
+				}
+
+				prevText = ""
 			}
 		}
 	}
