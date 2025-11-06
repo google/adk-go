@@ -52,6 +52,11 @@ func (s *vertexAiService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
+	events, err := s.client.listSessionEvents(ctx, req.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list session events: %w", err)
+	}
+	session.events = events
 	return &GetResponse{Session: session}, nil
 }
 
@@ -77,13 +82,18 @@ func (s *vertexAiService) Delete(ctx context.Context, req *DeleteRequest) error 
 	return nil
 }
 
-func (s *vertexAiService) AppendEvent(ctx context.Context, session Session, event *Event) error {
-	if session.ID() == "" || event == nil {
-		return fmt.Errorf("session_id and event are required, got session_id: %q, event_id: %t", session.ID(), event == nil)
+func (s *vertexAiService) AppendEvent(ctx context.Context, sess Session, event *Event) error {
+	if sess.ID() == "" || event == nil {
+		return fmt.Errorf("session_id and event are required, got session_id: %q, event_id: %t", sess.ID(), event == nil)
 	}
-	err := s.client.appendEvent(ctx, session.ID(), event)
+	err := s.client.appendEvent(ctx, sess.ID(), event)
 	if err != nil {
 		return fmt.Errorf("failed to append event: %w", err)
 	}
+	sessInt := sess.(*session)
+	sessInt.mu.Lock()
+	defer sessInt.mu.Unlock()
+
+	sessInt.events = append(sessInt.events, event)
 	return nil
 }

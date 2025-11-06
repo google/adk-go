@@ -42,7 +42,7 @@ func newVertexAiClient(location string, projectID string, reasoningEngine string
 	return &vertexAiClient{location, projectID, reasoningEngine}, nil
 }
 
-func (c *vertexAiClient) createSession(ctx context.Context, req *CreateRequest) (Session, error) {
+func (c *vertexAiClient) createSession(ctx context.Context, req *CreateRequest) (*session, error) {
 	rpcClient, err := aiplatform.NewSessionClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf(connectionErrorTemplate, err.Error())
@@ -67,28 +67,33 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *CreateRequest) 
 			userID:    req.UserID,
 			sessionID: sessionIDByOperationName(lro.Name()),
 		},
+		events: make([]*Event, 0),
+		state:  make(map[string]any),
 	}, nil
 }
 
-func (c *vertexAiClient) getSession(ctx context.Context, req *GetRequest) (Session, error) {
+func (c *vertexAiClient) getSession(ctx context.Context, req *GetRequest) (*session, error) {
 	rpcClient, err := aiplatform.NewSessionClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("could not establish connection to the aiplatform server: %s", err.Error())
+		return nil, fmt.Errorf(connectionErrorTemplate, err.Error())
 	}
 	defer func() { _ = rpcClient.Close() }()
-	rpcReq := &aiplatformpb.GetSessionRequest{
+
+	sessRpcReq := &aiplatformpb.GetSessionRequest{
 		Name: sessionNameByID(req.SessionID, c),
 	}
-	_, err = rpcClient.GetSession(ctx, rpcReq)
+	sessRpcResp, err := rpcClient.GetSession(ctx, sessRpcReq)
 	if err != nil {
 		return nil, err
 	}
+
 	return &session{
 		id: id{
 			appName:   req.AppName,
 			userID:    req.UserID,
 			sessionID: req.SessionID,
 		},
+		updatedAt: sessRpcResp.UpdateTime.AsTime(),
 	}, nil
 }
 
@@ -163,6 +168,40 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, sessionID string, even
 	}
 
 	return nil
+}
+
+func (c *vertexAiClient) listSessionEvents(ctx context.Context, sessionID string) ([]*Event, error) {
+	rpcClient, err := aiplatform.NewSessionClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf(connectionErrorTemplate, err.Error())
+	}
+	defer func() { _ = rpcClient.Close() }()
+
+	events := make([]*Event, 0)
+	eventsRpcReq := &aiplatformpb.ListEventsRequest{
+		Parent: sessionNameByID(sessionID, c),
+	}
+	it := rpcClient.ListEvents(ctx, eventsRpcReq)
+	for {
+		rpcResp, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		event := &Event{
+			ID:           sessionIdBySessionName(rpcResp.Name),
+			Timestamp:    rpcResp.Timestamp.AsTime(),
+			InvocationID: rpcResp.InvocationId,
+			Author:       rpcResp.Author,
+			Actions: EventActions{
+				StateDelta: make(map[string]any),
+			},
+		}
+		events = append(events, event)
+	}
+	return events, nil
 }
 
 func sessionIdBySessionName(sn string) string {
