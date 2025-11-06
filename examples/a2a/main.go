@@ -98,7 +98,7 @@ func startWeatherAgentServer() string {
 		requestHandler := a2asrv.NewHandler(executor)
 		mux.Handle(agentPath, a2asrv.NewJSONRPCHandler(requestHandler))
 
-		err = http.Serve(listener, mux)
+		err := http.Serve(listener, mux)
 
 		log.Printf("A2A server stopped: %v", err)
 	}()
