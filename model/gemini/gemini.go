@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package gemini implements the model.LLM interface for Gemini models.
+// Package gemini implements the [model.LLM] interface for Gemini models.
 package gemini
 
 import (
@@ -40,10 +40,10 @@ type geminiModel struct {
 // NewModel returns [model.LLM], backed by the Gemini API.
 //
 // It uses the provided context and configuration to initialize the underlying
-// genai.Client. The modelName specifies which Gemini model to target
+// [genai.Client]. The modelName specifies which Gemini model to target
 // (e.g., "gemini-2.5-flash").
 //
-// An error is returned if the genai.Client fails to initialize.
+// An error is returned if the [genai.Client] fails to initialize.
 func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (model.LLM, error) {
 	client, err := genai.NewClient(ctx, cfg)
 	if err != nil {

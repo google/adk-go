@@ -32,14 +32,14 @@ type databaseService struct {
 	db *gorm.DB
 }
 
-// NewSessionService creates a new session.Service implementation that uses a
+// NewSessionService creates a new [session.Service] implementation that uses a
 // relational database (e.g., PostgreSQL, Spanner, SQLite) via the GORM library.
 //
-// It requires a gorm.Dialector to specify the database connection and
-// accepts optional gorm.Option values for further GORM configuration.
+// It requires a [gorm.Dialector] to specify the database connection and
+// accepts optional [gorm.Option] values for further GORM configuration.
 //
-// It returns the new session.Service or an error if the database connection
-// (gorm.Open) fails.
+// It returns the new [session.Service] or an error if the database connection
+// [gorm.Open] fails.
 func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.Service, error) {
 	db, err := gorm.Open(dialector, opts...)
 	if err != nil {

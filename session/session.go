@@ -71,7 +71,7 @@ type ReadonlyState interface {
 	All() iter.Seq2[string, any]
 }
 
-// Events define a standard interface for an Event list.
+// Events define a standard interface for an [Event] list.
 // It provides methods for iterating over the sequence and accessing
 // individual events by their index.
 type Events interface {
@@ -117,8 +117,8 @@ type Event struct {
 
 // IsFinalResponse returns whether the event is the final response of an agent.
 //
-// Note: when multiple agents participate in one invocation, there could be one
-// event has `IsFinalResponse()` as True for each participating agent.
+// Note: when multiple agents participate in one invocation, there could be
+// multiple events with IsFinalResponse() as True, for each participating agent.
 func (e *Event) IsFinalResponse() bool {
 	if (e.Actions.SkipSummarization) || len(e.LongRunningToolIDs) > 0 {
 		return true
