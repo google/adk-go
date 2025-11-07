@@ -39,6 +39,7 @@ type inMemoryService struct {
 	artifacts omap.Map[string, *genai.Part]
 }
 
+// InMemoryService returns a new in-memory artifact service.
 func InMemoryService() Service {
 	return &inMemoryService{}
 }
@@ -60,10 +61,12 @@ type artifactKey struct {
 	Version   int64
 }
 
+// Encode encodes the artifactKey into a string.
 func (ak artifactKey) Encode() string {
 	return string(ordered.Encode(ak.AppName, ak.UserID, ak.SessionID, ak.FileName, ordered.Rev(ak.Version)))
 }
 
+// Decode decodes the string key into an artifactKey.
 func (ak *artifactKey) Decode(key string) error {
 	var v ordered.Reverse[int64]
 	err := ordered.Decode([]byte(key), &ak.AppName, &ak.UserID, &ak.SessionID, &ak.FileName, &v)
@@ -135,6 +138,7 @@ func (s *inMemoryService) delete(appName, userID, sessionID, fileName string, ve
 	s.artifacts.Delete(key)
 }
 
+// Save implements [artifact.Service]
 func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error) {
 	err := req.Validate()
 	if err != nil {
@@ -158,6 +162,7 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	return &SaveResponse{Version: nextVersion}, nil
 }
 
+// Delete implements [artifact.Service]
 func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {
 	err := req.Validate()
 	if err != nil {
@@ -185,6 +190,7 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 	return nil
 }
 
+// Load implements [artifact.Service]
 func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResponse, error) {
 	err := req.Validate()
 	if err != nil {
@@ -215,6 +221,7 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	return &LoadResponse{Part: artifact}, nil
 }
 
+// List implements [artifact.Service]
 func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 	err := req.Validate()
 	if err != nil {
@@ -251,7 +258,7 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 	return &ListResponse{FileNames: filenames}, nil
 }
 
-// Versions implements types.ArtifactService.
+// Versions implements [artifact.Service] and returns an error if no versions are found.
 func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error) {
 	err := req.Validate()
 	if err != nil {

@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package gcs provides a Google Cloud Storage (GCS) implementation of the
+// [artifact.Service] interface.
+//
+// This package allows storing and retrieving artifacts in a GCS bucket.
+// Artifacts are organized by application name, user ID, session ID, and filename,
+// with support for versioning.
 package gcs
 
 import (
@@ -86,6 +92,7 @@ func buildUserPrefix(appName, userID string) string {
 	return fmt.Sprintf("%s/%s/user/", appName, userID)
 }
 
+// Save implements [artifact.Service]
 func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (_ *artifact.SaveResponse, err error) {
 	err = req.Validate()
 	if err != nil {
@@ -131,6 +138,7 @@ func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (_ *ar
 	return &artifact.SaveResponse{Version: nextVersion}, nil
 }
 
+// Delete implements [artifact.Service]
 func (s *gcsService) Delete(ctx context.Context, req *artifact.DeleteRequest) error {
 	err := req.Validate()
 	if err != nil {
@@ -175,6 +183,7 @@ func (s *gcsService) Delete(ctx context.Context, req *artifact.DeleteRequest) er
 	return g.Wait()
 }
 
+// Load implements [artifact.Service]
 func (s *gcsService) Load(ctx context.Context, req *artifact.LoadRequest) (_ *artifact.LoadResponse, err error) {
 	err = req.Validate()
 	if err != nil {
@@ -269,6 +278,7 @@ func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string
 	return nil
 }
 
+// List implements [artifact.Service]
 func (s *gcsService) List(ctx context.Context, req *artifact.ListRequest) (*artifact.ListResponse, error) {
 	err := req.Validate()
 	if err != nil {
@@ -331,7 +341,7 @@ func (s *gcsService) versions(ctx context.Context, req *artifact.VersionsRequest
 	return &artifact.VersionsResponse{Versions: versions}, nil
 }
 
-// Versions implements types.Service and return err if versions is empty
+// Versions implements [artifact.Service] and returns an error if no versions are found.
 func (s *gcsService) Versions(ctx context.Context, req *artifact.VersionsRequest) (*artifact.VersionsResponse, error) {
 	response, err := s.versions(ctx, req)
 	if err != nil {

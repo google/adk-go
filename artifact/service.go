@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package artifact provides a service for managing artifacts.
+//
+// An artifact is a file identified by an application name, a user ID, a session ID,
+// and a filename. The service provides basic storage operations for artifacts,
+// such as Save, Load, Delete, and List. It also supports versioning of artifacts.
 package artifact
 
 import (
