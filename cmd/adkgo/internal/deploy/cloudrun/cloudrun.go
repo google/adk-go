@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package cloudrun handles command line parameters and execution logic for cloudrun deployment
+// Package cloudrun handles command line parameters and execution logic for cloudrun deployment.
 package cloudrun
 
 import (
@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"google.golang.org/adk/cmd/adkgo/root/deploy"
+	"google.golang.org/adk/cmd/adkgo/internal/deploy"
 	"google.golang.org/adk/internal/cli/util"
 )
 

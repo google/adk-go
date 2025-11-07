@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package main is an entry point for CLI.
+// Adkgo is a CLI tool to help deploy and test an ADK application.
 package main
 
 import (
-	"google.golang.org/adk/cmd/adkgo/root"
-	_ "google.golang.org/adk/cmd/adkgo/root/deploy"
-	_ "google.golang.org/adk/cmd/adkgo/root/deploy/cloudrun"
+	_ "google.golang.org/adk/cmd/adkgo/internal/deploy/cloudrun"
+	"google.golang.org/adk/cmd/adkgo/internal/root"
 )
 
 func main() {

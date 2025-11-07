@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package deploy allows to run deployment-related subcommands
+// Package deploy allows to run deployment-related subcommands.
 package deploy
 
 import (
 	"github.com/spf13/cobra"
-	"google.golang.org/adk/cmd/adkgo/root"
+	"google.golang.org/adk/cmd/adkgo/internal/root"
 )
 
-// deployCmd represents the deploy command
+// deployCmd represents the deploy command.
 var DeployCmd = &cobra.Command{
 	Use:   "deploy",
 	Short: "Makes deployment to various platforms easy",
