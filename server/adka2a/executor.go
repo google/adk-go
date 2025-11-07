@@ -37,7 +37,7 @@ type ExecutorConfig struct {
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
 
-// Executor invokes an ADK agent and translates [session.Event]-s to [a2a.Event]-s according to the following rules:
+// Executor invokes an ADK agent and translates [session.Event]s to [a2a.Event]s according to the following rules:
 //   - If the input doesn't reference any a2a.Task, produce a TaskStatusUpdateEvent with TaskStateSubmitted.
 //   - Right before runner.Runner invocation, produce TaskStatusUpdateEvent with TaskStateWorking.
 //   - For every session.Event produce a TaskArtifactUpdateEvent{Append=true} with transformed parts.
