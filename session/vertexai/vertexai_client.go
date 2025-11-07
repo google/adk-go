@@ -268,7 +268,10 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 		}
 		events = append(events, event)
 	}
-	if numRecentEvents != 0 {
+	if numRecentEvents > 0 {
+		if numRecentEvents > len(events) {
+			return events, nil
+		}
 		return events[len(events)-numRecentEvents:], nil
 	}
 	return events, nil
@@ -286,6 +289,8 @@ func sessionNameByID(id string, c *vertexAiClient, reasoningEngine string) strin
 	return fmt.Sprintf(sessionResourceTemplate, c.projectID, c.location, reasoningEngine, id)
 }
 
+var reasoningEnginePattern = regexp.MustCompile(`^projects/([a-zA-Z0-9-_]+)/locations/([a-zA-Z0-9-_]+)/reasoningEngines/(\\d+)$`)
+
 func (c *vertexAiClient) getReasoningEngineID(appName string) (string, error) {
 	if c.reasoningEngine != "" {
 		return c.reasoningEngine, nil
@@ -298,14 +303,7 @@ func (c *vertexAiClient) getReasoningEngineID(appName string) (string, error) {
 	}
 
 	// Regex pattern to match the full resource name
-	pattern := `^projects/([a-zA-Z0-9-_]+)/locations/([a-zA-Z0-9-_]+)/reasoningEngines/(\d+)$`
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		// This should not happen with a valid constant pattern
-		return "", fmt.Errorf("internal error compiling regex: %w", err)
-	}
-
-	matches := re.FindStringSubmatch(appName)
+	matches := reasoningEnginePattern.FindStringSubmatch(appName)
 
 	if len(matches) == 0 {
 		return "", fmt.Errorf("app name %s is not valid. It should either be the full ReasoningEngine resource name, or the reasoning engine id", appName)

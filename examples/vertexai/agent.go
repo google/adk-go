@@ -51,7 +51,7 @@ func main() {
 		log.Fatalf("Env var VERTEX_ENGINE_ID is not set")
 	}
 
-	rootAgent, err := сreateAgent()
+	rootAgent, err := createAgent()
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
@@ -76,7 +76,7 @@ func main() {
 	}
 }
 
-func сreateAgent() (agent.Agent, error) {
+func createAgent() (agent.Agent, error) {
 	ctx := context.Background()
 
 	model, err := gemini.NewModel(ctx, modelName, &genai.ClientConfig{})

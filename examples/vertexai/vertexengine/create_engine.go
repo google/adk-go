@@ -39,7 +39,7 @@ func main() {
 
 	err := createReasoningEngine(ctx, projectID, location, "adk-go", "A reasoning engine created by an adk go sample")
 	if err != nil {
-		print(fmt.Sprint("%w", err))
+		log.Fatalf("Failed to create reasoning engine: %v", err)
 	}
 }
 
