@@ -16,7 +16,7 @@ if err != nil {
 ```
 
 it allows to to decide, which launching options are supported in the run-time. 
-`full.NewLaucher()` includes all major ways you can run the example:
+`full.NewLauncher()` includes all major ways you can run the example:
 * console
 * restapi
 * a2a
