@@ -304,7 +304,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 		},
 		{
 			name:   "FilterByBranch",
-			branch: "branch1",
+			branch: "branch1.task1",
 			events: []*session.Event{
 				{
 					Author: "user",
