@@ -73,10 +73,7 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 		}
 		// Skip events that do not belong to the current branch.
 		// TODO: can we use a richier type for branch (e.g. []string) instead of using string prefix test?
-		// We use dot to delimit branch nodes. To avoid simple prefix match
-		// (e.g. agent_0 unexpectedly matching agent_00), require either perfect branch
-		// match, or match prefix with an additional explicit '.'
-		if invocationBranch != "" && (ev.Branch != invocationBranch && !strings.HasPrefix(invocationBranch, ev.Branch+".")) {
+		if !eventBelongsToBranch(invocationBranch, ev) {
 			continue
 		}
 		if isAuthEvent(ev) {
@@ -111,6 +108,19 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 		contents = append(contents, content)
 	}
 	return contents, nil
+}
+
+func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
+	if invocationBranch == "" {
+		return true
+	}
+	if event.Branch == invocationBranch {
+		return true
+	}
+	// We use dot to delimit branch nodes. To avoid simple prefix match
+	// (e.g. agent_0 unexpectedly matching agent_00), require either perfect branch
+	// match, or match prefix with an additional explicit '.'
+	return strings.HasPrefix(invocationBranch, event.Branch+".")
 }
 
 // rearrangeEventsForLatestFunctionResponse
