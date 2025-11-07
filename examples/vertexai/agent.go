@@ -25,7 +25,7 @@ import (
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/server/restapi/services"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/session/vertexai"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
@@ -55,7 +55,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
-	srvs, err := session.VertexAIService(location, projectID, engineId)
+	srvs, err := vertexai.NewSessionService(ctx, vertexai.VertexAIServiceConfig{
+		Location:        location,
+		ProjectID:       projectID,
+		ReasoningEngine: engineId,
+	})
 	if err != nil {
 		log.Fatalf("Failed to create session service: %v", err)
 	}

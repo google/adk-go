@@ -39,12 +39,6 @@ func InMemoryService() Service {
 	}
 }
 
-// VertexAIService returns VertextAiSessionService implementation.
-// TODO (crocodilys): Move VertexAIService to its own package and separate params into a Config struct
-func VertexAIService(location string, projectID string, reasoningEngine string) (Service, error) {
-	return newVertexAiSessionService(location, projectID, reasoningEngine)
-}
-
 // CreateRequest represents a request to create a session.
 type CreateRequest struct {
 	AppName string

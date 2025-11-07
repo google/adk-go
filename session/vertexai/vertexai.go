@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package session
+package vertexai
 
 import (
 	"context"
 	"fmt"
+
+	"google.golang.org/adk/session"
 )
 
 // VertexAiSessionService
@@ -24,43 +26,52 @@ type vertexAiService struct {
 	client *vertexAiClient
 }
 
-func newVertexAiSessionService(location string, projectID string, reasoningEngine string) (Service, error) {
-	client, err := newVertexAiClient(location, projectID, reasoningEngine)
+type VertexAIServiceConfig struct {
+	Location        string
+	ProjectID       string
+	ReasoningEngine string
+}
+
+// NewSessionService returns VertextAiSessionService implementation.
+func NewSessionService(ctx context.Context, cfg VertexAIServiceConfig) (session.Service, error) {
+	client, err := newVertexAiClient(ctx, cfg.Location, cfg.ProjectID, cfg.ReasoningEngine)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Vertex AI client: %w", err)
 	}
 
 	return &vertexAiService{client: client}, nil
 }
-
-func (s *vertexAiService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
+func (s *vertexAiService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
 	if req.AppName == "" || req.UserID == "" {
 		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
 	}
-	session, err := s.client.createSession(ctx, req)
+	if req.SessionID != "" {
+		return nil, fmt.Errorf("user-provided Session id is not supported for VertexAISessionService: %q", req.SessionID)
+	}
+	sess, err := s.client.createSession(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
-	return &CreateResponse{Session: session}, nil
+	return &session.CreateResponse{Session: sess}, nil
 }
 
-func (s *vertexAiService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
+func (s *vertexAiService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
 	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
 		return nil, fmt.Errorf("app_name, user_id and session_id are required, got app_name: %q, user_id: %q, session_id: %q", req.AppName, req.UserID, req.SessionID)
 	}
-	session, err := s.client.getSession(ctx, req)
+	sess, err := s.client.getSession(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
-	events, err := s.client.listSessionEvents(ctx, req.SessionID)
+	events, err := s.client.listSessionEvents(ctx, req.AppName, req.SessionID, req.After, req.NumRecentEvents)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list session events: %w", err)
 	}
-	session.events = events
-	return &GetResponse{Session: session}, nil
+	sess.events = events
+	return &session.GetResponse{Session: sess}, nil
 }
 
-func (s *vertexAiService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
+func (s *vertexAiService) List(ctx context.Context, req *session.ListRequest) (*session.ListResponse, error) {
 	if req.AppName == "" || req.UserID == "" {
 		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
 	}
@@ -68,10 +79,10 @@ func (s *vertexAiService) List(ctx context.Context, req *ListRequest) (*ListResp
 	if err != nil {
 		return nil, fmt.Errorf("failed to request sessions list: %w", err)
 	}
-	return &ListResponse{Sessions: sessions}, nil
+	return &session.ListResponse{Sessions: sessions}, nil
 }
 
-func (s *vertexAiService) Delete(ctx context.Context, req *DeleteRequest) error {
+func (s *vertexAiService) Delete(ctx context.Context, req *session.DeleteRequest) error {
 	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
 		return fmt.Errorf("app_name, user_id and session_id are required, got app_name: %q, user_id: %q, session_id: %q", req.AppName, req.UserID, req.SessionID)
 	}
@@ -82,18 +93,18 @@ func (s *vertexAiService) Delete(ctx context.Context, req *DeleteRequest) error 
 	return nil
 }
 
-func (s *vertexAiService) AppendEvent(ctx context.Context, sess Session, event *Event) error {
+func (s *vertexAiService) AppendEvent(ctx context.Context, sess session.Session, event *session.Event) error {
 	if sess.ID() == "" || event == nil {
 		return fmt.Errorf("session_id and event are required, got session_id: %q, event_id: %t", sess.ID(), event == nil)
 	}
-	err := s.client.appendEvent(ctx, sess.ID(), event)
+	err := s.client.appendEvent(ctx, sess.AppName(), sess.ID(), event)
 	if err != nil {
 		return fmt.Errorf("failed to append event: %w", err)
 	}
-	sessInt := sess.(*session)
-	sessInt.mu.Lock()
-	defer sessInt.mu.Unlock()
-
-	sessInt.events = append(sessInt.events, event)
+	sessInt := sess.(*localSession)
+	err = sessInt.appendEvent(event)
+	if err != nil {
+		return fmt.Errorf("failed to append event: %w", err)
+	}
 	return nil
 }
