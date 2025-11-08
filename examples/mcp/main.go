@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
@@ -85,8 +84,8 @@ func githubMCPTransport(ctx context.Context) mcp.Transport {
 }
 
 func main() {
-	// Create context that cancels on interrupt signals (SIGINT, SIGTERM)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Create context that cancels on interrupt signal (Ctrl+C)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
