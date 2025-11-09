@@ -120,12 +120,12 @@ func TestRequestBuilder_FromLLMRequest(t *testing.T) {
 	if !ok {
 		t.Fatalf("input schema properties type = %T", tool.InputSchema.Properties)
 	}
-	propSchema, ok := props["query"].(*genai.Schema)
+	propSchema, ok := props["query"].(map[string]any)
 	if !ok {
 		t.Fatalf("query property type = %T", props["query"])
 	}
-	if propSchema.Type != "string" {
-		t.Fatalf("normalized schema type mismatch: %v", propSchema.Type)
+	if propSchema["type"] != "string" {
+		t.Fatalf("normalized schema type mismatch: %v", propSchema["type"])
 	}
 	if tool.InputSchema.Required == nil || tool.InputSchema.Required[0] != "query" {
 		t.Fatalf("required fields missing: %v", tool.InputSchema.Required)
@@ -225,18 +225,26 @@ func TestNormalizeSchemaType(t *testing.T) {
 		Items: &genai.Schema{Type: genai.TypeBoolean},
 	}
 
-	normalizeSchemaType(schema)
+	result, err := schemaToMap(schema)
+	if err != nil {
+		t.Fatalf("schemaToMap() error = %v", err)
+	}
 
-	if schema.Type != "object" {
-		t.Fatalf("root type not normalized: %v", schema.Type)
+	if result["type"] != "object" {
+		t.Fatalf("root type not normalized: %v", result["type"])
 	}
-	if schema.Properties["child"].Type != "string" {
-		t.Fatalf("property type not normalized: %v", schema.Properties["child"].Type)
+	props := result["properties"].(map[string]any)
+	childType, _ := props["child"].(map[string]any)["type"].(string)
+	if childType != "string" {
+		t.Fatalf("property type not normalized: %v", childType)
 	}
-	if schema.AnyOf[0].Type != "integer" {
-		t.Fatalf("anyOf type not normalized: %v", schema.AnyOf[0].Type)
+	anyOfSlice := result["anyOf"].([]any)
+	firstAnyOf, _ := anyOfSlice[0].(map[string]any)
+	if firstAnyOf["type"] != "integer" {
+		t.Fatalf("anyOf type not normalized: %v", firstAnyOf["type"])
 	}
-	if schema.Items.Type != "boolean" {
-		t.Fatalf("items type not normalized: %v", schema.Items.Type)
+	items := result["items"].(map[string]any)
+	if items["type"] != "boolean" {
+		t.Fatalf("items type not normalized: %v", items["type"])
 	}
 }

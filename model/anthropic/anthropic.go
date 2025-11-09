@@ -152,7 +152,9 @@ func readStreamEvents(stream *ssestream.Stream[anthropic.MessageStreamEventUnion
 			yield(nil, fmt.Errorf("the stream is empty"))
 			return
 		}
-		defer stream.Close()
+		defer func() {
+			_ = stream.Close()
+		}()
 
 		if err := stream.Err(); err != nil {
 			yield(nil, fmt.Errorf("got the stream error: %w", err))

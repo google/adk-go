@@ -174,8 +174,11 @@ func (builder *RequestBuilder) buildToToolParam(fn *genai.FunctionDeclaration) (
 	if fn.Parameters != nil && len(fn.Parameters.Properties) > 0 {
 		properties := make(map[string]any, len(fn.Parameters.Properties))
 		for key, property := range fn.Parameters.Properties {
-			normalizeSchemaType(property)
-			properties[key] = property
+			propMap, err := schemaToMap(property)
+			if err != nil {
+				return anthropic.ToolUnionParam{}, fmt.Errorf("failed to convert schema for property %q: %w", key, err)
+			}
+			properties[key] = propMap
 		}
 		if len(properties) > 0 {
 			inputSchema.Properties = properties
@@ -196,16 +199,42 @@ func (builder *RequestBuilder) buildToToolParam(fn *genai.FunctionDeclaration) (
 	return anthropic.ToolUnionParam{OfTool: &toolParam}, nil
 }
 
-func normalizeSchemaType(schema *genai.Schema) {
-	schema.Type = genai.Type(strings.ToLower(string(schema.Type)))
-	for _, item := range schema.AnyOf {
-		normalizeSchemaType(item)
+func schemaToMap(schema *genai.Schema) (map[string]any, error) {
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return nil, err
 	}
-	for _, prop := range schema.Properties {
-		normalizeSchemaType(prop)
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
 	}
-	if schema.Items != nil {
-		normalizeSchemaType(schema.Items)
+	normalizeTypeStrings(result)
+	return result, nil
+}
+
+func normalizeTypeStrings(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		if typeVal, ok := v["type"].(string); ok && typeVal != "" {
+			v["type"] = strings.ToLower(typeVal)
+		}
+		if items, ok := v["items"]; ok {
+			normalizeTypeStrings(items)
+		}
+		if props, ok := v["properties"].(map[string]any); ok {
+			for _, prop := range props {
+				normalizeTypeStrings(prop)
+			}
+		}
+		if anyOf, ok := v["anyOf"].([]any); ok {
+			for _, item := range anyOf {
+				normalizeTypeStrings(item)
+			}
+		}
+	case []any:
+		for _, item := range v {
+			normalizeTypeStrings(item)
+		}
 	}
 }
 
