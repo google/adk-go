@@ -43,7 +43,7 @@ type databaseService struct {
 func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.Service, error) {
 	db, err := gorm.Open(dialector, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("error creating database session service :%w", err)
+		return nil, fmt.Errorf("error creating database session service: %w", err)
 	}
 	return &databaseService{db: db}, nil
 }
@@ -61,7 +61,7 @@ func AutoMigrate(service session.Service) error {
 	}
 	err := dbservice.db.AutoMigrate(&storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
 	if err != nil {
-		return fmt.Errorf("error auto migrating session service :%w", err)
+		return fmt.Errorf("error auto migrating session service: %w", err)
 	}
 	return nil
 }
