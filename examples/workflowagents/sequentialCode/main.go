@@ -30,7 +30,6 @@ import (
 )
 
 func main() {
-
 	ctx := context.Background()
 
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{})
@@ -148,5 +147,4 @@ Do not add any other text before or after the code block.`,
 	if err != nil {
 		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
-
 }

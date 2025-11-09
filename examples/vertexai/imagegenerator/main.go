@@ -159,13 +159,13 @@ func saveImage(ctx tool.Context, input saveImageInput) saveImageResult {
 
 	// Create an "output" directory in the current working directory if it doesn't exist.
 	outputDir := "output"
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		log.Printf("Failed to create output directory '%s': %v", outputDir, err)
 		return saveImageResult{Status: "fail"}
 	}
 
 	localPath := filepath.Join(outputDir, localFilename)
-	err = os.WriteFile(localPath, resp.Part.InlineData.Data, 0644)
+	err = os.WriteFile(localPath, resp.Part.InlineData.Data, 0o644)
 	if err != nil {
 		log.Printf("Failed to write image to local file '%s': %v", localPath, err)
 		return saveImageResult{Status: "fail"}
