@@ -1,0 +1,59 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example.agent</groupId>
+  <artifactId>my_agent</artifactId>
+  <version>1.0-SNAPSHOT</version>
+
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+  </properties>
+
+  <dependencies>
+    <!-- Google Agent Development Kit (ADK) -->
+    <dependency>
+      <groupId>com.google.ai</groupId>
+      <artifactId>agent-development-kit</artifactId>
+      <version>1.0.0</version>
+    </dependency>
+  </dependencies>
+
+</project> 
+package com.example.agent;
+ 
+import java.time.LocalTime;
+
+public class HelloTimeAgent {
+
+    // A simple function the agent can perform
+    public String getCurrentTime() {
+        return "⏰ The current time is " + LocalTime.now().withNano(0).toString();
+    }
+
+    public String greet(String name) {
+        return "Hello " + name + "! How can I help you today?";
+    }
+}
+package com.example.agent;
+
+import java.util.Scanner;
+
+public class AgentRunner {
+    public static void main(String[] args) {
+        HelloTimeAgent agent = new HelloTimeAgent();
+        Scanner input = new Scanner(System.in);
+
+        System.out.println("🤖 HelloTimeAgent is running!");
+        System.out.print("Enter your name: ");
+        String name = input.nextLine();
+
+        System.out.println(agent.greet(name));
+        System.out.println(agent.getCurrentTime());
+
+        input.close();
+    }
+}
