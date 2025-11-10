@@ -38,8 +38,20 @@ const (
 	defaultOAuthScope = "https://www.googleapis.com/auth/cloud-platform"
 )
 
+const (
+	ProviderVertexAI   = "vertex_ai"
+	ProviderAnthropic  = "anthropic"
+	ProviderAWSBedrock = "aws_bedrock"
+)
+
 // Config controls how the Anthropic-backed model is initialized.
 type Config struct {
+	// Provider indicates which service is used to access the Anthropic models.
+	// Supported values are "vertex_ai", "aws_bedrock", and "anthropic". Default is "vertex_ai".
+	Provider string
+	// APIKey is the API key used to authenticate with the Anthropic API.
+	// Only required when Provider is "anthropic".
+	APIKey string
 	// MaxTokens sets the maximum number of tokens the model can generate.
 	MaxTokens int64
 	// ClientOptions are forwarded to the underlying Anthropics SDK client.
@@ -53,6 +65,9 @@ func (c *Config) applyDefaults() {
 	if c.MaxTokens == 0 {
 		c.MaxTokens = defaultMaxTokens
 	}
+	if c.Provider == "" {
+		c.Provider = ProviderVertexAI
+	}
 }
 
 type AnthropicModel struct {
@@ -62,18 +77,10 @@ type AnthropicModel struct {
 	maxTokens int64
 }
 
-// NewModel creates a model.LLM backed by the Anthropic/Claude API running on
-// Vertex AI. The GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION environment
-// variables must be populated unless Config supplies explicit values.
+// NewModel returns [model.LLM] backed by the Anthropic API.
 func NewModel(ctx context.Context, modelName string, cfg *Config) (model.LLM, error) {
 	if modelName == "" {
 		return nil, fmt.Errorf("model name must be provided")
-	}
-
-	projectID := os.Getenv(envProjectID)
-	location := os.Getenv(envLocation)
-	if projectID == "" || location == "" {
-		return nil, fmt.Errorf("GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION must be set to use Anthropic on Vertex")
 	}
 
 	if cfg == nil {
@@ -82,7 +89,25 @@ func NewModel(ctx context.Context, modelName string, cfg *Config) (model.LLM, er
 	cfg.applyDefaults()
 
 	opts := append([]option.RequestOption{}, cfg.ClientOptions...)
-	opts = append(opts, vertex.WithGoogleAuth(ctx, location, projectID, defaultOAuthScope))
+
+	switch cfg.Provider {
+	case ProviderAnthropic:
+		if cfg.APIKey == "" {
+			return nil, fmt.Errorf("API key must be provided to use Anthropic provider")
+		}
+		opts = append(opts, option.WithAPIKey(cfg.APIKey))
+	case ProviderAWSBedrock:
+		// Do nothing special for AWS Bedrock for now. User need to provide the client option
+		// via `bedrock.WithConfig()` or `bedrock.WithLoadDefaultConfig()`.
+	default:
+		projectID := os.Getenv(envProjectID)
+		location := os.Getenv(envLocation)
+		if projectID == "" || location == "" {
+			return nil, fmt.Errorf("GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION must be set to use Anthropic on Vertex")
+		}
+		opts = append(opts, vertex.WithGoogleAuth(ctx, location, projectID, defaultOAuthScope))
+	}
+
 	return &AnthropicModel{
 		name:      modelName,
 		maxTokens: cfg.MaxTokens,
