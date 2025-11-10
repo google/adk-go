@@ -32,10 +32,10 @@ import (
 	"google.golang.org/genai"
 )
 
-// Package main demonstrates how to create an agent with multiple tools,
-// the current implementation allows agent to do a google search and use
-// other custom tool as well. This is a workaround for genai limitation
-// which doesn't allow to have different type of tools.
+// Package main demonstrates a workaround for using multiple tool types (e.g.,
+// Google Search and custom functions) in a single agent. This is necessary
+// due to limitations in the genai API. The approach is to wrap agents with
+// different tool types into sub-agents, which are then managed by a root agent.
 func main() {
 	ctx := context.Background()
 
