@@ -75,6 +75,13 @@ type SessionInput struct {
 type EvalConfig struct {
 	// Criteria defines the list of criteria for the evaluation.
 	Criteria []Criterion `json:"criteria"`
+
+	// JudgeLLM is the LLM instance to use for LLM-as-Judge evaluators.
+	// This field is not serialized to JSON.
+	JudgeLLM interface{} `json:"-"`
+
+	// JudgeModel is the default model name for LLM-as-Judge evaluators.
+	JudgeModel string `json:"judge_model,omitempty"`
 }
 
 // Criterion defines evaluation requirements for a specific metric.
