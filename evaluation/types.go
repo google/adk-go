@@ -52,6 +52,10 @@ type EvalCase struct {
 type ConversationTurn struct {
 	Role    string `json:"role"`    // "user" or "agent"
 	Content string `json:"content"` // The message content
+
+	// ExpectedInvocation defines the expected agent response and tool calls for this turn.
+	// This is used for multi-turn evaluation where expectations can vary per turn.
+	ExpectedInvocation *Invocation `json:"expected_invocation,omitempty"`
 }
 
 // ExpectedToolCall defines an expected tool invocation.
@@ -69,8 +73,8 @@ type SessionInput struct {
 
 // EvalConfig defines evaluation criteria and thresholds.
 type EvalConfig struct {
-	// Criteria maps metric names to their evaluation criteria
-	Criteria map[string]Criterion `json:"criteria"`
+	// Criteria defines the list of criteria for the evaluation.
+	Criteria []Criterion `json:"criteria"`
 }
 
 // Criterion defines evaluation requirements for a specific metric.
@@ -81,8 +85,9 @@ type Criterion interface {
 
 // Threshold defines pass/fail scoring bounds.
 type Threshold struct {
-	MinScore float64 `json:"min_score"`
-	MaxScore float64 `json:"max_score,omitempty"`
+	MinScore   float64    `json:"min_score"`
+	MaxScore   float64    `json:"max_score,omitempty"`
+	MetricType MetricType `json:"metric_type"`
 }
 
 // GetThreshold returns the threshold (implements Criterion interface).
@@ -90,9 +95,9 @@ func (t *Threshold) GetThreshold() *Threshold {
 	return t
 }
 
-// GetMetricType returns empty metric type for basic threshold.
+// GetMetricType returns the metric type for the threshold.
 func (t *Threshold) GetMetricType() MetricType {
-	return ""
+	return t.MetricType
 }
 
 // LLMAsJudgeCriterion defines criteria for LLM-based evaluation.
