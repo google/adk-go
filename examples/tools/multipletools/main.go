@@ -32,7 +32,7 @@ import (
 	"google.golang.org/genai"
 )
 
-// Package main demonstrates how to create an agent with multuple tools,
+// Package main demonstrates how to create an agent with multiple tools,
 // the current implementation allows agent to do a google search and use
 // other custom tool as well. This is a workaround for genai limitation
 // which doesn't allow to have different type of tools.
