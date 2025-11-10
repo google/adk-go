@@ -25,7 +25,7 @@ import (
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/server/restapi/services"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/session/vertexai"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
@@ -38,11 +38,28 @@ const (
 func main() {
 	ctx := context.Background()
 
-	rootAgent, err := сreateAgent()
+	projectID := os.Getenv("CLOUD_PROJECT_ID")
+	if projectID == "" {
+		log.Fatalf("Env var CLOUD_PROJECT_ID is not set")
+	}
+	location := os.Getenv("CLOUD_LOCATION")
+	if location == "" {
+		log.Fatalf("Env var CLOUD_LOCATION is not set")
+	}
+	engineId := os.Getenv("VERTEX_ENGINE_ID")
+	if engineId == "" {
+		log.Fatalf("Env var VERTEX_ENGINE_ID is not set")
+	}
+
+	rootAgent, err := createAgent()
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
-	srvs, err := session.VertexAIService(ctx, modelName)
+	srvs, err := vertexai.NewSessionService(ctx, vertexai.VertexAIServiceConfig{
+		Location:        location,
+		ProjectID:       projectID,
+		ReasoningEngine: engineId,
+	})
 	if err != nil {
 		log.Fatalf("Failed to create session service: %v", err)
 	}
@@ -59,7 +76,7 @@ func main() {
 	}
 }
 
-func сreateAgent() (agent.Agent, error) {
+func createAgent() (agent.Agent, error) {
 	ctx := context.Background()
 
 	model, err := gemini.NewModel(ctx, modelName, &genai.ClientConfig{})
