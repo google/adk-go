@@ -15,6 +15,8 @@
 package models
 
 import (
+	"fmt"
+
 	"google.golang.org/genai"
 )
 
@@ -25,4 +27,21 @@ type RunAgentRequest struct {
 	NewMessage genai.Content   `json:"new_message"`
 	Streaming  bool            `json:"streaming,omitempty"`
 	StateDelta *map[string]any `json:"state_delta,omitempty"`
+}
+
+// Validate checks if the required fields are not zero-ed
+func (req *RunAgentRequest) Validate() error {
+	elements := map[string]any{
+		"app_name":    req.AppName,
+		"user_id":     req.UserId,
+		"session_id":  req.SessionId,
+		"new_message": req.NewMessage,
+	}
+	for name, el := range elements {
+		if isZero := IsZeroValue(el); isZero {
+			return fmt.Errorf("%s is required", name)
+		}
+	}
+
+	return nil
 }
