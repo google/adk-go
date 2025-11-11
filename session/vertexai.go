@@ -21,13 +21,13 @@ import (
 	"google.golang.org/genai"
 )
 
-// VertexAiSessionService
-type vertexAiService struct {
+// VertexAISessionService implements session.Service for Vertex AI.
+type vertexAISessionService struct {
 	client *genai.Client
 	model  string
 }
 
-func newVertexAiSessionService(ctx context.Context, model string) (Service, error) {
+func newVertexAISessionService(ctx context.Context, model string) (Service, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Backend: genai.BackendVertexAI,
 	})
@@ -35,10 +35,10 @@ func newVertexAiSessionService(ctx context.Context, model string) (Service, erro
 		return nil, fmt.Errorf("failed to create Vertex AI client: %w", err)
 	}
 
-	return &vertexAiService{client: client, model: model}, nil
+	return &vertexAISessionService{client: client, model: model}, nil
 }
 
-func (s *vertexAiService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
+func (s *vertexAISessionService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
 	_, err := s.client.Chats.Create(ctx, s.model, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
@@ -57,18 +57,18 @@ func (s *vertexAiService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	return c, nil
 }
 
-func (s *vertexAiService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
+func (s *vertexAISessionService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
 	return nil, fmt.Errorf("session Get function not implemented")
 }
 
-func (s *vertexAiService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
+func (s *vertexAISessionService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 	return nil, fmt.Errorf("session List function not implemented")
 }
 
-func (s *vertexAiService) Delete(ctx context.Context, req *DeleteRequest) error {
+func (s *vertexAISessionService) Delete(ctx context.Context, req *DeleteRequest) error {
 	return fmt.Errorf("session Delete function not implemented")
 }
 
-func (s *vertexAiService) AppendEvent(ctx context.Context, session Session, event *Event) error {
+func (s *vertexAISessionService) AppendEvent(ctx context.Context, session Session, event *Event) error {
 	return fmt.Errorf("session AppendEvent function not implemented")
 }

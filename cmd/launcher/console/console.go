@@ -25,7 +25,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/runner"
@@ -57,7 +56,7 @@ func NewLauncher() launcher.SubLauncher {
 }
 
 // Run implements launcher.SubLauncher. It starts the console interaction loop.
-func (l *consoleLauncher) Run(ctx context.Context, config *adk.Config) error {
+func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	// userID and appName are not important at this moment, we can just use any
 	userID, appName := "console_user", "console_app"
 
@@ -176,7 +175,7 @@ func (l *consoleLauncher) SimpleDescription() string {
 }
 
 // Execute implements launcher.Launcher. It parses arguments and runs the launcher.
-func (l *consoleLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
+func (l *consoleLauncher) Execute(ctx context.Context, config *launcher.Config, args []string) error {
 	remainingArgs, err := l.Parse(args)
 	if err != nil {
 		return fmt.Errorf("cannot parse args: %w", err)

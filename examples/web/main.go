@@ -23,7 +23,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/examples/web/agents"
 	"google.golang.org/adk/model"
@@ -86,15 +86,14 @@ func main() {
 
 	artifactservice := artifact.InMemoryService()
 
-	config := &adk.Config{
+	config := &launcher.Config{
 		ArtifactService: artifactservice,
 		SessionService:  sessionService,
 		AgentLoader:     agentLoader,
 	}
 
 	l := full.NewLauncher()
-	err = l.Execute(ctx, config, os.Args[1:])
-	if err != nil {
-		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
 }

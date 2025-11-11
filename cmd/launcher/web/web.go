@@ -26,7 +26,6 @@ import (
 
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/session"
@@ -47,7 +46,7 @@ type webLauncher struct {
 }
 
 // Execute implements launcher.Launcher.
-func (w *webLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
+func (w *webLauncher) Execute(ctx context.Context, config *launcher.Config, args []string) error {
 	remainingArgs, err := w.Parse(args)
 	if err != nil {
 		return fmt.Errorf("cannot parse args: %w", err)
@@ -73,7 +72,7 @@ type Sublauncher interface {
 	SimpleDescription() string
 
 	// SetupSubrouters adds sublauncher-specific routes to the router.
-	SetupSubrouters(router *mux.Router, adkConfig *adk.Config) error
+	SetupSubrouters(router *mux.Router, config *launcher.Config) error
 	// UserMessage is a hook for sublaunchers to print a message to the user when the web server starts.
 	UserMessage(webURL string, printer func(v ...any))
 }
@@ -142,7 +141,7 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 }
 
 // Run implements launcher.SubLauncher.
-func (w *webLauncher) Run(ctx context.Context, config *adk.Config) error {
+func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
 	}

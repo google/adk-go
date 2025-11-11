@@ -19,7 +19,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/server/restapi/handlers"
 	"google.golang.org/adk/server/restapi/routers"
@@ -31,7 +31,7 @@ import (
 // NewHandler creates and returns an http.Handler for the ADK REST API.
 // This is the preferred way to integrate ADK REST API with any HTTP server.
 // The returned handler can be registered with any standard Go HTTP server or router.
-func NewHandler(config *adk.Config) http.Handler {
+func NewHandler(config *launcher.Config) http.Handler {
 	adkExporter := services.NewAPIServerSpanExporter()
 	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
 
@@ -52,7 +52,8 @@ func NewHandler(config *adk.Config) http.Handler {
 // Deprecated: Use NewHandler instead. This function assumes the caller is using
 // gorilla/mux and tightly couples the implementation to that router. NewHandler
 // returns a standard http.Handler that can be used with any HTTP server or router.
-func SetupRouter(router *mux.Router, routerConfig *adk.Config) *mux.Router {
+func SetupRouter(router *mux.Router, routerConfig *launcher.Config) *mux.Router {
+// SetupRouter initiates mux.Router with ADK REST API routers
 	adkExporter := services.NewAPIServerSpanExporter()
 	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
 	return setupRouter(router,

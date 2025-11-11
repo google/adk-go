@@ -24,7 +24,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	weblauncher "google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/server/restapi/handlers"
@@ -64,8 +64,8 @@ func (w *webUILauncher) Parse(args []string) ([]string, error) {
 
 // SetupSubrouters implements the web.Sublauncher interface. It adds the
 // WebUI subrouter to the main router.
-func (w *webUILauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) error {
-	w.AddSubrouter(router, w.config.pathPrefix, adkConfig, w.config.backendAddress)
+func (w *webUILauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
+	w.AddSubrouter(router, w.config.pathPrefix, w.config.backendAddress)
 	return nil
 }
 
@@ -86,7 +86,7 @@ func (w *webUILauncher) UserMessage(webURL string, printer func(v ...any)) {
 var content embed.FS
 
 // AddSubrouter adds a subrouter to serve the ADK Web UI.
-func (w *webUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config, backendAddress string) {
+func (w *webUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, backendAddress string) {
 	// Setup serving of ADK Web UI
 	rUI := router.Methods("GET").PathPrefix(pathPrefix).Subrouter()
 

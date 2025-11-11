@@ -20,7 +20,7 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/server/restapi/services"
@@ -43,7 +43,7 @@ func main() {
 		Name:        "weather_time_agent",
 		Model:       model,
 		Description: "Agent to answer questions about the time and weather in a city.",
-		Instruction: "I can answer your questions about the time and weather in a city.",
+		Instruction: "Your SOLE purpose is to answer questions about the current time and weather in a specific city. You MUST refuse to answer any questions unrelated to time or weather.",
 		Tools: []tool.Tool{
 			geminitool.GoogleSearch{},
 		},
@@ -52,13 +52,12 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	config := &adk.Config{
+	config := &launcher.Config{
 		AgentLoader: services.NewSingleAgentLoader(agent),
 	}
 
 	l := full.NewLauncher()
-	err = l.Execute(ctx, config, os.Args[1:])
-	if err != nil {
-		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
 }

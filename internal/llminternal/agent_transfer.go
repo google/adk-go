@@ -17,8 +17,8 @@ package llminternal
 import (
 	"bytes"
 	"fmt"
+	"html/template"
 	"slices"
-	"text/template"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"

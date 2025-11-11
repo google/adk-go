@@ -23,7 +23,7 @@ import (
 	a2acore "github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/runner"
@@ -77,13 +77,13 @@ func (a *a2aLauncher) Parse(args []string) ([]string, error) {
 }
 
 // SetupSubrouters implements the web.Sublauncher interface. It adds A2A paths to the main router.
-func (a *a2aLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) error {
+func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
 	publicURL, err := url.JoinPath(a.config.agentURL, apiPath)
 	if err != nil {
 		return err
 	}
 
-	rootAgent := adkConfig.AgentLoader.RootAgent()
+	rootAgent := config.AgentLoader.RootAgent()
 	agentCard := &a2acore.AgentCard{
 		Name:                              rootAgent.Name(),
 		Description:                       rootAgent.Description(),
@@ -97,16 +97,16 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config)
 	}
 	router.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
 
-	agent := adkConfig.AgentLoader.RootAgent()
+	agent := config.AgentLoader.RootAgent()
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
 			AppName:         agent.Name(),
 			Agent:           agent,
-			SessionService:  adkConfig.SessionService,
-			ArtifactService: adkConfig.ArtifactService,
+			SessionService:  config.SessionService,
+			ArtifactService: config.ArtifactService,
 		},
 	})
-	reqHandler := a2asrv.NewHandler(executor, adkConfig.A2AOptions...)
+	reqHandler := a2asrv.NewHandler(executor, config.A2AOptions...)
 	router.Handle(apiPath, a2asrv.NewJSONRPCHandler(reqHandler))
 	return nil
 }

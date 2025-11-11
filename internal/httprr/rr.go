@@ -117,7 +117,7 @@ func Open(file string, rt http.RoundTripper) (*RecordReplay, error) {
 
 // Recording reports whether the "-httprecord" flag is set
 // for the given file.
-// It return an error if the flag is set to an invalid value.
+// It returns an error if the flag is set to an invalid value.
 func Recording(file string) (bool, error) {
 	if *record != "" {
 		re, err := regexp.Compile(*record)

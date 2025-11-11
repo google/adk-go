@@ -36,7 +36,7 @@ type key struct {
 	appName, userID string
 }
 
-type sessionID = string
+type sessionID string
 
 type value struct {
 	content   *genai.Content
@@ -96,7 +96,8 @@ func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Ses
 		s.store[k] = v
 	}
 
-	v[curSession.ID()] = values
+	sid := sessionID(curSession.ID())
+	v[sid] = values
 	return nil
 }
 

@@ -18,7 +18,11 @@ package launcher
 import (
 	"context"
 
-	"google.golang.org/adk/cmd/launcher/adk"
+	"github.com/a2aproject/a2a-go/a2asrv"
+	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/memory"
+	"google.golang.org/adk/server/restapi/services"
+	"google.golang.org/adk/session"
 )
 
 // Launcher is the main interface for running an ADK application.
@@ -26,7 +30,7 @@ import (
 // corresponding logic.
 type Launcher interface {
 	// Execute parses command-line arguments and runs the launcher.
-	Execute(ctx context.Context, config *adk.Config, args []string) error
+	Execute(ctx context.Context, config *Config, args []string) error
 	// CommandLineSyntax returns a string describing the command-line flags and arguments.
 	CommandLineSyntax() string
 }
@@ -44,5 +48,14 @@ type SubLauncher interface {
 	// SimpleDescription provides a brief, one-line description of the sub-launcher's function.
 	SimpleDescription() string
 	// Run executes the sub-launcher's main logic.
-	Run(ctx context.Context, config *adk.Config) error
+	Run(ctx context.Context, config *Config) error
+}
+
+// Config contains parameters for web & console execution: sessions, artifacts, agents etc
+type Config struct {
+	SessionService  session.Service
+	ArtifactService artifact.Service
+	MemoryService   memory.Service
+	AgentLoader     services.AgentLoader
+	A2AOptions      []a2asrv.RequestHandlerOption
 }
