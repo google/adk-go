@@ -21,8 +21,8 @@ import (
 	"google.golang.org/genai"
 )
 
-// VertexAISessionService
-type vertexAIService struct {
+// VertexAISessionService implements session.Service for Vertex AI.
+type vertexAISessionService struct {
 	client *genai.Client
 	model  string
 }
@@ -35,10 +35,10 @@ func newVertexAISessionService(ctx context.Context, model string) (Service, erro
 		return nil, fmt.Errorf("failed to create Vertex AI client: %w", err)
 	}
 
-	return &vertexAIService{client: client, model: model}, nil
+	return &vertexAISessionService{client: client, model: model}, nil
 }
 
-func (s *vertexAIService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
+func (s *vertexAISessionService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
 	_, err := s.client.Chats.Create(ctx, s.model, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
@@ -57,18 +57,18 @@ func (s *vertexAIService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	return c, nil
 }
 
-func (s *vertexAIService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
+func (s *vertexAISessionService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
 	return nil, fmt.Errorf("session Get function not implemented")
 }
 
-func (s *vertexAIService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
+func (s *vertexAISessionService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 	return nil, fmt.Errorf("session List function not implemented")
 }
 
-func (s *vertexAIService) Delete(ctx context.Context, req *DeleteRequest) error {
+func (s *vertexAISessionService) Delete(ctx context.Context, req *DeleteRequest) error {
 	return fmt.Errorf("session Delete function not implemented")
 }
 
-func (s *vertexAIService) AppendEvent(ctx context.Context, session Session, event *Event) error {
+func (s *vertexAISessionService) AppendEvent(ctx context.Context, session Session, event *Event) error {
 	return fmt.Errorf("session AppendEvent function not implemented")
 }
