@@ -78,6 +78,36 @@ type AnthropicModel struct {
 }
 
 // NewModel returns [model.LLM] backed by the Anthropic API.
+//
+// For Vertex AI(default), ensure that the environment variables GOOGLE_CLOUD_PROJECT
+// and GOOGLE_CLOUD_LOCATION are set, and provide any necessary client options via cfg.ClientOptions.
+//
+// For Anthropic, use APIKey in cfg to authenticate:
+//
+// ```
+//
+//	cfg := &anthropic.Config{
+//	    Provider: anthropic.ProviderAnthropic,
+//	    APIKey: "your_api_key",
+//	}
+//
+// ```
+//
+// For AWS Bedrock, provide the necessary client options via cfg.ClientOptions,
+// such as bedrock.WithConfig() or bedrock.WithLoadDefaultConfig().
+//
+// ```
+//
+//		cfg := &anthropic.Config{
+//		    Provider: anthropic.ProviderAWSBedrock,
+//		    ClientOptions: []option.RequestOption{
+//		        bedrock.WithConfig(cfg),
+//		    },
+//	 }
+//
+// ```
+//
+// An error is returned if the model cannot be created.
 func NewModel(ctx context.Context, modelName string, cfg *Config) (model.LLM, error) {
 	if modelName == "" {
 		return nil, fmt.Errorf("model name must be provided")
