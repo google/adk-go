@@ -21,13 +21,13 @@ import (
 	"google.golang.org/genai"
 )
 
-// VertexAiSessionService
+// VertexAISessionService
 type vertexAIService struct {
 	client *genai.Client
 	model  string
 }
 
-func newVertexAiSessionService(ctx context.Context, model string) (Service, error) {
+func newVertexAISessionService(ctx context.Context, model string) (Service, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Backend: genai.BackendVertexAI,
 	})
