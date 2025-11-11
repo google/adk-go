@@ -16,6 +16,8 @@
 package web
 
 import (
+	"net/http"
+
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/internal/telemetry"
@@ -26,7 +28,30 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// SetupRouter initiates mux.Router with ADK REST API routers
+// NewHandler creates and returns an http.Handler for the ADK REST API.
+// This is the preferred way to integrate ADK REST API with any HTTP server.
+// The returned handler can be registered with any standard Go HTTP server or router.
+func NewHandler(config *adk.Config) http.Handler {
+	adkExporter := services.NewAPIServerSpanExporter()
+	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
+
+	router := mux.NewRouter().StrictSlash(true)
+	setupRouter(router,
+		routers.NewSessionsAPIRouter(handlers.NewSessionsAPIController(config.SessionService)),
+		routers.NewRuntimeAPIRouter(handlers.NewRuntimeAPIRouter(config.SessionService, config.AgentLoader, config.ArtifactService)),
+		routers.NewAppsAPIRouter(handlers.NewAppsAPIController(config.AgentLoader)),
+		routers.NewDebugAPIRouter(handlers.NewDebugAPIController(config.SessionService, config.AgentLoader, adkExporter)),
+		routers.NewArtifactsAPIRouter(handlers.NewArtifactsAPIController(config.ArtifactService)),
+		&routers.EvalAPIRouter{},
+	)
+	return router
+}
+
+// SetupRouter initiates mux.Router with ADK REST API routers.
+//
+// Deprecated: Use NewHandler instead. This function assumes the caller is using
+// gorilla/mux and tightly couples the implementation to that router. NewHandler
+// returns a standard http.Handler that can be used with any HTTP server or router.
 func SetupRouter(router *mux.Router, routerConfig *adk.Config) *mux.Router {
 	adkExporter := services.NewAPIServerSpanExporter()
 	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
