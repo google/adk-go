@@ -18,7 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"slices"
-	"text/template"
+	"html/template"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
