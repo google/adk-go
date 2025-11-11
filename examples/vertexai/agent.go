@@ -38,7 +38,7 @@ const (
 func main() {
 	ctx := context.Background()
 
-	rootAgent, err := сreateAgent()
+	rootAgent, err := сreateAgent(ctx)
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
@@ -53,15 +53,12 @@ func main() {
 	}
 
 	l := full.NewLauncher()
-	err = l.Execute(ctx, config, os.Args[1:])
-	if err != nil {
-		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
 }
 
-func сreateAgent() (agent.Agent, error) {
-	ctx := context.Background()
-
+func сreateAgent(ctx context.Context) (agent.Agent, error) {
 	model, err := gemini.NewModel(ctx, modelName, &genai.ClientConfig{})
 	if err != nil {
 		return nil, err
