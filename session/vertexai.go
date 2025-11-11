@@ -22,7 +22,7 @@ import (
 )
 
 // VertexAiSessionService
-type vertexAiService struct {
+type vertexAIService struct {
 	client *genai.Client
 	model  string
 }
@@ -35,10 +35,10 @@ func newVertexAiSessionService(ctx context.Context, model string) (Service, erro
 		return nil, fmt.Errorf("failed to create Vertex AI client: %w", err)
 	}
 
-	return &vertexAiService{client: client, model: model}, nil
+	return &vertexAIService{client: client, model: model}, nil
 }
 
-func (s *vertexAiService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
+func (s *vertexAIService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
 	_, err := s.client.Chats.Create(ctx, s.model, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
@@ -57,18 +57,18 @@ func (s *vertexAiService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	return c, nil
 }
 
-func (s *vertexAiService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
+func (s *vertexAIService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
 	return nil, fmt.Errorf("session Get function not implemented")
 }
 
-func (s *vertexAiService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
+func (s *vertexAIService) List(ctx context.Context, req *ListRequest) (*ListResponse, error) {
 	return nil, fmt.Errorf("session List function not implemented")
 }
 
-func (s *vertexAiService) Delete(ctx context.Context, req *DeleteRequest) error {
+func (s *vertexAIService) Delete(ctx context.Context, req *DeleteRequest) error {
 	return fmt.Errorf("session Delete function not implemented")
 }
 
-func (s *vertexAiService) AppendEvent(ctx context.Context, session Session, event *Event) error {
+func (s *vertexAIService) AppendEvent(ctx context.Context, session Session, event *Event) error {
 	return fmt.Errorf("session AppendEvent function not implemented")
 }
