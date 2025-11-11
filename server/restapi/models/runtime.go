@@ -30,7 +30,7 @@ type RunAgentRequest struct {
 }
 
 // Validate checks if the required fields are not zero-ed
-func (req *RunAgentRequest) Validate() error {
+func (req RunAgentRequest) Validate() error {
 	elements := map[string]any{
 		"app_name":    req.AppName,
 		"user_id":     req.UserId,
