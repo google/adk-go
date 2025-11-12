@@ -343,8 +343,15 @@ func (r *Runner) runAgentAndCollectEvents(ctx context.Context, sessionID string,
 func (r *Runner) buildExpectedInvocations(evalCase *EvalCase) []Invocation {
 	var invocations []Invocation
 
-	// If there's an expected response, create a single expected invocation
-	if evalCase.ExpectedResponse != "" {
+	for _, turn := range evalCase.Conversation {
+		if turn.ExpectedInvocation != nil {
+			invocations = append(invocations, *turn.ExpectedInvocation)
+		}
+	}
+
+	// If there's a top-level ExpectedResponse, and no turn-specific expected invocations,
+	// create a single expected invocation from the top-level fields for backward compatibility.
+	if len(invocations) == 0 && evalCase.ExpectedResponse != "" {
 		invocations = append(invocations, Invocation{
 			AgentResponse: evalCase.ExpectedResponse,
 			ToolCalls:     r.convertExpectedToolCalls(evalCase.ExpectedToolCalls),
