@@ -61,7 +61,7 @@ func AutoMigrate(service session.Service) error {
 	}
 	err := dbservice.db.AutoMigrate(&storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
 	if err != nil {
-		return fmt.Errorf("error auto migrating session service: %w", err)
+		return fmt.Errorf("auto migrate failed: %w", err)
 	}
 	return nil
 }
