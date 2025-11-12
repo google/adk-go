@@ -47,24 +47,10 @@ func NewHandler(config *launcher.Config) http.Handler {
 	return router
 }
 
-// SetupRouter initiates mux.Router with ADK REST API routers.
-//
-// Deprecated: Use NewHandler instead. This function assumes the caller is using
-// gorilla/mux and tightly couples the implementation to that router. NewHandler
-// returns a standard http.Handler that can be used with any HTTP server or router.
-func SetupRouter(router *mux.Router, routerConfig *launcher.Config) *mux.Router {
-// SetupRouter initiates mux.Router with ADK REST API routers
-	adkExporter := services.NewAPIServerSpanExporter()
-	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
-	return setupRouter(router,
-		routers.NewSessionsAPIRouter(handlers.NewSessionsAPIController(routerConfig.SessionService)),
-		routers.NewRuntimeAPIRouter(handlers.NewRuntimeAPIRouter(routerConfig.SessionService, routerConfig.AgentLoader, routerConfig.ArtifactService)),
-		routers.NewAppsAPIRouter(handlers.NewAppsAPIController(routerConfig.AgentLoader)),
-		routers.NewDebugAPIRouter(handlers.NewDebugAPIController(routerConfig.SessionService, routerConfig.AgentLoader, adkExporter)),
-		routers.NewArtifactsAPIRouter(handlers.NewArtifactsAPIController(routerConfig.ArtifactService)),
-		&routers.EvalAPIRouter{},
-	)
-}
+// Note: The public SetupRouter helper was removed per maintainer request. Use
+// NewHandler(config *launcher.Config) which returns an http.Handler, or the
+// internal setupRouter helper below if you need to configure a *mux.Router
+// directly within this package.
 
 func setupRouter(router *mux.Router, subrouters ...routers.Router) *mux.Router {
 	routers.SetupSubRouters(router, subrouters...)

@@ -23,7 +23,7 @@ import (
 	"os"
 
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/server/restapi/web"
@@ -59,7 +59,7 @@ func main() {
 	}
 
 	// Configure the ADK REST API
-	config := &adk.Config{
+	config := &launcher.Config{
 		AgentLoader:    services.NewSingleAgentLoader(agent),
 		SessionService: session.InMemoryService(),
 	}
