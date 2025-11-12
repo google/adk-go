@@ -33,7 +33,10 @@ import (
 
 // webConfig contains parameters for launching web server
 type webConfig struct {
-	port int
+	port         int
+	writeTimeout time.Duration
+	readTimeout  time.Duration
+	idleTimeout  time.Duration
 }
 
 // webLauncher can launch web server
@@ -175,9 +178,9 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 
 	srv := http.Server{
 		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
-		WriteTimeout: time.Second * 15,
-		ReadTimeout:  time.Second * 15,
-		IdleTimeout:  time.Second * 60,
+		WriteTimeout: w.config.writeTimeout,
+		ReadTimeout:  w.config.readTimeout,
+		IdleTimeout:  w.config.idleTimeout,
 		Handler:      router,
 	}
 
@@ -201,6 +204,9 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
 	fs.IntVar(&config.port, "port", 8080, "Localhost port for the server")
+	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m')")
+	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m')")
+	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m')")
 
 	return &webLauncher{
 		config:       config,
