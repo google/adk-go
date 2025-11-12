@@ -29,8 +29,6 @@ import (
 )
 
 // NewHandler creates and returns an http.Handler for the ADK REST API.
-// This is the preferred way to integrate ADK REST API with any HTTP server.
-// The returned handler can be registered with any standard Go HTTP server or router.
 func NewHandler(config *launcher.Config) http.Handler {
 	adkExporter := services.NewAPIServerSpanExporter()
 	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
@@ -46,11 +44,6 @@ func NewHandler(config *launcher.Config) http.Handler {
 	)
 	return router
 }
-
-// Note: The public SetupRouter helper was removed per maintainer request. Use
-// NewHandler(config *launcher.Config) which returns an http.Handler, or the
-// internal setupRouter helper below if you need to configure a *mux.Router
-// directly within this package.
 
 func setupRouter(router *mux.Router, subrouters ...routers.Router) *mux.Router {
 	routers.SetupSubRouters(router, subrouters...)
