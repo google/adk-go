@@ -962,8 +962,12 @@ func emptyService(t *testing.T) *databaseService {
 	if err != nil {
 		t.Fatalf("Failed to create session service: %v", err)
 	}
-	dbservice := service.(*databaseService)
-	err = dbservice.db.AutoMigrate(&storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
+	dbservice, ok := service.(*databaseService)
+	if !ok {
+		t.Fatalf("invalid session service type")
+	}
+
+	err = AutoMigrate(service)
 	if err != nil {
 		t.Fatalf("Failed to AutoMigrate db: %v", err)
 	}
