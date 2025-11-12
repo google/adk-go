@@ -69,10 +69,10 @@ func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
 	// Create the ADK REST API handler
 	apiHandler := restapiweb.NewHandler(config)
-	
+
 	// Wrap it with CORS middleware
 	corsHandler := corsWithArgs(a.config.frontendAddress)(apiHandler)
-	
+
 	// Register it at the /api/ path
 	router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Handler(
 		http.StripPrefix("/api", corsHandler),

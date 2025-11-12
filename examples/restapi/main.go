@@ -77,15 +77,18 @@ func main() {
 	// Add a simple health check endpoint
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		if _, err := w.Write([]byte("OK")); err != nil {
+			log.Printf("Failed to write response: %v", err)
+		}
 	})
 
 	// Start the server
 	log.Println("Starting server on :8080")
 	log.Println("API available at http://localhost:8080/api/")
 	log.Println("Health check at http://localhost:8080/health")
-	
+
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
+
