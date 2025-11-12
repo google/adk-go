@@ -111,7 +111,7 @@ func main() {
 
 	a2aServerAddress := startWeatherAgentServer()
 
-	remoteAgent, err := remoteagent.New(remoteagent.A2AConfig{
+	remoteAgent, err := remoteagent.NewA2A(remoteagent.A2AConfig{
 		Name:            "A2A Weather agent",
 		AgentCardSource: a2aServerAddress,
 	})
