@@ -16,6 +16,8 @@
 package web
 
 import (
+	"net/http"
+
 	"github.com/gorilla/mux"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/internal/telemetry"
@@ -26,18 +28,21 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// SetupRouter initiates mux.Router with ADK REST API routers
-func SetupRouter(router *mux.Router, routerConfig *launcher.Config) *mux.Router {
+// NewHandler creates and returns an http.Handler for the ADK REST API.
+func NewHandler(config *launcher.Config) http.Handler {
 	adkExporter := services.NewAPIServerSpanExporter()
 	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
-	return setupRouter(router,
-		routers.NewSessionsAPIRouter(handlers.NewSessionsAPIController(routerConfig.SessionService)),
-		routers.NewRuntimeAPIRouter(handlers.NewRuntimeAPIRouter(routerConfig.SessionService, routerConfig.AgentLoader, routerConfig.ArtifactService)),
-		routers.NewAppsAPIRouter(handlers.NewAppsAPIController(routerConfig.AgentLoader)),
-		routers.NewDebugAPIRouter(handlers.NewDebugAPIController(routerConfig.SessionService, routerConfig.AgentLoader, adkExporter)),
-		routers.NewArtifactsAPIRouter(handlers.NewArtifactsAPIController(routerConfig.ArtifactService)),
+
+	router := mux.NewRouter().StrictSlash(true)
+	setupRouter(router,
+		routers.NewSessionsAPIRouter(handlers.NewSessionsAPIController(config.SessionService)),
+		routers.NewRuntimeAPIRouter(handlers.NewRuntimeAPIRouter(config.SessionService, config.AgentLoader, config.ArtifactService)),
+		routers.NewAppsAPIRouter(handlers.NewAppsAPIController(config.AgentLoader)),
+		routers.NewDebugAPIRouter(handlers.NewDebugAPIController(config.SessionService, config.AgentLoader, adkExporter)),
+		routers.NewArtifactsAPIRouter(handlers.NewArtifactsAPIController(config.ArtifactService)),
 		&routers.EvalAPIRouter{},
 	)
+	return router
 }
 
 func setupRouter(router *mux.Router, subrouters ...routers.Router) *mux.Router {

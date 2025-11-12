@@ -67,9 +67,16 @@ func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 
 // SetupSubrouters adds the API router to the parent router.
 func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
-	rAPI := router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Subrouter()
-	restapiweb.SetupRouter(rAPI, config)
-	rAPI.Use(corsWithArgs(a.config.frontendAddress))
+	// Create the ADK REST API handler
+	apiHandler := restapiweb.NewHandler(config)
+
+	// Wrap it with CORS middleware
+	corsHandler := corsWithArgs(a.config.frontendAddress)(apiHandler)
+
+	// Register it at the /api/ path
+	router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Handler(
+		http.StripPrefix("/api", corsHandler),
+	)
 	return nil
 }
 
