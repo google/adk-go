@@ -46,21 +46,19 @@ type gcsService struct {
 	bucket        gcsBucket
 }
 
-// NewGCSArtifactService creates a gcsService for the specified bucket using a default client
-func NewGCSArtifactService(ctx context.Context, bucketName string, opts ...option.ClientOption) (artifact.Service, error) {
+// NewService creates a Google Cloud Storage service for the specified bucket.
+func NewService(ctx context.Context, bucketName string, opts ...option.ClientOption) (artifact.Service, error) {
 	storageClient, err := storage.NewClient(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gcs service: %w", err)
 	}
 	// Wrap the real client
 	clientWrapper := &gcsClientWrapper{client: storageClient}
-
 	s := &gcsService{
 		bucketName:    bucketName,
 		storageClient: clientWrapper,
 		bucket:        clientWrapper.bucket(bucketName),
 	}
-
 	return s, nil
 }
 
