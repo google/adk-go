@@ -248,6 +248,11 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 		}
 
+		if f.Model == nil {
+			yield(nil, fmt.Errorf("agent %q has no Model configured; ensure Model is set in llmagent.Config", ctx.Agent().Name()))
+			return
+		}
+
 		// TODO: Set _ADK_AGENT_NAME_LABEL_KEY in req.GenerateConfig.Labels
 		// to help with slicing the billing reports on a per-agent basis.
 
