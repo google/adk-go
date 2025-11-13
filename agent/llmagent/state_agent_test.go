@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"math"
 	"math/rand"
 	"strings"
@@ -429,9 +430,7 @@ func afterToolEnhancementCallback(ctx tool.Context, t tool.Tool, args map[string
 	}
 	fmt.Printf("✨ ENHANCE: Adding metadata to response from '%s'\n", t.Name())
 	enhancedResponse := make(map[string]any)
-	for k, v := range result {
-		enhancedResponse[k] = v
-	}
+	maps.Copy(enhancedResponse, result)
 	enhancedResponse["enhanced"] = true
 	enhancedResponse["enhancement_timestamp"] = time.Now()
 	enhancedResponse["tool_name"] = t.Name()
@@ -445,9 +444,7 @@ func afterToolAsyncCallback(ctx tool.Context, t tool.Tool, args map[string]any, 
 	}
 	fmt.Printf("🔄 ASYNC AFTER: Post-processing response from '%s'\n", t.Name())
 	processedResponse := make(map[string]any)
-	for k, v := range result {
-		processedResponse[k] = v
-	}
+	maps.Copy(processedResponse, result)
 	processedResponse["async_processed"] = true
 	processedResponse["processor"] = "async_after_callback"
 	return processedResponse, nil

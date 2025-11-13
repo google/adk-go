@@ -80,7 +80,7 @@ type myAgent struct {
 
 func (a myAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			if !yield(&session.Event{
 				LLMResponse: model.LLMResponse{
 					Content: &genai.Content{

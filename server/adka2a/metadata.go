@@ -15,6 +15,8 @@
 package adka2a
 
 import (
+	"maps"
+
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/session"
@@ -46,9 +48,7 @@ func toInvocationMeta(config ExecutorConfig, reqCtx *a2asrv.RequestContext) invo
 
 func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, error) {
 	result := make(map[string]any)
-	for k, v := range meta.eventMeta {
-		result[k] = v
-	}
+	maps.Copy(result, meta.eventMeta)
 
 	for k, v := range map[string]string{
 		"invocation_id": event.InvocationID,

@@ -33,7 +33,7 @@ func TestInjectSessionState(t *testing.T) {
 	testCases := []struct {
 		name             string                 // Name of the sub-test
 		template         string                 // Input template string
-		state            map[string]interface{} // Initial session state
+		state            map[string]any         // Initial session state
 		artifacts        map[string]*genai.Part // Artifacts for the mock service
 		expectNilService bool                   // Flag to test with a nil artifact service
 		want             string                 // Expected successful output
@@ -44,7 +44,7 @@ func TestInjectSessionState(t *testing.T) {
 		{
 			name:     "successful state injection",
 			template: "Hello {user_name}, you are in {app_state} state.",
-			state:    map[string]interface{}{"user_name": "Foo", "app_state": "active"},
+			state:    map[string]any{"user_name": "Foo", "app_state": "active"},
 			want:     "Hello Foo, you are in active state.",
 		},
 		// Corresponds to: test_inject_session_state_with_artifact
@@ -61,14 +61,14 @@ func TestInjectSessionState(t *testing.T) {
 		{
 			name:     "optional missing state variable",
 			template: "Optional value: {optional_value?}",
-			state:    map[string]interface{}{},
+			state:    map[string]any{},
 			want:     "Optional value: ",
 		},
 		// Corresponds to: test_inject_session_state_with_missing_state_raises_key_error
 		{
 			name:       "missing required state variable",
 			template:   "Hello {missing_key}!",
-			state:      map[string]interface{}{"user_name": "Foo"},
+			state:      map[string]any{"user_name": "Foo"},
 			wantErr:    true,
 			wantErrMsg: "failed to get key \"missing_key\" from state: state key does not exist",
 		},
@@ -86,28 +86,28 @@ func TestInjectSessionState(t *testing.T) {
 		{
 			name:     "invalid state name is not replaced",
 			template: "Hello {invalid-key}!",
-			state:    map[string]interface{}{"user_name": "Foo"},
+			state:    map[string]any{"user_name": "Foo"},
 			want:     "Hello {invalid-key}!",
 		},
 		// Corresponds to: test_inject_session_state_with_invalid_prefix_state_name_returns_original
 		{
 			name:     "invalid prefix state name is not replaced",
 			template: "Hello {invalid:key}!",
-			state:    map[string]interface{}{"user_name": "Foo"},
+			state:    map[string]any{"user_name": "Foo"},
 			want:     "Hello {invalid:key}!",
 		},
 		// Corresponds to: test_inject_session_state_with_valid_prefix_state
 		{
 			name:     "valid prefixed state variable",
 			template: "Hello {app:user_name}!",
-			state:    map[string]interface{}{"app:user_name": "Foo"},
+			state:    map[string]any{"app:user_name": "Foo"},
 			want:     "Hello Foo!",
 		},
 		// Corresponds to: test_inject_session_state_with_none_state_value_returns_empty
 		{
 			name:     "state value is nil",
 			template: "Value: {test_key}",
-			state:    map[string]interface{}{"test_key": nil},
+			state:    map[string]any{"test_key": nil},
 			want:     "Value: ",
 		},
 		// Corresponds to: test_inject_session_state_with_optional_missing_artifact_returns_empty
@@ -145,7 +145,7 @@ Your favorite color is {favorite_color}.
 The artifact says: {artifact.my_file}
 And another optional artifact: {artifact.other_file?}
 `,
-			state: map[string]interface{}{
+			state: map[string]any{
 				"user_name":      "Foo",
 				"user_age":       30,
 				"favorite_color": "blue",

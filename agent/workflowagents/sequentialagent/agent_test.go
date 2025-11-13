@@ -229,7 +229,7 @@ func TestNewSequentialAgent(t *testing.T) {
 
 			// run twice, the second time it will need to determine which agent to use, and we want to get the same result
 			gotEvents = make([]*session.Event, 0)
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
 					if err != nil {
 						t.Errorf("got unexpected error: %v", err)
