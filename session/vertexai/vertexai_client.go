@@ -17,7 +17,6 @@ package vertexai
 import (
 	"context"
 	"fmt"
-	"maps"
 	"regexp"
 	"strconv"
 	"strings"
@@ -83,18 +82,44 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 	}
 	lro, err := c.rpcClient.CreateSession(ctx, rpcReq)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error creating session: %w", err)
 	}
 
-	initState := maps.Clone(req.State)
+	createdSession, err := c.waitForOperation(ctx, req.AppName, req.UserID, sessionIDByOperationName(lro.Name()))
+	if err != nil {
+		return nil, fmt.Errorf("LRO for CreateSession failed: %w", err)
+	}
+	return createdSession, nil
+}
 
-	return &localSession{
-		appName:   req.AppName,
-		userID:    req.UserID,
-		sessionID: sessionIDByOperationName(lro.Name()),
-		events:    make([]*session.Event, 0),
-		state:     initState,
-	}, nil
+// waitForOperation polls the LRO until it is done.
+func (c *vertexAiClient) waitForOperation(ctx context.Context, appName, userId, sessionID string) (*localSession, error) {
+	const (
+		maxRetries = 10
+		baseDelay  = 1 * time.Second
+		maxDelay   = 5 * time.Second
+	)
+
+	for i := 0; i < maxRetries; i++ {
+		// Get the latest status of the operation.
+		ls, err := c.getSession(ctx, &session.GetRequest{AppName: appName, UserID: userId, SessionID: sessionID})
+		if err != nil {
+			// Basic retry on "not found" which might be due to propagation
+			if i < maxRetries-1 { // sLROtatus.Code(err) == codes.NotFound &&
+				delay := time.Duration(i*i) * baseDelay
+				if delay > maxDelay {
+					delay = maxDelay
+				}
+				fmt.Printf("GetOperation failed (attempt %d/%d), retrying in %v: %v\n", i+1, maxRetries, delay, err)
+				time.Sleep(delay)
+				continue
+			}
+			return nil, fmt.Errorf("error getting operation '%s': %w", sessionID, err)
+		} else {
+			return ls, nil
+		}
+	}
+	return nil, fmt.Errorf("LRO '%s' timed out after %d retries", sessionID, maxRetries)
 }
 
 func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest) (*localSession, error) {
@@ -107,7 +132,7 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest
 	}
 	sessRpcResp, err := c.rpcClient.GetSession(ctx, sessRpcReq)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error fetching session: %w", err)
 	}
 
 	if sessRpcResp == nil {
@@ -122,7 +147,7 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest
 		userID:    req.UserID,
 		sessionID: req.SessionID,
 		updatedAt: sessRpcResp.UpdateTime.AsTime(),
-		state:     sessRpcResp.SessionState.AsMap(),
+		state:     filterNilValues(sessRpcResp.SessionState.AsMap()),
 	}, nil
 }
 
@@ -136,6 +161,9 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequ
 	rpcReq := &aiplatformpb.ListSessionsRequest{
 		Parent: fmt.Sprintf(engineResourceTemplate, c.projectID, c.location, reasoningEngine),
 	}
+	if req.UserID != "" {
+		rpcReq.Filter = fmt.Sprintf("userId=\"%s\"", req.UserID)
+	}
 	it := c.rpcClient.ListSessions(ctx, rpcReq)
 	for {
 		rpcResp, err := it.Next()
@@ -143,22 +171,32 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequ
 			break
 		}
 		if err != nil {
-			return nil, err
-		}
-		// FIXME this should be a filter in the request
-		if rpcResp.UserId != req.UserID {
-			continue
+			return nil, fmt.Errorf("error creating session list: %w", err)
 		}
 		session := &localSession{
 			appName:   req.AppName,
 			userID:    rpcResp.UserId,
 			sessionID: sessionIdBySessionName(rpcResp.Name),
-			state:     rpcResp.SessionState.AsMap(),
+			state:     filterNilValues(rpcResp.SessionState.AsMap()),
 			updatedAt: rpcResp.UpdateTime.AsTime(),
 		}
 		sessions = append(sessions, session)
 	}
 	return sessions, nil
+}
+
+func filterNilValues(originalMap map[string]any) map[string]any {
+	if originalMap == nil {
+		return nil
+	}
+
+	filteredMap := make(map[string]any)
+	for key, value := range originalMap {
+		if value != nil {
+			filteredMap[key] = value
+		}
+	}
+	return filteredMap
 }
 
 func (c *vertexAiClient) deleteSession(ctx context.Context, req *session.DeleteRequest) error {
@@ -170,7 +208,7 @@ func (c *vertexAiClient) deleteSession(ctx context.Context, req *session.DeleteR
 		Name: sessionNameByID(req.SessionID, c, reasoningEngine),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("error deleting session: %w", err)
 	}
 	return lro.Wait(ctx)
 }
@@ -179,6 +217,16 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 	reasoningEngine, err := c.getReasoningEngineID(appName)
 	if err != nil {
 		return err
+	}
+
+	var eventState *aiplatformpb.EventActions
+	// Convert and set the initial state if provided
+	if len(event.Actions.StateDelta) > 0 {
+		sessionState, err := structpb.NewStruct(event.Actions.StateDelta)
+		if err != nil {
+			return fmt.Errorf("failed to convert state to structpb: %w", err)
+		}
+		eventState = &aiplatformpb.EventActions{StateDelta: sessionState}
 	}
 
 	// TODO add logic for other types of parts
@@ -209,10 +257,11 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 				Parts: parts,
 				Role:  role,
 			},
+			Actions: eventState,
 		},
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("error appending event: %w", err)
 	}
 
 	return nil
@@ -239,7 +288,7 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error fetching session events: %w", err)
 		}
 		parts := make([]*genai.Part, 0)
 		role := genai.RoleUser
@@ -257,7 +306,7 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 			InvocationID: rpcResp.InvocationId,
 			Author:       rpcResp.Author,
 			Actions: session.EventActions{
-				StateDelta: make(map[string]any),
+				StateDelta: filterNilValues(rpcResp.Actions.StateDelta.AsMap()),
 			},
 			LLMResponse: model.LLMResponse{
 				Content: &genai.Content{

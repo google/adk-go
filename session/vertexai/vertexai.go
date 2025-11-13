@@ -72,8 +72,8 @@ func (s *vertexAiService) Get(ctx context.Context, req *session.GetRequest) (*se
 }
 
 func (s *vertexAiService) List(ctx context.Context, req *session.ListRequest) (*session.ListResponse, error) {
-	if req.AppName == "" || req.UserID == "" {
-		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
+	if req.AppName == "" {
+		return nil, fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
 	}
 	sessions, err := s.client.listSessions(ctx, req)
 	if err != nil {
