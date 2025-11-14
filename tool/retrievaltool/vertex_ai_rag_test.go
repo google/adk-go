@@ -29,8 +29,12 @@ import (
 )
 
 func TestVertexAIRAG_ProcessRequest(t *testing.T) {
+	similarityTopK := int32(5)
+	vectorDistanceThreshold := 0.8
 	ragStore := &genai.VertexRAGStore{
-		RAGCorpora: []string{"projects/123456789/locations/us-central1/ragCorpora/1234567890"},
+		RAGCorpora:              []string{"projects/123456789/locations/us-central1/ragCorpora/1234567890"},
+		SimilarityTopK:          &similarityTopK,
+		VectorDistanceThreshold: &vectorDistanceThreshold,
 	}
 
 	tool, err := retrievaltool.NewVertexAIRAG("test_rag", "Test RAG tool", ragStore)
@@ -66,21 +70,33 @@ func TestVertexAIRAG_ProcessRequest(t *testing.T) {
 	for _, genaiTool := range req.Config.Tools {
 		if genaiTool.Retrieval != nil {
 			foundRetrievalTool = true
-			if genaiTool.Retrieval.VertexRAGStore == nil {
-				t.Error("VertexRAGStore is nil")
+			store := genaiTool.Retrieval.VertexRAGStore
+			if store == nil {
+				t.Fatal("VertexRAGStore is nil")
 			}
-			if len(genaiTool.Retrieval.VertexRAGStore.RAGCorpora) == 0 {
+
+			if len(store.RAGCorpora) == 0 {
 				t.Error("RAGCorpora is empty")
 			} else {
-				// Verify the corpus matches
 				expectedCorpus := "projects/123456789/locations/us-central1/ragCorpora/1234567890"
-				if genaiTool.Retrieval.VertexRAGStore.RAGCorpora[0] != expectedCorpus {
-					t.Errorf("Expected corpus %s, got %s", expectedCorpus, genaiTool.Retrieval.VertexRAGStore.RAGCorpora[0])
+				if store.RAGCorpora[0] != expectedCorpus {
+					t.Errorf("Expected corpus %s, got %s", expectedCorpus, store.RAGCorpora[0])
 				}
+			}
+
+			if store.SimilarityTopK == nil {
+				t.Error("SimilarityTopK is nil")
+			} else if *store.SimilarityTopK != similarityTopK {
+				t.Errorf("Expected SimilarityTopK %d, got %d", similarityTopK, *store.SimilarityTopK)
+			}
+
+			if store.VectorDistanceThreshold == nil {
+				t.Error("VectorDistanceThreshold is nil")
+			} else if *store.VectorDistanceThreshold != vectorDistanceThreshold {
+				t.Errorf("Expected VectorDistanceThreshold %f, got %f", vectorDistanceThreshold, *store.VectorDistanceThreshold)
 			}
 		}
 	}
-
 	if !foundRetrievalTool {
 		t.Error("Retrieval tool not found in request config")
 	}
