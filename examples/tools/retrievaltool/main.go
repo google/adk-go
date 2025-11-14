@@ -32,11 +32,20 @@ import (
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.0-flash-001", &genai.ClientConfig{
-		Backend:  genai.BackendVertexAI,
-		Project:  os.Getenv("PROJECT_ID"),
-		Location: "us-central1",
-	})
+	modelName := "gemini-2.0-flash-001"
+	if v := os.Getenv("MODEL_NAME"); v != "" {
+		modelName = v
+	}
+	location := "us-central1"
+	if v := os.Getenv("LOCATION"); v != "" {
+		location = v
+	}
+	model, err := gemini.NewModel(ctx, modelName, 
+		&genai.ClientConfig{
+			Backend:  genai.BackendVertexAI,
+			Project:  os.Getenv("PROJECT_ID"),
+			Location: location,
+		})
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
@@ -47,8 +56,24 @@ func main() {
 		log.Fatalf("RAG_CORPUS environment variable is required")
 	}
 
-	similarityTopK := int32(10)
-	vectorDistanceThreshold := 0.6
+	similarityTopKStr := "10"
+	if v := os.Getenv("SIMILARITY_TOP_K"); v != "" {
+		similarityTopKStr = v
+	}
+	similarityTopKVal, err := strconv.ParseInt(similarityTopKStr, 10, 32)
+	if err != nil {
+		log.Fatalf("failed to parse SIMILARITY_TOP_K: %v", err)
+	}
+	similarityTopK := int32(similarityTopKVal)
+
+	vectorDistanceThresholdStr := "0.6"
+	if v := os.Getenv("VECTOR_DISTANCE_THRESHOLD"); v != "" {
+		vectorDistanceThresholdStr = v
+	}
+	vectorDistanceThreshold, err := strconv.ParseFloat(vectorDistanceThresholdStr, 64)
+	if err != nil {
+		log.Fatalf("failed to parse VECTOR_DISTANCE_THRESHOLD: %v", err)
+	}
 
 	ragStore := &genai.VertexRAGStore{
 		RAGCorpora:              []string{ragCorpus},
