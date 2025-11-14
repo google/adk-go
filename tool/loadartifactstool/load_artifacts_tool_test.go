@@ -15,6 +15,7 @@
 package loadartifactstool_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -299,9 +300,8 @@ func TestLoadArtifactsTool_ProcessRequest_NoArtifactService(t *testing.T) {
 		t.Fatal("Expected error when artifact service not configured, got nil")
 	}
 
-	expectedErr := "artifact service not configured"
-	if !strings.Contains(err.Error(), expectedErr) {
-		t.Errorf("Expected error containing %q, got: %v", expectedErr, err)
+	if !errors.Is(err, toolinternal.ErrArtifactServiceNotConfigured) {
+		t.Errorf("Expected ErrArtifactServiceNotConfigured, got: %v", err)
 	}
 }
 

@@ -15,6 +15,7 @@
 package toolinternal
 
 import (
+	"errors"
 	"testing"
 
 	"google.golang.org/adk/agent"
@@ -47,38 +48,34 @@ func TestInternalArtifacts_NilSafe(t *testing.T) {
 	artifacts := toolCtx.Artifacts()
 	// artifacts will be nil when service not configured
 
-	// Attempting to call methods on nil should be safe (won't panic)
-	// but will return errors
-	t.Run("List returns error", func(t *testing.T) {
-		_, err := artifacts.List(t.Context())
-		if err == nil {
-			t.Error("Expected error from List(), got nil")
-		}
-		expectedMsg := "artifact service not configured"
-		if err != nil && err.Error() != expectedMsg {
-			t.Errorf("Expected error %q, got: %v", expectedMsg, err)
-		}
-	})
+	tests := []struct {
+		name string
+		call func() (any, error)
+	}{
+		{
+			name: "List",
+			call: func() (any, error) { return artifacts.List(t.Context()) },
+		},
+		{
+			name: "Load",
+			call: func() (any, error) { return artifacts.Load(t.Context(), "test.txt") },
+		},
+		{
+			name: "Save",
+			call: func() (any, error) { return artifacts.Save(t.Context(), "test.txt", nil) },
+		},
+	}
 
-	t.Run("Load returns error", func(t *testing.T) {
-		_, err := artifacts.Load(t.Context(), "test.txt")
-		if err == nil {
-			t.Error("Expected error from Load(), got nil")
-		}
-		expectedMsg := "artifact service not configured"
-		if err != nil && err.Error() != expectedMsg {
-			t.Errorf("Expected error %q, got: %v", expectedMsg, err)
-		}
-	})
-
-	t.Run("Save returns error", func(t *testing.T) {
-		_, err := artifacts.Save(t.Context(), "test.txt", nil)
-		if err == nil {
-			t.Error("Expected error from Save(), got nil")
-		}
-		expectedMsg := "artifact service not configured"
-		if err != nil && err.Error() != expectedMsg {
-			t.Errorf("Expected error %q, got: %v", expectedMsg, err)
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name+" returns error", func(t *testing.T) {
+			_, err := tt.call()
+			if err == nil {
+				t.Error("Expected an error, got nil")
+				return
+			}
+			if !errors.Is(err, ErrArtifactServiceNotConfigured) {
+				t.Errorf("Expected ErrArtifactServiceNotConfigured, got: %v", err)
+			}
+		})
+	}
 }

@@ -16,7 +16,7 @@ package toolinternal
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
@@ -28,14 +28,17 @@ import (
 	"google.golang.org/genai"
 )
 
+// ErrArtifactServiceNotConfigured is returned when artifact service operations are attempted without configuration.
+var ErrArtifactServiceNotConfigured = errors.New("artifact service not configured")
+
 type internalArtifacts struct {
 	agent.Artifacts
 	eventActions *session.EventActions
 }
 
 func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
-	if ia == nil || ia.Artifacts == nil {
-		return nil, fmt.Errorf("artifact service not configured")
+	if ia == nil {
+		return nil, ErrArtifactServiceNotConfigured
 	}
 	resp, err := ia.Artifacts.Save(ctx, name, data)
 	if err != nil {
@@ -52,15 +55,15 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 }
 
 func (ia *internalArtifacts) List(ctx context.Context) (*artifact.ListResponse, error) {
-	if ia == nil || ia.Artifacts == nil {
-		return nil, fmt.Errorf("artifact service not configured")
+	if ia == nil {
+		return nil, ErrArtifactServiceNotConfigured
 	}
 	return ia.Artifacts.List(ctx)
 }
 
 func (ia *internalArtifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {
-	if ia == nil || ia.Artifacts == nil {
-		return nil, fmt.Errorf("artifact service not configured")
+	if ia == nil {
+		return nil, ErrArtifactServiceNotConfigured
 	}
 	return ia.Artifacts.Load(ctx, name)
 }
