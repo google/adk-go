@@ -51,11 +51,24 @@ var (
 )
 
 const (
-	systemName           = "gcp.vertex.agent"
-	genAiOperationName   = "gen_ai.operation.name"
-	genAiToolDescription = "gen_ai.tool.description"
-	genAiToolName        = "gen_ai.tool.name"
-	genAiToolCallID      = "gen_ai.tool.call.id"
+	systemName            = "gcp.vertex.agent"
+	genAiOperationName    = "gen_ai.operation.name"
+	genAiToolDescription  = "gen_ai.tool.description"
+	genAiToolName         = "gen_ai.tool.name"
+	genAiToolCallID       = "gen_ai.tool.call.id"
+	genAiSystemName       = "gen_ai.system"
+	genAiRequestModelName = "gen_ai.request.model"
+
+	gcpVertexAgentLLMRequestName   = "gcp.vertex.agent.llm_request"
+	gcpVertexAgentToolCallArgsName = "gcp.vertex.agent.tool_call_args"
+	gcpVertexAgentEventID          = "gcp.vertex.agent.event_id"
+	gcpVertexAgentToolResponseName = "gcp.vertex.agent.tool_response"
+	gcpVertexAgentLLMResponseName  = "gcp.vertex.agent.llm_response"
+	gcpVertexAgentInvocationID     = "gcp.vertex.agent.invocation_id"
+	gcpVertexAgentSessionID        = "gcp.vertex.agent.session_id"
+
+	executeToolName = "execute_tool"
+	mergeToolName   = "(merged tools)"
 )
 
 // AddSpanProcessor adds a span processor to the local tracer config.
@@ -104,23 +117,23 @@ func StartTrace(ctx context.Context, traceName string) []trace.Span {
 	return spans
 }
 
-// TraceToolCall traces the tool execution events.
+// TraceMergedToolCalls traces the tool execution events.
 func TraceMergedToolCalls(spans []trace.Span, fnResponseEvent *session.Event) {
 	if fnResponseEvent == nil {
 		return
 	}
 	for _, span := range spans {
 		attributes := []attribute.KeyValue{
-			attribute.String(genAiOperationName, "execute_tool"),
-			attribute.String(genAiToolName, "(merged tools)"),
-			attribute.String(genAiToolDescription, "(merged tools)"),
+			attribute.String(genAiOperationName, executeToolName),
+			attribute.String(genAiToolName, mergeToolName),
+			attribute.String(genAiToolDescription, mergeToolName),
 			// Setting empty llm request and response (as UI expect these) while not
 			// applicable for tool_response.
-			attribute.String("gcp.vertex.agent.llm_request", "{}"),
-			attribute.String("gcp.vertex.agent.llm_request", "{}"),
-			attribute.String("gcp.vertex.agent.tool_call_args", "N/A"),
-			attribute.String("gcp.vertex.agent.event_id", fnResponseEvent.ID),
-			attribute.String("gcp.vertex.agent.tool_response", safeSerialize(fnResponseEvent)),
+			attribute.String(gcpVertexAgentLLMRequestName, "{}"),
+			attribute.String(gcpVertexAgentLLMRequestName, "{}"),
+			attribute.String(gcpVertexAgentToolCallArgsName, "N/A"),
+			attribute.String(gcpVertexAgentEventID, fnResponseEvent.ID),
+			attribute.String(gcpVertexAgentToolResponseName, safeSerialize(fnResponseEvent)),
 		}
 		span.SetAttributes(attributes...)
 		span.End()
@@ -134,17 +147,17 @@ func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fn
 	}
 	for _, span := range spans {
 		attributes := []attribute.KeyValue{
-			attribute.String(genAiOperationName, "execute_tool"),
+			attribute.String(genAiOperationName, executeToolName),
 			attribute.String(genAiToolName, tool.Name()),
 			attribute.String(genAiToolDescription, tool.Description()),
 			// TODO: add tool type
 
 			// Setting empty llm request and response (as UI expect these) while not
 			// applicable for tool_response.
-			attribute.String("gcp.vertex.agent.llm_request", "{}"),
-			attribute.String("gcp.vertex.agent.llm_request", "{}"),
-			attribute.String("gcp.vertex.agent.tool_call_args", safeSerialize(fnArgs)),
-			attribute.String("gcp.vertex.agent.event_id", fnResponseEvent.ID),
+			attribute.String(gcpVertexAgentLLMRequestName, "{}"),
+			attribute.String(gcpVertexAgentLLMRequestName, "{}"),
+			attribute.String(gcpVertexAgentToolCallArgsName, safeSerialize(fnArgs)),
+			attribute.String(gcpVertexAgentEventID, fnResponseEvent.ID),
 		}
 
 		toolCallID := "<not specified>"
@@ -167,7 +180,7 @@ func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fn
 		}
 
 		attributes = append(attributes, attribute.String(genAiToolCallID, toolCallID))
-		attributes = append(attributes, attribute.String("gcp.vertex.agent.tool_response", toolResponse))
+		attributes = append(attributes, attribute.String(gcpVertexAgentToolResponseName, toolResponse))
 
 		span.SetAttributes(attributes...)
 		span.End()
@@ -178,13 +191,13 @@ func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fn
 func TraceLLMCall(spans []trace.Span, agentCtx agent.InvocationContext, llmRequest *model.LLMRequest, event *session.Event) {
 	for _, span := range spans {
 		attributes := []attribute.KeyValue{
-			attribute.String("gen_ai.system", systemName),
-			attribute.String("gen_ai.request.model", llmRequest.Model),
-			attribute.String("gcp.vertex.agent.invocation_id", event.InvocationID),
-			attribute.String("gcp.vertex.agent.session_id", agentCtx.Session().ID()),
-			attribute.String("gcp.vertex.agent.event_id", event.ID),
-			attribute.String("gcp.vertex.agent.llm_request", safeSerialize(llmRequestToTrace(llmRequest))),
-			attribute.String("gcp.vertex.agent.llm_response", safeSerialize(event.LLMResponse)),
+			attribute.String(genAiSystemName, systemName),
+			attribute.String(genAiRequestModelName, llmRequest.Model),
+			attribute.String(gcpVertexAgentInvocationID, event.InvocationID),
+			attribute.String(gcpVertexAgentSessionID, agentCtx.Session().ID()),
+			attribute.String(gcpVertexAgentEventID, event.ID),
+			attribute.String(gcpVertexAgentLLMRequestName, safeSerialize(llmRequestToTrace(llmRequest))),
+			attribute.String(gcpVertexAgentLLMResponseName, safeSerialize(event.LLMResponse)),
 		}
 
 		if llmRequest.Config.TopP != nil {
