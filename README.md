@@ -45,6 +45,18 @@ To add ADK Go to your project, run:
 go get google.golang.org/adk
 ```
 
+## 📖 `llms.txt`
+
+[llms.txt](https://github.com/google/adk-go/blob/main/llms.txt) provides a comprehensive, code-first documentation summary of the Go Agent Development Kit (ADK). It is a distilled version of the official Go documentation found in [adk-docs](https://github.com/google/adk-docs/), specifically curated and formatted for optimal use with AI agents like Gemini-CLI. It includes detailed explanations and runnable code examples for core agent concepts, multi-agent systems, advanced features like context management and callbacks, and Agent2Agent (A2A) communication.
+
+**Use with Gemini CLI:**
+
+You can easily reference [llms.txt](https://github.com/google/adk-go/blob/main/llms.txt) in your Gemini CLI interactions to provide context for code generation, explanations, or debugging. For example:
+
+```bash
+Plan and implement an agent to review customer issues and generate a report. Use the ADK Go framework, referring to @llms.txt for sample code.
+```
+
 ## 📄 License
 
 This project is licensed under the Apache 2.0 License - see the
