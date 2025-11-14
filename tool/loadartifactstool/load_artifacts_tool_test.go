@@ -278,6 +278,33 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	}
 }
 
+func TestLoadArtifactsTool_ProcessRequest_NoArtifactService(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+
+	// Create tool context WITHOUT artifact service configured
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Artifacts: nil, // No artifact service
+	})
+	tc := toolinternal.NewToolContext(ctx, "", nil)
+
+	llmRequest := &model.LLMRequest{}
+
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	if err == nil {
+		t.Fatal("Expected error when artifact service not configured, got nil")
+	}
+
+	expectedErr := "artifact service not configured"
+	if !strings.Contains(err.Error(), expectedErr) {
+		t.Errorf("Expected error containing %q, got: %v", expectedErr, err)
+	}
+}
+
 func createToolContext(t *testing.T) tool.Context {
 	t.Helper()
 

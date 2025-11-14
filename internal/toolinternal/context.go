@@ -16,6 +16,7 @@ package toolinternal
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
@@ -33,6 +34,9 @@ type internalArtifacts struct {
 }
 
 func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
+	if ia == nil || ia.Artifacts == nil {
+		return nil, fmt.Errorf("artifact service not configured")
+	}
 	resp, err := ia.Artifacts.Save(ctx, name, data)
 	if err != nil {
 		return resp, err
@@ -47,6 +51,20 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 	return resp, nil
 }
 
+func (ia *internalArtifacts) List(ctx context.Context) (*artifact.ListResponse, error) {
+	if ia == nil || ia.Artifacts == nil {
+		return nil, fmt.Errorf("artifact service not configured")
+	}
+	return ia.Artifacts.List(ctx)
+}
+
+func (ia *internalArtifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {
+	if ia == nil || ia.Artifacts == nil {
+		return nil, fmt.Errorf("artifact service not configured")
+	}
+	return ia.Artifacts.Load(ctx, name)
+}
+
 func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions *session.EventActions) tool.Context {
 	if functionCallID == "" {
 		functionCallID = uuid.NewString()
@@ -59,15 +77,21 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 	}
 	cbCtx := contextinternal.NewCallbackContextWithDelta(ctx, actions.StateDelta)
 
+	// Only create internalArtifacts if the underlying Artifacts service is configured
+	var artifacts *internalArtifacts
+	if ctx.Artifacts() != nil {
+		artifacts = &internalArtifacts{
+			Artifacts:    ctx.Artifacts(),
+			eventActions: actions,
+		}
+	}
+
 	return &toolContext{
 		CallbackContext:   cbCtx,
 		invocationContext: ctx,
 		functionCallID:    functionCallID,
 		eventActions:      actions,
-		artifacts: &internalArtifacts{
-			Artifacts:    ctx.Artifacts(),
-			eventActions: actions,
-		},
+		artifacts:         artifacts,
 	}
 }
 

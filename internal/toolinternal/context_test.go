@@ -36,3 +36,49 @@ func TestToolContext(t *testing.T) {
 		t.Errorf("ToolContext(%+T) is unexpectedly an InvocationContext", got)
 	}
 }
+
+func TestInternalArtifacts_NilSafe(t *testing.T) {
+	// Create invocation context without artifact service
+	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{
+		Artifacts: nil,
+	})
+	toolCtx := NewToolContext(inv, "fn1", &session.EventActions{})
+
+	artifacts := toolCtx.Artifacts()
+	// artifacts will be nil when service not configured
+
+	// Attempting to call methods on nil should be safe (won't panic)
+	// but will return errors
+	t.Run("List returns error", func(t *testing.T) {
+		_, err := artifacts.List(t.Context())
+		if err == nil {
+			t.Error("Expected error from List(), got nil")
+		}
+		expectedMsg := "artifact service not configured"
+		if err != nil && err.Error() != expectedMsg {
+			t.Errorf("Expected error %q, got: %v", expectedMsg, err)
+		}
+	})
+
+	t.Run("Load returns error", func(t *testing.T) {
+		_, err := artifacts.Load(t.Context(), "test.txt")
+		if err == nil {
+			t.Error("Expected error from Load(), got nil")
+		}
+		expectedMsg := "artifact service not configured"
+		if err != nil && err.Error() != expectedMsg {
+			t.Errorf("Expected error %q, got: %v", expectedMsg, err)
+		}
+	})
+
+	t.Run("Save returns error", func(t *testing.T) {
+		_, err := artifacts.Save(t.Context(), "test.txt", nil)
+		if err == nil {
+			t.Error("Expected error from Save(), got nil")
+		}
+		expectedMsg := "artifact service not configured"
+		if err != nil && err.Error() != expectedMsg {
+			t.Errorf("Expected error %q, got: %v", expectedMsg, err)
+		}
+	})
+}
