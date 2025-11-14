@@ -417,17 +417,17 @@ func (f *Flow) callTool(tool toolinternal.FunctionTool, fArgs map[string]any, to
 	// If the result is present, it will be used instead of calling the actual tool.
 	result, err := f.invokeBeforeToolCallbacks(tool, fArgs, toolCtx)
 	if err != nil {
-		return map[string]any{"error": fmt.Errorf("BeforeToolCallback failed: %w", err)}
+		return map[string]any{"error": fmt.Errorf("BeforeToolCallback failed: %w", err).Error()}
 	}
 	if result == nil {
 		result, err = tool.Run(toolCtx, fArgs)
 		if err != nil {
-			return map[string]any{"error": fmt.Errorf("tool %q failed: %w", tool.Name(), err)}
+			return map[string]any{"error": fmt.Errorf("tool %q failed: %w", tool.Name(), err).Error()}
 		}
 	}
 	afterToolCallbackResult, err := f.invokeAfterToolCallbacks(tool, fArgs, toolCtx, result, err)
 	if err != nil {
-		return map[string]any{"error": fmt.Errorf("AfterToolCallback failed: %w", err)}
+		return map[string]any{"error": fmt.Errorf("AfterToolCallback failed: %w", err).Error()}
 	}
 	// If the result is present, it will replace the result returned by the tool's Run method.
 	if afterToolCallbackResult != nil {
