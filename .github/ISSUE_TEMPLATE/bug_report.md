@@ -32,8 +32,8 @@ If applicable, add screenshots to help explain your problem.
  - Go version:
  - ADK version:
 
- **Model Information:**
- - Which model is being used(e.g. gemini-2.5-pro)
+**Model Information:**
+ - Which model is being used (e.g. gemini-2.5-pro)
 
 **Additional context**
 Add any other context about the problem here.
