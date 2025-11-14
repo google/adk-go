@@ -32,11 +32,20 @@ import (
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.0-flash-001", &genai.ClientConfig{
-		Backend:  genai.BackendVertexAI,
-		Project:  os.Getenv("PROJECT_ID"),
-		Location: "us-central1",
-	})
+	modelName := "gemini-2.0-flash-001"
+	if v := os.Getenv("MODEL_NAME"); v != "" {
+		modelName = v
+	}
+	location := "us-central1"
+	if v := os.Getenv("LOCATION"); v != "" {
+		location = v
+	}
+	model, err := gemini.NewModel(ctx, modelName, 
+		&genai.ClientConfig{
+			Backend:  genai.BackendVertexAI,
+			Project:  os.Getenv("PROJECT_ID"),
+			Location: location,
+		})
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
