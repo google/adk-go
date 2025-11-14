@@ -76,7 +76,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 		}
 	}
 
-	invocationMeta := toInvocationMeta(e.config, ctx, reqCtx)
+	invocationMeta := toInvocationMeta(ctx, e.config, reqCtx)
 
 	if err := e.prepareSession(ctx, invocationMeta); err != nil {
 		event := toTaskFailedUpdateEvent(reqCtx, err, invocationMeta.eventMeta)
