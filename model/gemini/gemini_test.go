@@ -32,6 +32,11 @@ import (
 
 //go:generate go test -httprecord=testdata/.*\.httprr
 
+const (
+	systemInstructionText  = "Handle the requests as specified in the System Instruction."
+	continueProcessingText = "Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed."
+)
+
 func TestModel_Generate(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -185,6 +190,127 @@ func TestModel_TrackingHeaders(t *testing.T) {
 			t.Error("HTTP request was not intercepted; headers not verified")
 		}
 	})
+}
+
+func TestModel_Name(t *testing.T) {
+	model := &geminiModel{name: "gemini-2.5-flash"}
+	if got := model.Name(); got != "gemini-2.5-flash" {
+		t.Fatalf("Model.Name() = %v, want %v", got, "gemini-2.5-flash")
+	}
+}
+
+func TestModel_NewModelError(t *testing.T) {
+	_, err := NewModel(t.Context(), "gemini-2.5-flash", &genai.ClientConfig{
+		// project and API key are mutually exclusive in the client initializer
+		APIKey:  "api-key",
+		Project: "project-id",
+	})
+	if err == nil {
+		t.Fatal("NewModel() expected error due to project and API key are mutually exclusive, got nil")
+	}
+	if want := "mutually exclusive"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("NewModel() error = %q, want to contain %q", err, want)
+	}
+}
+
+func TestModel_GenerateWhenEmptyModelName(t *testing.T) {
+	config := &genai.ClientConfig{
+		APIKey: "fakekey",
+	}
+	newModel, err := NewModel(t.Context(), "", config)
+	if err != nil {
+		t.Fatalf("NewModel() unexpected error: %v", err)
+	}
+	req := &model.LLMRequest{
+		Contents: genai.Text("What is the capital of France? One word."),
+		Config: &genai.GenerateContentConfig{
+			Temperature: new(float32),
+		},
+	}
+
+	var errs []error
+	for _, err := range newModel.GenerateContent(t.Context(), req, false) {
+		errs = append(errs, err)
+	}
+
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d", len(errs))
+	}
+
+	err = errs[0]
+	if err == nil {
+		t.Fatal("Model.Generate() expected error due to empty model name, got nil")
+	}
+	if want := "model is empty"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("Model.Generate() error = %q, want to contain %q", err, want)
+	}
+}
+
+func TestModel_MaybeAppendUserContent(t *testing.T) {
+	tests := []struct {
+		name            string
+		initialContents []*genai.Content
+		wantLen         int
+		wantLastRole    string
+	}{
+		{
+			name:            "empty contents",
+			initialContents: []*genai.Content{},
+			wantLen:         1,
+			wantLastRole:    genai.RoleUser,
+		},
+		{
+			name:            "last role is not user",
+			initialContents: []*genai.Content{{Role: genai.RoleModel}},
+			wantLen:         2,
+			wantLastRole:    genai.RoleUser,
+		},
+		{
+			name:            "last role is user",
+			initialContents: []*genai.Content{{Role: genai.RoleUser}},
+			wantLen:         1,
+			wantLastRole:    genai.RoleUser,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			newModel := &geminiModel{name: "gemini-2.5-flash"}
+			req := &model.LLMRequest{
+				Contents: tt.initialContents,
+			}
+			newModel.maybeAppendUserContent(req)
+
+			if gotLen := len(req.Contents); gotLen != tt.wantLen {
+				t.Fatalf("Expected Contents length to be %d, got %d", tt.wantLen, gotLen)
+			}
+
+			if len(req.Contents) > 0 {
+				lastContent := req.Contents[len(req.Contents)-1]
+				if lastContent.Role != tt.wantLastRole {
+					t.Fatalf("Expected last content role to be %q, got %q", tt.wantLastRole, lastContent.Role)
+				}
+
+				if len(tt.initialContents) < tt.wantLen {
+					if len(lastContent.Parts) == 0 {
+						t.Fatal("Expected appended content to have at least one part, but it has none")
+					}
+					textPart := lastContent.Parts[0].Text
+
+					var wantText string
+					if len(tt.initialContents) == 0 {
+						wantText = systemInstructionText
+					} else {
+						wantText = continueProcessingText
+					}
+
+					if string(textPart) != wantText {
+						t.Errorf("Unexpected text in appended content. got %q, want %q", string(textPart), wantText)
+					}
+				}
+			}
+		})
+	}
 }
 
 // newGeminiTestClientConfig returns the genai.ClientConfig configured for record and replay.
