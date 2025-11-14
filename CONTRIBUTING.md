@@ -56,12 +56,12 @@ information on using pull requests.
 ### Requirement for PRs
 
 -   Code must follow [Google Go Style Guide](https://google.github.io/styleguide/go/index).
--   All PRs, other than small documentation or typo fixes, should have a Issue
+-   All PRs, other than small documentation or typo fixes, should have an Issue
     associated. If a relevant issue doesn't exist, please create one first or
     you may instead describe the bug or feature directly within the PR
     description, following the structure of our issue templates.
 -   Small, focused PRs. Keep changes minimal—one concern per PR.
--   For bug fixes or features, please provide logs or screenshot after the fix
+-   For bug fixes or features, please provide logs or screenshots after the fix
     is applied to help reviewers better understand the fix.
 -   Please include a `testing plan` section in your PR to talk about how you
     will test. This will save time for PR review. See `Testing Requirements`
@@ -74,7 +74,7 @@ For substantial features or architectural revisions:
 -   Open an Issue First: Outline your proposal, including design considerations
     and impact.
 -   Gather Feedback: Discuss with maintainers and the community to ensure
-    alignment and avoid duplicate work
+    alignment and avoid duplicate work.
 
 ### Testing Requirements
 
@@ -87,13 +87,13 @@ Please add or update unit tests for your change.
 
 Requirements for unit tests:
 
--   **Coverage:** Cover new features, edge cases, error conditions, and typical
+-   Cover new features, edge cases, error conditions, and typical
     use cases.
 -   Fast and isolated.
 -   Written clearly with descriptive names.
 -   Free of external dependencies (use mocks or fixtures as needed).
--   **Quality:** Aim for high readability and maintainability; include
-    comments for complex scenarios.
+-   Aim for high readability and maintainability; include comments for complex
+    scenarios.
 
 #### Manual End-to-End (E2E) Tests
 
@@ -120,8 +120,8 @@ Depending on your change:
 
 For any changes that impact user-facing documentation (guides, API reference,
 tutorials), please open a PR in the
-[adk-docs](https://github.com/google/adk-docs) repository to update relevant
-part before or alongside your code PR.
+[adk-docs](https://github.com/google/adk-docs) repository to update the relevant
+parts before or alongside your code PR.
 
-### Alignment with [adk-python](https://github.com/google/adk-python)
-We lean on adk-python for being the source of truth and one should refer to adk-python for validation.
+### Alignment with adk-python
+We lean on [adk-python](https://github.com/google/adk-python) for being the source of truth and one should refer to adk-python for validation.
