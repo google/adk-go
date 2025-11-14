@@ -37,6 +37,12 @@ func toInvocationMeta(config ExecutorConfig, reqCtx *a2asrv.RequestContext) invo
 	// TODO(yarolegovich): update once A2A provides auth data extraction from Context
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 
+	if reqCtx.Metadata != nil {
+		if reqUserID, ok := reqCtx.Metadata["adk_user_id"].(string); ok {
+			userID = reqUserID
+		}
+	}
+
 	m := map[string]any{
 		ToA2AMetaKey("app_name"):   config.RunnerConfig.AppName,
 		ToA2AMetaKey("user_id"):    userID,

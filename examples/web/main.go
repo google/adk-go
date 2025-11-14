@@ -19,6 +19,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -46,6 +47,20 @@ func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, l
 	}
 	return llmResponse, llmResponseError
 }
+
+type AuthInterceptor struct {
+}
+
+// Intercept implements a2asrv.RequestContextInterceptor.
+func (a *AuthInterceptor) Intercept(ctx context.Context, reqCtx *a2asrv.RequestContext) (context.Context, error) {
+	if reqCtx.Metadata == nil {
+		reqCtx.Metadata = make(map[string]any)
+	}
+	reqCtx.Metadata["adk_user_id"] = "user"
+	return ctx, nil
+}
+
+var _ a2asrv.RequestContextInterceptor = (*AuthInterceptor)(nil)
 
 func main() {
 	ctx := context.Background()
@@ -89,6 +104,9 @@ func main() {
 		ArtifactService: artifactservice,
 		SessionService:  sessionService,
 		AgentLoader:     agentLoader,
+		A2AOptions: []a2asrv.RequestHandlerOption{
+			a2asrv.WithRequestContextInterceptor(&AuthInterceptor{}),
+		},
 	}
 
 	l := full.NewLauncher()
