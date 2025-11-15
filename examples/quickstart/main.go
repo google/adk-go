@@ -19,11 +19,11 @@ import (
 	"log"
 	"os"
 
-	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher"
+	ladk "google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/genai"
@@ -52,8 +52,8 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	config := &launcher.Config{
-		AgentLoader: agent.NewSingleLoader(a),
+	config := &ladk.Config{
+		AgentLoader: services.NewSingleAgentLoader(a),
 	}
 
 	l := full.NewLauncher()
