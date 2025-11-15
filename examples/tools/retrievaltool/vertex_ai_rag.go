@@ -18,6 +18,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strconv"
 
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/cmd/launcher/adk"
@@ -40,7 +41,7 @@ func main() {
 	if v := os.Getenv("LOCATION"); v != "" {
 		location = v
 	}
-	model, err := gemini.NewModel(ctx, modelName, 
+	model, err := gemini.NewModel(ctx, modelName,
 		&genai.ClientConfig{
 			Backend:  genai.BackendVertexAI,
 			Project:  os.Getenv("PROJECT_ID"),
