@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"sync"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
@@ -107,7 +108,9 @@ type Runner struct {
 
 	// optional
 	compactionConfig *compaction.Config
+	compactorOnce    sync.Once
 	compactor        *compaction.Compactor
+	compactorErr     error
 }
 
 // Run runs the agent for the given user input, yielding events from agents.
@@ -318,14 +321,14 @@ func (r *Runner) maybeCompact(ctx agent.InvocationContext) {
 		return
 	}
 
-	// Create or reuse compactor
-	if r.compactor == nil {
-		var err error
-		r.compactor, err = compaction.New(*r.compactionConfig, llm)
-		if err != nil {
-			log.Printf("failed to create compactor: %v", err)
-			return
-		}
+	// Create or reuse compactor (thread-safe initialization using sync.Once)
+	r.compactorOnce.Do(func() {
+		r.compactor, r.compactorErr = compaction.New(*r.compactionConfig, llm)
+	})
+
+	if r.compactorErr != nil {
+		log.Printf("failed to create compactor: %v", r.compactorErr)
+		return
 	}
 
 	// Attempt compaction

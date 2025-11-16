@@ -217,34 +217,10 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 		filteredEvents = filteredEvents[firstIndexToKeep:]
 	}
 
-	// COMPACTION FEATURE MODIFICATION NEEDED:
-	// Session Compaction requires intelligent event filtering in Get() to:
-	// 1. Replace original events with their compaction summary when appropriate
-	// 2. Avoid including both original events AND their compaction summary in results
-	// 3. Maintain correct LLM context (summary replaces original events, not duplicate)
-	//
-	// When events are compacted:
-	//   - Original events (t1...t2) are summarized into a CompactedContent
-	//   - A new event is created with Actions.Compaction pointing to this summary
-	//   - This compaction event has a timestamp = t2 (end of window)
-	//   - When Get() is called, it must return EITHER the original events OR the compaction event,
-	//     never both for the same time window
-	//
-	// FUTURE ENHANCEMENT - Filter events based on compaction windows:
-	//   1. Build compaction window map: scan through events, find all with Actions.Compaction != nil
-	//   2. For each event in filtered set:
-	//      - If its timestamp falls in [Compaction.StartTimestamp, Compaction.EndTimestamp):
-	//        EXCLUDE it (it's been replaced by the compaction summary)
-	//      - If it IS a compaction event (Actions.Compaction != nil):
-	//        INCLUDE it (this is the replacement summary)
-	//      - Otherwise:
-	//        INCLUDE it (regular event, not affected by any compaction)
-	//   3. Return the deduplicated event set
-	//
-	// Why this is essential:
-	// - Without filtering: LLM sees both original events AND their summary → redundant tokens, conflicting context
-	// - With filtering: LLM sees only the compact summary → 60-80% token reduction for long sessions
-	// - Database still stores originals → preserves full audit trail for compliance/debugging
+	// COMPACTION FEATURE: Filter out original events that have been replaced by compaction summaries
+	// This ensures the LLM context contains only the compaction summaries and non-compacted events,
+	// achieving 60-80% token reduction for long sessions.
+	filteredEvents = filterEventsForCompaction(filteredEvents)
 
 	copiedSession.events = make([]*Event, 0, len(filteredEvents))
 	copiedSession.events = append(copiedSession.events, filteredEvents...)
@@ -629,6 +605,66 @@ func copySessionWithoutStateAndEvents(sess *session) *session {
 		},
 		updatedAt: sess.updatedAt,
 	}
+}
+
+// filterEventsForCompaction filters out original events that have been compacted.
+// It returns only compaction events (summaries) and non-compacted events, ensuring
+// the LLM context doesn't include both original events and their summaries.
+func filterEventsForCompaction(events []*Event) []*Event {
+	if len(events) == 0 {
+		return events
+	}
+
+	// First pass: identify all compaction ranges
+	compactionRanges := make([]compactionRange, 0)
+	for _, event := range events {
+		if event.Actions.Compaction != nil {
+			compactionRanges = append(compactionRanges, compactionRange{
+				startTimestamp: event.Actions.Compaction.StartTimestamp,
+				endTimestamp:   event.Actions.Compaction.EndTimestamp,
+			})
+		}
+	}
+
+	// If no compactions, return events as-is
+	if len(compactionRanges) == 0 {
+		return events
+	}
+
+	// Second pass: filter events based on compaction ranges
+	filtered := make([]*Event, 0, len(events))
+	for _, event := range events {
+		// Always include compaction events themselves
+		if event.Actions.Compaction != nil {
+			filtered = append(filtered, event)
+			continue
+		}
+
+		// Check if this event is within any compaction range
+		if !isEventWithinRange(event, compactionRanges) {
+			// Include events that are not compacted
+			filtered = append(filtered, event)
+		}
+	}
+
+	return filtered
+}
+
+// compactionRange represents the time window of a compaction event.
+type compactionRange struct {
+	startTimestamp float64
+	endTimestamp   float64
+}
+
+// isEventWithinRange checks if an event's timestamp falls within any compaction range.
+func isEventWithinRange(event *Event, ranges []compactionRange) bool {
+	eventTime := float64(event.Timestamp.Unix())
+	for _, r := range ranges {
+		if eventTime >= r.startTimestamp && eventTime <= r.endTimestamp {
+			return true
+		}
+	}
+	return false
 }
 
 var _ Service = (*inMemoryService)(nil)

@@ -156,26 +156,27 @@ func (c *Compactor) selectEventsToCompact(allEvents []*session.Event, lastCompac
 
 	// Gather all events from the invocations to compact
 	eventsToCompact := make([]*session.Event, 0)
-	startTime := 0.0
-	endTime := 0.0
 
-	for i, invID := range invocationsToCompact {
+	for _, invID := range invocationsToCompact {
 		invEvents := invocationMap[invID]
 		for _, evt := range invEvents {
 			eventsToCompact = append(eventsToCompact, evt)
-			if i == 0 && startTime == 0 {
-				startTime = float64(evt.Timestamp.Unix())
-			}
-			if float64(evt.Timestamp.Unix()) > endTime {
-				endTime = float64(evt.Timestamp.Unix())
-			}
 		}
 	}
 
-	// Sort by timestamp to ensure proper ordering
+	// If no events to compact, return early
+	if len(eventsToCompact) == 0 {
+		return nil, 0, 0
+	}
+
+	// Sort by timestamp to ensure proper ordering before determining time range
 	sort.Slice(eventsToCompact, func(i, j int) bool {
 		return eventsToCompact[i].Timestamp.Before(eventsToCompact[j].Timestamp)
 	})
+
+	// Calculate time range from sorted events
+	startTime := float64(eventsToCompact[0].Timestamp.Unix())
+	endTime := float64(eventsToCompact[len(eventsToCompact)-1].Timestamp.Unix())
 
 	return eventsToCompact, startTime, endTime
 }
