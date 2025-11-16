@@ -171,6 +171,10 @@ const (
 	KeyPrefixUser string = "user:"
 )
 
+// ErrSessionNotFound is returned when a requested session does not exist.
+// Callers should compare errors using errors.Is(err, session.ErrSessionNotFound).
+var ErrSessionNotFound = errors.New("session not found")
+
 // ErrStateKeyNotExist is the error thrown when key does not exist.
 var ErrStateKeyNotExist = errors.New("state key does not exist")
 
