@@ -27,7 +27,7 @@ import (
 	"google.golang.org/genai"
 )
 
-func Test_databaseService_Create(t *testing.T) {
+func Test_inMemoryService_Create(t *testing.T) {
 	tests := []struct {
 		name    string
 		setup   func(t *testing.T) Service
@@ -78,7 +78,7 @@ func Test_databaseService_Create(t *testing.T) {
 
 			got, err := s.Create(t.Context(), tt.req)
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("databaseService.Create() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("inMemoryService.Create() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -114,7 +114,7 @@ func Test_databaseService_Create(t *testing.T) {
 	}
 }
 
-func Test_databaseService_Delete(t *testing.T) {
+func Test_inMemoryService_Delete(t *testing.T) {
 	tests := []struct {
 		name              string
 		req               *DeleteRequest
@@ -149,18 +149,18 @@ func Test_databaseService_Delete(t *testing.T) {
 			err := s.Delete(t.Context(), tt.req)
 			if tt.wantErrIsNotFound {
 				if !errors.Is(err, ErrSessionNotFound) {
-					t.Fatalf("databaseService.Delete() error = %v, wantErr ErrSessionNotFound", err)
+					t.Fatalf("inMemoryService.Delete() error = %v, wantErr ErrSessionNotFound", err)
 				}
 				return
 			}
 			if (err != nil) != tt.wantErr {
-				t.Errorf("databaseService.Delete() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("inMemoryService.Delete() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func Test_databaseService_Get(t *testing.T) {
+func Test_inMemoryService_Get(t *testing.T) {
 	// This setup function is required for a test case.
 	// It creates the specific scenario from 'test_get_session_respects_user_id'.
 	setupGetRespectsUserID := func(t *testing.T) Service {
@@ -353,12 +353,12 @@ func Test_databaseService_Get(t *testing.T) {
 			got, err := s.Get(t.Context(), tt.req)
 			if tt.wantErrIsNotFound {
 				if !errors.Is(err, ErrSessionNotFound) {
-					t.Fatalf("databaseService.Get() error = %v, want ErrSessionNotFound", err)
+					t.Fatalf("inMemoryService.Get() error = %v, want ErrSessionNotFound", err)
 				}
 				return
 			}
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("databaseService.Get() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("inMemoryService.Get() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -387,7 +387,7 @@ func Test_databaseService_Get(t *testing.T) {
 	}
 }
 
-func Test_databaseService_List(t *testing.T) {
+func Test_inMemoryService_List(t *testing.T) {
 	tests := []struct {
 		name         string
 		req          *ListRequest
@@ -499,7 +499,7 @@ func Test_databaseService_List(t *testing.T) {
 			s := tt.setup(t)
 			got, err := s.List(t.Context(), tt.req)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("databaseService.List() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("inMemoryService.List() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -514,14 +514,14 @@ func Test_databaseService_List(t *testing.T) {
 					}),
 				}
 				if diff := cmp.Diff(tt.wantResponse, got, opts...); diff != "" {
-					t.Errorf("databaseService.List() = %v (-want +got):\n%s", got, diff)
+					t.Errorf("inMemoryService.List() = %v (-want +got):\n%s", got, diff)
 				}
 			}
 		})
 	}
 }
 
-func Test_databaseService_AppendEvent(t *testing.T) {
+func Test_inMemoryService_AppendEvent(t *testing.T) {
 	tests := []struct {
 		name              string
 		setup             func(t *testing.T) Service
@@ -808,12 +808,12 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			err := s.AppendEvent(ctx, tt.session, tt.event)
 			if tt.wantErrIsNotFound {
 				if !errors.Is(err, ErrSessionNotFound) {
-					t.Fatalf("databaseService.AppendEvent() error = %v, want ErrSessionNotFound", err)
+					t.Fatalf("inMemoryService.AppendEvent() error = %v, want ErrSessionNotFound", err)
 				}
 				return
 			}
 			if (err != nil) != tt.wantErr {
-				t.Errorf("databaseService.AppendEvent() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("inMemoryService.AppendEvent() error = %v, wantErr %v", err, tt.wantErr)
 			}
 
 			if err != nil {
@@ -826,7 +826,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 				SessionID: tt.session.ID(),
 			})
 			if err != nil {
-				t.Fatalf("databaseService.Get() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("inMemoryService.Get() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -854,7 +854,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 	}
 }
 
-func Test_databaseService_StateManagement(t *testing.T) {
+func Test_inMemoryService_StateManagement(t *testing.T) {
 	ctx := t.Context()
 	appName := "my_app"
 
