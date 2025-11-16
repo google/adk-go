@@ -29,6 +29,31 @@ This Go version of ADK is ideal for developers building cloud-native agent appli
 
 ---
 
+## 🆕 OpenAI Adapter for Local LLMs
+
+**This fork adds OpenAI-compatible adapter support**, enabling you to run ADK agents on:
+- 🖥️ **Local LLMs** (LM Studio, Ollama)
+- ☁️ **OpenAI API** (GPT-4, GPT-3.5-turbo)
+- 🔧 **Any OpenAI-compatible endpoint**
+
+### Features
+- ✅ Multi-turn tool calling
+- ✅ Streaming responses (SSE)
+- ✅ Session management with TTL
+- ✅ Comprehensive error handling
+- ✅ 146 tests, 74.8% coverage
+
+### Quick Start
+```bash
+cd examples/openai
+go build -o weather_agent main.go
+./weather_agent console
+```
+
+**📖 Full documentation:** [README_OPENAI.md](README_OPENAI.md)
+
+---
+
 ## ✨ Key Features
 
 *   **Idiomatic Go:** Designed to feel natural and leverage the power of Go.

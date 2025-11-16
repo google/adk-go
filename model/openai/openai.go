@@ -1,0 +1,589 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package openai implements the [model.LLM] interface for OpenAI-compatible APIs.
+// This includes OpenAI API, LM Studio, Ollama, and other compatible endpoints.
+package openai
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"iter"
+	"log"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"google.golang.org/adk/model"
+)
+
+const (
+	defaultMaxHistoryLength = 50
+	defaultSessionTTL       = 1 * time.Hour
+	defaultMaxRetries       = 3
+	defaultTimeout          = 120 * time.Second
+)
+
+// OpenAIMessage represents a message in OpenAI chat format.
+type OpenAIMessage struct {
+	Role       string      `json:"role"`
+	Content    interface{} `json:"content,omitempty"`
+	Name       string      `json:"name,omitempty"`
+	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
+}
+
+// ToolCall represents an OpenAI tool call.
+type ToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function FunctionCall `json:"function"`
+}
+
+// FunctionCall represents a function call within a tool call.
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// Tool represents an OpenAI tool definition.
+type Tool struct {
+	Type     string   `json:"type"`
+	Function Function `json:"function"`
+}
+
+// Function represents a function definition for OpenAI tools.
+type Function struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
+}
+
+// ChatCompletionRequest represents an OpenAI chat completion request.
+type ChatCompletionRequest struct {
+	Model       string          `json:"model"`
+	Messages    []OpenAIMessage `json:"messages"`
+	Temperature *float32        `json:"temperature,omitempty"`
+	MaxTokens   *int32          `json:"max_tokens,omitempty"`
+	Tools       []Tool          `json:"tools,omitempty"`
+	ToolChoice  interface{}     `json:"tool_choice,omitempty"`
+	Stream      bool            `json:"stream,omitempty"`
+}
+
+// ChatCompletionResponse represents an OpenAI chat completion response.
+type ChatCompletionResponse struct {
+	ID      string   `json:"id"`
+	Object  string   `json:"object"`
+	Created int64    `json:"created"`
+	Model   string   `json:"model"`
+	Choices []Choice `json:"choices"`
+	Usage   Usage    `json:"usage"`
+}
+
+// Choice represents a completion choice.
+type Choice struct {
+	Index        int           `json:"index"`
+	Message      OpenAIMessage `json:"message"`
+	Delta        OpenAIMessage `json:"delta,omitempty"`
+	FinishReason string        `json:"finish_reason,omitempty"`
+}
+
+// Usage represents token usage statistics.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// validateMessage validates an OpenAI message according to API rules.
+// Returns an error if the message violates OpenAI API constraints:
+//   - "tool" role messages must have ToolCallID
+//   - "assistant" role messages with ToolCalls should have empty or minimal Content
+//   - All messages must have a valid role
+func validateMessage(msg *OpenAIMessage) error {
+	if msg == nil {
+		return fmt.Errorf("message cannot be nil")
+	}
+
+	// Validate role is not empty
+	if msg.Role == "" {
+		return fmt.Errorf("message role cannot be empty")
+	}
+
+	// Validate "tool" role messages
+	if msg.Role == "tool" {
+		if msg.ToolCallID == "" {
+			return fmt.Errorf("tool role message must have ToolCallID")
+		}
+		// Tool messages should have content (the tool result)
+		if msg.Content == nil || msg.Content == "" {
+			return fmt.Errorf("tool role message must have content (tool result)")
+		}
+	}
+
+	// Validate "assistant" role messages with tool calls
+	if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+		// When assistant makes tool calls, content should be empty or null
+		// Some models allow a brief message, but typically it's empty
+		// We'll allow empty string, nil, or empty content
+		if msg.Content != nil {
+			if str, ok := msg.Content.(string); ok && str != "" {
+				// Non-empty string content with tool calls is allowed but not typical
+				// Log a debug message if logger is available, but don't error
+			}
+		}
+	}
+
+	// Validate tool calls if present
+	for i, tc := range msg.ToolCalls {
+		if tc.ID == "" {
+			return fmt.Errorf("tool call at index %d must have an ID", i)
+		}
+		if tc.Type == "" {
+			return fmt.Errorf("tool call at index %d must have a type", i)
+		}
+		if tc.Function.Name == "" {
+			return fmt.Errorf("tool call at index %d must have a function name", i)
+		}
+		// Arguments can be empty for functions with no parameters
+	}
+
+	return nil
+}
+
+// conversationState holds the history for a session.
+type conversationState struct {
+	history    []*OpenAIMessage
+	lastAccess time.Time
+}
+
+// Config holds configuration for the OpenAI adapter.
+type Config struct {
+	// BaseURL is the API endpoint (e.g., "https://api.openai.com/v1" or "http://localhost:1234/v1")
+	BaseURL string
+	// APIKey for authentication (optional for local LLMs)
+	APIKey string
+	// HTTPClient for making requests (optional, will use default if nil)
+	HTTPClient *http.Client
+	// MaxHistoryLength is the maximum number of messages to keep in history
+	MaxHistoryLength int
+	// SessionTTL is how long to keep session history before cleanup
+	SessionTTL time.Duration
+	// MaxRetries for failed requests
+	MaxRetries int
+	// Timeout for HTTP requests
+	Timeout time.Duration
+	// Logger for session and request logging (optional)
+	Logger *log.Logger
+}
+
+type openaiModel struct {
+	name             string
+	baseURL          string
+	apiKey           string
+	httpClient       *http.Client
+	maxHistoryLength int
+	sessionTTL       time.Duration
+	maxRetries       int
+	timeout          time.Duration
+	logger           *log.Logger
+
+	// Conversation state management
+	conversations map[string]*conversationState
+	mu            sync.RWMutex
+
+	// JSON pool for performance
+	jsonPool sync.Pool
+}
+
+// NewModel creates a new OpenAI-compatible model adapter.
+//
+// modelName specifies which model to use (e.g., "gpt-4", "gemma-3-12b-it").
+// cfg provides the configuration including API endpoint and authentication.
+func NewModel(modelName string, cfg *Config) (model.LLM, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+	if cfg.BaseURL == "" {
+		return nil, fmt.Errorf("BaseURL must be specified")
+	}
+
+	// Set defaults
+	maxHistoryLength := cfg.MaxHistoryLength
+	if maxHistoryLength == 0 {
+		maxHistoryLength = defaultMaxHistoryLength
+	}
+
+	sessionTTL := cfg.SessionTTL
+	if sessionTTL == 0 {
+		sessionTTL = defaultSessionTTL
+	}
+
+	maxRetries := cfg.MaxRetries
+	if maxRetries == 0 {
+		maxRetries = defaultMaxRetries
+	}
+
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = defaultTimeout
+	}
+
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{
+			Timeout: timeout,
+		}
+	}
+
+	m := &openaiModel{
+		name:             modelName,
+		baseURL:          strings.TrimSuffix(cfg.BaseURL, "/"),
+		apiKey:           cfg.APIKey,
+		httpClient:       httpClient,
+		maxHistoryLength: maxHistoryLength,
+		sessionTTL:       sessionTTL,
+		maxRetries:       maxRetries,
+		timeout:          timeout,
+		logger:           cfg.Logger,
+		conversations:    make(map[string]*conversationState),
+		jsonPool: sync.Pool{
+			New: func() interface{} {
+				return new(bytes.Buffer)
+			},
+		},
+	}
+
+	// Start cleanup goroutine for expired sessions
+	go m.cleanupExpiredSessions()
+
+	return m, nil
+}
+
+func (m *openaiModel) Name() string {
+	return m.name
+}
+
+// GenerateContent calls the OpenAI-compatible API with conversation history management.
+func (m *openaiModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if stream {
+		return m.generateStream(ctx, req)
+	}
+
+	return func(yield func(*model.LLMResponse, error) bool) {
+		resp, err := m.generate(ctx, req)
+		yield(resp, err)
+	}
+}
+
+// cleanupExpiredSessions removes old conversation states periodically.
+func (m *openaiModel) cleanupExpiredSessions() {
+	ticker := time.NewTicker(m.sessionTTL / 2)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		m.mu.Lock()
+		now := time.Now()
+		for sessionID, state := range m.conversations {
+			if now.Sub(state.lastAccess) > m.sessionTTL {
+				delete(m.conversations, sessionID)
+			}
+		}
+		m.mu.Unlock()
+	}
+}
+
+// getConversationHistory retrieves the conversation history for a session.
+// Returns nil if no history exists or if the session has expired.
+func (m *openaiModel) getConversationHistory(sessionID string) []*OpenAIMessage {
+	if sessionID == "" {
+		return nil
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	state, exists := m.conversations[sessionID]
+	if !exists {
+		return nil
+	}
+
+	// Check TTL
+	if time.Since(state.lastAccess) > m.sessionTTL {
+		return nil
+	}
+
+	// Return a copy to prevent concurrent modification
+	history := make([]*OpenAIMessage, len(state.history))
+	copy(history, state.history)
+
+	return history
+}
+
+// addToHistory adds messages to the conversation history for a session.
+// Validates each message before adding. If validation fails, logs error and skips the message.
+func (m *openaiModel) addToHistory(sessionID string, msgs ...*OpenAIMessage) {
+	if sessionID == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state, exists := m.conversations[sessionID]
+	if !exists {
+		state = &conversationState{
+			history: make([]*OpenAIMessage, 0, m.maxHistoryLength),
+		}
+		m.conversations[sessionID] = state
+	}
+
+	// Validate and add messages
+	for _, msg := range msgs {
+		if err := validateMessage(msg); err != nil {
+			// Log validation error if logger is available
+			if m.logger != nil {
+				m.logger.Printf("WARNING: Invalid message skipped: %v", err)
+			}
+			// Skip invalid message
+			continue
+		}
+		state.history = append(state.history, msg)
+	}
+
+	state.lastAccess = time.Now()
+
+	// Trim if exceeds max length (keep system message if present)
+	if len(state.history) > m.maxHistoryLength {
+		systemMsg := []*OpenAIMessage{}
+		if len(state.history) > 0 && state.history[0].Role == "system" {
+			systemMsg = append(systemMsg, state.history[0])
+		}
+
+		// Keep the most recent messages
+		startIdx := len(state.history) - m.maxHistoryLength + len(systemMsg)
+		state.history = append(systemMsg, state.history[startIdx:]...)
+	}
+}
+
+// clearHistory removes all conversation history for a session.
+func (m *openaiModel) clearHistory(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	delete(m.conversations, sessionID)
+}
+
+// generate calls the model synchronously.
+func (m *openaiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+	// Convert genai.Content to OpenAI messages
+	messages, err := m.convertToOpenAIMessages(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert messages: %w", err)
+	}
+
+	// Build OpenAI request
+	chatReq := ChatCompletionRequest{
+		Model:    m.name,
+		Messages: messages,
+		Stream:   false,
+	}
+
+	// Add configuration from req.Config
+	if req.Config != nil {
+		if req.Config.Temperature != nil {
+			chatReq.Temperature = req.Config.Temperature
+		}
+		if req.Config.MaxOutputTokens > 0 {
+			tokens := req.Config.MaxOutputTokens
+			chatReq.MaxTokens = &tokens
+		}
+	}
+
+	// Add tools if present
+	if len(req.Tools) > 0 {
+		chatReq.Tools = m.convertTools(req.Tools)
+		chatReq.ToolChoice = "auto"
+	}
+
+	// Make API call
+	respData, err := m.makeRequest(ctx, chatReq)
+	if err != nil {
+		return nil, err
+	}
+
+	var chatResp ChatCompletionResponse
+	if err := json.Unmarshal(respData, &chatResp); err != nil {
+		return nil, &OpenAIError{
+			Type:    ErrorTypeInvalidJSON,
+			Message: fmt.Sprintf("failed to parse response: %v", err),
+			Details: truncateString(string(respData), 200),
+		}
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, &OpenAIError{
+			Type:    ErrorTypeUnknown,
+			Message: "no choices in response",
+			Details: chatResp,
+		}
+	}
+
+	// Get the response message
+	responseMsg := &chatResp.Choices[0].Message
+
+	// Add response to history (even if no tools were used)
+	sessionID := extractSessionIDWithLogging(ctx, m.logger)
+	if sessionID != "" {
+		m.addToHistory(sessionID, responseMsg)
+	}
+
+	// Convert back to genai format
+	return m.convertToLLMResponse(responseMsg, &chatResp.Usage)
+}
+
+
+// makeRequest makes an HTTP request to the OpenAI API.
+func (m *openaiModel) makeRequest(ctx context.Context, req ChatCompletionRequest) ([]byte, error) {
+	buf := m.jsonPool.Get().(*bytes.Buffer)
+	defer func() {
+		buf.Reset()
+		m.jsonPool.Put(buf)
+	}()
+
+	if err := json.NewEncoder(buf).Encode(req); err != nil {
+		return nil, fmt.Errorf("failed to encode request: %w", err)
+	}
+
+	url := m.baseURL + "/chat/completions"
+
+	var lastErr error
+	initialBackoff := 1 * time.Second
+	maxBackoff := 30 * time.Second
+
+	// Store request body bytes for retries
+	reqBody := buf.Bytes()
+
+	for attempt := 0; attempt < m.maxRetries; attempt++ {
+		// Create a new request for each attempt (required for retries)
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		if m.apiKey != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+m.apiKey)
+		}
+
+		resp, err := m.httpClient.Do(httpReq)
+		if err != nil {
+			lastErr = &OpenAIError{
+				Type:    ErrorTypeNetwork,
+				Message: fmt.Sprintf("network error: %v", err),
+			}
+
+			// Retry with backoff on network errors
+			if attempt < m.maxRetries-1 {
+				backoff := calculateBackoff(attempt, initialBackoff, maxBackoff, 2.0)
+				if m.logger != nil {
+					m.logger.Printf("Network error, retrying in %v (attempt %d/%d): %v", backoff, attempt+1, m.maxRetries, err)
+				}
+				time.Sleep(backoff)
+			}
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if err != nil {
+			lastErr = &OpenAIError{
+				Type:    ErrorTypeNetwork,
+				Message: fmt.Sprintf("failed to read response: %v", err),
+			}
+			continue
+		}
+
+		// Handle success
+		if resp.StatusCode == http.StatusOK {
+			return body, nil
+		}
+
+		// Handle rate limiting
+		if resp.StatusCode == http.StatusTooManyRequests {
+			lastErr = &OpenAIError{
+				Type:    ErrorTypeRateLimit,
+				Message: "rate limit exceeded",
+				Code:    "rate_limit_exceeded",
+				Details: string(body),
+			}
+
+			// Check for retry-after header
+			if attempt < m.maxRetries-1 {
+				retryAfter := extractRetryAfter(resp)
+				if retryAfter == 0 {
+					retryAfter = calculateBackoff(attempt, initialBackoff, maxBackoff, 2.0)
+				}
+
+				if m.logger != nil {
+					m.logger.Printf("Rate limit hit, retrying in %v (attempt %d/%d)", retryAfter, attempt+1, m.maxRetries)
+				}
+
+				// Wait before retrying
+				select {
+				case <-time.After(retryAfter):
+					continue
+				case <-ctx.Done():
+					return nil, &OpenAIError{
+						Type:    ErrorTypeTimeout,
+						Message: "request cancelled during rate limit backoff",
+					}
+				}
+			}
+			continue
+		}
+
+		// Handle other HTTP errors
+		lastErr = &HTTPError{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       string(body),
+		}
+
+		// Don't retry 4xx errors (except 429) - they're client errors
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			break
+		}
+
+		// Retry 5xx errors with backoff
+		if attempt < m.maxRetries-1 {
+			backoff := calculateBackoff(attempt, initialBackoff, maxBackoff, 2.0)
+			if m.logger != nil {
+				m.logger.Printf("Server error %d, retrying in %v (attempt %d/%d)", resp.StatusCode, backoff, attempt+1, m.maxRetries)
+			}
+			time.Sleep(backoff)
+		}
+	}
+
+	return nil, fmt.Errorf("request failed after %d retries: %w", m.maxRetries, lastErr)
+}

@@ -20,3 +20,36 @@ profile.cov
 # Go workspace file
 go.work
 go.work.sum
+
+# Example binaries and logs
+examples/openai/weather_agent
+examples/openai/*.log
+examples/openai/test_llm.sh
+examples/openai/test_agent.sh
+examples/openai/test_weather.sh
+examples/openai/simple_demo.go
+examples/openai/test_direct.go
+examples/openai/test_simple.go
+
+# Debug and temporary test files
+model/openai/debug_test.go
+model/openai/debug_tool_test.go
+
+# Documentation files (not for git)
+AGENT_SETUP_CHECKLIST.md
+GOAL_STATUS_REPORT.md
+README_OPENAI.md
+
+# Model openai documentation and test results
+model/openai/VALIDATION.md
+model/openai/TEST_SUMMARY.md
+model/openai/SESSION_USAGE.md
+model/openai/test_results.txt
+model/openai/validation_test.go
+
+# All test files in model/openai
+model/openai/*_test.go
+
+# README files (documentation is in main README.md)
+examples/openai/README.md
+model/openai/README.md
