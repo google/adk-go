@@ -26,6 +26,8 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/loadartifactstool"
 	"google.golang.org/genai"
 )
 
@@ -310,6 +312,86 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 	expectedText := fmt.Sprintf("Uploaded file: %s. It has been saved to the artifacts", savedFileName)
 	if partWithBlob.Text != expectedText {
 		t.Errorf("unexpected text in placeholder part. got %q, want %q", partWithBlob.Text, expectedText)
+	}
+}
+
+func TestNew_ValidatesLoadArtifactsToolRequiresArtifactService(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		agent           agent.Agent
+		artifactService artifact.Service
+		wantErr         bool
+		errContains     string
+	}{
+		{
+			name: "error when load_artifacts tool present but no artifact service",
+			agent: must(llmagent.New(llmagent.Config{
+				Name:  "test_agent",
+				Tools: []tool.Tool{loadartifactstool.New()},
+			})),
+			artifactService: nil,
+			wantErr:         true,
+			errContains:     "load_artifacts tool but ArtifactService not configured",
+		},
+		{
+			name: "ok when load_artifacts tool and artifact service both present",
+			agent: must(llmagent.New(llmagent.Config{
+				Name:  "test_agent",
+				Tools: []tool.Tool{loadartifactstool.New()},
+			})),
+			artifactService: artifact.InMemoryService(),
+			wantErr:         false,
+		},
+		{
+			name: "ok when no load_artifacts tool and no artifact service",
+			agent: must(llmagent.New(llmagent.Config{
+				Name: "test_agent",
+			})),
+			artifactService: nil,
+			wantErr:         false,
+		},
+		{
+			name: "error when load_artifacts in sub-agent but no artifact service",
+			agent: must(llmagent.New(llmagent.Config{
+				Name: "parent_agent",
+				SubAgents: []agent.Agent{
+					must(llmagent.New(llmagent.Config{
+						Name:  "child_agent",
+						Tools: []tool.Tool{loadartifactstool.New()},
+					})),
+				},
+			})),
+			artifactService: nil,
+			wantErr:         true,
+			errContains:     "child_agent",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(Config{
+				AppName:         "testApp",
+				Agent:           tt.agent,
+				SessionService:  session.InMemoryService(),
+				ArtifactService: tt.artifactService,
+			})
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("New() expected error but got nil")
+					return
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("New() error = %v, want error containing %q", err, tt.errContains)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("New() unexpected error = %v", err)
+				}
+			}
+		})
 	}
 }
 

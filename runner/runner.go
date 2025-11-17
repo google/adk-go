@@ -64,6 +64,11 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)
 	}
 
+	// Validate that required services are configured for tools
+	if err := validateConfiguration(cfg.Agent, cfg.ArtifactService); err != nil {
+		return nil, err
+	}
+
 	return &Runner{
 		appName:         cfg.AppName,
 		rootAgent:       cfg.Agent,
@@ -263,6 +268,37 @@ func findAgent(curAgent agent.Agent, targetName string) agent.Agent {
 	for _, subAgent := range curAgent.SubAgents() {
 		if agent := findAgent(subAgent, targetName); agent != nil {
 			return agent
+		}
+	}
+	return nil
+}
+
+// validateConfiguration checks that required services are available for tools.
+func validateConfiguration(rootAgent agent.Agent, artifactService artifact.Service) error {
+	return walkAgentTree(rootAgent, func(a agent.Agent) error {
+		llmAgent, ok := a.(llminternal.Agent)
+		if !ok {
+			return nil
+		}
+
+		state := llminternal.Reveal(llmAgent)
+		for _, t := range state.Tools {
+			if t.Name() == "load_artifacts" && artifactService == nil {
+				return fmt.Errorf("agent %q uses load_artifacts tool but ArtifactService not configured in runner", a.Name())
+			}
+		}
+		return nil
+	})
+}
+
+// walkAgentTree recursively walks the agent tree and applies fn to each agent.
+func walkAgentTree(a agent.Agent, fn func(agent.Agent) error) error {
+	if err := fn(a); err != nil {
+		return err
+	}
+	for _, sub := range a.SubAgents() {
+		if err := walkAgentTree(sub, fn); err != nil {
+			return err
 		}
 	}
 	return nil
