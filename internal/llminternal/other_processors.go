@@ -48,3 +48,16 @@ func codeExecutionResponseProcessor(ctx agent.InvocationContext, req *model.LLMR
 	// TODO: implement (adk-python src/google/adk_code_execution.py)
 	return nil
 }
+
+func confirmationRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
+	// Check if the response contains a confirmation request
+	if confirmationReq, ok := resp.CustomMetadata["confirmation_request"]; ok {
+		if req.Tools != nil {
+			// When there's a confirmation request, we might need to modify the flow
+			// For now, we just log that a confirmation is required
+			// The actual handling would happen at a higher level
+			_ = confirmationReq // Use the confirmation request if needed
+		}
+	}
+	return nil
+}

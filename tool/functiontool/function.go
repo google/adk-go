@@ -42,6 +42,9 @@ type Config struct {
 	OutputSchema *jsonschema.Schema
 	// IsLongRunning makes a FunctionTool a long-running operation.
 	IsLongRunning bool
+	// RequireConfirmation indicates that all invocations of this tool require user confirmation.
+	// When true, the tool execution will pause and wait for explicit approval before proceeding.
+	RequireConfirmation bool
 }
 
 // Func represents a Go function that can be wrapped in a tool.
@@ -125,6 +128,15 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 		}
 	}
 
+	if f.cfg.RequireConfirmation {
+		instruction := "NOTE: This tool requires explicit user confirmation before execution."
+		if decl.Description != "" {
+			decl.Description += "\n\n" + instruction
+		} else {
+			decl.Description = instruction
+		}
+	}
+
 	return decl
 }
 
@@ -136,6 +148,15 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (map[str
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
 	}
+
+	// Check if confirmation is required for this tool
+	if f.cfg.RequireConfirmation {
+		err := ctx.RequestConfirmation("This tool requires confirmation before execution.", m)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
 	if err != nil {
 		return nil, err

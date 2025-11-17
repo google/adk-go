@@ -16,6 +16,7 @@ package toolinternal
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent"
@@ -48,6 +49,11 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 }
 
 func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions *session.EventActions) tool.Context {
+	return NewToolContextWithToolName(ctx, functionCallID, actions, "")
+}
+
+// NewToolContextWithToolName creates a new tool context with the ability to track the tool name
+func NewToolContextWithToolName(ctx agent.InvocationContext, functionCallID string, actions *session.EventActions, toolName string) tool.Context {
 	if functionCallID == "" {
 		functionCallID = uuid.NewString()
 	}
@@ -68,6 +74,7 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 			Artifacts:    ctx.Artifacts(),
 			eventActions: actions,
 		},
+		toolName: toolName,
 	}
 }
 
@@ -77,6 +84,7 @@ type toolContext struct {
 	functionCallID    string
 	eventActions      *session.EventActions
 	artifacts         *internalArtifacts
+	toolName          string
 }
 
 func (c *toolContext) Artifacts() agent.Artifacts {
@@ -97,4 +105,32 @@ func (c *toolContext) AgentName() string {
 
 func (c *toolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	return c.invocationContext.Memory().Search(ctx, query)
+}
+
+func (c *toolContext) RequestConfirmation(hint string, payload map[string]any) error {
+	// Create a confirmation request
+	confirmationID := uuid.NewString()
+	toolName := c.toolName
+	if toolName == "" {
+		// Fallback to function name if tool name isn't set
+		toolName = c.functionCallID
+	}
+
+	request := tool.ConfirmationRequest{
+		ID:       confirmationID,
+		ToolName: toolName,
+		Hint:     hint,
+		Payload:  payload,
+	}
+
+	// Store the confirmation request in the event actions
+	if c.eventActions.ConfirmationRequest == nil {
+		c.eventActions.ConfirmationRequest = &request
+	} else {
+		// If there's already a confirmation request, return an error
+		return fmt.Errorf("a confirmation request is already pending")
+	}
+
+	// Return a specific error to indicate that confirmation is required
+	return fmt.Errorf("confirmation required for action: %s", hint)
 }

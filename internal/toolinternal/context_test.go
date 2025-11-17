@@ -36,3 +36,44 @@ func TestToolContext(t *testing.T) {
 		t.Errorf("ToolContext(%+T) is unexpectedly an InvocationContext", got)
 	}
 }
+
+func TestToolContext_Confirmation(t *testing.T) {
+	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
+	actions := &session.EventActions{}
+	toolCtx := NewToolContextWithToolName(inv, "fn1", actions, "test_tool")
+
+	hint := "This is a test confirmation"
+	payload := map[string]any{"key": "value"}
+
+	// Initially, no confirmation should be requested
+	if actions.ConfirmationRequest != nil {
+		t.Errorf("ConfirmationRequest should be nil initially, got: %v", actions.ConfirmationRequest)
+	}
+
+	// Request confirmation
+	err := toolCtx.RequestConfirmation(hint, payload)
+	if err == nil {
+		t.Errorf("Expected RequestConfirmation to return an error to indicate confirmation is required")
+	}
+
+	// Check that confirmation request was stored in actions
+	if actions.ConfirmationRequest == nil {
+		t.Error("ConfirmationRequest should not be nil after calling RequestConfirmation")
+	} else {
+		if actions.ConfirmationRequest.Hint != hint {
+			t.Errorf("Expected hint %q, got %q", hint, actions.ConfirmationRequest.Hint)
+		}
+		if actions.ConfirmationRequest.ToolName != "test_tool" {
+			t.Errorf("Expected tool name %q, got %q", "test_tool", actions.ConfirmationRequest.ToolName)
+		}
+		if len(actions.ConfirmationRequest.Payload) != 1 || actions.ConfirmationRequest.Payload["key"] != "value" {
+			t.Errorf("Payload was not stored correctly: %v", actions.ConfirmationRequest.Payload)
+		}
+	}
+
+	// Try to request another confirmation - should fail
+	err = toolCtx.RequestConfirmation("Another request", map[string]any{})
+	if err == nil {
+		t.Error("Expected second call to RequestConfirmation to fail")
+	}
+}
