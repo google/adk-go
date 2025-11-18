@@ -18,9 +18,10 @@ import (
 	"reflect"
 	"testing"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type MockOutputSchema struct {
@@ -104,7 +105,7 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			event:          createTestEvent("testagent", "Test response", true),
 			wantStateDelta: map[string]any{},
 		},
-		//TODO tests with OutputSchema
+		// TODO tests with OutputSchema
 	}
 
 	// Iterate over the test cases

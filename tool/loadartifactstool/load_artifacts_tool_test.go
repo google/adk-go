@@ -19,15 +19,15 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/artifact"
 	artifactinternal "google.golang.org/adk/internal/artifact"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool/loadartifactstool"
-
-	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
+	"google.golang.org/adk/tool/loadartifactstool"
 )
 
 func TestLoadArtifactsTool_Run(t *testing.T) {
@@ -266,7 +266,6 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	}
 
 	err := requestProcessor.ProcessRequest(tc, llmRequest)
-
 	if err != nil {
 		t.Fatalf("ProcessRequest failed: %v", err)
 	}

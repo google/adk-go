@@ -16,9 +16,10 @@
 package toolinternal
 
 import (
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 type FunctionTool interface {

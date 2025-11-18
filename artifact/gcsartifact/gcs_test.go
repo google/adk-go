@@ -25,9 +25,10 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/iterator"
+
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/artifact/tests"
-	"google.golang.org/api/iterator"
 )
 
 // newGCSArtifactServiceForTesting creates a gcsService for the specified bucket using a mocked inmemory client
@@ -194,8 +195,10 @@ func (i *fakeObjectIterator) next() (*storage.ObjectAttrs, error) {
 	return &storage.ObjectAttrs{Name: obj.name, ContentType: obj.contentType}, nil
 }
 
-var _ gcsClient = (*fakeClient)(nil)
-var _ gcsBucket = (*fakeBucket)(nil)
-var _ gcsObject = (*fakeObject)(nil)
-var _ gcsObjectIterator = (*fakeObjectIterator)(nil)
-var _ gcsWriter = (*fakeWriter)(nil)
+var (
+	_ gcsClient         = (*fakeClient)(nil)
+	_ gcsBucket         = (*fakeBucket)(nil)
+	_ gcsObject         = (*fakeObject)(nil)
+	_ gcsObjectIterator = (*fakeObjectIterator)(nil)
+	_ gcsWriter         = (*fakeWriter)(nil)
+)

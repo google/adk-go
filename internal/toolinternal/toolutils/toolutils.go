@@ -18,8 +18,9 @@ package toolutils
 import (
 	"fmt"
 
-	"google.golang.org/adk/model"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/model"
 )
 
 type Tool interface {

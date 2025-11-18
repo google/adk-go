@@ -18,9 +18,10 @@ import (
 	"fmt"
 	"reflect"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
-	"google.golang.org/genai"
 )
 
 // basicRequestProcessor populates the LLMRequest

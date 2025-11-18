@@ -17,9 +17,10 @@ package context
 import (
 	"context"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func NewReadonlyContext(ctx agent.InvocationContext) agent.ReadonlyContext {

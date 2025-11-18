@@ -17,9 +17,10 @@ package artifact
 import (
 	"context"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
-	"google.golang.org/genai"
 )
 
 // Artifacts implements Artifacts

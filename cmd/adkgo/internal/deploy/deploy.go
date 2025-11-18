@@ -17,6 +17,7 @@ package deploy
 
 import (
 	"github.com/spf13/cobra"
+
 	"google.golang.org/adk/cmd/adkgo/internal/root"
 )
 

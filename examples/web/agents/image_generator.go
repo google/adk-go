@@ -20,13 +20,14 @@ import (
 	"log"
 	"os"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/loadartifactstool"
-	"google.golang.org/genai"
 )
 
 func generateImage(ctx tool.Context, input generateImageInput) (generateImageResult, error) {

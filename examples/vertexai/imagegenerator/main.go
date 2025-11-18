@@ -23,6 +23,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
@@ -32,7 +34,6 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/loadartifactstool"
-	"google.golang.org/genai"
 )
 
 func main() {

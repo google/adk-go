@@ -18,11 +18,12 @@ import (
 	"context"
 	"strings"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/model"
-	"google.golang.org/genai"
 )
 
 const EndMark = "---END-OF-EDIT---"
@@ -227,7 +228,6 @@ func GetLLMAuditorAgent(ctx context.Context, model model.LLM) agent.Agent {
 		},
 	},
 	)
-
 	if err != nil {
 		panic(err)
 	}
@@ -241,7 +241,6 @@ func GetLLMAuditorAgent(ctx context.Context, model model.LLM) agent.Agent {
 		},
 	},
 	)
-
 	if err != nil {
 		panic(err)
 	}

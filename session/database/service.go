@@ -23,8 +23,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"google.golang.org/adk/session"
 	"gorm.io/gorm"
+
+	"google.golang.org/adk/session"
 )
 
 // databaseService is an database implementation of sessionService.Service.
@@ -439,7 +440,7 @@ func fetchStorageAppState(tx *gorm.DB, appName string) (*storageAppState, error)
 	return &storageApp, nil
 }
 
-func fetchStorageUserState(tx *gorm.DB, appName string, userID string) (*storageUserState, error) {
+func fetchStorageUserState(tx *gorm.DB, appName, userID string) (*storageUserState, error) {
 	var storageUser storageUserState
 	if err := tx.First(&storageUser, "app_name = ? AND user_id = ?", appName, userID).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -471,14 +472,15 @@ func fetchAllAppStorageUserState(tx *gorm.DB, appName string) (map[string]*stora
 // for app, user, and session states based on key prefixes.
 // Temporary keys (starting with TempStatePrefix) are ignored.
 func extractStateDeltas(delta map[string]any) (
-	appStateDelta, userStateDelta, sessionStateDelta map[string]any) {
+	appStateDelta, userStateDelta, sessionStateDelta map[string]any,
+) {
 	// Initialize the maps to be returned.
 	appStateDelta = make(map[string]any)
 	userStateDelta = make(map[string]any)
 	sessionStateDelta = make(map[string]any)
 
 	if delta == nil {
-		return
+		return appStateDelta, userStateDelta, sessionStateDelta
 	}
 
 	for key, value := range delta {
@@ -491,7 +493,7 @@ func extractStateDeltas(delta map[string]any) (
 			sessionStateDelta[key] = value
 		}
 	}
-	return
+	return appStateDelta, userStateDelta, sessionStateDelta
 }
 
 // mergeStates combines app, user, and session state maps into a single map

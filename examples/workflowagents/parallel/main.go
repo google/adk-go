@@ -19,9 +19,11 @@ import (
 	"fmt"
 	"iter"
 	"log"
-	"math/rand/v2"
+	rand "math/rand/v2"
 	"os"
 	"time"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/parallelagent"
@@ -29,7 +31,6 @@ import (
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func main() {

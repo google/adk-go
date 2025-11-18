@@ -26,9 +26,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"google.golang.org/adk/internal/sessionutils"
 	"rsc.io/omap"
 	"rsc.io/ordered"
+
+	"google.golang.org/adk/internal/sessionutils"
 )
 
 type stateMap map[string]any

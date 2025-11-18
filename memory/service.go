@@ -19,8 +19,9 @@ import (
 	"context"
 	"time"
 
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/session"
 )
 
 // Service is a definition of the memory service.

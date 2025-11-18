@@ -20,11 +20,12 @@ import (
 	"sort"
 	"strings"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
@@ -160,7 +161,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 		}
 	}
 
-	var functionCallEventIdx = -1
+	functionCallEventIdx := -1
 	var allCallIDsFromMatchingEvent map[string]struct{}
 
 SearchLoop: // A label to allow breaking out of the nested loop
@@ -462,13 +463,16 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		switch {
 		case p.Text != "":
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text)})
+				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text),
+			})
 		case p.FunctionCall != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] called tool %q with parameters: %s", ev.Author, p.FunctionCall.Name, stringify(p.FunctionCall.Args))})
+				Text: fmt.Sprintf("[%s] called tool %q with parameters: %s", ev.Author, p.FunctionCall.Name, stringify(p.FunctionCall.Args)),
+			})
 		case p.FunctionResponse != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response))})
+				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response)),
+			})
 		default: // fallback to the original part for non-text and non-functionCall parts.
 			converted.Parts = append(converted.Parts, p)
 		}

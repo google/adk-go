@@ -19,11 +19,12 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/server/adkrest/internal/models"
 	"google.golang.org/adk/server/adkrest/internal/services"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // DebugAPIController is the controller for the Debug API.

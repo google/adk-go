@@ -28,7 +28,6 @@ type AppsAPIRouter struct {
 // NewAppsAPIRouter creates a new AppsAPIRouter.
 func NewAppsAPIRouter(controller *controllers.AppsAPIController) *AppsAPIRouter {
 	return &AppsAPIRouter{appsController: controller}
-
 }
 
 // Routes returns the routes for the Apps API.

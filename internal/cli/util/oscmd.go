@@ -26,15 +26,17 @@ import (
 // Printer is a function printing its arguments
 type Printer func(a ...any)
 
-var Reset = "\033[0m"
-var Red = "\033[31m"
-var Green = "\033[32m"
-var Yellow = "\033[33m"
-var Blue = "\033[34m"
-var Magenta = "\033[35m"
-var Cyan = "\033[36m"
-var Gray = "\033[37m"
-var White = "\033[97m"
+var (
+	Reset   = "\033[0m"
+	Red     = "\033[31m"
+	Green   = "\033[32m"
+	Yellow  = "\033[33m"
+	Blue    = "\033[34m"
+	Magenta = "\033[35m"
+	Cyan    = "\033[36m"
+	Gray    = "\033[37m"
+	White   = "\033[97m"
+)
 
 // LogStartStop is a helper function which executes a particular command with logging
 func LogStartStop(msg string, command func(p Printer) error) error {
@@ -59,7 +61,6 @@ type reprintableStream struct {
 
 // function Write is an interceptor of a stream adding some decorations
 func (s *reprintableStream) Write(p []byte) (total int, err error) {
-
 	start := 0
 	err = nil
 	if s.clean {
@@ -89,7 +90,7 @@ func (s *reprintableStream) Write(p []byte) (total int, err error) {
 	return len(p), err
 }
 
-func newReprintableStream(s io.Writer, prefix string, color string) io.Writer {
+func newReprintableStream(s io.Writer, prefix, color string) io.Writer {
 	return &reprintableStream{prefix: []byte("\n       " + color + prefix + " > " + Reset), stream: s, clean: true}
 }
 
@@ -101,7 +102,7 @@ func LogCommand(c *exec.Cmd, p Printer) error {
 	return c.Run()
 }
 
-func StripExtension(p string, expected string) (string, error) {
+func StripExtension(p, expected string) (string, error) {
 	ex := path.Ext(p)
 	if ex == "" {
 		return "", errors.New("Cannot find extension in '" + p + "'")
