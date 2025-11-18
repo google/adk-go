@@ -52,6 +52,7 @@ type OpenAIMessage struct {
 type ToolCall struct {
 	ID       string       `json:"id"`
 	Type     string       `json:"type"`
+	Index    int          `json:"index,omitempty"`
 	Function FunctionCall `json:"function"`
 }
 
@@ -161,6 +162,76 @@ func validateMessage(msg *OpenAIMessage) error {
 			return fmt.Errorf("tool call at index %d must have a function name", i)
 		}
 		// Arguments can be empty for functions with no parameters
+	}
+
+	return nil
+}
+
+// validateMessageSequence validates the order and structure of a message sequence.
+// According to OpenAI API rules:
+//   - After an "assistant" message with tool_calls, there must be "tool" messages
+//   - Each tool_call must have a corresponding tool message with matching tool_call_id
+//   - No "user" messages should appear between tool_calls and their responses
+func validateMessageSequence(messages []OpenAIMessage) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	// Track pending tool calls that need responses
+	pendingToolCalls := make(map[string]bool) // tool_call_id -> waiting for response
+
+	for i, msg := range messages {
+		// Validate individual message first
+		if err := validateMessage(&msg); err != nil {
+			return fmt.Errorf("invalid message at index %d: %w", i, err)
+		}
+
+		switch msg.Role {
+		case "assistant":
+			// If assistant has tool calls, track them as pending
+			if len(msg.ToolCalls) > 0 {
+				// Clear previous pending calls (starting a new tool call cycle)
+				pendingToolCalls = make(map[string]bool)
+				for _, tc := range msg.ToolCalls {
+					pendingToolCalls[tc.ID] = true
+				}
+			}
+
+		case "tool":
+			// Tool message should resolve a pending tool call
+			if msg.ToolCallID == "" {
+				return fmt.Errorf("tool message at index %d has empty tool_call_id", i)
+			}
+
+			// Check if this tool call was expected
+			if len(pendingToolCalls) == 0 {
+				return fmt.Errorf("tool message at index %d has no corresponding tool_calls", i)
+			}
+
+			// Mark this tool call as resolved
+			if pendingToolCalls[msg.ToolCallID] {
+				delete(pendingToolCalls, msg.ToolCallID)
+			} else {
+				// Warning: tool_call_id doesn't match any pending call
+				// This might happen in some edge cases, so we log but don't fail
+				// In strict mode, you could return an error here
+			}
+
+		case "user":
+			// User message should not appear while tool calls are pending
+			if len(pendingToolCalls) > 0 {
+				return fmt.Errorf("user message at index %d appears before tool responses are provided (pending: %d tool calls)", i, len(pendingToolCalls))
+			}
+
+		case "system":
+			// System messages are typically at the start, but can appear anywhere
+			// No special validation needed
+		}
+	}
+
+	// After processing all messages, check if there are unresolved tool calls
+	if len(pendingToolCalls) > 0 {
+		return fmt.Errorf("message sequence ends with %d unresolved tool calls", len(pendingToolCalls))
 	}
 
 	return nil
@@ -399,6 +470,11 @@ func (m *openaiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 	messages, err := m.convertToOpenAIMessages(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert messages: %w", err)
+	}
+
+	// Validate message sequence before sending to API
+	if err := validateMessageSequence(messages); err != nil {
+		return nil, fmt.Errorf("invalid message sequence: %w", err)
 	}
 
 	// Build OpenAI request

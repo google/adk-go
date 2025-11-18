@@ -108,8 +108,14 @@ func (m *openaiModel) convertContent(content *genai.Content) ([]*OpenAIMessage, 
 				}
 			}
 
+			// Use ID from FunctionCall if available, otherwise generate one
+			toolCallID := part.FunctionCall.ID
+			if toolCallID == "" {
+				toolCallID = generateToolCallID(part.FunctionCall.Name)
+			}
+
 			toolCalls = append(toolCalls, ToolCall{
-				ID:   generateToolCallID(part.FunctionCall.Name),
+				ID:   toolCallID,
 				Type: "function",
 				Function: FunctionCall{
 					Name:      part.FunctionCall.Name,
@@ -124,10 +130,16 @@ func (m *openaiModel) convertContent(content *genai.Content) ([]*OpenAIMessage, 
 				return nil, fmt.Errorf("failed to marshal function response: %w", err)
 			}
 
+			// Use ID from FunctionResponse if available, otherwise generate one
+			toolCallID := part.FunctionResponse.ID
+			if toolCallID == "" {
+				toolCallID = generateToolCallID(part.FunctionResponse.Name)
+			}
+
 			functionResponses = append(functionResponses, &OpenAIMessage{
 				Role:       "tool",
 				Content:    string(responseJSON),
-				ToolCallID: generateToolCallID(part.FunctionResponse.Name),
+				ToolCallID: toolCallID,
 			})
 
 		case part.ExecutableCode != nil:
@@ -199,7 +211,12 @@ func (m *openaiModel) convertToLLMResponse(msg *OpenAIMessage, usage *Usage) (*m
 				return nil, fmt.Errorf("failed to unmarshal tool call args: %w", err)
 			}
 
-			parts = append(parts, genai.NewPartFromFunctionCall(toolCall.Function.Name, args))
+			// Create FunctionCall part with ID preserved
+			part := genai.NewPartFromFunctionCall(toolCall.Function.Name, args)
+			if part.FunctionCall != nil {
+				part.FunctionCall.ID = toolCall.ID
+			}
+			parts = append(parts, part)
 		}
 	}
 

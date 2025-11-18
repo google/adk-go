@@ -48,6 +48,12 @@ func (m *openaiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 			return
 		}
 
+		// Validate message sequence before sending to API
+		if err := validateMessageSequence(messages); err != nil {
+			yield(nil, fmt.Errorf("invalid message sequence: %w", err))
+			return
+		}
+
 		// Build OpenAI request
 		chatReq := ChatCompletionRequest{
 			Model:    m.name,
@@ -223,27 +229,47 @@ func (m *openaiModel) processSSEStream(reader io.Reader, yield func(*model.LLMRe
 }
 
 // mergeToolCall merges incremental tool call updates.
+// OpenAI streams tool calls using an index field to identify which call to update.
 func (m *openaiModel) mergeToolCall(existing []ToolCall, delta ToolCall) []ToolCall {
-	// OpenAI uses index to identify which tool call to update
-	// For simplicity, we'll append new ones
-	// TODO: Implement proper merging by index
+	// Find the tool call by index (OpenAI's primary identifier in streaming)
+	if delta.Index >= 0 && delta.Index < len(existing) {
+		// Update existing tool call at this index
+		existing[delta.Index].Function.Arguments += delta.Function.Arguments
 
-	// Check if this is an update to an existing tool call
-	for i := range existing {
-		if existing[i].ID == delta.ID || (delta.ID == "" && i == len(existing)-1) {
-			// Merge the arguments
-			existing[i].Function.Arguments += delta.Function.Arguments
-			if delta.Function.Name != "" {
-				existing[i].Function.Name = delta.Function.Name
+		// Update other fields if present in delta
+		if delta.Function.Name != "" {
+			existing[delta.Index].Function.Name = delta.Function.Name
+		}
+		if delta.ID != "" {
+			existing[delta.Index].ID = delta.ID
+		}
+		if delta.Type != "" {
+			existing[delta.Index].Type = delta.Type
+		}
+
+		return existing
+	}
+
+	// If index matches the length, this is a new tool call being appended
+	if delta.Index == len(existing) {
+		// Ensure the index is preserved in the stored tool call
+		return append(existing, delta)
+	}
+
+	// Fallback: try to find by ID if index is not reliable
+	if delta.ID != "" {
+		for i := range existing {
+			if existing[i].ID == delta.ID {
+				existing[i].Function.Arguments += delta.Function.Arguments
+				if delta.Function.Name != "" {
+					existing[i].Function.Name = delta.Function.Name
+				}
+				return existing
 			}
-			if delta.ID != "" {
-				existing[i].ID = delta.ID
-			}
-			return existing
 		}
 	}
 
-	// New tool call
+	// New tool call without proper index - append to end
 	return append(existing, delta)
 }
 
@@ -263,7 +289,12 @@ func (m *openaiModel) createFinalResponse(text string, toolCalls []ToolCall) *mo
 				// Log error but continue
 				continue
 			}
-			parts = append(parts, genai.NewPartFromFunctionCall(toolCall.Function.Name, args))
+			// Create FunctionCall part with ID preserved
+			part := genai.NewPartFromFunctionCall(toolCall.Function.Name, args)
+			if part.FunctionCall != nil {
+				part.FunctionCall.ID = toolCall.ID
+			}
+			parts = append(parts, part)
 		}
 	}
 
