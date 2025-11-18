@@ -33,6 +33,7 @@ type DebugAPIController struct {
 	spansExporter  *services.APIServerSpanExporter
 }
 
+// NewDebugAPIController creates the controller for the Debug API.
 func NewDebugAPIController(sessionService session.Service, agentLoader agent.Loader, spansExporter *services.APIServerSpanExporter) *DebugAPIController {
 	return &DebugAPIController{
 		sessionService: sessionService,

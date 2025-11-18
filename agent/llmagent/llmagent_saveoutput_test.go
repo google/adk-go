@@ -119,11 +119,11 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			// The method modifies the event in-place, just like the Python version.
 			createdAgent, err := New(tc.agentConfig)
 			if err != nil {
-				t.Fatal("failed to create agent: %w", err)
+				t.Fatalf("failed to create agent: %v", err)
 			}
 			createdLlmAgent, ok := createdAgent.(*llmAgent)
 			if !ok {
-				t.Fatal("failed to create agent: %w", err)
+				t.Fatalf("failed to create agent: %v", err)
 			}
 			createdLlmAgent.maybeSaveOutputToState(tc.event)
 

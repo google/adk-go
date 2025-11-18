@@ -94,7 +94,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 		if ret, ok := resultSet[city]; ok {
 			return ret, nil
 		}
-		return Result{}, fmt.Errorf("Weather information for %q is not available.", city)
+		return Result{}, fmt.Errorf("weather information for %q is not available", city)
 	}
 
 	weatherReportTool, err := functiontool.New(

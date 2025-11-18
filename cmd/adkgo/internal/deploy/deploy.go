@@ -20,7 +20,7 @@ import (
 	"google.golang.org/adk/cmd/adkgo/internal/root"
 )
 
-// deployCmd represents the deploy command.
+// DeployCmd represents the deploy command.
 var DeployCmd = &cobra.Command{
 	Use:   "deploy",
 	Short: "Makes deployment to various platforms easy",
