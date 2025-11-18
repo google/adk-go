@@ -30,7 +30,7 @@ import (
 	"google.golang.org/adk/server/adkrest/controllers"
 )
 
-// webUIConfig contains parametres for lauching ADK Web UI
+// webUIConfig contains parameters for launching ADK Web UI
 type webUIConfig struct {
 	backendAddress string
 	pathPrefix     string
@@ -52,7 +52,7 @@ func (w *webUILauncher) Keyword() string {
 	return "webui"
 }
 
-// Parse implements web.Sublauncher. After parsing webui-specific arguments returns remaining un-parsed arguments
+// Parse implements web.Sublauncher. After parsing webui-specific arguments returns remaining unparsed arguments
 func (w *webUILauncher) Parse(args []string) ([]string, error) {
 	err := w.flags.Parse(args)
 	if err != nil || !w.flags.Parsed() {

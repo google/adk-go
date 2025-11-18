@@ -217,7 +217,7 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	}, nil
 }
 
-// List retrieves sessions from the database using its appName and optional UserId
+// List retrieves sessions from the database using its appName and optional UserID
 func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*session.ListResponse, error) {
 	appName, userID := req.AppName, req.UserID
 	if appName == "" {

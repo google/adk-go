@@ -67,7 +67,7 @@ There are various actions you can take to help you with the verification:
   * You may search the web to find information that supports or contradicts the claim.
   * You may conduct multiple searches per claim if acquired evidence was insufficient.
   * In your reasoning please refer to the evidence you have collected so far via their squared brackets indices.
-  * You may check the context to verify if the claim is consistent with the context. Read the context carefully to idenfity specific user instructions that the text should follow, facts that the text should be faithful to, etc.
+  * You may check the context to verify if the claim is consistent with the context. Read the context carefully to identify specific user instructions that the text should follow, facts that the text should be faithful to, etc.
   * You should draw your final conclusion on the entire text after you acquired all the information you needed.
 
 # Output format
@@ -217,7 +217,7 @@ func afterReviser(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llm
 	return llmResponse, nil
 }
 
-func GetLLmAuditorAgent(ctx context.Context, model model.LLM) agent.Agent {
+func GetLLMAuditorAgent(ctx context.Context, model model.LLM) agent.Agent {
 	criticAgent, err := llmagent.New(llmagent.Config{
 		Model:       model,
 		Name:        "critic_agent",

@@ -85,7 +85,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
-	llmAuditor := agents.GetLLmAuditorAgent(ctx, model)
+	llmAuditor := agents.GetLLMAuditorAgent(ctx, model)
 	imageGeneratorAgent := agents.GetImageGeneratorAgent(ctx, model)
 
 	agentLoader, err := agent.NewMultiLoader(

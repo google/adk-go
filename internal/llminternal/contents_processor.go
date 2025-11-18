@@ -72,7 +72,7 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 			continue
 		}
 		// Skip events that do not belong to the current branch.
-		// TODO: can we use a richier type for branch (e.g. []string) instead of using string prefix test?
+		// TODO: can we use a richer type for branch (e.g. []string) instead of using string prefix test?
 		if !eventBelongsToBranch(invocationBranch, ev) {
 			continue
 		}
@@ -136,7 +136,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 
 	lastEvent := events[len(events)-1]
 	lastResponses := listFunctionResponsesFromEvent(lastEvent)
-	// No need to process, since the latest event is not fuction_response.
+	// No need to process, since the latest event is not function_response.
 	if len(lastResponses) == 0 {
 		return events, nil
 	}

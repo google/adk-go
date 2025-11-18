@@ -170,7 +170,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
-			// We are followng python's execution flow which is
+			// We are following python's execution flow which is
 			//   BaseLlmFlow._postprocess_async
 			//    -> _postprocess_handle_function_calls_async
 			// TODO(hakim): figure out why this isn't handled by the runner.

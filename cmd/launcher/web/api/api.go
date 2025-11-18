@@ -77,6 +77,7 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 	router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Handler(
 		http.StripPrefix("/api", corsHandler),
 	)
+
 	return nil
 }
 

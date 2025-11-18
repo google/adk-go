@@ -113,7 +113,7 @@ func TestModel_GenerateStream(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// Transforms the stream into strings, concating the text value of the response parts
+			// Transforms the stream into strings, concatenating the text value of the response parts
 			got, err := readResponse(model.GenerateContent(t.Context(), tt.req, true))
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Model.GenerateStream() error = %v, wantErr %v", err, tt.wantErr)
@@ -213,8 +213,8 @@ type TextResponse struct {
 	FinalText string
 }
 
-// readResponse transforms a sequence into a TextResponse, concating the text value of the response parts
-// depending on the readPartial value it will only concat the text of partial events or the text of non partial events
+// readResponse transforms a sequence into a TextResponse, concatenating the text value of the response parts
+// depending on the readPartial value it will only concatenate the text of partial events or the text of non partial events
 func readResponse(s iter.Seq2[*model.LLMResponse, error]) (TextResponse, error) {
 	var partialBuilder, finalBuilder strings.Builder
 	var result TextResponse
