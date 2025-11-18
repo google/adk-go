@@ -123,7 +123,7 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			}
 			createdLlmAgent, ok := createdAgent.(*llmAgent)
 			if !ok {
-				t.Fatalf("failed to create agent: %v", err)
+				t.Fatalf("failed to convert to llmagent")
 			}
 			createdLlmAgent.maybeSaveOutputToState(tc.event)
 

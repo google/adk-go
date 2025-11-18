@@ -34,8 +34,8 @@ type RuntimeAPIController struct {
 	agentLoader     agent.Loader
 }
 
-// NewRuntimeAPIRouter creates the controller for the Runtime API.
-func NewRuntimeAPIRouter(sessionService session.Service, agentLoader agent.Loader, artifactService artifact.Service) *RuntimeAPIController {
+// NewRuntimeAPIController creates the controller for the Runtime API.
+func NewRuntimeAPIController(sessionService session.Service, agentLoader agent.Loader, artifactService artifact.Service) *RuntimeAPIController {
 	return &RuntimeAPIController{sessionService: sessionService, agentLoader: agentLoader, artifactService: artifactService}
 }
 

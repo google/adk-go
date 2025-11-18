@@ -117,7 +117,7 @@ type LoadRequest struct {
 	Version int64
 }
 
-// Validate checks if the struct is valid or if it is missing fields
+// Validate checks if the struct is valid or if it is missing fields.
 func (req *LoadRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
@@ -151,7 +151,7 @@ type DeleteRequest struct {
 	Version int64
 }
 
-// Validate checks if the struct is valid or if it is missing fields
+// Validate checks if the struct is valid or if it is missing fields.
 func (req *DeleteRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
@@ -176,7 +176,7 @@ type ListRequest struct {
 	AppName, UserID, SessionID string
 }
 
-// Validate checks if the struct is valid or if its missing field
+// Validate checks if the struct is valid or if it is missing a field.
 func (req *ListRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{

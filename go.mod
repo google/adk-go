@@ -16,6 +16,7 @@ require (
 
 require (
 	github.com/google/jsonschema-go v0.3.0
+	github.com/google/safehtml v0.1.0
 	github.com/modelcontextprotocol/go-sdk v0.7.0
 	google.golang.org/grpc v1.76.0
 	gorm.io/driver/sqlite v1.6.0

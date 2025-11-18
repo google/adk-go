@@ -53,7 +53,7 @@ type AuthInterceptor struct {
 	a2asrv.PassthroughCallInterceptor
 }
 
-// Before implements a before request callaback.
+// Before implements a before request callback.
 func (a *AuthInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error) {
 	callCtx.User = &a2asrv.AuthenticatedUser{
 		UserName: "user",
