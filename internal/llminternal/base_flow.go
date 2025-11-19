@@ -382,12 +382,12 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		result := f.callTool(funcTool, fnCall.Args, toolCtx)
 
 		// Check if confirmation was requested
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Author = ctx.Agent().Name()
+		ev.Branch = ctx.Branch()
+		ev.Actions = *toolCtx.Actions()
 		if toolCtx.Actions().ConfirmationRequest != nil {
 			// If confirmation is requested, we need to return an event with the confirmation request
-			ev := session.NewEvent(ctx.InvocationID())
-			ev.Author = ctx.Agent().Name()
-			ev.Branch = ctx.Branch()
-			ev.Actions = *toolCtx.Actions()
 			// Set a special status to indicate that confirmation is required
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
@@ -404,11 +404,8 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					"confirmation_request":  toolCtx.Actions().ConfirmationRequest,
 				},
 			}
-			telemetry.TraceToolCall(spans, curTool, fnCall.Args, ev)
-			fnResponseEvents = append(fnResponseEvents, ev)
 		} else {
 			// Normal response when no confirmation needed
-			ev := session.NewEvent(ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
 					Role: "user",
@@ -423,12 +420,9 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					},
 				},
 			}
-			ev.Author = ctx.Agent().Name()
-			ev.Branch = ctx.Branch()
-			ev.Actions = *toolCtx.Actions()
-			telemetry.TraceToolCall(spans, curTool, fnCall.Args, ev)
-			fnResponseEvents = append(fnResponseEvents, ev)
 		}
+		telemetry.TraceToolCall(spans, curTool, fnCall.Args, ev)
+		fnResponseEvents = append(fnResponseEvents, ev)
 	}
 	mergedEvent, err := mergeParallelFunctionResponseEvents(fnResponseEvents)
 	if err != nil {

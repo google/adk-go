@@ -50,13 +50,13 @@ func codeExecutionResponseProcessor(ctx agent.InvocationContext, req *model.LLMR
 }
 
 func confirmationRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
-	// Check if the response contains a confirmation request
-	if confirmationReq, ok := resp.CustomMetadata["confirmation_request"]; ok {
+	// This processor is a placeholder for handling confirmation requests that may originate
+	// from the LLM response. The primary logic for handling tool-initiated confirmation
+	// requests is handled in the base_flow.
+	if _, ok := resp.CustomMetadata["confirmation_request"]; ok {
 		if req.Tools != nil {
-			// When there's a confirmation request, we might need to modify the flow
-			// For now, we just log that a confirmation is required
-			// The actual handling would happen at a higher level
-			_ = confirmationReq // Use the confirmation request if needed
+			// The confirmation request would be handled at a higher level.
+			// Currently, this is a no-op.
 		}
 	}
 	return nil

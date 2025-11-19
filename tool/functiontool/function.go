@@ -45,6 +45,9 @@ type Config struct {
 	// RequireConfirmation indicates that all invocations of this tool require user confirmation.
 	// When true, the tool execution will pause and wait for explicit approval before proceeding.
 	RequireConfirmation bool
+	// ConfirmationInstruction is a custom instruction to be appended to the tool's description when confirmation is required.
+	// If empty, a default instruction will be used.
+	ConfirmationInstruction string
 }
 
 // Func represents a Go function that can be wrapped in a tool.
@@ -106,6 +109,13 @@ func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx tool.Context, req *mo
 	return toolutils.PackTool(req, f)
 }
 
+func appendInstruction(description, instruction string) string {
+	if description != "" {
+		return description + "\n\n" + instruction
+	}
+	return instruction
+}
+
 // FunctionDeclaration implements interfaces.FunctionTool.
 func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration {
 	decl := &genai.FunctionDeclaration{
@@ -121,20 +131,15 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 
 	if f.cfg.IsLongRunning {
 		instruction := "NOTE: This is a long-running operation. Do not call this tool again if it has already returned some intermediate or pending status."
-		if decl.Description != "" {
-			decl.Description += "\n\n" + instruction
-		} else {
-			decl.Description = instruction
-		}
+		decl.Description = appendInstruction(decl.Description, instruction)
 	}
 
 	if f.cfg.RequireConfirmation {
-		instruction := "NOTE: This tool requires explicit user confirmation before execution."
-		if decl.Description != "" {
-			decl.Description += "\n\n" + instruction
-		} else {
-			decl.Description = instruction
+		instruction := f.cfg.ConfirmationInstruction
+		if instruction == "" {
+			instruction = "NOTE: This tool requires explicit user confirmation before execution."
 		}
+		decl.Description = appendInstruction(decl.Description, instruction)
 	}
 
 	return decl

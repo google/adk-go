@@ -112,8 +112,8 @@ func (c *toolContext) RequestConfirmation(hint string, payload map[string]any) e
 	confirmationID := uuid.NewString()
 	toolName := c.toolName
 	if toolName == "" {
-		// Fallback to function name if tool name isn't set
-		toolName = c.functionCallID
+		// A meaningful tool name is required for a confirmation request.
+		return fmt.Errorf("tool name is missing in context for confirmation request with hint: %s", hint)
 	}
 
 	request := tool.ConfirmationRequest{

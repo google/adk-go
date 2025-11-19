@@ -77,3 +77,24 @@ func TestToolContext_Confirmation(t *testing.T) {
 		t.Error("Expected second call to RequestConfirmation to fail")
 	}
 }
+
+func TestToolContext_ConfirmationNoToolName(t *testing.T) {
+	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
+	actions := &session.EventActions{}
+	toolCtx := NewToolContext(inv, "fn1", actions)
+
+	hint := "This is a test confirmation"
+	payload := map[string]any{"key": "value"}
+
+	// Request confirmation - should fail because tool name is missing
+	err := toolCtx.RequestConfirmation(hint, payload)
+	if err == nil {
+		t.Error("Expected RequestConfirmation to return an error when tool name is missing")
+	}
+
+	// Check that no confirmation request was stored
+	if actions.ConfirmationRequest != nil {
+		t.Error("ConfirmationRequest should be nil when RequestConfirmation fails")
+	}
+}
+
