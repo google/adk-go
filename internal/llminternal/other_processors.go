@@ -16,7 +16,10 @@ package llminternal
 
 import (
 	"google.golang.org/adk/agent"
+	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/planner"
 )
 
 func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
@@ -25,7 +28,31 @@ func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 }
 
 func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_nl_plnning.py)
+	p := getPlanner(ctx)
+	if p == nil {
+		return nil
+	}
+
+	switch planner := p.(type) {
+	case *planner.BuiltInPlanner:
+		planner.ApplyThinkingConfig(req)
+	case *planner.ReActPlanner:
+		readonlyContext := icontext.NewReadonlyContext(ctx)
+		if planningInstruction := planner.BuildPlanningInstruction(readonlyContext, req); planningInstruction != "" {
+			utils.AppendInstructions(req, planningInstruction)
+		}
+
+		for _, content := range req.Contents {
+			if content.Parts == nil {
+				continue
+			}
+			for _, part := range content.Parts {
+				part.Thought = false
+			}
+		}
+	default:
+		return nil
+	}
 	return nil
 }
 
@@ -40,11 +67,42 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest) error 
 }
 
 func nlPlanningResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
-	// TODO: implement (adk-python src/google/adk/_nl_planning.py)
+	if resp == nil || resp.Content == nil || len(resp.Content.Parts) == 0 {
+		return nil
+	}
+
+	p := getPlanner(ctx)
+	if p == nil {
+		return nil
+	}
+
+	// Skip built-in planner response processing
+	if _, ok := p.(*planner.BuiltInPlanner); ok {
+		return nil
+	}
+
+	// Process the LLM response for Plan-Re-Act planner
+	// TODO: Need to implement CallbackContext creation and event yielding
+	// This is complex as we need to create a callback context and potentially yield events
+	// For now, just process the response parts
+	if processedParts := p.ProcessPlanningResponse(nil, resp.Content.Parts); processedParts != nil {
+		resp.Content.Parts = processedParts
+	}
+
 	return nil
 }
 
 func codeExecutionResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
 	// TODO: implement (adk-python src/google/adk_code_execution.py)
+	return nil
+}
+
+// getPlanner returns the planner from the invocation context, or nil if no planner is available.
+func getPlanner(ctx agent.InvocationContext) planner.BasePlanner {
+	if llmAgent, ok := ctx.Agent().(Agent); ok {
+		state := Reveal(llmAgent)
+		return state.Planner
+	}
+
 	return nil
 }
