@@ -57,5 +57,4 @@ func SetupSubRouters(router *mux.Router, subrouters ...Router) {
 				Handler(handler)
 		}
 	}
-
 }

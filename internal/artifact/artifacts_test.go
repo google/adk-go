@@ -18,9 +18,10 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/artifact"
 	artifactinternal "google.golang.org/adk/internal/artifact"
-	"google.golang.org/genai"
 )
 
 func TestArtifacts(t *testing.T) {

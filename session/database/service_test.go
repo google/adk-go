@@ -22,11 +22,12 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 )
 
 func Test_databaseService_Create(t *testing.T) {

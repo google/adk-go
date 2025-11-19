@@ -18,9 +18,10 @@ import (
 	"reflect"
 	"testing"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type MockOutputSchema struct {
@@ -104,7 +105,7 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			event:          createTestEvent("testagent", "Test response", true),
 			wantStateDelta: map[string]any{},
 		},
-		//TODO tests with OutputSchema
+		// TODO tests with OutputSchema
 	}
 
 	// Iterate over the test cases
@@ -119,11 +120,11 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			// The method modifies the event in-place, just like the Python version.
 			createdAgent, err := New(tc.agentConfig)
 			if err != nil {
-				t.Fatal("failed to create agent: %w", err)
+				t.Fatalf("failed to create agent: %v", err)
 			}
 			createdLlmAgent, ok := createdAgent.(*llmAgent)
 			if !ok {
-				t.Fatal("failed to create agent: %w", err)
+				t.Fatalf("failed to convert to llmagent")
 			}
 			createdLlmAgent.maybeSaveOutputToState(tc.event)
 

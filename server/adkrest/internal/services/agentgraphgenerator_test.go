@@ -21,6 +21,8 @@ import (
 
 	"github.com/awalterschulze/gographviz"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
@@ -29,7 +31,6 @@ import (
 	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 type dummyLLM struct {
@@ -104,8 +105,10 @@ type mockTool struct {
 	name string
 }
 
-func (m *mockTool) Name() string        { return m.name }
+func (m *mockTool) Name() string { return m.name }
+
 func (m *mockTool) Description() string { return "" }
+
 func (m *mockTool) IsLongRunning() bool { return false }
 
 func TestNodeName(t *testing.T) {
@@ -363,7 +366,6 @@ func TestEdgeHighlighted(t *testing.T) {
 }
 
 func TestDrawNode(t *testing.T) {
-
 	tests := []struct {
 		name             string
 		agent            agent.Agent
@@ -411,7 +413,6 @@ func TestDrawNode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			graph := gographviz.NewGraph()
 			err := graph.SetName("G")
 			if err != nil {
@@ -449,7 +450,6 @@ func TestDrawNode(t *testing.T) {
 			if !visitedNodes[nodeName] {
 				t.Error("Agent node not marked as visited")
 			}
-
 		})
 	}
 }
@@ -484,7 +484,8 @@ func TestDrawClusterNode(t *testing.T) {
 		t.Error("Cluster agent not marked as visited")
 	}
 }
-func lookupEdge(t *testing.T, graph *gographviz.Graph, src string, dst string) *gographviz.Edge {
+
+func lookupEdge(t *testing.T, graph *gographviz.Graph, src, dst string) *gographviz.Edge {
 	node := graph.Edges.SrcToDsts[src]
 	if node == nil {
 		return nil
@@ -542,7 +543,6 @@ func TestDrawEdge(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			graph := gographviz.NewGraph()
 			err := graph.SetName("G")
 			if err != nil {

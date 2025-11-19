@@ -3,6 +3,15 @@ version: "2"
 formatters:
   enable:
     - goimports
+    - gofumpt
+
+  settings:
+    goimports:
+      local-prefixes:
+        - google.golang.org/adk
+    gofumpt:
+      extra-rules: true
+      module-path: google.golang.org/adk
 
 linters:
   enable:
@@ -52,4 +61,3 @@ linters:
           - goheader
           - errcheck
           - staticcheck
-

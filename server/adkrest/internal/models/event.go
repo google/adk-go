@@ -17,9 +17,10 @@ package models
 import (
 	"time"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // EventActions represent a data model for session.EventActions

@@ -21,8 +21,9 @@ import (
 	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
-	"google.golang.org/adk/internal/converters"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/internal/converters"
 )
 
 var (

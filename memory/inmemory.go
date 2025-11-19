@@ -21,8 +21,9 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/session"
 )
 
 // InMemoryService returns a new in-memory implementation of the memory service. Thread-safe.

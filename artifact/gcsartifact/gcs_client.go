@@ -138,8 +138,10 @@ func (g *gcsWriterWrapper) SetContentType(cType string) {
 	g.w.ContentType = cType
 }
 
-var _ gcsClient = (*gcsClientWrapper)(nil)
-var _ gcsBucket = (*gcsBucketWrapper)(nil)
-var _ gcsObject = (*gcsObjectWrapper)(nil)
-var _ gcsObjectIterator = (*gcsObjectIteratorWrapper)(nil)
-var _ gcsWriter = (*gcsWriterWrapper)(nil)
+var (
+	_ gcsClient         = (*gcsClientWrapper)(nil)
+	_ gcsBucket         = (*gcsBucketWrapper)(nil)
+	_ gcsObject         = (*gcsObjectWrapper)(nil)
+	_ gcsObjectIterator = (*gcsObjectIteratorWrapper)(nil)
+	_ gcsWriter         = (*gcsWriterWrapper)(nil)
+)

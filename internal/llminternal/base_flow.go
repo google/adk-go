@@ -20,6 +20,8 @@ import (
 	"maps"
 	"slices"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
@@ -30,7 +32,6 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
@@ -39,7 +40,7 @@ type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMRe
 
 type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
-type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error)
+type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
 type Flow struct {
 	Model model.LLM
@@ -171,7 +172,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
-			// We are followng python's execution flow which is
+			// We are following python's execution flow which is
 			//   BaseLlmFlow._postprocess_async
 			//    -> _postprocess_handle_function_calls_async
 			// TODO(hakim): figure out why this isn't handled by the runner.
@@ -375,8 +376,8 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		if !ok {
 			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
 		}
-		toolCtx := toolinternal.NewToolContextWithToolName(ctx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, fnCall.Name)
-		//toolCtx := tool.
+		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)})
+		// toolCtx := tool.
 		spans := telemetry.StartTrace(ctx, "execute_tool "+fnCall.Name)
 
 		result := f.callTool(funcTool, fnCall.Args, toolCtx)

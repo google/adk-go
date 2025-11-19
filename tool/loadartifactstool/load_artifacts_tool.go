@@ -23,12 +23,13 @@ import (
 	"fmt"
 
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 // artifactsTool is a tool that loads artifacts and adds them to the session.

@@ -19,11 +19,12 @@ import (
 	"fmt"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 // FunctionTool: borrow implementation from MCP go.

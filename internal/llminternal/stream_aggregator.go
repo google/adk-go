@@ -19,9 +19,10 @@ import (
 	"fmt"
 	"iter"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/internal/llminternal/converters"
 	"google.golang.org/adk/model"
-	"google.golang.org/genai"
 )
 
 // streamingResponseAggregator aggregates partial streaming responses.

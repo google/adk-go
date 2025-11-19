@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/parallelagent"
@@ -34,7 +36,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/genai"
 )
 
 func TestAgentTransferRequestProcessor(t *testing.T) {
@@ -45,7 +46,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		t.Fatalf("unexpected TransferToAgentTool: name=%q, desc=%q, decl=%v", curTool.Name(), curTool.Description(), curTool)
 	}
 
-	check := func(t *testing.T, curAgent, root agent.Agent, wantParent string, wantAgents []string, unwantAgents []string) {
+	check := func(t *testing.T, curAgent, root agent.Agent, wantParent string, wantAgents, unwantAgents []string) {
 		req := &model.LLMRequest{}
 
 		parents, err := parentmap.New(root)

@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/version"
 	"google.golang.org/adk/tool"

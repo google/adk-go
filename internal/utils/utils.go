@@ -18,10 +18,11 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // TODO: split in proper files/packages.

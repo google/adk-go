@@ -21,6 +21,8 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/google/uuid"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
@@ -32,7 +34,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/genai"
 )
 
 func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
@@ -48,11 +49,12 @@ func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, l
 	return llmResponse, llmResponseError
 }
 
-// needed to use 'user' for both a2a and webui (which are sharing the same sessions service)
+// AuthInterceptor sets 'user' name needed for both a2a and webui launchers which sharing the same sessions service.
 type AuthInterceptor struct {
 	a2asrv.PassthroughCallInterceptor
 }
 
+// Before implements a before request callback.
 func (a *AuthInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error) {
 	callCtx.User = &a2asrv.AuthenticatedUser{
 		UserName: "user",
@@ -84,7 +86,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
-	llmAuditor := agents.GetLLmAuditorAgent(ctx, model)
+	llmAuditor := agents.GetLLMAuditorAgent(ctx, model)
 	imageGeneratorAgent := agents.GetImageGeneratorAgent(ctx, model)
 
 	agentLoader, err := agent.NewMultiLoader(
