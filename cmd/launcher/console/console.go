@@ -24,7 +24,9 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
@@ -140,6 +142,49 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 			}
 			log.Fatal(err)
 		case userInput := <-inputChan:
+			// 处理特殊命令
+			trimmedInput := strings.TrimSpace(userInput)
+			switch strings.ToLower(trimmedInput) {
+			case "q", "quit", "exit":
+				fmt.Println("\n正在退出...")
+				return nil
+			case "vim":
+				// 创建临时文件
+				tempFile, err := os.CreateTemp("", "adk-vim-input-")
+				if err != nil {
+					fmt.Printf("创建临时文件失败: %v\n", err)
+					fmt.Print("\nUser -> ")
+					continue
+				}
+				tempFilePath := tempFile.Name()
+				tempFile.Close()
+				defer os.Remove(tempFilePath) // 确保程序结束时删除临时文件
+
+				// 启动vim编辑器
+				fmt.Println("正在启动vim编辑器，请输入您的文本内容...")
+				cmd := exec.Command("vim", tempFilePath)
+				cmd.Stdin = os.Stdin
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				err = cmd.Run()
+				if err != nil {
+					fmt.Printf("vim编辑失败: %v\n", err)
+					fmt.Print("\nUser -> ")
+					continue
+				}
+
+				// 读取vim编辑的内容
+				vimContent, err := os.ReadFile(tempFilePath)
+				if err != nil {
+					fmt.Printf("读取vim编辑内容失败: %v\n", err)
+					fmt.Print("\nUser -> ")
+					continue
+				}
+
+				userInput = string(vimContent)
+				fmt.Println("已成功读取vim编辑的内容")
+			}
+
 			userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
 			streamingMode := l.config.streamingMode
