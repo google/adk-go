@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"reflect"
 
 	"google.golang.org/genai"
 
@@ -85,7 +86,13 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 		}
 		llmResponse.Partial = true
 		return nil
-	} else
+	}
+
+	if part0 != nil && reflect.ValueOf(*part0).IsZero() {
+		llmResponse.Partial = true
+		return nil
+	}
+
 	// If there is aggregated text and there is no content or parts return aggregated response
 	if (s.thoughtText != "" || s.text != "") &&
 		(llmResponse.Content == nil ||
