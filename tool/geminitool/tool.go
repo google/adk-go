@@ -32,9 +32,10 @@ package geminitool
 import (
 	"fmt"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 // New creates  gemini API tool.

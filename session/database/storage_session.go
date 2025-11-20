@@ -19,9 +19,10 @@ import (
 	"fmt"
 	"time"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // storageSession corresponds to the 'sessions' table.

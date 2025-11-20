@@ -21,6 +21,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+
 	"google.golang.org/adk/cmd/launcher"
 	weblauncher "google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/internal/cli/util"
@@ -77,6 +78,7 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 	router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Handler(
 		http.StripPrefix("/api", corsHandler),
 	)
+
 	return nil
 }
 

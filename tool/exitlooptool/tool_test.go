@@ -19,13 +19,14 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/exitlooptool"
-	"google.golang.org/genai"
 )
 
 // --- Test Suite ---

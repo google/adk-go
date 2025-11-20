@@ -18,6 +18,7 @@ package telemetry
 
 import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
 	internaltelemetry "google.golang.org/adk/internal/telemetry"
 )
 

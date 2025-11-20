@@ -21,10 +21,11 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func Test_inMemoryService_SearchMemory(t *testing.T) {

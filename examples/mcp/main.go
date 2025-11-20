@@ -24,6 +24,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/cmd/launcher"
@@ -31,7 +33,6 @@ import (
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptoolset"
-	"google.golang.org/genai"
 )
 
 // This example demonstrates 2 ways to use MCP tools with ADK:

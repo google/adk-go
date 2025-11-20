@@ -27,6 +27,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
@@ -38,7 +40,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptoolset"
-	"google.golang.org/genai"
 )
 
 type Input struct {

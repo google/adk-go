@@ -24,17 +24,17 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/tool/functiontool"
-
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
+	"google.golang.org/adk/tool/functiontool"
 )
 
 const modelName = "gemini-2.0-flash"
@@ -400,10 +400,10 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, nil
 				},
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -435,10 +435,10 @@ func TestToolCallback(t *testing.T) {
 			Tools:                    []tool.Tool{rand},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
 				// Since it retursn non nil, the next callback won't be executed.
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "3"}, nil
 				},
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -474,7 +474,7 @@ func TestToolCallback(t *testing.T) {
 				},
 			},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -510,7 +510,7 @@ func TestToolCallback(t *testing.T) {
 				},
 			},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, nil
 				},
 			},

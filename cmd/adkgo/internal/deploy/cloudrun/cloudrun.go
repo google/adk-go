@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
 	"google.golang.org/adk/cmd/adkgo/internal/deploy"
 	"google.golang.org/adk/internal/cli/util"
 )
@@ -196,7 +197,7 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cl
 				b.WriteString(`, "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"]
 				`)
 			}
-			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0600)
+			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
 		})
 }
 
@@ -204,13 +205,15 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cl
 func (f *deployCloudRunFlags) gcloudDeployToCloudRun() error {
 	return util.LogStartStop("Deploying to Cloud Run",
 		func(p util.Printer) error {
-			params := []string{"run", "deploy", f.cloudRun.serviceName,
+			params := []string{
+				"run", "deploy", f.cloudRun.serviceName,
 				"--source", ".",
 				"--set-secrets=GOOGLE_API_KEY=GOOGLE_API_KEY:latest",
 				"--region", f.gcloud.region,
 				"--project", f.gcloud.projectName,
 				"--ingress", "all",
-				"--no-allow-unauthenticated"}
+				"--no-allow-unauthenticated",
+			}
 
 			cmd := exec.Command("gcloud", params...)
 

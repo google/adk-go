@@ -33,10 +33,11 @@ import (
 
 	"cloud.google.com/go/storage"
 	"golang.org/x/sync/errgroup"
-	"google.golang.org/adk/artifact"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/artifact"
 )
 
 // gcsService is a google cloud storage implementation of the Service.
@@ -316,7 +317,7 @@ func (s *gcsService) versions(ctx context.Context, req *artifact.VersionsRequest
 	}
 	blobsIterator := s.bucket.objects(ctx, query)
 
-	var versions = make([]int64, 0)
+	versions := make([]int64, 0)
 	for {
 		blob, err := blobsIterator.next()
 		if err == iterator.Done {

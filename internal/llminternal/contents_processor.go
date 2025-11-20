@@ -20,11 +20,12 @@ import (
 	"sort"
 	"strings"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
@@ -72,7 +73,7 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 			continue
 		}
 		// Skip events that do not belong to the current branch.
-		// TODO: can we use a richier type for branch (e.g. []string) instead of using string prefix test?
+		// TODO: can we use a richer type for branch (e.g. []string) instead of using string prefix test?
 		if !eventBelongsToBranch(invocationBranch, ev) {
 			continue
 		}
@@ -136,7 +137,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 
 	lastEvent := events[len(events)-1]
 	lastResponses := listFunctionResponsesFromEvent(lastEvent)
-	// No need to process, since the latest event is not fuction_response.
+	// No need to process, since the latest event is not function_response.
 	if len(lastResponses) == 0 {
 		return events, nil
 	}
@@ -160,7 +161,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 		}
 	}
 
-	var functionCallEventIdx = -1
+	functionCallEventIdx := -1
 	var allCallIDsFromMatchingEvent map[string]struct{}
 
 SearchLoop: // A label to allow breaking out of the nested loop
@@ -462,13 +463,16 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		switch {
 		case p.Text != "":
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text)})
+				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text),
+			})
 		case p.FunctionCall != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] called tool %q with parameters: %s", ev.Author, p.FunctionCall.Name, stringify(p.FunctionCall.Args))})
+				Text: fmt.Sprintf("[%s] called tool %q with parameters: %s", ev.Author, p.FunctionCall.Name, stringify(p.FunctionCall.Args)),
+			})
 		case p.FunctionResponse != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response))})
+				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response)),
+			})
 		default: // fallback to the original part for non-text and non-functionCall parts.
 			converted.Parts = append(converted.Parts, p)
 		}

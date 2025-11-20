@@ -20,13 +20,13 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
 
 	imemory "google.golang.org/adk/internal/memory"
 	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func TestMemory_AddAndSearch(t *testing.T) {

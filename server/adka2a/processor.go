@@ -17,14 +17,14 @@ package adka2a
 import (
 	"context"
 	"fmt"
-
 	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type eventProcessor struct {
@@ -50,7 +50,7 @@ func newEventProcessor(reqCtx *a2asrv.RequestContext, meta invocationMeta) *even
 	}
 }
 
-func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2a.TaskArtifactUpdateEvent, error) {
+func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.TaskArtifactUpdateEvent, error) {
 	if event == nil {
 		return nil, nil
 	}

@@ -18,10 +18,11 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/genai"
 )
 
 func TestGeminiTool_ProcessRequest(t *testing.T) {

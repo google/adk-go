@@ -20,6 +20,8 @@ import (
 	"os"
 	"strings"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/cmd/launcher"
@@ -29,7 +31,6 @@ import (
 	"google.golang.org/adk/tool/agenttool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/genai"
 )
 
 // Package main demonstrates a workaround for using multiple tool types (e.g.,

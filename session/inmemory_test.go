@@ -22,8 +22,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"google.golang.org/adk/model"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/model"
 )
 
 func Test_databaseService_Create(t *testing.T) {

@@ -22,6 +22,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
@@ -30,8 +32,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
-
-	"google.golang.org/genai"
 )
 
 func TestNewLoopAgent(t *testing.T) {
@@ -180,7 +180,6 @@ func TestNewLoopAgent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			ctx := t.Context()
 
 			loopAgent, err := loopagent.New(loopagent.Config{

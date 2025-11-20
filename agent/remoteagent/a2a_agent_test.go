@@ -33,16 +33,17 @@ import (
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
+
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
 )
 
 const connBufSize int = 1024 * 1024

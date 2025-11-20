@@ -48,7 +48,6 @@ func TestNewAPIServerSpanExporter(t *testing.T) {
 }
 
 func TestAPIServerSpanExporterExportSpans(t *testing.T) {
-
 	tests := []struct {
 		name          string
 		spanName      string
@@ -139,7 +138,6 @@ func TestAPIServerSpanExporterExportSpans(t *testing.T) {
 			if _, ok := eventDict["trace_id"]; !ok {
 				t.Fatalf("traceDict should contain trace_id")
 			}
-
 		})
 	}
 }

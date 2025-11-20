@@ -21,12 +21,13 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func newTestInvocationContext(t *testing.T, agentName string, events ...*session.Event) agent.InvocationContext {

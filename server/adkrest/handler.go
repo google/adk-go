@@ -18,13 +18,13 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/server/adkrest/controllers"
 	"google.golang.org/adk/server/adkrest/internal/routers"
 	"google.golang.org/adk/server/adkrest/internal/services"
-
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 // NewHandler creates and returns an http.Handler for the ADK REST API.
@@ -37,7 +37,7 @@ func NewHandler(config *launcher.Config) http.Handler {
 	// where the ADK REST API will be served.
 	setupRouter(router,
 		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(config.SessionService)),
-		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIRouter(config.SessionService, config.AgentLoader, config.ArtifactService)),
+		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(config.SessionService, config.AgentLoader, config.ArtifactService)),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(config.AgentLoader)),
 		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(config.SessionService, config.AgentLoader, adkExporter)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(config.ArtifactService)),

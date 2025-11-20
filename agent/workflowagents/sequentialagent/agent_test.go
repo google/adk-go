@@ -22,13 +22,14 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func TestNewSequentialAgent(t *testing.T) {
@@ -144,7 +145,8 @@ func TestNewSequentialAgent(t *testing.T) {
 			args: args{
 				maxIterations: 0,
 				subAgents: []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{
-					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1")}, "test_agent"), newCustomAgent(t, 3)},
+					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1"),
+				}, "test_agent"), newCustomAgent(t, 3)},
 			},
 			wantErr:        true,
 			wantErrMessage: `failed to create agent tree: agent names must be unique in the agent tree, found duplicate: "test_agent"`,
@@ -154,7 +156,8 @@ func TestNewSequentialAgent(t *testing.T) {
 			args: args{
 				maxIterations: 0,
 				subAgents: []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{
-					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1")}, "test_agent1"), newCustomAgent(t, 3)},
+					newSequentialAgent(t, []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2)}, "test_agent1"),
+				}, "test_agent1"), newCustomAgent(t, 3)},
 			},
 			wantErr:        true,
 			wantErrMessage: `failed to create agent tree: agent names must be unique in the agent tree, found duplicate: "test_agent1"`,
@@ -172,8 +175,10 @@ func TestNewSequentialAgent(t *testing.T) {
 			name: "err with repeated inner sequential in two levels",
 			args: args{
 				maxIterations: 0,
-				subAgents: []agent.Agent{newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{sameAgent}, "test_agent1"),
-					sameAgent, newCustomAgent(t, 3)},
+				subAgents: []agent.Agent{
+					newCustomAgent(t, 0), newSequentialAgent(t, []agent.Agent{sameAgent}, "test_agent1"),
+					sameAgent, newCustomAgent(t, 3),
+				},
 			},
 			wantErr:        true,
 			wantErrMessage: `failed to create agent tree: "same_agent" agent cannot have >1 parents, found: "test_agent1", "test_agent"`,

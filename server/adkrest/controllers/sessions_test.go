@@ -27,6 +27,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/gorilla/mux"
+
 	"google.golang.org/adk/server/adkrest/controllers"
 	"google.golang.org/adk/server/adkrest/internal/fakes"
 	"google.golang.org/adk/server/adkrest/internal/models"
@@ -433,7 +434,6 @@ func TestListSessions(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func sessionVars(sessionID fakes.SessionKey) map[string]string {

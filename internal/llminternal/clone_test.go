@@ -57,7 +57,7 @@ func TestClone(t *testing.T) {
 			t.Errorf("clone() should not be affected by modifications to original")
 		}
 		if original.Sl[0] != "a" {
-			t.Errorf("origina slice was modified")
+			t.Errorf("original slice was modified")
 		}
 		if original.M["k"] != "v" {
 			t.Errorf("original map was modified")
