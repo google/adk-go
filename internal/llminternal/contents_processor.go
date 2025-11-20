@@ -17,6 +17,7 @@ package llminternal
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -105,6 +106,21 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 		if content == nil {
 			continue
 		}
+
+		parts := []*genai.Part{}
+		for _, p := range content.Parts {
+			if p == nil || reflect.ValueOf(*p).IsZero() {
+				continue
+			}
+
+			parts = append(parts, p)
+		}
+
+		if len(parts) == 0 {
+			continue
+		}
+		content.Parts = parts
+
 		utils.RemoveClientFunctionCallID(content)
 		contents = append(contents, content)
 	}
