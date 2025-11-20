@@ -27,14 +27,14 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/httprr"
-	"google.golang.org/adk/internal/testutil"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/typeutil"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"github.com/sjzsdu/adk-go/internal/httprr"
+	"github.com/sjzsdu/adk-go/internal/testutil"
+	"github.com/sjzsdu/adk-go/internal/toolinternal"
+	"github.com/sjzsdu/adk-go/internal/typeutil"
+	"github.com/sjzsdu/adk-go/model"
+	"github.com/sjzsdu/adk-go/model/gemini"
+	"github.com/sjzsdu/adk-go/tool"
+	"github.com/sjzsdu/adk-go/tool/functiontool"
 )
 
 func ExampleNew() {

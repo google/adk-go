@@ -16,11 +16,11 @@
 package prod
 
 import (
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/universal"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/cmd/launcher/web/a2a"
-	"google.golang.org/adk/cmd/launcher/web/api"
+	"github.com/sjzsdu/adk-go/cmd/launcher"
+	"github.com/sjzsdu/adk-go/cmd/launcher/universal"
+	"github.com/sjzsdu/adk-go/cmd/launcher/web"
+	"github.com/sjzsdu/adk-go/cmd/launcher/web/a2a"
+	"github.com/sjzsdu/adk-go/cmd/launcher/web/api"
 )
 
 // NewLauncher returnes universal launcher capable of serving api and a2a

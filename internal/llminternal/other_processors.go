@@ -15,8 +15,8 @@
 package llminternal
 
 import (
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/model"
 )
 
 func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
