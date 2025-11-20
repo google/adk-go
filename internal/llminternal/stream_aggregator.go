@@ -88,6 +88,7 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 		return nil
 	}
 
+	// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
 	if part0 != nil && reflect.ValueOf(*part0).IsZero() {
 		llmResponse.Partial = true
 		return nil
