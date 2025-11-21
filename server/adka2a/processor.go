@@ -31,11 +31,15 @@ type eventProcessor struct {
 	reqCtx *a2asrv.RequestContext
 	meta   invocationMeta
 
-	// Created once the first TaskArtifactUpdateEvent is sent. Used for subsequent artifact updates.
+	// terminalActions is used to keep track of escalate and agent transfer actions on processed events.
+	// It is then gets passed to caller through with metadata of a terminal event.
+	// This is done to make sure the caller processes it, since intermediate events without parts might be ignored.
+	terminalActions session.EventActions
+
+	// responseID is created once the first TaskArtifactUpdateEvent is sent. Used for subsequent artifact updates.
 	responseID a2a.ArtifactID
 
-	// We don't send terminal events during processing because we don't want A2A server to stop reading from the queue
-	// until the whole ADK response is saved as an A2A artifact.
+	// terminalEvents is used to postpone sending a terminal event until the whole ADK response is saved as an A2A artifact.
 	// The highest-priority terminal event from this map is going to be send as the final Task status update, in the order of priority:
 	//  - failed
 	//  - input_required
@@ -54,6 +58,8 @@ func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.
 	if event == nil {
 		return nil, nil
 	}
+
+	p.updateTerminalActions(event)
 
 	eventMeta, err := toEventMeta(p.meta, event)
 	if err != nil {
@@ -108,14 +114,15 @@ func (p *eventProcessor) makeTerminalEvents() []a2a.Event {
 
 	for _, s := range []a2a.TaskState{a2a.TaskStateFailed, a2a.TaskStateInputRequired} {
 		if ev, ok := p.terminalEvents[s]; ok {
+			ev.Metadata = setActionsMeta(ev.Metadata, p.terminalActions)
 			result = append(result, ev)
 			return result
 		}
 	}
 
 	ev := a2a.NewStatusUpdateEvent(p.reqCtx, a2a.TaskStateCompleted, nil)
-	ev.Metadata = p.meta.eventMeta
 	ev.Final = true
+	ev.Metadata = setActionsMeta(p.meta.eventMeta, p.terminalActions)
 	result = append(result, ev)
 	return result
 }
@@ -130,6 +137,13 @@ func (p *eventProcessor) makeTaskFailedEvent(cause error, event *session.Event) 
 		}
 	}
 	return toTaskFailedUpdateEvent(p.reqCtx, cause, meta)
+}
+
+func (p *eventProcessor) updateTerminalActions(event *session.Event) {
+	p.terminalActions.Escalate = p.terminalActions.Escalate || event.Actions.Escalate
+	if event.Actions.TransferToAgent != "" {
+		p.terminalActions.TransferToAgent = event.Actions.TransferToAgent
+	}
 }
 
 func toTaskFailedUpdateEvent(task a2a.TaskInfoProvider, cause error, meta map[string]any) *a2a.TaskStatusUpdateEvent {

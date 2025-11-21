@@ -27,6 +27,9 @@ import (
 var (
 	customMetaTaskIDKey    = ToADKMetaKey("task_id")
 	customMetaContextIDKey = ToADKMetaKey("context_id")
+
+	metadataEscalateKey        = ToA2AMetaKey("escalate")
+	metadataTransferToAgentKey = ToA2AMetaKey("transfer_to_agent")
 )
 
 // NewRemoteAgentEvent create a new Event authored by the agent running in the provided invocation context.
@@ -55,7 +58,9 @@ func EventToMessage(event *session.Event) (*a2a.Message, error) {
 		role = a2a.MessageRoleAgent
 	}
 
-	return a2a.NewMessage(role, parts...), nil
+	msg := a2a.NewMessage(role, parts...)
+	msg.Metadata = setActionsMeta(msg.Metadata, event.Actions)
+	return msg, nil
 }
 
 // ToSessionEvent converts the provided a2a event to session event authored by the agent running in the provided invocation context.
@@ -155,6 +160,7 @@ func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message) (*session.Eve
 	if msg.TaskID != "" || msg.ContextID != "" {
 		event.CustomMetadata = ToCustomMetadata(msg.TaskID, msg.ContextID)
 	}
+	event.Actions = toEventActions(msg)
 	return event, nil
 }
 
@@ -213,6 +219,7 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 	if !task.Status.State.Terminal() && task.Status.State != a2a.TaskStateInputRequired {
 		event.Partial = true
 	}
+	event.Actions = toEventActions(task)
 	return event, nil
 }
 
@@ -234,6 +241,7 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 		event.Content = genai.NewContentFromParts(parts, genai.RoleModel)
 	}
 	event.CustomMetadata = ToCustomMetadata(update.TaskID, update.ContextID)
+	event.Actions = toEventActions(update)
 	event.TurnComplete = true
 	return event, nil
 }
@@ -263,4 +271,12 @@ func toGenAIRole(role a2a.MessageRole) genai.Role {
 	} else {
 		return genai.RoleModel
 	}
+}
+
+func toEventActions(event a2a.Event) session.EventActions {
+	meta := event.Meta()
+	var result session.EventActions
+	result.Escalate, _ = meta[metadataEscalateKey].(bool)
+	result.TransferToAgent, _ = meta[metadataTransferToAgentKey].(string)
+	return result
 }

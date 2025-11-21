@@ -48,6 +48,7 @@ func TestToSessionEvent(t *testing.T) {
 				Parts:     []a2a.Part{a2a.TextPart{Text: "foo"}},
 				TaskID:    taskID,
 				ContextID: contextID,
+				Metadata:  map[string]any{metadataEscalateKey: true, metadataTransferToAgentKey: "a-2"},
 			},
 			want: &session.Event{
 				LLMResponse: model.LLMResponse{
@@ -57,8 +58,9 @@ func TestToSessionEvent(t *testing.T) {
 						customMetaContextIDKey: contextID,
 					},
 				},
-				Author: agentName,
-				Branch: branch,
+				Author:  agentName,
+				Branch:  branch,
+				Actions: session.EventActions{Escalate: true, TransferToAgent: "a-2"},
 			},
 		},
 		{
@@ -100,6 +102,7 @@ func TestToSessionEvent(t *testing.T) {
 					State:   a2a.TaskStateCompleted,
 					Message: a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "done"}),
 				},
+				Metadata: map[string]any{metadataEscalateKey: true},
 			},
 			want: &session.Event{
 				LLMResponse: model.LLMResponse{
@@ -120,8 +123,9 @@ func TestToSessionEvent(t *testing.T) {
 						customMetaContextIDKey: contextID,
 					},
 				},
-				Author: agentName,
-				Branch: branch,
+				Author:  agentName,
+				Branch:  branch,
+				Actions: session.EventActions{Escalate: true},
 			},
 		},
 		{
@@ -158,7 +162,8 @@ func TestToSessionEvent(t *testing.T) {
 						},
 					},
 				},
-				Status: a2a.TaskStatus{State: a2a.TaskStateInputRequired},
+				Status:   a2a.TaskStatus{State: a2a.TaskStateInputRequired},
+				Metadata: map[string]any{metadataEscalateKey: true},
 			},
 			want: &session.Event{
 				LLMResponse: model.LLMResponse{
@@ -179,6 +184,7 @@ func TestToSessionEvent(t *testing.T) {
 				LongRunningToolIDs: []string{"get_weather"},
 				Author:             agentName,
 				Branch:             branch,
+				Actions:            session.EventActions{Escalate: true},
 			},
 		},
 		{

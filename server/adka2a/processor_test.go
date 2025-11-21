@@ -56,7 +56,7 @@ func TestEventProcessor_Process(t *testing.T) {
 		{
 			name: "skip if no response",
 			events: []*session.Event{
-				{ID: "125", InvocationID: "345", Actions: session.EventActions{Escalate: true}},
+				{ID: "125", InvocationID: "345"},
 				{ID: "127", InvocationID: "345", Branch: "b", Author: "a"},
 			},
 			terminal: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil)},
@@ -243,6 +243,57 @@ func TestEventProcessor_Process(t *testing.T) {
 			terminal: []a2a.Event{
 				newArtifactLastChunkEvent(task),
 				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, nil),
+			},
+		},
+		{
+			name: "actions in completed event meta",
+			events: []*session.Event{
+				{ID: "125", InvocationID: "345", Actions: session.EventActions{Escalate: true, TransferToAgent: "a-2"}},
+			},
+			terminal: []a2a.Event{
+				&a2a.TaskStatusUpdateEvent{
+					TaskID:    task.ID,
+					ContextID: task.ContextID,
+					Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
+					Metadata:  map[string]any{metadataEscalateKey: true, metadataTransferToAgentKey: "a-2"},
+					Final:     true,
+				},
+			},
+		},
+		{
+			name: "last agent transfer is returned",
+			events: []*session.Event{
+				{ID: "125", InvocationID: "345", Actions: session.EventActions{TransferToAgent: "a-2"}},
+				{ID: "126", InvocationID: "346", Actions: session.EventActions{TransferToAgent: "a-3"}},
+			},
+			terminal: []a2a.Event{
+				&a2a.TaskStatusUpdateEvent{
+					TaskID:    task.ID,
+					ContextID: task.ContextID,
+					Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
+					Metadata:  map[string]any{metadataTransferToAgentKey: "a-3"},
+					Final:     true,
+				},
+			},
+		},
+		{
+			name: "actions not overwritten by subsequent events",
+			events: []*session.Event{
+				{
+					LLMResponse: modelResponseFromParts(genai.NewPartFromText("The answer is")),
+					Actions:     session.EventActions{Escalate: true, TransferToAgent: "a-2"},
+				},
+				{LLMResponse: model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}},
+			},
+			processed: []*a2a.TaskArtifactUpdateEvent{
+				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "The answer is"}),
+			},
+			terminal: []a2a.Event{
+				newArtifactLastChunkEvent(task),
+				toTaskFailedUpdateEvent(
+					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
+					map[string]any{ToA2AMetaKey("error_code"): "1", metadataEscalateKey: true, metadataTransferToAgentKey: "a-2"},
+				),
 			},
 		},
 	}
