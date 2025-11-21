@@ -7,9 +7,17 @@ This example demonstrates how to use the confirmation feature in FunctionTools.
 1. **Static Confirmation**: Using `RequireConfirmation: true` in the tool config to always require confirmation
 2. **Dynamic Confirmation**: Using `ctx.RequestConfirmation()` within the tool function to request confirmation at runtime
 
+## Prerequisites
+
+Set your Google API key:
+```bash
+export GOOGLE_API_KEY=your_api_key_here
+```
+
 ## Running the Example
 
 ```bash
+cd examples/tools/confirmation
 go run main.go
 ```
 

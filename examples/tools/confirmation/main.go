@@ -21,11 +21,13 @@ import (
 	"log"
 	"os"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/llm"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/runner/full"
-	"google.golang.org/adk/session"
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/cmd/launcher"
+	"google.golang.org/adk/cmd/launcher/full"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
@@ -60,6 +62,13 @@ func staticConfirmationTool(ctx tool.Context, args WriteFileArgs) (string, error
 
 func main() {
 	ctx := context.Background()
+
+	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+		APIKey: os.Getenv("GOOGLE_API_KEY"),
+	})
+	if err != nil {
+		log.Fatalf("Failed to create model: %v", err)
+	}
 	
 	// Create a function tool that requests confirmation dynamically
 	dynamicTool, err := functiontool.New(functiontool.Config{
@@ -72,7 +81,7 @@ func main() {
 	
 	// Create a function tool that always requires confirmation via config
 	staticTool, err := functiontool.New(functiontool.Config{
-		Name:                  "write_file_static",
+		Name:                 "write_file_static",
 		Description:          "Write content to a file, with static confirmation requirement",
 		RequireConfirmation:  true,
 	}, staticConfirmationTool)
@@ -80,27 +89,21 @@ func main() {
 		log.Fatalf("Failed to create static confirmation tool: %v", err)
 	}
 
-	// Create a simple LLM agent with the tools
-	llmAgent, err := agent.NewLLMAgent(ctx, agent.LLMAgentConfig{
-		Name:  "file_operator",
-		Model: &model.MockModel{}, // Use mock model for example
-		Tools: []tool.Tool{dynamicTool, staticTool},
+	a, err := llmagent.New(llmagent.Config{
+		Name:        "file_operator",
+		Model:       model,
+		Description: "Agent that writes files with confirmation",
+		Tools:       []tool.Tool{dynamicTool, staticTool},
 	})
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	// Create a runner config
-	config := &session.SessionConfig{
-		Agents: []agent.Agent{llmAgent},
-	}
-
-	// Create a launcher with full capabilities
-	l := full.NewLauncher()
+	l := full.NewLauncher(launcher.Config{
+		Agents: []agent.Agent{a},
+	})
 	
-	// Run the agent
-	err = l.ParseAndRun(ctx, config, os.Args[1:], nil)
-	if err != nil {
+	if err := l.ParseAndRun(ctx, os.Args[1:]); err != nil {
 		log.Fatalf("Failed to run: %v", err)
 	}
 }
