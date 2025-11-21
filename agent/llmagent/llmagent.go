@@ -26,6 +26,7 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/planner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
@@ -78,6 +79,7 @@ func New(cfg Config) (agent.Agent, error) {
 			GlobalInstruction:         cfg.GlobalInstruction,
 			GlobalInstructionProvider: llminternal.InstructionProvider(cfg.GlobalInstructionProvider),
 			OutputKey:                 cfg.OutputKey,
+			Planner:                   cfg.Planner,
 		},
 	}
 
@@ -255,6 +257,10 @@ type Config struct {
 	// - Extracts agent reply for later use, such as in tools, callbacks, etc.
 	// - Connects agents to coordinate with each other.
 	OutputKey string
+
+	// Planner allows the agent to generate plans for the queries to guide its action.
+	// If not provided, no planning will be performed.
+	Planner planner.BasePlanner
 }
 
 // BeforeModelCallback that is called before sending a request to the model.
@@ -384,6 +390,11 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 
 		event.Actions.StateDelta[a.OutputKey] = result
 	}
+}
+
+// Planner returns the planner instance for this agent, if any.
+func (a *llmAgent) Planner() planner.BasePlanner {
+	return a.State.Planner
 }
 
 // InstructionProvider allows to create instructions dynamically. It is called
