@@ -16,6 +16,7 @@ package toolinternal
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 	"google.golang.org/genai"
@@ -28,12 +29,18 @@ import (
 	"google.golang.org/adk/tool"
 )
 
+// ErrArtifactServiceNotConfigured is returned when artifact service operations are attempted without configuration.
+var ErrArtifactServiceNotConfigured = errors.New("artifact service not configured")
+
 type internalArtifacts struct {
 	agent.Artifacts
 	eventActions *session.EventActions
 }
 
 func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
+	if ia == nil {
+		return nil, ErrArtifactServiceNotConfigured
+	}
 	resp, err := ia.Artifacts.Save(ctx, name, data)
 	if err != nil {
 		return resp, err
@@ -48,6 +55,20 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 	return resp, nil
 }
 
+func (ia *internalArtifacts) List(ctx context.Context) (*artifact.ListResponse, error) {
+	if ia == nil {
+		return nil, ErrArtifactServiceNotConfigured
+	}
+	return ia.Artifacts.List(ctx)
+}
+
+func (ia *internalArtifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {
+	if ia == nil {
+		return nil, ErrArtifactServiceNotConfigured
+	}
+	return ia.Artifacts.Load(ctx, name)
+}
+
 func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions *session.EventActions) tool.Context {
 	if functionCallID == "" {
 		functionCallID = uuid.NewString()
@@ -60,15 +81,21 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 	}
 	cbCtx := contextinternal.NewCallbackContextWithDelta(ctx, actions.StateDelta)
 
+	// Only create internalArtifacts if the underlying Artifacts service is configured
+	var artifacts *internalArtifacts
+	if ctx.Artifacts() != nil {
+		artifacts = &internalArtifacts{
+			Artifacts:    ctx.Artifacts(),
+			eventActions: actions,
+		}
+	}
+
 	return &toolContext{
 		CallbackContext:   cbCtx,
 		invocationContext: ctx,
 		functionCallID:    functionCallID,
 		eventActions:      actions,
-		artifacts: &internalArtifacts{
-			Artifacts:    ctx.Artifacts(),
-			eventActions: actions,
-		},
+		artifacts:         artifacts,
 	}
 }
 
