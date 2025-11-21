@@ -185,8 +185,14 @@ func TestFunctionTool_Simple(t *testing.T) {
 
 func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t *testing.T) {
 	// First tool
-	identityFunc := func(ctx tool.Context, x int) (int, error) {
-		return x, nil
+	type IntInput struct {
+		X int `json:"x"`
+	}
+	type IntOutput struct {
+		Result int `json:"result"`
+	}
+	identityFunc := func(ctx tool.Context, input IntInput) (IntOutput, error) {
+		return IntOutput{Result: input.X}, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{
 		Name:        "identity",
@@ -197,8 +203,14 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	}
 
 	// Second tool
-	stringIdentityFunc := func(ctx tool.Context, input string) (string, error) {
-		return input, nil
+	type StringInput struct {
+		Value string `json:"value"`
+	}
+	type StringOutput struct {
+		Result string `json:"result"`
+	}
+	stringIdentityFunc := func(ctx tool.Context, input StringInput) (StringOutput, error) {
+		return StringOutput{Result: input.Value}, nil
 	}
 	stringIdentityTool, err := functiontool.New(
 		functiontool.Config{
@@ -507,4 +519,61 @@ func stringify(v any) string {
 		panic(err)
 	}
 	return string(x)
+}
+
+func TestNew_InvalidInputType(t *testing.T) {
+	testCases := []struct {
+		name       string
+		createTool func() (tool.Tool, error)
+		wantErrMsg string
+	}{
+		{
+			name: "string_input",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "string_tool",
+					Description: "a tool with string input",
+				}, func(ctx tool.Context, input string) (string, error) {
+					return input, nil
+				})
+			},
+			wantErrMsg: "input must be a struct type, got: string",
+		},
+		{
+			name: "int_input",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "int_tool",
+					Description: "a tool with int input",
+				}, func(ctx tool.Context, input int) (int, error) {
+					return input, nil
+				})
+			},
+			wantErrMsg: "input must be a struct type, got: int",
+		},
+		{
+			name: "bool_input",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "bool_tool",
+					Description: "a tool with bool input",
+				}, func(ctx tool.Context, input bool) (bool, error) {
+					return input, nil
+				})
+			},
+			wantErrMsg: "input must be a struct type, got: bool",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.createTool()
+			if err == nil {
+				t.Fatalf("New() succeeded, want error containing %q", tc.wantErrMsg)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrMsg) {
+				t.Errorf("New() error = %q, want error containing %q", err.Error(), tc.wantErrMsg)
+			}
+		})
+	}
 }

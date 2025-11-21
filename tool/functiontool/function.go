@@ -17,6 +17,7 @@ package functiontool
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -54,6 +55,16 @@ type Func[TArgs, TResults any] func(tool.Context, TArgs) (TResults, error)
 func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
 	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
+
+	var zeroArgs TArgs
+	argsType := reflect.TypeOf(zeroArgs)
+	for argsType != nil && argsType.Kind() == reflect.Ptr {
+		argsType = argsType.Elem()
+	}
+	if argsType == nil || argsType.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("input must be a struct type, got: %v", argsType)
+	}
+
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to infer input schema: %w", err)
