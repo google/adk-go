@@ -381,19 +381,22 @@ func (s *state) Get(key string) (any, error) {
 }
 
 func (s *state) All() iter.Seq2[string, any] {
-	return func(yield func(key string, val any) bool) {
-		s.mu.RLock()
-
-		for k, v := range s.state {
-			s.mu.RUnlock()
-			if !yield(k, v) {
-				return
-			}
+			return func(yield func(key string, val any) bool) {
+			// Create a copy of the map while holding the lock
 			s.mu.RLock()
-		}
+			copy := make(map[string]any, len(s.state))
+			for k, v := range s.state {
+				copy[k] = v
+			}
+			s.mu.RUnlock()
 
-		s.mu.RUnlock()
-	}
+			// Iterate over the copy without holding the lock
+			for k, v := range copy {
+				if !yield(k, v) {
+					return
+				}
+			}
+		}
 }
 
 func (s *state) Set(key string, value any) error {
