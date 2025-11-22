@@ -91,3 +91,84 @@ func TestGeminiTool_ProcessRequest(t *testing.T) {
 		})
 	}
 }
+
+func TestSimpleTools_ProcessRequest(t *testing.T) {
+	testCases := []struct {
+		name     string
+		tool     toolinternal.RequestProcessor
+		wantTool *genai.Tool
+	}{
+		{
+			name:     "GoogleSearch",
+			tool:     geminitool.GoogleSearch{},
+			wantTool: &genai.Tool{GoogleSearch: &genai.GoogleSearch{}},
+		},
+		{
+			name:     "GoogleMaps",
+			tool:     geminitool.GoogleMaps{},
+			wantTool: &genai.Tool{GoogleMaps: &genai.GoogleMaps{}},
+		},
+		{
+			name:     "EnterpriseWebSearch",
+			tool:     geminitool.EnterpriseWebSearch{},
+			wantTool: &genai.Tool{EnterpriseWebSearch: &genai.EnterpriseWebSearch{}},
+		},
+		{
+			name:     "URLContext",
+			tool:     geminitool.URLContext{},
+			wantTool: &genai.Tool{URLContext: &genai.URLContext{}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			runStandardToolTests(t, tc.tool, tc.wantTool)
+		})
+	}
+}
+
+func runStandardToolTests(t *testing.T, tool toolinternal.RequestProcessor, wantTool *genai.Tool) {
+	t.Run("add to empty request", func(t *testing.T) {
+		req := &model.LLMRequest{}
+
+		err := tool.ProcessRequest(nil, req)
+		if err != nil {
+			t.Fatalf("ProcessRequest() error = %v, wantErr false", err)
+		}
+
+		wantTools := []*genai.Tool{wantTool}
+		if diff := cmp.Diff(wantTools, req.Config.Tools); diff != "" {
+			t.Errorf("ProcessRequest returned unexpected tools (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("add to existing tools", func(t *testing.T) {
+		req := &model.LLMRequest{
+			Config: &genai.GenerateContentConfig{
+				Tools: []*genai.Tool{
+					{GoogleSearch: &genai.GoogleSearch{}},
+				},
+			},
+		}
+
+		err := tool.ProcessRequest(nil, req)
+		if err != nil {
+			t.Fatalf("ProcessRequest() error = %v, wantErr false", err)
+		}
+
+		wantTools := []*genai.Tool{
+			{GoogleSearch: &genai.GoogleSearch{}},
+			wantTool,
+		}
+		if diff := cmp.Diff(wantTools, req.Config.Tools); diff != "" {
+			t.Errorf("ProcessRequest returned unexpected tools (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("error on nil request", func(t *testing.T) {
+		err := tool.ProcessRequest(nil, nil)
+		if err == nil {
+			t.Fatal("ProcessRequest() error = nil, wantErr true")
+		}
+	})
+}
