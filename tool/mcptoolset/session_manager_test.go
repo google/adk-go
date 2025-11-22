@@ -15,6 +15,7 @@
 package mcptoolset
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -77,7 +78,7 @@ func TestGenerateSessionKey(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clientTransport, _ := mcp.NewInMemoryTransports()
+			clientTransport := &mcp.SSEClientTransport{}
 
 			client := mcp.NewClient(&mcp.Implementation{Name: "test_client", Version: "v1.0.0"}, nil)
 			sm := NewSessionManager(client, clientTransport)
@@ -93,6 +94,25 @@ func TestGenerateSessionKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGenerateSessionKey_IgnoresHeadersForNonHTTPTransport(t *testing.T) {
+	ctx := context.Background()
+	clientTransport, _ := mcp.NewInMemoryTransports()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test_client", Version: "v1.0.0"}, nil)
+	sm := NewSessionManager(client, clientTransport)
+
+	key1 := sm.generateSessionKey(map[string]string{"Authorization": "Bearer token123"})
+	key2 := sm.generateSessionKey(map[string]string{"Authorization": "Bearer token456"})
+
+	if key1 != "default" || key2 != "default" {
+		t.Fatalf("expected default keys for non-HTTP transport, got %q and %q", key1, key2)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	_, err := server.Connect(ctx, clientTransport, nil)
+	_ = err
 }
 
 func TestDefaultKey(t *testing.T) {

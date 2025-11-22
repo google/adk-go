@@ -51,8 +51,24 @@ func NewSessionManager(client *mcp.Client, transport mcp.Transport) *SessionMana
 	}
 }
 
+// headersAffectSession returns true only for HTTP-based transports where
+// headers are actually used by the connection.
+func (sm *SessionManager) headersAffectSession() bool {
+	switch sm.transport.(type) {
+	case *mcp.SSEClientTransport, *mcp.StreamableClientTransport:
+		return true
+	default:
+		return false
+	}
+}
+
 // generateSessionKey creates a hash-based key from headers
 func (sm *SessionManager) generateSessionKey(headers map[string]string) string {
+	// For non-HTTP transports (e.g., stdio, in-memory), headers don't apply,
+	// so we always pool into the same session.
+	if !sm.headersAffectSession() {
+		return "default"
+	}
 	if len(headers) == 0 {
 		return "default"
 	}
