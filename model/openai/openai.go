@@ -372,13 +372,14 @@ func (m *openAIModel) convertContent(content *genai.Content) ([]openAIMessage, e
 		}
 	} else if len(contentArray) > 0 {
 		// Add text parts to content array
-		for _, text := range textParts {
-			contentArray = append([]map[string]any{{
+		textMaps := make([]map[string]any, len(textParts))
+		for i, text := range textParts {
+			textMaps[i] = map[string]any{
 				"type": "text",
 				"text": text,
-			}}, contentArray...)
+			}
 		}
-		msg.Content = contentArray
+		msg.Content = append(textMaps, contentArray...)
 	} else if len(textParts) > 0 {
 		msg.Content = strings.Join(textParts, "\n")
 	}
