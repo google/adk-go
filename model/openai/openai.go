@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/sjzsdu/adk-go/internal/llminternal"
@@ -49,7 +50,7 @@ type openaiModel struct {
 // ChatMessage represents a message in the chat completion request
 type ChatMessage struct {
 	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
+	Content    string     `json:"content"`
 	Name       string     `json:"name,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
@@ -205,6 +206,8 @@ func (m *openaiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 			return
 		}
 
+		// 直接在回调函数中处理yield结果，不通过返回错误来终止
+		yieldFailed := false
 		err = m.callChatStreamAPI(ctx, chatReq, func(resp *ChatCompletionResponse) error {
 			if len(resp.Choices) == 0 {
 				return nil // Skip empty responses
@@ -217,13 +220,19 @@ func (m *openaiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 			// Process through aggregator
 			for aggResp, err := range aggregator.ProcessResponse(ctx, m.convertToGenaiResponse(llmResp)) {
 				if !yield(aggResp, err) {
-					return fmt.Errorf("streaming interrupted")
+					yieldFailed = true
+					return io.EOF // 立即终止stream API调用
 				}
 			}
 			return nil
 		})
 
-		if err != nil {
+		// 如果yield返回false导致提前终止，直接返回而不处理错误
+		if yieldFailed {
+			return
+		}
+
+		if err != nil && err != io.EOF {
 			yield(nil, fmt.Errorf("failed to call OpenAI streaming API: %w", err))
 			return
 		}
@@ -260,7 +269,7 @@ func (m *openaiModel) buildChatRequest(req *model.LLMRequest, stream bool) (*Cha
 				break
 			}
 		}
-		
+
 		// 如果没有system消息，创建一个新的
 		if !hasSystemMessage {
 			systemContent := ""
@@ -271,8 +280,8 @@ func (m *openaiModel) buildChatRequest(req *model.LLMRequest, stream bool) (*Cha
 			}
 			// 将system消息插入到messages的开头
 			messages = append([]ChatMessage{{
-					Role:    "system",
-					Content: systemContent,
+				Role:    "system",
+				Content: systemContent,
 			}}, messages...)
 		}
 	}
@@ -295,13 +304,13 @@ func (m *openaiModel) buildChatRequest(req *model.LLMRequest, stream bool) (*Cha
 		if req.Config.TopP != nil {
 			chatReq.TopP = float64(*req.Config.TopP)
 		}
-		
+
 		// 处理ResponseMIMEType（正确拼写）
 		if req.Config.ResponseMIMEType == "application/json" && req.Config.ResponseSchema != nil {
 			// OpenAI目前的ChatCompletionRequest结构不支持ResponseFormat字段
 			// 这里保留注释供将来参考，当API支持时可以实现
 		}
-		
+
 		// 处理TopK（OpenAI没有直接对应的参数）
 		if req.Config.TopK != nil && *req.Config.TopK > 0 {
 			// OpenAI API不直接支持TopK参数
@@ -330,39 +339,63 @@ func (m *openaiModel) convertToOpenAIMessages(contents []*genai.Content) ([]Chat
 			continue
 		}
 
-		msg := ChatMessage{
-			Role: m.convertRole(content.Role),
+		role := m.convertRole(content.Role)
+
+		var pending struct {
+			msg       *ChatMessage
+			textParts []string
 		}
 
-		// Convert parts to content
-		var textParts []string
-		var toolCalls []ToolCall
+		flushPending := func() {
+			if pending.msg == nil {
+				return
+			}
+			if len(pending.textParts) > 0 {
+				pending.msg.Content = strings.Join(pending.textParts, " ")
+			}
+			// 仅在存在文本或工具调用时追加消息，避免产生空消息
+			if pending.msg.Content != "" || len(pending.msg.ToolCalls) > 0 {
+				messages = append(messages, *pending.msg)
+			}
+			pending.msg = nil
+			pending.textParts = nil
+		}
+
+		ensurePending := func() *ChatMessage {
+			if pending.msg == nil {
+				pending.msg = &ChatMessage{Role: role}
+				pending.textParts = nil
+			}
+			return pending.msg
+		}
 
 		for _, part := range content.Parts {
-			if part.Text != "" {
-				textParts = append(textParts, part.Text)
+			if part == nil {
+				continue
 			}
-			if part.FunctionCall != nil {
-				argsBytes, _ := json.Marshal(part.FunctionCall.Args)
-				toolCalls = append(toolCalls, ToolCall{
-					ID:   fmt.Sprintf("call_%s", part.FunctionCall.Name),
-					Type: "function",
-					Function: Function{
-						Name:      part.FunctionCall.Name,
-						Arguments: string(argsBytes),
-					},
-				})
+			switch {
+			case part.Text != "":
+				msg := ensurePending()
+				pending.textParts = append(pending.textParts, part.Text)
+				msg.Content = strings.Join(pending.textParts, " ")
+			case part.FunctionCall != nil:
+				msg := ensurePending()
+				toolCall, err := m.convertFunctionCall(part.FunctionCall)
+				if err != nil {
+					return nil, err
+				}
+				msg.ToolCalls = append(msg.ToolCalls, *toolCall)
+			case part.FunctionResponse != nil:
+				flushPending()
+				toolMsg, err := m.convertFunctionResponse(part.FunctionResponse)
+				if err != nil {
+					return nil, err
+				}
+				messages = append(messages, *toolMsg)
 			}
 		}
 
-		if len(textParts) > 0 {
-			msg.Content = strings.Join(textParts, " ")
-		}
-		if len(toolCalls) > 0 {
-			msg.ToolCalls = toolCalls
-		}
-
-		messages = append(messages, msg)
+		flushPending()
 	}
 
 	return messages, nil
@@ -384,36 +417,121 @@ func (m *openaiModel) convertRole(role string) string {
 	}
 }
 
-// convertTools converts ADK tools to OpenAI tools
-func (m *openaiModel) convertTools(tools map[string]any) ([]Tool, error) {
-	var openaiTools []Tool
-
-	// This is a simplified conversion - in a real implementation,
-	// you'd need to properly parse the tool definitions based on your tool format
-	for name, toolDef := range tools {
-		tool := Tool{
-			Type: "function",
-			Function: FunctionTool{
-				Name:        name,
-				Description: fmt.Sprintf("Tool: %s", name),
-				Parameters:  make(map[string]interface{}),
-			},
-		}
-
-		// Add tool definition parsing logic here based on your tool format
-		if toolMap, ok := toolDef.(map[string]interface{}); ok {
-			if desc, ok := toolMap["description"].(string); ok {
-				tool.Function.Description = desc
-			}
-			if params, ok := toolMap["parameters"].(map[string]interface{}); ok {
-				tool.Function.Parameters = params
-			}
-		}
-
-		openaiTools = append(openaiTools, tool)
+func (m *openaiModel) convertFunctionCall(fn *genai.FunctionCall) (*ToolCall, error) {
+	if fn == nil {
+		return nil, fmt.Errorf("function call is nil")
 	}
 
-	return openaiTools, nil
+	callID := fn.ID
+	if callID == "" {
+		callID = fmt.Sprintf("call_%s", fn.Name)
+	}
+
+	args := fn.Args
+	if args == nil {
+		args = map[string]any{}
+	}
+
+	argsBytes, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal args for function %q: %w", fn.Name, err)
+	}
+
+	return &ToolCall{
+		ID:   callID,
+		Type: "function",
+		Function: Function{
+			Name:      fn.Name,
+			Arguments: string(argsBytes),
+		},
+	}, nil
+}
+
+func (m *openaiModel) convertFunctionResponse(fr *genai.FunctionResponse) (*ChatMessage, error) {
+	if fr == nil {
+		return nil, fmt.Errorf("function response is nil")
+	}
+	if fr.ID == "" {
+		return nil, fmt.Errorf("function response %q missing ID", fr.Name)
+	}
+
+	content := "{}"
+	if fr.Response == nil {
+		content = ""
+	} else if bytes, err := json.Marshal(fr.Response); err == nil {
+		content = string(bytes)
+	} else {
+		return nil, fmt.Errorf("failed to marshal function response %q: %w", fr.Name, err)
+	}
+
+	return &ChatMessage{
+		Role:       "tool",
+		Name:       fr.Name,
+		ToolCallID: fr.ID,
+		Content:    content,
+	}, nil
+}
+
+// convertTools converts ADK tools to OpenAI tools
+func (m *openaiModel) convertTools(tools map[string]any) ([]Tool, error) {
+	if len(tools) == 0 {
+		return nil, nil
+	}
+
+	type declProvider interface {
+		Name() string
+		Declaration() *genai.FunctionDeclaration
+	}
+
+	keys := make([]string, 0, len(tools))
+	for name := range tools {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+
+	result := make([]Tool, 0, len(keys))
+
+	for _, name := range keys {
+		rawTool := tools[name]
+		provider, ok := rawTool.(declProvider)
+		if !ok {
+			return nil, fmt.Errorf("tool %q does not expose a function declaration", name)
+		}
+
+		decl := provider.Declaration()
+		if decl == nil {
+			return nil, fmt.Errorf("tool %q has no function declaration", provider.Name())
+		}
+
+		var params map[string]any
+		if decl.ParametersJsonSchema != nil {
+			schemaBytes, err := json.Marshal(decl.ParametersJsonSchema)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal parameters schema for tool %q: %w", provider.Name(), err)
+			}
+			if len(schemaBytes) > 0 {
+				if err := json.Unmarshal(schemaBytes, &params); err != nil {
+					return nil, fmt.Errorf("failed to convert parameters schema for tool %q: %w", provider.Name(), err)
+				}
+			}
+		}
+
+		toolName := decl.Name
+		if toolName == "" {
+			toolName = provider.Name()
+		}
+
+		result = append(result, Tool{
+			Type: "function",
+			Function: FunctionTool{
+				Name:        toolName,
+				Description: decl.Description,
+				Parameters:  params,
+			},
+		})
+	}
+
+	return result, nil
 }
 
 // callChatAPI makes a synchronous call to OpenAI chat API
@@ -575,10 +693,11 @@ func (m *openaiModel) convertToGenaiContent(msg *ChatMessage, delta *ChatMessage
 	for _, toolCall := range activeMsg.ToolCalls {
 		if toolCall.Type == "function" {
 			var args map[string]any
-			json.Unmarshal([]byte(toolCall.Function.Arguments), &args)
+			_ = json.Unmarshal([]byte(toolCall.Function.Arguments), &args)
 
 			fcPart := &genai.Part{
 				FunctionCall: &genai.FunctionCall{
+					ID:   toolCall.ID,
 					Name: toolCall.Function.Name,
 					Args: args,
 				},
@@ -604,12 +723,12 @@ func (m *openaiModel) convertToGenaiResponse(resp *model.LLMResponse) *genai.Gen
 }
 
 // maybeAppendUserContent appends a user content, so that model can continue to output.
+// 注意：在工具调用场景下，助手消息后应该跟tool消息而不是user消息
 func (m *openaiModel) maybeAppendUserContent(req *model.LLMRequest) {
+	// 简化实现，避免干扰工具调用流程
+	// 只在消息为空时添加初始提示
 	if len(req.Contents) == 0 {
 		req.Contents = append(req.Contents, genai.NewContentFromText("Handle the requests as specified in the System Instruction.", "user"))
 	}
-
-	if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != "user" {
-		req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
-	}
+	// 不再在助手消息后添加用户消息，避免破坏工具调用流程
 }
