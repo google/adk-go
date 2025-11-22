@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// This example demonstrates how to use the ADK REST API handler directly
-// with the standard net/http package, without relying on any specific router.
+// Package provides an example ADK REST API server with an ADK agent.
 package main
 
 import (

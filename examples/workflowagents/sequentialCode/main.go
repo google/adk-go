@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package demonstrates a coding workflow agent that runs sub-agents sequentially.
 package main
 
 import (

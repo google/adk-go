@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package console provides a simple way to interact with an agent from console application
+// Package console provides a simple way to interact with an agent from console application.
 package console
 
 import (

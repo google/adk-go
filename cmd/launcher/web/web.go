@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package web provides a way to run ADK using a web server (extended by sublaunchers)
+// Package web provides a way to run ADK using a web server.
 package web
 
 import (

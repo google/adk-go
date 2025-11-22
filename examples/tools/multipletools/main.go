@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package demonstrates a workaround for using Google Search tool with other tools.
 package main
 
 import (

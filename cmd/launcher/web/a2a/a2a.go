@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package a2a provides a sublauncher that adds A2A capabilities to the web server
+// Package a2a provides a sublauncher that provides A2A capabilities.
 package a2a
 
 import (

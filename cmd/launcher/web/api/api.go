@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package api provides a sublauncher that adds ADK REST API to the web server (using url /api/)
+// Package api provides a sublauncher that adds ADK REST API capabilities.
 package api
 
 import (

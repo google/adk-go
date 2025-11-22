@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Adkgo is a CLI tool to help deploy and test an ADK application.
+// adkgo is a CLI tool to help deploy and test an ADK application.
 package main
 
 import (
