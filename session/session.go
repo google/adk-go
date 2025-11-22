@@ -125,7 +125,10 @@ func (e *Event) IsFinalResponse() bool {
 		return true
 	}
 
-	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
+	// Check if there's a confirmation request - if so, this is not a final response
+	hasConfirmationRequest := e.Actions.ConfirmationRequest != nil
+
+	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse) && !hasConfirmationRequest
 }
 
 // NewEvent creates a new event defining now as the timestamp.
@@ -154,6 +157,9 @@ type EventActions struct {
 	TransferToAgent string
 	// The agent is escalating to a higher level agent.
 	Escalate bool
+
+	// If set, indicates that a confirmation is required before proceeding.
+	ConfirmationRequest *ConfirmationRequest
 }
 
 // Prefixes for defining session's state scopes
