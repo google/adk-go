@@ -139,13 +139,10 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 }
 
 func (s *set) getSession(ctx agent.ReadonlyContext) (*mcp.ClientSession, error) {
-	headers := make(map[string]string)
+	var headers map[string]string
 
 	if s.headerProvider != nil {
-		providerHeaders := s.headerProvider(ctx)
-		for k, v := range providerHeaders {
-			headers[k] = v
-		}
+		headers = s.headerProvider(ctx)
 	}
 
 	return s.sessionManager.GetSession(ctx, headers)
