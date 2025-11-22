@@ -21,3 +21,4 @@ profile.cov
 go.work
 go.work.sum
 .DS_Store
+examples/tools/confirmation/confirmation

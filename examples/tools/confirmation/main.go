@@ -99,11 +99,12 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	l := full.NewLauncher(launcher.Config{
-		Agents: []agent.Agent{a},
-	})
-	
-	if err := l.ParseAndRun(ctx, os.Args[1:]); err != nil {
-		log.Fatalf("Failed to run: %v", err)
+	config := &launcher.Config{
+		AgentLoader: agent.NewSingleLoader(a),
+	}
+
+	l := full.NewLauncher()
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
 }

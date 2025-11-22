@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package tool provides types and interfaces for confirmation functionality.
-package tool
+package session
 
 // ConfirmationRequest represents a request for confirmation that needs to be handled by the user/system.
 type ConfirmationRequest struct {

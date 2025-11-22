@@ -117,7 +117,7 @@ func (c *toolContext) RequestConfirmation(hint string, payload map[string]any) e
 		return fmt.Errorf("tool name is missing in context for confirmation request with hint: %s", hint)
 	}
 
-	request := tool.ConfirmationRequest{
+	request := session.ConfirmationRequest{
 		ID:       confirmationID,
 		ToolName: toolName,
 		Hint:     hint,

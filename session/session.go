@@ -22,7 +22,6 @@ import (
 	"github.com/google/uuid"
 
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
 )
 
 // Session represents a series of interactions between a user and agents.
@@ -160,7 +159,7 @@ type EventActions struct {
 	Escalate bool
 
 	// If set, indicates that a confirmation is required before proceeding.
-	ConfirmationRequest *tool.ConfirmationRequest
+	ConfirmationRequest *ConfirmationRequest
 }
 
 // Prefixes for defining session's state scopes
