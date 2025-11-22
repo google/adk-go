@@ -57,7 +57,7 @@ func New(cfg Config) (tool.Toolset, error) {
 		transport:      cfg.Transport,
 		toolFilter:     cfg.ToolFilter,
 		headerProvider: cfg.HeaderProvider,
-		sessionManager: NewSessionManager(client, cfg.Transport),
+		sessionManager: newSessionManager(client, cfg.Transport),
 	}, nil
 }
 
@@ -83,7 +83,7 @@ type set struct {
 	toolFilter     tool.Predicate
 	headerProvider func(agent.ReadonlyContext) map[string]string
 
-	sessionManager *SessionManager
+	sessionManager *sessionManager
 }
 
 func (*set) Name() string {

@@ -28,8 +28,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// SessionManager manages MCP client sessions with header-based pooling
-type SessionManager struct {
+// sessionManager manages MCP client sessions with header-based pooling
+type sessionManager struct {
 	client    *mcp.Client
 	transport mcp.Transport
 
@@ -42,9 +42,9 @@ type sessionEntry struct {
 	headers map[string]string
 }
 
-// NewSessionManager creates a new session manager
-func NewSessionManager(client *mcp.Client, transport mcp.Transport) *SessionManager {
-	return &SessionManager{
+// newSessionManager creates a new session manager
+func newSessionManager(client *mcp.Client, transport mcp.Transport) *sessionManager {
+	return &sessionManager{
 		client:    client,
 		transport: transport,
 		sessions:  make(map[string]*sessionEntry),
@@ -53,7 +53,7 @@ func NewSessionManager(client *mcp.Client, transport mcp.Transport) *SessionMana
 
 // headersAffectSession returns true only for HTTP-based transports where
 // headers are actually used by the connection.
-func (sm *SessionManager) headersAffectSession() bool {
+func (sm *sessionManager) headersAffectSession() bool {
 	switch sm.transport.(type) {
 	case *mcp.SSEClientTransport, *mcp.StreamableClientTransport:
 		return true
@@ -63,7 +63,7 @@ func (sm *SessionManager) headersAffectSession() bool {
 }
 
 // generateSessionKey creates a hash-based key from headers
-func (sm *SessionManager) generateSessionKey(headers map[string]string) string {
+func (sm *sessionManager) generateSessionKey(headers map[string]string) string {
 	// For non-HTTP transports (e.g., stdio, in-memory), headers don't apply,
 	// so we always pool into the same session.
 	if !sm.headersAffectSession() {
@@ -90,7 +90,7 @@ func (sm *SessionManager) generateSessionKey(headers map[string]string) string {
 }
 
 // GetSession returns a session for the given headers, creating if necessary
-func (sm *SessionManager) GetSession(ctx context.Context, headers map[string]string) (*mcp.ClientSession, error) {
+func (sm *sessionManager) GetSession(ctx context.Context, headers map[string]string) (*mcp.ClientSession, error) {
 	key := sm.generateSessionKey(headers)
 
 	sm.mu.RLock()
@@ -127,7 +127,7 @@ func (sm *SessionManager) GetSession(ctx context.Context, headers map[string]str
 }
 
 // isSessionValid checks if a session is still usable
-func (sm *SessionManager) isSessionValid(ctx context.Context, session *mcp.ClientSession) bool {
+func (sm *sessionManager) isSessionValid(ctx context.Context, session *mcp.ClientSession) bool {
 	if session == nil {
 		return false
 	}
@@ -146,7 +146,7 @@ func (sm *SessionManager) isSessionValid(ctx context.Context, session *mcp.Clien
 }
 
 // wrapTransportWithHeaders creates a transport that injects headers
-func (sm *SessionManager) wrapTransportWithHeaders(headers map[string]string) mcp.Transport {
+func (sm *sessionManager) wrapTransportWithHeaders(headers map[string]string) mcp.Transport {
 	switch t := sm.transport.(type) {
 
 	case *mcp.SSEClientTransport:
@@ -183,7 +183,7 @@ func wrapHTTPClient(httpClient *http.Client, headers map[string]string) *http.Cl
 }
 
 // Close closes all sessions
-func (sm *SessionManager) Close() error {
+func (sm *sessionManager) Close() error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 

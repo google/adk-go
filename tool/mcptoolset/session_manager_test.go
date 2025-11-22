@@ -81,7 +81,7 @@ func TestGenerateSessionKey(t *testing.T) {
 			clientTransport := &mcp.SSEClientTransport{}
 
 			client := mcp.NewClient(&mcp.Implementation{Name: "test_client", Version: "v1.0.0"}, nil)
-			sm := NewSessionManager(client, clientTransport)
+			sm := newSessionManager(client, clientTransport)
 
 			key1 := sm.generateSessionKey(tt.headers1)
 			key2 := sm.generateSessionKey(tt.headers2)
@@ -101,7 +101,7 @@ func TestGenerateSessionKey_IgnoresHeadersForNonHTTPTransport(t *testing.T) {
 	clientTransport, _ := mcp.NewInMemoryTransports()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test_client", Version: "v1.0.0"}, nil)
-	sm := NewSessionManager(client, clientTransport)
+	sm := newSessionManager(client, clientTransport)
 
 	key1 := sm.generateSessionKey(map[string]string{"Authorization": "Bearer token123"})
 	key2 := sm.generateSessionKey(map[string]string{"Authorization": "Bearer token456"})
@@ -119,7 +119,7 @@ func TestDefaultKey(t *testing.T) {
 	clientTransport, _ := mcp.NewInMemoryTransports()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test_client", Version: "v1.0.0"}, nil)
-	sm := NewSessionManager(client, clientTransport)
+	sm := newSessionManager(client, clientTransport)
 
 	emptyKey := sm.generateSessionKey(map[string]string{})
 	nilKey := sm.generateSessionKey(nil)
@@ -143,7 +143,7 @@ func TestGetSession(t *testing.T) {
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test_client", Version: "v1.0.0"}, nil)
-	sm := NewSessionManager(client, clientTransport)
+	sm := newSessionManager(client, clientTransport)
 	defer sm.Close()
 
 	headers := map[string]string{"Authorization": "Bearer token123"}
@@ -183,7 +183,7 @@ func TestGetSessionWithNilHeaders(t *testing.T) {
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test_client", Version: "v1.0.0"}, nil)
-	sm := NewSessionManager(client, clientTransport)
+	sm := newSessionManager(client, clientTransport)
 	defer sm.Close()
 
 	session, err := sm.GetSession(ctx, nil)
@@ -211,7 +211,7 @@ func TestClose(t *testing.T) {
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test_client", Version: "v1.0.0"}, nil)
-	sm := NewSessionManager(client, clientTransport)
+	sm := newSessionManager(client, clientTransport)
 
 	headers := map[string]string{"Authorization": "Bearer token123"}
 
@@ -250,7 +250,7 @@ func TestIsSessionValid(t *testing.T) {
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test_client", Version: "v1.0.0"}, nil)
-	sm := NewSessionManager(client, clientTransport)
+	sm := newSessionManager(client, clientTransport)
 	defer sm.Close()
 
 	session, err := sm.GetSession(ctx, nil)
