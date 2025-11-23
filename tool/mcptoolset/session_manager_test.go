@@ -439,7 +439,7 @@ func TestWrapHTTPClient(t *testing.T) {
 			if diff := cmp.Diff(tt.headers, ht.Headers); diff != "" {
 				t.Errorf("headers mismatch (-want +got):\n%s", diff)
 			}
-			// Verify timeout is preserved
+
 			if tt.httpClient != nil && wrapped.Timeout != tt.httpClient.Timeout {
 				t.Errorf("timeout mismatch: got %v, want %v", wrapped.Timeout, tt.httpClient.Timeout)
 			}

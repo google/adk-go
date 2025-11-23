@@ -204,7 +204,6 @@ func (sm *sessionManager) Close() error {
 	return nil
 }
 
-// headerTransport that uses fixed headers instead of context
 type headerTransport struct {
 	Base    http.RoundTripper
 	Headers map[string]string
