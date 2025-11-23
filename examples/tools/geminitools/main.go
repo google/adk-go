@@ -77,7 +77,7 @@ func main() {
 		// OR with search engine:
 		// &geminitool.VertexAiSearch{
 		// 	SearchEngineID: "projects/YOUR_PROJECT/locations/us/collections/default/engines/YOUR_ENGINE",
-		// 	Filter:         "category:documentation",
+		// 	Filter:         "category: ANY(\"persona_A\")",
 		// 	MaxResults:     genai.Ptr(int32(10)),
 		// },
 	}
