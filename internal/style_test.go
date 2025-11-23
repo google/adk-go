@@ -56,7 +56,7 @@ func TestCopyrightHeader(t *testing.T) {
 			return err
 		}
 		if info.IsDir() {
-			if ignore[path] {
+			if ignore[filepath.ToSlash(path)] {
 				return filepath.SkipDir
 			}
 			return nil
@@ -85,7 +85,10 @@ func hasCopyrightHeader(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return strings.HasPrefix(string(content), copyrightHeader), nil
+	// Normalize line endings to LF to support Windows (CRLF)
+	fileContent := strings.ReplaceAll(string(content), "\r\n", "\n")
+	header := strings.ReplaceAll(copyrightHeader, "\r\n", "\n")
+	return strings.HasPrefix(fileContent, header), nil
 }
 
 func addCopyrightHeader(path string) error {
