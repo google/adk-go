@@ -28,7 +28,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const defaultSessionKey = "default"
+const (
+	defaultSessionKey  = "default"
+	defaultPingTimeout = 2 * time.Second
+)
 
 // sessionManager manages MCP client sessions with header-based pooling
 type sessionManager struct {
@@ -134,7 +137,7 @@ func (sm *sessionManager) isSessionValid(ctx context.Context, session *mcp.Clien
 	pingCtx := ctx
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
-		pingCtx, cancel = context.WithTimeout(ctx, 2*time.Second)
+		pingCtx, cancel = context.WithTimeout(ctx, defaultPingTimeout)
 		defer cancel()
 	}
 
