@@ -28,23 +28,23 @@ import (
 type GoogleMaps struct{}
 
 // Name implements tool.Tool.
-func (s GoogleMaps) Name() string {
+func (m GoogleMaps) Name() string {
 	return "google_maps"
 }
 
 // Description implements tool.Tool.
-func (s GoogleMaps) Description() string {
+func (m GoogleMaps) Description() string {
 	return "Grounds query results with Google Maps to provide location-based information."
 }
 
 // ProcessRequest adds the GoogleMaps tool to the LLM request.
-func (s GoogleMaps) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (m GoogleMaps) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return setTool(req, &genai.Tool{
 		GoogleMaps: &genai.GoogleMaps{},
 	})
 }
 
 // IsLongRunning implements tool.Tool.
-func (t GoogleMaps) IsLongRunning() bool {
+func (m GoogleMaps) IsLongRunning() bool {
 	return false
 }

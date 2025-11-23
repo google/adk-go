@@ -51,37 +51,37 @@ type VertexAiSearch struct {
 }
 
 // Name implements tool.Tool.
-func (s *VertexAiSearch) Name() string {
+func (v *VertexAiSearch) Name() string {
 	return "vertex_ai_search"
 }
 
 // Description implements tool.Tool.
-func (s *VertexAiSearch) Description() string {
+func (v *VertexAiSearch) Description() string {
 	return "Retrieves information from Vertex AI Search data stores or search engines."
 }
 
 // ProcessRequest adds the VertexAiSearch tool to the LLM request.
-func (s *VertexAiSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
-	if (s.DataStoreID == "" && s.SearchEngineID == "") ||
-		(s.DataStoreID != "" && s.SearchEngineID != "") {
+func (v *VertexAiSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+	if (v.DataStoreID == "" && v.SearchEngineID == "") ||
+		(v.DataStoreID != "" && v.SearchEngineID != "") {
 		return fmt.Errorf("either DataStoreID or SearchEngineID must be specified (but not both)")
 	}
 
-	if len(s.DataStoreSpecs) > 0 && s.SearchEngineID == "" {
+	if len(v.DataStoreSpecs) > 0 && v.SearchEngineID == "" {
 		return fmt.Errorf("SearchEngineID must be specified if DataStoreSpecs is provided")
 	}
 
 	vertexAISearch := &genai.VertexAISearch{
-		Filter:     s.Filter,
-		MaxResults: s.MaxResults,
+		Filter:     v.Filter,
+		MaxResults: v.MaxResults,
 	}
 
-	if s.DataStoreID != "" {
-		vertexAISearch.Datastore = s.DataStoreID
+	if v.DataStoreID != "" {
+		vertexAISearch.Datastore = v.DataStoreID
 	}
-	if s.SearchEngineID != "" {
-		vertexAISearch.Engine = s.SearchEngineID
-		vertexAISearch.DataStoreSpecs = s.DataStoreSpecs
+	if v.SearchEngineID != "" {
+		vertexAISearch.Engine = v.SearchEngineID
+		vertexAISearch.DataStoreSpecs = v.DataStoreSpecs
 	}
 
 	return setTool(req, &genai.Tool{
@@ -92,6 +92,6 @@ func (s *VertexAiSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest)
 }
 
 // IsLongRunning implements tool.Tool.
-func (t *VertexAiSearch) IsLongRunning() bool {
+func (v *VertexAiSearch) IsLongRunning() bool {
 	return false
 }

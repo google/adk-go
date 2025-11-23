@@ -45,6 +45,6 @@ func (s EnterpriseWebSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequ
 }
 
 // IsLongRunning implements tool.Tool.
-func (t EnterpriseWebSearch) IsLongRunning() bool {
+func (s EnterpriseWebSearch) IsLongRunning() bool {
 	return false
 }

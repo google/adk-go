@@ -45,6 +45,6 @@ func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) er
 }
 
 // IsLongRunning implements tool.Tool.
-func (t GoogleSearch) IsLongRunning() bool {
+func (s GoogleSearch) IsLongRunning() bool {
 	return false
 }

@@ -29,23 +29,23 @@ import (
 type URLContext struct{}
 
 // Name implements tool.Tool.
-func (s URLContext) Name() string {
+func (u URLContext) Name() string {
 	return "url_context"
 }
 
 // Description implements tool.Tool.
-func (s URLContext) Description() string {
+func (u URLContext) Description() string {
 	return "Retrieves content from URLs to inform and shape model responses."
 }
 
 // ProcessRequest adds the URLContext tool to the LLM request.
-func (s URLContext) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (u URLContext) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return setTool(req, &genai.Tool{
 		URLContext: &genai.URLContext{},
 	})
 }
 
 // IsLongRunning implements tool.Tool.
-func (t URLContext) IsLongRunning() bool {
+func (u URLContext) IsLongRunning() bool {
 	return false
 }
