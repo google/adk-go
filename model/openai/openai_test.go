@@ -163,7 +163,7 @@ func newStreamingTestServer(t *testing.T, chunks []string, finalContent string) 
 // newTestModel creates a model connected to the test server.
 func newTestModel(t *testing.T, server *httptest.Server) model.LLM {
 	t.Helper()
-	llm, err := NewModel(context.Background(), "test-model", &Config{
+	llm, err := NewModel(context.Background(), "test-model", &ClientConfig{
 		APIKey:     "test-api-key",
 		BaseURL:    server.URL,
 		HTTPClient: server.Client(),
@@ -567,7 +567,7 @@ func TestModel_ErrorHandling(t *testing.T) {
 
 func TestNewModel_MissingConfig(t *testing.T) {
 	// Test without API key
-	_, err := NewModel(context.Background(), "test-model", &Config{
+	_, err := NewModel(context.Background(), "test-model", &ClientConfig{
 		BaseURL: "http://localhost",
 	})
 	if err == nil {
@@ -575,7 +575,7 @@ func TestNewModel_MissingConfig(t *testing.T) {
 	}
 
 	// Test without base URL
-	_, err = NewModel(context.Background(), "test-model", &Config{
+	_, err = NewModel(context.Background(), "test-model", &ClientConfig{
 		APIKey: "test-key",
 	})
 	if err == nil {
