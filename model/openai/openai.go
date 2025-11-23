@@ -33,8 +33,8 @@ import (
 	"google.golang.org/genai"
 )
 
-// Config holds configuration for the OpenAI client.
-type Config struct {
+// ClientConfig holds configuration for the OpenAI client.
+type ClientConfig struct {
 	// APIKey is the API key for authentication.
 	// If empty, will be read from environment variables based on the model name.
 	APIKey string
@@ -48,7 +48,7 @@ type Config struct {
 // openAIModel implements the model.LLM interface for OpenAI-compatible APIs.
 type openAIModel struct {
 	modelName  string
-	config     *Config
+	config     *ClientConfig
 	httpClient *http.Client
 }
 
@@ -62,12 +62,12 @@ type openAIModel struct {
 // If config.BaseURL is empty, it will be read from OPENAI_BASE_URL environment variable.
 //
 // An error is returned if no API key or base URL can be found.
-func NewModel(ctx context.Context, modelName string, config *Config) (model.LLM, error) {
+func NewModel(ctx context.Context, modelName string, config *ClientConfig) (model.LLM, error) {
 	// ctx is reserved for future use (e.g., client initialization with context)
 	_ = ctx
 
 	if config == nil {
-		config = &Config{}
+		config = &ClientConfig{}
 	}
 
 	if config.APIKey == "" {
