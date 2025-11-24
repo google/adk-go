@@ -26,7 +26,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
 )
 
 func Test_inMemoryService_Create(t *testing.T) {
@@ -116,7 +115,7 @@ func Test_inMemoryService_Create(t *testing.T) {
 	}
 }
 
-func Test_databaseService_Delete(t *testing.T) {
+func Test_inMemoryService_Delete(t *testing.T) {
 	tests := []struct {
 		name            string
 		req             *DeleteRequest
@@ -155,7 +154,7 @@ func Test_databaseService_Delete(t *testing.T) {
 			}
 
 			if tt.wantNotFoundErr {
-				if !errors.Is(err, session.ErrSessionNotFound) {
+				if !errors.Is(err, ErrSessionNotFound) {
 					t.Fatalf("inMemoryService.Delete() expected ErrSessionNotFound, got %v", err)
 				}
 			}
@@ -167,7 +166,7 @@ func Test_databaseService_Delete(t *testing.T) {
 	}
 }
 
-func Test_databaseService_Get(t *testing.T) {
+func Test_inMemoryService_Get(t *testing.T) {
 	// This setup function is required for a test case.
 	// It creates the specific scenario from 'test_get_session_respects_user_id'.
 	setupGetRespectsUserID := func(t *testing.T) Service {
@@ -364,7 +363,7 @@ func Test_databaseService_Get(t *testing.T) {
 			}
 
 			if tt.wantNotFoundErr {
-				if !errors.Is(err, session.ErrSessionNotFound) {
+				if !errors.Is(err, ErrSessionNotFound) {
 					t.Fatalf("inMemoryService.Get() expected ErrSessionNotFound, got %v", err)
 				}
 			}
@@ -394,7 +393,7 @@ func Test_databaseService_Get(t *testing.T) {
 	}
 }
 
-func Test_databaseService_List(t *testing.T) {
+func Test_inMemoryService_List(t *testing.T) {
 	tests := []struct {
 		name         string
 		req          *ListRequest
@@ -528,7 +527,7 @@ func Test_databaseService_List(t *testing.T) {
 	}
 }
 
-func Test_databaseService_AppendEvent(t *testing.T) {
+func Test_inMemoryService_AppendEvent(t *testing.T) {
 	tests := []struct {
 		name              string
 		setup             func(t *testing.T) Service
@@ -819,7 +818,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			}
 
 			if tt.wantNotFoundErr {
-				if !errors.Is(err, session.ErrSessionNotFound) {
+				if !errors.Is(err, ErrSessionNotFound) {
 					t.Fatalf("inMemoryService.AppendEvent() expected ErrSessionNotFound, got %v", err)
 				}
 			}
@@ -862,7 +861,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 	}
 }
 
-func Test_databaseService_StateManagement(t *testing.T) {
+func Test_inMemoryService_StateManagement(t *testing.T) {
 	ctx := t.Context()
 	appName := "my_app"
 
