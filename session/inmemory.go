@@ -191,7 +191,13 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 		sessionID: sessionID,
 	}
 
-	s.sessions.Delete(id.Encode())
+	encodedKey := id.Encode()
+	_, ok := s.sessions.Get(encodedKey)
+	if !ok {
+		return fmt.Errorf("%w with id %+v ", ErrSessionNotFound, req.SessionID)
+	}
+
+	s.sessions.Delete(encodedKey)
 	return nil
 }
 
