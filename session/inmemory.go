@@ -216,7 +216,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	stored_session, ok := s.sessions.Get(sess.id.Encode())
 	if !ok {
-		return fmt.Errorf("%w with id %+v ", ErrSessionNotFound, sess.ID())
+return fmt.Errorf("%w with id %q", ErrSessionNotFound, sess.ID())
 	}
 
 	// update the in-memory session
