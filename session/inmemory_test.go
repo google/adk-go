@@ -151,11 +151,13 @@ func Test_inMemoryService_Delete(t *testing.T) {
 
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("inMemoryService.Delete() error = %v, wantErr %v", err, tt.wantErr)
+				return
 			}
 
 			if tt.wantNotFoundErr {
 				if !errors.Is(err, ErrSessionNotFound) {
 					t.Fatalf("inMemoryService.Delete() expected ErrSessionNotFound, got %v", err)
+					return
 				}
 			}
 
@@ -360,11 +362,13 @@ func Test_inMemoryService_Get(t *testing.T) {
 
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("inMemoryService.Get() error = %v, wantErr %v", err, tt.wantErr)
+				return
 			}
 
 			if tt.wantNotFoundErr {
 				if !errors.Is(err, ErrSessionNotFound) {
 					t.Fatalf("inMemoryService.Get() expected ErrSessionNotFound, got %v", err)
+					return
 				}
 			}
 
@@ -815,11 +819,13 @@ func Test_inMemoryService_AppendEvent(t *testing.T) {
 
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("inMemoryService.AppendEvent() error = %v, wantErr %v", err, tt.wantErr)
+				return
 			}
 
 			if tt.wantNotFoundErr {
 				if !errors.Is(err, ErrSessionNotFound) {
 					t.Fatalf("inMemoryService.AppendEvent() expected ErrSessionNotFound, got %v", err)
+					return
 				}
 			}
 
