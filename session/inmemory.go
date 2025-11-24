@@ -110,7 +110,7 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 
 	res, ok := s.sessions.Get(id.Encode())
 	if !ok {
-		return nil, fmt.Errorf("%w with id %+v ", ErrSessionNotFound, req.SessionID)
+return nil, fmt.Errorf("%w with id %q", ErrSessionNotFound, req.SessionID)
 	}
 
 	copiedSession := copySessionWithoutStateAndEvents(res)
