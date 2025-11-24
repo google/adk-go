@@ -15,6 +15,7 @@
 package database
 
 import (
+	"errors"
 	"maps"
 	"strconv"
 	"testing"
@@ -29,6 +30,15 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
+
+// checkTestError is a test helper that validates error conditions.
+// It fails the test immediately if the error state doesn't match expectations.
+func checkTestError(t *testing.T, err error, wantErr bool, format string, args ...any) {
+	t.Helper()
+	if (err != nil) != wantErr {
+		t.Fatalf(format, append(args, err, wantErr)...)
+	}
+}
 
 func Test_databaseService_Create(t *testing.T) {
 	tests := []struct {
@@ -80,10 +90,7 @@ func Test_databaseService_Create(t *testing.T) {
 			s := tt.setup(t)
 
 			got, err := s.Create(t.Context(), tt.req)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("databaseService.Create() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
+			checkTestError(t, err, tt.wantErr, "databaseService.Create() error = %v, wantErr %v")
 
 			if err != nil {
 				return
@@ -119,10 +126,11 @@ func Test_databaseService_Create(t *testing.T) {
 
 func Test_databaseService_Delete(t *testing.T) {
 	tests := []struct {
-		name    string
-		req     *session.DeleteRequest
-		setup   func(t *testing.T) *databaseService
-		wantErr bool
+		name            string
+		req             *session.DeleteRequest
+		setup           func(t *testing.T) *databaseService
+		wantErr         bool
+		wantNotFoundErr bool
 	}{
 		{
 			name:  "delete ok",
@@ -134,20 +142,29 @@ func Test_databaseService_Delete(t *testing.T) {
 			},
 		},
 		{
-			name:  "no error when not found",
+			name:  "error when session not found",
 			setup: serviceDbWithData,
 			req: &session.DeleteRequest{
 				AppName:   "appTest",
 				UserID:    "user1",
 				SessionID: "session1",
 			},
+			wantErr:         true,
+			wantNotFoundErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setup(t)
-			if err := s.Delete(t.Context(), tt.req); (err != nil) != tt.wantErr {
-				t.Errorf("databaseService.Delete() error = %v, wantErr %v", err, tt.wantErr)
+			err := s.Delete(t.Context(), tt.req)
+			if tt.wantNotFoundErr {
+				if !errors.Is(err, session.ErrSessionNotFound) {
+					t.Fatalf("databaseService.Delete() error = %v, want ErrSessionNotFound", err)
+				}
+				return
+			}
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("databaseService.Delete() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -220,12 +237,13 @@ func Test_databaseService_Get(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		req          *session.GetRequest
-		setup        func(t *testing.T) *databaseService
-		wantResponse *session.GetResponse
-		wantEvents   []*session.Event
-		wantErr      bool
+		name            string
+		req             *session.GetRequest
+		setup           func(t *testing.T) *databaseService
+		wantResponse    *session.GetResponse
+		wantEvents      []*session.Event
+		wantErr         bool
+		wantNotFoundErr bool
 	}{
 		{
 			name:  "ok",
@@ -255,7 +273,8 @@ func Test_databaseService_Get(t *testing.T) {
 				UserID:    "user1",
 				SessionID: "session1",
 			},
-			wantErr: true,
+			wantErr:         true,
+			wantNotFoundErr: true,
 		},
 		{
 			name:  "get session respects user id",
@@ -338,10 +357,7 @@ func Test_databaseService_Get(t *testing.T) {
 			s := tt.setup(t)
 
 			got, err := s.Get(t.Context(), tt.req)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("databaseService.Get() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
+			checkTestError(t, err, tt.wantErr, "databaseService.Get() error = %v, wantErr %v")
 
 			if err != nil {
 				return
@@ -482,6 +498,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 		wantStoredSession *localSession // State of the session after Get
 		wantEventCount    int           // Expected event count in storage
 		wantErr           bool
+		wantNotFoundErr   bool
 	}{
 		{
 			name:  "append event to the session and overwrite in storage",
@@ -567,7 +584,8 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 					Partial: false,
 				},
 			},
-			wantErr: true,
+			wantErr:         true,
+			wantNotFoundErr: true,
 		},
 		{
 			name:  "append event with bytes content",
@@ -725,9 +743,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 
 			tt.session.updatedAt = time.Now() // set updatedAt value to pass stale validation
 			err := s.AppendEvent(ctx, tt.session, tt.event)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("databaseService.AppendEvent() error = %v, wantErr %v", err, tt.wantErr)
-			}
+			checkTestError(t, err, tt.wantErr, "databaseService.AppendEvent() error = %v, wantErr %v")
 
 			if err != nil {
 				return
