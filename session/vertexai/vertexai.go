@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"google.golang.org/adk/session"
+	"google.golang.org/api/option"
 )
 
 // VertexAiSessionService
@@ -33,8 +34,8 @@ type VertexAIServiceConfig struct {
 }
 
 // NewSessionService returns VertextAiSessionService implementation.
-func NewSessionService(ctx context.Context, cfg VertexAIServiceConfig) (session.Service, error) {
-	client, err := newVertexAiClient(ctx, cfg.Location, cfg.ProjectID, cfg.ReasoningEngine)
+func NewSessionService(ctx context.Context, cfg VertexAIServiceConfig, opts ...option.ClientOption) (session.Service, error) {
+	client, err := newVertexAiClient(ctx, cfg.Location, cfg.ProjectID, cfg.ReasoningEngine, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Vertex AI client: %w", err)
 	}

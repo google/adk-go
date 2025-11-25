@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 	"google.golang.org/genai"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -46,8 +47,8 @@ type vertexAiClient struct {
 	rpcClient       *aiplatform.SessionClient
 }
 
-func newVertexAiClient(ctx context.Context, location string, projectID string, reasoningEngine string) (*vertexAiClient, error) {
-	rpcClient, err := aiplatform.NewSessionClient(ctx)
+func newVertexAiClient(ctx context.Context, location string, projectID string, reasoningEngine string, opts ...option.ClientOption) (*vertexAiClient, error) {
+	rpcClient, err := aiplatform.NewSessionClient(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf(connectionErrorTemplate, err.Error())
 	}
