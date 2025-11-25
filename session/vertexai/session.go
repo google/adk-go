@@ -190,6 +190,8 @@ func updateSessionState(sess *localSession, event *session.Event) error {
 	return nil
 }
 
-var _ session.Session = (*localSession)(nil)
-var _ session.Events = (*events)(nil)
-var _ session.State = (*state)(nil)
+var (
+	_ session.Session = (*localSession)(nil)
+	_ session.Events  = (*events)(nil)
+	_ session.State   = (*state)(nil)
+)

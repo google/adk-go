@@ -42,6 +42,7 @@ func NewSessionService(ctx context.Context, cfg VertexAIServiceConfig, opts ...o
 
 	return &vertexAiService{client: client}, nil
 }
+
 func (s *vertexAiService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
 	if req.AppName == "" || req.UserID == "" {
 		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)

@@ -47,7 +47,8 @@ type vertexAiClient struct {
 	rpcClient       *aiplatform.SessionClient
 }
 
-func newVertexAiClient(ctx context.Context, location string, projectID string, reasoningEngine string, opts ...option.ClientOption) (*vertexAiClient, error) {
+func newVertexAiClient(ctx context.Context, location string, projectID string, reasoningEngine string,
+	opts ...option.ClientOption) (*vertexAiClient, error) {
 	rpcClient, err := aiplatform.NewSessionClient(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf(connectionErrorTemplate, err.Error())

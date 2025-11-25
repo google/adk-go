@@ -959,7 +959,7 @@ func Test_databaseService_StateManagement(t *testing.T) {
 		}
 
 		t.Cleanup(func() {
-			s.AppendEvent(ctx, s2.Session, &session.Event{
+			err := s.AppendEvent(ctx, s2.Session, &session.Event{
 				ID:           "clean_up_event",
 				Author:       "test",
 				InvocationID: "test",
@@ -973,6 +973,9 @@ func Test_databaseService_StateManagement(t *testing.T) {
 					},
 				},
 			})
+			if err != nil {
+				t.Fatalf("Failed to appendEvent on cleanup: %v", err)
+			}
 		})
 	})
 
@@ -1005,7 +1008,7 @@ func Test_databaseService_StateManagement(t *testing.T) {
 		}
 
 		t.Cleanup(func() {
-			s.AppendEvent(ctx, s1b.Session, &session.Event{
+			err := s.AppendEvent(ctx, s1b.Session, &session.Event{
 				ID:           "clean_up_event",
 				Author:       "test",
 				InvocationID: "test",
@@ -1019,6 +1022,9 @@ func Test_databaseService_StateManagement(t *testing.T) {
 					},
 				},
 			})
+			if err != nil {
+				t.Fatalf("Failed to appendEvent on cleanup: %v", err)
+			}
 		})
 	})
 
@@ -1124,15 +1130,18 @@ func deleteAllFromApp(t *testing.T, v session.Service, app string) {
 		AppName: app,
 	})
 	if err != nil {
-		t.Errorf("%s", err)
+		t.Errorf("error listing session for delete all: %s", err)
 	}
 
 	for _, s := range sessionsResp.Sessions {
-		v.Delete(cleanupCtx, &session.DeleteRequest{
+		err := v.Delete(cleanupCtx, &session.DeleteRequest{
 			AppName:   s.AppName(),
 			UserID:    s.UserID(),
 			SessionID: s.ID(),
 		})
+		if err != nil {
+			t.Errorf("error deleting session for delete all: %s", err)
+		}
 	}
 }
 
@@ -1241,6 +1250,9 @@ func setupReplay(t *testing.T, filename string) ([]option.ClientOption, func(), 
 	var clientOpts []option.ClientOption
 	for _, opt := range grpcOpts {
 		clientOpts = append(clientOpts, option.WithGRPCDialOption(opt))
+		if os.Getenv("UPDATE_REPLAYS") != "true" {
+			clientOpts = append(clientOpts, option.WithoutAuthentication())
+		}
 	}
 
 	// 3. Return the SAFE client options
