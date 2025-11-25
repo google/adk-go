@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/model"
 )
 
 func TestBuiltInPlanner_New(t *testing.T) {
@@ -70,46 +72,43 @@ func TestBuiltInPlanner_ProcessPlanningResponse(t *testing.T) {
 }
 
 func TestBuiltInPlanner_ApplyThinkingConfig(t *testing.T) {
-	req := &struct {
-		Config *genai.GenerateContentConfig
-	}{
-		Config: nil,
-	}
-
-	if req.Config != nil && req.Config.ThinkingConfig != nil {
-		t.Error("Expected ThinkingConfig to not be set")
-	}
-
 	thinkingConfig := &genai.ThinkingConfig{IncludeThoughts: true}
-	req = &struct {
-		Config *genai.GenerateContentConfig
-	}{
-		Config: nil,
-	}
+	p := NewBuiltInPlanner(thinkingConfig)
 
-	if req.Config == nil {
-		req.Config = &genai.GenerateContentConfig{}
-	}
-	req.Config.ThinkingConfig = thinkingConfig
+	t.Run("creates config when missing", func(t *testing.T) {
+		req := &model.LLMRequest{Config: nil}
 
-	if req.Config == nil {
-		t.Error("Expected Config to be set")
-	} else if req.Config.ThinkingConfig == nil {
-		t.Error("Expected ThinkingConfig to be set")
-	} else if req.Config.ThinkingConfig.IncludeThoughts != true {
-		t.Errorf("Expected IncludeThoughts true, got %v", req.Config.ThinkingConfig.IncludeThoughts)
-	}
+		p.ApplyThinkingConfig(req)
 
-	req = &struct {
-		Config *genai.GenerateContentConfig
-	}{
-		Config: &genai.GenerateContentConfig{},
-	}
-	req.Config.ThinkingConfig = thinkingConfig
+		if req.Config == nil {
+			t.Fatal("req.Config should not be nil after ApplyThinkingConfig")
+		}
+		if req.Config.ThinkingConfig == nil {
+			t.Fatal("req.Config.ThinkingConfig should not be nil")
+		}
+		if !req.Config.ThinkingConfig.IncludeThoughts {
+			t.Errorf("Expected IncludeThoughts to be true, got false")
+		}
+	})
 
-	if req.Config.ThinkingConfig == nil {
-		t.Error("Expected ThinkingConfig to be set")
-	} else if req.Config.ThinkingConfig.IncludeThoughts != true {
-		t.Errorf("Expected IncludeThoughts true, got %v", req.Config.ThinkingConfig.IncludeThoughts)
-	}
+	t.Run("updates existing config", func(t *testing.T) {
+		req := &model.LLMRequest{Config: &genai.GenerateContentConfig{}}
+
+		p.ApplyThinkingConfig(req)
+
+		if req.Config.ThinkingConfig == nil {
+			t.Fatal("req.Config.ThinkingConfig should not be nil")
+		}
+		if !req.Config.ThinkingConfig.IncludeThoughts {
+			t.Errorf("Expected IncludeThoughts to be true, got false")
+		}
+	})
+
+	t.Run("no-op when planner config is nil", func(t *testing.T) {
+		req := &model.LLMRequest{Config: nil}
+		NewBuiltInPlanner(nil).ApplyThinkingConfig(req)
+		if req.Config != nil {
+			t.Error("req.Config should be nil when planner has nil config")
+		}
+	})
 }
