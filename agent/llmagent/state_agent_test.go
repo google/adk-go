@@ -18,11 +18,14 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"math"
 	"math/rand"
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -31,7 +34,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/genai"
 )
 
 // FakeLLM is a mock implementation of model.LLM for testing.
@@ -116,7 +118,8 @@ func beforeAgentCallback(t *testing.T) agent.BeforeAgentCallback {
 			title:                   "In before_agent_callback",
 			keysInCtxSession:        []string{"before_agent_callback_state_key"},
 			keysInServiceSession:    []string{},
-			keysNotInServiceSession: []string{"before_agent_callback_state_key"}},
+			keysNotInServiceSession: []string{"before_agent_callback_state_key"},
+		},
 		)
 		return nil, nil
 	}
@@ -131,7 +134,8 @@ func beforeModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmReques
 			title:                   "In before_model_callback",
 			keysInCtxSession:        []string{"before_agent_callback_state_key", "before_model_callback_state_key"},
 			keysInServiceSession:    []string{"before_agent_callback_state_key"},
-			keysNotInServiceSession: []string{"before_model_callback_state_key"}},
+			keysNotInServiceSession: []string{"before_model_callback_state_key"},
+		},
 		)
 		return nil, nil
 	}
@@ -146,7 +150,8 @@ func afterModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmRespons
 			title:                   "In after_model_callback",
 			keysInCtxSession:        []string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key"},
 			keysInServiceSession:    []string{"before_agent_callback_state_key"},
-			keysNotInServiceSession: []string{"before_model_callback_state_key", "after_model_callback_state_key"}},
+			keysNotInServiceSession: []string{"before_model_callback_state_key", "after_model_callback_state_key"},
+		},
 		)
 		return nil, nil
 	}
@@ -161,7 +166,8 @@ func afterAgentCallback(t *testing.T) agent.AfterAgentCallback {
 			title:                   "In after_agent_callback",
 			keysInCtxSession:        []string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key", "after_agent_callback_state_key"},
 			keysInServiceSession:    []string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key"},
-			keysNotInServiceSession: []string{"after_agent_callback_state_key"}},
+			keysNotInServiceSession: []string{"after_agent_callback_state_key"},
+		},
 		)
 		return nil, nil
 	}
@@ -256,7 +262,7 @@ type WeatherResult struct {
 	Timestamp   time.Time `json:"timestamp"`
 }
 
-func GetWeather(ctx tool.Context, args WeatherArgs) WeatherResult {
+func GetWeather(ctx tool.Context, args WeatherArgs) (WeatherResult, error) {
 	// Simulate weather data
 	temperatures := []int{-10, -5, 0, 5, 10, 15, 20, 25, 30, 35}
 	conditions := []string{"sunny", "cloudy", "rainy", "snowy", "windy"}
@@ -267,7 +273,7 @@ func GetWeather(ctx tool.Context, args WeatherArgs) WeatherResult {
 		Condition:   conditions[rand.Intn(len(conditions))],
 		Humidity:    rand.Intn(61) + 30, // 30-90
 		Timestamp:   time.Now(),
-	}
+	}, nil
 }
 
 type CalculationArgs struct {
@@ -284,7 +290,7 @@ type CalculationResult struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-func Calculate(ctx tool.Context, args CalculationArgs) CalculationResult {
+func Calculate(ctx tool.Context, args CalculationArgs) (CalculationResult, error) {
 	operations := map[string]float64{
 		"add":      args.X + args.Y,
 		"subtract": args.X - args.Y,
@@ -306,7 +312,7 @@ func Calculate(ctx tool.Context, args CalculationArgs) CalculationResult {
 			Y:         args.Y,
 			Result:    "Unknown operation",
 			Timestamp: time.Now(),
-		}
+		}, nil
 	}
 
 	return CalculationResult{
@@ -315,7 +321,7 @@ func Calculate(ctx tool.Context, args CalculationArgs) CalculationResult {
 		Y:         args.Y,
 		Result:    result,
 		Timestamp: time.Now(),
-	}
+	}, nil
 }
 
 type LogActivityParams struct {
@@ -334,7 +340,7 @@ type LogActivityResult struct {
 	err          error
 }
 
-func LogActivity(ctx tool.Context, params LogActivityParams) LogActivityResult {
+func LogActivity(ctx tool.Context, params LogActivityParams) (LogActivityResult, error) {
 	var activityLog []LogEntry
 	val, err := ctx.State().Get("activity_log")
 	if err == nil {
@@ -346,7 +352,7 @@ func LogActivity(ctx tool.Context, params LogActivityParams) LogActivityResult {
 	if err := ctx.State().Set("activity_log", activityLog); err != nil {
 		return LogActivityResult{
 			err: err,
-		}
+		}, err
 	}
 
 	return LogActivityResult{
@@ -354,7 +360,7 @@ func LogActivity(ctx tool.Context, params LogActivityParams) LogActivityResult {
 		Entry:        logEntry,
 		TotalEntries: len(activityLog),
 		err:          nil,
-	}
+	}, nil
 }
 
 // --- Before Tool Callbacks ---
@@ -423,15 +429,13 @@ func beforeToolValidationCallback(ctx tool.Context, t tool.Tool, args map[string
 
 // --- After Tool Callbacks ---
 
-func afterToolEnhancementCallback(ctx tool.Context, t tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+func afterToolEnhancementCallback(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err != nil {
 		return result, err // Don't enhance if there was an error
 	}
 	fmt.Printf("✨ ENHANCE: Adding metadata to response from '%s'\n", t.Name())
 	enhancedResponse := make(map[string]any)
-	for k, v := range result {
-		enhancedResponse[k] = v
-	}
+	maps.Copy(enhancedResponse, result)
 	enhancedResponse["enhanced"] = true
 	enhancedResponse["enhancement_timestamp"] = time.Now()
 	enhancedResponse["tool_name"] = t.Name()
@@ -439,15 +443,13 @@ func afterToolEnhancementCallback(ctx tool.Context, t tool.Tool, args map[string
 	return enhancedResponse, nil
 }
 
-func afterToolAsyncCallback(ctx tool.Context, t tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+func afterToolAsyncCallback(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err != nil {
 		return result, err
 	}
 	fmt.Printf("🔄 ASYNC AFTER: Post-processing response from '%s'\n", t.Name())
 	processedResponse := make(map[string]any)
-	for k, v := range result {
-		processedResponse[k] = v
-	}
+	maps.Copy(processedResponse, result)
 	processedResponse["async_processed"] = true
 	processedResponse["processor"] = "async_after_callback"
 	return processedResponse, nil

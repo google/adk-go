@@ -21,7 +21,9 @@ import (
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/version"
 	"google.golang.org/adk/tool"
 )
 
@@ -48,8 +50,12 @@ import (
 //		},
 //	})
 func New(cfg Config) (tool.Toolset, error) {
+	client := cfg.Client
+	if client == nil {
+		client = mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, nil)
+	}
 	return &set{
-		client:     mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: "v1.0.0"}, nil),
+		client:     client,
 		transport:  cfg.Transport,
 		toolFilter: cfg.ToolFilter,
 	}, nil
@@ -57,6 +63,8 @@ func New(cfg Config) (tool.Toolset, error) {
 
 // Config provides initial configuration for the MCP ToolSet.
 type Config struct {
+	// Client is an optional custom MCP client to use. If nil, a default client will be created.
+	Client *mcp.Client
 	// Transport that will be used to connect to MCP server.
 	Transport mcp.Transport
 	// ToolFilter selects tools for which tool.Predicate returns true.

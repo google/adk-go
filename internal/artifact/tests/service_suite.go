@@ -23,8 +23,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"google.golang.org/adk/artifact"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/artifact"
 )
 
 func TestArtifactService(t *testing.T, name string, factory func(t *testing.T) (artifact.Service, error)) {
@@ -377,28 +378,32 @@ func testArtifactService_UserScoped(ctx context.Context, t *testing.T, srv artif
 func testArtifactService_Empty(ctx context.Context, t *testing.T, srv artifact.Service, testSuffix string) {
 	t.Run(fmt.Sprintf("Load_%s", testSuffix), func(t *testing.T) {
 		got, err := srv.Load(ctx, &artifact.LoadRequest{
-			AppName: "app", UserID: "user", SessionID: "session", FileName: "file"})
+			AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
+		})
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("List() = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
 		}
 	})
 	t.Run(fmt.Sprintf("List_%s", testSuffix), func(t *testing.T) {
 		_, err := srv.List(ctx, &artifact.ListRequest{
-			AppName: "app", UserID: "user", SessionID: "session"})
+			AppName: "app", UserID: "user", SessionID: "session",
+		})
 		if err != nil {
 			t.Fatalf("List() failed: %v", err)
 		}
 	})
 	t.Run(fmt.Sprintf("Delete_%s", testSuffix), func(t *testing.T) {
 		err := srv.Delete(ctx, &artifact.DeleteRequest{
-			AppName: "app", UserID: "user", SessionID: "session", FileName: "file1"})
+			AppName: "app", UserID: "user", SessionID: "session", FileName: "file1",
+		})
 		if err != nil {
 			t.Fatalf("Delete() failed: %v", err)
 		}
 	})
 	t.Run(fmt.Sprintf("Versions_%s", testSuffix), func(t *testing.T) {
 		got, err := srv.Versions(ctx, &artifact.VersionsRequest{
-			AppName: "app", UserID: "user", SessionID: "session", FileName: "file1"})
+			AppName: "app", UserID: "user", SessionID: "session", FileName: "file1",
+		})
 		if !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("Versions() = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
 		}

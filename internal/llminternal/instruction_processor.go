@@ -17,6 +17,7 @@ package llminternal
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -122,8 +123,8 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 		varName = strings.TrimSuffix(varName, "?")
 	}
 
-	if strings.HasPrefix(varName, "artifact.") {
-		fileName := strings.TrimPrefix(varName, "artifact.")
+	if after, ok := strings.CutPrefix(varName, "artifact."); ok {
+		fileName := after
 		if ctx.Artifacts() == nil {
 			return "", fmt.Errorf("artifact service is not initialized")
 		}
@@ -188,10 +189,8 @@ func isValidStateName(varName string) bool {
 	if len(parts) == 2 {
 		prefix := parts[0] + ":"
 		validPrefixes := []string{appPrefix, userPrefix, tempPrefix}
-		for _, p := range validPrefixes {
-			if prefix == p {
-				return isIdentifier(parts[1])
-			}
+		if slices.Contains(validPrefixes, prefix) {
+			return isIdentifier(parts[1])
 		}
 	}
 	return false

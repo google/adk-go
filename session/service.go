@@ -69,7 +69,7 @@ type GetRequest struct {
 	After time.Time
 }
 
-// GetResponse represents a response from Get.
+// GetResponse represents a response from [Service.Get].
 type GetResponse struct {
 	Session Session
 }
@@ -80,7 +80,7 @@ type ListRequest struct {
 	UserID  string
 }
 
-// ListResponse represents a response from List.
+// ListResponse represents a response from [Service.List].
 type ListResponse struct {
 	Sessions []Session
 }

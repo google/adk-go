@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package remoteagent allows to use a remote agent via A2A protocol.
 package remoteagent
 
 import (
@@ -24,6 +25,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/server/adka2a"
@@ -48,9 +50,9 @@ type A2AConfig struct {
 	MessageSendConfig *a2a.MessageSendConfig
 }
 
-// New creates a RemoteAgent. A2A (Agent-To-Agent) protocol is used for communication with an
+// NewA2A creates a remote A2A agent. A2A (Agent-To-Agent) protocol is used for communication with an
 // agent which can run in a different process or on a different host.
-func New(cfg A2AConfig) (agent.Agent, error) {
+func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.AgentCard == nil && cfg.AgentCardSource == "" {
 		return nil, fmt.Errorf("either AgentCard or AgentCardSource must be provided")
 	}

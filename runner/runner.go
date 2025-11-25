@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package runner provides a runtime for ADK agents.
 package runner
 
 import (
@@ -19,6 +20,8 @@ import (
 	"fmt"
 	"iter"
 	"log"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
@@ -32,18 +35,31 @@ import (
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
+// Config is used to create a [Runner].
 type Config struct {
-	AppName         string
-	Agent           agent.Agent
-	SessionService  session.Service
+	AppName string
+	// Root agent which starts the execution.
+	Agent          agent.Agent
+	SessionService session.Service
+
+	// optional
 	ArtifactService artifact.Service
-	MemoryService   memory.Service
+	// optional
+	MemoryService memory.Service
 }
 
+// New creates a new [Runner].
 func New(cfg Config) (*Runner, error) {
+	if cfg.Agent == nil {
+		return nil, fmt.Errorf("root agent is required")
+	}
+
+	if cfg.SessionService == nil {
+		return nil, fmt.Errorf("session service is required")
+	}
+
 	parents, err := parentmap.New(cfg.Agent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)
@@ -59,6 +75,9 @@ func New(cfg Config) (*Runner, error) {
 	}, nil
 }
 
+// Runner manages the execution of the agent within a session, handling message
+// processing, event generation, and interaction with various services like
+// artifact storage, session management, and memory.
 type Runner struct {
 	appName         string
 	rootAgent       agent.Agent
@@ -69,7 +88,9 @@ type Runner struct {
 	parents parentmap.Map
 }
 
-// Run runs the agent.
+// Run runs the agent for the given user input, yielding events from agents.
+// For each user message it finds the proper agent within an agent tree to
+// continue the conversation within the session.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
@@ -142,9 +163,6 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 			// only commit non-partial event to a session service
 			if !event.LLMResponse.Partial {
-
-				// TODO: update session state & delta
-
 				if err := r.sessionService.AppendEvent(ctx, session, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return

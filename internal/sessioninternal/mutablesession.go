@@ -76,7 +76,6 @@ func (s *MutableSession) Set(key string, value any) error {
 	mutableState, ok := s.storedSession.State().(MutableState)
 	if !ok {
 		return fmt.Errorf("this session state is not mutable")
-
 	}
 	if err := mutableState.Set(key, value); err != nil {
 		return fmt.Errorf("failed to set key %q in state: %w", key, err)

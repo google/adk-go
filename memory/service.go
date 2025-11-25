@@ -12,20 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package memory defines the entities to interact with agent memory (long-term knowledge).
 package memory
 
 import (
 	"context"
 	"time"
 
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/session"
 )
 
 // Service is a definition of the memory service.
 //
-// The service provides functionalities to ingest sessions into memory so that
-// the memory can be used for user queries.
+// The service ingests sessions into memory so that it can be used for
+// user queries across user-scoped sessions.
 type Service interface {
 	// AddSession adds a session to the memory service.
 	//
@@ -36,7 +38,7 @@ type Service interface {
 	Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error)
 }
 
-// CreateRequest represents a request for memory search.
+// SearchRequest represents a request for memory search.
 type SearchRequest struct {
 	Query   string
 	UserID  string

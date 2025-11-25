@@ -15,9 +15,10 @@
 package geminitool
 
 import (
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 // GoogleSearch is a built-in tool that is automatically invoked by Gemini 2
@@ -26,14 +27,17 @@ import (
 // perform local code execution.
 type GoogleSearch struct{}
 
+// Name implements tool.Tool.
 func (s GoogleSearch) Name() string {
 	return "google_search"
 }
 
+// Description implements tool.Tool.
 func (s GoogleSearch) Description() string {
-	return "google_search"
+	return "Performs a Google search to retrieve information from the web."
 }
 
+// ProcessRequest adds the GoogleSearch tool to the LLM request.
 func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return setTool(req, &genai.Tool{
 		GoogleSearch: &genai.GoogleSearch{},

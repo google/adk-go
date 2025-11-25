@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"google.golang.org/adk/model"
 )
 
@@ -48,7 +49,7 @@ type Session interface {
 // key-value pairs.
 type State interface {
 	// Get retrieves the value associated with a given key.
-	// It return a ErrStateKeyNotExist error if the key does not exist.
+	// It returns a ErrStateKeyNotExist error if the key does not exist.
 	Get(string) (any, error)
 	// Set assigns the given value to the given key, overwriting any
 	// existing value. It returns an error if the underlying storage
@@ -64,14 +65,14 @@ type State interface {
 // key-value pairs.
 type ReadonlyState interface {
 	// Get retrieves the value associated with a given key.
-	// It return a ErrStateKeyNotExist error if the key does not exist.
+	// It returns a ErrStateKeyNotExist error if the key does not exist.
 	Get(string) (any, error)
 	// All returns an iterator (iter.Seq2) that yields all key-value pairs
 	// currently in the state. The order of iteration is not guaranteed.
 	All() iter.Seq2[string, any]
 }
 
-// Events define a standard interface for an Event list.
+// Events define a standard interface for an [Event] list.
 // It provides methods for iterating over the sequence and accessing
 // individual events by their index.
 type Events interface {
@@ -117,8 +118,8 @@ type Event struct {
 
 // IsFinalResponse returns whether the event is the final response of an agent.
 //
-// Note: when multiple agents participate in one invocation, there could be one
-// event has `IsFinalResponse()` as True for each participating agent.
+// Note: when multiple agents participate in one invocation, there could be
+// multiple events with IsFinalResponse() as True, for each participating agent.
 func (e *Event) IsFinalResponse() bool {
 	if (e.Actions.SkipSummarization) || len(e.LongRunningToolIDs) > 0 {
 		return true

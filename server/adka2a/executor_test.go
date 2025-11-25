@@ -25,11 +25,12 @@ import (
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type testQueue struct {
@@ -288,7 +289,7 @@ func TestExecutor_SessionReuse(t *testing.T) {
 		t.Fatalf("executor.Execute() error = %v, want nil", err)
 	}
 
-	meta := toInvocationMeta(config, reqCtx)
+	meta := toInvocationMeta(ctx, config, reqCtx)
 	sessions, err := sessionService.List(ctx, &session.ListRequest{AppName: runnerConfig.AppName, UserID: meta.userID})
 	if err != nil {
 		t.Fatalf("sessionService.List() error = %v, want nil", err)
@@ -298,7 +299,7 @@ func TestExecutor_SessionReuse(t *testing.T) {
 	}
 
 	reqCtx.ContextID = a2a.NewContextID()
-	otherContextMeta := toInvocationMeta(config, reqCtx)
+	otherContextMeta := toInvocationMeta(ctx, config, reqCtx)
 	if meta.sessionID == otherContextMeta.sessionID {
 		t.Fatal("want sessionID to be different for different contextIDs")
 	}

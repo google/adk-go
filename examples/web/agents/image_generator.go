@@ -20,16 +20,17 @@ import (
 	"log"
 	"os"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/loadartifactstool"
-	"google.golang.org/genai"
 )
 
-func generateImage(ctx tool.Context, input generateImageInput) generateImageResult {
+func generateImage(ctx tool.Context, input generateImageInput) (generateImageResult, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
 		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
@@ -38,7 +39,7 @@ func generateImage(ctx tool.Context, input generateImageInput) generateImageResu
 	if err != nil {
 		return generateImageResult{
 			Status: "fail",
-		}
+		}, nil
 	}
 
 	response, err := client.Models.GenerateImages(
@@ -49,20 +50,20 @@ func generateImage(ctx tool.Context, input generateImageInput) generateImageResu
 	if err != nil {
 		return generateImageResult{
 			Status: "fail",
-		}
+		}, nil
 	}
 
 	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
 	if err != nil {
 		return generateImageResult{
 			Status: "fail",
-		}
+		}, nil
 	}
 
 	return generateImageResult{
 		Status:   "success",
 		Filename: input.Filename,
-	}
+	}, nil
 }
 
 type generateImageInput struct {

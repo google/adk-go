@@ -8,7 +8,7 @@ This folder hosts examples to test different features. The examples are usually 
 # Launcher
 In many examples you can see such lines:
 ```go
-l := full.NewLaucher()
+l := full.NewLauncher()
 err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
 if err != nil {
     log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())
@@ -16,18 +16,12 @@ if err != nil {
 ```
 
 it allows to to decide, which launching options are supported in the run-time. 
-`full.NewLaucher()`
-means
-`universal.NewLauncher(console.NewLauncher(), web.NewLauncher(api.NewLauncher(), a2a.NewLauncher(), webui.NewLauncher()))`
- - in that case supported options are either console or web. For web you can enable independently api (ADK REST API), a2a and webui (ADK Web UI).
+`full.NewLauncher()` includes all major ways you can run the example:
+* console
+* restapi
+* a2a
+* webui (it can run standalone or with restapi or a2a).
 
 Run `go run ./example/quickstart/main.go help` for details
 
-
-As an alternative, you may want to use `prod`
-`prod.NewLaucher()`
-meaning
-`universal.NewLauncher(web.NewLauncher(api.NewLauncher(), a2a.NewLauncher(rootAgentName)))`
-- the only supported options is web. For web you can enable independently api (ADK REST API) or a2a.
-
-
+As an alternative, you may want to use `prod.NewLauncher()` which only builds-in restapi and a2a launchers.

@@ -32,9 +32,10 @@ package geminitool
 import (
 	"fmt"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 // New creates  gemini API tool.
@@ -45,21 +46,25 @@ func New(name string, t *genai.Tool) tool.Tool {
 	}
 }
 
+// geminiTool is a wrapper around a genai.Tool.
 type geminiTool struct {
 	name  string
 	value *genai.Tool
 }
 
+// ProcessRequest adds the Gemini tool to the LLM request.
 func (t *geminiTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return setTool(req, t.value)
 }
 
+// Name implements tool.Tool.
 func (t *geminiTool) Name() string {
 	return t.name
 }
 
+// Description implements tool.Tool.
 func (t *geminiTool) Description() string {
-	return t.name
+	return "Performs a Google search to retrieve information from the web."
 }
 
 // IsLongRunning implements tool.Tool.

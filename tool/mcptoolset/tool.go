@@ -21,11 +21,12 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 type getSessionFunc func(ctx context.Context) (*mcp.ClientSession, error)
@@ -52,14 +53,17 @@ type mcpTool struct {
 	getSessionFunc getSessionFunc
 }
 
+// Name implements the tool.Tool.
 func (t *mcpTool) Name() string {
 	return t.name
 }
 
+// Description implements the tool.Tool.
 func (t *mcpTool) Description() string {
 	return t.description
 }
 
+// IsLongRunning implements the tool.Tool.
 func (t *mcpTool) IsLongRunning() bool {
 	return false
 }

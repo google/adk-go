@@ -23,7 +23,7 @@ import (
 	"google.golang.org/adk/cmd/launcher/web/api"
 )
 
-// NewLaucher returnes universal launcher capable of serving api and a2a
-func NewLaucher() launcher.Launcher {
+// NewLauncher returnes universal launcher capable of serving api and a2a
+func NewLauncher() launcher.Launcher {
 	return universal.NewLauncher(web.NewLauncher(api.NewLauncher(), a2a.NewLauncher()))
 }

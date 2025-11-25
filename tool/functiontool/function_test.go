@@ -25,6 +25,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
@@ -33,7 +35,6 @@ import (
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/genai"
 )
 
 func ExampleNew() {
@@ -45,8 +46,8 @@ func ExampleNew() {
 		Sum int `json:"sum"` // the sum of two integers
 	}
 
-	handler := func(ctx tool.Context, input SumArgs) SumResult {
-		return SumResult{Sum: input.A + input.B}
+	handler := func(ctx tool.Context, input SumArgs) (SumResult, error) {
+		return SumResult{Sum: input.A + input.B}, nil
 	}
 	sumTool, err := functiontool.New(functiontool.Config{
 		Name:        "sum",
@@ -89,15 +90,12 @@ func TestFunctionTool_Simple(t *testing.T) {
 		},
 	}
 
-	weatherReport := func(ctx tool.Context, input Args) Result {
+	weatherReport := func(ctx tool.Context, input Args) (Result, error) {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
-			return ret
+			return ret, nil
 		}
-		return Result{
-			Status: "error",
-			Report: fmt.Sprintf("Weather information for %q is not available.", city),
-		}
+		return Result{}, fmt.Errorf("weather information for %q is not available", city)
 	}
 
 	weatherReportTool, err := functiontool.New(
@@ -111,27 +109,28 @@ func TestFunctionTool_Simple(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name   string
-		prompt string
-		want   Result
+		name    string
+		prompt  string
+		want    Result
+		isError bool
 	}{
 		{
-			name:   "london",
-			prompt: "Report the current weather of the capital city of U.K.",
-			want:   resultSet["london"],
+			name:    "london",
+			prompt:  "Report the current weather of the capital city of U.K.",
+			want:    resultSet["london"],
+			isError: false,
 		},
 		{
-			name:   "paris",
-			prompt: "How is the weather of Paris now?",
-			want:   resultSet["paris"],
+			name:    "paris",
+			prompt:  "How is the weather of Paris now?",
+			want:    resultSet["paris"],
+			isError: false,
 		},
 		{
-			name:   "new york",
-			prompt: "Tell me about the current weather in New York",
-			want: Result{
-				Status: "error",
-				Report: `Weather information for "new york" is not available.`,
-			},
+			name:    "new york",
+			prompt:  "Tell me about the current weather in New York",
+			want:    Result{},
+			isError: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -163,6 +162,12 @@ func TestFunctionTool_Simple(t *testing.T) {
 				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
 			}
 			callResult, err := funcTool.Run(nil, resp.Args)
+			if tc.isError {
+				if err == nil {
+					t.Fatalf("weatherReportTool.Run(%v) expected to fail but got success with result %v", resp.Args, callResult)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("weatherReportTool.Run failed: %v", err)
 			}
@@ -180,8 +185,8 @@ func TestFunctionTool_Simple(t *testing.T) {
 
 func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t *testing.T) {
 	// First tool
-	identityFunc := func(ctx tool.Context, x int) int {
-		return x
+	identityFunc := func(ctx tool.Context, x int) (int, error) {
+		return x, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{
 		Name:        "identity",
@@ -192,8 +197,8 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	}
 
 	// Second tool
-	stringIdentityFunc := func(ctx tool.Context, input string) string {
-		return input
+	stringIdentityFunc := func(ctx tool.Context, input string) (string, error) {
+		return input, nil
 	}
 	stringIdentityTool, err := functiontool.New(
 		functiontool.Config{
@@ -238,12 +243,12 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 		"paris":  "The weather in Paris is sunny with a temperature of 25 derees Celsius.",
 	}
 
-	weatherReport := func(ctx tool.Context, input Args) string {
+	weatherReport := func(ctx tool.Context, input Args) (string, error) {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
-			return ret
+			return ret, nil
 		}
-		return fmt.Sprintf("Weather information for %q is not available.", city)
+		return fmt.Sprintf("Weather information for %q is not available.", city), nil
 	}
 
 	weatherReportTool, err := functiontool.New(
@@ -396,12 +401,12 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		Name:        "print_quantity",
 		Description: "print the remaining quantity of the given fruit.",
 		InputSchema: ischema,
-	}, func(ctx tool.Context, input Args) any {
+	}, func(ctx tool.Context, input Args) (any, error) {
 		fruit := strings.ToLower(input.Fruit)
 		if fruit != "mandarin" && fruit != "kiwi" {
 			t.Errorf("unexpected fruit: %q", fruit)
 		}
-		return nil // always return nil.
+		return nil, nil // always return nil.
 	})
 	if err != nil {
 		t.Fatalf("NewFunctionTool failed: %v", err)

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package loopagent provides an agent that repeatedly runs its sub-agents for a
+// specified number of iterations or until termination condition is met.
 package loopagent
 
 import (
@@ -23,6 +25,7 @@ import (
 	"google.golang.org/adk/session"
 )
 
+// Config defines the configuration for a LoopAgent.
 type Config struct {
 	// Basic agent setup.
 	AgentConfig agent.Config

@@ -19,18 +19,20 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptoolset"
-	"google.golang.org/genai"
 )
 
 // This example demonstrates 2 ways to use MCP tools with ADK:
@@ -58,13 +60,13 @@ func GetWeather(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mc
 	}, nil
 }
 
-func localMCPTransport() mcp.Transport {
+func localMCPTransport(ctx context.Context) mcp.Transport {
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 
 	// Run in-memory MCP server.
 	server := mcp.NewServer(&mcp.Implementation{Name: "weather_server", Version: "v1.0.0"}, nil)
 	mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: "returns weather in the given city"}, GetWeather)
-	_, err := server.Connect(context.Background(), serverTransport, nil)
+	_, err := server.Connect(ctx, serverTransport, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -72,18 +74,20 @@ func localMCPTransport() mcp.Transport {
 	return clientTransport
 }
 
-func githubMCPTransport() mcp.Transport {
+func githubMCPTransport(ctx context.Context) mcp.Transport {
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: os.Getenv("GITHUB_PAT")},
 	)
 	return &mcp.StreamableClientTransport{
 		Endpoint:   "https://api.githubcopilot.com/mcp/",
-		HTTPClient: oauth2.NewClient(context.Background(), ts),
+		HTTPClient: oauth2.NewClient(ctx, ts),
 	}
 }
 
 func main() {
-	ctx := context.Background()
+	// Create context that cancels on interrupt signal (Ctrl+C)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
 		APIKey: os.Getenv("GOOGLE_API_KEY"),
@@ -94,9 +98,9 @@ func main() {
 
 	var transport mcp.Transport
 	if strings.ToLower(os.Getenv("AGENT_MODE")) == "github" {
-		transport = githubMCPTransport()
+		transport = githubMCPTransport(ctx)
 	} else {
-		transport = localMCPTransport()
+		transport = localMCPTransport(ctx)
 	}
 
 	mcpToolSet, err := mcptoolset.New(mcptoolset.Config{
@@ -107,7 +111,7 @@ func main() {
 	}
 
 	// Create LLMAgent with MCP tool set
-	agent, err := llmagent.New(llmagent.Config{
+	a, err := llmagent.New(llmagent.Config{
 		Name:        "helper_agent",
 		Model:       model,
 		Description: "Helper agent.",
@@ -120,13 +124,11 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	config := &adk.Config{
-		AgentLoader: services.NewSingleAgentLoader(agent),
+	config := &launcher.Config{
+		AgentLoader: agent.NewSingleLoader(a),
 	}
 	l := full.NewLauncher()
-	err = l.Execute(ctx, config, os.Args[1:])
-	if err != nil {
-		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
-
 }

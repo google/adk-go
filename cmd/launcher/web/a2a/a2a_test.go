@@ -24,12 +24,12 @@ import (
 	a2acore "github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/cmd/launcher/adk"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/server/restapi/services"
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/cmd/launcher"
+	"google.golang.org/adk/cmd/launcher/web"
+	"google.golang.org/adk/session"
 )
 
 func getFreePort(t *testing.T) int {
@@ -58,8 +58,8 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 
 	port := getFreePort(t)
 
-	launcher := web.NewLauncher(NewLauncher())
-	_, err := launcher.Parse([]string{
+	l := web.NewLauncher(NewLauncher())
+	_, err := l.Parse([]string{
 		"--port", strconv.Itoa(port),
 		"a2a", "--a2a_agent_url", "http://localhost:" + strconv.Itoa(port),
 	})
@@ -81,13 +81,13 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agent.New() error = %v", err)
 	}
-	config := &adk.Config{
-		AgentLoader:    services.NewSingleAgentLoader(agnt),
+	config := &launcher.Config{
+		AgentLoader:    agent.NewSingleLoader(agnt),
 		SessionService: session.InMemoryService(),
 	}
 
 	go func() {
-		if err := launcher.Run(t.Context(), config); err != nil {
+		if err := l.Run(t.Context(), config); err != nil {
 			t.Errorf("launcher.Run() error = %v", err)
 		}
 	}()

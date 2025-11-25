@@ -22,7 +22,6 @@ import (
 	"strings"
 
 	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/adk"
 )
 
 // uniLauncher contains information about sublaunchers
@@ -32,7 +31,7 @@ type uniLauncher struct {
 }
 
 // Execute implements launcher.Launcher. Parses args and runs the chosen launcher. Returns error if there are non-parsed arguments.
-func (l *uniLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
+func (l *uniLauncher) Execute(ctx context.Context, config *launcher.Config, args []string) error {
 	return l.ParseAndRun(ctx, config, args, ErrorOnUnparsedArgs)
 }
 
@@ -45,7 +44,7 @@ func NewLauncher(sublaunchers ...launcher.SubLauncher) launcher.Launcher {
 
 // ParseAndRun parses arguments and runs the chosen sublauncher. It allows to provide a
 // hook for processing any remaining arguments.
-func (l *uniLauncher) ParseAndRun(ctx context.Context, config *adk.Config, args []string, parseRemaining func([]string) error) error {
+func (l *uniLauncher) ParseAndRun(ctx context.Context, config *launcher.Config, args []string, parseRemaining func([]string) error) error {
 	remainingArgs, err := l.parse(args)
 	if err != nil {
 		return err
@@ -61,7 +60,7 @@ func (l *uniLauncher) ParseAndRun(ctx context.Context, config *adk.Config, args 
 }
 
 // run executes the chosen sublauncher.
-func (l *uniLauncher) run(ctx context.Context, config *adk.Config) error {
+func (l *uniLauncher) run(ctx context.Context, config *launcher.Config) error {
 	return l.chosenLauncher.Run(ctx, config)
 }
 

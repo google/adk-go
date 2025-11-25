@@ -21,10 +21,11 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // ExecutorConfig represents mandatory Executor dependencies.
@@ -37,7 +38,7 @@ type ExecutorConfig struct {
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
 
-// Executor invokes an ADK agent and translates [session.Event]-s to [a2a.Event]-s according to the following rules:
+// Executor invokes an ADK agent and translates [session.Event]s to [a2a.Event]s according to the following rules:
 //   - If the input doesn't reference any a2a.Task, produce a TaskStatusUpdateEvent with TaskStateSubmitted.
 //   - Right before runner.Runner invocation, produce TaskStatusUpdateEvent with TaskStateWorking.
 //   - For every session.Event produce a TaskArtifactUpdateEvent{Append=true} with transformed parts.
@@ -76,7 +77,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 		}
 	}
 
-	invocationMeta := toInvocationMeta(e.config, reqCtx)
+	invocationMeta := toInvocationMeta(ctx, e.config, reqCtx)
 
 	if err := e.prepareSession(ctx, invocationMeta); err != nil {
 		event := toTaskFailedUpdateEvent(reqCtx, err, invocationMeta.eventMeta)

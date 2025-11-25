@@ -21,8 +21,9 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/session"
 )
 
 // InMemoryService returns a new in-memory implementation of the memory service. Thread-safe.
@@ -36,7 +37,7 @@ type key struct {
 	appName, userID string
 }
 
-type sessionID = string
+type sessionID string
 
 type value struct {
 	content   *genai.Content
@@ -96,7 +97,8 @@ func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Ses
 		s.store[k] = v
 	}
 
-	v[curSession.ID()] = values
+	sid := sessionID(curSession.ID())
+	v[sid] = values
 	return nil
 }
 

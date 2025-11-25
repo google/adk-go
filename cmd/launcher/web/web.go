@@ -25,8 +25,8 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+
 	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/adk"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/session"
@@ -34,7 +34,10 @@ import (
 
 // webConfig contains parameters for launching web server
 type webConfig struct {
-	port int
+	port         int
+	writeTimeout time.Duration
+	readTimeout  time.Duration
+	idleTimeout  time.Duration
 }
 
 // webLauncher can launch web server
@@ -47,7 +50,7 @@ type webLauncher struct {
 }
 
 // Execute implements launcher.Launcher.
-func (w *webLauncher) Execute(ctx context.Context, config *adk.Config, args []string) error {
+func (w *webLauncher) Execute(ctx context.Context, config *launcher.Config, args []string) error {
 	remainingArgs, err := w.Parse(args)
 	if err != nil {
 		return fmt.Errorf("cannot parse args: %w", err)
@@ -73,7 +76,7 @@ type Sublauncher interface {
 	SimpleDescription() string
 
 	// SetupSubrouters adds sublauncher-specific routes to the router.
-	SetupSubrouters(router *mux.Router, adkConfig *adk.Config) error
+	SetupSubrouters(router *mux.Router, config *launcher.Config) error
 	// UserMessage is a hook for sublaunchers to print a message to the user when the web server starts.
 	UserMessage(webURL string, printer func(v ...any))
 }
@@ -102,7 +105,6 @@ func (w *webLauncher) Keyword() string {
 // and then iterates through the remaining arguments to find and parse arguments
 // for any specified sublaunchers. It returns any arguments that are not processed.
 func (w *webLauncher) Parse(args []string) ([]string, error) {
-
 	keyToSublauncher := make(map[string]Sublauncher)
 	for _, l := range w.sublaunchers {
 		if _, ok := keyToSublauncher[l.Keyword()]; ok {
@@ -142,7 +144,7 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 }
 
 // Run implements launcher.SubLauncher.
-func (w *webLauncher) Run(ctx context.Context, config *adk.Config) error {
+func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
 	}
@@ -176,9 +178,9 @@ func (w *webLauncher) Run(ctx context.Context, config *adk.Config) error {
 
 	srv := http.Server{
 		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
-		WriteTimeout: time.Second * 15,
-		ReadTimeout:  time.Second * 15,
-		IdleTimeout:  time.Second * 60,
+		WriteTimeout: w.config.writeTimeout,
+		ReadTimeout:  w.config.readTimeout,
+		IdleTimeout:  w.config.idleTimeout,
 		Handler:      router,
 	}
 
@@ -202,6 +204,9 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
 	fs.IntVar(&config.port, "port", 8080, "Localhost port for the server")
+	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
+	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
+	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
 
 	return &webLauncher{
 		config:       config,

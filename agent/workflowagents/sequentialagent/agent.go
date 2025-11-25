@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package sequentialagent provides an agent that runs its sub-agents in a sequence.
 package sequentialagent
 
 import (
@@ -48,6 +49,7 @@ func New(cfg Config) (agent.Agent, error) {
 	return sequentialAgent, nil
 }
 
+// Config defines the configuration for a SequentialAgent.
 type Config struct {
 	// Basic agent setup.
 	AgentConfig agent.Config

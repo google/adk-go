@@ -17,14 +17,17 @@ package llminternal
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
@@ -57,9 +60,7 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 
 // buildContentsDefault returns the contents for the LLM request by applying
 // filtering, rearrangement, and content processing to the given events.
-func buildContentsDefault(agentName, branch string, events []*session.Event) ([]*genai.Content, error) {
-	branchPrefix := branch + "."
-
+func buildContentsDefault(agentName, invocationBranch string, events []*session.Event) ([]*genai.Content, error) {
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
 	for _, ev := range events {
@@ -74,8 +75,8 @@ func buildContentsDefault(agentName, branch string, events []*session.Event) ([]
 			continue
 		}
 		// Skip events that do not belong to the current branch.
-		// TODO: can we use a richier type for branch (e.g. []string) instead of using string prefix test?
-		if branch != "" && (ev.Branch != branch && !strings.HasPrefix(ev.Branch, branchPrefix)) {
+		// TODO: can we use a richer type for branch (e.g. []string) instead of using string prefix test?
+		if !eventBelongsToBranch(invocationBranch, ev) {
 			continue
 		}
 		if isAuthEvent(ev) {
@@ -106,10 +107,32 @@ func buildContentsDefault(agentName, branch string, events []*session.Event) ([]
 		if content == nil {
 			continue
 		}
+
+		// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
+		content.Parts = slices.DeleteFunc(content.Parts, func(p *genai.Part) bool {
+			return p == nil || reflect.ValueOf(*p).IsZero()
+		})
+		if len(content.Parts) == 0 {
+			continue
+		}
+
 		utils.RemoveClientFunctionCallID(content)
 		contents = append(contents, content)
 	}
 	return contents, nil
+}
+
+func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
+	if invocationBranch == "" {
+		return true
+	}
+	if event.Branch == invocationBranch {
+		return true
+	}
+	// We use dot to delimit branch nodes. To avoid simple prefix match
+	// (e.g. agent_0 unexpectedly matching agent_00), require either perfect branch
+	// match, or match prefix with an additional explicit '.'
+	return strings.HasPrefix(invocationBranch, event.Branch+".")
 }
 
 // rearrangeEventsForLatestFunctionResponse
@@ -125,7 +148,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 
 	lastEvent := events[len(events)-1]
 	lastResponses := listFunctionResponsesFromEvent(lastEvent)
-	// No need to process, since the latest event is not fuction_response.
+	// No need to process, since the latest event is not function_response.
 	if len(lastResponses) == 0 {
 		return events, nil
 	}
@@ -149,7 +172,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 		}
 	}
 
-	var functionCallEventIdx = -1
+	functionCallEventIdx := -1
 	var allCallIDsFromMatchingEvent map[string]struct{}
 
 SearchLoop: // A label to allow breaking out of the nested loop
@@ -451,13 +474,16 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		switch {
 		case p.Text != "":
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text)})
+				Text: fmt.Sprintf("[%s] said: %s", ev.Author, p.Text),
+			})
 		case p.FunctionCall != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] called tool %q with parameters: %s", ev.Author, p.FunctionCall.Name, stringify(p.FunctionCall.Args))})
+				Text: fmt.Sprintf("[%s] called tool %q with parameters: %s", ev.Author, p.FunctionCall.Name, stringify(p.FunctionCall.Args)),
+			})
 		case p.FunctionResponse != nil:
 			converted.Parts = append(converted.Parts, &genai.Part{
-				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response))})
+				Text: fmt.Sprintf("[%s] %q tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response)),
+			})
 		default: // fallback to the original part for non-text and non-functionCall parts.
 			converted.Parts = append(converted.Parts, p)
 		}

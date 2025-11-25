@@ -33,34 +33,35 @@ import (
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
+
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
 )
 
 const connBufSize int = 1024 * 1024
 
-type mockExecutor struct {
+type mockA2AExecutor struct {
 	executeFn func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error
 }
 
-var _ a2asrv.AgentExecutor = (*mockExecutor)(nil)
+var _ a2asrv.AgentExecutor = (*mockA2AExecutor)(nil)
 
-func (e *mockExecutor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+func (e *mockA2AExecutor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
 	if e.executeFn != nil {
 		return e.executeFn(ctx, reqCtx, queue)
 	}
 	return fmt.Errorf("not implemented")
 }
 
-func (e *mockExecutor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+func (e *mockA2AExecutor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
 	return fmt.Errorf("not implemented")
 }
 
@@ -87,13 +88,13 @@ func newTestClientFactory(listener *bufconn.Listener) *a2aclient.Factory {
 	return a2aclient.NewFactory(withInsecureGRPC)
 }
 
-func newRemoteAgent(t *testing.T, name string, listener *bufconn.Listener) agent.Agent {
+func newA2ARemoteAgent(t *testing.T, name string, listener *bufconn.Listener) agent.Agent {
 	t.Helper()
 	card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolGRPC, URL: "passthrough:///bufnet", Capabilities: a2a.AgentCapabilities{Streaming: true}}
 	clientFactory := newTestClientFactory(listener)
-	agent, err := New(A2AConfig{Name: name, AgentCard: card, ClientFactory: clientFactory})
+	agent, err := NewA2A(A2AConfig{Name: name, AgentCard: card, ClientFactory: clientFactory})
 	if err != nil {
-		t.Fatalf("remoteagent.New() error = %v", err)
+		t.Fatalf("remoteagent.NewA2A() error = %v", err)
 	}
 	return agent
 }
@@ -160,7 +161,7 @@ func newADKEventReplay(t *testing.T, events []*session.Event) a2asrv.AgentExecut
 }
 
 func newA2AEventReplay(t *testing.T, events []a2a.Event) a2asrv.AgentExecutor {
-	return &mockExecutor{
+	return &mockA2AExecutor{
 		executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
 			for _, ev := range events {
 				// A2A stack is going to fail the request if events don't have correct taskID and contextID
@@ -207,6 +208,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 		name          string
 		remoteEvents  []*session.Event
 		wantResponses []model.LLMResponse
+		wantEscalate  bool
+		wantTransfer  string
 	}{
 		{
 			name: "text streaming",
@@ -256,6 +259,34 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{TurnComplete: true},
 			},
 		},
+		{
+			name: "escalation",
+			remoteEvents: []*session.Event{
+				{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("stop", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				},
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: genai.NewContentFromText("stop", genai.RoleModel), Partial: true},
+				{TurnComplete: true},
+			},
+			wantEscalate: true,
+		},
+		{
+			name: "transfer",
+			remoteEvents: []*session.Event{
+				{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("stop", genai.RoleModel)},
+					Actions:     session.EventActions{TransferToAgent: "a-2"},
+				},
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: genai.NewContentFromText("stop", genai.RoleModel), Partial: true},
+				{TurnComplete: true},
+			},
+			wantTransfer: "a-2",
+		},
 	}
 
 	ignoreFields := []cmp.Option{
@@ -267,24 +298,32 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 			listener := bufconn.Listen(connBufSize)
 			executor := newADKEventReplay(t, tc.remoteEvents)
 			go startA2AServer(t, executor, listener)
-			remoteAgent := newRemoteAgent(t, "a2a", listener)
+			remoteAgent := newA2ARemoteAgent(t, "a2a", listener)
 
 			ictx := newInvocationContext(t, []*session.Event{newUserHello()})
 			gotEvents, err := runAndCollect(ictx, remoteAgent)
 			if err != nil {
-				t.Errorf("agent.Run() error = %v", err)
+				t.Fatalf("agent.Run() error = %v", err)
 			}
 			gotResponses := toLLMResponses(gotEvents)
 			if diff := cmp.Diff(tc.wantResponses, gotResponses, ignoreFields...); diff != "" {
-				t.Errorf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
+				t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
 			}
+			var lastActions *session.EventActions
 			for _, event := range gotEvents {
 				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("response")]; !ok {
-					t.Errorf("event.CustomMetadata = %v, want meta[%q] = original a2a event", event.CustomMetadata, adka2a.ToADKMetaKey("response"))
+					t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original a2a event", event.CustomMetadata, adka2a.ToADKMetaKey("response"))
 				}
 				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; !ok {
-					t.Errorf("event.CustomMetadata = %v, want meta[%q] = original a2a request", event.CustomMetadata, adka2a.ToADKMetaKey("request"))
+					t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original a2a request", event.CustomMetadata, adka2a.ToADKMetaKey("request"))
 				}
+				lastActions = &event.Actions
+			}
+			if tc.wantEscalate != lastActions.Escalate {
+				t.Fatalf("lastActions.Escalate = %v, want %v", lastActions.Escalate, tc.wantEscalate)
+			}
+			if tc.wantTransfer != lastActions.TransferToAgent {
+				t.Fatalf("lastActions.TransferToAgent = %v, want %v", lastActions.TransferToAgent, tc.wantTransfer)
 			}
 		})
 	}
@@ -442,7 +481,7 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			listener := bufconn.Listen(connBufSize)
 			executor := newA2AEventReplay(t, tc.remoteEvents)
 			go startA2AServer(t, executor, listener)
-			remoteAgent := newRemoteAgent(t, "a2a", listener)
+			remoteAgent := newA2ARemoteAgent(t, "a2a", listener)
 
 			ictx := newInvocationContext(t, []*session.Event{newUserHello()})
 			gotEvents, err := runAndCollect(ictx, remoteAgent)
@@ -475,7 +514,7 @@ func TestRemoteAgent_EmptyResultForEmptySession(t *testing.T) {
 	go startA2AServer(t, executor, listener)
 
 	agentName := "a2a agent"
-	remoteAgent := newRemoteAgent(t, agentName, listener)
+	remoteAgent := newA2ARemoteAgent(t, agentName, listener)
 
 	gotEvents, err := runAndCollect(ictx, remoteAgent)
 	if err != nil {
@@ -513,9 +552,9 @@ func TestRemoteAgent_ResolvesAgentCard(t *testing.T) {
 	cardServer := httptest.NewServer(mux)
 
 	clientFactory := newTestClientFactory(listener)
-	remoteAgent, err := New(A2AConfig{Name: "a2a", AgentCardSource: cardServer.URL, ClientFactory: clientFactory})
+	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCardSource: cardServer.URL, ClientFactory: clientFactory})
 	if err != nil {
-		t.Fatalf("remoteagent.New() error = %v", err)
+		t.Fatalf("remoteagent.NewA2A() error = %v", err)
 	}
 
 	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
@@ -540,13 +579,13 @@ func TestRemoteAgent_ErrorEventIfNoCompatibleTransport(t *testing.T) {
 	go startA2AServer(t, executor, listener)
 
 	clientFactory := a2aclient.NewFactory(a2aclient.WithDefaultsDisabled())
-	remoteAgent, err := New(A2AConfig{
+	remoteAgent, err := NewA2A(A2AConfig{
 		Name:          "a2a",
 		AgentCard:     &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolGRPC, URL: "passthrough:///bufnet"},
 		ClientFactory: clientFactory,
 	})
 	if err != nil {
-		t.Fatalf("remoteagent.New() error = %v", err)
+		t.Fatalf("remoteagent.NewA2A() error = %v", err)
 	}
 
 	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
@@ -567,14 +606,14 @@ func TestRemoteAgent_ErrorEventOnServerError(t *testing.T) {
 	listener := bufconn.Listen(connBufSize)
 
 	executorErr := fmt.Errorf("mockExecutor failed")
-	executor := &mockExecutor{
+	executor := &mockA2AExecutor{
 		executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, q eventqueue.Queue) error {
 			return executorErr
 		},
 	}
 	go startA2AServer(t, executor, listener)
 
-	remoteAgent := newRemoteAgent(t, "a2a agent", listener)
+	remoteAgent := newA2ARemoteAgent(t, "a2a agent", listener)
 
 	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
 	gotEvents, err := runAndCollect(ictx, remoteAgent)

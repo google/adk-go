@@ -209,7 +209,7 @@ func TestErrors(t *testing.T) {
 
 	// corrupt httprr trace
 	corruptTraceFile := makeTmpFile()
-	os.WriteFile(corruptTraceFile, []byte("httprr trace v1\ngarbage\n"), 0666)
+	os.WriteFile(corruptTraceFile, []byte("httprr trace v1\ngarbage\n"), 0o666)
 	if _, err := Open(corruptTraceFile, nil); err == nil || !strings.Contains(err.Error(), "corrupt httprr trace") {
 		t.Errorf("did not diagnose invalid httprr trace: err = %v", err)
 	}
@@ -308,7 +308,7 @@ func TestErrors(t *testing.T) {
 
 	// error during http.ReadResponse: trace is structurally okay but has malformed response inside
 	tmpFile := makeTmpFile()
-	if err := os.WriteFile(tmpFile, badResponseTrace, 0666); err != nil {
+	if err := os.WriteFile(tmpFile, badResponseTrace, 0o666); err != nil {
 		t.Fatal(err)
 	}
 	rr, err = Open(tmpFile, nil)

@@ -24,13 +24,14 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/adk/cmd/launcher/adk"
+
+	"google.golang.org/adk/cmd/launcher"
 	weblauncher "google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/server/restapi/handlers"
+	"google.golang.org/adk/server/adkrest/controllers"
 )
 
-// webUIConfig contains parametres for lauching ADK Web UI
+// webUIConfig contains parameters for launching ADK Web UI
 type webUIConfig struct {
 	backendAddress string
 	pathPrefix     string
@@ -52,7 +53,7 @@ func (w *webUILauncher) Keyword() string {
 	return "webui"
 }
 
-// Parse implements web.Sublauncher. After parsing webui-specific arguments returns remaining un-parsed arguments
+// Parse implements web.Sublauncher. After parsing webui-specific arguments returns remaining unparsed arguments
 func (w *webUILauncher) Parse(args []string) ([]string, error) {
 	err := w.flags.Parse(args)
 	if err != nil || !w.flags.Parsed() {
@@ -64,8 +65,8 @@ func (w *webUILauncher) Parse(args []string) ([]string, error) {
 
 // SetupSubrouters implements the web.Sublauncher interface. It adds the
 // WebUI subrouter to the main router.
-func (w *webUILauncher) SetupSubrouters(router *mux.Router, adkConfig *adk.Config) error {
-	w.AddSubrouter(router, w.config.pathPrefix, adkConfig, w.config.backendAddress)
+func (w *webUILauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
+	w.AddSubrouter(router, w.config.pathPrefix, w.config.backendAddress)
 	return nil
 }
 
@@ -86,7 +87,7 @@ func (w *webUILauncher) UserMessage(webURL string, printer func(v ...any)) {
 var content embed.FS
 
 // AddSubrouter adds a subrouter to serve the ADK Web UI.
-func (w *webUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkConfig *adk.Config, backendAddress string) {
+func (w *webUILauncher) AddSubrouter(router *mux.Router, pathPrefix, backendAddress string) {
 	// Setup serving of ADK Web UI
 	rUI := router.Methods("GET").PathPrefix(pathPrefix).Subrouter()
 
@@ -96,7 +97,7 @@ func (w *webUILauncher) AddSubrouter(router *mux.Router, pathPrefix string, adkC
 		BackendUrl string `json:"backendUrl"`
 	}{BackendUrl: backendAddress}
 	rUI.Methods("GET").Path("/assets/config/runtime-config.json").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handlers.EncodeJSONResponse(runtimeConfigResponse, http.StatusOK, w)
+		controllers.EncodeJSONResponse(runtimeConfigResponse, http.StatusOK, w)
 	})
 
 	//   redirect the user from / to pathPrefix (/ui/)

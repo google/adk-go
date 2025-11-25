@@ -15,7 +15,11 @@
 package adka2a
 
 import (
+	"context"
+	"maps"
+
 	"github.com/a2aproject/a2a-go/a2asrv"
+
 	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/session"
 )
@@ -31,9 +35,16 @@ type invocationMeta struct {
 	eventMeta map[string]any
 }
 
-func toInvocationMeta(config ExecutorConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
+func toInvocationMeta(ctx context.Context, config ExecutorConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
 	// TODO(yarolegovich): update once A2A provides auth data extraction from Context
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
+
+	// override userID if set in the call context
+	if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
+		if callCtx.User != nil && callCtx.User.Name() != "" {
+			userID = callCtx.User.Name()
+		}
+	}
 
 	m := map[string]any{
 		ToA2AMetaKey("app_name"):   config.RunnerConfig.AppName,
@@ -46,9 +57,7 @@ func toInvocationMeta(config ExecutorConfig, reqCtx *a2asrv.RequestContext) invo
 
 func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, error) {
 	result := make(map[string]any)
-	for k, v := range meta.eventMeta {
-		result[k] = v
-	}
+	maps.Copy(result, meta.eventMeta)
 
 	for k, v := range map[string]string{
 		"invocation_id": event.InvocationID,
@@ -77,4 +86,20 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 	// TODO(yarolegovich): include custom and usage metadata when added to session.Event
 
 	return result, nil
+}
+
+func setActionsMeta(meta map[string]any, actions session.EventActions) map[string]any {
+	if actions.TransferToAgent == "" && !actions.Escalate { // if meta was nil, it should remain nil
+		return meta
+	}
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	if actions.Escalate {
+		meta[metadataEscalateKey] = true
+	}
+	if actions.TransferToAgent != "" {
+		meta[metadataTransferToAgentKey] = actions.TransferToAgent
+	}
+	return meta
 }

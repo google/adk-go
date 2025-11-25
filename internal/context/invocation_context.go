@@ -18,9 +18,10 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type InvocationContextParams struct {
@@ -86,6 +87,7 @@ func (c *InvocationContext) RunConfig() *agent.RunConfig {
 func (c *InvocationContext) EndInvocation() {
 	c.params.EndInvocation = true
 }
+
 func (c *InvocationContext) Ended() bool {
 	return c.params.EndInvocation
 }

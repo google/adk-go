@@ -19,6 +19,8 @@ import (
 	"iter"
 	"strings"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	agentinternal "google.golang.org/adk/internal/agent"
 	icontext "google.golang.org/adk/internal/context"
@@ -26,7 +28,6 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 // New is a constructor for LLMAgent.
@@ -285,7 +286,7 @@ type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]a
 //   - args:   The arguments originally passed to the tool.
 //   - result: The result returned by the tool's Run method.
 //   - err:    The error returned by the tool's Run method.
-type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error)
+type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
 // IncludeContents controls what parts of prior conversation history is received by llmagent.
 type IncludeContents string

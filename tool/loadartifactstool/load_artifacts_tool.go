@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package loadartifactstool defines a tool for loading artifacts.
+// This tool informs the model about available artifacts and provides their content when
+// requested by the model through a function call.
 package loadartifactstool
 
 import (
@@ -20,12 +23,13 @@ import (
 	"fmt"
 
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 // artifactsTool is a tool that loads artifacts and adds them to the session.
@@ -57,7 +61,11 @@ func (t *artifactsTool) IsLongRunning() bool {
 	return false
 }
 
-// Declaration implements tool.Tool.
+// Declaration returns the GenAI FunctionDeclaration for the load_artifacts tool.
+//
+// This declaration allows the LLM to understand and call the tool
+// by specifying the function name, a detailed description of its
+// purpose, and the required input parameters (schema).
 func (t *artifactsTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        t.name,
@@ -107,7 +115,8 @@ func (t *artifactsTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 	return result, nil
 }
 
-// ProcessRequest implements tool.Tool.
+// ProcessRequest processes the LLM request. It packs the tool, appends initial
+// instructions, and processes any load artifacts function calls.
 func (t *artifactsTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
