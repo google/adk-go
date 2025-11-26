@@ -583,6 +583,257 @@ func TestNewModel_MissingConfig(t *testing.T) {
 	}
 }
 
+func TestConvertFunctionDeclaration(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   *genai.FunctionDeclaration
+		want openAITool
+	}{
+		{
+			name: "with_ParametersJsonSchema_map",
+			fn: &genai.FunctionDeclaration{
+				Name:        "get_weather",
+				Description: "Get weather for a location",
+				ParametersJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"location": map[string]any{
+							"type":        "string",
+							"description": "City name",
+						},
+					},
+					"required": []any{"location"},
+				},
+			},
+			want: openAITool{
+				Type: "function",
+				Function: openAIFunction{
+					Name:        "get_weather",
+					Description: "Get weather for a location",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"location": map[string]any{
+								"type":        "string",
+								"description": "City name",
+							},
+						},
+						"required": []any{"location"},
+					},
+				},
+			},
+		},
+		{
+			name: "with_Parameters_legacy",
+			fn: &genai.FunctionDeclaration{
+				Name:        "calculate",
+				Description: "Calculate something",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"x": {
+							Type:        genai.TypeNumber,
+							Description: "First number",
+						},
+						"y": {
+							Type:        genai.TypeNumber,
+							Description: "Second number",
+						},
+					},
+					Required: []string{"x", "y"},
+				},
+			},
+			want: openAITool{
+				Type: "function",
+				Function: openAIFunction{
+					Name:        "calculate",
+					Description: "Calculate something",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"x": map[string]any{
+								"type":        "number",
+								"description": "First number",
+							},
+							"y": map[string]any{
+								"type":        "number",
+								"description": "Second number",
+							},
+						},
+						"required": []string{"x", "y"},
+					},
+				},
+			},
+		},
+		{
+			name: "no_parameters",
+			fn: &genai.FunctionDeclaration{
+				Name:        "get_time",
+				Description: "Get current time",
+			},
+			want: openAITool{
+				Type: "function",
+				Function: openAIFunction{
+					Name:        "get_time",
+					Description: "Get current time",
+					Parameters:  map[string]any{},
+				},
+			},
+		},
+		{
+			name: "prefers_ParametersJsonSchema_over_Parameters",
+			fn: &genai.FunctionDeclaration{
+				Name:        "test_tool",
+				Description: "Test tool with both schemas",
+				ParametersJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"new_param": map[string]any{"type": "string"},
+					},
+				},
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"old_param": {Type: genai.TypeString},
+					},
+				},
+			},
+			want: openAITool{
+				Type: "function",
+				Function: openAIFunction{
+					Name:        "test_tool",
+					Description: "Test tool with both schemas",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"new_param": map[string]any{"type": "string"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := convertFunctionDeclaration(tt.fn)
+			if diff := cmp.Diff(tt.want, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("convertFunctionDeclaration() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestTryConvertJsonSchema(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema any
+		want   map[string]any
+	}{
+		{
+			name: "already_map",
+			schema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"field": map[string]any{"type": "string"}},
+			},
+			want: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"field": map[string]any{"type": "string"}},
+			},
+		},
+		{
+			name: "struct_via_json",
+			schema: struct {
+				Type       string                 `json:"type"`
+				Properties map[string]interface{} `json:"properties"`
+			}{
+				Type: "object",
+				Properties: map[string]interface{}{
+					"name": map[string]interface{}{"type": "string"},
+				},
+			},
+			want: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string"},
+				},
+			},
+		},
+		{
+			name:   "invalid_type",
+			schema: make(chan int), // Cannot be marshaled
+			want:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tryConvertJsonSchema(tt.schema)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("tryConvertJsonSchema() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestConvertLegacyParameters(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema *genai.Schema
+		want   map[string]any
+	}{
+		{
+			name: "with_properties_and_required",
+			schema: &genai.Schema{
+				Type: genai.TypeObject,
+				Properties: map[string]*genai.Schema{
+					"name": {
+						Type:        genai.TypeString,
+						Description: "User name",
+					},
+					"age": {
+						Type:        genai.TypeInteger,
+						Description: "User age",
+					},
+				},
+				Required: []string{"name"},
+			},
+			want: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{
+						"type":        "string",
+						"description": "User name",
+					},
+					"age": map[string]any{
+						"type":        "integer",
+						"description": "User age",
+					},
+				},
+				"required": []string{"name"},
+			},
+		},
+		{
+			name: "empty_properties",
+			schema: &genai.Schema{
+				Type: genai.TypeObject,
+			},
+			want: map[string]any{
+				"type": "object",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := convertLegacyParameters(tt.schema)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("convertLegacyParameters() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // Helper function
 func float32Ptr(f float32) *float32 {
 	return &f
