@@ -38,7 +38,7 @@ type ClientConfig struct {
 	// APIKey is the API key for authentication.
 	// If empty, will be read from environment variables based on the model name.
 	APIKey string
-	// BaseURL is the base URL for the API (e.g., "https://api.openai.com/v1").
+	// BaseURL is the base URL for the API (e.g., "https://api.example.com/v1").
 	// If empty, will be inferred from the model name.
 	BaseURL string
 	// HTTPClient is the HTTP client to use (optional)
@@ -403,20 +403,7 @@ func extractTextFromContent(content *genai.Content) string {
 
 // convertFunctionDeclaration converts a genai.FunctionDeclaration to OpenAI tool format.
 func convertFunctionDeclaration(fn *genai.FunctionDeclaration) openAITool {
-	params := make(map[string]any)
-	if fn.Parameters != nil {
-		params["type"] = "object"
-		if fn.Parameters.Properties != nil {
-			props := make(map[string]any)
-			for k, v := range fn.Parameters.Properties {
-				props[k] = schemaToMap(v)
-			}
-			params["properties"] = props
-		}
-		if len(fn.Parameters.Required) > 0 {
-			params["required"] = fn.Parameters.Required
-		}
-	}
+	params := convertFunctionParameters(fn)
 
 	return openAITool{
 		Type: "function",
@@ -426,6 +413,67 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) openAITool {
 			Parameters:  params,
 		},
 	}
+}
+
+// convertFunctionParameters extracts parameters from a FunctionDeclaration.
+// It prefers ParametersJsonSchema (new standard) over Parameters (legacy).
+func convertFunctionParameters(fn *genai.FunctionDeclaration) map[string]any {
+	// Try ParametersJsonSchema first (new standard used by functiontool)
+	if fn.ParametersJsonSchema != nil {
+		if params := tryConvertJsonSchema(fn.ParametersJsonSchema); params != nil {
+			return params
+		}
+	}
+
+	// Fallback to Parameters (legacy format used by older code)
+	if fn.Parameters != nil {
+		return convertLegacyParameters(fn.Parameters)
+	}
+
+	return make(map[string]any)
+}
+
+// tryConvertJsonSchema attempts to convert ParametersJsonSchema to map[string]any.
+// Returns nil if conversion fails.
+func tryConvertJsonSchema(schema any) map[string]any {
+	// Fast path: already a map
+	if params, ok := schema.(map[string]any); ok {
+		return params
+	}
+
+	// Slow path: convert via JSON marshaling (handles *jsonschema.Schema, etc.)
+	jsonBytes, err := json.Marshal(schema)
+	if err != nil {
+		return nil
+	}
+
+	var params map[string]any
+	if err := json.Unmarshal(jsonBytes, &params); err != nil {
+		return nil
+	}
+
+	return params
+}
+
+// convertLegacyParameters converts genai.Schema to OpenAI parameters format.
+func convertLegacyParameters(schema *genai.Schema) map[string]any {
+	params := map[string]any{
+		"type": "object",
+	}
+
+	if schema.Properties != nil {
+		props := make(map[string]any)
+		for k, v := range schema.Properties {
+			props[k] = schemaToMap(v)
+		}
+		params["properties"] = props
+	}
+
+	if len(schema.Required) > 0 {
+		params["required"] = schema.Required
+	}
+
+	return params
 }
 
 // schemaToMap recursively converts a genai.Schema to a map representation.
