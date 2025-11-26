@@ -333,7 +333,7 @@ func TestNew_ValidatesLoadArtifactsToolRequiresArtifactService(t *testing.T) {
 			})),
 			artifactService: nil,
 			wantErr:         true,
-			errContains:     "load_artifacts tool but ArtifactService not configured",
+			errContains:     "requires ArtifactService to be configured in runner",
 		},
 		{
 			name: "ok when load_artifacts tool and artifact service both present",

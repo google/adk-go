@@ -66,7 +66,7 @@ func New(cfg Config) (*Runner, error) {
 	}
 
 	// Validate that required services are configured for tools
-	if err := validateConfiguration(cfg.Agent, cfg.ArtifactService); err != nil {
+	if err := validateConfiguration(cfg.Agent, cfg.ArtifactService, cfg.MemoryService); err != nil {
 		return nil, err
 	}
 
@@ -275,8 +275,19 @@ func findAgent(curAgent agent.Agent, targetName string) agent.Agent {
 }
 
 // validateConfiguration checks that required services are available for tools.
-func validateConfiguration(rootAgent agent.Agent, artifactService artifact.Service) error {
+func validateConfiguration(rootAgent agent.Agent, artifactService artifact.Service, memoryService memory.Service) error {
+	valCfg := agent.ValidationConfig{
+		HasArtifactService: artifactService != nil,
+		HasMemoryService:   memoryService != nil,
+	}
+
 	return walkAgentTree(rootAgent, func(a agent.Agent) error {
+		if v, ok := a.(agent.Validator); ok {
+			if err := v.Validate(valCfg); err != nil {
+				return fmt.Errorf("agent %q validation failed: %w", a.Name(), err)
+			}
+		}
+
 		llmAgent, ok := a.(llminternal.Agent)
 		if !ok {
 			return nil
@@ -284,8 +295,10 @@ func validateConfiguration(rootAgent agent.Agent, artifactService artifact.Servi
 
 		state := llminternal.Reveal(llmAgent)
 		for _, t := range state.Tools {
-			if t.Name() == "load_artifacts" && artifactService == nil {
-				return fmt.Errorf("agent %q uses load_artifacts tool but ArtifactService not configured in runner", a.Name())
+			if v, ok := t.(agent.Validator); ok {
+				if err := v.Validate(valCfg); err != nil {
+					return fmt.Errorf("agent %q tool %q validation failed: %w", a.Name(), t.Name(), err)
+				}
 			}
 		}
 		return nil

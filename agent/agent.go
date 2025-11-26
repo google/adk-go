@@ -117,6 +117,18 @@ type Memory interface {
 	Search(ctx context.Context, query string) (*memory.SearchResponse, error)
 }
 
+// ValidationConfig holds the configuration status of the runner services.
+type ValidationConfig struct {
+	HasArtifactService bool
+	HasMemoryService   bool
+}
+
+// Validator is an optional interface that Agents and Tools can implement
+// to validate if the runner configuration meets their requirements.
+type Validator interface {
+	Validate(ValidationConfig) error
+}
+
 // BeforeAgentCallback is a function that is called before the agent starts
 // its run.
 // If it returns non-nil content or error, the agent run will be skipped and a
