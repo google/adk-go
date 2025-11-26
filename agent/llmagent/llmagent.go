@@ -255,6 +255,10 @@ type Config struct {
 	// - Extracts agent reply for later use, such as in tools, callbacks, etc.
 	// - Connects agents to coordinate with each other.
 	OutputKey string
+
+	// Validate is an optional function that checks if the runner configuration
+	// meets the agent's requirements.
+	Validate func(agent.ValidationConfig) error
 }
 
 // BeforeModelCallback that is called before sending a request to the model.
@@ -393,3 +397,10 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 // placeholders into the instruction. You can use
 // util/instructionutil.InjectSessionState() helper if this functionality is needed.
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
+
+func (a *llmAgent) Validate(cfg agent.ValidationConfig) error {
+	if c, ok := a.Config.(Config); ok && c.Validate != nil {
+		return c.Validate(cfg)
+	}
+	return nil
+}

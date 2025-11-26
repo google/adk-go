@@ -315,7 +315,62 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 	}
 }
 
+func TestNew_ValidatesAgent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		validateErr error
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "agent validation passes",
+			validateErr: nil,
+			wantErr:     false,
+		},
+		{
+			name:        "agent validation fails",
+			validateErr: fmt.Errorf("validation failed"),
+			wantErr:     true,
+			errContains: "agent \"validating_agent\" validation failed: validation failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testAgent := must(llmagent.New(llmagent.Config{
+				Name: "validating_agent",
+				Validate: func(cfg agent.ValidationConfig) error {
+					return tt.validateErr
+				},
+			}))
+
+			_, err := New(Config{
+				AppName:        "testApp",
+				Agent:          testAgent,
+				SessionService: session.InMemoryService(),
+			})
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("New() expected error but got nil")
+					return
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("New() error = %v, want error containing %q", err, tt.errContains)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("New() unexpected error = %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestNew_ValidatesLoadArtifactsToolRequiresArtifactService(t *testing.T) {
+
 	t.Parallel()
 
 	tests := []struct {
