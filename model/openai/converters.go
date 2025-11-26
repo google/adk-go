@@ -390,6 +390,14 @@ func convertLogprobs(logprobs *ChoiceLogprobs) *genai.LogprobsResult {
 // convertTools converts ADK tools to OpenAI tool format.
 // Tools are sorted by name for deterministic order (important for testing and reproducibility).
 func (m *openaiModel) convertTools(adkTools map[string]any) []Tool {
+	// Debug logging
+	if m.debugLogging && m.logger != nil {
+		m.logger.Printf("[convertTools] Input: %d tools", len(adkTools))
+		for name, def := range adkTools {
+			m.logger.Printf("[convertTools] Tool '%s': type=%T, value=%+v", name, def, def)
+		}
+	}
+
 	// Extract and sort tool names for deterministic order
 	names := make([]string, 0, len(adkTools))
 	for name := range adkTools {
@@ -421,9 +429,29 @@ func (m *openaiModel) convertTools(adkTools map[string]any) []Tool {
 			} else if params, ok := toolMap["input_schema"].(map[string]any); ok {
 				tool.Function.Parameters = params
 			}
+
+			// Debug: log extracted values
+			if m.debugLogging && m.logger != nil {
+				m.logger.Printf("[convertTools] Tool '%s' extracted: desc=%q, params=%+v",
+					name, tool.Function.Description, tool.Function.Parameters)
+			}
+		} else {
+			// Debug: tool definition is not a map
+			if m.debugLogging && m.logger != nil {
+				m.logger.Printf("[convertTools] WARNING: Tool '%s' definition is not map[string]any, type=%T", name, toolDef)
+			}
 		}
 
 		tools = append(tools, tool)
+	}
+
+	// Debug: log final tools
+	if m.debugLogging && m.logger != nil {
+		m.logger.Printf("[convertTools] Output: %d tools converted", len(tools))
+		for _, t := range tools {
+			m.logger.Printf("[convertTools] Final tool: name=%s, desc=%q, params=%v",
+				t.Function.Name, t.Function.Description, t.Function.Parameters)
+		}
 	}
 
 	return tools
