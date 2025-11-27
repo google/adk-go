@@ -16,11 +16,31 @@ package llminternal
 
 import (
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 )
 
+// identityRequestProcessor sets up identity context for LLM agents in the LLM request.
+// It adds system instructions that inform the LLM about the agent's name and description.
 func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	// TODO: implement (adk-python src/google/adk/flows/llm_flows/identity.py)
+	// reference: adk-python src/google/adk/flows/llm_flows/identity.py
+
+	llmAgent := asLLMAgent(ctx.Agent())
+	if llmAgent == nil {
+		return nil // do nothing.
+	}
+
+	// Add identity information to system instructions.
+	var identityInstructions []string
+	if name := ctx.Agent().Name(); name != "" {
+		identityInstructions = append(identityInstructions, `You are an agent. Your internal name is "`+name+`".`)
+	}
+	if description := ctx.Agent().Description(); description != "" {
+		identityInstructions = append(identityInstructions, `The description about you is "`+description+`".`)
+	}
+
+	// Append identity instructions to the system instruction.
+	utils.AppendInstructions(req, identityInstructions...)
 	return nil
 }
 
