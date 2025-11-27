@@ -30,15 +30,19 @@ import (
 func Test_identityRequestProcessor(t *testing.T) {
 	testCases := []struct {
 		name           string
-		agentConfig    agent.Config
+		agent          agent.Agent
 		req            *model.LLMRequest
 		wantErr        bool
 		wantSystemInst string
 	}{
 		{
 			name: "LLM agent with name only - adds name instruction",
-			agentConfig: agent.Config{
-				Name: "TestAgent",
+			agent: &struct {
+				agent.Agent
+				State
+			}{
+				Agent: utils.Must(agent.New(agent.Config{Name: "TestAgent"})),
+				State: State{},
 			},
 			req:            &model.LLMRequest{},
 			wantErr:        false,
@@ -46,9 +50,12 @@ func Test_identityRequestProcessor(t *testing.T) {
 		},
 		{
 			name: "LLM agent with description only - adds description instruction",
-			agentConfig: agent.Config{
-				Name:        "",
-				Description: "A helpful assistant that answers questions",
+			agent: &struct {
+				agent.Agent
+				State
+			}{
+				Agent: utils.Must(agent.New(agent.Config{Description: "A helpful assistant that answers questions"})),
+				State: State{},
 			},
 			req:            &model.LLMRequest{},
 			wantErr:        false,
@@ -56,9 +63,15 @@ func Test_identityRequestProcessor(t *testing.T) {
 		},
 		{
 			name: "LLM agent with both name and description - adds both instructions",
-			agentConfig: agent.Config{
-				Name:        "HelperBot",
-				Description: "A friendly assistant that helps users with their tasks",
+			agent: &struct {
+				agent.Agent
+				State
+			}{
+				Agent: utils.Must(agent.New(agent.Config{
+					Name:        "HelperBot",
+					Description: "A friendly assistant that helps users with their tasks",
+				})),
+				State: State{},
 			},
 			req:            &model.LLMRequest{},
 			wantErr:        false,
@@ -66,9 +79,15 @@ func Test_identityRequestProcessor(t *testing.T) {
 		},
 		{
 			name: "LLM agent with special characters in name and description",
-			agentConfig: agent.Config{
-				Name:        `"Test" Agent`,
-				Description: `A "helpful" assistant`,
+			agent: &struct {
+				agent.Agent
+				State
+			}{
+				Agent: utils.Must(agent.New(agent.Config{
+					Name:        `"Test" Agent`,
+					Description: `A "helpful" assistant`,
+				})),
+				State: State{},
 			},
 			req:            &model.LLMRequest{},
 			wantErr:        false,
@@ -76,9 +95,15 @@ func Test_identityRequestProcessor(t *testing.T) {
 		},
 		{
 			name: "LLM agent with existing system instruction - appends to existing",
-			agentConfig: agent.Config{
-				Name:        "ExistingAgent",
-				Description: "Agent with existing instructions",
+			agent: &struct {
+				agent.Agent
+				State
+			}{
+				Agent: utils.Must(agent.New(agent.Config{
+					Name:        "ExistingAgent",
+					Description: "Agent with existing instructions",
+				})),
+				State: State{},
 			},
 			req: &model.LLMRequest{
 				Config: &genai.GenerateContentConfig{
@@ -92,9 +117,15 @@ func Test_identityRequestProcessor(t *testing.T) {
 		},
 		{
 			name: "LLM agent with existing config but no system instruction - creates new",
-			agentConfig: agent.Config{
-				Name:        "ConfigAgent",
-				Description: "Agent with existing config",
+			agent: &struct {
+				agent.Agent
+				State
+			}{
+				Agent: utils.Must(agent.New(agent.Config{
+					Name:        "ConfigAgent",
+					Description: "Agent with existing config",
+				})),
+				State: State{},
 			},
 			req: &model.LLMRequest{
 				Config: &genai.GenerateContentConfig{
@@ -106,8 +137,15 @@ func Test_identityRequestProcessor(t *testing.T) {
 				`The description about you is "Agent with existing config".`,
 		},
 		{
-			name:           "Non-LLM agent - does nothing and returns no error",
-			agentConfig:    agent.Config{},
+			name:           "Non-LLM agent with name - does nothing and returns no error",
+			agent:          utils.Must(agent.New(agent.Config{Name: "NonLLMAgent"})),
+			req:            &model.LLMRequest{},
+			wantErr:        false,
+			wantSystemInst: "",
+		},
+		{
+			name:           "Nil agent - does nothing and returns no error",
+			agent:          nil,
 			req:            &model.LLMRequest{},
 			wantErr:        false,
 			wantSystemInst: "",
@@ -116,23 +154,9 @@ func Test_identityRequestProcessor(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			var testAgent agent.Agent
-
-			// Create a test agent implementing the Agent interface and llmagent state
-			// if name or description is empty, we use a nil agent to simulate non-LLM agent.
-			if tc.agentConfig.Name != "" || tc.agentConfig.Description != "" {
-				testAgent = &struct {
-					agent.Agent
-					State
-				}{
-					Agent: utils.Must(agent.New(tc.agentConfig)),
-					State: State{},
-				}
-			}
-
 			// Create real invocation context
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
-				Agent: testAgent,
+				Agent: tc.agent,
 			})
 
 			// Call the function under test
