@@ -17,6 +17,7 @@ package vertexai
 import (
 	"context"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -94,6 +95,7 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 	return createdSession, nil
 }
 
+// TODO replace with LRO wait when it's fixed
 // waitForOperation polls the LRO until it is done.
 func (c *vertexAiClient) waitForOperation(ctx context.Context, appName, userId, sessionID string) (*localSession, error) {
 	const (
@@ -112,7 +114,7 @@ func (c *vertexAiClient) waitForOperation(ctx context.Context, appName, userId, 
 				if delay > maxDelay {
 					delay = maxDelay
 				}
-				fmt.Printf("GetOperation failed (attempt %d/%d), retrying in %v: %v\n", i+1, maxRetries, delay, err)
+				log.Printf("GetOperation failed (attempt %d/%d), retrying in %v: %v\n", i+1, maxRetries, delay, err)
 				time.Sleep(delay)
 				continue
 			}
@@ -422,7 +424,7 @@ func sessionNameByID(id string, c *vertexAiClient, reasoningEngine string) strin
 	return fmt.Sprintf(sessionResourceTemplate, c.projectID, c.location, reasoningEngine, id)
 }
 
-var reasoningEnginePattern = regexp.MustCompile(`^projects/([a-zA-Z0-9-_]+)/locations/([a-zA-Z0-9-_]+)/reasoningEngines/(\\d+)$`)
+var reasoningEnginePattern = regexp.MustCompile(`^projects/([a-zA-Z0-9-_]+)/locations/([a-zA-Z0-9-_]+)/reasoningEngines/(\d+)$`)
 
 func (c *vertexAiClient) getReasoningEngineID(appName string) (string, error) {
 	if c.reasoningEngine != "" {

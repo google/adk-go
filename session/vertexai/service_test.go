@@ -938,7 +938,7 @@ func Test_vertexaiService_AppendEvent(t *testing.T) {
 	}
 }
 
-func Test_databaseService_StateManagement(t *testing.T) {
+func Test_vertexService_StateManagement(t *testing.T) {
 	ctx := t.Context()
 	appName := EngineId
 
@@ -1098,9 +1098,6 @@ func Test_databaseService_StateManagement(t *testing.T) {
 			t.Fatalf("Expected 1 stored event, got %d", storedEvents.Len())
 		}
 		storedDelta := storedEvents.At(0).Actions.StateDelta
-		//if _, exists := storedDelta["temp:k1"]; exists {
-		//	t.Errorf("temp:k1 key was found in the stored event's state delta")
-		//}
 		if storedDelta["sk"] != "v2" {
 			t.Errorf("Expected 'sk' key in stored event, but was missing or wrong value")
 		}

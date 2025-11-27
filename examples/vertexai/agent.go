@@ -46,8 +46,8 @@ func main() {
 	if location == "" {
 		log.Fatalf("Env var CLOUD_LOCATION is not set")
 	}
-	engineId := os.Getenv("VERTEX_ENGINE_ID")
-	if engineId == "" {
+	engineID := os.Getenv("VERTEX_ENGINE_ID")
+	if engineID == "" {
 		log.Fatalf("Env var VERTEX_ENGINE_ID is not set")
 	}
 
@@ -58,7 +58,7 @@ func main() {
 	srvs, err := vertexai.NewSessionService(ctx, vertexai.VertexAIServiceConfig{
 		Location:        location,
 		ProjectID:       projectID,
-		ReasoningEngine: engineId,
+		ReasoningEngine: engineID,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create session service: %v", err)
