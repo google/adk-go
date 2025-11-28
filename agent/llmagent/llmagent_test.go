@@ -553,6 +553,7 @@ func TestInstructionProvider(t *testing.T) {
 			},
 			wantLLMRequests: []*model.LLMRequest{
 				{
+					Model: "mock",
 					Contents: []*genai.Content{
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
@@ -579,6 +580,7 @@ func TestInstructionProvider(t *testing.T) {
 			},
 			wantLLMRequests: []*model.LLMRequest{
 				{
+					Model: "mock",
 					Contents: []*genai.Content{
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
@@ -605,6 +607,7 @@ func TestInstructionProvider(t *testing.T) {
 			},
 			wantLLMRequests: []*model.LLMRequest{
 				{
+					Model: "mock",
 					Contents: []*genai.Content{
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
@@ -633,6 +636,7 @@ func TestInstructionProvider(t *testing.T) {
 			},
 			wantLLMRequests: []*model.LLMRequest{
 				{
+					Model: "mock",
 					Contents: []*genai.Content{
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
