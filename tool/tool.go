@@ -51,6 +51,9 @@ type Context interface {
 	Actions() *session.EventActions
 	// SearchMemory performs a semantic search on the agent's memory.
 	SearchMemory(context.Context, string) (*memory.SearchResponse, error)
+	// RequestConfirmation requests user approval for an action. This causes
+	// the tool execution to pause until confirmation is received.
+	RequestConfirmation(hint string, payload map[string]any) error
 }
 
 // Toolset is an interface for a collection of tools. It allows grouping
