@@ -16,7 +16,9 @@
 package functiontool
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -49,11 +51,24 @@ type Config struct {
 // It takes a tool.Context and a generic argument type, and returns a generic result type.
 type Func[TArgs, TResults any] func(tool.Context, TArgs) (TResults, error)
 
+// ErrInvalidArgument indicates the input parameter type is invalid.
+var ErrInvalidArgument = errors.New("invalid argument")
+
 // New creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
 func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
 	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
+
+	var zeroArgs TArgs
+	argsType := reflect.TypeOf(zeroArgs)
+	for argsType != nil && argsType.Kind() == reflect.Ptr {
+		argsType = argsType.Elem()
+	}
+	if argsType == nil || (argsType.Kind() != reflect.Struct && argsType.Kind() != reflect.Map) {
+		return nil, fmt.Errorf("input must be a pointer to a struct or a pointer to a map, but received: %v: %w", argsType, ErrInvalidArgument)
+	}
+
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to infer input schema: %w", err)

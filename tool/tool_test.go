@@ -31,6 +31,13 @@ func TestTypes(t *testing.T) {
 		requestProc  = "RequestProcessor"
 	)
 
+	type intInput struct {
+		Value int `json:"value"`
+	}
+	type intOutput struct {
+		Value int `json:"value"`
+	}
+
 	tests := []struct {
 		name          string
 		constructor   func() (tool.Tool, error)
@@ -39,7 +46,9 @@ func TestTypes(t *testing.T) {
 		{
 			name: "FunctionTool",
 			constructor: func() (tool.Tool, error) {
-				return functiontool.New(functiontool.Config{}, func(tool.Context, int) (int, error) { return 0, nil })
+				return functiontool.New(functiontool.Config{}, func(_ tool.Context, input intInput) (intOutput, error) {
+					return intOutput(input), nil
+				})
 			},
 			expectedTypes: []string{requestProc, functionTool},
 		},
