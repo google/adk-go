@@ -49,6 +49,17 @@ func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.S
 	return &databaseService{db: db}, nil
 }
 
+// NewSessionServiceGorm creates a new [session.Service] implementation that uses a
+// relational database (e.g., PostgreSQL, Spanner, SQLite) via an already initialized GORM DB.
+// This allows reusing the same database across multiple ADK services and your application.
+//
+// It requires a an initialized [*gorm.DB] to specify the database connection.
+//
+// It returns the new [session.Service]. Error is always nil, but may be used in the future.
+func NewSessionServiceGorm(db *gorm.DB) (session.Service, error) {
+	return &databaseService{db: db}, nil
+}
+
 // AutoMigrate runs the GORM auto-migration tool to ensure the database schema
 // matches the internal storage models (e.g., storageSession, storageEvent).
 //
