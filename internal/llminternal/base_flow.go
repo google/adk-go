@@ -105,7 +105,14 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 
 func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		req := &model.LLMRequest{}
+		if f.Model == nil {
+			yield(nil, fmt.Errorf("agent %q has no Model configured; ensure Model is set in llmagent.Config", ctx.Agent().Name()))
+			return
+		}
+
+		req := &model.LLMRequest{
+			Model: f.Model.Name(),
+		}
 
 		// Preprocess before calling the LLM.
 		if err := f.preprocess(ctx, req); err != nil {
@@ -247,11 +254,6 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 				yield(callbackResponse, callbackErr)
 				return
 			}
-		}
-
-		if f.Model == nil {
-			yield(nil, fmt.Errorf("agent %q has no Model configured; ensure Model is set in llmagent.Config", ctx.Agent().Name()))
-			return
 		}
 
 		// TODO: Set _ADK_AGENT_NAME_LABEL_KEY in req.GenerateConfig.Labels
