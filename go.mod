@@ -3,6 +3,7 @@ module google.golang.org/adk
 go 1.24.4
 
 require (
+	cloud.google.com/go/aiplatform v1.105.0
 	cloud.google.com/go/storage v1.56.1
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
@@ -15,10 +16,12 @@ require (
 )
 
 require (
+	cloud.google.com/go v0.123.0
 	github.com/google/jsonschema-go v0.3.0
 	github.com/google/safehtml v0.1.0
 	github.com/modelcontextprotocol/go-sdk v0.7.0
 	google.golang.org/grpc v1.76.0
+	google.golang.org/protobuf v1.36.10
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.0
 )
@@ -62,7 +65,6 @@ require (
 )
 
 require (
-	cloud.google.com/go v0.123.0 // indirect
 	cloud.google.com/go/auth v0.17.0 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/longrunning v0.7.0 // indirect
@@ -80,5 +82,4 @@ require (
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251014184007-4626949a642f // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
 )
