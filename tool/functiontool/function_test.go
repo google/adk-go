@@ -337,6 +337,40 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 	}
 }
 
+func TestFunctionTool_MapInput(t *testing.T) {
+	type Output struct {
+		Sum int `json:"sum"`
+	}
+	sumTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "sum_map",
+			Description: "sums numbers provided in a map input",
+		},
+		func(ctx tool.Context, input map[string]int) (Output, error) {
+			return Output{Sum: input["a"] + input["b"]}, nil
+		})
+	if err != nil {
+		t.Fatalf("NewFunctionTool failed: %v", err)
+	}
+
+	funcTool, ok := sumTool.(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("sumTool does not implement itype.RequestProcessor")
+	}
+	callResult, err := funcTool.Run(nil, map[string]any{"a": 2, "b": 3})
+	if err != nil {
+		t.Fatalf("sumTool.Run failed: %v", err)
+	}
+	got, err := typeutil.ConvertToWithJSONSchema[map[string]any, Output](callResult, nil)
+	if err != nil {
+		t.Fatalf("sumTool.Run returned unexpected result of type %[1]T: %[1]v", callResult)
+	}
+	want := Output{Sum: 5}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("sumTool.Run returned unexpected result (-want +got):\n%s", diff)
+	}
+}
+
 // newGeminiTestClientConfig returns the genai.ClientConfig configured for record and replay.
 func newGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig {
 	t.Helper()

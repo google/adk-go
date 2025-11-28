@@ -65,8 +65,8 @@ func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.T
 	for argsType != nil && argsType.Kind() == reflect.Ptr {
 		argsType = argsType.Elem()
 	}
-	if argsType == nil || argsType.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("input must be a struct type or struct pointer type, got: %v: %w", argsType, ErrInvalidArgument)
+	if argsType == nil || (argsType.Kind() != reflect.Struct && argsType.Kind() != reflect.Map) {
+		return nil, fmt.Errorf("input must be a pointer to a struct or a pointer to a map, but received: %v: %w", argsType, ErrInvalidArgument)
 	}
 
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
