@@ -18,20 +18,20 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"math/rand/v2"
+	rand "math/rand/v2"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
 	"google.golang.org/adk/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-
-	"google.golang.org/genai"
 )
 
 func TestNewParallelAgent(t *testing.T) {

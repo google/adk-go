@@ -102,7 +102,7 @@ func TestSaveRequest_Validate(t *testing.T) {
 				Part:      genai.NewPartFromFunctionCall("example", nil),
 			},
 			wantErr:    true,
-			wantErrMsg: "invalid save request: Part.InlineData or Part.Text have to be set",
+			wantErrMsg: "invalid save request: Part.InlineData or Part.Text has to be set",
 		},
 		{
 			name:       "Completely empty request",

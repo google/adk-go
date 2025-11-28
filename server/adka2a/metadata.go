@@ -19,6 +19,7 @@ import (
 	"maps"
 
 	"github.com/a2aproject/a2a-go/a2asrv"
+
 	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/session"
 )
@@ -85,4 +86,20 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 	// TODO(yarolegovich): include custom and usage metadata when added to session.Event
 
 	return result, nil
+}
+
+func setActionsMeta(meta map[string]any, actions session.EventActions) map[string]any {
+	if actions.TransferToAgent == "" && !actions.Escalate { // if meta was nil, it should remain nil
+		return meta
+	}
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	if actions.Escalate {
+		meta[metadataEscalateKey] = true
+	}
+	if actions.TransferToAgent != "" {
+		meta[metadataTransferToAgentKey] = actions.TransferToAgent
+	}
+	return meta
 }

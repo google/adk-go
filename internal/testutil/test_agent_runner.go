@@ -21,12 +21,13 @@ import (
 	"iter"
 	"testing"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type TestAgentRunner struct {

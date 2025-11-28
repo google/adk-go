@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// mcptool package provides MCP adapter, allowing to add MCP tools to LLMAgent.
+// Package mcptoolset provides an MCP tool set.
 package mcptoolset
 
 import (
@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/version"
 	"google.golang.org/adk/tool"

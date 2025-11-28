@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
@@ -29,7 +31,6 @@ import (
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type testModel struct {
@@ -703,16 +704,22 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			name: "Rearrangement with mixed LRO and normal calls",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analyze data and search for info", "user")}},
-				{Author: agentName,
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{{FunctionCall: fcLROMixed}, {FunctionCall: fcNormalMixed}}},
+				{
+					Author: agentName,
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "model",
+							Parts: []*genai.Part{{FunctionCall: fcLROMixed}, {FunctionCall: fcNormalMixed}},
+						},
 					},
 				},
-				{Author: "user",
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "user",
-						Parts: []*genai.Part{{FunctionResponse: frLROInterMixed}, {FunctionResponse: frNormalMixed}}},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "user",
+							Parts: []*genai.Part{{FunctionResponse: frLROInterMixed}, {FunctionResponse: frNormalMixed}},
+						},
 					},
 				},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analysis in progress, search completed", "model")}},
@@ -748,16 +755,22 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			name: "Mixed rearrangement in history (non-final event)",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analyze and search simultaneously", "user")}},
-				{Author: agentName,
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{{FunctionCall: fcHistLROMixed}, {FunctionCall: fcHistNormalMixed}}},
+				{
+					Author: agentName,
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "model",
+							Parts: []*genai.Part{{FunctionCall: fcHistLROMixed}, {FunctionCall: fcHistNormalMixed}},
+						},
 					},
 				},
-				{Author: "user",
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "user",
-						Parts: []*genai.Part{{FunctionResponse: frHistLROInterMixed}, {FunctionResponse: frHistNormalMixed}}},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "user",
+							Parts: []*genai.Part{{FunctionResponse: frHistLROInterMixed}, {FunctionResponse: frHistNormalMixed}},
+						},
 					},
 				},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Analysis continuing, search done", "model")}},
@@ -778,23 +791,32 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			name: "Rearrangement preserves mixed text parts",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Before function call", "user")}},
-				{Author: agentName,
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{{Text: "I'll process this for you"}, {FunctionCall: fcPreserve}}},
+				{
+					Author: agentName,
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "model",
+							Parts: []*genai.Part{{Text: "I'll process this for you"}, {FunctionCall: fcPreserve}},
+						},
 					},
 				},
-				{Author: "user",
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "user",
-						Parts: []*genai.Part{{Text: "Intermediate prefix"}, {FunctionResponse: frPreserveInter}, {Text: "Processing..."}}},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "user",
+							Parts: []*genai.Part{{Text: "Intermediate prefix"}, {FunctionResponse: frPreserveInter}, {Text: "Processing..."}},
+						},
 					},
 				},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Still working on it...", "model")}},
-				{Author: "user",
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role:  "user",
-						Parts: []*genai.Part{{Text: "Final prefix"}, {FunctionResponse: frPreserveFinal}, {Text: "Final suffix"}}},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "user",
+							Parts: []*genai.Part{{Text: "Final prefix"}, {FunctionResponse: frPreserveFinal}, {Text: "Final suffix"}},
+						},
 					},
 				},
 			},
@@ -918,5 +940,7 @@ func (s *fakeSession) At(i int) *session.Event {
 	return s.events[i]
 }
 
-var _ session.Session = (*fakeSession)(nil)
-var _ session.Events = (*fakeSession)(nil)
+var (
+	_ session.Session = (*fakeSession)(nil)
+	_ session.Events  = (*fakeSession)(nil)
+)

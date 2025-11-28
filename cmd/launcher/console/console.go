@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package console provides a simple way to interact with an agent from console application
+// Package console provides a simple way to interact with an agent from console application.
 package console
 
 import (
@@ -23,13 +23,14 @@ import (
 	"log"
 	"os"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // consoleConfig contains command-line params for console launcher

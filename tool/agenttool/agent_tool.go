@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"strings"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/llminternal"
@@ -31,7 +33,6 @@ import (
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 // agentTool implements a tool that allows an agent to call another agent.
@@ -173,7 +174,6 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 		ArtifactService: artifact.InMemoryService(),
 		MemoryService:   memory.InMemoryService(),
 	})
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to create runner")
 	}

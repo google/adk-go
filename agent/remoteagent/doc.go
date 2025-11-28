@@ -12,22 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package tool defines internal-only interfaces and logic for tools.
-package toolinternal
-
-import (
-	"google.golang.org/genai"
-
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
-)
-
-type FunctionTool interface {
-	tool.Tool
-	Declaration() *genai.FunctionDeclaration
-	Run(ctx tool.Context, args any) (result map[string]any, err error)
-}
-
-type RequestProcessor interface {
-	ProcessRequest(ctx tool.Context, req *model.LLMRequest) error
-}
+// Package remoteagent allows to use a remote ADK agents.
+package remoteagent

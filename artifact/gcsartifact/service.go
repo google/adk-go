@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package gcs provides a Google Cloud Storage (GCS) implementation of the
-// [artifact.Service] interface.
+// Package gcsartifact provides a Google Cloud Storage (GCS) [artifact.Service].
 //
 // This package allows storing and retrieving artifacts in a GCS bucket.
 // Artifacts are organized by application name, user ID, session ID, and filename,
 // with support for versioning.
-package gcs
+package gcsartifact
 
 import (
 	"context"
@@ -33,10 +32,11 @@ import (
 
 	"cloud.google.com/go/storage"
 	"golang.org/x/sync/errgroup"
-	"google.golang.org/adk/artifact"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/artifact"
 )
 
 // gcsService is a google cloud storage implementation of the Service.
@@ -316,7 +316,7 @@ func (s *gcsService) versions(ctx context.Context, req *artifact.VersionsRequest
 	}
 	blobsIterator := s.bucket.objects(ctx, query)
 
-	var versions = make([]int64, 0)
+	versions := make([]int64, 0)
 	for {
 		blob, err := blobsIterator.next()
 		if err == iterator.Done {

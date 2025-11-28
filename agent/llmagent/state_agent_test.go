@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
@@ -32,7 +34,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/genai"
 )
 
 // FakeLLM is a mock implementation of model.LLM for testing.
@@ -117,7 +118,8 @@ func beforeAgentCallback(t *testing.T) agent.BeforeAgentCallback {
 			title:                   "In before_agent_callback",
 			keysInCtxSession:        []string{"before_agent_callback_state_key"},
 			keysInServiceSession:    []string{},
-			keysNotInServiceSession: []string{"before_agent_callback_state_key"}},
+			keysNotInServiceSession: []string{"before_agent_callback_state_key"},
+		},
 		)
 		return nil, nil
 	}
@@ -132,7 +134,8 @@ func beforeModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmReques
 			title:                   "In before_model_callback",
 			keysInCtxSession:        []string{"before_agent_callback_state_key", "before_model_callback_state_key"},
 			keysInServiceSession:    []string{"before_agent_callback_state_key"},
-			keysNotInServiceSession: []string{"before_model_callback_state_key"}},
+			keysNotInServiceSession: []string{"before_model_callback_state_key"},
+		},
 		)
 		return nil, nil
 	}
@@ -147,7 +150,8 @@ func afterModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmRespons
 			title:                   "In after_model_callback",
 			keysInCtxSession:        []string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key"},
 			keysInServiceSession:    []string{"before_agent_callback_state_key"},
-			keysNotInServiceSession: []string{"before_model_callback_state_key", "after_model_callback_state_key"}},
+			keysNotInServiceSession: []string{"before_model_callback_state_key", "after_model_callback_state_key"},
+		},
 		)
 		return nil, nil
 	}
@@ -162,7 +166,8 @@ func afterAgentCallback(t *testing.T) agent.AfterAgentCallback {
 			title:                   "In after_agent_callback",
 			keysInCtxSession:        []string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key", "after_agent_callback_state_key"},
 			keysInServiceSession:    []string{"before_agent_callback_state_key", "before_model_callback_state_key", "after_model_callback_state_key"},
-			keysNotInServiceSession: []string{"after_agent_callback_state_key"}},
+			keysNotInServiceSession: []string{"after_agent_callback_state_key"},
+		},
 		)
 		return nil, nil
 	}
@@ -424,7 +429,7 @@ func beforeToolValidationCallback(ctx tool.Context, t tool.Tool, args map[string
 
 // --- After Tool Callbacks ---
 
-func afterToolEnhancementCallback(ctx tool.Context, t tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+func afterToolEnhancementCallback(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err != nil {
 		return result, err // Don't enhance if there was an error
 	}
@@ -438,7 +443,7 @@ func afterToolEnhancementCallback(ctx tool.Context, t tool.Tool, args map[string
 	return enhancedResponse, nil
 }
 
-func afterToolAsyncCallback(ctx tool.Context, t tool.Tool, args map[string]any, result map[string]any, err error) (map[string]any, error) {
+func afterToolAsyncCallback(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err != nil {
 		return result, err
 	}

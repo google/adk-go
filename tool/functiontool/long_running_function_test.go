@@ -21,12 +21,13 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/genai"
 )
 
 func TestNewLongRunningFunctionTool(t *testing.T) {
@@ -69,14 +70,13 @@ func TestNewLongRunningFunctionTool(t *testing.T) {
 	_ = sumTool // use the tool
 }
 
-func NewContentFromFunctionResponseWithID(name string, response map[string]any, id string, role string) *genai.Content {
+func NewContentFromFunctionResponseWithID(name string, response map[string]any, id, role string) *genai.Content {
 	content := genai.NewContentFromFunctionResponse(name, response, genai.Role(role))
 	content.Parts[0].FunctionResponse.ID = id
 	return content
 }
 
-type IncArgs struct {
-}
+type IncArgs struct{}
 
 func TestLongRunningFunctionFlow(t *testing.T) {
 	functionCalled := 0
@@ -264,8 +264,7 @@ func TestLongRunningToolIDsAreSet(t *testing.T) {
 	mockModel := &testutil.MockModel{Responses: responses}
 	functionCalled := 0
 
-	type IncArgs struct {
-	}
+	type IncArgs struct{}
 
 	increaseByOne := func(ctx tool.Context, x IncArgs) (map[string]string, error) {
 		functionCalled++

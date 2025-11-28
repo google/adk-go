@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package remoteagent allows to use a remote agent via A2A protocol.
 package remoteagent
 
 import (
@@ -25,6 +24,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/server/adka2a"

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package web provides a way to run ADK using a web server (extended by sublaunchers)
+// Package web provides a way to run ADK using a web server.
 package web
 
 import (
@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
@@ -104,7 +105,6 @@ func (w *webLauncher) Keyword() string {
 // and then iterates through the remaining arguments to find and parse arguments
 // for any specified sublaunchers. It returns any arguments that are not processed.
 func (w *webLauncher) Parse(args []string) ([]string, error) {
-
 	keyToSublauncher := make(map[string]Sublauncher)
 	for _, l := range w.sublaunchers {
 		if _, ok := keyToSublauncher[l.Keyword()]; ok {

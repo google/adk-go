@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package demonstrates a workaround for using Google Search tool with other tools.
 package main
 
 import (
@@ -19,6 +20,8 @@ import (
 	"log"
 	"os"
 	"strings"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -29,7 +32,6 @@ import (
 	"google.golang.org/adk/tool/agenttool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/genai"
 )
 
 // Package main demonstrates a workaround for using multiple tool types (e.g.,

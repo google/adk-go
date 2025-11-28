@@ -95,5 +95,5 @@ func addCopyrightHeader(path string) error {
 	}
 	newContent := []byte(copyrightHeader)
 	newContent = append(newContent, content...)
-	return os.WriteFile(path, newContent, 0644)
+	return os.WriteFile(path, newContent, 0o644)
 }

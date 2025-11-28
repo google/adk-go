@@ -12,5 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package llmagent provides a way to build LLM-based agents.
+// Package llmagent provides an LLM-based agent.
+// LLM agents use large language models to perform tasks based on instructions, user input,
+// deciding on actions to take, and executing actions using available tools or
+// delegating to sub agents.
 package llmagent

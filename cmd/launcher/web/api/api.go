@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package api provides a sublauncher that adds ADK REST API to the web server (using url /api/)
+// Package api provides a sublauncher that adds ADK REST API capabilities.
 package api
 
 import (
@@ -21,6 +21,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+
 	"google.golang.org/adk/cmd/launcher"
 	weblauncher "google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/internal/cli/util"
@@ -77,6 +78,7 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 	router.Methods("GET", "POST", "DELETE", "OPTIONS").PathPrefix("/api/").Handler(
 		http.StripPrefix("/api", corsHandler),
 	)
+
 	return nil
 }
 

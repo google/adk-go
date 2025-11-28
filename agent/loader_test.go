@@ -38,6 +38,7 @@ func (a *testAgent) Description() string {
 func (a *testAgent) Run(InvocationContext) iter.Seq2[*session.Event, error] {
 	panic("not implemented")
 }
+
 func (a *testAgent) SubAgents() []Agent {
 	panic("not implemented")
 }
@@ -101,5 +102,4 @@ func TestDuplicateName(t *testing.T) {
 			t.Errorf("NewMultiLoader() name=%v, error = %v, wantErr %v", tt.name, err, tt.wantErr)
 		}
 	}
-
 }

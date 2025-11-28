@@ -20,11 +20,11 @@ import (
 	"slices"
 
 	"github.com/awalterschulze/gographviz"
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/tool"
 
+	"google.golang.org/adk/agent"
 	agentinternal "google.golang.org/adk/internal/agent"
 	llmagentinternal "google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/tool"
 )
 
 const (
@@ -55,6 +55,7 @@ func nodeName(instance any) string {
 		return "Unknown instance type"
 	}
 }
+
 func nodeCaption(instance any) string {
 	caption := ""
 	switch i := instance.(type) {
@@ -120,7 +121,7 @@ func boolPtr(b bool) *bool {
 // Otherwise, pointer to bool type is returned, where true
 // means the directed connection between nodes, while false means
 // there is a reversed order between nodes.
-func edgeHighlighted(from string, to string, higlightedPairs [][]string) *bool {
+func edgeHighlighted(from, to string, higlightedPairs [][]string) *bool {
 	if len(higlightedPairs) == 0 {
 		return nil
 	}
@@ -137,7 +138,7 @@ func edgeHighlighted(from string, to string, higlightedPairs [][]string) *bool {
 	return nil
 }
 
-func drawCluster(parentGraph *gographviz.Graph, cluster *gographviz.Graph, agent agent.Agent, highlightedPairs [][]string, visitedNodes map[string]bool) error {
+func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, highlightedPairs [][]string, visitedNodes map[string]bool) error {
 	agentInternal, ok := agent.(agentinternal.Agent)
 	if !ok {
 		return nil
@@ -172,7 +173,7 @@ func drawCluster(parentGraph *gographviz.Graph, cluster *gographviz.Graph, agent
 	return nil
 }
 
-func drawNode(graph *gographviz.Graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool) error {
+func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool) error {
 	name := nodeName(instance)
 	shape := nodeShape(instance)
 	caption := nodeCaption(instance)
@@ -236,7 +237,7 @@ func drawEdge(graph *gographviz.Graph, from, to string, highlightedPairs [][]str
 	return graph.AddEdge(from, to, true, edgeAttributes)
 }
 
-func buildGraph(graph *gographviz.Graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool) error {
+func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool) error {
 	namedInstance, ok := instance.(namedInstance)
 	if !ok {
 		return nil

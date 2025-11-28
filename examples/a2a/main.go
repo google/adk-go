@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package main provides an example ADK agent that uses A2A.
 package main
 
 import (
@@ -24,6 +25,8 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/remoteagent"
@@ -35,7 +38,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/genai"
 )
 
 // newWeatherAgent creates a simple LLM-agent as in the quickstart example.

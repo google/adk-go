@@ -25,6 +25,7 @@ type AppsAPIController struct {
 	agentLoader agent.Loader
 }
 
+// NewAppsAPIController creates a controller for Apps API.
 func NewAppsAPIController(agentLoader agent.Loader) *AppsAPIController {
 	return &AppsAPIController{agentLoader: agentLoader}
 }

@@ -25,6 +25,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
@@ -33,7 +35,6 @@ import (
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/genai"
 )
 
 func ExampleNew() {
@@ -94,7 +95,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 		if ret, ok := resultSet[city]; ok {
 			return ret, nil
 		}
-		return Result{}, fmt.Errorf("Weather information for %q is not available.", city)
+		return Result{}, fmt.Errorf("weather information for %q is not available", city)
 	}
 
 	weatherReportTool, err := functiontool.New(
