@@ -21,30 +21,31 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-// GoogleSearch is a built-in tool that is automatically invoked by Gemini 2
-// models to retrieve search results from Google Search.
+// URLContext is a built-in tool that is automatically invoked by Gemini 2
+// models to retrieve content from URLs and use that content to inform and
+// shape its response.
 // The tool operates internally within the model and does not require or
 // perform local code execution.
-type GoogleSearch struct{}
+type URLContext struct{}
 
 // Name implements tool.Tool.
-func (s GoogleSearch) Name() string {
-	return "google_search"
+func (u URLContext) Name() string {
+	return "url_context"
 }
 
 // Description implements tool.Tool.
-func (s GoogleSearch) Description() string {
-	return "Performs a Google search to retrieve information from the web."
+func (u URLContext) Description() string {
+	return "Retrieves content from URLs to inform and shape model responses."
 }
 
-// ProcessRequest adds the GoogleSearch tool to the LLM request.
-func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+// ProcessRequest adds the URLContext tool to the LLM request.
+func (u URLContext) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return setTool(req, &genai.Tool{
-		GoogleSearch: &genai.GoogleSearch{},
+		URLContext: &genai.URLContext{},
 	})
 }
 
 // IsLongRunning implements tool.Tool.
-func (s GoogleSearch) IsLongRunning() bool {
+func (u URLContext) IsLongRunning() bool {
 	return false
 }
