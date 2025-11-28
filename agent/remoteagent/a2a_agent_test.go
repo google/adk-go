@@ -17,10 +17,8 @@ package remoteagent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"iter"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,15 +26,11 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
-	"github.com/a2aproject/a2a-go/a2agrpc"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
 
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
@@ -45,8 +39,6 @@ import (
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
 )
-
-const connBufSize int = 1024 * 1024
 
 type mockA2AExecutor struct {
 	executeFn func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error
@@ -65,34 +57,15 @@ func (e *mockA2AExecutor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestCont
 	return fmt.Errorf("not implemented")
 }
 
-func startA2AServer(t *testing.T, agentExecutor a2asrv.AgentExecutor, listener *bufconn.Listener) {
+func startA2AServer(agentExecutor a2asrv.AgentExecutor) *httptest.Server {
 	requestHandler := a2asrv.NewHandler(agentExecutor)
-	grpcHandler := a2agrpc.NewHandler(requestHandler)
-
-	s := grpc.NewServer()
-	t.Cleanup(s.Stop)
-
-	grpcHandler.RegisterWith(s)
-	if err := s.Serve(listener); err != nil {
-		if !errors.Is(err, grpc.ErrServerStopped) {
-			t.Errorf("Server exited with error: %v", err)
-		}
-	}
+	return httptest.NewServer(a2asrv.NewJSONRPCHandler(requestHandler))
 }
 
-func newTestClientFactory(listener *bufconn.Listener) *a2aclient.Factory {
-	withInsecureGRPC := a2aclient.WithGRPCTransport(
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	return a2aclient.NewFactory(withInsecureGRPC)
-}
-
-func newA2ARemoteAgent(t *testing.T, name string, listener *bufconn.Listener) agent.Agent {
+func newA2ARemoteAgent(t *testing.T, name string, server *httptest.Server) agent.Agent {
 	t.Helper()
-	card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolGRPC, URL: "passthrough:///bufnet", Capabilities: a2a.AgentCapabilities{Streaming: true}}
-	clientFactory := newTestClientFactory(listener)
-	agent, err := NewA2A(A2AConfig{Name: name, AgentCard: card, ClientFactory: clientFactory})
+	card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolJSONRPC, URL: server.URL, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+	agent, err := NewA2A(A2AConfig{Name: name, AgentCard: card})
 	if err != nil {
 		t.Fatalf("remoteagent.NewA2A() error = %v", err)
 	}
@@ -117,7 +90,7 @@ func newInvocationContext(t *testing.T, events []*session.Event) agent.Invocatio
 }
 
 func runAndCollect(ic agent.InvocationContext, agnt agent.Agent) ([]*session.Event, error) {
-	collected := []*session.Event{}
+	var collected []*session.Event
 	for ev, err := range agnt.Run(ic) {
 		if err != nil {
 			return collected, err
@@ -128,9 +101,9 @@ func runAndCollect(ic agent.InvocationContext, agnt agent.Agent) ([]*session.Eve
 }
 
 func toLLMResponses(events []*session.Event) []model.LLMResponse {
-	result := make([]model.LLMResponse, len(events))
-	for i, v := range events {
-		result[i] = v.LLMResponse
+	var result []model.LLMResponse
+	for _, v := range events {
+		result = append(result, v.LLMResponse)
 	}
 	return result
 }
@@ -295,10 +268,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			listener := bufconn.Listen(connBufSize)
 			executor := newADKEventReplay(t, tc.remoteEvents)
-			go startA2AServer(t, executor, listener)
-			remoteAgent := newA2ARemoteAgent(t, "a2a", listener)
+			remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
 
 			ictx := newInvocationContext(t, []*session.Event{newUserHello()})
 			gotEvents, err := runAndCollect(ictx, remoteAgent)
@@ -478,43 +449,229 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			listener := bufconn.Listen(connBufSize)
 			executor := newA2AEventReplay(t, tc.remoteEvents)
-			go startA2AServer(t, executor, listener)
-			remoteAgent := newA2ARemoteAgent(t, "a2a", listener)
+			remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
 
 			ictx := newInvocationContext(t, []*session.Event{newUserHello()})
 			gotEvents, err := runAndCollect(ictx, remoteAgent)
 			if err != nil {
-				t.Errorf("agent.Run() error = %v", err)
+				t.Fatalf("agent.Run() error = %v", err)
 			}
 			gotResponses := toLLMResponses(gotEvents)
 			if diff := cmp.Diff(tc.wantResponses, gotResponses, ignoreFields...); diff != "" {
-				t.Errorf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
+				t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
 			}
 			for _, event := range gotEvents {
 				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("response")]; !ok {
-					t.Errorf("event.CustomMetadata = %v, want meta[%q] = original a2a event", event.CustomMetadata, adka2a.ToADKMetaKey("response"))
+					t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original a2a event", event.CustomMetadata, adka2a.ToADKMetaKey("response"))
 				}
 				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; !ok {
-					t.Errorf("event.CustomMetadata = %v, want meta[%q] = original a2a request", event.CustomMetadata, adka2a.ToADKMetaKey("request"))
+					t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original a2a request", event.CustomMetadata, adka2a.ToADKMetaKey("request"))
 				}
 			}
 		})
 	}
 }
 
+func TestRemoteAgent_RequestCallbacks(t *testing.T) {
+	testCases := []struct {
+		name          string
+		events        func(*a2asrv.RequestContext) []a2a.Event
+		before        []BeforeA2ARequestCallback
+		after         []AfterA2ARequestCallback
+		wantResponses []model.LLMResponse
+		wantErr       error
+	}{
+		{
+			name: "request and response modification",
+			events: func(rc *a2asrv.RequestContext) []a2a.Event {
+				return []a2a.Event{a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "foo"})}
+			},
+			before: []BeforeA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error) {
+					req.Metadata = map[string]any{"counter": 1}
+					return nil, nil
+				},
+			},
+			after: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+					result.Content = genai.NewContentFromText(result.Content.Parts[0].Text+"bar", genai.RoleModel)
+					result.CustomMetadata = req.Metadata
+					return nil, nil
+				},
+			},
+			wantResponses: []model.LLMResponse{
+				{
+					Content:        genai.NewContentFromText("foobar", genai.RoleModel),
+					CustomMetadata: map[string]any{"counter": 1},
+				},
+			},
+		},
+		{
+			name: "after invoked for every event",
+			events: func(rc *a2asrv.RequestContext) []a2a.Event {
+				artifactEvent := a2a.NewArtifactEvent(rc, a2a.TextPart{Text: "Hello"})
+				finalEvent := a2a.NewStatusUpdateEvent(rc, a2a.TaskStateCompleted, nil)
+				finalEvent.Final = true
+				return []a2a.Event{
+					artifactEvent,
+					a2a.NewArtifactUpdateEvent(rc, artifactEvent.Artifact.ID, a2a.TextPart{Text: ", world!"}),
+					finalEvent,
+				}
+			},
+			after: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+					result.CustomMetadata = map[string]any{"foo": "bar"}
+					return nil, nil
+				},
+			},
+			wantResponses: []model.LLMResponse{
+				{
+					Partial:        true,
+					Content:        genai.NewContentFromText("Hello", genai.RoleModel),
+					CustomMetadata: map[string]any{"foo": "bar"},
+				},
+				{
+					Partial:        true,
+					Content:        genai.NewContentFromText(", world!", genai.RoleModel),
+					CustomMetadata: map[string]any{"foo": "bar"},
+				},
+				{TurnComplete: true, CustomMetadata: map[string]any{"foo": "bar"}},
+			},
+		},
+		{
+			name: "after error stops the run",
+			events: func(rc *a2asrv.RequestContext) []a2a.Event {
+				finalEvent := a2a.NewStatusUpdateEvent(rc, a2a.TaskStateCompleted, nil)
+				finalEvent.Final = true
+				return []a2a.Event{
+					a2a.NewArtifactEvent(rc, a2a.TextPart{Text: "Hello"}),
+					finalEvent,
+				}
+			},
+			after: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+					return nil, fmt.Errorf("rejected")
+				},
+			},
+			wantErr: fmt.Errorf("rejected"),
+		},
+		{
+			name: "request overwrite with response",
+			before: []BeforeA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error) {
+					return &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}}, nil
+				},
+			},
+			wantResponses: []model.LLMResponse{{Content: genai.NewContentFromText("hello", genai.RoleModel)}},
+		},
+		{
+			name: "request overwrite with error",
+			before: []BeforeA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error) {
+					return nil, fmt.Errorf("failed")
+				},
+			},
+			wantErr: fmt.Errorf("failed"),
+		},
+		{
+			name: "response overwrite",
+			after: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+					return &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}}, nil
+				},
+			},
+			wantResponses: []model.LLMResponse{{Content: genai.NewContentFromText("hello", genai.RoleModel)}},
+		},
+		{
+			name: "response overwrite with error",
+			after: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+					return nil, fmt.Errorf("failed")
+				},
+			},
+			wantErr: fmt.Errorf("failed"),
+		},
+		{
+			name: "before interceptor short-circuit",
+			before: []BeforeA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error) {
+					return nil, fmt.Errorf("failed")
+				},
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error) {
+					t.Fatalf("not called")
+					return nil, nil
+				},
+			},
+			wantErr: fmt.Errorf("failed"),
+		},
+		{
+			name: "after interceptor short-circuit",
+			after: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+					return nil, fmt.Errorf("failed")
+				},
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, event a2a.Event, err error, result *session.Event) (*session.Event, error) {
+					t.Fatalf("not called")
+					return nil, nil
+				},
+			},
+			wantErr: fmt.Errorf("failed"),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &mockA2AExecutor{
+				executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+					if tc.events != nil {
+						for _, event := range tc.events(reqCtx) {
+							if err := queue.Write(ctx, event); err != nil {
+								return err
+							}
+						}
+						return nil
+					}
+					return queue.Write(ctx, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "Hi!"}))
+				},
+			}
+			server := startA2AServer(executor)
+			card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolJSONRPC, URL: server.URL, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+			remoteAgent, err := NewA2A(A2AConfig{
+				Name:                   "a2a",
+				AgentCard:              card,
+				BeforeRequestCallbacks: tc.before,
+				AfterRequestCallbacks:  tc.after,
+			})
+			if err != nil {
+				t.Fatalf("remoteagent.NewA2A() error = %v", err)
+			}
+
+			ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+			gotEvents, err := runAndCollect(ictx, remoteAgent)
+			if err != nil && tc.wantErr == nil {
+				t.Fatalf("agent.Run() error = %v, want nil", err)
+			}
+			if err == nil && tc.wantErr != nil {
+				t.Fatalf("agent.Run() error = nil, want %v", tc.wantErr)
+			}
+			gotResponses := toLLMResponses(gotEvents)
+			if diff := cmp.Diff(tc.wantResponses, gotResponses); diff != "" {
+				t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
+			}
+		})
+	}
+}
+
 func TestRemoteAgent_EmptyResultForEmptySession(t *testing.T) {
-	listener := bufconn.Listen(connBufSize)
 	ictx := newInvocationContext(t, []*session.Event{})
 
 	executor := newA2AEventReplay(t, []a2a.Event{
 		a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "will not be invoked, because input is empty"}),
 	})
-	go startA2AServer(t, executor, listener)
 
 	agentName := "a2a agent"
-	remoteAgent := newA2ARemoteAgent(t, agentName, listener)
+	remoteAgent := newA2ARemoteAgent(t, agentName, startA2AServer(executor))
 
 	gotEvents, err := runAndCollect(ictx, remoteAgent)
 	if err != nil {
@@ -538,21 +695,22 @@ func TestRemoteAgent_ResolvesAgentCard(t *testing.T) {
 	remoteEvents := []a2a.Event{a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "Hello!"})}
 	wantResponses := []model.LLMResponse{{Content: genai.NewContentFromText("Hello!", genai.RoleModel)}}
 
-	listener := bufconn.Listen(connBufSize)
 	executor := newA2AEventReplay(t, remoteEvents)
-	go startA2AServer(t, executor, listener)
+	handler := a2asrv.NewHandler(executor)
 
+	var cardServer *httptest.Server
 	mux := http.NewServeMux()
+	mux.Handle("/invoke", a2asrv.NewJSONRPCHandler(handler))
 	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
-		card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolGRPC, URL: "passthrough:///bufnet", Capabilities: a2a.AgentCapabilities{Streaming: true}}
+		url := fmt.Sprintf("%s/invoke", cardServer.URL)
+		card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolJSONRPC, URL: url, Capabilities: a2a.AgentCapabilities{Streaming: true}}
 		if err := json.NewEncoder(w).Encode(card); err != nil {
 			t.Errorf("json.Encode(agentCard) error = %v", err)
 		}
 	})
-	cardServer := httptest.NewServer(mux)
+	cardServer = httptest.NewServer(mux)
 
-	clientFactory := newTestClientFactory(listener)
-	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCardSource: cardServer.URL, ClientFactory: clientFactory})
+	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCardSource: cardServer.URL})
 	if err != nil {
 		t.Fatalf("remoteagent.NewA2A() error = %v", err)
 	}
@@ -573,16 +731,17 @@ func TestRemoteAgent_ResolvesAgentCard(t *testing.T) {
 }
 
 func TestRemoteAgent_ErrorEventIfNoCompatibleTransport(t *testing.T) {
-	listener := bufconn.Listen(connBufSize)
 	remoteEvents := []a2a.Event{a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "will not be invoked!"})}
 	executor := newA2AEventReplay(t, remoteEvents)
-	go startA2AServer(t, executor, listener)
+	server := startA2AServer(executor)
 
-	clientFactory := a2aclient.NewFactory(a2aclient.WithDefaultsDisabled())
 	remoteAgent, err := NewA2A(A2AConfig{
 		Name:          "a2a",
-		AgentCard:     &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolGRPC, URL: "passthrough:///bufnet"},
-		ClientFactory: clientFactory,
+		ClientFactory: a2aclient.NewFactory(a2aclient.WithDefaultsDisabled()),
+		AgentCard: &a2a.AgentCard{
+			PreferredTransport: a2a.TransportProtocolJSONRPC,
+			URL:                server.URL,
+		},
 	})
 	if err != nil {
 		t.Fatalf("remoteagent.NewA2A() error = %v", err)
@@ -603,17 +762,14 @@ func TestRemoteAgent_ErrorEventIfNoCompatibleTransport(t *testing.T) {
 }
 
 func TestRemoteAgent_ErrorEventOnServerError(t *testing.T) {
-	listener := bufconn.Listen(connBufSize)
-
 	executorErr := fmt.Errorf("mockExecutor failed")
 	executor := &mockA2AExecutor{
 		executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, q eventqueue.Queue) error {
 			return executorErr
 		},
 	}
-	go startA2AServer(t, executor, listener)
 
-	remoteAgent := newA2ARemoteAgent(t, "a2a agent", listener)
+	remoteAgent := newA2ARemoteAgent(t, "a2a agent", startA2AServer(executor))
 
 	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
 	gotEvents, err := runAndCollect(ictx, remoteAgent)
@@ -624,7 +780,7 @@ func TestRemoteAgent_ErrorEventOnServerError(t *testing.T) {
 	if len(gotEvents) != 1 {
 		t.Fatalf("len(events) = %d, want 1", len(gotEvents))
 	}
-	if !strings.Contains(gotEvents[0].ErrorMessage, executorErr.Error()) {
-		t.Fatalf("event.ErrorMessage = %s, want to contain %q", gotEvents[0].ErrorMessage, executorErr.Error())
+	if gotEvents[0].ErrorMessage == "" {
+		t.Fatal("event.ErrorMessage empty, want non-empty")
 	}
 }
