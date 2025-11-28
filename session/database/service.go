@@ -155,7 +155,10 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 		}).
 		First(&foundSession).Error
 	if err != nil {
-		// For any error including ErrRecordNotFound, return it as a system error.
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("session %q: %w", sessionID, session.ErrSessionNotFound)
+		}
+		// For any other error (e.g., connection lost), return it as a system error.
 		return nil, fmt.Errorf("database error while fetching session: %w", err)
 	}
 
@@ -312,6 +315,10 @@ func (s *databaseService) Delete(ctx context.Context, req *session.DeleteRequest
 			return fmt.Errorf("database error during session deletion: %w", result.Error)
 		}
 
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("session %q: %w", req.SessionID, session.ErrSessionNotFound)
+		}
+
 		return nil // Returning nil commits the transaction
 	})
 }
@@ -348,16 +355,16 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 
 // applyEvent fetches the session, validates it, applies state changes from an
 // event, and saves the event atomically.
-func (s *databaseService) applyEvent(ctx context.Context, session *localSession, event *session.Event) error {
+func (s *databaseService) applyEvent(ctx context.Context, storedSession *localSession, event *session.Event) error {
 	// Wrap database operations in a single transaction.
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Fetch the session object from storage.
 		var storageSess storageSession
-		err := tx.Where(&storageSession{AppName: session.AppName(), UserID: session.UserID(), ID: session.ID()}).
+		err := tx.Where(&storageSession{AppName: storedSession.AppName(), UserID: storedSession.UserID(), ID: storedSession.ID()}).
 			First(&storageSess).Error
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("session not found, cannot apply event")
+				return fmt.Errorf("append event for session %q: %w", storedSession.ID(), session.ErrSessionNotFound)
 			}
 			return fmt.Errorf("failed to get session: %w", err)
 		}
@@ -365,7 +372,7 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		// Ensure the session object is not stale.
 		// We use UnixNano() for microsecond-level precision, matching the Python code.
 		storageUpdateTime := storageSess.UpdateTime.UnixNano()
-		sessionUpdateTime := session.updatedAt.UnixNano()
+		sessionUpdateTime := storedSession.updatedAt.UnixNano()
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
@@ -375,11 +382,11 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		}
 
 		// Fetch App and User states.
-		storageApp, err := fetchStorageAppState(tx, session.AppName())
+		storageApp, err := fetchStorageAppState(tx, storedSession.AppName())
 		if err != nil {
 			return err
 		}
-		storageUser, err := fetchStorageUserState(tx, session.AppName(), session.UserID())
+		storageUser, err := fetchStorageUserState(tx, storedSession.AppName(), storedSession.UserID())
 		if err != nil {
 			return err
 		}
@@ -406,7 +413,7 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		}
 
 		// Create the new event record in the database.
-		storageEv, err := createStorageEvent(session, event)
+		storageEv, err := createStorageEvent(storedSession, event)
 		if err != nil {
 			return fmt.Errorf("failed to map event to storage model: %w", err)
 		}
@@ -420,7 +427,7 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
 
-		session.updatedAt = storageSess.UpdateTime
+		storedSession.updatedAt = storageSess.UpdateTime
 
 		return nil // Returning nil commits the transaction.
 	})
