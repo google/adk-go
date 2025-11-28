@@ -508,3 +508,46 @@ func stringify(v any) string {
 	}
 	return string(x)
 }
+
+func TestFunctionTool_PanicRecovery(t *testing.T) {
+	type Args struct {
+		Value string `json:"value"`
+	}
+
+	panicHandler := func(ctx tool.Context, input Args) (string, error) {
+		panic("intentional panic for testing")
+	}
+
+	panicTool, err := functiontool.New(functiontool.Config{
+		Name:        "panic_tool",
+		Description: "a tool that always panics",
+	}, panicHandler)
+	if err != nil {
+		t.Fatalf("NewFunctionTool failed: %v", err)
+	}
+
+	funcTool, ok := panicTool.(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("panicTool does not implement toolinternal.FunctionTool")
+	}
+
+	result, err := funcTool.Run(nil, map[string]any{"value": "test"})
+	if err == nil {
+		t.Fatal("expected error from panic recovery, got nil")
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %v", result)
+	}
+
+	expectedErrParts := []string{
+		"panic in tool",
+		"panic_tool",
+		"intentional panic for testing",
+		"stack:",
+	}
+	for _, part := range expectedErrParts {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("expected error to contain %q, but it did not. Error: %v", part, err)
+		}
+	}
+}
