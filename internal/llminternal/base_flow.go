@@ -35,7 +35,7 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-var ErrModelNotConfigured = errors.New("has no Model configured; ensure Model is set in llmagent.Config")
+var ErrModelNotConfigured = errors.New("model not configured; ensure Model is set in llmagent.Config")
 
 type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
