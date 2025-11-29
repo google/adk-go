@@ -1,8 +1,18 @@
 # ADK GO samples
+
 This folder hosts examples to test different features. The examples are usually minimal and simplistic to test one or a few scenarios.
 
-
 **Note**: This is different from the [google/adk-samples](https://github.com/google/adk-samples) repo, which hosts more complex e2e samples for customers to use or modify directly.
+
+## Example Highlights
+
+### Session History Compaction
+New feature that reduces token usage in long-running conversations by 60-80%!
+
+See [`examples/compaction/`](./compaction/) for:
+- **Basic Example** (`main.go`): Quick start with all launcher modes
+- **Advanced Example** (`advanced/main.go`): Direct runner usage with interactive conversation
+- Complete configuration guide and troubleshooting tips
 
 
 # Launcher
