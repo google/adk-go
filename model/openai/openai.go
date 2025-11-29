@@ -146,6 +146,7 @@ type openAIMessage struct {
 
 type openAIToolCall struct {
 	ID       string             `json:"id"`
+	Index    *int               `json:"index,omitempty"`
 	Type     string             `json:"type"` // "function"
 	Function openAIFunctionCall `json:"function"`
 }
@@ -585,20 +586,24 @@ func (m *openAIModel) generateStream(ctx context.Context, openaiReq *openAIReque
 			// Handle tool calls
 			if len(delta.ToolCalls) > 0 {
 				for idx, tc := range delta.ToolCalls {
+					targetIdx := idx
+					if tc.Index != nil {
+						targetIdx = *tc.Index
+					}
 					// Ensure we have enough space in toolCalls slice
-					for len(toolCalls) <= idx {
+					for len(toolCalls) <= targetIdx {
 						toolCalls = append(toolCalls, openAIToolCall{})
 					}
 					if tc.ID != "" {
-						toolCalls[idx].ID = tc.ID
+						toolCalls[targetIdx].ID = tc.ID
 					}
 					if tc.Type != "" {
-						toolCalls[idx].Type = tc.Type
+						toolCalls[targetIdx].Type = tc.Type
 					}
 					if tc.Function.Name != "" {
-						toolCalls[idx].Function.Name = tc.Function.Name
+						toolCalls[targetIdx].Function.Name += tc.Function.Name
 					}
-					toolCalls[idx].Function.Arguments += tc.Function.Arguments
+					toolCalls[targetIdx].Function.Arguments += tc.Function.Arguments
 				}
 			}
 
@@ -720,6 +725,9 @@ func (m *openAIModel) convertResponse(resp *openAIResponse) (*model.LLMResponse,
 
 	// Handle tool calls
 	for _, tc := range toolCalls {
+		if tc.ID == "" && tc.Function.Name == "" && tc.Function.Arguments == "" {
+			continue
+		}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal tool arguments: %w", err)
@@ -753,6 +761,9 @@ func (m *openAIModel) buildFinalResponse(text string, toolCalls []openAIToolCall
 	}
 
 	for _, tc := range toolCalls {
+		if tc.ID == "" && tc.Function.Name == "" && tc.Function.Arguments == "" {
+			continue
+		}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 			continue
