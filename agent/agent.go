@@ -207,10 +207,6 @@ func (a *agent) internal() *agent {
 }
 
 func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
-	if event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
-		return genai.RoleUser
-	}
-
 	return ctx.Agent().Name()
 }
 
@@ -284,8 +280,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
 		event.Actions = *callbackCtx.actions
-		// TODO set context invocation ended
-		// ctx.invocationEnded = true
+ ctx.invocationEnded = true
 		return event, nil
 	}
 
