@@ -60,8 +60,10 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	}
 
 	encodedKey := key.Encode()
-	_, ok := s.sessions.Get(encodedKey)
-	if ok {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.sessions.Get(encodedKey); ok {
 		return nil, fmt.Errorf("session %s already exists", req.SessionID)
 	}
 
@@ -74,9 +76,6 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 		state:     state,
 		updatedAt: time.Now(),
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.sessions.Set(encodedKey, val)
 	appDelta, userDelta, _ := sessionutils.ExtractStateDeltas(req.State)

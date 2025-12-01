@@ -17,6 +17,9 @@ package session
 import (
 	"maps"
 	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1001,3 +1004,48 @@ func emptyService(t *testing.T) Service {
 }
 
 // TODO: test concurrency
+func Test_inMemoryService_CreateConcurrentAccess(t *testing.T) {
+	s := InMemoryService()
+	const goroutines = 16
+	const attempts = 32
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	req := &CreateRequest{
+		AppName:   "race-app",
+		UserID:    "race-user",
+		SessionID: "race-session",
+	}
+
+	var successCount atomic.Int32
+	var errorCount atomic.Int32
+
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			<-start
+			for range attempts {
+				_, err := s.Create(t.Context(), req)
+				if err == nil {
+					successCount.Add(1)
+				} else if strings.Contains(err.Error(), "already exists") {
+					errorCount.Add(1)
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	if successCount.Load() != 1 {
+		t.Errorf("expected 1 successful creation, but got %d", successCount.Load())
+	}
+
+	expectedErrors := int32(goroutines*attempts - 1)
+	if errorCount.Load() != expectedErrors {
+		t.Errorf("expected %d 'already exists' errors, but got %d", expectedErrors, errorCount.Load())
+	}
+}
