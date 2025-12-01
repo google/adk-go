@@ -48,3 +48,16 @@ func codeExecutionResponseProcessor(ctx agent.InvocationContext, req *model.LLMR
 	// TODO: implement (adk-python src/google/adk_code_execution.py)
 	return nil
 }
+
+func confirmationRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
+	// This processor is a placeholder for handling confirmation requests that may originate
+	// from the LLM response. The primary logic for handling tool-initiated confirmation
+	// requests is handled in the base_flow.
+	if _, ok := resp.CustomMetadata["confirmation_request"]; ok {
+		if req.Tools != nil {
+			// The confirmation request would be handled at a higher level.
+			// Currently, this is a no-op.
+		}
+	}
+	return nil
+}

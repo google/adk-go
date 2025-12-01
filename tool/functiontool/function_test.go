@@ -508,3 +508,60 @@ func stringify(v any) string {
 	}
 	return string(x)
 }
+
+func TestFunctionTool_Confirmation(t *testing.T) {
+	tests := []struct {
+		name                 string
+		requireConfirmation bool
+	}{
+		{
+			name:                 "no confirmation required",
+			requireConfirmation: false,
+		},
+		{
+			name:                 "confirmation required",
+			requireConfirmation: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := functiontool.Config{
+				Name:                  "test_tool",
+				Description:          "A test tool",
+				RequireConfirmation: test.requireConfirmation,
+			}
+
+			handler := func(ctx tool.Context, args struct{}) (string, error) {
+				return "success", nil
+			}
+
+			ft, err := functiontool.New(cfg, handler)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			// Test the function declaration
+			fnTool, ok := ft.(interface{ Declaration() *genai.FunctionDeclaration })
+			if !ok {
+				t.Fatal("tool does not implement FunctionTool interface")
+			}
+
+			decl := fnTool.Declaration()
+
+			if test.requireConfirmation {
+				// Check if confirmation requirement is mentioned in the description
+				expectedText := "NOTE: This tool requires explicit user confirmation before execution."
+				if !strings.Contains(decl.Description, expectedText) {
+					t.Errorf("Expected function description to contain confirmation requirement, got: %s", decl.Description)
+				}
+			} else {
+				// Check that confirmation requirement is NOT mentioned when not required
+				expectedText := "NOTE: This tool requires explicit user confirmation before execution."
+				if strings.Contains(decl.Description, expectedText) {
+					t.Errorf("Expected function description to not contain confirmation requirement, got: %s", decl.Description)
+				}
+			}
+		})
+	}
+}

@@ -75,6 +75,7 @@ var (
 	DefaultResponseProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error{
 		nlPlanningResponseProcessor,
 		codeExecutionResponseProcessor,
+		confirmationRequestProcessor,
 	}
 )
 
@@ -239,7 +240,7 @@ func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []
 			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
 		}
 		// TODO: how to prevent mutation on this?
-		toolCtx := toolinternal.NewToolContext(ctx, "", &session.EventActions{})
+		toolCtx := toolinternal.NewToolContextWithToolName(ctx, "", &session.EventActions{}, t.Name())
 		if err := requestProcessor.ProcessRequest(toolCtx, req); err != nil {
 			return err
 		}
@@ -386,26 +387,46 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 
 		result := f.callTool(funcTool, fnCall.Args, toolCtx)
 
-		// TODO: agent.canonical_after_tool_callbacks
-		// TODO: handle long-running tool.
+		// Check if confirmation was requested
 		ev := session.NewEvent(ctx.InvocationID())
-		ev.LLMResponse = model.LLMResponse{
-			Content: &genai.Content{
-				Role: "user",
-				Parts: []*genai.Part{
-					{
-						FunctionResponse: &genai.FunctionResponse{
-							ID:       fnCall.ID,
-							Name:     fnCall.Name,
-							Response: result,
-						},
-					},
-				},
-			},
-		}
 		ev.Author = ctx.Agent().Name()
 		ev.Branch = ctx.Branch()
 		ev.Actions = *toolCtx.Actions()
+		if toolCtx.Actions().ConfirmationRequest != nil {
+			// If confirmation is requested, we need to return an event with the confirmation request
+			// Set a special status to indicate that confirmation is required
+			ev.LLMResponse = model.LLMResponse{
+				Content: &genai.Content{
+					Role: "user",
+					Parts: []*genai.Part{
+						{
+							Text: fmt.Sprintf("Confirmation required for tool %s: %s", fnCall.Name, toolCtx.Actions().ConfirmationRequest.Hint),
+						},
+					},
+				},
+				// Add custom metadata to indicate this is a confirmation request
+				CustomMetadata: map[string]any{
+					"confirmation_required": true,
+					"confirmation_request":  toolCtx.Actions().ConfirmationRequest,
+				},
+			}
+		} else {
+			// Normal response when no confirmation needed
+			ev.LLMResponse = model.LLMResponse{
+				Content: &genai.Content{
+					Role: "user",
+					Parts: []*genai.Part{
+						{
+							FunctionResponse: &genai.FunctionResponse{
+								ID:       fnCall.ID,
+								Name:     fnCall.Name,
+								Response: result,
+							},
+						},
+					},
+				},
+			}
+		}
 		telemetry.TraceToolCall(spans, curTool, fnCall.Args, ev)
 		fnResponseEvents = append(fnResponseEvents, ev)
 	}
