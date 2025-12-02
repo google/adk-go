@@ -17,6 +17,7 @@ package sessioninternal_test
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"testing"
 
@@ -105,10 +106,7 @@ func TestMutableSession_All(t *testing.T) {
 			sessionID := fmt.Sprintf("testAll-%d", i)
 			ms, _ := createMutableSession(ctx, t, sessionID, tc.initial)
 
-			gotMap := make(map[string]any)
-			for k, v := range ms.All() {
-				gotMap[k] = v
-			}
+			gotMap := maps.Collect(ms.All())
 
 			wantMap := tc.initial
 			if wantMap == nil {

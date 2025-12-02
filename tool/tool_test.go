@@ -39,7 +39,7 @@ func TestTypes(t *testing.T) {
 		{
 			name: "FunctionTool",
 			constructor: func() (tool.Tool, error) {
-				return functiontool.New(functiontool.Config{}, func(tool.Context, int) int { return 0 })
+				return functiontool.New(functiontool.Config{}, func(tool.Context, int) (int, error) { return 0, nil })
 			},
 			expectedTypes: []string{requestProc, functionTool},
 		},
@@ -93,5 +93,4 @@ func TestTypes(t *testing.T) {
 			}
 		})
 	}
-
 }

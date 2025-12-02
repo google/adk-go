@@ -19,20 +19,21 @@ import (
 	"log"
 	"os"
 
+	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/google/uuid"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/examples/web/agents"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/genai"
 )
 
 func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
@@ -46,6 +47,19 @@ func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, l
 		}
 	}
 	return llmResponse, llmResponseError
+}
+
+// AuthInterceptor sets 'user' name needed for both a2a and webui launchers which sharing the same sessions service.
+type AuthInterceptor struct {
+	a2asrv.PassthroughCallInterceptor
+}
+
+// Before implements a before request callback.
+func (a *AuthInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error) {
+	callCtx.User = &a2asrv.AuthenticatedUser{
+		UserName: "user",
+	}
+	return ctx, nil
 }
 
 func main() {
@@ -72,10 +86,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
-	llmAuditor := agents.GetLLmAuditorAgent(ctx, model)
+	llmAuditor := agents.GetLLMAuditorAgent(ctx, model)
 	imageGeneratorAgent := agents.GetImageGeneratorAgent(ctx, model)
 
-	agentLoader, err := services.NewMultiAgentLoader(
+	agentLoader, err := agent.NewMultiLoader(
 		rootAgent,
 		llmAuditor,
 		imageGeneratorAgent,
@@ -86,15 +100,17 @@ func main() {
 
 	artifactservice := artifact.InMemoryService()
 
-	config := &adk.Config{
+	config := &launcher.Config{
 		ArtifactService: artifactservice,
 		SessionService:  sessionService,
 		AgentLoader:     agentLoader,
+		A2AOptions: []a2asrv.RequestHandlerOption{
+			a2asrv.WithCallInterceptor(&AuthInterceptor{}),
+		},
 	}
 
 	l := full.NewLauncher()
-	err = l.Execute(ctx, config, os.Args[1:])
-	if err != nil {
-		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
 }

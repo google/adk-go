@@ -23,8 +23,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"google.golang.org/adk/session"
 	"gorm.io/gorm"
+
+	"google.golang.org/adk/session"
 )
 
 // databaseService is an database implementation of sessionService.Service.
@@ -43,9 +44,27 @@ type databaseService struct {
 func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.Service, error) {
 	db, err := gorm.Open(dialector, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("error creating database session service :%w", err)
+		return nil, fmt.Errorf("error creating database session service: %w", err)
 	}
 	return &databaseService{db: db}, nil
+}
+
+// AutoMigrate runs the GORM auto-migration tool to ensure the database schema
+// matches the internal storage models (e.g., storageSession, storageEvent).
+//
+// NOTE: This function relies on a type assertion to the concrete *databaseService
+// implementation. It will return an error if the provided session.Service is
+// a different implementation.
+func AutoMigrate(service session.Service) error {
+	dbservice, ok := service.(*databaseService)
+	if !ok {
+		return fmt.Errorf("invalid session service type")
+	}
+	err := dbservice.db.AutoMigrate(&storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
+	if err != nil {
+		return fmt.Errorf("auto migrate failed: %w", err)
+	}
+	return nil
 }
 
 // Create generates a session and inserts it to the db, implements session.Service
@@ -199,7 +218,7 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	}, nil
 }
 
-// List retrieves sessions from the database using its appName and optional UserId
+// List retrieves sessions from the database using its appName and optional UserID
 func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*session.ListResponse, error) {
 	appName, userID := req.AppName, req.UserID
 	if appName == "" {
@@ -421,7 +440,7 @@ func fetchStorageAppState(tx *gorm.DB, appName string) (*storageAppState, error)
 	return &storageApp, nil
 }
 
-func fetchStorageUserState(tx *gorm.DB, appName string, userID string) (*storageUserState, error) {
+func fetchStorageUserState(tx *gorm.DB, appName, userID string) (*storageUserState, error) {
 	var storageUser storageUserState
 	if err := tx.First(&storageUser, "app_name = ? AND user_id = ?", appName, userID).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -453,14 +472,15 @@ func fetchAllAppStorageUserState(tx *gorm.DB, appName string) (map[string]*stora
 // for app, user, and session states based on key prefixes.
 // Temporary keys (starting with TempStatePrefix) are ignored.
 func extractStateDeltas(delta map[string]any) (
-	appStateDelta, userStateDelta, sessionStateDelta map[string]any) {
+	appStateDelta, userStateDelta, sessionStateDelta map[string]any,
+) {
 	// Initialize the maps to be returned.
 	appStateDelta = make(map[string]any)
 	userStateDelta = make(map[string]any)
 	sessionStateDelta = make(map[string]any)
 
 	if delta == nil {
-		return
+		return appStateDelta, userStateDelta, sessionStateDelta
 	}
 
 	for key, value := range delta {
@@ -473,7 +493,7 @@ func extractStateDeltas(delta map[string]any) (
 			sessionStateDelta[key] = value
 		}
 	}
-	return
+	return appStateDelta, userStateDelta, sessionStateDelta
 }
 
 // mergeStates combines app, user, and session state maps into a single map

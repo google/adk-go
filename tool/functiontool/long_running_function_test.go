@@ -21,12 +21,13 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
-	"google.golang.org/genai"
 )
 
 func TestNewLongRunningFunctionTool(t *testing.T) {
@@ -38,8 +39,8 @@ func TestNewLongRunningFunctionTool(t *testing.T) {
 		Result string `json:"result"` // the operation result
 	}
 
-	handler := func(ctx tool.Context, input SumArgs) SumResult {
-		return SumResult{Result: "Processing sum"}
+	handler := func(ctx tool.Context, input SumArgs) (SumResult, error) {
+		return SumResult{Result: "Processing sum"}, nil
 	}
 	sumTool, err := functiontool.New(functiontool.Config{
 		Name:          "sum",
@@ -69,35 +70,34 @@ func TestNewLongRunningFunctionTool(t *testing.T) {
 	_ = sumTool // use the tool
 }
 
-func NewContentFromFunctionResponseWithID(name string, response map[string]any, id string, role string) *genai.Content {
+func NewContentFromFunctionResponseWithID(name string, response map[string]any, id, role string) *genai.Content {
 	content := genai.NewContentFromFunctionResponse(name, response, genai.Role(role))
 	content.Parts[0].FunctionResponse.ID = id
 	return content
 }
 
-type IncArgs struct {
-}
+type IncArgs struct{}
 
 func TestLongRunningFunctionFlow(t *testing.T) {
 	functionCalled := 0
-	increaseByOne := func(ctx tool.Context, x IncArgs) map[string]string {
+	increaseByOne := func(ctx tool.Context, x IncArgs) (map[string]string, error) {
 		functionCalled++
-		return map[string]string{"status": "pending"}
+		return map[string]string{"status": "pending"}, nil
 	}
 	testLongRunningFunctionFlow(t, increaseByOne, "status", &functionCalled)
 }
 
 func TestLongRunningStringFunctionFlow(t *testing.T) {
 	functionCalled := 0
-	increaseByOne := func(ctx tool.Context, x IncArgs) string {
+	increaseByOne := func(ctx tool.Context, x IncArgs) (string, error) {
 		functionCalled++
-		return "pending"
+		return "pending", nil
 	}
 	testLongRunningFunctionFlow(t, increaseByOne, "result", &functionCalled)
 }
 
 // --- Test Suite ---
-func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx tool.Context, x IncArgs) Out, resultKey string, callCount *int) {
+func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx tool.Context, x IncArgs) (Out, error), resultKey string, callCount *int) {
 	// 1. Setup
 	responses := []*genai.Content{
 		genai.NewContentFromFunctionCall("increaseByOne", map[string]any{}, "model"),
@@ -264,12 +264,11 @@ func TestLongRunningToolIDsAreSet(t *testing.T) {
 	mockModel := &testutil.MockModel{Responses: responses}
 	functionCalled := 0
 
-	type IncArgs struct {
-	}
+	type IncArgs struct{}
 
-	increaseByOne := func(ctx tool.Context, x IncArgs) map[string]string {
+	increaseByOne := func(ctx tool.Context, x IncArgs) (map[string]string, error) {
 		functionCalled++
-		return map[string]string{"status": "pending"}
+		return map[string]string{"status": "pending"}, nil
 	}
 
 	longRunningTool, err := functiontool.New(functiontool.Config{

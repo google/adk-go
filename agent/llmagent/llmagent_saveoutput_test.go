@@ -18,9 +18,10 @@ import (
 	"reflect"
 	"testing"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type MockOutputSchema struct {
@@ -44,7 +45,7 @@ func createTestEvent(author, contentText string, isFinal bool) *session.Event {
 		InvocationID: "test_invocation",
 		Author:       author,
 		LLMResponse:  model.LLMResponse{Content: content, Partial: !isFinal},
-		Actions:      session.EventActions{StateDelta: make(map[string]interface{})},
+		Actions:      session.EventActions{StateDelta: make(map[string]any)},
 	}
 }
 
@@ -54,38 +55,38 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 		name             string
 		agentConfig      Config
 		event            *session.Event
-		wantStateDelta   map[string]interface{}
+		wantStateDelta   map[string]any
 		customEventParts []*genai.Part // For multi-part test
 	}{
 		{
 			name:           "skips when event author differs from agentConfig name",
 			agentConfig:    Config{Name: "agent_a", OutputKey: "result"},
 			event:          createTestEvent("agent_b", "Response from B", true),
-			wantStateDelta: map[string]interface{}{},
+			wantStateDelta: map[string]any{},
 		},
 		{
 			name:           "saves when event author matches agentConfig name",
 			agentConfig:    Config{Name: "test_agent", OutputKey: "result"},
 			event:          createTestEvent("test_agent", "Test response", true),
-			wantStateDelta: map[string]interface{}{"result": "Test response"},
+			wantStateDelta: map[string]any{"result": "Test response"},
 		},
 		{
 			name:           "skips when output_key is not set",
 			agentConfig:    Config{Name: "test_agent"}, // No OutputKey
 			event:          createTestEvent("test_agent", "Test response", true),
-			wantStateDelta: map[string]interface{}{},
+			wantStateDelta: map[string]any{},
 		},
 		{
 			name:           "skips for non-final responses",
 			agentConfig:    Config{Name: "test_agent", OutputKey: "result"},
 			event:          createTestEvent("test_agent", "*genai.Partial response", false),
-			wantStateDelta: map[string]interface{}{},
+			wantStateDelta: map[string]any{},
 		},
 		{
 			name:           "skips when event has no content text",
 			agentConfig:    Config{Name: "test_agent", OutputKey: "result"},
 			event:          createTestEvent("test_agent", "", true),
-			wantStateDelta: map[string]interface{}{},
+			wantStateDelta: map[string]any{},
 		},
 		{
 			name:        "concatenates multiple text parts",
@@ -96,15 +97,15 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 				{Text: "world"},
 				{Text: "!"},
 			},
-			wantStateDelta: map[string]interface{}{"result": "Hello world!"},
+			wantStateDelta: map[string]any{"result": "Hello world!"},
 		},
 		{
 			name:           "skips on case-sensitive name mismatch",
 			agentConfig:    Config{Name: "TestAgent", OutputKey: "result"},
 			event:          createTestEvent("testagent", "Test response", true),
-			wantStateDelta: map[string]interface{}{},
+			wantStateDelta: map[string]any{},
 		},
-		//TODO tests with OutputSchema
+		// TODO tests with OutputSchema
 	}
 
 	// Iterate over the test cases
@@ -119,11 +120,11 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			// The method modifies the event in-place, just like the Python version.
 			createdAgent, err := New(tc.agentConfig)
 			if err != nil {
-				t.Fatal("failed to create agent: %w", err)
+				t.Fatalf("failed to create agent: %v", err)
 			}
 			createdLlmAgent, ok := createdAgent.(*llmAgent)
 			if !ok {
-				t.Fatal("failed to create agent: %w", err)
+				t.Fatalf("failed to convert to llmagent")
 			}
 			createdLlmAgent.maybeSaveOutputToState(tc.event)
 

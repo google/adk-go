@@ -23,16 +23,17 @@ import (
 	"os"
 	"path/filepath"
 
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/loadartifactstool"
-	"google.golang.org/genai"
 )
 
 func main() {
@@ -63,7 +64,7 @@ func main() {
 		log.Fatalf("Failed to create generate image tool: %v", err)
 	}
 
-	agent, err := llmagent.New(llmagent.Config{
+	a, err := llmagent.New(llmagent.Config{
 		Name:        "image_generator",
 		Model:       model,
 		Description: "Agent to generate pictures, answers questions about it and saves it locally if asked.",
@@ -78,29 +79,26 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	config := &adk.Config{
+	config := &launcher.Config{
 		ArtifactService: artifact.InMemoryService(),
-		AgentLoader:     services.NewSingleAgentLoader(agent),
+		AgentLoader:     agent.NewSingleLoader(a),
 	}
 
 	l := full.NewLauncher()
-	err = l.Execute(ctx, config, os.Args[1:])
-	if err != nil {
-		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
 }
 
 // This is a function tool to generate images using Vertex AI's Imagen model.
-func generateImage(ctx tool.Context, input generateImageInput) generateImageResult {
+func generateImage(ctx tool.Context, input generateImageInput) (generateImageResult, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
 		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
 		Backend:  genai.BackendVertexAI,
 	})
 	if err != nil {
-		return generateImageResult{
-			Status: "fail",
-		}
+		return generateImageResult{}, err
 	}
 
 	response, err := client.Models.GenerateImages(
@@ -109,21 +107,14 @@ func generateImage(ctx tool.Context, input generateImageInput) generateImageResu
 		input.Prompt,
 		&genai.GenerateImagesConfig{NumberOfImages: 1})
 	if err != nil {
-		return generateImageResult{
-			Status: "fail",
-		}
+		return generateImageResult{}, err
 	}
 
 	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
 	if err != nil {
-		return generateImageResult{
-			Status: "fail",
-		}
+		return generateImageResult{}, err
 	}
-	return generateImageResult{
-		Status:   "success",
-		Filename: input.Filename,
-	}
+	return generateImageResult{Filename: input.Filename, Status: "success"}, nil
 }
 
 type generateImageInput struct {
@@ -138,17 +129,17 @@ type generateImageResult struct {
 
 // This is function tool that loads image from the artifacts service and
 // saves is to the local filesystem.
-func saveImage(ctx tool.Context, input saveImageInput) saveImageResult {
+func saveImage(ctx tool.Context, input saveImageInput) (saveImageResult, error) {
 	filename := input.Filename
 	resp, err := ctx.Artifacts().Load(ctx, filename)
 	if err != nil {
 		log.Printf("Failed to load artifact '%s': %v", filename, err)
-		return saveImageResult{Status: "fail"}
+		return saveImageResult{}, err
 	}
 
 	if resp.Part.InlineData == nil || len(resp.Part.InlineData.Data) == 0 {
 		log.Printf("Artifact '%s' has no inline data", filename)
-		return saveImageResult{Status: "fail"}
+		return saveImageResult{}, err
 	}
 
 	// Ensure the filename has a .png extension for the local file.
@@ -159,20 +150,20 @@ func saveImage(ctx tool.Context, input saveImageInput) saveImageResult {
 
 	// Create an "output" directory in the current working directory if it doesn't exist.
 	outputDir := "output"
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		log.Printf("Failed to create output directory '%s': %v", outputDir, err)
-		return saveImageResult{Status: "fail"}
+		return saveImageResult{}, err
 	}
 
 	localPath := filepath.Join(outputDir, localFilename)
-	err = os.WriteFile(localPath, resp.Part.InlineData.Data, 0644)
+	err = os.WriteFile(localPath, resp.Part.InlineData.Data, 0o644)
 	if err != nil {
 		log.Printf("Failed to write image to local file '%s': %v", localPath, err)
-		return saveImageResult{Status: "fail"}
+		return saveImageResult{}, err
 	}
 
 	log.Printf("Successfully saved image to %s", localPath)
-	return saveImageResult{Status: "success"}
+	return saveImageResult{Status: "success"}, nil
 }
 
 type saveImageInput struct {

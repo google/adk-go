@@ -189,5 +189,4 @@ func TestPartsOneWayConversion(t *testing.T) {
 	if diff := cmp.Diff([]a2a.Part{wantA2A}, gotA2A); diff != "" {
 		t.Fatalf("toA2AParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotA2A, wantA2A, diff)
 	}
-
 }

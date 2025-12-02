@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package demonstrates a workaround for using Google Search tool with other tools.
 package main
 
 import (
@@ -20,22 +21,23 @@ import (
 	"os"
 	"strings"
 
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/geminitool"
-	"google.golang.org/genai"
 )
 
-// Package main demonstrates how to create an agent with multuple tools,
-// the current implementation allows agent to do a google search and use
-// other custom tool as well. This is a workaround for genai limitation
-// which doesn't allow to have different type of tools.
+// Package main demonstrates a workaround for using multiple tool types (e.g.,
+// Google Search and custom functions) in a single agent. This is necessary
+// due to limitations in the genai API. The approach is to wrap agents with
+// different tool types into sub-agents, which are then managed by a root agent.
 func main() {
 	ctx := context.Background()
 
@@ -65,10 +67,10 @@ func main() {
 	type Output struct {
 		Poem string `json:"poem"`
 	}
-	handler := func(ctx tool.Context, input Input) Output {
+	handler := func(ctx tool.Context, input Input) (Output, error) {
 		return Output{
 			Poem: strings.Repeat("A line of a poem,", input.LineCount) + "\n",
-		}
+		}, nil
 	}
 	poemTool, err := functiontool.New(functiontool.Config{
 		Name:        "poem",
@@ -90,7 +92,7 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	agent, err := llmagent.New(llmagent.Config{
+	a, err := llmagent.New(llmagent.Config{
 		Name:        "root_agent",
 		Model:       model,
 		Description: "You can do a google search and generate poems.",
@@ -104,12 +106,12 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	config := &adk.Config{
-		AgentLoader: services.NewSingleAgentLoader(agent),
+	config := &launcher.Config{
+		AgentLoader: agent.NewSingleLoader(a),
 	}
+
 	l := full.NewLauncher()
-	err = l.Execute(ctx, config, os.Args[1:])
-	if err != nil {
-		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
 }

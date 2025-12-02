@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package demonstrates a workflow agent that runs sub-agents sequentially.
 package main
 
 import (
@@ -21,14 +22,14 @@ import (
 	"log"
 	"os"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type myAgent struct {
@@ -83,14 +84,12 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	config := &adk.Config{
-		AgentLoader: services.NewSingleAgentLoader(sequentialAgent),
+	config := &launcher.Config{
+		AgentLoader: agent.NewSingleLoader(sequentialAgent),
 	}
 
 	l := full.NewLauncher()
-	err = l.Execute(ctx, config, os.Args[1:])
-	if err != nil {
-		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
-
 }

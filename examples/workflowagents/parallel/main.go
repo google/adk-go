@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package demonstrates a workflow agent that runs sub-agents in parallel.
 package main
 
 import (
@@ -19,18 +20,18 @@ import (
 	"fmt"
 	"iter"
 	"log"
-	"math/rand/v2"
+	rand "math/rand/v2"
 	"os"
 	"time"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagents/parallelagent"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/server/restapi/services"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func main() {
@@ -65,14 +66,13 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	config := &adk.Config{
-		AgentLoader: services.NewSingleAgentLoader(parallelAgent),
+	config := &launcher.Config{
+		AgentLoader: agent.NewSingleLoader(parallelAgent),
 	}
 
 	l := full.NewLauncher()
-	err = l.Execute(ctx, config, os.Args[1:])
-	if err != nil {
-		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
 }
 
@@ -82,7 +82,7 @@ type myAgent struct {
 
 func (a myAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		for i := 0; i < 3; i++ {
+		for range 3 {
 			if !yield(&session.Event{
 				LLMResponse: model.LLMResponse{
 					Content: &genai.Content{

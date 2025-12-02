@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package provides an example ADK agent that loads and describes artifacts.
 package main
 
 import (
@@ -21,6 +22,8 @@ import (
 	"log"
 	"os"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
@@ -29,7 +32,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/loadartifactstool"
-	"google.golang.org/genai"
 )
 
 // Note: you need to run the program from the loadartifacts directory

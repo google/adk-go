@@ -19,8 +19,9 @@ import (
 	"context"
 	"time"
 
-	"google.golang.org/adk/session"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/session"
 )
 
 // Service is a definition of the memory service.
@@ -37,7 +38,7 @@ type Service interface {
 	Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error)
 }
 
-// CreateRequest represents a request for memory search.
+// SearchRequest represents a request for memory search.
 type SearchRequest struct {
 	Query   string
 	UserID  string

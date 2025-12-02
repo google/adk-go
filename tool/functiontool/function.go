@@ -17,13 +17,15 @@ package functiontool
 
 import (
 	"fmt"
+	"runtime/debug"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
 // FunctionTool: borrow implementation from MCP go.
@@ -46,7 +48,7 @@ type Config struct {
 
 // Func represents a Go function that can be wrapped in a tool.
 // It takes a tool.Context and a generic argument type, and returns a generic result type.
-type Func[TArgs, TResults any] func(tool.Context, TArgs) TResults
+type Func[TArgs, TResults any] func(tool.Context, TArgs) (TResults, error)
 
 // New creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
@@ -129,9 +131,14 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result map[string]any, err error) {
 	// TODO: Handle function call request from tc.InvocationContext.
-	// TODO: Handle panic -> convert to error.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in tool %q: %v\nstack: %s", f.Name(), r, debug.Stack())
+		}
+	}()
+
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
@@ -140,7 +147,10 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (map[str
 	if err != nil {
 		return nil, err
 	}
-	output := f.handler(ctx, input)
+	output, err := f.handler(ctx, input)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := typeutil.ConvertToWithJSONSchema[TResults, map[string]any](output, f.outputSchema)
 	if err == nil { // all good
 		return resp, nil

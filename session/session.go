@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"google.golang.org/adk/model"
 )
 
@@ -48,7 +49,7 @@ type Session interface {
 // key-value pairs.
 type State interface {
 	// Get retrieves the value associated with a given key.
-	// It return a ErrStateKeyNotExist error if the key does not exist.
+	// It returns a ErrStateKeyNotExist error if the key does not exist.
 	Get(string) (any, error)
 	// Set assigns the given value to the given key, overwriting any
 	// existing value. It returns an error if the underlying storage
@@ -64,7 +65,7 @@ type State interface {
 // key-value pairs.
 type ReadonlyState interface {
 	// Get retrieves the value associated with a given key.
-	// It return a ErrStateKeyNotExist error if the key does not exist.
+	// It returns a ErrStateKeyNotExist error if the key does not exist.
 	Get(string) (any, error)
 	// All returns an iterator (iter.Seq2) that yields all key-value pairs
 	// currently in the state. The order of iteration is not guaranteed.

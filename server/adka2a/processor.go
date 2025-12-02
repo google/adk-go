@@ -17,25 +17,30 @@ package adka2a
 import (
 	"context"
 	"fmt"
-
+	"maps"
 	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type eventProcessor struct {
 	reqCtx *a2asrv.RequestContext
 	meta   invocationMeta
 
-	// Created once the first TaskArtifactUpdateEvent is sent. Used for subsequent artifact updates.
+	// terminalActions is used to keep track of escalate and agent transfer actions on processed events.
+	// It is then gets passed to caller through with metadata of a terminal event.
+	// This is done to make sure the caller processes it, since intermediate events without parts might be ignored.
+	terminalActions session.EventActions
+
+	// responseID is created once the first TaskArtifactUpdateEvent is sent. Used for subsequent artifact updates.
 	responseID a2a.ArtifactID
 
-	// We don't send terminal events during processing because we don't want A2A server to stop reading from the queue
-	// until the whole ADK response is saved as an A2A artifact.
+	// terminalEvents is used to postpone sending a terminal event until the whole ADK response is saved as an A2A artifact.
 	// The highest-priority terminal event from this map is going to be send as the final Task status update, in the order of priority:
 	//  - failed
 	//  - input_required
@@ -50,10 +55,12 @@ func newEventProcessor(reqCtx *a2asrv.RequestContext, meta invocationMeta) *even
 	}
 }
 
-func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2a.TaskArtifactUpdateEvent, error) {
+func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.TaskArtifactUpdateEvent, error) {
 	if event == nil {
 		return nil, nil
 	}
+
+	p.updateTerminalActions(event)
 
 	eventMeta, err := toEventMeta(p.meta, event)
 	if err != nil {
@@ -64,7 +71,10 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 	if resp.ErrorCode != "" {
 		// TODO(yarolegovich): consider merging responses if multiple errors can be produced during an invocation
 		if _, ok := p.terminalEvents[a2a.TaskStateFailed]; !ok {
-			p.terminalEvents[a2a.TaskStateFailed] = toTaskFailedUpdateEvent(p.reqCtx, errorFromResponse(&resp), eventMeta)
+			// terminal event might add additional keys to its metadata when it's dispatched and these changes should
+			// not be reflected in this event's metadata
+			terminalEventMeta := maps.Clone(eventMeta)
+			p.terminalEvents[a2a.TaskStateFailed] = toTaskFailedUpdateEvent(p.reqCtx, errorFromResponse(&resp), terminalEventMeta)
 		}
 	}
 
@@ -108,14 +118,18 @@ func (p *eventProcessor) makeTerminalEvents() []a2a.Event {
 
 	for _, s := range []a2a.TaskState{a2a.TaskStateFailed, a2a.TaskStateInputRequired} {
 		if ev, ok := p.terminalEvents[s]; ok {
+			ev.Metadata = setActionsMeta(ev.Metadata, p.terminalActions)
 			result = append(result, ev)
 			return result
 		}
 	}
 
 	ev := a2a.NewStatusUpdateEvent(p.reqCtx, a2a.TaskStateCompleted, nil)
-	ev.Metadata = p.meta.eventMeta
 	ev.Final = true
+	// we're modifying base processor metadata which might have been sent with one of the previous events.
+	// this update shouldn't be reflected in the sent events' metadata.
+	baseMetaCopy := maps.Clone(p.meta.eventMeta)
+	ev.Metadata = setActionsMeta(baseMetaCopy, p.terminalActions)
 	result = append(result, ev)
 	return result
 }
@@ -130,6 +144,13 @@ func (p *eventProcessor) makeTaskFailedEvent(cause error, event *session.Event) 
 		}
 	}
 	return toTaskFailedUpdateEvent(p.reqCtx, cause, meta)
+}
+
+func (p *eventProcessor) updateTerminalActions(event *session.Event) {
+	p.terminalActions.Escalate = p.terminalActions.Escalate || event.Actions.Escalate
+	if event.Actions.TransferToAgent != "" {
+		p.terminalActions.TransferToAgent = event.Actions.TransferToAgent
+	}
 }
 
 func toTaskFailedUpdateEvent(task a2a.TaskInfoProvider, cause error, meta map[string]any) *a2a.TaskStatusUpdateEvent {

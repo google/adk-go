@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package demonstrates a coding workflow agent that runs sub-agents sequentially.
 package main
 
 import (
@@ -19,18 +20,17 @@ import (
 	"log"
 	"os"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
-	"google.golang.org/adk/cmd/launcher/adk"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/server/restapi/services"
-	"google.golang.org/genai"
 )
 
 func main() {
-
 	ctx := context.Background()
 
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{})
@@ -140,13 +140,11 @@ Do not add any other text before or after the code block.`,
 	// The rootAgent can now be used by the ADK framework.
 	log.Printf("Successfully created root agent: %s", rootAgent.Name())
 
-	config := &adk.Config{
-		AgentLoader: services.NewSingleAgentLoader(rootAgent),
+	config := &launcher.Config{
+		AgentLoader: agent.NewSingleLoader(rootAgent),
 	}
 	l := full.NewLauncher()
-	err = l.Execute(ctx, config, os.Args[1:])
-	if err != nil {
-		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
-
 }
