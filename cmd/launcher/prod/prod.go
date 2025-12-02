@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package prod provides easy way to play with ADK with all available options without development support (no console, no ADK Web UI, just API and A2A )
+// Package prod provides easy way to play with ADK with all available options without
+// development support (no console, no ADK Web UI) including only production
+// options like the REST API and A2A support.
 package prod
 
 import (
@@ -23,7 +25,7 @@ import (
 	"google.golang.org/adk/cmd/launcher/web/api"
 )
 
-// NewLauncher returnes universal launcher capable of serving api and a2a
+// NewLauncher returns a launcher capable of serving ADK REST API and A2A.
 func NewLauncher() launcher.Launcher {
 	return universal.NewLauncher(web.NewLauncher(api.NewLauncher(), a2a.NewLauncher()))
 }

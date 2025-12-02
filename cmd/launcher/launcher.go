@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package launcher provides ways to interact with agents
+// Package launcher provides ways to interact with agents.
 package launcher
 
 import (

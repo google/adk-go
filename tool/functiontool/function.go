@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime/debug"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -145,9 +146,14 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result map[string]any, err error) {
 	// TODO: Handle function call request from tc.InvocationContext.
-	// TODO: Handle panic -> convert to error.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in tool %q: %v\nstack: %s", f.Name(), r, debug.Stack())
+		}
+	}()
+
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)

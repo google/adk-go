@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package webui provides a sublauncher that adds ADK Web UI to the web server (using url /ui/)
+// Package webui provides a sublauncher that adds ADK Web UI capabilities.
 package webui
 
 import (
