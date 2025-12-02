@@ -110,7 +110,7 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 
 	res, ok := s.sessions.Get(id.Encode())
 	if !ok {
-		return nil, fmt.Errorf("session %+v not found", req.SessionID)
+		return nil, fmt.Errorf("session %q: %w", req.SessionID, ErrSessionNotFound)
 	}
 
 	copiedSession := copySessionWithoutStateAndEvents(res)
@@ -191,6 +191,10 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 		sessionID: sessionID,
 	}
 
+	if _, ok := s.sessions.Get(id.Encode()); !ok {
+		return fmt.Errorf("session %q: %w", sessionID, ErrSessionNotFound)
+	}
+
 	s.sessions.Delete(id.Encode())
 	return nil
 }
@@ -216,7 +220,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	stored_session, ok := s.sessions.Get(sess.id.Encode())
 	if !ok {
-		return fmt.Errorf("session not found, cannot apply event")
+		return fmt.Errorf("append event for session %q: %w", sess.ID(), ErrSessionNotFound)
 	}
 
 	// update the in-memory session
