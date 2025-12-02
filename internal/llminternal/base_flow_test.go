@@ -197,6 +197,54 @@ func TestCallTool(t *testing.T) {
 			},
 			want: map[string]any{"result": "success"},
 		},
+		{
+			name: "before callback result passed to after callback",
+			tool: &mockFunctionTool{
+				name: "testTool",
+				runFunc: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+					t.Error("tool should not be called")
+					return nil, nil
+				},
+			},
+			beforeToolCallbacks: []BeforeToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return map[string]any{"result": "from_before"}, nil
+				},
+			},
+			afterToolCallbacks: []AfterToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+					if val, ok := result["result"]; !ok || val != "from_before" {
+						return nil, errors.New("unexpected result in after callback")
+					}
+					return map[string]any{"result": "from_after"}, nil
+				},
+			},
+			want: map[string]any{"result": "from_after"},
+		},
+		{
+			name: "before callback error passed to after callback",
+			tool: &mockFunctionTool{
+				name: "testTool",
+				runFunc: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+					t.Error("tool should not be called")
+					return nil, nil
+				},
+			},
+			beforeToolCallbacks: []BeforeToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, errors.New("error_from_before")
+				},
+			},
+			afterToolCallbacks: []AfterToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+					if err == nil || err.Error() != "error_from_before" {
+						return nil, errors.New("unexpected error in after callback")
+					}
+					return map[string]any{"result": "error_handled_in_after"}, nil
+				},
+			},
+			want: map[string]any{"result": "error_handled_in_after"},
+		},
 	}
 
 	for _, tc := range tests {

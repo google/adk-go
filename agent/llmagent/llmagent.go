@@ -224,26 +224,14 @@ type Config struct {
 	OutputSchema *genai.Schema
 
 	// Callbacks are executed in the order they are provided.
-	// The execution of the callback chain stops at the first callback that returns a non-nil
-	// response
-	//   - If a callback returns (map[string]any, nil), it will be used directly as the result of
-	//     the tool call. Subsequent [BeforeToolCallback]s in the list are skipped.
-	//   - If a callback returns (nil, error), the tool execution is aborted, and the returned
-	//     error is propagated. Subsequent [BeforeToolCallback]s are skipped.
-	//   - If a callback returns (nil, nil), the execution continues to the next [BeforeToolCallback]
-	//     in the sequence.
+	// If a callback returns result/error, then the execution of the callback
+	// list stops AND the actual tool call is skipped.
 	BeforeToolCallbacks []BeforeToolCallback
 	// Tools available to the agent.
 	Tools []tool.Tool
 	// Callbacks are executed in the order they are provided.
-	// The execution of the callback chain stops at the first callback that returns a non-nil
-	// response.
-	//   - If a callback returns (map[string]any, nil), it will replace the result returned by
-	//     the tool's Run method. Subsequent [AfterToolCallback]s in the list are skipped.
-	//   - If a callback returns (nil, error), this error indicates a failure within the
-	//     callback itself, and will be propagated. Subsequent [AfterToolCallback]s are skipped.
-	//   - If a callback returns (nil, nil), the execution continues to the next [AfterToolCallback]
-	//     in the sequence.
+	// If a callback returns result/error, then the execution of the callback
+	// list stops and this result/error is returned instead.
 	AfterToolCallbacks []AfterToolCallback
 	// Toolsets will be used by llmagent to extract tools and pass to the
 	// underlying LLM.

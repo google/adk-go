@@ -420,12 +420,8 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 }
 
 func (f *Flow) callTool(tool toolinternal.FunctionTool, fArgs map[string]any, toolCtx tool.Context) map[string]any {
-	// If the result is present, it will be used instead of calling the actual tool.
 	result, err := f.invokeBeforeToolCallbacks(tool, fArgs, toolCtx)
-	if err != nil {
-		return map[string]any{"error": err.Error()}
-	}
-	if result == nil {
+	if result == nil && err == nil {
 		result, err = tool.Run(toolCtx, fArgs)
 	}
 	result, err = f.invokeAfterToolCallbacks(tool, fArgs, toolCtx, result, err)
