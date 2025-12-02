@@ -8,7 +8,6 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
 	github.com/openai/openai-go/v3 v3.8.1
-	golang.org/x/sync v0.17.0
 	golang.org/x/sync v0.18.0
 	google.golang.org/api v0.252.0
 	google.golang.org/genai v1.36.0
