@@ -110,6 +110,9 @@ func TestCallTool(t *testing.T) {
 				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"result": "intercepted"}, nil
 				},
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return map[string]any{"result": "2nd callback should not be called"}, nil
+				},
 			},
 			want: map[string]any{"result": "intercepted"},
 		},
@@ -125,6 +128,9 @@ func TestCallTool(t *testing.T) {
 			beforeToolCallbacks: []BeforeToolCallback{
 				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("before callback error")
+				},
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, errors.New("unexpected error")
 				},
 			},
 			want: map[string]any{"error": "before callback error"},
@@ -159,6 +165,9 @@ func TestCallTool(t *testing.T) {
 					}
 					return nil, nil
 				},
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+					return map[string]any{"result": "unexpected output"}, nil
+				},
 			},
 			want: map[string]any{"result": "error handled"},
 		},
@@ -173,6 +182,9 @@ func TestCallTool(t *testing.T) {
 			afterToolCallbacks: []AfterToolCallback{
 				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, errors.New("after callback error")
+				},
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+					return nil, errors.New("unexpected error")
 				},
 			},
 			want: map[string]any{"error": "after callback error"},
