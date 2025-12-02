@@ -60,7 +60,7 @@ func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.S
 // service will not attempt to open or close the database connection.
 func NewSessionServiceGorm(db *gorm.DB) (session.Service, error) {
 	if db == nil {
-		return nil, fmt.Errorf("db cannot be nil")
+return nil, fmt.Errorf("gorm.DB cannot be nil")
 	}
 	return &databaseService{db: db}, nil
 }
