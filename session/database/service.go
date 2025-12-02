@@ -42,9 +42,25 @@ type databaseService struct {
 // It returns the new [session.Service] or an error if the database connection
 // [gorm.Open] fails.
 func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.Service, error) {
+	// Deprecated: prefer NewSessionServiceGorm which accepts an already
+	// initialized *gorm.DB. This wrapper remains for backward compatibility
+	// and will open a database connection using the provided dialector.
 	db, err := gorm.Open(dialector, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("error creating database session service: %w", err)
+	}
+	return NewSessionServiceGorm(db)
+}
+
+// NewSessionServiceGorm creates a new [session.Service] backed by the
+// provided *gorm.DB. This constructor is preferred when callers already
+// manage a shared database connection (recommended). The caller is
+// responsible for managing the lifecycle of the provided DB (e.g. closing
+// the underlying sql.DB via `sqlDB, _ := db.DB(); sqlDB.Close()`). The
+// service will not attempt to open or close the database connection.
+func NewSessionServiceGorm(db *gorm.DB) (session.Service, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db cannot be nil")
 	}
 	return &databaseService{db: db}, nil
 }
