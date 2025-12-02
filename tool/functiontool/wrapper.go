@@ -34,7 +34,6 @@ type nonStructInputWrapper[TArgs, TResults any] struct {
 	inputSchema  *jsonschema.Resolved
 	outputSchema *jsonschema.Resolved
 	handler      Func[TArgs, TResults]
-	innerTool    *functionTool[TArgs, TResults]
 }
 
 // wrapNonStructInput wraps a functionTool if its input type is not a struct.
@@ -55,12 +54,6 @@ func wrapNonStructInput[TArgs, TResults any](
 			inputSchema:  inputSchema,
 			outputSchema: outputSchema,
 			handler:      handler,
-			innerTool: &functionTool[TArgs, TResults]{
-				cfg:          cfg,
-				inputSchema:  inputSchema,
-				outputSchema: outputSchema,
-				handler:      handler,
-			},
 		}, nil
 	}
 
@@ -110,17 +103,10 @@ func (w *nonStructInputWrapper[TArgs, TResults]) Declaration() *genai.FunctionDe
 		Required: []string{"input"},
 	}
 
-	// Copy the original input schema properties to the "input" property
-	if w.inputSchema != nil {
-		wrappedSchema.Properties["input"] = w.inputSchema.Schema()
-	} else {
-		// Use string as default if no schema
-		wrappedSchema.Properties["input"] = &jsonschema.Schema{Type: "string"}
-	}
-
-	if wrappedSchema != nil {
-		decl.ParametersJsonSchema = wrappedSchema
-	}
+	// Copy the original input schema properties to the "input" property.
+	// `inputSchema` is expected to be non-nil (inferred by New), so assign directly.
+	wrappedSchema.Properties["input"] = w.inputSchema.Schema()
+	decl.ParametersJsonSchema = wrappedSchema
 	if w.outputSchema != nil {
 		decl.ResponseJsonSchema = w.outputSchema.Schema()
 	}
@@ -174,10 +160,11 @@ func (w *nonStructInputWrapper[TArgs, TResults]) Run(ctx tool.Context, args any)
 		return resp, nil
 	}
 
-	// If conversion fails and outputSchema is set, validate and return with wrapped error
+	// If conversion fails and outputSchema is set, validate and return a
+	// specific validation error to aid debugging.
 	if w.outputSchema != nil {
 		if err1 := w.outputSchema.Validate(output); err1 != nil {
-			return resp, err // if it fails propagate original err.
+			return nil, fmt.Errorf("output validation failed: %w", err1)
 		}
 	}
 	wrappedOutput := map[string]any{"result": output}
