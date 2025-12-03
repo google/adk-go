@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package provides an example ADK agent that loads and describes artifacts.
 package main
 
 import (

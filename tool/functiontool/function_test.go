@@ -16,6 +16,7 @@ package functiontool_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
@@ -185,8 +186,14 @@ func TestFunctionTool_Simple(t *testing.T) {
 
 func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t *testing.T) {
 	// First tool
-	identityFunc := func(ctx tool.Context, x int) (int, error) {
-		return x, nil
+	type IntInput struct {
+		X int `json:"x"`
+	}
+	type IntOutput struct {
+		Result int `json:"result"`
+	}
+	identityFunc := func(ctx tool.Context, input IntInput) (IntOutput, error) {
+		return IntOutput{Result: input.X}, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{
 		Name:        "identity",
@@ -197,8 +204,14 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	}
 
 	// Second tool
-	stringIdentityFunc := func(ctx tool.Context, input string) (string, error) {
-		return input, nil
+	type StringInput struct {
+		Value string `json:"value"`
+	}
+	type StringOutput struct {
+		Result string `json:"result"`
+	}
+	stringIdentityFunc := func(ctx tool.Context, input StringInput) (StringOutput, error) {
+		return StringOutput{Result: input.Value}, nil
 	}
 	stringIdentityTool, err := functiontool.New(
 		functiontool.Config{
@@ -321,6 +334,40 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 				t.Errorf("weatherReportTool.Run returned unexpected result (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestFunctionTool_MapInput(t *testing.T) {
+	type Output struct {
+		Sum int `json:"sum"`
+	}
+	sumTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "sum_map",
+			Description: "sums numbers provided in a map input",
+		},
+		func(ctx tool.Context, input map[string]int) (Output, error) {
+			return Output{Sum: input["a"] + input["b"]}, nil
+		})
+	if err != nil {
+		t.Fatalf("NewFunctionTool failed: %v", err)
+	}
+
+	funcTool, ok := sumTool.(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("sumTool does not implement itype.RequestProcessor")
+	}
+	callResult, err := funcTool.Run(nil, map[string]any{"a": 2, "b": 3})
+	if err != nil {
+		t.Fatalf("sumTool.Run failed: %v", err)
+	}
+	got, err := typeutil.ConvertToWithJSONSchema[map[string]any, Output](callResult, nil)
+	if err != nil {
+		t.Fatalf("sumTool.Run returned unexpected result of type %[1]T: %[1]v", callResult)
+	}
+	want := Output{Sum: 5}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("sumTool.Run returned unexpected result (-want +got):\n%s", diff)
 	}
 }
 
@@ -507,4 +554,104 @@ func stringify(v any) string {
 		panic(err)
 	}
 	return string(x)
+}
+
+func TestNew_InvalidInputType(t *testing.T) {
+	testCases := []struct {
+		name       string
+		createTool func() (tool.Tool, error)
+		wantErrMsg string
+	}{
+		{
+			name: "string_input",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "string_tool",
+					Description: "a tool with string input",
+				}, func(ctx tool.Context, input string) (string, error) {
+					return input, nil
+				})
+			},
+			wantErrMsg: "input must be a struct type, got: string",
+		},
+		{
+			name: "int_input",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "int_tool",
+					Description: "a tool with int input",
+				}, func(ctx tool.Context, input int) (int, error) {
+					return input, nil
+				})
+			},
+			wantErrMsg: "input must be a struct type, got: int",
+		},
+		{
+			name: "bool_input",
+			createTool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name:        "bool_tool",
+					Description: "a tool with bool input",
+				}, func(ctx tool.Context, input bool) (bool, error) {
+					return input, nil
+				})
+			},
+			wantErrMsg: "input must be a struct type, got: bool",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.createTool()
+			if err == nil {
+				t.Fatalf("functiontool.New() succeeded, want error containing %q", tc.wantErrMsg)
+			}
+			if !errors.Is(err, functiontool.ErrInvalidArgument) {
+				t.Fatalf("functiontool.New() error = %v, want %v", err, functiontool.ErrInvalidArgument)
+			}
+		})
+	}
+}
+
+func TestFunctionTool_PanicRecovery(t *testing.T) {
+	type Args struct {
+		Value string `json:"value"`
+	}
+
+	panicHandler := func(ctx tool.Context, input Args) (string, error) {
+		panic("intentional panic for testing")
+	}
+
+	panicTool, err := functiontool.New(functiontool.Config{
+		Name:        "panic_tool",
+		Description: "a tool that always panics",
+	}, panicHandler)
+	if err != nil {
+		t.Fatalf("NewFunctionTool failed: %v", err)
+	}
+
+	funcTool, ok := panicTool.(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("panicTool does not implement toolinternal.FunctionTool")
+	}
+
+	result, err := funcTool.Run(nil, map[string]any{"value": "test"})
+	if err == nil {
+		t.Fatal("expected error from panic recovery, got nil")
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %v", result)
+	}
+
+	expectedErrParts := []string{
+		"panic in tool",
+		"panic_tool",
+		"intentional panic for testing",
+		"stack:",
+	}
+	for _, part := range expectedErrParts {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("expected error to contain %q, but it did not. Error: %v", part, err)
+		}
+	}
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// mcptool package provides MCP adapter, allowing to add MCP tools to LLMAgent.
+// Package mcptoolset provides an MCP tool set.
 package mcptoolset
 
 import (

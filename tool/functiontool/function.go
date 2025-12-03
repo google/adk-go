@@ -16,7 +16,10 @@
 package functiontool
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
+	"runtime/debug"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -49,11 +52,24 @@ type Config struct {
 // It takes a tool.Context and a generic argument type, and returns a generic result type.
 type Func[TArgs, TResults any] func(tool.Context, TArgs) (TResults, error)
 
+// ErrInvalidArgument indicates the input parameter type is invalid.
+var ErrInvalidArgument = errors.New("invalid argument")
+
 // New creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
 func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
 	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
+
+	var zeroArgs TArgs
+	argsType := reflect.TypeOf(zeroArgs)
+	for argsType != nil && argsType.Kind() == reflect.Ptr {
+		argsType = argsType.Elem()
+	}
+	if argsType == nil || (argsType.Kind() != reflect.Struct && argsType.Kind() != reflect.Map) {
+		return nil, fmt.Errorf("input must be a struct or a map or a pointer to those types, but received: %v: %w", argsType, ErrInvalidArgument)
+	}
+
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to infer input schema: %w", err)
@@ -130,9 +146,14 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result map[string]any, err error) {
 	// TODO: Handle function call request from tc.InvocationContext.
-	// TODO: Handle panic -> convert to error.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in tool %q: %v\nstack: %s", f.Name(), r, debug.Stack())
+		}
+	}()
+
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
