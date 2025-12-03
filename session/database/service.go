@@ -36,31 +36,17 @@ type databaseService struct {
 // NewSessionService creates a new [session.Service] implementation that uses a
 // relational database (e.g., PostgreSQL, Spanner, SQLite) via the GORM library.
 //
-// It requires a [gorm.Dialector] to specify the database connection and
-// accepts optional [gorm.Option] values for further GORM configuration.
+// It requires a [gorm.DB] to specify the database connection.
 //
-// It returns the new [session.Service] or an error if the database connection
-// [gorm.Open] fails.
-func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.Service, error) {
-	db, err := gorm.Open(dialector, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("error creating database session service: %w", err)
-	}
+// It returns the new [session.Service].
+func NewSessionService(db *gorm.DB) (session.Service, error) {
 	return &databaseService{db: db}, nil
 }
 
 // AutoMigrate runs the GORM auto-migration tool to ensure the database schema
 // matches the internal storage models (e.g., storageSession, storageEvent).
-//
-// NOTE: This function relies on a type assertion to the concrete *databaseService
-// implementation. It will return an error if the provided session.Service is
-// a different implementation.
-func AutoMigrate(service session.Service) error {
-	dbservice, ok := service.(*databaseService)
-	if !ok {
-		return fmt.Errorf("invalid session service type")
-	}
-	err := dbservice.db.AutoMigrate(&storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
+func AutoMigrate(db *gorm.DB) error {
+	err := db.AutoMigrate(&storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
 	if err != nil {
 		return fmt.Errorf("auto migrate failed: %w", err)
 	}

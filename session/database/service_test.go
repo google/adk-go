@@ -959,7 +959,12 @@ func emptyService(t *testing.T) *databaseService {
 		PrepareStmt: true,
 	}
 
-	service, err := NewSessionService(sqlite.Open("file::memory:?cache=shared"), gormConfig)
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), gormConfig)
+	if err != nil {
+		t.Fatalf("Failed to open GORM connection: %v", err)
+	}
+
+	service, err := NewSessionService(db)
 	if err != nil {
 		t.Fatalf("Failed to create session service: %v", err)
 	}
@@ -968,7 +973,7 @@ func emptyService(t *testing.T) *databaseService {
 		t.Fatalf("invalid session service type")
 	}
 
-	err = AutoMigrate(service)
+	err = AutoMigrate(db)
 	if err != nil {
 		t.Fatalf("Failed to AutoMigrate db: %v", err)
 	}
@@ -1010,8 +1015,5 @@ func emptyService(t *testing.T) *databaseService {
 		}
 	})
 
-	if err != nil {
-		t.Fatalf("Failed to open GORM connection: %v", err)
-	}
 	return dbservice
 }
