@@ -647,6 +647,20 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 			},
 			wantResponses: []model.LLMResponse{{Content: genai.NewContentFromText("hello", genai.RoleModel)}},
 		},
+		{
+			name: "after interceptor invoked with before result",
+			before: []BeforeA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error) {
+					return nil, fmt.Errorf("before error")
+				},
+			},
+			after: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, result *session.Event, err error) (*session.Event, error) {
+					return nil, fmt.Errorf("after error")
+				},
+			},
+			wantErr: fmt.Errorf("after error"),
+		},
 	}
 
 	for _, tc := range testCases {

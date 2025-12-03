@@ -39,7 +39,7 @@ import (
 // as the agent invocation result.
 type BeforeA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error)
 
-// A2AEventConverter can be used to provide a custome implementation of A2A event transformation logic.
+// A2AEventConverter can be used to provide a custom implementation of A2A event transformation logic.
 type A2AEventConverter func(ctx agent.ReadonlyContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error)
 
 // AfterA2ARequestCallback is called after receiving a response from the remote agent and converting it to a session.Event.
@@ -135,8 +135,13 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		}
 
 		req := &a2a.MessageSendParams{Message: msg, Config: cfg.MessageSendConfig}
-		if cbResp, cbErr := runBeforeA2ARequestCallbacks(ctx, cfg, req); cbResp != nil || cbErr != nil {
-			yield(cbResp, cbErr)
+
+		if bcbResp, bcbErr := runBeforeA2ARequestCallbacks(ctx, cfg, req); bcbResp != nil || bcbErr != nil {
+			if acbResp, acbErr := runAfterA2ARequestCallbacks(ctx, cfg, req, bcbResp, bcbErr); acbResp != nil || acbErr != nil {
+				yield(acbResp, acbErr)
+			} else {
+				yield(bcbResp, bcbErr)
+			}
 			return
 		}
 
