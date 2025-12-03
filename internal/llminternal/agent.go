@@ -32,7 +32,7 @@ type State struct {
 
 	Tools    []tool.Tool
 	Toolsets []tool.Toolset
-	Filter	 map[string]bool
+	Filter   map[string]bool
 
 	IncludeContents string
 

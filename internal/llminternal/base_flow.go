@@ -215,23 +215,17 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) er
 			return err
 		}
 	}
+
 	// TODO(cs168898): Add a dynamic filter where it can filter based on per request (for ratelimiting).
 	filter := Reveal(llmAgent).Filter
 	hasFilter := len(filter) > 0
 
 	// run processors for tools and filter
-	tools := []tool.Tool{}
+	allTools := []tool.Tool{}
 	baseTools := Reveal(llmAgent).Tools
 
-	if hasFilter {
-		for _, t := range baseTools {
-			if use, ok := filter[t.Name()]; ok && use {
-				tools = append(tools, t)
-			}
-		}
-	} else {
-		tools = append(tools, baseTools...)
-	}
+	// Collect all the tools
+	allTools = append(allTools, baseTools...)
 
 	for _, toolSet := range Reveal(llmAgent).Toolsets {
 
@@ -240,23 +234,29 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) er
 			return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
 		}
 
-		// if filter contains something then filter accordingly
-		if hasFilter {
-			for _, tool := range tsTools {
-				use, found := filter[tool.Name()]
-				if !found {
-					continue
-				}
-				if use {
-					tools = append(tools, tool)
-				}
-			}
-		} else {
-			// else just append the original toolset
-			tools = append(tools, tsTools...)
+		allTools = append(allTools, tsTools...)
+	}
+
+	// Check if filter is empty
+	if !hasFilter {
+		return toolPreprocess(ctx, req, allTools)
+	}
+
+	filteredTools := filterTools(filter, allTools)
+
+	return toolPreprocess(ctx, req, filteredTools)
+}
+
+func filterTools(filter map[string]bool, allTools []tool.Tool) []tool.Tool {
+	filteredTools := make([]tool.Tool, 0, len(allTools))
+	for _, tool := range allTools {
+		// we create a denylist which means we only add those that are NOT found in the filter
+		if _, found := filter[tool.Name()]; !found {
+			filteredTools = append(filteredTools, tool)
 		}
 	}
-	return toolPreprocess(ctx, req, tools)
+
+	return filteredTools
 }
 
 // toolPreprocess runs tool preprocess on the given request

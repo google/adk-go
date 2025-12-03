@@ -968,7 +968,8 @@ func TestToolFiltering(t *testing.T) {
 		DisallowTransferToParent: true,
 		DisallowTransferToPeers:  true,
 		Tools:                    []tool.Tool{sumTool},
-		Filter:                   map[string]bool{sumTool.Name(): false},
+		// The Filter's map values are ignored, but it has to be boolean.
+		Filter: map[string]bool{sumTool.Name(): true},
 	})
 	if err != nil {
 		t.Fatalf("failed to create LLM Agent: %v", err)
