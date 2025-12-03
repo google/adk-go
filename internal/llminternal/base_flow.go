@@ -369,6 +369,7 @@ func findLongRunningFunctionCallIDs(c *genai.Content, tools map[string]tool.Tool
 // TODO: check feasibility of running tool.Run concurrently.
 func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse) (*session.Event, error) {
 	var fnResponseEvents []*session.Event
+	accumulatedStateDelta := make(map[string]any)
 
 	fnCalls := utils.FunctionCalls(resp.Content)
 	for _, fnCall := range fnCalls {
@@ -380,7 +381,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		if !ok {
 			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
 		}
-		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)})
+		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{StateDelta: accumulatedStateDelta})
 		// toolCtx := tool.
 		spans := telemetry.StartTrace(ctx, "execute_tool "+fnCall.Name)
 
@@ -412,6 +413,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	mergedEvent, err := mergeParallelFunctionResponseEvents(fnResponseEvents)
 	if err != nil {
 		return mergedEvent, err
+	}
+	// Ensure the merged event's StateDelta reflects all accumulated changes.
+	if mergedEvent != nil {
+		mergedEvent.Actions.StateDelta = accumulatedStateDelta
 	}
 	// this is needed for debug traces of parallel calls
 	spans := telemetry.StartTrace(ctx, "execute_tool (merged)")
@@ -522,7 +527,10 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		base.Escalate = true
 	}
 	if other.StateDelta != nil {
-		base.StateDelta = other.StateDelta
+		if base.StateDelta == nil {
+			base.StateDelta = make(map[string]any)
+		}
+		maps.Copy(base.StateDelta, other.StateDelta)
 	}
 	return base
 }
