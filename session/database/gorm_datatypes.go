@@ -90,7 +90,9 @@ func (sm *stateMap) Scan(value any) error {
 
 func (sm stateMap) GormValue(ctx context.Context, db *gorm.DB) clause.Expr {
 	data, _ := json.Marshal(sm)
-	// TODO log the expression result
+	if db.Logger != nil {
+		db.Logger.Info(ctx, "GormValue expression result: %s", string(data))
+	}
 	return gorm.Expr("?", string(data))
 }
 
@@ -163,6 +165,8 @@ func (js dynamicJSON) GormValue(ctx context.Context, db *gorm.DB) clause.Expr {
 	if len(js) == 0 {
 		return gorm.Expr("NULL")
 	}
-	// TODO log the expression result
+	if db.Logger != nil {
+		db.Logger.Info(ctx, "GormValue expression result: %s", string(js))
+	}
 	return gorm.Expr("?", string(js))
 }
