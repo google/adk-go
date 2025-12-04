@@ -40,7 +40,7 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		return nil // In python, no error is yielded.
 	}
 	fn := buildContentsDefault // "" or "default".
-	if llmAgent.internal().IncludeContents == "none" {
+	if llmAgent.internal().IncludeContents == IncludeContentsNone {
 		// Include current turn context only (no conversation history)
 		fn = buildContentsCurrentTurnContextOnly
 	}
