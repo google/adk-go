@@ -89,9 +89,13 @@ func (sm *stateMap) Scan(value any) error {
 }
 
 func (sm stateMap) GormValue(ctx context.Context, db *gorm.DB) clause.Expr {
-	data, _ := json.Marshal(sm)
+	data, err := json.Marshal(sm)
 	if db.Logger != nil {
-		db.Logger.Info(ctx, "GormValue expression result: %s", string(data))
+		if err != nil {
+			db.Logger.Error(ctx, "GormValue json.Marshal error: %v", err)
+		} else {
+			db.Logger.Info(ctx, "GormValue expression result: %s", string(data))
+		}
 	}
 	return gorm.Expr("?", string(data))
 }
