@@ -276,13 +276,13 @@ type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]a
 type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
 // IncludeContents controls what parts of prior conversation history is received by llmagent.
-type IncludeContents string
+type IncludeContents = llminternal.IncludeContents
 
 const (
 	// IncludeContentsNone makes the llmagent operate solely on its current turn (latest user input + any following agent events).
-	IncludeContentsNone IncludeContents = "none"
+	IncludeContentsNone = llminternal.IncludeContentsNone
 	// IncludeContentsDefault is enabled by default. The llmagent receives the relevant conversation history.
-	IncludeContentsDefault IncludeContents = "default"
+	IncludeContentsDefault = llminternal.IncludeContentsDefault
 )
 
 type llmAgent struct {
