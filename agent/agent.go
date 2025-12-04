@@ -389,10 +389,10 @@ func (c *callbackContextState) All() iter.Seq2[string, any] {
 type invocationContext struct {
 	context.Context
 
-	agent     Agent
-	artifacts Artifacts
-	memory    Memory
-	session   session.Session
+	agent         Agent
+	artifacts     Artifacts
+	memory        Memory
+	session       session.Session
 
 	invocationID  string
 	branch        string
