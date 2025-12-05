@@ -154,6 +154,11 @@ type EventActions struct {
 	TransferToAgent string
 	// The agent is escalating to a higher level agent.
 	Escalate bool
+	// If set, this event represents a compacted summary of previous events.
+	// The compacted range is defined by StartTimestamp and EndTimestamp.
+	// When building LLM context, original events within this range are excluded
+	// and replaced by the CompactedContent summary.
+	Compaction *EventCompaction
 }
 
 // Prefixes for defining session's state scopes

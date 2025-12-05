@@ -20,11 +20,13 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"sync"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/compaction"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/internal/artifact"
@@ -48,6 +50,10 @@ type Config struct {
 	ArtifactService artifact.Service
 	// optional
 	MemoryService memory.Service
+	// optional
+	// CompactionConfig enables and configures session history compaction.
+	// If nil, compaction is disabled.
+	CompactionConfig *compaction.Config
 }
 
 // New creates a new [Runner].
@@ -65,14 +71,28 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)
 	}
 
-	return &Runner{
+	runner := &Runner{
 		appName:         cfg.AppName,
 		rootAgent:       cfg.Agent,
 		sessionService:  cfg.SessionService,
 		artifactService: cfg.ArtifactService,
 		memoryService:   cfg.MemoryService,
 		parents:         parents,
-	}, nil
+	}
+
+	// Initialize compactor if compaction is enabled
+	if cfg.CompactionConfig != nil {
+		if err := cfg.CompactionConfig.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid compaction config: %w", err)
+		}
+		if cfg.CompactionConfig.Enabled {
+			// Compactor requires an LLM - we'll get it from the context during Run()
+			// For now, just store the config
+			runner.compactionConfig = cfg.CompactionConfig
+		}
+	}
+
+	return runner, nil
 }
 
 // Runner manages the execution of the agent within a session, handling message
@@ -86,6 +106,12 @@ type Runner struct {
 	memoryService   memory.Service
 
 	parents parentmap.Map
+
+	// optional
+	compactionConfig *compaction.Config
+	compactorOnce    sync.Once
+	compactor        *compaction.Compactor
+	compactorErr     error
 }
 
 // Run runs the agent for the given user input, yielding events from agents.
@@ -172,6 +198,11 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			if !yield(event, nil) {
 				return
 			}
+		}
+
+		// Trigger compaction asynchronously if enabled
+		if r.compactionConfig != nil && r.compactionConfig.Enabled {
+			go r.maybeCompact(ctx)
 		}
 	}
 }
@@ -267,4 +298,51 @@ func findAgent(curAgent agent.Agent, targetName string) agent.Agent {
 		}
 	}
 	return nil
+}
+
+// maybeCompact checks if compaction should be triggered and performs it asynchronously.
+// This method is called as a goroutine after a successful invocation completes.
+// It does not yield results to the caller - any errors are only logged.
+func (r *Runner) maybeCompact(ctx agent.InvocationContext) {
+	// Validate that compaction is enabled
+	if r.compactionConfig == nil || !r.compactionConfig.Enabled {
+		return
+	}
+
+	// Get the LLM from the agent to use for summarization
+	llmAgent, ok := ctx.Agent().(llminternal.Agent)
+	if !ok {
+		log.Printf("cannot perform compaction: agent is not an LLM agent")
+		return
+	}
+
+	llm := llminternal.Reveal(llmAgent).Model
+	if llm == nil {
+		log.Printf("cannot perform compaction: LLM not available")
+		return
+	}
+
+	// Create or reuse compactor (thread-safe initialization using sync.Once)
+	r.compactorOnce.Do(func() {
+		r.compactor, r.compactorErr = compaction.New(*r.compactionConfig, llm)
+	})
+
+	if r.compactorErr != nil {
+		log.Printf("failed to create compactor: %v", r.compactorErr)
+		return
+	}
+
+	// Attempt compaction
+	compactionEvent, err := r.compactor.MaybeCompact(ctx, ctx.Session(), ctx.InvocationID())
+	if err != nil {
+		log.Printf("compaction failed: %v", err)
+		return
+	}
+
+	// If compaction occurred, store the compaction event
+	if compactionEvent != nil {
+		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), compactionEvent); err != nil {
+			log.Printf("failed to append compaction event: %v", err)
+		}
+	}
 }
