@@ -60,6 +60,13 @@ type A2AConfig struct {
 	// CardResolveOptions can be used to provide a set of agencard.Resolver configurations.
 	CardResolveOptions []agentcard.ResolveOption
 
+	// BeforeAgentCallbacks is a list of callbacks that are called sequentially
+	// before the agent starts its run.
+	//
+	// If any callback returns non-nil content or error, then the agent run and
+	// the remaining callbacks will be skipped, and a new event will be created
+	// from the content or error of that callback.
+	BeforeAgentCallbacks []agent.BeforeAgentCallback
 	// BeforeRequestCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil result or error. Then the
 	// actual request is skipped, and the returned response/error is used.
@@ -78,6 +85,13 @@ type A2AConfig struct {
 	// This is the ideal place to log agent responses, collect metrics on token or perform
 	// pre-processing of events before a mapper is invoked.
 	AfterRequestCallbacks []AfterA2ARequestCallback
+	// AfterAgentCallbacks is a list of callbacks that are called sequentially
+	// after the agent has completed its run.
+	//
+	// If any callback returns non-nil content or error, then a new event will be
+	// created from the content or error of that callback and the remaining
+	// callbacks will be skipped.
+	AfterAgentCallbacks []agent.AfterAgentCallback
 
 	// ClientFactory can be used to provide a set of a2aclient.Client configurations.
 	ClientFactory *a2aclient.Factory
@@ -94,8 +108,10 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 
 	remoteAgent := &a2aAgent{resolvedCard: cfg.AgentCard}
 	return agent.New(agent.Config{
-		Name:        cfg.Name,
-		Description: cfg.Description,
+		Name:                 cfg.Name,
+		Description:          cfg.Description,
+		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
+		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
 		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return remoteAgent.run(ic, cfg)
 		},
