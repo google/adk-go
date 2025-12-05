@@ -33,7 +33,7 @@ type State struct {
 	Tools    []tool.Tool
 	Toolsets []tool.Toolset
 
-	IncludeContents string
+	IncludeContents IncludeContents
 
 	GenerateContentConfig *genai.GenerateContentConfig
 
@@ -52,6 +52,16 @@ type State struct {
 }
 
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
+
+// IncludeContents controls what parts of prior conversation history is received by llmagent.
+type IncludeContents string
+
+const (
+	// IncludeContentsNone makes the llmagent operate solely on its current turn (latest user input + any following agent events).
+	IncludeContentsNone IncludeContents = "none"
+	// IncludeContentsDefault is enabled by default. The llmagent receives the relevant conversation history.
+	IncludeContentsDefault IncludeContents = "default"
+)
 
 func (s *State) internal() *State { return s }
 
