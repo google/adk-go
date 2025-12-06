@@ -62,6 +62,7 @@ func New(cfg Config) (Agent, error) {
 		beforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		run:                  cfg.Run,
 		afterAgentCallbacks:  cfg.AfterAgentCallbacks,
+		validate:             cfg.Validate,
 		State: agentinternal.State{
 			AgentType: agentinternal.TypeCustomAgent,
 		},
@@ -99,6 +100,10 @@ type Config struct {
 	// created from the content or error of that callback and the remaining
 	// callbacks will be skipped.
 	AfterAgentCallbacks []AfterAgentCallback
+
+	// Validate is an optional function that checks if the runner configuration
+	// meets the agent's requirements.
+	Validate func(ValidationConfig) error
 }
 
 // Artifacts interface provides methods to work with artifacts of the current
@@ -115,6 +120,18 @@ type Artifacts interface {
 type Memory interface {
 	AddSession(context.Context, session.Session) error
 	Search(ctx context.Context, query string) (*memory.SearchResponse, error)
+}
+
+// ValidationConfig holds the configuration status of the runner services.
+type ValidationConfig struct {
+	HasArtifactService bool
+	HasMemoryService   bool
+}
+
+// Validator is an optional interface that Agents and Tools can implement
+// to validate if the runner configuration meets their requirements.
+type Validator interface {
+	Validate(ValidationConfig) error
 }
 
 // BeforeAgentCallback is a function that is called before the agent starts
@@ -140,6 +157,14 @@ type agent struct {
 	beforeAgentCallbacks []BeforeAgentCallback
 	run                  func(InvocationContext) iter.Seq2[*session.Event, error]
 	afterAgentCallbacks  []AfterAgentCallback
+	validate             func(ValidationConfig) error
+}
+
+func (a *agent) Validate(cfg ValidationConfig) error {
+	if a.validate != nil {
+		return a.validate(cfg)
+	}
+	return nil
 }
 
 func (a *agent) Name() string {

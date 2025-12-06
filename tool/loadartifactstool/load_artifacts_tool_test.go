@@ -15,6 +15,7 @@
 package loadartifactstool_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -274,6 +275,32 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	}
 	if llmRequest.Contents[0].Role != "model" {
 		t.Errorf("Content Role: got %v, want 'model'", llmRequest.Contents[0].Role)
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_NoArtifactService(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+
+	// Create tool context WITHOUT artifact service configured
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Artifacts: nil, // No artifact service
+	})
+	tc := toolinternal.NewToolContext(ctx, "", nil)
+
+	llmRequest := &model.LLMRequest{}
+
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	if err == nil {
+		t.Fatal("Expected error when artifact service not configured, got nil")
+	}
+
+	if !errors.Is(err, toolinternal.ErrArtifactServiceNotConfigured) {
+		t.Errorf("Expected ErrArtifactServiceNotConfigured, got: %v", err)
 	}
 }
 

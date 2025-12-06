@@ -61,6 +61,14 @@ func (t *artifactsTool) IsLongRunning() bool {
 	return false
 }
 
+// Validate implements agent.Validator.
+func (t *artifactsTool) Validate(cfg agent.ValidationConfig) error {
+	if !cfg.HasArtifactService {
+		return fmt.Errorf("tool %q requires ArtifactService to be configured in runner", t.name)
+	}
+	return nil
+}
+
 // Declaration returns the GenAI FunctionDeclaration for the load_artifacts tool.
 //
 // This declaration allows the LLM to understand and call the tool

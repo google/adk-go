@@ -65,6 +65,11 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)
 	}
 
+	// Validate that required services are configured for tools
+	if err := validateConfiguration(cfg.Agent, cfg.ArtifactService, cfg.MemoryService); err != nil {
+		return nil, err
+	}
+
 	return &Runner{
 		appName:         cfg.AppName,
 		rootAgent:       cfg.Agent,
@@ -264,6 +269,50 @@ func findAgent(curAgent agent.Agent, targetName string) agent.Agent {
 	for _, subAgent := range curAgent.SubAgents() {
 		if agent := findAgent(subAgent, targetName); agent != nil {
 			return agent
+		}
+	}
+	return nil
+}
+
+// validateConfiguration checks that required services are available for tools.
+func validateConfiguration(rootAgent agent.Agent, artifactService artifact.Service, memoryService memory.Service) error {
+	valCfg := agent.ValidationConfig{
+		HasArtifactService: artifactService != nil,
+		HasMemoryService:   memoryService != nil,
+	}
+
+	return walkAgentTree(rootAgent, func(a agent.Agent) error {
+		if v, ok := a.(agent.Validator); ok {
+			if err := v.Validate(valCfg); err != nil {
+				return fmt.Errorf("agent %q validation failed: %w", a.Name(), err)
+			}
+		}
+
+		llmAgent, ok := a.(llminternal.Agent)
+		if !ok {
+			return nil
+		}
+
+		state := llminternal.Reveal(llmAgent)
+		for _, t := range state.Tools {
+			if v, ok := t.(agent.Validator); ok {
+				if err := v.Validate(valCfg); err != nil {
+					return fmt.Errorf("agent %q tool %q validation failed: %w", a.Name(), t.Name(), err)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// walkAgentTree recursively walks the agent tree and applies fn to each agent.
+func walkAgentTree(a agent.Agent, fn func(agent.Agent) error) error {
+	if err := fn(a); err != nil {
+		return err
+	}
+	for _, sub := range a.SubAgents() {
+		if err := walkAgentTree(sub, fn); err != nil {
+			return err
 		}
 	}
 	return nil
