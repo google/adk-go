@@ -32,17 +32,21 @@ import (
 type getSessionFunc func(ctx context.Context) (*mcp.ClientSession, error)
 
 func convertTool(t *mcp.Tool, getSessionFunc getSessionFunc) (tool.Tool, error) {
-	return &mcpTool{
+	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
 		funcDeclaration: &genai.FunctionDeclaration{
 			Name:                 t.Name,
 			Description:          t.Description,
 			ParametersJsonSchema: t.InputSchema,
-			ResponseJsonSchema:   t.OutputSchema,
 		},
 		getSessionFunc: getSessionFunc,
-	}, nil
+	}
+
+	if t.OutputSchema != nil {
+		mcp.funcDeclaration.ResponseJsonSchema = t.OutputSchema
+	}
+	return mcp, nil
 }
 
 type mcpTool struct {
