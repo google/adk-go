@@ -32,6 +32,12 @@ import (
 
 // New is a constructor for LLMAgent.
 func New(cfg Config) (agent.Agent, error) {
+	if cfg.ValidateFunc != nil {
+		if err := cfg.ValidateFunc(); err != nil {
+			return nil, fmt.Errorf("llmagent %q validation failed: %w", cfg.Name, err)
+		}
+	}
+
 	beforeModelCallbacks := make([]llminternal.BeforeModelCallback, 0, len(cfg.BeforeModelCallbacks))
 	for _, c := range cfg.BeforeModelCallbacks {
 		beforeModelCallbacks = append(beforeModelCallbacks, llminternal.BeforeModelCallback(c))
@@ -256,9 +262,9 @@ type Config struct {
 	// - Connects agents to coordinate with each other.
 	OutputKey string
 
-	// Validate is an optional function that checks if the runner configuration
-	// meets the agent's requirements.
-	Validate func(agent.ValidationConfig) error
+	// ValidateFunc is an optional function that checks if the agent is
+	// configured correctly.
+	ValidateFunc func() error
 }
 
 // BeforeModelCallback that is called before sending a request to the model.
@@ -397,10 +403,3 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 // placeholders into the instruction. You can use
 // util/instructionutil.InjectSessionState() helper if this functionality is needed.
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
-
-func (a *llmAgent) Validate(cfg agent.ValidationConfig) error {
-	if c, ok := a.Config.(Config); ok && c.Validate != nil {
-		return c.Validate(cfg)
-	}
-	return nil
-}

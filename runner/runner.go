@@ -66,7 +66,7 @@ func New(cfg Config) (*Runner, error) {
 	}
 
 	// Validate that required services are configured for tools
-	if err := validateConfiguration(cfg.Agent, cfg.ArtifactService, cfg.MemoryService); err != nil {
+	if err := validateConfiguration(cfg); err != nil {
 		return nil, err
 	}
 
@@ -274,16 +274,17 @@ func findAgent(curAgent agent.Agent, targetName string) agent.Agent {
 	return nil
 }
 
-// validateConfiguration checks that required services are available for tools.
-func validateConfiguration(rootAgent agent.Agent, artifactService artifact.Service, memoryService memory.Service) error {
-	valCfg := agent.ValidationConfig{
-		HasArtifactService: artifactService != nil,
-		HasMemoryService:   memoryService != nil,
-	}
+// Validator is an optional interface that Agents and Tools can implement
+// to validate if the runner configuration meets their requirements.
+type Validator interface {
+	Validate(Config) error
+}
 
-	return walkAgentTree(rootAgent, func(a agent.Agent) error {
-		if v, ok := a.(agent.Validator); ok {
-			if err := v.Validate(valCfg); err != nil {
+// validateConfiguration checks that required services are available for tools.
+func validateConfiguration(cfg Config) error {
+	return walkAgentTree(cfg.Agent, func(a agent.Agent) error {
+		if v, ok := a.(Validator); ok {
+			if err := v.Validate(cfg); err != nil {
 				return fmt.Errorf("agent %q validation failed: %w", a.Name(), err)
 			}
 		}
@@ -295,8 +296,8 @@ func validateConfiguration(rootAgent agent.Agent, artifactService artifact.Servi
 
 		state := llminternal.Reveal(llmAgent)
 		for _, t := range state.Tools {
-			if v, ok := t.(agent.Validator); ok {
-				if err := v.Validate(valCfg); err != nil {
+			if v, ok := t.(Validator); ok {
+				if err := v.Validate(cfg); err != nil {
 					return fmt.Errorf("agent %q tool %q validation failed: %w", a.Name(), t.Name(), err)
 				}
 			}

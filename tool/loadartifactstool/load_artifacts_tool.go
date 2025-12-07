@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/runner"
 	"google.golang.org/adk/tool"
 )
 
@@ -61,9 +62,9 @@ func (t *artifactsTool) IsLongRunning() bool {
 	return false
 }
 
-// Validate implements agent.Validator.
-func (t *artifactsTool) Validate(cfg agent.ValidationConfig) error {
-	if !cfg.HasArtifactService {
+// Validate implements runner.Validator.
+func (t *artifactsTool) Validate(cfg runner.Config) error {
+	if cfg.ArtifactService == nil {
 		return fmt.Errorf("tool %q requires ArtifactService to be configured in runner", t.name)
 	}
 	return nil

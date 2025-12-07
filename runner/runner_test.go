@@ -27,7 +27,6 @@ import (
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/loadartifactstool"
 	"google.golang.org/genai"
 )
 
@@ -333,44 +332,53 @@ func TestNew_ValidatesAgent(t *testing.T) {
 			name:        "agent validation fails",
 			validateErr: fmt.Errorf("validation failed"),
 			wantErr:     true,
-			errContains: "agent \"validating_agent\" validation failed: validation failed",
+			errContains: "llmagent \"validating_agent\" validation failed: validation failed",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testAgent := must(llmagent.New(llmagent.Config{
+			_, err := llmagent.New(llmagent.Config{
 				Name: "validating_agent",
-				Validate: func(cfg agent.ValidationConfig) error {
+				ValidateFunc: func() error {
 					return tt.validateErr
 				},
-			}))
-
-			_, err := New(Config{
-				AppName:        "testApp",
-				Agent:          testAgent,
-				SessionService: session.InMemoryService(),
 			})
 
 			if tt.wantErr {
 				if err == nil {
-					t.Errorf("New() expected error but got nil")
+					t.Errorf("llmagent.New() expected error but got nil")
 					return
 				}
 				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
-					t.Errorf("New() error = %v, want error containing %q", err, tt.errContains)
+					t.Errorf("llmagent.New() error = %v, want error containing %q", err, tt.errContains)
 				}
 			} else {
 				if err != nil {
-					t.Errorf("New() unexpected error = %v", err)
+					t.Errorf("llmagent.New() unexpected error = %v", err)
 				}
 			}
 		})
 	}
 }
 
-func TestNew_ValidatesLoadArtifactsToolRequiresArtifactService(t *testing.T) {
+type mockValidatorTool struct {
+	name         string
+	validateFunc func(Config) error
+}
 
+func (t *mockValidatorTool) Name() string { return t.name }
+func (t *mockValidatorTool) Description() string { return "mock tool" }
+func (t *mockValidatorTool) IsLongRunning() bool { return false }
+func (t *mockValidatorTool) Run(ctx tool.Context, args any) (map[string]any, error) { return nil, nil }
+func (t *mockValidatorTool) Validate(cfg Config) error {
+	if t.validateFunc != nil {
+		return t.validateFunc(cfg)
+	}
+	return nil
+}
+
+func TestNew_ValidatesTool(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -381,40 +389,62 @@ func TestNew_ValidatesLoadArtifactsToolRequiresArtifactService(t *testing.T) {
 		errContains     string
 	}{
 		{
-			name: "error when load_artifacts tool present but no artifact service",
+			name: "error when tool validation fails",
 			agent: must(llmagent.New(llmagent.Config{
 				Name:  "test_agent",
-				Tools: []tool.Tool{loadartifactstool.New()},
+				Tools: []tool.Tool{
+					&mockValidatorTool{
+						name: "validation_tool",
+						validateFunc: func(cfg Config) error {
+							if cfg.ArtifactService == nil {
+								return fmt.Errorf("requires ArtifactService")
+							}
+							return nil
+						},
+					},
+				},
 			})),
 			artifactService: nil,
 			wantErr:         true,
-			errContains:     "requires ArtifactService to be configured in runner",
+			errContains:     "requires ArtifactService",
 		},
 		{
-			name: "ok when load_artifacts tool and artifact service both present",
+			name: "ok when tool validation passes",
 			agent: must(llmagent.New(llmagent.Config{
 				Name:  "test_agent",
-				Tools: []tool.Tool{loadartifactstool.New()},
+				Tools: []tool.Tool{
+					&mockValidatorTool{
+						name: "validation_tool",
+						validateFunc: func(cfg Config) error {
+							if cfg.ArtifactService == nil {
+								return fmt.Errorf("requires ArtifactService")
+							}
+							return nil
+						},
+					},
+				},
 			})),
 			artifactService: artifact.InMemoryService(),
 			wantErr:         false,
 		},
 		{
-			name: "ok when no load_artifacts tool and no artifact service",
-			agent: must(llmagent.New(llmagent.Config{
-				Name: "test_agent",
-			})),
-			artifactService: nil,
-			wantErr:         false,
-		},
-		{
-			name: "error when load_artifacts in sub-agent but no artifact service",
+			name: "error when nested tool validation fails",
 			agent: must(llmagent.New(llmagent.Config{
 				Name: "parent_agent",
 				SubAgents: []agent.Agent{
 					must(llmagent.New(llmagent.Config{
 						Name:  "child_agent",
-						Tools: []tool.Tool{loadartifactstool.New()},
+						Tools: []tool.Tool{
+							&mockValidatorTool{
+								name: "validation_tool",
+								validateFunc: func(cfg Config) error {
+									if cfg.ArtifactService == nil {
+										return fmt.Errorf("requires ArtifactService")
+									}
+									return nil
+								},
+							},
+						},
 					})),
 				},
 			})),
