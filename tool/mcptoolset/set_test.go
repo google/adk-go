@@ -307,3 +307,57 @@ func TestToolFilter(t *testing.T) {
 		t.Errorf("tools mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestSessionContextCancellation(t *testing.T) {
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	// We don't need actual tools for this test, just the connection.
+	_, err := server.Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wrap in-memory transport to spy on the context passed to Connect.
+	spyTransport := &contextSpyTransport{Transport: clientTransport}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport: spyTransport,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err = ts.Tools(icontext.NewReadonlyContext(
+		icontext.NewInvocationContext(
+			ctx,
+			icontext.InvocationContextParams{},
+		),
+	))
+	if err != nil {
+		t.Fatalf("First Tools call failed: %v", err)
+	}
+
+	// Cancel the context.
+	cancel()
+
+	// Check if the context passed to Connect was cancelled.
+	if err := spyTransport.Context().Err(); err != nil {
+		t.Fatalf("Transport context cancelled: %v. Session is incorrectly tied to request context.", err)
+	}
+}
+
+type contextSpyTransport struct {
+	mcp.Transport
+	ctx context.Context
+}
+
+func (t *contextSpyTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	t.ctx = ctx
+	return t.Transport.Connect(ctx)
+}
+
+func (t *contextSpyTransport) Context() context.Context {
+	return t.ctx
+}

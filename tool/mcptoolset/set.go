@@ -142,7 +142,7 @@ func (s *set) getSession(ctx context.Context) (*mcp.ClientSession, error) {
 		return s.session, nil
 	}
 
-	session, err := s.client.Connect(ctx, s.transport, nil)
+	session, err := s.client.Connect(context.Background(), s.transport, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init MCP session: %w", err)
 	}
