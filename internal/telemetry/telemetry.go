@@ -51,13 +51,22 @@ var (
 )
 
 const (
-	systemName            = "gcp.vertex.agent"
-	genAiOperationName    = "gen_ai.operation.name"
-	genAiToolDescription  = "gen_ai.tool.description"
-	genAiToolName         = "gen_ai.tool.name"
-	genAiToolCallID       = "gen_ai.tool.call.id"
-	genAiSystemName       = "gen_ai.system"
+	systemName           = "gcp.vertex.agent"
+	genAiOperationName   = "gen_ai.operation.name"
+	genAiToolDescription = "gen_ai.tool.description"
+	genAiToolName        = "gen_ai.tool.name"
+	genAiToolCallID      = "gen_ai.tool.call.id"
+	genAiSystemName      = "gen_ai.system"
+
 	genAiRequestModelName = "gen_ai.request.model"
+	genAiRequestTopP      = "gen_ai.request.top_p"
+	genAiRequestMaxTokens = "gen_ai.request.max_tokens"
+
+	genAiResponseFinishReason        = "gen_ai.response.finish_reason"
+	genAiResponsePromptTokens        = "gen_ai.response.prompt_tokens"
+	genAiResponseCompletionTokens    = "gen_ai.response.completion_tokens"
+	genAiResponseCachedContentTokens = "gen_ai.response.cached_content_tokens"
+	genAiResponseTotalTokens         = "gen_ai.response.total_tokens"
 
 	gcpVertexAgentLLMRequestName   = "gcp.vertex.agent.llm_request"
 	gcpVertexAgentToolCallArgsName = "gcp.vertex.agent.tool_call_args"
@@ -201,20 +210,28 @@ func TraceLLMCall(spans []trace.Span, agentCtx agent.InvocationContext, llmReque
 		}
 
 		if llmRequest.Config.TopP != nil {
-			attributes = append(attributes, attribute.Float64("gen_ai.request.top_p", float64(*llmRequest.Config.TopP)))
+			attributes = append(attributes, attribute.Float64(genAiRequestTopP, float64(*llmRequest.Config.TopP)))
 		}
 
 		if llmRequest.Config.MaxOutputTokens != 0 {
-			attributes = append(attributes, attribute.Int("gen_ai.request.max_tokens", int(llmRequest.Config.MaxOutputTokens)))
+			attributes = append(attributes, attribute.Int(genAiRequestMaxTokens, int(llmRequest.Config.MaxOutputTokens)))
 		}
 		if event.FinishReason != "" {
-			attributes = append(attributes, attribute.String("gen_ai.response.finish_reason", string(event.FinishReason)))
+			attributes = append(attributes, attribute.String(genAiResponseFinishReason, string(event.FinishReason)))
 		}
 		if event.UsageMetadata != nil {
-			attributes = append(attributes, attribute.Int("gen_ai.response.prompt_tokens", int(event.UsageMetadata.PromptTokenCount)))
-			attributes = append(attributes, attribute.Int("gen_ai.response.completion_tokens", int(event.UsageMetadata.CandidatesTokenCount)))
-			attributes = append(attributes, attribute.Int("gen_ai.response.cached_content_tokens", int(event.UsageMetadata.CachedContentTokenCount)))
-			attributes = append(attributes, attribute.Int("gen_ai.response.total_tokens", int(event.UsageMetadata.TotalTokenCount)))
+			if event.UsageMetadata.PromptTokenCount > 0 {
+				attributes = append(attributes, attribute.Int(genAiResponsePromptTokens, int(event.UsageMetadata.PromptTokenCount)))
+			}
+			if event.UsageMetadata.CandidatesTokenCount > 0 {
+				attributes = append(attributes, attribute.Int(genAiResponseCompletionTokens, int(event.UsageMetadata.CandidatesTokenCount)))
+			}
+			if event.UsageMetadata.CachedContentTokenCount > 0 {
+				attributes = append(attributes, attribute.Int(genAiResponseCachedContentTokens, int(event.UsageMetadata.CachedContentTokenCount)))
+			}
+			if event.UsageMetadata.TotalTokenCount > 0 {
+				attributes = append(attributes, attribute.Int(genAiResponseTotalTokens, int(event.UsageMetadata.TotalTokenCount)))
+			}
 		}
 
 		span.SetAttributes(attributes...)
