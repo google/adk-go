@@ -19,12 +19,11 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	artifactinternal "google.golang.org/adk/internal/artifact"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/session"
 )
@@ -197,7 +196,7 @@ And another optional artifact:
 				}
 			}
 			// Create invocation context
-			ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+			ctx := agent.NewInvocationContextFromParams(context.Background(), agent.InvocationContextParams{
 				Artifacts: artifacts,
 				Session:   sess,
 			})

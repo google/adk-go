@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"iter"
 	"testing"
 
@@ -112,9 +113,9 @@ func TestAgentCallbacks(t *testing.T) {
 				t.Fatalf("failed to create agent: %v", err)
 			}
 
-			ctx := &invocationContext{
-				agent: testAgent,
-			}
+			ctx := NewInvocationContextFromParams(context.Background(), InvocationContextParams{
+				Agent: testAgent,
+			})
 			var gotEvents []*session.Event
 			for event, err := range testAgent.Run(ctx) {
 				if err != nil {
@@ -158,10 +159,10 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	ctx := &invocationContext{
-		agent:         testAgent,
-		endInvocation: true,
-	}
+	ctx := NewInvocationContextFromParams(context.Background(), InvocationContextParams{
+		Agent:         testAgent,
+		EndInvocation: true,
+	})
 	for _, err := range testAgent.Run(ctx) {
 		if err != nil {
 			t.Fatalf("unexpected error from the agent: %v", err)
@@ -191,9 +192,9 @@ func TestEndInvocation_EndsAfterMainCall(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	ctx := &invocationContext{
-		agent: testAgent,
-	}
+	ctx := NewInvocationContextFromParams(context.Background(), InvocationContextParams{
+		Agent: testAgent,
+	})
 	var gotEvents []*session.Event
 	for event, err := range testAgent.Run(ctx) {
 		if err != nil {

@@ -22,7 +22,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
-	contextinternal "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -58,7 +57,7 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 	if actions.StateDelta == nil {
 		actions.StateDelta = make(map[string]any)
 	}
-	cbCtx := contextinternal.NewCallbackContextWithDelta(ctx, actions.StateDelta)
+	cbCtx := agent.NewCallbackContextWithDelta(ctx, actions.StateDelta)
 
 	return &toolContext{
 		CallbackContext:   cbCtx,

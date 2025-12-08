@@ -33,7 +33,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
@@ -85,7 +84,7 @@ func newInvocationContext(t *testing.T, events []*session.Event) agent.Invocatio
 			t.Fatalf("sessionService.AppendEvent() error = %v", err)
 		}
 	}
-	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Session: resp.Session})
+	ic := agent.NewInvocationContextFromParams(ctx, agent.InvocationContextParams{Session: resp.Session})
 	return ic
 }
 

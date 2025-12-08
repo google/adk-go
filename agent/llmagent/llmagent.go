@@ -23,7 +23,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	agentinternal "google.golang.org/adk/internal/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -307,7 +306,7 @@ type agentState = agentinternal.State
 
 func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	// TODO: branch context?
-	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+	ctx = agent.NewInvocationContextFromParams(ctx, agent.InvocationContextParams{
 		Artifacts:   ctx.Artifacts(),
 		Memory:      ctx.Memory(),
 		Session:     ctx.Session(),

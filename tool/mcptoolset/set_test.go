@@ -31,7 +31,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/model"
@@ -287,10 +286,10 @@ func TestToolFilter(t *testing.T) {
 		t.Fatalf("Failed to create MCP tool set: %v", err)
 	}
 
-	tools, err := ts.Tools(icontext.NewReadonlyContext(
-		icontext.NewInvocationContext(
+	tools, err := ts.Tools(agent.NewReadonlyContext(
+		agent.NewInvocationContextFromParams(
 			t.Context(),
-			icontext.InvocationContextParams{},
+			agent.InvocationContextParams{},
 		),
 	))
 	if err != nil {

@@ -24,7 +24,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
@@ -45,13 +44,13 @@ func newTestInvocationContext(t *testing.T, agentName string, events ...*session
 			return nil
 		}
 	}
-	agent, err := agent.New(agent.Config{Name: agentName})
+	agentInstance, err := agent.New(agent.Config{Name: agentName})
 	if err != nil {
 		t.Errorf("agent.New() error = %v", err)
 		return nil
 	}
-	return icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Agent:   agent,
+	return agent.NewInvocationContextFromParams(ctx, agent.InvocationContextParams{
+		Agent:   agentInstance,
 		Session: resp.Session,
 	})
 }

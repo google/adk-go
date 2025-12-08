@@ -18,12 +18,11 @@ import (
 	"testing"
 
 	"google.golang.org/adk/agent"
-	contextinternal "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/session"
 )
 
 func TestToolContext(t *testing.T) {
-	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
+	inv := agent.NewInvocationContextFromParams(t.Context(), agent.InvocationContextParams{})
 	toolCtx := NewToolContext(inv, "fn1", &session.EventActions{})
 
 	if _, ok := toolCtx.(agent.ReadonlyContext); !ok {

@@ -23,7 +23,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 )
@@ -67,7 +66,7 @@ var placeholderRegex = regexp.MustCompile(`{+[^{}]*}+`)
 
 func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agentState *State) error {
 	if agentState.InstructionProvider != nil {
-		instruction, err := agentState.InstructionProvider(icontext.NewReadonlyContext(ctx))
+		instruction, err := agentState.InstructionProvider(agent.NewReadonlyContext(ctx))
 		if err != nil {
 			return fmt.Errorf("failed to evaluate global instruction provider: %w", err)
 		}
@@ -91,7 +90,7 @@ func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agen
 
 func appendGlobalInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agentState *State) error {
 	if agentState.GlobalInstructionProvider != nil {
-		instruction, err := agentState.GlobalInstructionProvider(icontext.NewReadonlyContext(ctx))
+		instruction, err := agentState.GlobalInstructionProvider(agent.NewReadonlyContext(ctx))
 		if err != nil {
 			return fmt.Errorf("failed to evaluate global instruction provider: %w", err)
 		}

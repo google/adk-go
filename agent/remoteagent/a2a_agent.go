@@ -26,7 +26,6 @@ import (
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
@@ -174,7 +173,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			var err error
 			var event *session.Event
 			if cfg.Converter != nil {
-				event, err = cfg.Converter(icontext.NewReadonlyContext(ctx), req, a2aEvent, a2aErr)
+				event, err = cfg.Converter(agent.NewReadonlyContext(ctx), req, a2aEvent, a2aErr)
 			} else {
 				event, err = convertToSessionEvent(ctx, req, a2aEvent, a2aErr)
 			}
@@ -307,7 +306,7 @@ func destroy(client *a2aclient.Client) {
 }
 
 func runBeforeA2ARequestCallbacks(ctx agent.InvocationContext, cfg A2AConfig, req *a2a.MessageSendParams) (*session.Event, error) {
-	cctx := icontext.NewCallbackContext(ctx)
+	cctx := agent.NewCallbackContext(ctx)
 	for _, callback := range cfg.BeforeRequestCallbacks {
 		if cbResp, cbErr := callback(cctx, req); cbResp != nil || cbErr != nil {
 			return cbResp, cbErr
@@ -317,7 +316,7 @@ func runBeforeA2ARequestCallbacks(ctx agent.InvocationContext, cfg A2AConfig, re
 }
 
 func runAfterA2ARequestCallbacks(ctx agent.InvocationContext, cfg A2AConfig, req *a2a.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
-	cctx := icontext.NewCallbackContext(ctx)
+	cctx := agent.NewCallbackContext(ctx)
 	for _, callback := range cfg.AfterRequestCallbacks {
 		if cbEvent, cbErr := callback(cctx, req, resp, err); cbEvent != nil || cbErr != nil {
 			return cbEvent, cbErr

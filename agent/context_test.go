@@ -12,31 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package context
+package agent
 
 import (
+	"strings"
 	"testing"
-
-	"google.golang.org/adk/agent"
 )
 
 func TestReadonlyContext(t *testing.T) {
-	inv := NewInvocationContext(t.Context(), InvocationContextParams{})
+	inv := NewInvocationContextFromParams(t.Context(), InvocationContextParams{})
 	readonly := NewReadonlyContext(inv)
 
-	if got, ok := readonly.(agent.InvocationContext); ok {
+	if got, ok := readonly.(InvocationContext); ok {
 		t.Errorf("ReadonlyContext(%+T) is unexpectedly an InvocationContext", got)
 	}
 }
 
 func TestCallbackContext(t *testing.T) {
-	inv := NewInvocationContext(t.Context(), InvocationContextParams{})
+	inv := NewInvocationContextFromParams(t.Context(), InvocationContextParams{})
 	callback := NewCallbackContext(inv)
 
-	if _, ok := callback.(agent.ReadonlyContext); !ok {
+	if _, ok := callback.(ReadonlyContext); !ok {
 		t.Errorf("CallbackContext(%+T) is unexpectedly not a ReadonlyContext", callback)
 	}
-	if got, ok := callback.(agent.InvocationContext); ok {
+	if got, ok := callback.(InvocationContext); ok {
 		t.Errorf("CallbackContext(%+T) is unexpectedly an InvocationContext", got)
+	}
+}
+
+func TestInvocationContextDefaultInvocationID(t *testing.T) {
+	inv := NewInvocationContextFromParams(t.Context(), InvocationContextParams{})
+
+	if inv.InvocationID() == "" {
+		t.Fatal("InvocationID() is unexpectedly empty")
+	}
+	if !strings.HasPrefix(inv.InvocationID(), "e-") {
+		t.Fatalf("InvocationID() = %q, want prefix \"e-\"", inv.InvocationID())
 	}
 }
