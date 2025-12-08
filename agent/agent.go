@@ -25,6 +25,7 @@ import (
 	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 )
 
@@ -389,7 +390,7 @@ type invocationContext struct {
 	invocationID  string
 	branch        string
 	userContent   *genai.Content
-	runConfig     *RunConfig
+	runConfig     *runconfig.RunConfig
 	endInvocation bool
 }
 
@@ -421,7 +422,7 @@ func (c *invocationContext) UserContent() *genai.Content {
 	return c.userContent
 }
 
-func (c *invocationContext) RunConfig() *RunConfig {
+func (c *invocationContext) RunConfig() *runconfig.RunConfig {
 	return c.runConfig
 }
 

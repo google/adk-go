@@ -37,6 +37,7 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptoolset"
@@ -263,7 +264,7 @@ func (r *testAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 		content = genai.NewContentFromText(newMessage, genai.RoleUser)
 	}
 
-	return r.runner.Run(ctx, userID, session.ID(), content, agent.RunConfig{})
+	return r.runner.Run(ctx, userID, session.ID(), content, runconfig.RunConfig{})
 }
 
 func TestToolFilter(t *testing.T) {

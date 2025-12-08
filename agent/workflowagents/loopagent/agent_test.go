@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/agent/workflowagents/loopagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -216,7 +217,7 @@ func TestNewLoopAgent(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
+			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), runconfig.RunConfig{}) {
 				if err != nil {
 					t.Errorf("got unexpected error: %v", err)
 				}

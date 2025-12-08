@@ -21,6 +21,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 )
 
@@ -33,7 +34,7 @@ type InvocationContextParams struct {
 	Agent  agent.Agent
 
 	UserContent   *genai.Content
-	RunConfig     *agent.RunConfig
+	RunConfig     *runconfig.RunConfig
 	EndInvocation bool
 }
 
@@ -80,7 +81,7 @@ func (c *InvocationContext) UserContent() *genai.Content {
 	return c.params.UserContent
 }
 
-func (c *InvocationContext) RunConfig() *agent.RunConfig {
+func (c *InvocationContext) RunConfig() *runconfig.RunConfig {
 	return c.params.RunConfig
 }
 

@@ -23,6 +23,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/server/adkrest/internal/models"
 	"google.golang.org/adk/session"
 )
@@ -156,7 +157,7 @@ func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appNam
 	return nil
 }
 
-func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Runner, *agent.RunConfig, error) {
+func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Runner, *runconfig.RunConfig, error) {
 	curAgent, err := c.agentLoader.LoadAgent(req.AppName)
 	if err != nil {
 		return nil, nil, newStatusError(fmt.Errorf("load agent: %w", err), http.StatusInternalServerError)
@@ -173,11 +174,11 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 		return nil, nil, newStatusError(fmt.Errorf("create runner: %w", err), http.StatusInternalServerError)
 	}
 
-	streamingMode := agent.StreamingModeNone
+	streamingMode := runconfig.StreamingModeNone
 	if req.Streaming {
-		streamingMode = agent.StreamingModeSSE
+		streamingMode = runconfig.StreamingModeSSE
 	}
-	return r, &agent.RunConfig{
+	return r, &runconfig.RunConfig{
 		StreamingMode: streamingMode,
 	}, nil
 }

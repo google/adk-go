@@ -34,6 +34,7 @@ import (
 	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
+	runner "google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 )
 
@@ -91,7 +92,7 @@ type Runner struct {
 // Run runs the agent for the given user input, yielding events from agents.
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg runner.RunConfig) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.

@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
@@ -197,8 +198,8 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 	}
 
 	// TODO(dpasiukevich): verify agent loop termination.
-	eventCh := r.Run(toolCtx, subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
-		StreamingMode: agent.StreamingModeSSE,
+	eventCh := r.Run(toolCtx, subSession.Session.UserID(), subSession.Session.ID(), content, runconfig.RunConfig{
+		StreamingMode: runconfig.StreamingModeSSE,
 	})
 
 	var lastEvent *session.Event

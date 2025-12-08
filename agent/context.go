@@ -19,6 +19,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 )
 
@@ -88,7 +89,7 @@ type InvocationContext interface {
 	UserContent() *genai.Content
 
 	// RunConfig stores the runtime configuration used during this invocation.
-	RunConfig() *RunConfig
+	RunConfig() *runconfig.RunConfig
 
 	// EndInvocation ends the current invocation. This stops any planned agent
 	// calls.

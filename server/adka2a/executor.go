@@ -23,8 +23,8 @@ import (
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 )
 
@@ -33,7 +33,7 @@ type ExecutorConfig struct {
 	// RunnerConfig is the configuration which will be used for [runner.New] during A2A Execute invocation.
 	RunnerConfig runner.Config
 	// RunConfig is the configuration which will be passed to [runner.Runner.Run] during A2A Execute invocation.
-	RunConfig agent.RunConfig
+	RunConfig runconfig.RunConfig
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)

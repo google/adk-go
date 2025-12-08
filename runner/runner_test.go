@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 )
 
@@ -239,7 +240,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 		Role: genai.RoleUser,
 	}
 
-	cfg := agent.RunConfig{
+	cfg := runconfig.RunConfig{
 		SaveInputBlobsAsArtifacts: true,
 	}
 

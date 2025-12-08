@@ -32,6 +32,7 @@ import (
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -106,7 +107,7 @@ func TestLLMAgentStreamingModeSSE(t *testing.T) {
 		t.Fatalf("NewLLMAgent failed: %v", err)
 	}
 	testRunner := testutil.NewTestAgentRunner(t, a)
-	stream := testRunner.RunContentWithConfig(t, "test_session", genai.NewContentFromText("What is the sum of the first 50 prime numbers?", "user"), agent.RunConfig{StreamingMode: agent.StreamingModeSSE})
+	stream := testRunner.RunContentWithConfig(t, "test_session", genai.NewContentFromText("What is the sum of the first 50 prime numbers?", "user"), runconfig.RunConfig{StreamingMode: runconfig.StreamingModeSSE})
 	events, err := testutil.CollectEvents(stream)
 	gotThought := false
 	numContents := 0

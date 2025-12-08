@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 )
 
@@ -235,7 +236,7 @@ func TestNewSequentialAgent(t *testing.T) {
 			// run twice, the second time it will need to determine which agent to use, and we want to get the same result
 			gotEvents = make([]*session.Event, 0)
 			for range 2 {
-				for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
+				for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), runconfig.RunConfig{}) {
 					if err != nil {
 						t.Errorf("got unexpected error: %v", err)
 					}

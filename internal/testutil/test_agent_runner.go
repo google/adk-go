@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 )
 
@@ -77,10 +78,10 @@ func (r *TestAgentRunner) Run(t *testing.T, sessionID, newMessage string) iter.S
 
 func (r *TestAgentRunner) RunContent(t *testing.T, sessionID string, content *genai.Content) iter.Seq2[*session.Event, error] {
 	t.Helper()
-	return r.RunContentWithConfig(t, sessionID, content, agent.RunConfig{})
+	return r.RunContentWithConfig(t, sessionID, content, runconfig.RunConfig{})
 }
 
-func (r *TestAgentRunner) RunContentWithConfig(t *testing.T, sessionID string, content *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+func (r *TestAgentRunner) RunContentWithConfig(t *testing.T, sessionID string, content *genai.Content, cfg runconfig.RunConfig) iter.Seq2[*session.Event, error] {
 	t.Helper()
 	ctx := t.Context()
 

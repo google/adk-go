@@ -25,17 +25,17 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 )
 
 // consoleConfig contains command-line params for console launcher
 type consoleConfig struct {
-	streamingMode       agent.StreamingMode
+	streamingMode       runconfig.StreamingMode
 	streamingModeString string // command-line param to be converted to agent.StreamingMode
 }
 
@@ -50,8 +50,8 @@ func NewLauncher() launcher.SubLauncher {
 	config := &consoleConfig{}
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
-	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
-		fmt.Sprintf("defines streaming mode (%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE))
+	fs.StringVar(&config.streamingModeString, "streaming_mode", string(runconfig.StreamingModeSSE),
+		fmt.Sprintf("defines streaming mode (%s|%s)", runconfig.StreamingModeNone, runconfig.StreamingModeSSE))
 
 	return &consoleLauncher{config: config, flags: fs}
 }
@@ -102,11 +102,11 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 		streamingMode := l.config.streamingMode
 		if streamingMode == "" {
-			streamingMode = agent.StreamingModeSSE
+			streamingMode = runconfig.StreamingModeSSE
 		}
 		fmt.Print("\nAgent -> ")
 		prevText := ""
-		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
+		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, runconfig.RunConfig{
 			StreamingMode: streamingMode,
 		}) {
 			if err != nil {
@@ -121,7 +121,7 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 					text += p.Text
 				}
 
-				if streamingMode != agent.StreamingModeSSE {
+				if streamingMode != runconfig.StreamingModeSSE {
 					fmt.Print(text)
 					continue
 				}
@@ -151,12 +151,12 @@ func (l *consoleLauncher) Parse(args []string) ([]string, error) {
 	if err != nil || !l.flags.Parsed() {
 		return nil, fmt.Errorf("failed to parse flags: %v", err)
 	}
-	if l.config.streamingModeString != string(agent.StreamingModeNone) &&
-		l.config.streamingModeString != string(agent.StreamingModeSSE) {
+	if l.config.streamingModeString != string(runconfig.StreamingModeNone) &&
+		l.config.streamingModeString != string(runconfig.StreamingModeSSE) {
 		return nil, fmt.Errorf("invalid streaming_mode: %v. Should be (%s|%s)", l.config.streamingModeString,
-			agent.StreamingModeNone, agent.StreamingModeSSE)
+			runconfig.StreamingModeNone, runconfig.StreamingModeSSE)
 	}
-	l.config.streamingMode = agent.StreamingMode(l.config.streamingModeString)
+	l.config.streamingMode = runconfig.StreamingMode(l.config.streamingModeString)
 	return l.flags.Args(), nil
 }
 

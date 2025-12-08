@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 )
 
@@ -123,7 +124,7 @@ func TestNewParallelAgent(t *testing.T) {
 				}()
 			}
 
-			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
+			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), runconfig.RunConfig{}) {
 				if tt.wantErr != (err != nil) {
 					if tt.cancelContext && err == nil {
 						// In case of context cancellation some events can be processed before cancel is applied.

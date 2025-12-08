@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/runner/runconfig"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
@@ -223,7 +224,7 @@ func TestAgentSessionLifecycle(t *testing.T) {
 	// Run the agent
 	userContent := genai.NewContentFromText("Hello agent", genai.RoleUser)
 
-	eventStream := r.Run(ctx, "test_user", sessionID, userContent, agent.RunConfig{})
+	eventStream := r.Run(ctx, "test_user", sessionID, userContent, runconfig.RunConfig{})
 
 	// Iterate through events to trigger agent execution
 	for _, err := range eventStream {
@@ -608,7 +609,7 @@ func TestToolCallbacksAgent(t *testing.T) {
 			sessionID := createResp.Session.ID()
 
 			userContent := genai.NewContentFromText(tc.query, genai.RoleUser) // Session ID based on test name
-			eventStream := r.Run(ctx, "test_user", sessionID, userContent, agent.RunConfig{})
+			eventStream := r.Run(ctx, "test_user", sessionID, userContent, runconfig.RunConfig{})
 
 			toolResults := collectToolResults(t, eventStream)
 			if err != nil {
