@@ -20,6 +20,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -65,7 +66,7 @@ func main() {
 	}
 
 	// Create the REST API handler - this returns a standard http.Handler
-	apiHandler := adkrest.NewHandler(config)
+	apiHandler := adkrest.NewHandler(config, 120*time.Second)
 
 	// Create a standard net/http ServeMux
 	mux := http.NewServeMux()

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
@@ -29,14 +30,15 @@ import (
 
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
+	sseTimeout      time.Duration
 	sessionService  session.Service
 	artifactService artifact.Service
 	agentLoader     agent.Loader
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
-func NewRuntimeAPIController(sessionService session.Service, agentLoader agent.Loader, artifactService artifact.Service) *RuntimeAPIController {
-	return &RuntimeAPIController{sessionService: sessionService, agentLoader: agentLoader, artifactService: artifactService}
+func NewRuntimeAPIController(sessionService session.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration) *RuntimeAPIController {
+	return &RuntimeAPIController{sessionService: sessionService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout}
 }
 
 // RunAgent executes a non-streaming agent run for a given session and message.
@@ -83,14 +85,18 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 
 // RunSSEHandler executes an agent run and streams the resulting events using Server-Sent Events (SSE).
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) error {
-	flusher, ok := rw.(http.Flusher)
-	if !ok {
-		return newStatusError(fmt.Errorf("streaming not supported"), http.StatusInternalServerError)
-	}
 
 	rw.Header().Set("Content-Type", "text/event-stream")
 	rw.Header().Set("Cache-Control", "no-cache")
 	rw.Header().Set("Connection", "keep-alive")
+
+	// set custom deadlines for this request - it overrides server-wide timeouts
+	rc := http.NewResponseController(rw)
+	deadline := time.Now().Add(c.sseTimeout)
+	err := rc.SetWriteDeadline(deadline)
+	if err != nil {
+		return newStatusError(fmt.Errorf("set write deadline: %w", err), http.StatusInternalServerError)
+	}
 
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
@@ -116,10 +122,14 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 			if err != nil {
 				return newStatusError(fmt.Errorf("write response: %w", err), http.StatusInternalServerError)
 			}
-			flusher.Flush()
+			err = rc.Flush()
+			if err != nil {
+				return newStatusError(fmt.Errorf("flush failed: %w", err), http.StatusInternalServerError)
+			}
+
 			continue
 		}
-		err := flashEvent(flusher, rw, *event)
+		err := flashEvent(rc, rw, *event)
 		if err != nil {
 			return err
 		}
@@ -127,7 +137,7 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	return nil
 }
 
-func flashEvent(flusher http.Flusher, rw http.ResponseWriter, event session.Event) error {
+func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, event session.Event) error {
 	_, err := fmt.Fprintf(rw, "data: ")
 	if err != nil {
 		return newStatusError(fmt.Errorf("write response: %w", err), http.StatusInternalServerError)
@@ -140,7 +150,10 @@ func flashEvent(flusher http.Flusher, rw http.ResponseWriter, event session.Even
 	if err != nil {
 		return newStatusError(fmt.Errorf("write response: %w", err), http.StatusInternalServerError)
 	}
-	flusher.Flush()
+	err = rc.Flush()
+	if err != nil {
+		return newStatusError(fmt.Errorf("flush failed: %w", err), http.StatusInternalServerError)
+	}
 	return nil
 }
 

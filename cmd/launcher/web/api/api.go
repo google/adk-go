@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/mux"
 
@@ -31,6 +32,7 @@ import (
 // apiConfig contains parametres for lauching ADK REST API
 type apiConfig struct {
 	frontendAddress string
+	sseWriteTimeout time.Duration
 }
 
 // apiLauncher can launch ADK REST API
@@ -69,7 +71,7 @@ func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 // SetupSubrouters adds the API router to the parent router.
 func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
 	// Create the ADK REST API handler
-	apiHandler := adkrest.NewHandler(config)
+	apiHandler := adkrest.NewHandler(config, a.config.sseWriteTimeout)
 
 	// Wrap it with CORS middleware
 	corsHandler := corsWithArgs(a.config.frontendAddress)(apiHandler)
@@ -108,6 +110,7 @@ func NewLauncher() weblauncher.Sublauncher {
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
 	fs.StringVar(&config.frontendAddress, "webui_address", "localhost:8080", "ADK WebUI address as seen from the user browser. It's used to allow CORS requests. Please specify only hostname and (optionally) port.")
+	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
 
 	return &apiLauncher{
 		config: config,
