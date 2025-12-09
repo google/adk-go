@@ -48,12 +48,21 @@ func TestToSessionEvent(t *testing.T) {
 				Parts:     []a2a.Part{a2a.TextPart{Text: "foo"}},
 				TaskID:    taskID,
 				ContextID: contextID,
-				Metadata:  map[string]any{metadataEscalateKey: true, metadataTransferToAgentKey: "a-2"},
+				Metadata: map[string]any{
+					metadataGroundingKey:       map[string]any{"sourceFlaggingUris": []any{map[string]any{"sourceId": "id1"}}},
+					metadataUsageKey:           map[string]any{"candidatesTokenCount": float64(12), "thoughtsTokenCount": float64(42)},
+					metadataCustomMetaKey:      map[string]any{"nested": map[string]any{"key": "value"}},
+					metadataTransferToAgentKey: "a-2",
+					metadataEscalateKey:        true,
+				},
 			},
 			want: &session.Event{
 				LLMResponse: model.LLMResponse{
-					Content: genai.NewContentFromParts([]*genai.Part{{Text: "foo"}}, genai.RoleModel),
+					Content:           genai.NewContentFromParts([]*genai.Part{{Text: "foo"}}, genai.RoleModel),
+					UsageMetadata:     &genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 12, ThoughtsTokenCount: 42},
+					GroundingMetadata: &genai.GroundingMetadata{SourceFlaggingUris: []*genai.GroundingMetadataSourceFlaggingURI{{SourceID: "id1"}}},
 					CustomMetadata: map[string]any{
+						"nested":               map[string]any{"key": "value"},
 						customMetaTaskIDKey:    string(taskID),
 						customMetaContextIDKey: contextID,
 					},
@@ -102,7 +111,12 @@ func TestToSessionEvent(t *testing.T) {
 					State:   a2a.TaskStateCompleted,
 					Message: a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "done"}),
 				},
-				Metadata: map[string]any{metadataEscalateKey: true},
+				Metadata: map[string]any{
+					metadataGroundingKey:  map[string]any{"sourceFlaggingUris": []any{map[string]any{"sourceId": "id1"}}},
+					metadataUsageKey:      map[string]any{"candidatesTokenCount": float64(12), "thoughtsTokenCount": float64(42)},
+					metadataCustomMetaKey: map[string]any{"nested": map[string]any{"key": "value"}},
+					metadataEscalateKey:   true,
+				},
 			},
 			want: &session.Event{
 				LLMResponse: model.LLMResponse{
@@ -118,7 +132,10 @@ func TestToSessionEvent(t *testing.T) {
 						{Text: "bar"},
 						{Text: "done"},
 					}, genai.RoleModel),
+					UsageMetadata:     &genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 12, ThoughtsTokenCount: 42},
+					GroundingMetadata: &genai.GroundingMetadata{SourceFlaggingUris: []*genai.GroundingMetadataSourceFlaggingURI{{SourceID: "id1"}}},
 					CustomMetadata: map[string]any{
+						"nested":               map[string]any{"key": "value"},
 						customMetaTaskIDKey:    string(taskID),
 						customMetaContextIDKey: contextID,
 					},
@@ -204,6 +221,11 @@ func TestToSessionEvent(t *testing.T) {
 				Artifact: &a2a.Artifact{
 					ID: a2a.NewArtifactID(), Parts: a2a.ContentParts{a2a.TextPart{Text: "foo"}, a2a.TextPart{Text: "bar"}},
 				},
+				Metadata: map[string]any{
+					metadataGroundingKey:  map[string]any{"sourceFlaggingUris": []any{map[string]any{"sourceId": "id1"}}},
+					metadataUsageKey:      map[string]any{"candidatesTokenCount": float64(12), "thoughtsTokenCount": float64(42)},
+					metadataCustomMetaKey: map[string]any{"nested": map[string]any{"key": "value"}},
+				},
 			},
 			want: &session.Event{
 				LLMResponse: model.LLMResponse{
@@ -211,7 +233,10 @@ func TestToSessionEvent(t *testing.T) {
 						{Text: "foo"},
 						{Text: "bar"},
 					}, genai.RoleModel),
+					GroundingMetadata: &genai.GroundingMetadata{SourceFlaggingUris: []*genai.GroundingMetadataSourceFlaggingURI{{SourceID: "id1"}}},
+					UsageMetadata:     &genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 12, ThoughtsTokenCount: 42},
 					CustomMetadata: map[string]any{
+						"nested":               map[string]any{"key": "value"},
 						customMetaTaskIDKey:    string(taskID),
 						customMetaContextIDKey: contextID,
 					},
@@ -281,18 +306,28 @@ func TestToSessionEvent(t *testing.T) {
 						Parts: []a2a.Part{a2a.TextPart{Text: "foo"}},
 					},
 				},
+				Metadata: map[string]any{
+					metadataGroundingKey:  map[string]any{"sourceFlaggingUris": []any{map[string]any{"sourceId": "id1"}}},
+					metadataUsageKey:      map[string]any{"candidatesTokenCount": float64(12), "thoughtsTokenCount": float64(42)},
+					metadataCustomMetaKey: map[string]any{"nested": map[string]any{"key": "value"}},
+					metadataEscalateKey:   true,
+				},
 			},
 			want: &session.Event{
 				LLMResponse: model.LLMResponse{
 					Content: genai.NewContentFromParts([]*genai.Part{{Text: "foo"}}, genai.RoleModel),
 					CustomMetadata: map[string]any{
+						"nested":               map[string]any{"key": "value"},
 						customMetaTaskIDKey:    string(taskID),
 						customMetaContextIDKey: contextID,
 					},
-					TurnComplete: true,
+					TurnComplete:      true,
+					GroundingMetadata: &genai.GroundingMetadata{SourceFlaggingUris: []*genai.GroundingMetadataSourceFlaggingURI{{SourceID: "id1"}}},
+					UsageMetadata:     &genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 12, ThoughtsTokenCount: 42},
 				},
-				Author: agentName,
-				Branch: branch,
+				Actions: session.EventActions{Escalate: true},
+				Author:  agentName,
+				Branch:  branch,
 			},
 		},
 		{
@@ -339,6 +374,49 @@ func TestToSessionEvent(t *testing.T) {
 			name:  "non-final task status update without message is skipped",
 			input: &a2a.TaskStatusUpdateEvent{TaskID: taskID, ContextID: contextID},
 			want:  nil,
+		},
+		{
+			name: "task status failed with single-part message",
+			input: &a2a.TaskStatusUpdateEvent{
+				TaskID:    taskID,
+				ContextID: contextID,
+				Final:     true,
+				Status: a2a.TaskStatus{
+					State:   a2a.TaskStateFailed,
+					Message: &a2a.Message{Parts: []a2a.Part{a2a.TextPart{Text: "failed with an error"}}},
+				},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					ErrorMessage: "failed with an error",
+					CustomMetadata: map[string]any{
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
+					},
+					TurnComplete: true,
+				},
+				Author: agentName,
+				Branch: branch,
+			},
+		},
+		{
+			name: "task with single-part text status",
+			input: &a2a.Task{
+				ID:        taskID,
+				ContextID: contextID,
+				Status: a2a.TaskStatus{
+					State:   a2a.TaskStateFailed,
+					Message: &a2a.Message{Parts: []a2a.Part{a2a.TextPart{Text: "failed with an error"}}},
+				},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					ErrorMessage:   "failed with an error",
+					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
+				},
+				Author: agentName,
+				Branch: branch,
+			},
 		},
 	}
 

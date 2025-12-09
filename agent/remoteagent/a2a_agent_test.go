@@ -260,6 +260,29 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 			},
 			wantTransfer: "a-2",
 		},
+		{
+			name: "metadata",
+			remoteEvents: []*session.Event{
+				{
+					LLMResponse: model.LLMResponse{
+						Content:           genai.NewContentFromText("hello", genai.RoleModel),
+						UsageMetadata:     &genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 12, ThoughtsTokenCount: 42},
+						GroundingMetadata: &genai.GroundingMetadata{SourceFlaggingUris: []*genai.GroundingMetadataSourceFlaggingURI{{SourceID: "id1"}}},
+						CustomMetadata:    map[string]any{"nested": map[string]any{"key": "value"}},
+					},
+				},
+			},
+			wantResponses: []model.LLMResponse{
+				{
+					Content:           genai.NewContentFromText("hello", genai.RoleModel),
+					UsageMetadata:     &genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 12, ThoughtsTokenCount: 42},
+					GroundingMetadata: &genai.GroundingMetadata{SourceFlaggingUris: []*genai.GroundingMetadataSourceFlaggingURI{{SourceID: "id1"}}},
+					CustomMetadata:    map[string]any{"nested": map[string]any{"key": "value"}},
+					Partial:           true,
+				},
+				{TurnComplete: true},
+			},
+		},
 	}
 
 	ignoreFields := []cmp.Option{

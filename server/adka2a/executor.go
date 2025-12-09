@@ -133,7 +133,6 @@ func (e *Executor) process(ctx ExecutorContext, r *runner.Runner, processor *eve
 
 		a2aEvent, pErr := processor.process(ctx, adkEvent)
 		if pErr == nil && a2aEvent != nil && e.config.AfterEventCallback != nil {
-			fmt.Println("callback")
 			pErr = e.config.AfterEventCallback(ctx, adkEvent, a2aEvent)
 		}
 
