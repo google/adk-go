@@ -328,7 +328,7 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 		return nil
 	}
 
-	// The update_time in the database is in milliseconds, so we need to convert to milliseconds
+	// Truncate timestamp to millisecond precision to match database precision and prevent rounding errors.
 	event.Timestamp = time.UnixMilli(event.Timestamp.UnixMilli())
 	
 	// Trim temp state before persisting
