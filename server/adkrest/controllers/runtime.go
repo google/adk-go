@@ -85,7 +85,6 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 
 // RunSSEHandler executes an agent run and streams the resulting events using Server-Sent Events (SSE).
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) error {
-
 	rw.Header().Set("Content-Type", "text/event-stream")
 	rw.Header().Set("Cache-Control", "no-cache")
 	rw.Header().Set("Connection", "keep-alive")
