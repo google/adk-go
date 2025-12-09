@@ -13,6 +13,9 @@
 // limitations under the License.
 
 // Package telemetry sets up the open telemetry exporters to the ADK.
+//
+// WARNING: telemetry provided by ADK (internaltelemetry package) may change (e.g. attributes and their names)
+// because we're in process to standardize and unify telemetry across all ADKs.
 package telemetry
 
 import (
@@ -62,11 +65,11 @@ const (
 	genAiRequestTopP      = "gen_ai.request.top_p"
 	genAiRequestMaxTokens = "gen_ai.request.max_tokens"
 
-	genAiResponseFinishReason        = "gen_ai.response.finish_reason"
-	genAiResponsePromptTokens        = "gen_ai.response.prompt_tokens"
-	genAiResponseCompletionTokens    = "gen_ai.response.completion_tokens"
-	genAiResponseCachedContentTokens = "gen_ai.response.cached_content_tokens"
-	genAiResponseTotalTokens         = "gen_ai.response.total_tokens"
+	genAiResponseFinishReason            = "gen_ai.response.finish_reason"
+	genAiResponsePromptTokenCount        = "gen_ai.response.prompt_token_count"
+	genAiResponseCandidatesTokenCount    = "gen_ai.response.candidates_token_count"
+	genAiResponseCachedContentTokenCount = "gen_ai.response.cached_content_token_count"
+	genAiResponseTotalTokenCount         = "gen_ai.response.total_token_count"
 
 	gcpVertexAgentLLMRequestName   = "gcp.vertex.agent.llm_request"
 	gcpVertexAgentToolCallArgsName = "gcp.vertex.agent.tool_call_args"
@@ -221,16 +224,16 @@ func TraceLLMCall(spans []trace.Span, agentCtx agent.InvocationContext, llmReque
 		}
 		if event.UsageMetadata != nil {
 			if event.UsageMetadata.PromptTokenCount > 0 {
-				attributes = append(attributes, attribute.Int(genAiResponsePromptTokens, int(event.UsageMetadata.PromptTokenCount)))
+				attributes = append(attributes, attribute.Int(genAiResponsePromptTokenCount, int(event.UsageMetadata.PromptTokenCount)))
 			}
 			if event.UsageMetadata.CandidatesTokenCount > 0 {
-				attributes = append(attributes, attribute.Int(genAiResponseCompletionTokens, int(event.UsageMetadata.CandidatesTokenCount)))
+				attributes = append(attributes, attribute.Int(genAiResponseCandidatesTokenCount, int(event.UsageMetadata.CandidatesTokenCount)))
 			}
 			if event.UsageMetadata.CachedContentTokenCount > 0 {
-				attributes = append(attributes, attribute.Int(genAiResponseCachedContentTokens, int(event.UsageMetadata.CachedContentTokenCount)))
+				attributes = append(attributes, attribute.Int(genAiResponseCachedContentTokenCount, int(event.UsageMetadata.CachedContentTokenCount)))
 			}
 			if event.UsageMetadata.TotalTokenCount > 0 {
-				attributes = append(attributes, attribute.Int(genAiResponseTotalTokens, int(event.UsageMetadata.TotalTokenCount)))
+				attributes = append(attributes, attribute.Int(genAiResponseTotalTokenCount, int(event.UsageMetadata.TotalTokenCount)))
 			}
 		}
 
