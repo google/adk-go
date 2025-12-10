@@ -59,7 +59,7 @@ type IncludeContents string
 const (
 	// IncludeContentsNone makes the llmagent operate solely on its current turn (latest user input + any following agent events).
 	IncludeContentsNone IncludeContents = "none"
-	// IncludeContentsDefault is enabled by default. The llmagent receives the relevant conversation history.
+	// IncludeContentsDefault is enabled by default. It will receives the relevant conversation history.
 	IncludeContentsDefault IncludeContents = "default"
 )
 
