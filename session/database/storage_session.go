@@ -31,8 +31,8 @@ type storageSession struct {
 	UserID     string `gorm:"primaryKey;"`
 	ID         string `gorm:"primaryKey;"`
 	State      stateMap
-	CreateTime time.Time
-	UpdateTime time.Time
+	CreateTime time.Time `gorm:"precision:6"`
+	UpdateTime time.Time `gorm:"precision:6"`
 
 	// Has-Many relationship: A session has many events.
 	Events []storageEvent `gorm:"foreignKey:AppName,UserID,SessionID;references:AppName,UserID,ID"`
@@ -80,7 +80,7 @@ type storageEvent struct {
 	Actions                []byte
 	LongRunningToolIDsJSON dynamicJSON
 	Branch                 *string
-	Timestamp              time.Time
+	Timestamp              time.Time `gorm:"precision:6"`
 
 	// Fields from llm_response
 	Content           dynamicJSON
@@ -289,7 +289,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 type storageAppState struct {
 	AppName    string `gorm:"primaryKey;"`
 	State      stateMap
-	UpdateTime time.Time
+	UpdateTime time.Time `gorm:"precision:6"`
 }
 
 // TableName explicitly sets the table name for the AppState struct.
@@ -302,7 +302,7 @@ type storageUserState struct {
 	AppName    string `gorm:"primaryKey;"`
 	UserID     string `gorm:"primaryKey;"`
 	State      stateMap
-	UpdateTime time.Time
+	UpdateTime time.Time `gorm:"precision:6"`
 }
 
 // TableName explicitly sets the table name for the UserState struct.

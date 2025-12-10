@@ -209,7 +209,7 @@ func Test_databaseService_Get(t *testing.T) {
 			event := &session.Event{
 				ID:          strconv.Itoa(i),
 				Author:      "user",
-				Timestamp:   time.Time{}.Add(time.Duration(i)),
+				Timestamp:   time.Time{}.Add(time.Duration(i) * time.Microsecond),
 				LLMResponse: model.LLMResponse{},
 			}
 			if err := s.AppendEvent(ctx, created.Session.(*localSession), event); err != nil {
@@ -287,11 +287,11 @@ func Test_databaseService_Get(t *testing.T) {
 				AppName: "my_app", UserID: "user", SessionID: "s1",
 			},
 			wantEvents: []*session.Event{
-				{ID: "1", Author: "user", Timestamp: time.Time{}.Add(1), LLMResponse: model.LLMResponse{}},
-				{ID: "2", Author: "user", Timestamp: time.Time{}.Add(2), LLMResponse: model.LLMResponse{}},
-				{ID: "3", Author: "user", Timestamp: time.Time{}.Add(3), LLMResponse: model.LLMResponse{}},
-				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: model.LLMResponse{}},
-				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: model.LLMResponse{}},
+				{ID: "1", Author: "user", Timestamp: time.Time{}.Add(1 * time.Microsecond), LLMResponse: model.LLMResponse{}},
+				{ID: "2", Author: "user", Timestamp: time.Time{}.Add(2 * time.Microsecond), LLMResponse: model.LLMResponse{}},
+				{ID: "3", Author: "user", Timestamp: time.Time{}.Add(3 * time.Microsecond), LLMResponse: model.LLMResponse{}},
+				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4 * time.Microsecond), LLMResponse: model.LLMResponse{}},
+				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5 * time.Microsecond), LLMResponse: model.LLMResponse{}},
 			},
 		},
 		{
@@ -302,9 +302,9 @@ func Test_databaseService_Get(t *testing.T) {
 				NumRecentEvents: 3,
 			},
 			wantEvents: []*session.Event{
-				{ID: "3", Author: "user", Timestamp: time.Time{}.Add(3), LLMResponse: model.LLMResponse{}},
-				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: model.LLMResponse{}},
-				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: model.LLMResponse{}},
+				{ID: "3", Author: "user", Timestamp: time.Time{}.Add(3 * time.Microsecond), LLMResponse: model.LLMResponse{}},
+				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4 * time.Microsecond), LLMResponse: model.LLMResponse{}},
+				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5 * time.Microsecond), LLMResponse: model.LLMResponse{}},
 			},
 		},
 		{
@@ -312,11 +312,11 @@ func Test_databaseService_Get(t *testing.T) {
 			setup: setupGetWithConfig,
 			req: &session.GetRequest{
 				AppName: "my_app", UserID: "user", SessionID: "s1",
-				After: time.Time{}.Add(4),
+				After: time.Time{}.Add(4 * time.Microsecond),
 			},
 			wantEvents: []*session.Event{
-				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: model.LLMResponse{}},
-				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: model.LLMResponse{}},
+				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4 * time.Microsecond), LLMResponse: model.LLMResponse{}},
+				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5 * time.Microsecond), LLMResponse: model.LLMResponse{}},
 			},
 		},
 		{
@@ -325,11 +325,11 @@ func Test_databaseService_Get(t *testing.T) {
 			req: &session.GetRequest{
 				AppName: "my_app", UserID: "user", SessionID: "s1",
 				NumRecentEvents: 3,
-				After:           time.Time{}.Add(4),
+				After:           time.Time{}.Add(4 * time.Microsecond),
 			},
 			wantEvents: []*session.Event{
-				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4), LLMResponse: model.LLMResponse{}},
-				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5), LLMResponse: model.LLMResponse{}},
+				{ID: "4", Author: "user", Timestamp: time.Time{}.Add(4 * time.Microsecond), LLMResponse: model.LLMResponse{}},
+				{ID: "5", Author: "user", Timestamp: time.Time{}.Add(5 * time.Microsecond), LLMResponse: model.LLMResponse{}},
 			},
 		},
 	}
