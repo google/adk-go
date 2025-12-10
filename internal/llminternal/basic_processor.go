@@ -16,34 +16,36 @@ package llminternal
 
 import (
 	"fmt"
+	"iter"
 	"reflect"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 )
 
 // basicRequestProcessor populates the LLMRequest
 // with the agent's LLM generation configs.
-func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
+func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	// reference: adk-python src/google/adk/flows/llm_flows/basic.py
-
-	llmAgent := asLLMAgent(ctx.Agent())
-	if llmAgent == nil {
-		return nil // do nothing.
+	return func(yield func(*session.Event, error) bool) {
+		llmAgent := asLLMAgent(ctx.Agent())
+		if llmAgent == nil {
+			return // do nothing.
+		}
+		req.Config = clone(llmAgent.internal().GenerateContentConfig)
+		if req.Config == nil {
+			req.Config = &genai.GenerateContentConfig{}
+		}
+		if llmAgent.internal().OutputSchema != nil {
+			req.Config.ResponseSchema = llmAgent.internal().OutputSchema
+			req.Config.ResponseMIMEType = "application/json"
+		}
+		// TODO: missing features
+		//  populate LLMRequest LiveConnectConfig setting
 	}
-	req.Config = clone(llmAgent.internal().GenerateContentConfig)
-	if req.Config == nil {
-		req.Config = &genai.GenerateContentConfig{}
-	}
-	if llmAgent.internal().OutputSchema != nil {
-		req.Config.ResponseSchema = llmAgent.internal().OutputSchema
-		req.Config.ResponseMIMEType = "application/json"
-	}
-	// TODO: missing features
-	//  populate LLMRequest LiveConnectConfig setting
-	return nil
 }
 
 // clone returns a deep copy of the src.

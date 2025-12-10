@@ -58,8 +58,13 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			Agent: curAgent,
 		})
 
-		if err := llminternal.AgentTransferRequestProcessor(ctx, req); err != nil {
-			t.Fatalf("AgentTransferRequestProcessor() = %v, want success", err)
+		for ev, err := range llminternal.AgentTransferRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			if ev != nil {
+				t.Fatal("AgentTransferRequestProcessor generated an unexpected event")
+			}
+			if err != nil {
+				t.Fatalf("AgentTransferRequestProcessor failed: %v", err)
+			}
 		}
 
 		// We don't expect transfer. Check AgentTransferRequestProcessor was no-op.

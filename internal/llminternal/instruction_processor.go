@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"fmt"
+	"iter"
 	"regexp"
 	"slices"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 )
 
 // TODO: Remove this once state keywords are implemented and replace with those consts
@@ -36,30 +38,32 @@ const (
 )
 
 // instructionsRequestProcessor configures req's instructions and global instructions for LLM flow.
-func instructionsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	llmAgent := asLLMAgent(ctx.Agent())
-	if llmAgent == nil {
-		return nil // do nothing.
+func instructionsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		llmAgent := asLLMAgent(ctx.Agent())
+		if llmAgent == nil {
+			return // do nothing.
+		}
+
+		parents := parentmap.FromContext(ctx)
+
+		rootAgent := asLLMAgent(parents.RootAgent(ctx.Agent()))
+		if rootAgent == nil {
+			rootAgent = llmAgent
+		}
+
+		// Append global instructions.
+		if err := appendGlobalInstructions(ctx, req, rootAgent.internal()); err != nil {
+			yield(nil, fmt.Errorf("failed to append global instructions: %w", err))
+			return
+		}
+
+		// Append agent's instruction
+		if err := appendInstructions(ctx, req, llmAgent.internal()); err != nil {
+			yield(nil, fmt.Errorf("failed to append instructions: %w", err))
+			return
+		}
 	}
-
-	parents := parentmap.FromContext(ctx)
-
-	rootAgent := asLLMAgent(parents.RootAgent(ctx.Agent()))
-	if rootAgent == nil {
-		rootAgent = llmAgent
-	}
-
-	// Append global instructions.
-	if err := appendGlobalInstructions(ctx, req, rootAgent.internal()); err != nil {
-		return fmt.Errorf("failed to append global instructions: %w", err)
-	}
-
-	// Append agent's instruction
-	if err := appendInstructions(ctx, req, llmAgent.internal()); err != nil {
-		return fmt.Errorf("failed to append instructions: %w", err)
-	}
-
-	return nil
 }
 
 // The regex to find placeholders like {variable} or {artifact.file_name}.

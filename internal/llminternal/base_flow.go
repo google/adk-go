@@ -45,7 +45,7 @@ type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args, result map[s
 type Flow struct {
 	Model model.LLM
 
-	RequestProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest) error
+	RequestProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]
 	ResponseProcessors   []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error
 	BeforeModelCallbacks []BeforeModelCallback
 	AfterModelCallbacks  []AfterModelCallback
@@ -54,7 +54,7 @@ type Flow struct {
 }
 
 var (
-	DefaultRequestProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest) error{
+	DefaultRequestProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{
 		basicRequestProcessor,
 		authPreprocessor,
 		instructionsRequestProcessor,
@@ -108,9 +108,16 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		req := &model.LLMRequest{}
 
 		// Preprocess before calling the LLM.
-		if err := f.preprocess(ctx, req); err != nil {
-			yield(nil, err)
-			return
+		for ev, err := range f.preprocess(ctx, req) {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if ev != nil {
+				if !yield(ev, nil) {
+					return
+				}
+			}
 		}
 		if ctx.Ended() {
 			return
@@ -200,31 +207,43 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 	}
 }
 
-func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	llmAgent, ok := ctx.Agent().(Agent)
-	if !ok {
-		return fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name())
-	}
-
-	// apply request processor functions to the request in the configured order.
-	for _, processor := range f.RequestProcessors {
-		if err := processor(ctx, req); err != nil {
-			return err
-		}
-	}
-
-	// run processors for tools.
-	tools := Reveal(llmAgent).Tools
-	for _, toolSet := range Reveal(llmAgent).Toolsets {
-		tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
-		if err != nil {
-			return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
+func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		llmAgent, ok := ctx.Agent().(Agent)
+		if !ok {
+			yield(nil, fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name()))
+			return
 		}
 
-		tools = append(tools, tsTools...)
-	}
+		// apply request processor functions to the request in the configured order.
+		for _, processor := range f.RequestProcessors {
+			for ev, err := range processor(ctx, req, f) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if ev != nil {
+					yield(ev, nil)
+				}
+			}
+		}
 
-	return toolPreprocess(ctx, req, tools)
+		// run processors for tools.
+		tools := Reveal(llmAgent).Tools
+		for _, toolSet := range Reveal(llmAgent).Toolsets {
+			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
+			if err != nil {
+				yield(nil, fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err))
+				return
+			}
+
+			tools = append(tools, tsTools...)
+		}
+
+		if err := toolPreprocess(ctx, req, tools); err != nil {
+			yield(nil, err)
+		}
+	}
 }
 
 // toolPreprocess runs tool preprocess on the given request
