@@ -71,7 +71,7 @@ func New(cfg Config) (agent.Agent, error) {
 			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
 			InputSchema:              cfg.InputSchema,
 			OutputSchema:             cfg.OutputSchema,
-IncludeContents:           cfg.IncludeContents,
+			IncludeContents:           cfg.IncludeContents,
 			Instruction:               cfg.Instruction,
 			InstructionProvider:       llminternal.InstructionProvider(cfg.InstructionProvider),
 			GlobalInstruction:         cfg.GlobalInstruction,
