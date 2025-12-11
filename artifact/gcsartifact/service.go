@@ -117,7 +117,7 @@ func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (_ *ar
 	writer := s.bucket.object(blobName).newWriter(ctx)
 	defer func() {
 		if closeErr := writer.Close(); closeErr != nil && err == nil {
-			err = fmt.Errorf("failed to close blob reader: %w", closeErr)
+			err = fmt.Errorf("failed to close blob writer: %w", closeErr)
 		}
 	}()
 
