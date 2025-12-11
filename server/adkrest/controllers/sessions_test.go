@@ -28,9 +28,9 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/server/adkrest/controllers"
-	"google.golang.org/adk/server/adkrest/internal/fakes"
-	"google.golang.org/adk/server/adkrest/internal/models"
+	"github.com/sjzsdu/adk-go/server/adkrest/controllers"
+	"github.com/sjzsdu/adk-go/server/adkrest/internal/fakes"
+	"github.com/sjzsdu/adk-go/server/adkrest/internal/models"
 )
 
 func TestGetSession(t *testing.T) {

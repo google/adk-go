@@ -26,12 +26,12 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/workflowagents/loopagent"
-	"google.golang.org/adk/agent/workflowagents/parallelagent"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/agent/workflowagents/loopagent"
+	"github.com/sjzsdu/adk-go/agent/workflowagents/parallelagent"
+	"github.com/sjzsdu/adk-go/model"
+	"github.com/sjzsdu/adk-go/runner"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 func TestNewParallelAgent(t *testing.T) {

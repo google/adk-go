@@ -16,24 +16,24 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/google/uuid"
-	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/full"
-	"google.golang.org/adk/examples/web/agents"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/geminitool"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/agent/llmagent"
+	"github.com/sjzsdu/adk-go/artifact"
+	"github.com/sjzsdu/adk-go/cmd/launcher"
+	"github.com/sjzsdu/adk-go/cmd/launcher/full"
+	"github.com/sjzsdu/adk-go/examples/web/agents"
+	"github.com/sjzsdu/adk-go/model"
+	"github.com/sjzsdu/adk-go/session"
+	"github.com/sjzsdu/adk-go/tool"
+	"github.com/sjzsdu/adk-go/tool/geminitool"
+	"github.com/sjzsdu/adk-go/util/modelfactory"
 )
 
 func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
@@ -64,14 +64,12 @@ func (a *AuthInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContex
 
 func main() {
 	ctx := context.Background()
-	apiKey := os.Getenv("GOOGLE_API_KEY")
+	flag.Parse()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
-		APIKey: apiKey,
-	})
-	if err != nil {
-		log.Fatalf("Failed to create model: %v", err)
-	}
+	// 从命令行参数创建模型配置
+	modelConfig := modelfactory.NewFromFlags()
+	model := modelfactory.MustCreateModel(ctx, modelConfig)
+
 	sessionService := session.InMemoryService()
 	rootAgent, err := llmagent.New(llmagent.Config{
 		Name:        "weather_time_agent",
@@ -110,7 +108,9 @@ func main() {
 	}
 
 	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+	// 过滤掉-model和-model-name参数，避免与launcher参数冲突
+	launcherArgs := modelfactory.ExtractLauncherArgs(os.Args[1:])
+	if err = l.Execute(ctx, config, launcherArgs); err != nil {
 		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
 }
