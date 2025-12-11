@@ -1,0 +1,28 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 2 AM UTC daily
+
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    
+    - name: Setup
+      uses: ./.github/actions/setup
+
+    - name: Nightly Test
+      run: go test -race -mod=readonly -v -count=1 -shuffle=on ./...
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Run govulncheck
+      uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1.0.4
+      with:
+           go-version-file: go.mod
+           repo-checkout: true
