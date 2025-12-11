@@ -15,7 +15,6 @@
 package session
 
 import (
-	"errors"
 	"iter"
 	"time"
 
@@ -171,9 +170,6 @@ const (
 	// (within the same app_name).
 	KeyPrefixUser string = "user:"
 )
-
-// ErrStateKeyNotExist is the error thrown when key does not exist.
-var ErrStateKeyNotExist = errors.New("state key does not exist")
 
 func hasFunctionCalls(resp *model.LLMResponse) bool {
 	if resp == nil || resp.Content == nil {
