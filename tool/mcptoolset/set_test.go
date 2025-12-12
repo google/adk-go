@@ -307,3 +307,63 @@ func TestToolFilter(t *testing.T) {
 		t.Errorf("tools mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestSessionReconnection(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+
+	rt := &reconnectableTransport{server: server}
+	spyTransport := &spyTransport{Transport: rt}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport: spyTransport,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	ctx := icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}))
+
+	// First call to Tools should create a session.
+	if _, err := ts.Tools(ctx); err != nil {
+		t.Fatalf("First Tools call failed: %v", err)
+	}
+
+	// Kill the transport by closing the connection.
+	spyTransport.lastConn.Close()
+
+	// Second call should detect the closed connection and reconnect.
+	if _, err := ts.Tools(ctx); err != nil {
+		t.Fatalf("Second Tools call failed: %v", err)
+	}
+
+	// Verify that we reconnected (should have 2 connections).
+	if spyTransport.connectCount != 2 {
+		t.Errorf("Expected 2 Connect calls (reconnect after close), got %d", spyTransport.connectCount)
+	}
+}
+
+type spyTransport struct {
+	mcp.Transport
+	connectCount int
+	lastConn     mcp.Connection
+}
+
+func (t *spyTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	t.connectCount++
+	conn, err := t.Transport.Connect(ctx)
+	t.lastConn = conn
+	return conn, err
+}
+
+type reconnectableTransport struct {
+	server *mcp.Server
+}
+
+func (rt *reconnectableTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	ct, st := mcp.NewInMemoryTransports()
+	_, err := rt.server.Connect(context.Background(), st, nil)
+	if err != nil {
+		return nil, err
+	}
+	return ct.Connect(ctx)
+}

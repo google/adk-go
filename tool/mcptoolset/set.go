@@ -139,7 +139,10 @@ func (s *set) getSession(ctx context.Context) (*mcp.ClientSession, error) {
 	defer s.mu.Unlock()
 
 	if s.session != nil {
-		return s.session, nil
+		if err := s.session.Ping(ctx, &mcp.PingParams{}); err == nil {
+			return s.session, nil
+		}
+		s.session.Close()
 	}
 
 	session, err := s.client.Connect(ctx, s.transport, nil)
