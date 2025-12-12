@@ -307,3 +307,113 @@ func TestToolFilter(t *testing.T) {
 		t.Errorf("tools mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestHeaderProvider(t *testing.T) {
+	const toolDescription = "returns weather in the given city"
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "weather_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: toolDescription}, weatherFunc)
+	_, err := server.Connect(t.Context(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedHeaders []map[string]string
+	headerProvider := func(ctx agent.ReadonlyContext) map[string]string {
+		headers := map[string]string{
+			"Authorization": "Bearer token123",
+			"X-User-ID":     ctx.UserID(),
+		}
+		capturedHeaders = append(capturedHeaders, headers)
+		return headers
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport:      clientTransport,
+		HeaderProvider: headerProvider,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	sessionService := session.InMemoryService()
+	sess, err := sessionService.Create(t.Context(), &session.CreateRequest{
+		AppName:   "test_app",
+		UserID:    "user123",
+		SessionID: "session123",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+
+	ctx := icontext.NewReadonlyContext(
+		icontext.NewInvocationContext(
+			t.Context(),
+			icontext.InvocationContextParams{
+				Session: sess.Session,
+			},
+		),
+	)
+
+	tools, err := ts.Tools(ctx)
+	if err != nil {
+		t.Fatalf("Failed to get tools: %v", err)
+	}
+
+	if len(tools) != 1 {
+		t.Fatalf("Expected 1 tool, got %d", len(tools))
+	}
+
+	if len(capturedHeaders) == 0 {
+		t.Fatal("HeaderProvider was not called")
+	}
+
+	lastHeaders := capturedHeaders[len(capturedHeaders)-1]
+	wantHeaders := map[string]string{
+		"Authorization": "Bearer token123",
+		"X-User-ID":     "user123",
+	}
+
+	if diff := cmp.Diff(wantHeaders, lastHeaders); diff != "" {
+		t.Errorf("headers mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestHeaderProviderNil(t *testing.T) {
+	const toolDescription = "returns weather in the given city"
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "weather_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: toolDescription}, weatherFunc)
+	_, err := server.Connect(t.Context(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport:      clientTransport,
+		HeaderProvider: nil,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	ctx := icontext.NewReadonlyContext(
+		icontext.NewInvocationContext(
+			t.Context(),
+			icontext.InvocationContextParams{},
+		),
+	)
+
+	tools, err := ts.Tools(ctx)
+	if err != nil {
+		t.Fatalf("Failed to get tools with nil HeaderProvider: %v", err)
+	}
+
+	if len(tools) != 1 {
+		t.Fatalf("Expected 1 tool, got %d", len(tools))
+	}
+}
