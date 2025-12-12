@@ -107,20 +107,20 @@ func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.
 	return result, nil
 }
 
-func (p *eventProcessor) makeTerminalEvents() []a2a.Event {
-	result := make([]a2a.Event, 0, 2)
-
-	if p.responseID != "" {
-		ev := a2a.NewArtifactUpdateEvent(p.reqCtx, p.responseID)
-		ev.LastChunk = true
-		result = append(result, ev)
+func (p *eventProcessor) makeFinalArtifactUpdate() (*a2a.TaskArtifactUpdateEvent, bool) {
+	if p.responseID == "" {
+		return nil, false
 	}
+	ev := a2a.NewArtifactUpdateEvent(p.reqCtx, p.responseID)
+	ev.LastChunk = true
+	return ev, true
+}
 
+func (p *eventProcessor) makeFinalStatusUpdate() *a2a.TaskStatusUpdateEvent {
 	for _, s := range []a2a.TaskState{a2a.TaskStateFailed, a2a.TaskStateInputRequired} {
 		if ev, ok := p.terminalEvents[s]; ok {
 			ev.Metadata = setActionsMeta(ev.Metadata, p.terminalActions)
-			result = append(result, ev)
-			return result
+			return ev
 		}
 	}
 
@@ -130,8 +130,7 @@ func (p *eventProcessor) makeTerminalEvents() []a2a.Event {
 	// this update shouldn't be reflected in the sent events' metadata.
 	baseMetaCopy := maps.Clone(p.meta.eventMeta)
 	ev.Metadata = setActionsMeta(baseMetaCopy, p.terminalActions)
-	result = append(result, ev)
-	return result
+	return ev
 }
 
 func (p *eventProcessor) makeTaskFailedEvent(cause error, event *session.Event) *a2a.TaskStatusUpdateEvent {

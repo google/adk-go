@@ -18,10 +18,24 @@ import (
 	"context"
 	"maps"
 
+	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/session"
+)
+
+var (
+	customMetaTaskIDKey    = ToADKMetaKey("task_id")
+	customMetaContextIDKey = ToADKMetaKey("context_id")
+
+	metadataEscalateKey        = ToA2AMetaKey("escalate")
+	metadataTransferToAgentKey = ToA2AMetaKey("transfer_to_agent")
+	metadataErrorCodeKey       = ToA2AMetaKey("error_code")
+	metadataGroundingKey       = ToA2AMetaKey("grounding_metadata")
+	metadataUsageKey           = ToA2AMetaKey("usage_metadata")
+	metadataCustomMetaKey      = ToA2AMetaKey("custom_metadata")
 )
 
 // ToA2AMetaKey adds a prefix used to differentiage ADK-related values stored in Metadata an A2A event.
@@ -29,30 +43,42 @@ func ToA2AMetaKey(key string) string {
 	return "adk_" + key
 }
 
+// ToADKMetaKey adds a prefix used to differentiage A2A-related values stored in custom metadata of an ADK session event.
+func ToADKMetaKey(key string) string {
+	return "a2a:" + key
+}
+
 type invocationMeta struct {
 	userID    string
 	sessionID string
+	agentName string
+	reqCtx    *a2asrv.RequestContext
 	eventMeta map[string]any
 }
 
 func toInvocationMeta(ctx context.Context, config ExecutorConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
-	// TODO(yarolegovich): update once A2A provides auth data extraction from Context
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 
-	// override userID if set in the call context
+	// a2a sdk attaches authn info to the call context, use it when provided
 	if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
 		if callCtx.User != nil && callCtx.User.Name() != "" {
 			userID = callCtx.User.Name()
 		}
 	}
 
-	m := map[string]any{
+	meta := map[string]any{
 		ToA2AMetaKey("app_name"):   config.RunnerConfig.AppName,
 		ToA2AMetaKey("user_id"):    userID,
 		ToA2AMetaKey("session_id"): sessionID,
 	}
 
-	return invocationMeta{userID: userID, sessionID: sessionID, eventMeta: m}
+	return invocationMeta{
+		userID:    userID,
+		sessionID: sessionID,
+		agentName: config.RunnerConfig.Agent.Name(),
+		eventMeta: meta,
+		reqCtx:    reqCtx,
+	}
 }
 
 func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, error) {
@@ -69,21 +95,26 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 		}
 	}
 
-	response := event.LLMResponse
-
-	if response.ErrorCode != "" {
-		result[ToA2AMetaKey("error_code")] = response.ErrorCode
-	}
-
-	if response.GroundingMetadata != nil {
-		v, err := converters.ToMapStructure(response.GroundingMetadata)
+	if event.GroundingMetadata != nil {
+		v, err := converters.ToMapStructure(event.GroundingMetadata)
 		if err != nil {
 			return nil, err
 		}
-		result[ToA2AMetaKey("grounding_metadata")] = v
+		result[metadataGroundingKey] = v
 	}
-
-	// TODO(yarolegovich): include custom and usage metadata when added to session.Event
+	if event.UsageMetadata != nil {
+		v, err := converters.ToMapStructure(event.UsageMetadata)
+		if err != nil {
+			return nil, err
+		}
+		result[metadataUsageKey] = v
+	}
+	if event.CustomMetadata != nil {
+		result[metadataCustomMetaKey] = event.CustomMetadata
+	}
+	if event.LLMResponse.ErrorCode != "" {
+		result[metadataErrorCodeKey] = event.LLMResponse.ErrorCode
+	}
 
 	return result, nil
 }
@@ -102,4 +133,39 @@ func setActionsMeta(meta map[string]any, actions session.EventActions) map[strin
 		meta[metadataTransferToAgentKey] = actions.TransferToAgent
 	}
 	return meta
+}
+
+func processA2AMeta(a2aEvent a2a.Event, event *session.Event) error {
+	taskInfo, meta := a2aEvent.TaskInfo(), a2aEvent.Meta()
+
+	if gm, ok := meta[metadataGroundingKey].(map[string]any); ok {
+		converted, err := converters.FromMapStructure[genai.GroundingMetadata](gm)
+		if err != nil {
+			return err
+		}
+		event.GroundingMetadata = converted
+	}
+
+	if um, ok := meta[metadataUsageKey].(map[string]any); ok {
+		converted, err := converters.FromMapStructure[genai.GenerateContentResponseUsageMetadata](um)
+		if err != nil {
+			return err
+		}
+		event.UsageMetadata = converted
+	}
+
+	event.CustomMetadata = ToCustomMetadata(taskInfo.TaskID, taskInfo.ContextID)
+	if um, ok := meta[metadataCustomMetaKey].(map[string]any); ok {
+		if event.CustomMetadata == nil {
+			event.CustomMetadata = make(map[string]any)
+		}
+		maps.Copy(event.CustomMetadata, um)
+	}
+
+	if ec, ok := meta[metadataErrorCodeKey].(string); ok {
+		event.LLMResponse.ErrorCode = ec
+	}
+
+	event.Actions = toEventActions(a2aEvent.Meta())
+	return nil
 }

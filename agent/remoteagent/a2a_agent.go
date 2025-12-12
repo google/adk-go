@@ -255,10 +255,12 @@ func resolveAgentCard(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.AgentCar
 func newMessage(ctx agent.InvocationContext) (*a2a.Message, error) {
 	events := ctx.Session().Events()
 	if userFnCall := getUserFunctionCallAt(events, events.Len()-1); userFnCall != nil {
-		msg, err := adka2a.EventToMessage(userFnCall.event)
+		event := userFnCall.event
+		parts, err := adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}
+		msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
 		msg.TaskID = userFnCall.taskID
 		msg.ContextID = userFnCall.contextID
 		return msg, nil

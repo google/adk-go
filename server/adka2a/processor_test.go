@@ -323,7 +323,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				t.Fatalf("processor.process() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotEvents, tc.events, diff)
 			}
 
-			gotTerminal := processor.makeTerminalEvents()
+			gotTerminal := makeTerminalEvents(processor)
 			if diff := cmp.Diff(tc.terminal, gotTerminal, ignoreFields...); diff != "" {
 				t.Fatalf("processor.makeTerminalEvents() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotTerminal, tc.terminal, diff)
 			}
@@ -382,7 +382,7 @@ func TestEventProcessor_ArtifactUpdates(t *testing.T) {
 		}
 	}
 
-	terminal := processor.makeTerminalEvents()
+	terminal := makeTerminalEvents(processor)
 	finalUpdate, ok := terminal[0].(*a2a.TaskArtifactUpdateEvent)
 	if len(terminal) != 2 || !ok {
 		t.Fatalf("processor.makeTerminalEvents() = %v, want [finalArtifactChunk, finalStatusUpdate]", terminal)
@@ -390,4 +390,13 @@ func TestEventProcessor_ArtifactUpdates(t *testing.T) {
 	if !(finalUpdate.Append && finalUpdate.LastChunk) {
 		t.Fatalf("finalArtifactUpdate = %+v, want {Append=true, LastChunk=true}", finalUpdate)
 	}
+}
+
+func makeTerminalEvents(processor *eventProcessor) []a2a.Event {
+	result := make([]a2a.Event, 0, 2)
+	if finalUpdate, ok := processor.makeFinalArtifactUpdate(); ok {
+		result = append(result, finalUpdate)
+	}
+	result = append(result, processor.makeFinalStatusUpdate())
+	return result
 }

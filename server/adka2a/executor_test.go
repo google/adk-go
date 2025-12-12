@@ -77,10 +77,21 @@ func newEventReplayAgent(events []*session.Event, failWith error) (agent.Agent, 
 	})
 }
 
+func newInMemoryQueue(t *testing.T) eventqueue.Queue {
+	t.Helper()
+	qm := eventqueue.NewInMemoryManager()
+	q, err := qm.GetOrCreate(t.Context(), "test")
+	if err != nil {
+		t.Fatalf("qm.GetOrCreate() error = %v", err)
+	}
+	return q
+}
+
 type eventIndex struct{ i int }
 
 func TestExecutor_Execute(t *testing.T) {
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	hiMsg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "hi"})
 	hiMsgForTask := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
 
 	testCases := []struct {
@@ -118,13 +129,13 @@ func TestExecutor_Execute(t *testing.T) {
 		},
 		{
 			name:    "success for a new task",
-			request: &a2a.MessageSendParams{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "hi"})},
+			request: &a2a.MessageSendParams{Message: hiMsg},
 			events: []*session.Event{
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
 			},
 			wantEvents: []a2a.Event{
-				a2a.NewStatusUpdateEvent(task, a2a.TaskStateSubmitted, nil),
+				a2a.NewSubmittedTask(task, hiMsg),
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
 				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}),
@@ -221,7 +232,7 @@ func TestExecutor_Execute(t *testing.T) {
 			sessionService := &testSessionService{Service: session.InMemoryService(), createErr: tc.createSessionFails}
 			runnerConfig := runner.Config{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
 			executor := NewExecutor(ExecutorConfig{RunnerConfig: runnerConfig})
-			queue := &testQueue{Queue: eventqueue.NewInMemoryQueue(10), writeErr: tc.queueWriteFails}
+			queue := &testQueue{Queue: newInMemoryQueue(t), writeErr: tc.queueWriteFails}
 			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: tc.request.Message}
 			if tc.request.Message != nil && tc.request.Message.TaskID == task.ID {
 				reqCtx.StoredTask = task
@@ -248,7 +259,7 @@ func TestExecutor_Cancel(t *testing.T) {
 	executor := NewExecutor(ExecutorConfig{})
 	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
 
-	queue := &testQueue{Queue: eventqueue.NewInMemoryQueue(10)}
+	queue := &testQueue{Queue: newInMemoryQueue(t)}
 
 	reqCtx.StoredTask = task
 	err := executor.Cancel(t.Context(), reqCtx, queue)
@@ -278,7 +289,7 @@ func TestExecutor_SessionReuse(t *testing.T) {
 	runnerConfig := runner.Config{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
 	config := ExecutorConfig{RunnerConfig: runnerConfig}
 	executor := NewExecutor(config)
-	queue := eventqueue.NewInMemoryQueue(100)
+	queue := newInMemoryQueue(t)
 
 	err = executor.Execute(ctx, reqCtx, queue)
 	if err != nil {
@@ -302,5 +313,147 @@ func TestExecutor_SessionReuse(t *testing.T) {
 	otherContextMeta := toInvocationMeta(ctx, config, reqCtx)
 	if meta.sessionID == otherContextMeta.sessionID {
 		t.Fatal("want sessionID to be different for different contextIDs")
+	}
+}
+
+func TestExecutor_Callbacks(t *testing.T) {
+	type contextKeyType struct{}
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
+
+	testCases := []struct {
+		name               string
+		createSessionFails bool
+		events             []*session.Event
+		beforeExecution    BeforeExecuteCallback
+		afterEvent         AfterEventCallback
+		afterExecution     AfterExecuteCallback
+		wantEvents         []a2a.Event
+		wantErr            error
+	}{
+		{
+			name: "abort execution",
+			beforeExecution: func(ctx context.Context, reqCtx *a2asrv.RequestContext) (context.Context, error) {
+				return nil, fmt.Errorf("aborted")
+			},
+			wantErr: fmt.Errorf("aborted"),
+		},
+		{
+			name: "instrument context",
+			beforeExecution: func(ctx context.Context, reqCtx *a2asrv.RequestContext) (context.Context, error) {
+				return context.WithValue(ctx, contextKeyType{}, "bar"), nil
+			},
+			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
+				text, _ := ctx.Value(contextKeyType{}).(string)
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: text})
+				return nil
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "bar"})),
+			},
+		},
+		{
+			name: "intercept processing failure",
+			events: []*session.Event{
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello, world!"))},
+			},
+			afterEvent: func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
+				return fmt.Errorf("fail!")
+			},
+			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "bar"})
+				return nil
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				newFinalStatusUpdate(task, a2a.TaskStateFailed, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "bar"})),
+			},
+		},
+		{
+			name:               "intercept session setup failure",
+			createSessionFails: true,
+			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
+				eventCount := 0
+				for range ctx.ReadonlyState().All() {
+					eventCount++
+				}
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: fmt.Sprintf("%d events", eventCount)})
+				return nil
+			},
+			wantEvents: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateFailed, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "0 events"}))},
+		},
+		{
+			name: "enrich event",
+			events: []*session.Event{
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
+			},
+			afterEvent: func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
+				processed.Artifact.Parts = append(processed.Artifact.Parts, a2a.TextPart{Text: " (enriched)"})
+				return nil
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}, a2a.TextPart{Text: " (enriched)"}),
+				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}, a2a.TextPart{Text: " (enriched)"}),
+				newArtifactLastChunkEvent(task),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
+			},
+		},
+		{
+			name: "abort execution",
+			events: []*session.Event{
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
+			},
+			afterEvent: func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
+				return fmt.Errorf("abort execution")
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				toTaskFailedUpdateEvent(task, fmt.Errorf("processor failed: abort execution"), nil),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		ignoreFields := []cmp.Option{
+			cmpopts.IgnoreFields(a2a.Message{}, "ID"),
+			cmpopts.IgnoreFields(a2a.Artifact{}, "ID"),
+			cmpopts.IgnoreFields(a2a.TaskStatus{}, "Timestamp"),
+			cmpopts.IgnoreFields(a2a.TaskStatusUpdateEvent{}, "Metadata"),
+			cmpopts.IgnoreFields(a2a.TaskArtifactUpdateEvent{}, "Metadata"),
+		}
+
+		t.Run(tc.name, func(t *testing.T) {
+			agent, err := newEventReplayAgent(tc.events, nil)
+			if err != nil {
+				t.Fatalf("newEventReplayAgent() error = %v, want nil", err)
+			}
+			sessionService := &testSessionService{Service: session.InMemoryService(), createErr: tc.createSessionFails}
+			runnerConfig := runner.Config{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig:          runnerConfig,
+				BeforeExecuteCallback: tc.beforeExecution,
+				AfterEventCallback:    tc.afterEvent,
+				AfterExecuteCallback:  tc.afterExecution,
+			})
+			queue := &testQueue{Queue: newInMemoryQueue(t)}
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+
+			err = executor.Execute(t.Context(), reqCtx, queue)
+			if err != nil && tc.wantErr == nil {
+				t.Fatalf("executor.Execute() error = %v, want nil", err)
+			}
+			if err == nil && tc.wantErr != nil {
+				t.Fatalf("executor.Execute() error = nil, want %v", tc.wantErr)
+			}
+			if tc.wantEvents != nil {
+				if diff := cmp.Diff(tc.wantEvents, queue.events, ignoreFields...); diff != "" {
+					t.Fatalf("executor.Execute() wrong events (+got,-want):\ngot = %v\nwant = %v\ndiff = %s", queue.events, tc.wantEvents, diff)
+				}
+			}
+		})
 	}
 }
