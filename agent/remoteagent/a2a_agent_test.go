@@ -187,13 +187,16 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 		{
 			name: "text streaming",
 			remoteEvents: []*session.Event{
-				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}},
+				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello ", genai.RoleModel)}},
 				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("world", genai.RoleModel)}},
 			},
 			wantResponses: []model.LLMResponse{
-				{Content: genai.NewContentFromText("hello", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromText("hello ", genai.RoleModel), Partial: true},
 				{Content: genai.NewContentFromText("world", genai.RoleModel), Partial: true},
-				{TurnComplete: true},
+				{
+					Content:      genai.NewContentFromText("hello world", genai.RoleModel),
+					TurnComplete: true,
+				},
 			},
 		},
 		{
@@ -242,7 +245,7 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 			},
 			wantResponses: []model.LLMResponse{
 				{Content: genai.NewContentFromText("stop", genai.RoleModel), Partial: true},
-				{TurnComplete: true},
+				{Content: genai.NewContentFromText("stop", genai.RoleModel), TurnComplete: true},
 			},
 			wantEscalate: true,
 		},
@@ -256,9 +259,47 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 			},
 			wantResponses: []model.LLMResponse{
 				{Content: genai.NewContentFromText("stop", genai.RoleModel), Partial: true},
-				{TurnComplete: true},
+				{Content: genai.NewContentFromText("stop", genai.RoleModel), TurnComplete: true},
 			},
 			wantTransfer: "a-2",
+		},
+		{
+			name: "long-running function call",
+			remoteEvents: []*session.Event{
+				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hello!", genai.RoleModel)}},
+				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(" I'll need your approval first:", genai.RoleModel)}},
+				{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts(
+						[]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "create_ticket", ID: "abc-123"}}}, genai.RoleModel,
+					)},
+					LongRunningToolIDs: []string{"abc-123"},
+				},
+				{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts(
+						[]*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+							Name: "create_ticket", ID: "abc-123", Response: map[string]any{"ticket_id": "123"},
+						}}}, genai.RoleModel,
+					)},
+				},
+				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel)}},
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: genai.NewContentFromText("Hello!", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromText(" I'll need your approval first:", genai.RoleModel), Partial: true},
+				// Aggregated partial responses are emitted before a long-running function call
+				{Content: genai.NewContentFromText("Hello! I'll need your approval first:", genai.RoleModel)},
+				{Content: genai.NewContentFromParts(
+					[]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "create_ticket", ID: "abc-123"}}}, genai.RoleModel,
+				)},
+				{Content: genai.NewContentFromParts(
+					[]*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+						Name: "create_ticket", ID: "abc-123", Response: map[string]any{"ticket_id": "123"},
+					}}}, genai.RoleModel,
+				)},
+				{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel), Partial: true},
+				// Only partial responses aggregated after the previous flush are included in the terminal event.
+				{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel), TurnComplete: true},
+			},
 		},
 	}
 
@@ -283,7 +324,9 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 			var lastActions *session.EventActions
 			for _, event := range gotEvents {
 				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("response")]; !ok {
-					t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original a2a event", event.CustomMetadata, adka2a.ToADKMetaKey("response"))
+					if aggregated, _ := event.CustomMetadata[adka2a.ToADKMetaKey("aggregated")].(bool); !aggregated {
+						t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original event or meta[%q] = true", event.CustomMetadata, adka2a.ToADKMetaKey("response"), adka2a.ToADKMetaKey("aggregated"))
+					}
 				}
 				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; !ok {
 					t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original a2a request", event.CustomMetadata, adka2a.ToADKMetaKey("request"))
@@ -379,7 +422,7 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 				},
 			},
 			wantResponses: []model.LLMResponse{
-				{Content: genai.NewContentFromText("hello", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromText("hello", genai.RoleModel)},
 				{Content: genai.NewContentFromText("world", genai.RoleModel)},
 			},
 		},
@@ -414,19 +457,23 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			wantResponses: []model.LLMResponse{
 				{Content: genai.NewContentFromText("hello", genai.RoleModel), Partial: true},
 				{Content: genai.NewContentFromText("world", genai.RoleModel), Partial: true},
-				{TurnComplete: true},
+				{
+					Content:      genai.NewContentFromText("helloworld", genai.RoleModel),
+					TurnComplete: true,
+				},
 			},
 		},
 		{
 			name: "non-final status update messages as thoughts",
 			remoteEvents: []a2a.Event{
-				a2a.NewStatusUpdateEvent(task, a2a.TaskStateSubmitted, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "submitted..."})),
-				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "working..."})),
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateSubmitted, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "submitted...\n"})),
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "working...\n"})),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, a2a.TextPart{Text: "completed!"}),
 			},
 			wantResponses: []model.LLMResponse{
-				{Content: &genai.Content{Parts: []*genai.Part{{Text: "submitted...", Thought: true}}, Role: genai.RoleModel}, Partial: true},
-				{Content: &genai.Content{Parts: []*genai.Part{{Text: "working...", Thought: true}}, Role: genai.RoleModel}, Partial: true},
+				{Content: &genai.Content{Parts: []*genai.Part{{Text: "submitted...\n", Thought: true}}, Role: genai.RoleModel}, Partial: true},
+				{Content: &genai.Content{Parts: []*genai.Part{{Text: "working...\n", Thought: true}}, Role: genai.RoleModel}, Partial: true},
+				{Content: genai.NewContentFromParts([]*genai.Part{{Thought: true, Text: "submitted...\nworking...\n"}}, genai.RoleModel)},
 				{Content: genai.NewContentFromText("completed!", genai.RoleModel), TurnComplete: true},
 			},
 		},
@@ -463,7 +510,9 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			}
 			for _, event := range gotEvents {
 				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("response")]; !ok {
-					t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original a2a event", event.CustomMetadata, adka2a.ToADKMetaKey("response"))
+					if aggregated, _ := event.CustomMetadata[adka2a.ToADKMetaKey("aggregated")].(bool); !aggregated {
+						t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original event or meta[%q] = true", event.CustomMetadata, adka2a.ToADKMetaKey("response"), adka2a.ToADKMetaKey("aggregated"))
+					}
 				}
 				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; !ok {
 					t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original a2a request", event.CustomMetadata, adka2a.ToADKMetaKey("request"))
@@ -538,7 +587,11 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 					Content:        genai.NewContentFromText(", world!", genai.RoleModel),
 					CustomMetadata: map[string]any{"foo": "bar"},
 				},
-				{TurnComplete: true, CustomMetadata: map[string]any{"foo": "bar"}},
+				{
+					TurnComplete:   true,
+					Content:        genai.NewContentFromText("Hello, world!", genai.RoleModel),
+					CustomMetadata: map[string]any{"foo": "bar"},
+				},
 			},
 		},
 		{
