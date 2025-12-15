@@ -48,6 +48,8 @@ type LLMResponse struct {
 	LogprobsResult    *genai.LogprobsResult
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
+	// The Runner fully processes only the final non-partial event, partial
+	// events are simply forwarded downstream (eg. to UI for display).
 	Partial bool
 	// Indicates whether the response from the model is complete.
 	// Only used for streaming mode.

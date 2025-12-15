@@ -216,9 +216,6 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 	if task.Status.State == a2a.TaskStateInputRequired {
 		event.LongRunningToolIDs = longRunningToolIDs
 	}
-	if !task.Status.State.Terminal() && task.Status.State != a2a.TaskStateInputRequired {
-		event.Partial = true
-	}
 	event.Actions = toEventActions(task)
 	return event, nil
 }
