@@ -102,6 +102,7 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	}
 
 	var adkTools []tool.Tool
+	reconnected := false
 
 	cursor := ""
 	for {
@@ -109,11 +110,31 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 			Cursor: cursor,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to list MCP tools: %w", err)
+			if reconnected {
+				return nil, fmt.Errorf("failed to list MCP tools after reconnection: %w", err)
+			}
+			// On any error, attempt to refresh the connection.
+			// refreshConnection uses ping to verify if reconnection is actually needed.
+			var refreshErr error
+			session, refreshErr = s.refreshConnection(ctx)
+			if refreshErr != nil {
+				return nil, fmt.Errorf("failed to list MCP tools: %w", err)
+			}
+			reconnected = true
+			// Per MCP spec, cursors should not persist across sessions.
+			// Start listing from scratch after reconnection.
+			cursor = ""
+			adkTools = nil
+			resp, err = session.ListTools(ctx, &mcp.ListToolsParams{
+				Cursor: cursor,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to list MCP tools: %w", err)
+			}
 		}
 
 		for _, mcpTool := range resp.Tools {
-			t, err := convertTool(mcpTool, s.getSession)
+			t, err := convertTool(mcpTool, s)
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 			}
@@ -145,6 +166,29 @@ func (s *set) getSession(ctx context.Context) (*mcp.ClientSession, error) {
 	session, err := s.client.Connect(ctx, s.transport, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init MCP session: %w", err)
+	}
+
+	s.session = session
+	return s.session, nil
+}
+
+func (s *set) refreshConnection(ctx context.Context) (*mcp.ClientSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// First, try ping to confirm connection is dead
+	if s.session != nil {
+		if err := s.session.Ping(ctx, &mcp.PingParams{}); err == nil {
+			// Connection is actually alive, don't refresh
+			return s.session, nil
+		}
+		s.session.Close()
+		s.session = nil
+	}
+
+	session, err := s.client.Connect(ctx, s.transport, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to refresh MCP session: %w", err)
 	}
 
 	s.session = session
