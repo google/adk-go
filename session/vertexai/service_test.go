@@ -194,7 +194,7 @@ func Test_vertexaiService_Get(t *testing.T) {
 				ID:           strconv.Itoa(i),
 				InvocationID: "test",
 				Author:       "user",
-				Timestamp:    time.Time{}.Add(time.Duration(i)),
+				Timestamp:    time.Time{}.Add(time.Duration(i) * time.Second),
 				LLMResponse:  model.LLMResponse{},
 			}
 			if err := s.AppendEvent(ctx, created.Session.(*localSession), event); err != nil {
@@ -273,7 +273,7 @@ func Test_vertexaiService_Get(t *testing.T) {
 			},
 			wantEvents: []*session.Event{
 				{
-					ID: "1", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(1),
+					ID: "1", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(1 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},
@@ -282,7 +282,7 @@ func Test_vertexaiService_Get(t *testing.T) {
 					},
 				},
 				{
-					ID: "2", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(2),
+					ID: "2", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(2 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},
@@ -291,7 +291,7 @@ func Test_vertexaiService_Get(t *testing.T) {
 					},
 				},
 				{
-					ID: "3", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(3),
+					ID: "3", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(3 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},
@@ -300,7 +300,7 @@ func Test_vertexaiService_Get(t *testing.T) {
 					},
 				},
 				{
-					ID: "4", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(4),
+					ID: "4", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(4 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},
@@ -309,7 +309,7 @@ func Test_vertexaiService_Get(t *testing.T) {
 					},
 				},
 				{
-					ID: "5", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(5),
+					ID: "5", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(5 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},
@@ -328,7 +328,7 @@ func Test_vertexaiService_Get(t *testing.T) {
 			},
 			wantEvents: []*session.Event{
 				{
-					ID: "3", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(3),
+					ID: "3", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(3 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},
@@ -337,7 +337,7 @@ func Test_vertexaiService_Get(t *testing.T) {
 					},
 				},
 				{
-					ID: "4", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(4),
+					ID: "4", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(4 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},
@@ -346,7 +346,7 @@ func Test_vertexaiService_Get(t *testing.T) {
 					},
 				},
 				{
-					ID: "5", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(5),
+					ID: "5", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(5 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},
@@ -361,12 +361,12 @@ func Test_vertexaiService_Get(t *testing.T) {
 			setup: setupGetWithConfig,
 			req: &session.GetRequest{
 				AppName: EngineId2, UserID: "user", SessionID: "s1",
-				After: time.Time{}.Add(4),
+				After: time.Time{}.Add(4 * time.Second),
 			},
-			wantErr: true,
+			wantErr: false,
 			wantEvents: []*session.Event{
 				{
-					ID: "4", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(4),
+					ID: "4", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(4 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},
@@ -375,7 +375,7 @@ func Test_vertexaiService_Get(t *testing.T) {
 					},
 				},
 				{
-					ID: "5", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(5),
+					ID: "5", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(5 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},
@@ -391,12 +391,12 @@ func Test_vertexaiService_Get(t *testing.T) {
 			req: &session.GetRequest{
 				AppName: EngineId2, UserID: "user", SessionID: "s1",
 				NumRecentEvents: 3,
-				After:           time.Time{}.Add(4),
+				After:           time.Time{}.Add(4 * time.Second),
 			},
-			wantErr: true,
+			wantErr: false,
 			wantEvents: []*session.Event{
 				{
-					ID: "4", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(4),
+					ID: "4", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(4 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},
@@ -405,7 +405,7 @@ func Test_vertexaiService_Get(t *testing.T) {
 					},
 				},
 				{
-					ID: "5", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(5),
+					ID: "5", Author: "user", InvocationID: "test", Timestamp: time.Time{}.Add(5 * time.Second),
 					LLMResponse: model.LLMResponse{
 						Content: &genai.Content{},
 					},

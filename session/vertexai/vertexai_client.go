@@ -289,9 +289,7 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 		Parent: sessionNameByID(sessionID, c, reasoningEngine),
 	}
 	if !after.IsZero() {
-		// TODO after parameter support
-		// eventsRpcReq.Filter = fmt.Sprintf("timestamp>=%q", after.Format("2006-01-02T15:04:05-07:00"))
-		return nil, fmt.Errorf("timestamp filter is not supported for VertexAISessionService")
+		eventsRpcReq.Filter = fmt.Sprintf("timestamp>=%q", after.Format("2006-01-02T15:04:05-07:00"))
 	}
 	it := c.rpcClient.ListEvents(ctx, eventsRpcReq)
 	for {
