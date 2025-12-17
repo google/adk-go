@@ -85,13 +85,21 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 						return
 					}
 
-					if event.Actions.Escalate {
+					if err != nil {
 						shouldExit = true
+						break
+					}
+					if event != nil && event.Actions.Escalate {
+						shouldExit = true
+						break
 					}
 				}
 				if shouldExit {
-					return
+					break
 				}
+			}
+			if shouldExit {
+				return
 			}
 
 			if count > 0 {
