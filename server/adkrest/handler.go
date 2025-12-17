@@ -16,7 +16,6 @@ package adkrest
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/gorilla/mux"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -28,7 +27,7 @@ import (
 )
 
 // NewHandler creates and returns an http.Handler for the ADK REST API.
-func NewHandler(config *Config, sseWriteTimeout time.Duration) http.Handler {
+func NewHandler(config *Config) http.Handler {
 	adkExporter := services.NewAPIServerSpanExporter()
 	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
 
@@ -37,7 +36,7 @@ func NewHandler(config *Config, sseWriteTimeout time.Duration) http.Handler {
 	// where the ADK REST API will be served.
 	setupRouter(router,
 		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(config.SessionService)),
-		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(config.SessionService, config.AgentLoader, config.ArtifactService, sseWriteTimeout)),
+		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(config.SessionService, config.AgentLoader, config.ArtifactService, config.SSEWriteTimeout)),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(config.AgentLoader)),
 		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(config.SessionService, config.AgentLoader, adkExporter)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(config.ArtifactService)),

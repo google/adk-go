@@ -15,6 +15,8 @@
 package adkrest
 
 import (
+	"time"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/session"
@@ -25,4 +27,5 @@ type Config struct {
 	SessionService  session.Service
 	ArtifactService artifact.Service
 	AgentLoader     agent.Loader
+	SSEWriteTimeout time.Duration
 }
