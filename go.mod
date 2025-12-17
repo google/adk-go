@@ -9,7 +9,7 @@ require (
 	github.com/gorilla/mux v1.8.1
 	golang.org/x/sync v0.18.0
 	google.golang.org/api v0.252.0
-	google.golang.org/genai v1.36.0
+	google.golang.org/genai v1.40.0
 	rsc.io/omap v1.2.0
 	rsc.io/ordered v1.1.1
 )
