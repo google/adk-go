@@ -60,6 +60,7 @@ const (
 	genAiToolName        = "gen_ai.tool.name"
 	genAiToolCallID      = "gen_ai.tool.call.id"
 	genAiSystemName      = "gen_ai.system"
+	genAiConversationID  = "gen_ai.conversation.id"
 
 	genAiRequestModelName = "gen_ai.request.model"
 	genAiRequestTopP      = "gen_ai.request.top_p"
@@ -207,6 +208,7 @@ func TraceLLMCall(spans []trace.Span, agentCtx agent.InvocationContext, llmReque
 			attribute.String(genAiRequestModelName, llmRequest.Model),
 			attribute.String(gcpVertexAgentInvocationID, event.InvocationID),
 			attribute.String(gcpVertexAgentSessionID, agentCtx.Session().ID()),
+			attribute.String(genAiConversationID, agentCtx.Session().ID()),
 			attribute.String(gcpVertexAgentEventID, event.ID),
 			attribute.String(gcpVertexAgentLLMRequestName, safeSerialize(llmRequestToTrace(llmRequest))),
 			attribute.String(gcpVertexAgentLLMResponseName, safeSerialize(event.LLMResponse)),
