@@ -190,7 +190,7 @@ func Test_databaseService_Get(t *testing.T) {
 		return s
 	}
 
-	now := time.Now()
+	now := time.Date(2025, time.January, 1, 12, 0, 0, 0, time.Local)
 	setupGetWithConfig := func(t *testing.T) *databaseService {
 		t.Helper()
 		s := emptyService(t)
