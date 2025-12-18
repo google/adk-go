@@ -311,10 +311,7 @@ func TestLoadArtifactsTool_ProcessRequest_NilArtifactService(t *testing.T) {
 	}
 
 	err := requestProcessor.ProcessRequest(tc, llmRequest)
-	if err == nil {
-		t.Fatal("Expected error when artifact service is nil, got nil")
-	}
-	if !errors.Is(err, loadartifactstool.ErrArtifactServiceNotInitialized) {
-		t.Errorf("Expected ErrArtifactServiceNotInitialized, got: %v", err)
+if !errors.Is(err, loadartifactstool.ErrArtifactServiceNotInitialized) {
+		t.Errorf("ProcessRequest() with nil artifact service returned error = %v, want %v", err, loadartifactstool.ErrArtifactServiceNotInitialized)
 	}
 }
