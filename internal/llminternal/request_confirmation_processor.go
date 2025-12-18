@@ -149,7 +149,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			}
 
 			// Remove the tools that have already been confirmed.
-			for j := len(events) - 1; j >= confirmationEventIndex; j-- {
+			for j := len(events) - 1; j > confirmationEventIndex; j-- {
 				event = events[j]
 				responses := utils.FunctionResponses(event.Content)
 				if len(responses) == 0 {

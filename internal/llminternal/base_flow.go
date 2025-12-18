@@ -552,5 +552,12 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.StateDelta != nil {
 		base.StateDelta = other.StateDelta
 	}
+	// TODO add similar logic for state
+	if other.RequestedToolConfirmations != nil {
+		if base.RequestedToolConfirmations == nil {
+			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
+		}
+		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
+	}
 	return base
 }
