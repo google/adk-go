@@ -70,6 +70,7 @@ const (
 	genAiResponseCandidatesTokenCount    = "gen_ai.response.candidates_token_count"
 	genAiResponseCachedContentTokenCount = "gen_ai.response.cached_content_token_count"
 	genAiResponseTotalTokenCount         = "gen_ai.response.total_token_count"
+	genAiConversationID                  = "gen_ai.conversation.id"
 
 	gcpVertexAgentLLMRequestName   = "gcp.vertex.agent.llm_request"
 	gcpVertexAgentToolCallArgsName = "gcp.vertex.agent.tool_call_args"
@@ -201,12 +202,14 @@ func TraceToolCall(spans []trace.Span, tool tool.Tool, fnArgs map[string]any, fn
 
 // TraceLLMCall fills the call_llm event details.
 func TraceLLMCall(spans []trace.Span, agentCtx agent.InvocationContext, llmRequest *model.LLMRequest, event *session.Event) {
+	sessionID := agentCtx.Session().ID()
 	for _, span := range spans {
 		attributes := []attribute.KeyValue{
 			attribute.String(genAiSystemName, systemName),
 			attribute.String(genAiRequestModelName, llmRequest.Model),
 			attribute.String(gcpVertexAgentInvocationID, event.InvocationID),
-			attribute.String(gcpVertexAgentSessionID, agentCtx.Session().ID()),
+			attribute.String(gcpVertexAgentSessionID, sessionID),
+			attribute.String(genAiConversationID, sessionID),
 			attribute.String(gcpVertexAgentEventID, event.ID),
 			attribute.String(gcpVertexAgentLLMRequestName, safeSerialize(llmRequestToTrace(llmRequest))),
 			attribute.String(gcpVertexAgentLLMResponseName, safeSerialize(event.LLMResponse)),
