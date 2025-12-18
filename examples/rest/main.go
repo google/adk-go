@@ -26,7 +26,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/server/adkrest"
 	"google.golang.org/adk/session"
@@ -60,13 +59,14 @@ func main() {
 	}
 
 	// Configure the ADK REST API
-	config := &launcher.Config{
-		AgentLoader:    agent.NewSingleLoader(a),
-		SessionService: session.InMemoryService(),
+	config := &adkrest.Config{
+		AgentLoader:     agent.NewSingleLoader(a),
+		SessionService:  session.InMemoryService(),
+		SSEWriteTimeout: 120 * time.Second,
 	}
 
 	// Create the REST API handler - this returns a standard http.Handler
-	apiHandler := adkrest.NewHandler(config, 120*time.Second)
+	apiHandler := adkrest.NewHandler(config)
 
 	// Create a standard net/http ServeMux
 	mux := http.NewServeMux()
