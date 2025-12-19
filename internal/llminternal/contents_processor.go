@@ -123,7 +123,7 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 }
 
 func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
-	if invocationBranch == "" {
+	if invocationBranch == "" || event.Branch == "" {
 		return true
 	}
 	if event.Branch == invocationBranch {
