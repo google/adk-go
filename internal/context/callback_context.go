@@ -17,6 +17,7 @@ package context
 import (
 	"context"
 	"iter"
+	"sync"
 
 	"google.golang.org/genai"
 
@@ -27,7 +28,8 @@ import (
 
 type internalArtifacts struct {
 	agent.Artifacts
-	eventActions *session.EventActions
+	eventActions    *session.EventActions
+	mu sync.RWMutex
 }
 
 func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
@@ -36,11 +38,14 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 		return resp, err
 	}
 	if ia.eventActions != nil {
+		ia.mu.Lock()
+		defer ia.mu.Unlock()
 		if ia.eventActions.ArtifactDelta == nil {
 			ia.eventActions.ArtifactDelta = make(map[string]int64)
 		}
-		// TODO: RWLock, check the version stored is newer in case multiple tools save the same file.
-		ia.eventActions.ArtifactDelta[name] = resp.Version
+		if current, ok := ia.eventActions.ArtifactDelta[name]; !ok || resp.Version > current {
+			ia.eventActions.ArtifactDelta[name] = resp.Version
+		}
 	}
 	return resp, nil
 }
