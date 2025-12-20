@@ -26,6 +26,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/server/adkrest"
 	"google.golang.org/adk/session"
@@ -60,8 +61,9 @@ func main() {
 
 	// Configure the ADK REST API
 	config := &adkrest.Config{
-		AgentLoader:     agent.NewSingleLoader(a),
 		SessionService:  session.InMemoryService(),
+		ArtifactService: artifact.InMemoryService(),
+		AgentLoader:     agent.NewSingleLoader(a),
 		SSEWriteTimeout: 120 * time.Second,
 	}
 
