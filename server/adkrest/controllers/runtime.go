@@ -126,7 +126,7 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 				return newStatusError(fmt.Errorf("failed to flush: %w", err), http.StatusInternalServerError)
 			}
 
-			continue
+			return nil
 		}
 		err := flashEvent(rc, rw, *event)
 		if err != nil {
