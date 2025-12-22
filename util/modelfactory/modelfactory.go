@@ -10,6 +10,7 @@ import (
 	"github.com/sjzsdu/adk-go/model/deepseek"
 	"github.com/sjzsdu/adk-go/model/gemini"
 	"github.com/sjzsdu/adk-go/model/kimi"
+	"github.com/sjzsdu/adk-go/model/ollama"
 	"github.com/sjzsdu/adk-go/model/qwen"
 	"github.com/sjzsdu/adk-go/model/siliconflow"
 	"github.com/sjzsdu/adk-go/model/zhipu"
@@ -18,7 +19,7 @@ import (
 
 // Config contains model factory configuration options
 type Config struct {
-	ModelType string // Model type to use: gemini, kimi, qwen, siliconflow, zhipu, deepseek
+	ModelType string // Model type to use: gemini, kimi, qwen, siliconflow, zhipu, deepseek, ollama
 	ModelName string // Specific model name to use (optional)
 }
 
@@ -41,6 +42,14 @@ func CreateModel(ctx context.Context, cfg *Config) (model.LLM, error) {
 	modelName := cfg.ModelName
 
 	switch cfg.ModelType {
+	case "ollama":
+		// Ollama model initialization
+		config := ollama.Config{}
+		if modelName == "" {
+			modelName = ollama.DefaultModel
+		}
+		model, err = ollama.NewModel(ctx, modelName, config)
+
 	case "kimi":
 		// Kimi model initialization
 		apiKey := os.Getenv("KIMI_API_KEY")
