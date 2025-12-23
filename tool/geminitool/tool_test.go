@@ -15,6 +15,7 @@
 package geminitool_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -82,6 +83,250 @@ func TestGeminiTool_ProcessRequest(t *testing.T) {
 				t.Fatalf("ProcessRequest() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if tt.wantErr {
+				return
+			}
+
+			if diff := cmp.Diff(tt.wantTools, tt.req.Config.Tools); diff != "" {
+				t.Errorf("ProcessRequest returned unexpected tools (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestSimpleTools_ProcessRequest(t *testing.T) {
+	testCases := []struct {
+		name     string
+		tool     toolinternal.RequestProcessor
+		wantTool *genai.Tool
+	}{
+		{
+			name:     "GoogleSearch",
+			tool:     geminitool.GoogleSearch{},
+			wantTool: &genai.Tool{GoogleSearch: &genai.GoogleSearch{}},
+		},
+		{
+			name:     "GoogleMaps",
+			tool:     geminitool.GoogleMaps{},
+			wantTool: &genai.Tool{GoogleMaps: &genai.GoogleMaps{}},
+		},
+		{
+			name:     "EnterpriseWebSearch",
+			tool:     geminitool.EnterpriseWebSearch{},
+			wantTool: &genai.Tool{EnterpriseWebSearch: &genai.EnterpriseWebSearch{}},
+		},
+		{
+			name:     "URLContext",
+			tool:     geminitool.URLContext{},
+			wantTool: &genai.Tool{URLContext: &genai.URLContext{}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			runStandardToolTests(t, tc.tool, tc.wantTool)
+		})
+	}
+}
+
+func runStandardToolTests(t *testing.T, tool toolinternal.RequestProcessor, wantTool *genai.Tool) {
+	t.Run("add to empty request", func(t *testing.T) {
+		req := &model.LLMRequest{}
+
+		err := tool.ProcessRequest(nil, req)
+		if err != nil {
+			t.Fatalf("ProcessRequest() error = %v, wantErr false", err)
+		}
+
+		wantTools := []*genai.Tool{wantTool}
+		if diff := cmp.Diff(wantTools, req.Config.Tools); diff != "" {
+			t.Errorf("ProcessRequest returned unexpected tools (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("add to existing tools", func(t *testing.T) {
+		req := &model.LLMRequest{
+			Config: &genai.GenerateContentConfig{
+				Tools: []*genai.Tool{
+					{GoogleSearch: &genai.GoogleSearch{}},
+				},
+			},
+		}
+
+		err := tool.ProcessRequest(nil, req)
+		if err != nil {
+			t.Fatalf("ProcessRequest() error = %v, wantErr false", err)
+		}
+
+		wantTools := []*genai.Tool{
+			{GoogleSearch: &genai.GoogleSearch{}},
+			wantTool,
+		}
+		if diff := cmp.Diff(wantTools, req.Config.Tools); diff != "" {
+			t.Errorf("ProcessRequest returned unexpected tools (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("error on nil request", func(t *testing.T) {
+		err := tool.ProcessRequest(nil, nil)
+		if err == nil {
+			t.Fatal("ProcessRequest() error = nil, wantErr true")
+		}
+	})
+}
+
+func TestVertexAiSearch_ProcessRequest(t *testing.T) {
+	maxResults10 := int32(10)
+	maxResults5 := int32(5)
+
+	testCases := []struct {
+		name        string
+		tool        *geminitool.VertexAiSearch
+		req         *model.LLMRequest
+		wantTools   []*genai.Tool
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name: "add to empty request with DataStoreID",
+			tool: &geminitool.VertexAiSearch{
+				DataStoreID: "projects/test/locations/us/collections/default/dataStores/test-ds",
+				Filter:      "test-filter",
+				MaxResults:  &maxResults10,
+			},
+			req: &model.LLMRequest{},
+			wantTools: []*genai.Tool{
+				{
+					Retrieval: &genai.Retrieval{
+						VertexAISearch: &genai.VertexAISearch{
+							Datastore:  "projects/test/locations/us/collections/default/dataStores/test-ds",
+							Filter:     "test-filter",
+							MaxResults: &maxResults10,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "add to empty request with SearchEngineID",
+			tool: &geminitool.VertexAiSearch{
+				SearchEngineID: "projects/test/locations/us/collections/default/engines/test-engine",
+				Filter:         "test-filter",
+				MaxResults:     &maxResults5,
+			},
+			req: &model.LLMRequest{},
+			wantTools: []*genai.Tool{
+				{
+					Retrieval: &genai.Retrieval{
+						VertexAISearch: &genai.VertexAISearch{
+							Engine:     "projects/test/locations/us/collections/default/engines/test-engine",
+							Filter:     "test-filter",
+							MaxResults: &maxResults5,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "add to empty request with SearchEngineID and DataStoreSpecs",
+			tool: &geminitool.VertexAiSearch{
+				SearchEngineID: "projects/test/locations/us/collections/default/engines/test-engine",
+				DataStoreSpecs: []*genai.VertexAISearchDataStoreSpec{
+					{DataStore: "projects/test/locations/us/collections/default/dataStores/test-ds"},
+				},
+			},
+			req: &model.LLMRequest{},
+			wantTools: []*genai.Tool{
+				{
+					Retrieval: &genai.Retrieval{
+						VertexAISearch: &genai.VertexAISearch{
+							Engine: "projects/test/locations/us/collections/default/engines/test-engine",
+							DataStoreSpecs: []*genai.VertexAISearchDataStoreSpec{
+								{DataStore: "projects/test/locations/us/collections/default/dataStores/test-ds"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "add to existing tools",
+			tool: &geminitool.VertexAiSearch{
+				DataStoreID: "projects/test/locations/us/collections/default/dataStores/test-ds",
+			},
+			req: &model.LLMRequest{
+				Config: &genai.GenerateContentConfig{
+					Tools: []*genai.Tool{
+						{GoogleSearch: &genai.GoogleSearch{}},
+					},
+				},
+			},
+			wantTools: []*genai.Tool{
+				{GoogleSearch: &genai.GoogleSearch{}},
+				{
+					Retrieval: &genai.Retrieval{
+						VertexAISearch: &genai.VertexAISearch{
+							Datastore: "projects/test/locations/us/collections/default/dataStores/test-ds",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "error when both DataStoreID and SearchEngineID are specified",
+			tool: &geminitool.VertexAiSearch{
+				DataStoreID:    "projects/test/locations/us/collections/default/dataStores/test-ds",
+				SearchEngineID: "projects/test/locations/us/collections/default/engines/test-engine",
+			},
+			req:         &model.LLMRequest{},
+			wantErr:     true,
+			errContains: "either DataStoreID or SearchEngineID must be specified (but not both)",
+		},
+		{
+			name:        "error when neither DataStoreID nor SearchEngineID are specified",
+			tool:        &geminitool.VertexAiSearch{},
+			req:         &model.LLMRequest{},
+			wantErr:     true,
+			errContains: "either DataStoreID or SearchEngineID must be specified (but not both)",
+		},
+		{
+			name: "error when DataStoreSpecs without SearchEngineID",
+			tool: &geminitool.VertexAiSearch{
+				DataStoreID: "projects/test/locations/us/collections/default/dataStores/test-ds",
+				DataStoreSpecs: []*genai.VertexAISearchDataStoreSpec{
+					{DataStore: "projects/test/locations/us/collections/default/dataStores/test-ds"},
+				},
+			},
+			req:         &model.LLMRequest{},
+			wantErr:     true,
+			errContains: "SearchEngineID must be specified if DataStoreSpecs is provided",
+		},
+		{
+			name: "error on nil request",
+			tool: &geminitool.VertexAiSearch{
+				DataStoreID: "projects/test/locations/us/collections/default/dataStores/test-ds",
+			},
+			req:     nil,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			requestProcessor, ok := any(tt.tool).(toolinternal.RequestProcessor)
+			if !ok {
+				t.Fatal("VertexAiSearch does not implement RequestProcessor")
+			}
+
+			err := requestProcessor.ProcessRequest(nil, tt.req)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ProcessRequest() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if tt.errContains != "" && err != nil {
+					if !strings.Contains(err.Error(), tt.errContains) {
+						t.Errorf("ProcessRequest() error = %v, want error containing %q", err, tt.errContains)
+					}
+				}
 				return
 			}
 
