@@ -262,6 +262,7 @@ type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMRe
 // Parameters:
 //   - ctx: The tool.Context for the current tool execution.
 //   - tool: The tool.Tool instance that is about to be executed.
+//     This value can be nil if the tool name invoked by the LLM function call does not correspond to an existing tool.
 //   - args: The original arguments provided to the tool.
 type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
@@ -271,9 +272,11 @@ type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]a
 // Parameters:
 //   - ctx:    The tool.Context for the tool execution.
 //   - tool:   The tool.Tool instance that was executed.
+//     This value can be nil if the tool name invoked by the LLM function call does not correspond to an existing tool,
+//     and a BeforeToolCallback generated result or an error
 //   - args:   The arguments originally passed to the tool.
-//   - result: The result returned by the tool's Run method.
-//   - err:    The error returned by the tool's Run method.
+//   - result: The result returned by the tool's Run method or by a BeforeToolCallback.
+//   - err:    The error returned by the tool's Run method or by a BeforeToolCallback.
 type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
 // IncludeContents controls what parts of prior conversation history is received by llmagent.
