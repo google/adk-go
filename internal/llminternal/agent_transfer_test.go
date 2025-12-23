@@ -21,14 +21,13 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk/agent"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/internal/agent/parentmap"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
@@ -54,7 +53,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		ctx := icontext.NewInvocationContext(parentmap.ToContext(t.Context(), parents), icontext.InvocationContextParams{
+		ctx := agent.NewInvocationContextFromParams(parentmap.ToContext(t.Context(), parents), agent.InvocationContextParams{
 			Agent: curAgent,
 		})
 
@@ -447,7 +446,7 @@ func TestTransferToAgentToolRun(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		curTool := &llminternal.TransferToAgentTool{}
 
-		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+		invCtx := agent.NewInvocationContextFromParams(t.Context(), agent.InvocationContextParams{})
 		ctx := toolinternal.NewToolContext(invCtx, "", &session.EventActions{})
 
 		wantAgentName := "TestAgent"
@@ -474,7 +473,7 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				curTool := &llminternal.TransferToAgentTool{}
-				ctx := toolinternal.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil)
+				ctx := toolinternal.NewToolContext(agent.NewInvocationContextFromParams(t.Context(), agent.InvocationContextParams{}), "", nil)
 				if got, err := curTool.Run(ctx, tc.args); err == nil {
 					t.Fatalf("Run(%v) = (%v, %v), want error", tc.args, got, err)
 				}

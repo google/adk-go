@@ -19,11 +19,10 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk/agent"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
@@ -363,7 +362,7 @@ func createToolContext(t *testing.T, testAgent agent.Agent) tool.Context {
 	s := createResponse.Session
 	sessionImpl := sessioninternal.NewMutableSession(sessionService, s)
 
-	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+	ctx := agent.NewInvocationContextFromParams(t.Context(), agent.InvocationContextParams{
 		Session: sessionImpl,
 	})
 

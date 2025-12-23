@@ -26,7 +26,6 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
@@ -218,7 +217,7 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) er
 	// run processors for tools.
 	tools := Reveal(llmAgent).Tools
 	for _, toolSet := range Reveal(llmAgent).Toolsets {
-		tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
+		tsTools, err := toolSet.Tools(agent.NewReadonlyContext(ctx))
 		if err != nil {
 			return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
 		}
@@ -250,7 +249,7 @@ func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []
 func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, stateDelta map[string]any) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		for _, callback := range f.BeforeModelCallbacks {
-			cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta)
+			cctx := agent.NewCallbackContextWithDelta(ctx, stateDelta)
 			callbackResponse, callbackErr := callback(cctx, req)
 
 			if callbackResponse != nil || callbackErr != nil {
@@ -295,7 +294,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, llmErr error) (*model.LLMResponse, error) {
 	for _, callback := range f.AfterModelCallbacks {
-		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta)
+		cctx := agent.NewCallbackContextWithDelta(ctx, stateDelta)
 		callbackResponse, callbackErr := callback(cctx, llmResp, llmErr)
 
 		if callbackResponse != nil || callbackErr != nil {

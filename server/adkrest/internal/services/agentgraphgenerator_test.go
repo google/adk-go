@@ -21,9 +21,9 @@ import (
 
 	"github.com/awalterschulze/gographviz"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/adk/agent"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
 	"google.golang.org/adk/agent/workflowagents/parallelagent"
