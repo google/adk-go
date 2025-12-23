@@ -52,6 +52,7 @@ type TransportWithHeaders struct {
 
 func (t *TransportWithHeaders) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.project != "" {
+		req = req.Clone(req.Context())
 		req.Header.Add("X-Goog-User-Project", t.project)
 	}
 	return t.parent.RoundTrip(req)
@@ -59,20 +60,22 @@ func (t *TransportWithHeaders) RoundTrip(req *http.Request) (*http.Response, err
 
 func main() {
 	project := os.Getenv("GCP_PROJECT_ID")
+	apiKey := os.Getenv("GOOGLE_API_KEY")
+	token := os.Getenv("TEST_TOKEN")
 
 	// Create context that cancels on interrupt signal (Ctrl+C)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
-		APIKey: os.Getenv("GOOGLE_API_KEY"),
+		APIKey: apiKey,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
 	oauthClient := oauth2.NewClient(ctx, oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: os.Getenv("TEST_TOKEN")},
+		&oauth2.Token{AccessToken: token},
 	))
 
 	transport := &mcp.StreamableClientTransport{
