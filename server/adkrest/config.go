@@ -15,6 +15,7 @@
 package adkrest
 
 import (
+	"errors"
 	"time"
 
 	"google.golang.org/adk/agent"
@@ -28,4 +29,18 @@ type Config struct {
 	ArtifactService artifact.Service
 	AgentLoader     agent.Loader
 	SSEWriteTimeout time.Duration
+}
+
+// Validate validates the config
+func (c *Config) Validate() error {
+	if c.SessionService == nil {
+		return errors.New("session service is required")
+	}
+	if c.ArtifactService == nil {
+		return errors.New("artifact service is required")
+	}
+	if c.AgentLoader == nil {
+		return errors.New("agent loader is required")
+	}
+	return nil
 }

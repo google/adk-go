@@ -68,7 +68,10 @@ func main() {
 	}
 
 	// Create the REST API handler - this returns a standard http.Handler
-	apiHandler := adkrest.NewHandler(config)
+	apiHandler, err := adkrest.NewHandler(config)
+	if err != nil {
+		log.Fatalf("Failed to create ADK REST API handler: %v", err)
+	}
 
 	// Create a standard net/http ServeMux
 	mux := http.NewServeMux()

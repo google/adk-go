@@ -78,7 +78,10 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		SSEWriteTimeout: a.config.sseWriteTimeout,
 	}
 	// Create the ADK REST API handler
-	apiHandler := adkrest.NewHandler(adkrestConfig)
+	apiHandler, err := adkrest.NewHandler(adkrestConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create ADK REST API handler: %v", err)
+	}
 
 	// Wrap it with CORS middleware
 	corsHandler := corsWithArgs(a.config.frontendAddress)(apiHandler)

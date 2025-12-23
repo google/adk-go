@@ -27,7 +27,11 @@ import (
 )
 
 // NewHandler creates and returns an http.Handler for the ADK REST API.
-func NewHandler(config *Config) http.Handler {
+func NewHandler(config *Config) (http.Handler, error) {
+	err := config.Validate()
+	if err != nil {
+		return nil, err
+	}
 	adkExporter := services.NewAPIServerSpanExporter()
 	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
 
@@ -42,7 +46,7 @@ func NewHandler(config *Config) http.Handler {
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(config.ArtifactService)),
 		&routers.EvalAPIRouter{},
 	)
-	return router
+	return router, nil
 }
 
 func setupRouter(router *mux.Router, subrouters ...routers.Router) *mux.Router {
