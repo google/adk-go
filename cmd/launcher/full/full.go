@@ -16,13 +16,13 @@
 package full
 
 import (
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/console"
-	"google.golang.org/adk/cmd/launcher/universal"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/cmd/launcher/web/a2a"
-	"google.golang.org/adk/cmd/launcher/web/api"
-	"google.golang.org/adk/cmd/launcher/web/webui"
+	"github.com/sjzsdu/adk-go/cmd/launcher"
+	"github.com/sjzsdu/adk-go/cmd/launcher/console"
+	"github.com/sjzsdu/adk-go/cmd/launcher/universal"
+	"github.com/sjzsdu/adk-go/cmd/launcher/web"
+	"github.com/sjzsdu/adk-go/cmd/launcher/web/a2a"
+	"github.com/sjzsdu/adk-go/cmd/launcher/web/api"
+	"github.com/sjzsdu/adk-go/cmd/launcher/web/webui"
 )
 
 // NewLauncher returnes the most versatile universal launcher with all options built-in.

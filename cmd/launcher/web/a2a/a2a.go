@@ -24,11 +24,11 @@ import (
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adka2a"
+	"github.com/sjzsdu/adk-go/cmd/launcher"
+	"github.com/sjzsdu/adk-go/cmd/launcher/web"
+	"github.com/sjzsdu/adk-go/internal/cli/util"
+	"github.com/sjzsdu/adk-go/runner"
+	"github.com/sjzsdu/adk-go/server/adka2a"
 )
 
 // apiPath is a suffix used to build an A2A invocation URL

@@ -20,8 +20,8 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/model"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/model"
 )
 
 // basicRequestProcessor populates the LLMRequest

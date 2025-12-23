@@ -21,8 +21,8 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 // NewRemoteAgentEvent create a new Event authored by the agent running in the provided invocation context.
