@@ -131,6 +131,70 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 	fmt.Print("\nUser -> ")
 
+	// Check if we have piped input (non-interactive mode)
+	stat, _ := os.Stdin.Stat()
+	isPiped := (stat.Mode() & os.ModeCharDevice) == 0
+
+	if isPiped {
+		// Read all input from pipe
+		userInput, err := reader.ReadString(0) // Read until EOF
+		if err != nil && err.Error() != "EOF" {
+			log.Fatal(err)
+		}
+
+		// If input is empty (only contains whitespace), return
+		if strings.TrimSpace(userInput) == "" {
+			return nil
+		}
+
+		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
+
+		streamingMode := l.config.streamingMode
+		if streamingMode == "" {
+			streamingMode = agent.StreamingModeSSE
+		}
+		fmt.Print("Agent -> ")
+		prevText := ""
+		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
+			StreamingMode: streamingMode,
+		}) {
+			if err != nil {
+				fmt.Printf("\nAGENT_ERROR: %v\n", err)
+			} else {
+				if event.LLMResponse.Content == nil {
+					continue
+				}
+
+				text := ""
+				for _, p := range event.LLMResponse.Content.Parts {
+					text += p.Text
+				}
+
+				if streamingMode != agent.StreamingModeSSE {
+					fmt.Print(text)
+					continue
+				}
+
+				// In SSE mode, always print partial responses and capture them.
+				if !event.IsFinalResponse() {
+					fmt.Print(text)
+					prevText += text
+					continue
+				}
+
+				// Only print final response if it doesn't match previously captured text.
+				if text != prevText {
+					fmt.Print(text)
+				}
+
+				prevText = ""
+			}
+		}
+		fmt.Println() // Add newline at the end
+		return nil
+	}
+
+	// Interactive mode (original behavior)
 	for {
 		select {
 		case <-ctx.Done():
