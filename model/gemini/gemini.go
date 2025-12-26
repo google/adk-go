@@ -21,6 +21,7 @@ import (
 	"iter"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -29,6 +30,11 @@ import (
 	"google.golang.org/adk/internal/llminternal/converters"
 	"google.golang.org/adk/internal/version"
 	"google.golang.org/adk/model"
+)
+
+const (
+	systemInstructionText  = "Handle the requests as specified in the System Instruction."
+	continueProcessingText = "Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed."
 )
 
 // TODO: test coverage
@@ -46,6 +52,10 @@ type geminiModel struct {
 //
 // An error is returned if the [genai.Client] fails to initialize.
 func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (model.LLM, error) {
+	if modelName == "" {
+		return nil, ErrEmptyModelName
+	}
+
 	client, err := genai.NewClient(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -133,11 +143,14 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 
 // maybeAppendUserContent appends a user content, so that model can continue to output.
 func (m *geminiModel) maybeAppendUserContent(req *model.LLMRequest) {
-	if len(req.Contents) == 0 {
-		req.Contents = append(req.Contents, genai.NewContentFromText("Handle the requests as specified in the System Instruction.", "user"))
-	}
+	// Filter out nil contents in-place to simplify logic and ensure clean data.
+	req.Contents = slices.DeleteFunc(req.Contents, func(c *genai.Content) bool { return c == nil })
 
-	if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != "user" {
-		req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
+	if len(req.Contents) == 0 {
+		// If there were no valid contents, start with a system instruction.
+		req.Contents = []*genai.Content{genai.NewContentFromText(systemInstructionText, "user")}
+	} else if req.Contents[len(req.Contents)-1].Role != "user" {
+		// If the last content was not from the user, add a prompt to continue.
+		req.Contents = append(req.Contents, genai.NewContentFromText(continueProcessingText, "user"))
 	}
 }
