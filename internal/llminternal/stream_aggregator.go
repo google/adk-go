@@ -39,7 +39,12 @@ type streamingResponseAggregator struct {
 	currentTextBuffer    string
 	currentTextIsThought *bool
 
-	currentFunctionCalls map[string]*functionCallState
+	currentFunctionCalls         map[string]*functionCallState
+	activeFunctionCallOrder      []string
+	activeFunctionCallKeysByName map[string][]string
+	lastFunctionCallKey          string
+	unnamedSequence              int
+	unnamedCursor                int
 }
 
 // NewStreamingResponseAggregator creates a new, initialized streamingResponseAggregator.
@@ -294,6 +299,7 @@ func (s *streamingResponseAggregator) clearFunctionCallState(key string) {
 		return
 	}
 	delete(s.currentFunctionCalls, key)
+	s.removeActiveFunctionCallKey(key)
 }
 
 func (s *streamingResponseAggregator) hasPendingFunctionCall() bool {
@@ -304,23 +310,19 @@ func (s *streamingResponseAggregator) createPendingFunctionCallResponse() *model
 	if !s.hasPendingFunctionCall() || s.response == nil {
 		return nil
 	}
-	state := s.firstPendingFunctionCall()
-	if state == nil {
-		return nil
-	}
-	part := s.buildFunctionCallPart(state)
-	if part == nil {
+	parts := s.buildPendingFunctionCallParts()
+	if len(parts) == 0 {
 		return nil
 	}
 	response := &model.LLMResponse{
-		Content:           &genai.Content{Parts: []*genai.Part{part}, Role: s.role},
+		Content:           &genai.Content{Parts: parts, Role: s.role},
 		ErrorCode:         s.response.ErrorCode,
 		ErrorMessage:      s.response.ErrorMessage,
 		UsageMetadata:     s.response.UsageMetadata,
 		GroundingMetadata: s.response.GroundingMetadata,
 		FinishReason:      s.response.FinishReason,
 	}
-	s.clearFunctionCallState(state.key)
+	s.clearAllFunctionCallState()
 	s.clearTextBuffers()
 	return response
 }
@@ -352,10 +354,7 @@ func (s *functionCallState) hasData() bool {
 }
 
 func (s *streamingResponseAggregator) ensureFunctionCallState(fc *genai.FunctionCall) *functionCallState {
-	key := functionCallKey(fc)
-	if key == "" {
-		key = "__default__"
-	}
+	key := s.resolveFunctionCallKey(fc)
 	if s.currentFunctionCalls == nil {
 		s.currentFunctionCalls = make(map[string]*functionCallState)
 	}
@@ -363,30 +362,35 @@ func (s *streamingResponseAggregator) ensureFunctionCallState(fc *genai.Function
 	if !ok {
 		state = &functionCallState{key: key}
 		s.currentFunctionCalls[key] = state
+		s.trackActiveFunctionCall(fc, key)
 	}
+	s.lastFunctionCallKey = key
 	return state
 }
 
-func (s *streamingResponseAggregator) firstPendingFunctionCall() *functionCallState {
-	for _, state := range s.currentFunctionCalls {
-		if state != nil && state.hasData() {
-			return state
-		}
-	}
-	return nil
-}
-
-func functionCallKey(fc *genai.FunctionCall) string {
+func (s *streamingResponseAggregator) resolveFunctionCallKey(fc *genai.FunctionCall) string {
 	if fc == nil {
-		return ""
+		return "__default__"
 	}
 	if fc.ID != "" {
 		return fc.ID
 	}
 	if fc.Name != "" {
-		return fc.Name
+		if s.shouldStartNewUnnamedCall(fc) {
+			return s.newSyntheticKey(fc.Name)
+		}
+		if key := s.singleActiveKeyForName(fc.Name); key != "" {
+			return key
+		}
+		if key := s.mostRecentKeyForName(fc.Name); key != "" {
+			return key
+		}
+		return s.newSyntheticKey(fc.Name)
 	}
-	return ""
+	if key := s.nextUnnamedFunctionCallKey(); key != "" {
+		return key
+	}
+	return "__default__"
 }
 
 func isStreamingFunctionCall(fc *genai.FunctionCall) bool {
@@ -394,6 +398,144 @@ func isStreamingFunctionCall(fc *genai.FunctionCall) bool {
 		return false
 	}
 	return len(fc.PartialArgs) > 0 || fc.WillContinue != nil
+}
+
+func (s *streamingResponseAggregator) trackActiveFunctionCall(fc *genai.FunctionCall, key string) {
+	if key == "" {
+		return
+	}
+	s.activeFunctionCallOrder = append(s.activeFunctionCallOrder, key)
+	name := ""
+	if fc != nil {
+		name = fc.Name
+	}
+	if name == "" {
+		return
+	}
+	if s.activeFunctionCallKeysByName == nil {
+		s.activeFunctionCallKeysByName = make(map[string][]string)
+	}
+	s.activeFunctionCallKeysByName[name] = append(s.activeFunctionCallKeysByName[name], key)
+}
+
+func (s *streamingResponseAggregator) removeActiveFunctionCallKey(key string) {
+	if key == "" {
+		return
+	}
+	if len(s.activeFunctionCallOrder) > 0 {
+		out := s.activeFunctionCallOrder[:0]
+		for _, k := range s.activeFunctionCallOrder {
+			if k != key {
+				out = append(out, k)
+			}
+		}
+		s.activeFunctionCallOrder = out
+		if s.unnamedCursor >= len(s.activeFunctionCallOrder) {
+			s.unnamedCursor = 0
+		}
+	}
+	if len(s.activeFunctionCallKeysByName) == 0 {
+		return
+	}
+	for name, keys := range s.activeFunctionCallKeysByName {
+		out := keys[:0]
+		for _, k := range keys {
+			if k != key {
+				out = append(out, k)
+			}
+		}
+		if len(out) == 0 {
+			delete(s.activeFunctionCallKeysByName, name)
+		} else {
+			s.activeFunctionCallKeysByName[name] = out
+		}
+	}
+}
+
+func (s *streamingResponseAggregator) clearAllFunctionCallState() {
+	s.currentFunctionCalls = nil
+	s.activeFunctionCallOrder = nil
+	s.activeFunctionCallKeysByName = nil
+	s.lastFunctionCallKey = ""
+	s.unnamedSequence = 0
+	s.unnamedCursor = 0
+}
+
+func (s *streamingResponseAggregator) singleActiveKeyForName(name string) string {
+	if name == "" || len(s.activeFunctionCallKeysByName) == 0 {
+		return ""
+	}
+	keys := s.activeFunctionCallKeysByName[name]
+	if len(keys) == 1 {
+		return keys[0]
+	}
+	return ""
+}
+
+func (s *streamingResponseAggregator) mostRecentKeyForName(name string) string {
+	if name == "" || len(s.activeFunctionCallKeysByName) == 0 {
+		return ""
+	}
+	keys := s.activeFunctionCallKeysByName[name]
+	if len(keys) == 0 {
+		return ""
+	}
+	return keys[len(keys)-1]
+}
+
+func (s *streamingResponseAggregator) shouldStartNewUnnamedCall(fc *genai.FunctionCall) bool {
+	if fc == nil || fc.Name == "" {
+		return false
+	}
+	keys := s.activeFunctionCallKeysByName[fc.Name]
+	return len(keys) == 0
+}
+
+func (s *streamingResponseAggregator) newSyntheticKey(name string) string {
+	s.unnamedSequence++
+	if name == "" {
+		return fmt.Sprintf("__call_%d__", s.unnamedSequence)
+	}
+	return fmt.Sprintf("%s#%d", name, s.unnamedSequence)
+}
+
+func (s *streamingResponseAggregator) nextUnnamedFunctionCallKey() string {
+	if len(s.activeFunctionCallOrder) == 0 {
+		return ""
+	}
+	if s.unnamedCursor >= len(s.activeFunctionCallOrder) {
+		s.unnamedCursor = 0
+	}
+	key := s.activeFunctionCallOrder[s.unnamedCursor]
+	s.unnamedCursor++
+	return key
+}
+
+func (s *streamingResponseAggregator) buildPendingFunctionCallParts() []*genai.Part {
+	if s.currentFunctionCalls == nil {
+		return nil
+	}
+	var parts []*genai.Part
+	for _, key := range s.activeFunctionCallOrder {
+		state := s.currentFunctionCalls[key]
+		if state == nil || !state.hasData() {
+			continue
+		}
+		if part := s.buildFunctionCallPart(state); part != nil {
+			parts = append(parts, part)
+		}
+	}
+	if len(parts) == 0 {
+		for _, state := range s.currentFunctionCalls {
+			if state == nil || !state.hasData() {
+				continue
+			}
+			if part := s.buildFunctionCallPart(state); part != nil {
+				parts = append(parts, part)
+			}
+		}
+	}
+	return parts
 }
 
 type jsonPathToken struct {
