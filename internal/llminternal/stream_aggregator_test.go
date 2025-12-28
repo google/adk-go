@@ -321,6 +321,8 @@ func TestStreamAggregatorKeepsPendingFunctionCallWhenEmptyChunkArrives(t *testin
 	}
 }
 
+// Thought signatures doc: parallel function calls in one response preserve order,
+// and only the first functionCall needs a signature for the step.
 func TestStreamAggregatorParallelFunctionCallsPreserveOrderAndSignature(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -357,6 +359,8 @@ func TestStreamAggregatorParallelFunctionCallsPreserveOrderAndSignature(t *testi
 	}
 }
 
+// Thought signatures doc: sequential steps require the first functionCall in each step
+// to carry a signature. We preserve per-call signatures across separate responses.
 func TestStreamAggregatorSequentialFunctionCallsPreserveSignatures(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -392,6 +396,8 @@ func TestStreamAggregatorSequentialFunctionCallsPreserveSignatures(t *testing.T)
 	}
 }
 
+// Thought signatures doc: the final text part may contain a signature even if empty.
+// We keep that part to preserve the signature.
 func TestStreamAggregatorPreservesSignatureOnEmptyFinalTextPart(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -421,6 +427,7 @@ func TestStreamAggregatorPreservesSignatureOnEmptyFinalTextPart(t *testing.T) {
 	}
 }
 
+// Thought signatures doc: never merge a part with a signature with other parts.
 func TestStreamAggregatorDoesNotMergeSignedTextPart(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -448,6 +455,7 @@ func TestStreamAggregatorDoesNotMergeSignedTextPart(t *testing.T) {
 	}
 }
 
+// Thought signatures doc: streaming function-call args may be interleaved; aggregate by call ID.
 func TestStreamAggregatorInterleavedStreamingFunctionCalls(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -495,6 +503,8 @@ func TestStreamAggregatorInterleavedStreamingFunctionCalls(t *testing.T) {
 	}
 }
 
+// Missing IDs are not specified in the doc; we defensively fall back to round-robin
+// over active calls to keep ordering deterministic.
 func TestStreamAggregatorInterleavedFunctionCallsWithoutIDs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -542,6 +552,8 @@ func TestStreamAggregatorInterleavedFunctionCallsWithoutIDs(t *testing.T) {
 	}
 }
 
+// Thought signatures doc: if the stream ends unexpectedly, we still must return
+// the exact parts (with signatures) that were received. Flush all pending calls.
 func TestStreamAggregatorCloseFlushesMultiplePendingFunctionCalls(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
