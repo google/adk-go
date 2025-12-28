@@ -495,6 +495,107 @@ func TestStreamAggregatorInterleavedStreamingFunctionCalls(t *testing.T) {
 	}
 }
 
+func TestStreamAggregatorInterleavedFunctionCallsWithoutIDs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	sig1 := []byte("sig-one")
+	sig2 := []byte("sig-two")
+
+	responses := collectResponses(t, aggregator, ctx,
+		newFunctionCallChunk("fn_one", "", sig1, true, []*genai.PartialArg{{JsonPath: "$.x", StringValue: "A"}}...),
+		newFunctionCallChunk("fn_two", "", sig2, true, []*genai.PartialArg{{JsonPath: "$.y", StringValue: "X"}}...),
+		newFunctionCallChunk("", "", nil, false, []*genai.PartialArg{{JsonPath: "$.x", StringValue: "B"}}...),
+		newFunctionCallChunk("", "", nil, false, []*genai.PartialArg{{JsonPath: "$.y", StringValue: "Y"}}...),
+	)
+
+	var finals []*genai.Part
+	for _, resp := range responses {
+		if resp == nil || resp.Partial || resp.Content == nil || len(resp.Content.Parts) == 0 {
+			continue
+		}
+		part := resp.Content.Parts[0]
+		if part.FunctionCall != nil {
+			finals = append(finals, part)
+		}
+	}
+	if len(finals) != 2 {
+		t.Fatalf("expected 2 finalized function calls, got %d", len(finals))
+	}
+	if got, want := finals[0].FunctionCall.Name, "fn_one"; got != want {
+		t.Fatalf("first function call name mismatch: got %q want %q", got, want)
+	}
+	if got, want := finals[0].FunctionCall.Args["x"], "AB"; got != want {
+		t.Fatalf("first function call args mismatch: got %v want %v", got, want)
+	}
+	if !bytes.Equal(finals[0].ThoughtSignature, sig1) {
+		t.Fatalf("first function call signature mismatch: got %v want %v", finals[0].ThoughtSignature, sig1)
+	}
+	if got, want := finals[1].FunctionCall.Name, "fn_two"; got != want {
+		t.Fatalf("second function call name mismatch: got %q want %q", got, want)
+	}
+	if got, want := finals[1].FunctionCall.Args["y"], "XY"; got != want {
+		t.Fatalf("second function call args mismatch: got %v want %v", got, want)
+	}
+	if !bytes.Equal(finals[1].ThoughtSignature, sig2) {
+		t.Fatalf("second function call signature mismatch: got %v want %v", finals[1].ThoughtSignature, sig2)
+	}
+}
+
+func TestStreamAggregatorCloseFlushesMultiplePendingFunctionCalls(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	sig1 := []byte("sig-one")
+	sig2 := []byte("sig-two")
+
+	process := func(resp *genai.GenerateContentResponse) {
+		for llmResp, err := range aggregator.ProcessResponse(ctx, resp) {
+			if err != nil {
+				t.Fatalf("ProcessResponse returned error: %v", err)
+			}
+			if llmResp == nil {
+				continue
+			}
+		}
+	}
+
+	process(newFunctionCallChunk("fn_one", "", sig1, true, []*genai.PartialArg{{JsonPath: "$.x", StringValue: "A"}}...))
+	process(newFunctionCallChunk("fn_two", "", sig2, true, []*genai.PartialArg{{JsonPath: "$.y", StringValue: "X"}}...))
+
+	finalResp := aggregator.Close()
+	if finalResp == nil || finalResp.Content == nil {
+		t.Fatalf("expected final response from Close")
+	}
+	if got := len(finalResp.Content.Parts); got != 2 {
+		t.Fatalf("expected 2 function call parts, got %d", got)
+	}
+
+	first := finalResp.Content.Parts[0]
+	second := finalResp.Content.Parts[1]
+	if first.FunctionCall == nil || second.FunctionCall == nil {
+		t.Fatalf("expected function call parts in Close response")
+	}
+	if got, want := first.FunctionCall.Name, "fn_one"; got != want {
+		t.Fatalf("first function call name mismatch: got %q want %q", got, want)
+	}
+	if got, want := first.FunctionCall.Args["x"], "A"; got != want {
+		t.Fatalf("first function call args mismatch: got %v want %v", got, want)
+	}
+	if !bytes.Equal(first.ThoughtSignature, sig1) {
+		t.Fatalf("first function call signature mismatch: got %v want %v", first.ThoughtSignature, sig1)
+	}
+	if got, want := second.FunctionCall.Name, "fn_two"; got != want {
+		t.Fatalf("second function call name mismatch: got %q want %q", got, want)
+	}
+	if got, want := second.FunctionCall.Args["y"], "X"; got != want {
+		t.Fatalf("second function call args mismatch: got %v want %v", got, want)
+	}
+	if !bytes.Equal(second.ThoughtSignature, sig2) {
+		t.Fatalf("second function call signature mismatch: got %v want %v", second.ThoughtSignature, sig2)
+	}
+}
+
 func TestStreamAggregatorMixedTextAndFunctionCallOrder(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
