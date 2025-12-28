@@ -32,10 +32,12 @@ import (
 // It aggregates content from partial responses, and generates LlmResponses for
 // individual (partial) model responses, as well as for aggregated content.
 type streamingResponseAggregator struct {
-	text        string
-	thoughtText string
-	response    *model.LLMResponse
-	role        string
+	response *model.LLMResponse
+	role     string
+
+	textParts            []*genai.Part
+	currentTextBuffer    string
+	currentTextIsThought *bool
 
 	currentFunctionCallName string
 	currentFunctionCallID   string
@@ -78,42 +80,53 @@ func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genRe
 func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMResponse) *model.LLMResponse {
 	s.response = llmResponse
 
-	var part0 *genai.Part
-	if llmResponse.Content != nil && len(llmResponse.Content.Parts) > 0 {
-		part0 = llmResponse.Content.Parts[0]
+	if llmResponse.Content != nil {
 		s.role = llmResponse.Content.Role
 	}
 
-	if part0 != nil && part0.FunctionCall != nil {
-		s.handleFunctionCall(part0, llmResponse)
-		if len(part0.FunctionCall.PartialArgs) > 0 {
-			return nil
+	if llmResponse.Content == nil || len(llmResponse.Content.Parts) == 0 {
+		if s.hasPendingTextParts() {
+			return s.createAggregateResponse()
 		}
-	}
-
-	// If part is text append it
-	if part0 != nil && part0.Text != "" {
-		if part0.Thought {
-			s.thoughtText += part0.Text
-		} else {
-			s.text += part0.Text
-		}
-		llmResponse.Partial = true
 		return nil
 	}
 
-	// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
-	if part0 != nil && reflect.ValueOf(*part0).IsZero() {
-		llmResponse.Partial = true
-		return nil
+	parts := llmResponse.Content.Parts
+	sawNonEmptyText := false
+	sawFunctionCall := false
+	sawInlineData := false
+
+	for _, part := range parts {
+		if part == nil {
+			continue
+		}
+
+		if part.FunctionCall != nil {
+			sawFunctionCall = true
+			s.flushTextBuffer()
+			s.handleFunctionCall(part, llmResponse)
+			continue
+		}
+
+		if part.Text != "" || len(part.ThoughtSignature) > 0 {
+			if part.Text != "" {
+				sawNonEmptyText = true
+			}
+			s.handleTextPart(part)
+			llmResponse.Partial = true
+			continue
+		}
+
+		if reflect.ValueOf(*part).IsZero() {
+			llmResponse.Partial = true
+			continue
+		}
+
+		sawInlineData = true
+		s.flushTextBuffer()
 	}
 
-	// If there is aggregated text and there is no content or parts return aggregated response
-	if (s.thoughtText != "" || s.text != "") &&
-		(llmResponse.Content == nil ||
-			len(llmResponse.Content.Parts) == 0 ||
-			// don't yield the merged text event when receiving audio data
-			(len(llmResponse.Content.Parts) > 0 && llmResponse.Content.Parts[0].InlineData == nil)) {
+	if s.hasPendingTextParts() && (sawInlineData || (!sawNonEmptyText && !sawFunctionCall)) {
 		return s.createAggregateResponse()
 	}
 
@@ -134,34 +147,68 @@ func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 }
 
 func (s *streamingResponseAggregator) createAggregateResponse() *model.LLMResponse {
-	if (s.text != "" || s.thoughtText != "") && s.response != nil {
-		var parts []*genai.Part
-		if s.thoughtText != "" {
-			parts = append(parts, &genai.Part{Text: s.thoughtText, Thought: true})
-		}
-		if s.text != "" {
-			parts = append(parts, &genai.Part{Text: s.text, Thought: false})
-		}
-
-		response := &model.LLMResponse{
-			Content:           &genai.Content{Parts: parts, Role: s.role},
-			ErrorCode:         s.response.ErrorCode,
-			ErrorMessage:      s.response.ErrorMessage,
-			UsageMetadata:     s.response.UsageMetadata,
-			GroundingMetadata: s.response.GroundingMetadata,
-			FinishReason:      s.response.FinishReason,
-		}
-		s.clearTextBuffers()
-		return response
+	s.flushTextBuffer()
+	if len(s.textParts) == 0 || s.response == nil {
+		return nil
 	}
-	return nil
+
+	parts := make([]*genai.Part, len(s.textParts))
+	copy(parts, s.textParts)
+
+	response := &model.LLMResponse{
+		Content:           &genai.Content{Parts: parts, Role: s.role},
+		ErrorCode:         s.response.ErrorCode,
+		ErrorMessage:      s.response.ErrorMessage,
+		UsageMetadata:     s.response.UsageMetadata,
+		GroundingMetadata: s.response.GroundingMetadata,
+		FinishReason:      s.response.FinishReason,
+	}
+	s.clearTextBuffers()
+	return response
 }
 
 func (s *streamingResponseAggregator) clearTextBuffers() {
 	s.response = nil
-	s.text = ""
-	s.thoughtText = ""
+	s.textParts = nil
+	s.currentTextBuffer = ""
+	s.currentTextIsThought = nil
 	s.role = ""
+}
+
+func (s *streamingResponseAggregator) handleTextPart(part *genai.Part) {
+	if len(part.ThoughtSignature) > 0 {
+		s.flushTextBuffer()
+		s.textParts = append(s.textParts, cloneTextPart(part))
+		return
+	}
+
+	if part.Text == "" {
+		return
+	}
+
+	if s.currentTextIsThought == nil || *s.currentTextIsThought != part.Thought {
+		s.flushTextBuffer()
+		val := part.Thought
+		s.currentTextIsThought = &val
+	}
+	s.currentTextBuffer += part.Text
+}
+
+func (s *streamingResponseAggregator) flushTextBuffer() {
+	if s.currentTextBuffer == "" {
+		return
+	}
+	thought := false
+	if s.currentTextIsThought != nil {
+		thought = *s.currentTextIsThought
+	}
+	s.textParts = append(s.textParts, &genai.Part{Text: s.currentTextBuffer, Thought: thought})
+	s.currentTextBuffer = ""
+	s.currentTextIsThought = nil
+}
+
+func (s *streamingResponseAggregator) hasPendingTextParts() bool {
+	return s.currentTextBuffer != "" || len(s.textParts) > 0
 }
 
 func (s *streamingResponseAggregator) handleFunctionCall(part *genai.Part, llmResponse *model.LLMResponse) {
@@ -268,6 +315,20 @@ func (s *streamingResponseAggregator) createPendingFunctionCallResponse() *model
 	s.resetFunctionCallState()
 	s.clearTextBuffers()
 	return response
+}
+
+func cloneTextPart(part *genai.Part) *genai.Part {
+	if part == nil {
+		return nil
+	}
+	out := &genai.Part{
+		Text:    part.Text,
+		Thought: part.Thought,
+	}
+	if len(part.ThoughtSignature) > 0 {
+		out.ThoughtSignature = append([]byte(nil), part.ThoughtSignature...)
+	}
+	return out
 }
 
 type jsonPathToken struct {
