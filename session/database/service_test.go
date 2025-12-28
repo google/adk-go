@@ -15,7 +15,9 @@
 package database
 
 import (
+	"bytes"
 	"maps"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -29,6 +31,14 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
+
+// TestMain sets up the test environment.
+// We set time.Local to UTC to ensure consistent timestamp formatting in tests,
+// since the database stores timestamps without timezone info and tests expect UTC format.
+func TestMain(m *testing.M) {
+	time.Local = time.UTC
+	os.Exit(m.Run())
+}
 
 func Test_databaseService_Create(t *testing.T) {
 	tests := []struct {
@@ -358,6 +368,7 @@ func Test_databaseService_Get(t *testing.T) {
 			if tt.wantEvents != nil {
 				opts := []cmp.Option{
 					cmpopts.SortSlices(func(a, b *session.Event) bool { return a.Timestamp.Before(b.Timestamp) }),
+					cmp.Comparer(func(a, b time.Time) bool { return a.Equal(b) }),
 				}
 				if diff := cmp.Diff(events(tt.wantEvents), got.Session.Events(), opts...); diff != "" {
 					t.Errorf("Get session events mismatch: (-want +got):\n%s", diff)
@@ -470,6 +481,66 @@ func Test_databaseService_List(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func Test_databaseService_ThoughtSignatureRoundTrip(t *testing.T) {
+	s := emptyService(t)
+	ctx := t.Context()
+
+	created, err := s.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "s1",
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	// Update to avoid stale validation during AppendEvent.
+	created.Session.(*localSession).updatedAt = time.Now()
+
+	sig := []byte("signature-bytes")
+	part := genai.NewPartFromFunctionCall("do_work", map[string]any{"a": "b"})
+	part.ThoughtSignature = append([]byte(nil), sig...)
+
+	event := &session.Event{
+		ID:        "event1",
+		Author:    "model",
+		Timestamp: time.Now(),
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{part},
+			},
+		},
+	}
+
+	if err := s.AppendEvent(ctx, created.Session.(*localSession), event); err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "s1",
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+
+	if got.Session.Events().Len() != 1 {
+		t.Fatalf("Get returned %d events, want 1", got.Session.Events().Len())
+	}
+
+	gotEvent := got.Session.Events().At(0)
+	if gotEvent == nil || gotEvent.Content == nil || len(gotEvent.Content.Parts) == 0 {
+		t.Fatalf("Get returned empty event content")
+	}
+
+	gotSig := gotEvent.Content.Parts[0].ThoughtSignature
+	if !bytes.Equal(gotSig, sig) {
+		t.Fatalf("thought signature mismatch: got %v want %v", gotSig, sig)
 	}
 }
 
