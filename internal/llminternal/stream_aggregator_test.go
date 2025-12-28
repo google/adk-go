@@ -17,6 +17,7 @@ package llminternal_test
 import (
 	"bytes"
 	"context"
+	"iter"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -320,6 +321,133 @@ func TestStreamAggregatorKeepsPendingFunctionCallWhenEmptyChunkArrives(t *testin
 	}
 }
 
+func TestStreamAggregatorParallelFunctionCallsPreserveOrderAndSignature(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	thoughtSignature := []byte("signature-bytes")
+
+	part1 := genai.NewPartFromFunctionCall("fn_one", map[string]any{"x": "1"})
+	part1.ThoughtSignature = thoughtSignature
+	part2 := genai.NewPartFromFunctionCall("fn_two", map[string]any{"y": "2"})
+
+	responses := collectResponses(t, aggregator, ctx, newPartsChunk([]*genai.Part{part1, part2}, genai.FinishReasonStop))
+	finalResp := lastNonPartial(responses)
+	if finalResp == nil || finalResp.Content == nil {
+		t.Fatalf("expected final response with content")
+	}
+
+	if got := len(finalResp.Content.Parts); got != 2 {
+		t.Fatalf("expected 2 parts, got %d", got)
+	}
+	if finalResp.Content.Parts[0].FunctionCall == nil || finalResp.Content.Parts[1].FunctionCall == nil {
+		t.Fatalf("expected function call parts")
+	}
+	if !bytes.Equal(finalResp.Content.Parts[0].ThoughtSignature, thoughtSignature) {
+		t.Fatalf("first function call signature mismatch: got %v want %v", finalResp.Content.Parts[0].ThoughtSignature, thoughtSignature)
+	}
+	if len(finalResp.Content.Parts[1].ThoughtSignature) != 0 {
+		t.Fatalf("expected second function call to have no signature")
+	}
+	if got, want := finalResp.Content.Parts[0].FunctionCall.Name, "fn_one"; got != want {
+		t.Fatalf("first function call name mismatch: got %q want %q", got, want)
+	}
+	if got, want := finalResp.Content.Parts[1].FunctionCall.Name, "fn_two"; got != want {
+		t.Fatalf("second function call name mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestStreamAggregatorSequentialFunctionCallsPreserveSignatures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	sig1 := []byte("sig-one")
+	sig2 := []byte("sig-two")
+
+	part1 := genai.NewPartFromFunctionCall("fn_first", map[string]any{"a": "1"})
+	part1.ThoughtSignature = sig1
+	part2 := genai.NewPartFromFunctionCall("fn_second", map[string]any{"b": "2"})
+	part2.ThoughtSignature = sig2
+
+	responses := collectResponses(t, aggregator, ctx,
+		newPartsChunk([]*genai.Part{part1}, genai.FinishReasonStop),
+		newPartsChunk([]*genai.Part{part2}, genai.FinishReasonStop),
+	)
+
+	var gotSigs [][]byte
+	for _, resp := range responses {
+		if resp == nil || resp.Partial || resp.Content == nil || len(resp.Content.Parts) == 0 {
+			continue
+		}
+		part := resp.Content.Parts[0]
+		if part.FunctionCall != nil {
+			gotSigs = append(gotSigs, part.ThoughtSignature)
+		}
+	}
+	if len(gotSigs) != 2 {
+		t.Fatalf("expected 2 function call responses, got %d", len(gotSigs))
+	}
+	if !bytes.Equal(gotSigs[0], sig1) || !bytes.Equal(gotSigs[1], sig2) {
+		t.Fatalf("function call signatures mismatch: got %v want [%v %v]", gotSigs, sig1, sig2)
+	}
+}
+
+func TestStreamAggregatorPreservesSignatureOnEmptyFinalTextPart(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	signature := []byte("final-signature")
+
+	responses := collectResponses(t, aggregator, ctx,
+		newTextChunk("Hello", nil, false, genai.FinishReason("")),
+		newTextChunk("", signature, false, genai.FinishReasonStop),
+	)
+
+	finalResp := lastNonPartial(responses)
+	if finalResp == nil || finalResp.Content == nil {
+		t.Fatalf("expected final response with content")
+	}
+	if got := len(finalResp.Content.Parts); got != 2 {
+		t.Fatalf("expected 2 parts, got %d", got)
+	}
+	if finalResp.Content.Parts[0].Text != "Hello" {
+		t.Fatalf("unexpected first part text: %q", finalResp.Content.Parts[0].Text)
+	}
+	if len(finalResp.Content.Parts[1].ThoughtSignature) == 0 {
+		t.Fatalf("expected signature on final empty part")
+	}
+	if !bytes.Equal(finalResp.Content.Parts[1].ThoughtSignature, signature) {
+		t.Fatalf("signature mismatch: got %v want %v", finalResp.Content.Parts[1].ThoughtSignature, signature)
+	}
+}
+
+func TestStreamAggregatorDoesNotMergeSignedTextPart(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	signature := []byte("text-signature")
+
+	responses := collectResponses(t, aggregator, ctx,
+		newTextChunk("A", nil, false, genai.FinishReason("")),
+		newTextChunk("B", signature, false, genai.FinishReason("")),
+		newTextChunk("C", nil, false, genai.FinishReasonStop),
+	)
+
+	finalResp := lastNonPartial(responses)
+	if finalResp == nil || finalResp.Content == nil {
+		t.Fatalf("expected final response with content")
+	}
+	if got := len(finalResp.Content.Parts); got != 3 {
+		t.Fatalf("expected 3 parts, got %d", got)
+	}
+	if finalResp.Content.Parts[0].Text != "A" || finalResp.Content.Parts[1].Text != "B" || finalResp.Content.Parts[2].Text != "C" {
+		t.Fatalf("unexpected text parts: %q %q %q", finalResp.Content.Parts[0].Text, finalResp.Content.Parts[1].Text, finalResp.Content.Parts[2].Text)
+	}
+	if !bytes.Equal(finalResp.Content.Parts[1].ThoughtSignature, signature) {
+		t.Fatalf("signed part signature mismatch: got %v want %v", finalResp.Content.Parts[1].ThoughtSignature, signature)
+	}
+}
+
 func newFunctionCallChunk(name, id string, sig []byte, willContinue bool, args ...*genai.PartialArg) *genai.GenerateContentResponse {
 	part := &genai.Part{
 		FunctionCall: &genai.FunctionCall{
@@ -347,4 +475,56 @@ func newFunctionCallChunk(name, id string, sig []byte, willContinue bool, args .
 			},
 		},
 	}
+}
+
+func newTextChunk(text string, sig []byte, thought bool, finishReason genai.FinishReason) *genai.GenerateContentResponse {
+	part := &genai.Part{Text: text, Thought: thought}
+	if len(sig) > 0 {
+		part.ThoughtSignature = sig
+	}
+	return newPartsChunk([]*genai.Part{part}, finishReason)
+}
+
+func newPartsChunk(parts []*genai.Part, finishReason genai.FinishReason) *genai.GenerateContentResponse {
+	return &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content:      &genai.Content{Role: "model", Parts: parts},
+				FinishReason: finishReason,
+			},
+		},
+	}
+}
+
+type responseAggregator interface {
+	ProcessResponse(ctx context.Context, genResp *genai.GenerateContentResponse) iter.Seq2[*model.LLMResponse, error]
+	Close() *model.LLMResponse
+}
+
+func collectResponses(t *testing.T, aggregator responseAggregator, ctx context.Context, responses ...*genai.GenerateContentResponse) []*model.LLMResponse {
+	t.Helper()
+	var out []*model.LLMResponse
+	for _, resp := range responses {
+		for llmResp, err := range aggregator.ProcessResponse(ctx, resp) {
+			if err != nil {
+				t.Fatalf("ProcessResponse returned error: %v", err)
+			}
+			if llmResp != nil {
+				out = append(out, llmResp)
+			}
+		}
+	}
+	if final := aggregator.Close(); final != nil {
+		out = append(out, final)
+	}
+	return out
+}
+
+func lastNonPartial(responses []*model.LLMResponse) *model.LLMResponse {
+	for i := len(responses) - 1; i >= 0; i-- {
+		if responses[i] != nil && !responses[i].Partial {
+			return responses[i]
+		}
+	}
+	return nil
 }

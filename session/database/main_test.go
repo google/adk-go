@@ -21,6 +21,8 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Force a stable timezone for database tests so timestamp round-trips
+	// don't depend on the machine's local TZ.
 	origLocal := time.Local
 	time.Local = time.UTC
 	code := m.Run()
