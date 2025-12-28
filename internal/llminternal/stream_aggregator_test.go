@@ -448,6 +448,93 @@ func TestStreamAggregatorDoesNotMergeSignedTextPart(t *testing.T) {
 	}
 }
 
+func TestStreamAggregatorInterleavedStreamingFunctionCalls(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	sig1 := []byte("sig-one")
+	sig2 := []byte("sig-two")
+
+	responses := collectResponses(t, aggregator, ctx,
+		newFunctionCallChunk("fn_one", "fc_1", sig1, true, []*genai.PartialArg{{JsonPath: "$.x", StringValue: "A"}}...),
+		newFunctionCallChunk("fn_two", "fc_2", sig2, true, []*genai.PartialArg{{JsonPath: "$.y", StringValue: "X"}}...),
+		newFunctionCallChunk("", "fc_1", nil, false, []*genai.PartialArg{{JsonPath: "$.x", StringValue: "B"}}...),
+		newFunctionCallChunk("", "fc_2", nil, false, []*genai.PartialArg{{JsonPath: "$.y", StringValue: "Y"}}...),
+	)
+
+	var finals []*genai.Part
+	for _, resp := range responses {
+		if resp == nil || resp.Partial || resp.Content == nil || len(resp.Content.Parts) == 0 {
+			continue
+		}
+		part := resp.Content.Parts[0]
+		if part.FunctionCall != nil {
+			finals = append(finals, part)
+		}
+	}
+	if len(finals) != 2 {
+		t.Fatalf("expected 2 finalized function calls, got %d", len(finals))
+	}
+	if got, want := finals[0].FunctionCall.Name, "fn_one"; got != want {
+		t.Fatalf("first function call name mismatch: got %q want %q", got, want)
+	}
+	if got, want := finals[0].FunctionCall.Args["x"], "AB"; got != want {
+		t.Fatalf("first function call args mismatch: got %v want %v", got, want)
+	}
+	if !bytes.Equal(finals[0].ThoughtSignature, sig1) {
+		t.Fatalf("first function call signature mismatch: got %v want %v", finals[0].ThoughtSignature, sig1)
+	}
+	if got, want := finals[1].FunctionCall.Name, "fn_two"; got != want {
+		t.Fatalf("second function call name mismatch: got %q want %q", got, want)
+	}
+	if got, want := finals[1].FunctionCall.Args["y"], "XY"; got != want {
+		t.Fatalf("second function call args mismatch: got %v want %v", got, want)
+	}
+	if !bytes.Equal(finals[1].ThoughtSignature, sig2) {
+		t.Fatalf("second function call signature mismatch: got %v want %v", finals[1].ThoughtSignature, sig2)
+	}
+}
+
+func TestStreamAggregatorMixedTextAndFunctionCallOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	aggregator := llminternal.NewStreamingResponseAggregator()
+
+	fcPart := genai.NewPartFromFunctionCall("fn_call", map[string]any{"k": "v"})
+	resp := newPartsChunk([]*genai.Part{
+		{Text: "Hello"},
+		fcPart,
+		{Text: "World"},
+	}, genai.FinishReasonStop)
+
+	responses := collectResponses(t, aggregator, ctx, resp)
+	var withFn *model.LLMResponse
+	for _, r := range responses {
+		if r == nil || r.Content == nil {
+			continue
+		}
+		for _, p := range r.Content.Parts {
+			if p.FunctionCall != nil {
+				withFn = r
+				break
+			}
+		}
+		if withFn != nil {
+			break
+		}
+	}
+	if withFn == nil || withFn.Content == nil {
+		t.Fatalf("expected response containing function call")
+	}
+	parts := withFn.Content.Parts
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(parts))
+	}
+	if parts[0].Text != "Hello" || parts[1].FunctionCall == nil || parts[2].Text != "World" {
+		t.Fatalf("unexpected part order: %+v", parts)
+	}
+}
+
 func newFunctionCallChunk(name, id string, sig []byte, willContinue bool, args ...*genai.PartialArg) *genai.GenerateContentResponse {
 	part := &genai.Part{
 		FunctionCall: &genai.FunctionCall{
