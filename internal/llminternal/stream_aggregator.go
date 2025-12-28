@@ -220,7 +220,10 @@ func (s *streamingResponseAggregator) handleFunctionCall(part *genai.Part, llmRe
 	}
 
 	if !isStreamingFunctionCall(fc) {
-		return
+		if !s.hasPendingFunctionCall() || fc.Name != "" || fc.ID != "" || len(fc.PartialArgs) > 0 {
+			return
+		}
+		// Empty functionCall chunk can mark the end of streamed args.
 	}
 
 	state := s.ensureFunctionCallState(fc)
