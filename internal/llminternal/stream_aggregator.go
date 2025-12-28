@@ -39,10 +39,7 @@ type streamingResponseAggregator struct {
 	currentTextBuffer    string
 	currentTextIsThought *bool
 
-	currentFunctionCallName string
-	currentFunctionCallID   string
-	currentFunctionCallArgs map[string]any
-	currentThoughtSignature []byte
+	currentFunctionCalls map[string]*functionCallState
 }
 
 // NewStreamingResponseAggregator creates a new, initialized streamingResponseAggregator.
@@ -213,24 +210,27 @@ func (s *streamingResponseAggregator) hasPendingTextParts() bool {
 
 func (s *streamingResponseAggregator) handleFunctionCall(part *genai.Part, llmResponse *model.LLMResponse) {
 	fc := part.FunctionCall
-	if len(fc.PartialArgs) == 0 {
-		if !s.hasPendingFunctionCall() {
-			s.resetFunctionCallState()
-		}
+	if fc == nil {
 		return
 	}
 
+	if !isStreamingFunctionCall(fc) {
+		return
+	}
+
+	state := s.ensureFunctionCallState(fc)
+
 	if fc.Name != "" {
-		s.currentFunctionCallName = fc.Name
+		state.name = fc.Name
 	}
 	if fc.ID != "" {
-		s.currentFunctionCallID = fc.ID
+		state.id = fc.ID
 	}
-	if len(part.ThoughtSignature) > 0 && len(s.currentThoughtSignature) == 0 {
-		s.currentThoughtSignature = append([]byte(nil), part.ThoughtSignature...)
+	if len(part.ThoughtSignature) > 0 && len(state.thoughtSignature) == 0 {
+		state.thoughtSignature = append([]byte(nil), part.ThoughtSignature...)
 	}
-	if s.currentFunctionCallArgs == nil {
-		s.currentFunctionCallArgs = make(map[string]any)
+	if state.args == nil {
+		state.args = make(map[string]any)
 	}
 
 	for _, partialArg := range fc.PartialArgs {
@@ -243,15 +243,15 @@ func (s *streamingResponseAggregator) handleFunctionCall(part *genai.Part, llmRe
 			continue
 		}
 		if strVal, isString := value.(string); isString {
-			if existing, ok := getValueAtPath(s.currentFunctionCallArgs, pathTokens); ok {
+			if existing, ok := getValueAtPath(state.args, pathTokens); ok {
 				if existingStr, ok := existing.(string); ok {
 					value = existingStr + strVal
 				}
 			}
 		}
-		updated := setValueAtPath(s.currentFunctionCallArgs, pathTokens, value)
+		updated := setValueAtPath(state.args, pathTokens, value)
 		if root, ok := updated.(map[string]any); ok {
-			s.currentFunctionCallArgs = root
+			state.args = root
 		}
 	}
 
@@ -260,47 +260,55 @@ func (s *streamingResponseAggregator) handleFunctionCall(part *genai.Part, llmRe
 		return
 	}
 
-	if finalPart := s.buildFunctionCallPart(); finalPart != nil {
+	if !state.hasData() {
+		return
+	}
+
+	if finalPart := s.buildFunctionCallPart(state); finalPart != nil {
 		if llmResponse.Content == nil {
 			llmResponse.Content = &genai.Content{Role: s.role}
 		}
 		llmResponse.Content.Parts = []*genai.Part{finalPart}
 		llmResponse.Partial = false
 	}
-	s.resetFunctionCallState()
+	s.clearFunctionCallState(state.key)
 }
 
-func (s *streamingResponseAggregator) buildFunctionCallPart() *genai.Part {
-	if s.currentFunctionCallName == "" && len(s.currentFunctionCallArgs) == 0 {
+func (s *streamingResponseAggregator) buildFunctionCallPart(state *functionCallState) *genai.Part {
+	if state == nil || !state.hasData() {
 		return nil
 	}
-	args := cloneValue(s.currentFunctionCallArgs).(map[string]any)
-	part := genai.NewPartFromFunctionCall(s.currentFunctionCallName, args)
+	args := cloneValue(state.args).(map[string]any)
+	part := genai.NewPartFromFunctionCall(state.name, args)
 	if part.FunctionCall != nil {
-		part.FunctionCall.ID = s.currentFunctionCallID
+		part.FunctionCall.ID = state.id
 	}
-	if len(s.currentThoughtSignature) > 0 {
-		part.ThoughtSignature = append([]byte(nil), s.currentThoughtSignature...)
+	if len(state.thoughtSignature) > 0 {
+		part.ThoughtSignature = append([]byte(nil), state.thoughtSignature...)
 	}
 	return part
 }
 
-func (s *streamingResponseAggregator) resetFunctionCallState() {
-	s.currentFunctionCallArgs = nil
-	s.currentFunctionCallID = ""
-	s.currentFunctionCallName = ""
-	s.currentThoughtSignature = nil
+func (s *streamingResponseAggregator) clearFunctionCallState(key string) {
+	if key == "" || s.currentFunctionCalls == nil {
+		return
+	}
+	delete(s.currentFunctionCalls, key)
 }
 
 func (s *streamingResponseAggregator) hasPendingFunctionCall() bool {
-	return len(s.currentFunctionCallArgs) > 0 || s.currentFunctionCallName != ""
+	return s.currentFunctionCalls != nil && len(s.currentFunctionCalls) > 0
 }
 
 func (s *streamingResponseAggregator) createPendingFunctionCallResponse() *model.LLMResponse {
 	if !s.hasPendingFunctionCall() || s.response == nil {
 		return nil
 	}
-	part := s.buildFunctionCallPart()
+	state := s.firstPendingFunctionCall()
+	if state == nil {
+		return nil
+	}
+	part := s.buildFunctionCallPart(state)
 	if part == nil {
 		return nil
 	}
@@ -312,7 +320,7 @@ func (s *streamingResponseAggregator) createPendingFunctionCallResponse() *model
 		GroundingMetadata: s.response.GroundingMetadata,
 		FinishReason:      s.response.FinishReason,
 	}
-	s.resetFunctionCallState()
+	s.clearFunctionCallState(state.key)
 	s.clearTextBuffers()
 	return response
 }
@@ -329,6 +337,63 @@ func cloneTextPart(part *genai.Part) *genai.Part {
 		out.ThoughtSignature = append([]byte(nil), part.ThoughtSignature...)
 	}
 	return out
+}
+
+type functionCallState struct {
+	key              string
+	name             string
+	id               string
+	args             map[string]any
+	thoughtSignature []byte
+}
+
+func (s *functionCallState) hasData() bool {
+	return s.name != "" || len(s.args) > 0
+}
+
+func (s *streamingResponseAggregator) ensureFunctionCallState(fc *genai.FunctionCall) *functionCallState {
+	key := functionCallKey(fc)
+	if key == "" {
+		key = "__default__"
+	}
+	if s.currentFunctionCalls == nil {
+		s.currentFunctionCalls = make(map[string]*functionCallState)
+	}
+	state, ok := s.currentFunctionCalls[key]
+	if !ok {
+		state = &functionCallState{key: key}
+		s.currentFunctionCalls[key] = state
+	}
+	return state
+}
+
+func (s *streamingResponseAggregator) firstPendingFunctionCall() *functionCallState {
+	for _, state := range s.currentFunctionCalls {
+		if state != nil && state.hasData() {
+			return state
+		}
+	}
+	return nil
+}
+
+func functionCallKey(fc *genai.FunctionCall) string {
+	if fc == nil {
+		return ""
+	}
+	if fc.ID != "" {
+		return fc.ID
+	}
+	if fc.Name != "" {
+		return fc.Name
+	}
+	return ""
+}
+
+func isStreamingFunctionCall(fc *genai.FunctionCall) bool {
+	if fc == nil {
+		return false
+	}
+	return len(fc.PartialArgs) > 0 || fc.WillContinue != nil
 }
 
 type jsonPathToken struct {
