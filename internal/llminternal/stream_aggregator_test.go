@@ -15,11 +15,14 @@
 package llminternal_test
 
 import (
+	"bytes"
+	"context"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	llminternal "google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/model"
 )
@@ -203,5 +206,145 @@ func TestStreamAggregator(t *testing.T) {
 				t.Errorf("unexpected stream length, expected %d got %d", len(tc.want), count)
 			}
 		})
+	}
+}
+
+func TestStreamAggregatorStreamingFunctionCallArguments(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	thoughtSignature := []byte("signature-bytes")
+	var finalResponse *model.LLMResponse
+
+	process := func(resp *genai.GenerateContentResponse) {
+		for llmResp, err := range aggregator.ProcessResponse(ctx, resp) {
+			if err != nil {
+				t.Fatalf("ProcessResponse returned error: %v", err)
+			}
+			if llmResp == nil || llmResp.Content == nil || len(llmResp.Content.Parts) == 0 {
+				continue
+			}
+			part := llmResp.Content.Parts[0]
+			if part.FunctionCall != nil && !llmResp.Partial {
+				finalResponse = llmResp
+			}
+		}
+	}
+
+	process(newFunctionCallChunk("get_weather", "fc_001", thoughtSignature, true, []*genai.PartialArg{
+		{JsonPath: "$.location", StringValue: "New "},
+	}...))
+
+	if finalResponse != nil {
+		t.Fatalf("got final response before stream finished: %+v", finalResponse)
+	}
+
+	process(newFunctionCallChunk("", "fc_001", nil, true, []*genai.PartialArg{
+		{JsonPath: "$.location", StringValue: "York"},
+	}...))
+
+	process(newFunctionCallChunk("", "fc_001", nil, false, []*genai.PartialArg{
+		{JsonPath: "$.unit", StringValue: "celsius"},
+	}...))
+
+	if finalResponse == nil {
+		t.Fatalf("expected final response after streaming function call")
+	}
+
+	if len(finalResponse.Content.Parts) != 1 {
+		t.Fatalf("expected 1 part, got %d", len(finalResponse.Content.Parts))
+	}
+	fcPart := finalResponse.Content.Parts[0]
+	if fcPart.FunctionCall == nil {
+		t.Fatalf("expected function call part in final response")
+	}
+	if got, want := fcPart.FunctionCall.Args["location"], "New York"; got != want {
+		t.Fatalf("location arg mismatch: got %v want %v", got, want)
+	}
+	if got, want := fcPart.FunctionCall.Args["unit"], "celsius"; got != want {
+		t.Fatalf("unit arg mismatch: got %v want %v", got, want)
+	}
+	if got := fcPart.FunctionCall.ID; got != "fc_001" {
+		t.Fatalf("function call id mismatch: got %q want %q", got, "fc_001")
+	}
+	if !bytes.Equal(fcPart.ThoughtSignature, thoughtSignature) {
+		t.Fatalf("thought signature mismatch: got %v want %v", fcPart.ThoughtSignature, thoughtSignature)
+	}
+
+	if closeResp := aggregator.Close(); closeResp != nil {
+		t.Fatalf("expected no additional response from Close, got %+v", closeResp)
+	}
+}
+
+func TestStreamAggregatorKeepsPendingFunctionCallWhenEmptyChunkArrives(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	thoughtSignature := []byte("signature-bytes")
+
+	process := func(resp *genai.GenerateContentResponse) *model.LLMResponse {
+		for llmResp, err := range aggregator.ProcessResponse(ctx, resp) {
+			if err != nil {
+				t.Fatalf("ProcessResponse returned error: %v", err)
+			}
+			if llmResp != nil {
+				return llmResp
+			}
+		}
+		return nil
+	}
+
+	// Start a streaming function call with partial args.
+	process(newFunctionCallChunk("get_weather", "fc_001", thoughtSignature, true, []*genai.PartialArg{
+		{JsonPath: "$.location", StringValue: "San"},
+	}...))
+
+	// Simulate an empty function call chunk (no PartialArgs).
+	process(newFunctionCallChunk("", "fc_001", nil, true))
+
+	// Finish stream without more args. Close should flush the pending function call.
+	finalResp := aggregator.Close()
+	if finalResp == nil || finalResp.Content == nil || len(finalResp.Content.Parts) == 0 {
+		t.Fatalf("expected final response from Close, got nil/empty")
+	}
+
+	part := finalResp.Content.Parts[0]
+	if part.FunctionCall == nil {
+		t.Fatalf("expected function call part in final response")
+	}
+	if got, want := part.FunctionCall.Args["location"], "San"; got != want {
+		t.Fatalf("location arg mismatch: got %v want %v", got, want)
+	}
+	if !bytes.Equal(part.ThoughtSignature, thoughtSignature) {
+		t.Fatalf("thought signature mismatch: got %v want %v", part.ThoughtSignature, thoughtSignature)
+	}
+}
+
+func newFunctionCallChunk(name, id string, sig []byte, willContinue bool, args ...*genai.PartialArg) *genai.GenerateContentResponse {
+	part := &genai.Part{
+		FunctionCall: &genai.FunctionCall{
+			Name:         name,
+			ID:           id,
+			PartialArgs:  args,
+			WillContinue: genai.Ptr(willContinue),
+		},
+	}
+	if len(sig) > 0 {
+		part.ThoughtSignature = sig
+	}
+	finishReason := genai.FinishReason("")
+	if !willContinue {
+		finishReason = genai.FinishReasonStop
+	}
+	return &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{part},
+				},
+				FinishReason: finishReason,
+			},
+		},
 	}
 }
