@@ -162,3 +162,49 @@ func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req 
 	}
 	EncodeJSONResponse(sessions, http.StatusOK, rw)
 }
+
+// UpdateSessionHandler handles updating a session's state, specifically it performs a PATCH.
+func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req *http.Request) {
+	params := mux.Vars(req)
+	sessionID, err := models.SessionIDFromHTTPParameters(params)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if sessionID.ID == "" {
+		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	patchRequest := models.PatchSessionStateDeltaRequest{}
+	if err := json.NewDecoder(req.Body).Decode(&patchRequest); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Normalize directives (e.g. delete) to nil values for the service layer
+	normalizedDelta, err := models.NormalizeStateDelta(patchRequest.StateDelta)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Use PatchState to update state without appending an event
+	patchResp, err := c.service.PatchState(req.Context(), &session.PatchStateRequest{
+		AppName:    sessionID.AppName,
+		UserID:     sessionID.UserID,
+		SessionID:  sessionID.ID,
+		StateDelta: normalizedDelta,
+	})
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	respSession, err := models.FromSession(patchResp.Session)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	EncodeJSONResponse(respSession, http.StatusOK, rw)
+}

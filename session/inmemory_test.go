@@ -937,6 +937,180 @@ func Test_databaseService_StateManagement(t *testing.T) {
 	})
 }
 
+func Test_inMemoryService_PatchState(t *testing.T) {
+	tests := []struct {
+		name           string
+		setup          func(t *testing.T) Service
+		req            *PatchStateRequest
+		wantState      map[string]any
+		wantEventCount int
+		wantErr        bool
+	}{
+		{
+			name:  "patch adds new key",
+			setup: serviceDbWithData,
+			req: &PatchStateRequest{
+				AppName:   "app1",
+				UserID:    "user1",
+				SessionID: "session1",
+				StateDelta: map[string]any{
+					"newKey": "newValue",
+				},
+			},
+			wantState: map[string]any{
+				"k1":     "v1",
+				"newKey": "newValue",
+			},
+			wantEventCount: 0,
+		},
+		{
+			name:  "patch overwrites existing key",
+			setup: serviceDbWithData,
+			req: &PatchStateRequest{
+				AppName:   "app1",
+				UserID:    "user1",
+				SessionID: "session1",
+				StateDelta: map[string]any{
+					"k1": "updatedValue",
+				},
+			},
+			wantState: map[string]any{
+				"k1": "updatedValue",
+			},
+			wantEventCount: 0,
+		},
+		{
+			name:  "patch deletes key with nil value",
+			setup: serviceDbWithData,
+			req: &PatchStateRequest{
+				AppName:   "app1",
+				UserID:    "user1",
+				SessionID: "session1",
+				StateDelta: map[string]any{
+					"k1": nil,
+				},
+			},
+			wantState:      map[string]any{},
+			wantEventCount: 0,
+		},
+		{
+			name:  "patch does not append events to session with existing events",
+			setup: serviceDbWithData,
+			req: &PatchStateRequest{
+				AppName:   "app2",
+				UserID:    "user2",
+				SessionID: "session2",
+				StateDelta: map[string]any{
+					"newKey": "newValue",
+				},
+			},
+			wantState: map[string]any{
+				"k2":     "v2",
+				"newKey": "newValue",
+			},
+			wantEventCount: 1, // Should still have only the original event
+		},
+		{
+			name:  "patch on non-existent session returns error",
+			setup: serviceDbWithData,
+			req: &PatchStateRequest{
+				AppName:   "app1",
+				UserID:    "user1",
+				SessionID: "nonexistent",
+				StateDelta: map[string]any{
+					"k1": "v1",
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name:  "patch with empty delta still updates timestamp",
+			setup: serviceDbWithData,
+			req: &PatchStateRequest{
+				AppName:    "app1",
+				UserID:     "user1",
+				SessionID:  "session1",
+				StateDelta: map[string]any{},
+			},
+			wantState: map[string]any{
+				"k1": "v1",
+			},
+			wantEventCount: 0,
+		},
+		{
+			name:  "patch with missing app_name returns error",
+			setup: emptyService,
+			req: &PatchStateRequest{
+				AppName:   "",
+				UserID:    "user1",
+				SessionID: "session1",
+				StateDelta: map[string]any{
+					"k1": "v1",
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := tt.setup(t)
+
+			// Record time before patch
+			timeBefore := time.Now().Add(-time.Millisecond)
+
+			resp, err := service.PatchState(t.Context(), tt.req)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("PatchState() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+
+			// Verify state
+			gotState := map[string]any{}
+			maps.Insert(gotState, resp.Session.State().All())
+			if diff := cmp.Diff(tt.wantState, gotState); diff != "" {
+				t.Errorf("PatchState() state mismatch (-want +got):\n%s", diff)
+			}
+
+			// Verify event count (should not have appended any events)
+			if resp.Session.Events().Len() != tt.wantEventCount {
+				t.Errorf("PatchState() event count = %d, want %d", resp.Session.Events().Len(), tt.wantEventCount)
+			}
+
+			// Verify lastUpdateTime was updated
+			if !resp.Session.LastUpdateTime().After(timeBefore) {
+				t.Errorf("PatchState() lastUpdateTime was not updated, got %v, want after %v",
+					resp.Session.LastUpdateTime(), timeBefore)
+			}
+
+			// Verify the change persisted by fetching the session again
+			getResp, err := service.Get(t.Context(), &GetRequest{
+				AppName:   tt.req.AppName,
+				UserID:    tt.req.UserID,
+				SessionID: tt.req.SessionID,
+			})
+			if err != nil {
+				t.Fatalf("Get() after PatchState() failed: %v", err)
+			}
+
+			persistedState := map[string]any{}
+			maps.Insert(persistedState, getResp.Session.State().All())
+			if diff := cmp.Diff(tt.wantState, persistedState); diff != "" {
+				t.Errorf("Get() after PatchState() state mismatch (-want +got):\n%s", diff)
+			}
+
+			// Verify event count persisted
+			if getResp.Session.Events().Len() != tt.wantEventCount {
+				t.Errorf("Get() after PatchState() event count = %d, want %d",
+					getResp.Session.Events().Len(), tt.wantEventCount)
+			}
+		})
+	}
+}
+
 func serviceDbWithData(t *testing.T) Service {
 	t.Helper()
 

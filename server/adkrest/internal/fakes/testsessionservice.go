@@ -185,4 +185,36 @@ func (s *FakeSessionService) AppendEvent(ctx context.Context, curSession session
 	return nil
 }
 
+func (s *FakeSessionService) PatchState(ctx context.Context, req *session.PatchStateRequest) (*session.PatchStateResponse, error) {
+	key := SessionKey{
+		AppName:   req.AppName,
+		UserID:    req.UserID,
+		SessionID: req.SessionID,
+	}
+	testSession, ok := s.Sessions[key]
+	if !ok {
+		return nil, fmt.Errorf("session %q not found", req.SessionID)
+	}
+
+	// Apply state delta
+	if testSession.SessionState == nil {
+		testSession.SessionState = make(TestState)
+	}
+	for k, v := range req.StateDelta {
+		if v == nil {
+			delete(testSession.SessionState, k)
+		} else {
+			testSession.SessionState[k] = v
+		}
+	}
+
+	// Update timestamp
+	testSession.UpdatedAt = time.Now()
+	s.Sessions[key] = testSession
+
+	return &session.PatchStateResponse{
+		Session: &testSession,
+	}, nil
+}
+
 var _ session.Service = (*FakeSessionService)(nil)

@@ -349,6 +349,127 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	return sess.appendEvent(event)
 }
 
+// PatchState updates a session's state without appending an event
+func (s *databaseService) PatchState(ctx context.Context, req *session.PatchStateRequest) (*session.PatchStateResponse, error) {
+	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
+	if appName == "" || userID == "" || sessionID == "" {
+		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
+	}
+
+	var responseSession *localSession
+
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Fetch the session from storage
+		var storageSess storageSession
+		err := tx.Where(&storageSession{AppName: appName, UserID: userID, ID: sessionID}).
+			First(&storageSess).Error
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("session %q not found", sessionID)
+			}
+			return fmt.Errorf("failed to get session: %w", err)
+		}
+
+		// Fetch App and User states
+		storageApp, err := fetchStorageAppState(tx, appName)
+		if err != nil {
+			return err
+		}
+		storageUser, err := fetchStorageUserState(tx, appName, userID)
+		if err != nil {
+			return err
+		}
+
+		// Extract state deltas
+		appDelta, userDelta, sessionDelta := extractStateDeltas(req.StateDelta)
+
+		// Apply app state delta
+		if len(appDelta) > 0 {
+			for key, value := range appDelta {
+				if value == nil {
+					delete(storageApp.State, key)
+				} else {
+					storageApp.State[key] = value
+				}
+			}
+			if err := tx.Save(&storageApp).Error; err != nil {
+				return fmt.Errorf("failed to save app state: %w", err)
+			}
+		}
+
+		// Apply user state delta
+		if len(userDelta) > 0 {
+			for key, value := range userDelta {
+				if value == nil {
+					delete(storageUser.State, key)
+				} else {
+					storageUser.State[key] = value
+				}
+			}
+			if err := tx.Save(&storageUser).Error; err != nil {
+				return fmt.Errorf("failed to save user state: %w", err)
+			}
+		}
+
+		// Apply session state delta
+		if len(sessionDelta) > 0 {
+			for key, value := range sessionDelta {
+				if value == nil {
+					delete(storageSess.State, key)
+				} else {
+					storageSess.State[key] = value
+				}
+			}
+		}
+
+		// Update timestamp
+		storageSess.UpdateTime = time.Now()
+
+		// Save the session
+		if err := tx.Save(&storageSess).Error; err != nil {
+			return fmt.Errorf("failed to save session state: %w", err)
+		}
+
+		// Create response session
+		responseSession, err = createSessionFromStorageSession(&storageSess)
+		if err != nil {
+			return fmt.Errorf("failed to map storage object: %w", err)
+		}
+		responseSession.state = mergeStates(storageApp.State, storageUser.State, responseSession.state)
+
+		// Fetch events for the response
+		var storageEvents []storageEvent
+		if err := tx.Model(&storageEvent{}).
+			Where("app_name = ?", appName).
+			Where("user_id = ?", userID).
+			Where("session_id = ?", sessionID).
+			Order("timestamp ASC").
+			Find(&storageEvents).Error; err != nil {
+			return fmt.Errorf("database error while fetching events: %w", err)
+		}
+
+		responseEvents := make([]*session.Event, 0, len(storageEvents))
+		for i := range storageEvents {
+			evt, err := createEventFromStorageEvent(&storageEvents[i])
+			if err != nil {
+				return fmt.Errorf("failed to map storage event: %w", err)
+			}
+			responseEvents = append(responseEvents, evt)
+		}
+		responseSession.events = responseEvents
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &session.PatchStateResponse{
+		Session: responseSession,
+	}, nil
+}
+
 // applyEvent fetches the session, validates it, applies state changes from an
 // event, and saves the event atomically.
 func (s *databaseService) applyEvent(ctx context.Context, session *localSession, event *session.Event) error {

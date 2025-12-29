@@ -29,6 +29,11 @@ type Service interface {
 	Delete(context.Context, *DeleteRequest) error
 	// AppendEvent is used to append an event to a session, and remove temporary state keys from the event.
 	AppendEvent(context.Context, Session, *Event) error
+	// PatchState applies a state delta to a session without appending an event.
+	// Keys in the delta are merged into the existing state (add or overwrite).
+	// To delete a key, set its value to nil in the delta.
+	// This method updates the session's lastUpdateTime.
+	PatchState(context.Context, *PatchStateRequest) (*PatchStateResponse, error)
 }
 
 // InMemoryService returns an in-memory implementation of the session service.
@@ -90,4 +95,20 @@ type DeleteRequest struct {
 	AppName   string
 	UserID    string
 	SessionID string
+}
+
+// PatchStateRequest represents a request to patch session state.
+type PatchStateRequest struct {
+	AppName   string
+	UserID    string
+	SessionID string
+	// StateDelta contains the state changes to apply.
+	// Keys are merged into existing state (add or overwrite).
+	// To delete a key, set its value to nil.
+	StateDelta map[string]any
+}
+
+// PatchStateResponse represents a response from [Service.PatchState].
+type PatchStateResponse struct {
+	Session Session
 }

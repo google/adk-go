@@ -235,6 +235,56 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	return nil
 }
 
+// PatchState updates a session's state without appending an event.
+func (s *inMemoryService) PatchState(ctx context.Context, req *PatchStateRequest) (*PatchStateResponse, error) {
+	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
+	if appName == "" || userID == "" || sessionID == "" {
+		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id := id{
+		appName:   appName,
+		userID:    userID,
+		sessionID: sessionID,
+	}
+
+	storedSession, ok := s.sessions.Get(id.Encode())
+	if !ok {
+		return nil, fmt.Errorf("session %q not found", sessionID)
+	}
+
+	// Apply state delta: extract app/user/session deltas
+	appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(req.StateDelta)
+
+	// Update app and user state
+	s.updateAppState(appDelta, appName)
+	s.updateUserState(userDelta, appName, userID)
+
+	// Apply session state delta: add/overwrite keys, delete keys with nil value
+	for key, value := range sessionDelta {
+		if value == nil {
+			delete(storedSession.state, key)
+		} else {
+			storedSession.state[key] = value
+		}
+	}
+
+	// Update timestamp
+	storedSession.updatedAt = time.Now()
+
+	// Return a copy of the updated session
+	copiedSession := copySessionWithoutStateAndEvents(storedSession)
+	copiedSession.state = s.mergeStates(storedSession.state, appName, userID)
+	copiedSession.events = slices.Clone(storedSession.events)
+
+	return &PatchStateResponse{
+		Session: copiedSession,
+	}, nil
+}
+
 func (s *inMemoryService) updateAppState(appDelta stateMap, appName string) stateMap {
 	innerMap, ok := s.appState[appName]
 	if !ok {
