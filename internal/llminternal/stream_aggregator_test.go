@@ -37,9 +37,9 @@ type streamAggregatorTest struct {
 	wantPartial          []bool
 }
 
-// Doc: streamGenerateContent returns multiple response chunks; clients aggregate
-// partial chunks and emit a final combined response.
-// https://ai.google.dev/api
+// Doc: https://ai.google.dev/gemini-api/docs/thought-signatures
+// Quote: "It is advisable to parse the entire request until the `finish_reason` is returned by the model."
+// Summary: Streaming consumers should parse all chunks before final aggregation.
 // Scenario: Two streaming calls emit partial responses followed by aggregated output.
 func TestStreamAggregator(t *testing.T) {
 	ctx := t.Context()
@@ -214,9 +214,9 @@ func TestStreamAggregator(t *testing.T) {
 	}
 }
 
-// Doc: Streaming function-call arguments are delivered via partialArgs with JSONPath
-// and willContinue, requiring aggregation across chunks.
-// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
+// Doc: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
+// Quote: "Intermediate responses will contain a `functionCall` object with `partialArgs` and `willContinue` fields."
+// Summary: Streamed function-call args arrive across multiple chunks and must be aggregated.
 // Scenario: A single function call streams args across multiple chunks; signature is on the first chunk.
 func TestStreamAggregatorStreamingFunctionCallArguments(t *testing.T) {
 	t.Parallel()
@@ -285,8 +285,9 @@ func TestStreamAggregatorStreamingFunctionCallArguments(t *testing.T) {
 	}
 }
 
-// Doc: Streaming examples can emit an empty functionCall chunk after partialArgs.
-// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
+// Doc: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
+// Quote: "\"functionCall\": {}"
+// Summary: The streaming example includes an empty functionCall chunk as a marker.
 // Scenario: An empty chunk should finalize the pending call so signatures/args are not dropped.
 func TestStreamAggregatorFinalizesFunctionCallWhenEmptyChunkArrives(t *testing.T) {
 	t.Parallel()
@@ -337,9 +338,9 @@ func TestStreamAggregatorFinalizesFunctionCallWhenEmptyChunkArrives(t *testing.T
 	}
 }
 
-// Doc: In a step with parallel function calls, only the first functionCall part
-// carries thought_signature; order must be preserved.
-// https://ai.google.dev/gemini-api/docs/thought-signatures
+// Doc: https://ai.google.dev/gemini-api/docs/thought-signatures
+// Quote: "the `thought_signature` is attached only to the first `functionCall` part."
+// Summary: Parallel tool calls keep order and only the first part carries the signature.
 // Scenario: Two parallel function calls in one response preserve order/signature placement.
 func TestStreamAggregatorParallelFunctionCallsPreserveOrderAndSignature(t *testing.T) {
 	t.Parallel()
@@ -377,9 +378,9 @@ func TestStreamAggregatorParallelFunctionCallsPreserveOrderAndSignature(t *testi
 	}
 }
 
-// Doc: In sequential steps, the first functionCall part of each step must carry
-// thought_signature.
-// https://ai.google.dev/gemini-api/docs/thought-signatures
+// Doc: https://ai.google.dev/gemini-api/docs/thought-signatures
+// Quote: "each function call will have a signature and you must pass all signatures back."
+// Summary: Sequential function calls must each preserve their own signatures.
 // Scenario: Two sequential function calls each keep their own signatures.
 func TestStreamAggregatorSequentialFunctionCallsPreserveSignatures(t *testing.T) {
 	t.Parallel()
@@ -416,8 +417,9 @@ func TestStreamAggregatorSequentialFunctionCallsPreserveSignatures(t *testing.T)
 	}
 }
 
-// Doc: In streaming, thought_signature may appear in an empty final text part.
-// https://ai.google.dev/gemini-api/docs/thought-signatures
+// Doc: https://ai.google.dev/gemini-api/docs/thought-signatures
+// Quote: "the model may return the thought signature in a part with an empty text content part."
+// Summary: A final empty text part can carry the signature and must be preserved.
 // Scenario: Preserve the empty final part to keep the signature.
 func TestStreamAggregatorPreservesSignatureOnEmptyFinalTextPart(t *testing.T) {
 	t.Parallel()
@@ -448,8 +450,9 @@ func TestStreamAggregatorPreservesSignatureOnEmptyFinalTextPart(t *testing.T) {
 	}
 }
 
-// Doc: Never merge a part that carries thought_signature with any other part.
-// https://ai.google.dev/gemini-api/docs/thought-signatures
+// Doc: https://ai.google.dev/gemini-api/docs/function_calling
+// Quote: "Don't merge a `Part` containing a signature with one that does not."
+// Summary: Signed parts must remain distinct from adjacent text.
 // Scenario: Signed text part remains distinct from adjacent text.
 func TestStreamAggregatorDoesNotMergeSignedTextPart(t *testing.T) {
 	t.Parallel()
@@ -478,9 +481,9 @@ func TestStreamAggregatorDoesNotMergeSignedTextPart(t *testing.T) {
 	}
 }
 
-// Doc: Streaming function-call args are chunked; if multiple calls are in-flight,
-// aggregate by call ID to avoid mixing args.
-// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
+// Doc: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
+// Quote: "If `true`, more `partialArgs` are expected for the overall function call in subsequent streamed responses."
+// Summary: Streaming args may span multiple chunks; keep each call's args isolated.
 // Scenario: Interleaved chunks for two calls are merged by ID and keep signatures.
 func TestStreamAggregatorInterleavedStreamingFunctionCalls(t *testing.T) {
 	t.Parallel()
@@ -529,8 +532,9 @@ func TestStreamAggregatorInterleavedStreamingFunctionCalls(t *testing.T) {
 	}
 }
 
-// Doc: Function-call streaming examples omit call IDs, so clients cannot rely on IDs.
-// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
+// Doc: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling
+// Quote: "Intermediate responses will contain a `functionCall` object with `partialArgs` and `willContinue` fields."
+// Summary: Streaming examples omit IDs, so clients should not depend on them.
 // Scenario: With missing IDs, fall back to deterministic ordering for parallel streams.
 func TestStreamAggregatorInterleavedFunctionCallsWithoutIDs(t *testing.T) {
 	t.Parallel()
@@ -579,8 +583,9 @@ func TestStreamAggregatorInterleavedFunctionCallsWithoutIDs(t *testing.T) {
 	}
 }
 
-// Doc: All parts (including thought_signature) must be returned back to the model.
-// https://ai.google.dev/gemini-api/docs/thought-signatures
+// Doc: https://ai.google.dev/gemini-api/docs/thought-signatures
+// Quote: "You must return this signature in the exact part where it was received when sending the conversation history back to the model."
+// Summary: Pending function-call parts must be preserved to avoid dropping signatures.
 // Scenario: If the stream ends early, flush all pending calls so signatures are preserved.
 func TestStreamAggregatorCloseFlushesMultiplePendingFunctionCalls(t *testing.T) {
 	t.Parallel()
@@ -636,8 +641,9 @@ func TestStreamAggregatorCloseFlushesMultiplePendingFunctionCalls(t *testing.T) 
 	}
 }
 
-// Doc: The full response must preserve part ordering when returned to the model.
-// https://ai.google.dev/gemini-api/docs/thought-signatures
+// Doc: https://ai.google.dev/gemini-api/docs/function_calling
+// Quote: "include the responses in the same order as they were requested."
+// Summary: Preserve part ordering when mixing text and function calls.
 // Scenario: Mixed text + functionCall + text stays in original order.
 func TestStreamAggregatorMixedTextAndFunctionCallOrder(t *testing.T) {
 	t.Parallel()
