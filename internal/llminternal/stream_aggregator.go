@@ -603,6 +603,9 @@ func parseJSONPath(path string) ([]jsonPathToken, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid array index in json path %q: %w", path, err)
 			}
+			if idx < 0 {
+				return nil, fmt.Errorf("negative array indices are not supported in json path %q", path)
+			}
 			tokens = append(tokens, jsonPathToken{index: idx, isIndex: true})
 			i++
 		default:
@@ -667,9 +670,6 @@ func setValueAtPath(current any, tokens []jsonPathToken, value any) any {
 		var slice []any
 		if existing, ok := current.([]any); ok && existing != nil {
 			slice = existing
-		}
-		if head.index < 0 {
-			head.index = 0
 		}
 		if len(slice) <= head.index {
 			newSlice := make([]any, head.index+1)
