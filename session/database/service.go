@@ -329,7 +329,7 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	}
 
 	// Truncate timestamp to microsecond precision to match database precision and prevent rounding errors.
-	event.Timestamp = time.UnixMicro(event.Timestamp.UnixMicro())
+	event.Timestamp = event.Timestamp.Truncate(time.Microsecond)
 
 	// Trim temp state before persisting
 	event = trimTempDeltaState(event)
