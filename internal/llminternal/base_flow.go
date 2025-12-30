@@ -492,10 +492,6 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 
 func mergeEventActions(base, other *session.EventActions) *session.EventActions {
 	// flows/llm_flows/functions.py merge_parallel_function_response_events
-	//
-	// TODO: merge_parallel_function_response_events creates a "last one wins" scenario
-	// except parts and requested_auth_configs. Check with the ADK team about
-	// the intention.
 	if other == nil {
 		return base
 	}
@@ -512,7 +508,10 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		base.Escalate = true
 	}
 	if other.StateDelta != nil {
-		base.StateDelta = other.StateDelta
+		if base.StateDelta == nil {
+			base.StateDelta = make(map[string]any)
+		}
+		maps.Copy(base.StateDelta, other.StateDelta)
 	}
 	return base
 }
