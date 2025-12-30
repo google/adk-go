@@ -359,6 +359,18 @@ func (s *databaseService) PatchState(ctx context.Context, req *session.PatchStat
 	var responseSession *localSession
 
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// applyDelta applies a state delta to a state map.
+		// A nil value in the delta means the key should be deleted.
+		applyDelta := func(state map[string]any, delta map[string]any) {
+			for key, value := range delta {
+				if value == nil {
+					delete(state, key)
+				} else {
+					state[key] = value
+				}
+			}
+		}
+
 		// Fetch the session from storage
 		var storageSess storageSession
 		err := tx.Where(&storageSession{AppName: appName, UserID: userID, ID: sessionID}).
@@ -385,13 +397,7 @@ func (s *databaseService) PatchState(ctx context.Context, req *session.PatchStat
 
 		// Apply app state delta
 		if len(appDelta) > 0 {
-			for key, value := range appDelta {
-				if value == nil {
-					delete(storageApp.State, key)
-				} else {
-					storageApp.State[key] = value
-				}
-			}
+			applyDelta(storageApp.State, appDelta)
 			if err := tx.Save(&storageApp).Error; err != nil {
 				return fmt.Errorf("failed to save app state: %w", err)
 			}
@@ -399,13 +405,7 @@ func (s *databaseService) PatchState(ctx context.Context, req *session.PatchStat
 
 		// Apply user state delta
 		if len(userDelta) > 0 {
-			for key, value := range userDelta {
-				if value == nil {
-					delete(storageUser.State, key)
-				} else {
-					storageUser.State[key] = value
-				}
-			}
+			applyDelta(storageUser.State, userDelta)
 			if err := tx.Save(&storageUser).Error; err != nil {
 				return fmt.Errorf("failed to save user state: %w", err)
 			}
@@ -413,13 +413,7 @@ func (s *databaseService) PatchState(ctx context.Context, req *session.PatchStat
 
 		// Apply session state delta
 		if len(sessionDelta) > 0 {
-			for key, value := range sessionDelta {
-				if value == nil {
-					delete(storageSess.State, key)
-				} else {
-					storageSess.State[key] = value
-				}
-			}
+			applyDelta(storageSess.State, sessionDelta)
 		}
 
 		// Update timestamp
