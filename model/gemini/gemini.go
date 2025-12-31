@@ -38,6 +38,24 @@ type geminiModel struct {
 	versionHeaderValue string
 }
 
+// Config provides a simplified configuration for creating a Gemini model.
+// This is provided for convenience and backward compatibility.
+// For more advanced configuration options, use [NewModel] with [genai.ClientConfig].
+type Config struct {
+	// APIKey is the API key for authenticating with the Gemini API.
+	APIKey string
+	// Model specifies which Gemini model to use (e.g., "gemini-2.0-flash-exp").
+	Model string
+}
+
+// New creates a new Gemini model using a simplified [Config].
+// For more advanced configuration options, use [NewModel] with [genai.ClientConfig].
+func New(ctx context.Context, cfg Config) (model.LLM, error) {
+	return NewModel(ctx, cfg.Model, &genai.ClientConfig{
+		APIKey: cfg.APIKey,
+	})
+}
+
 // NewModel returns [model.LLM], backed by the Gemini API.
 //
 // It uses the provided context and configuration to initialize the underlying
