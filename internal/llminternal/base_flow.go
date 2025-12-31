@@ -508,10 +508,23 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		base.Escalate = true
 	}
 	if other.StateDelta != nil {
-		if base.StateDelta == nil {
-			base.StateDelta = make(map[string]any)
-		}
-		maps.Copy(base.StateDelta, other.StateDelta)
+		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
 	}
 	return base
+}
+
+func deepMergeMap(dst, src map[string]any) map[string]any {
+	if dst == nil {
+		dst = make(map[string]any)
+	}
+	for key, value := range src {
+		if srcMap, ok := value.(map[string]any); ok {
+			if dstMap, ok := dst[key].(map[string]any); ok {
+				dst[key] = deepMergeMap(dstMap, srcMap)
+				continue
+			}
+		}
+		dst[key] = value
+	}
+	return dst
 }

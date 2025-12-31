@@ -333,6 +333,24 @@ func TestMergeEventActions(t *testing.T) {
 			},
 		},
 		{
+			name: "state delta merged with nested map values",
+			base: &session.EventActions{
+				StateDelta: map[string]any{
+					"outer": map[string]any{"key1": "value1", "key2": "value2"},
+				},
+			},
+			other: &session.EventActions{
+				StateDelta: map[string]any{
+					"outer": map[string]any{"key2": "updated", "key3": "value3"},
+				},
+			},
+			want: &session.EventActions{
+				StateDelta: map[string]any{
+					"outer": map[string]any{"key1": "value1", "key2": "updated", "key3": "value3"},
+				},
+			},
+		},
+		{
 			name: "state delta merged with multiple keys from multiple tools",
 			base: &session.EventActions{
 				StateDelta: map[string]any{"tool1_key": "tool1_value"},
