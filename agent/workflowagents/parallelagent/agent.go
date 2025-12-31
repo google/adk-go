@@ -23,7 +23,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	agentinternal "google.golang.org/adk/internal/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/session"
 )
 
@@ -80,7 +79,7 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		}
 		subAgent := sa
 		errGroup.Go(func() error {
-			subCtx := icontext.NewInvocationContext(errGroupCtx, icontext.InvocationContextParams{
+			subCtx := agent.NewInvocationContextFromParams(errGroupCtx, agent.InvocationContextParams{
 				Artifacts:   ctx.Artifacts(),
 				Memory:      ctx.Memory(),
 				Session:     ctx.Session(),

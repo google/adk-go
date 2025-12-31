@@ -20,10 +20,9 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/adk/agent"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
@@ -449,7 +448,7 @@ func TestToSessionEvent(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Branch: branch, Agent: a2aAgent})
+			ictx := agent.NewInvocationContextFromParams(t.Context(), agent.InvocationContextParams{Branch: branch, Agent: a2aAgent})
 			got, err := ToSessionEvent(ictx, tc.input)
 			if err != nil {
 				t.Errorf("ToSessionEvent() error = %v, want nil", err)
