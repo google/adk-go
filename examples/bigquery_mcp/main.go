@@ -40,7 +40,7 @@ import (
 //    - set the environment variable `GOOGLE_API_KEY`
 //    - set the environment variable `TEST_TOKEN`   (you can use command like "export TEST_TOKEN=$(gcloud auth print-access-token)")
 //    - ensure you have enabled "BigQuery API" (bigquery.googleapis.com) for project indicated in `GCP_PROJECT_ID`
-//	  - ensure you have access to the project indidated in `GCP_PROJECT_ID`
+//	  - ensure you have access to the project indicated in `GCP_PROJECT_ID`
 // You can try prompt like:
 //    `select server date using googlesql from project ` + value of `GCP_PROJECT_ID`
 
@@ -60,8 +60,17 @@ func (t *TransportWithHeaders) RoundTrip(req *http.Request) (*http.Response, err
 
 func main() {
 	project := os.Getenv("GCP_PROJECT_ID")
+	if project == "" {
+		log.Fatalf("Please set you environment variable 'GCP_PROJECT_ID' to a valid GCP project ID")
+	}
 	apiKey := os.Getenv("GOOGLE_API_KEY")
+	if apiKey == "" {
+		log.Fatalf("Please set you environment variable 'GOOGLE_API_KEY' to a valid API key")
+	}
 	token := os.Getenv("TEST_TOKEN")
+	if token == "" {
+		log.Fatalf("Please set you environment variable 'TEST_TOKEN' to a valid token - you can use command like 'export TEST_TOKEN=$(gcloud auth print-access-token)'")
+	}
 
 	// Create context that cancels on interrupt signal (Ctrl+C)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -87,7 +96,7 @@ func main() {
 	}
 	mcpToolSet, err := mcptoolset.New(mcptoolset.Config{
 		Transport: transport,
-		// WARNING: we need to filter out "get_table_info" tool because of errors is causes ("reference to undefined schema at $defs.RangePartitioning.properties.range")
+		// WARNING: we need to filter out "get_table_info" tool because of errors it causes ("reference to undefined schema at $defs.RangePartitioning.properties.range")
 		// we need now just 'execute_sql' tool
 		ToolFilter: tool.StringPredicate([]string{"execute_sql"}),
 	})
