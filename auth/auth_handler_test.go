@@ -45,7 +45,10 @@ func TestAuthHandler_GenerateAuthRequest_NonOAuth(t *testing.T) {
 		},
 	}
 	handler := NewAuthHandler(cfg)
-	result := handler.GenerateAuthRequest()
+	result, err := handler.GenerateAuthRequest()
+	if err != nil {
+		t.Fatalf("GenerateAuthRequest() error = %v", err)
+	}
 
 	if result == cfg {
 		t.Error("GenerateAuthRequest should return a copy, not same pointer")
@@ -68,7 +71,10 @@ func TestAuthHandler_GenerateAuthRequest_OAuth2_NoCredential(t *testing.T) {
 		// No RawAuthCredential
 	}
 	handler := NewAuthHandler(cfg)
-	result := handler.GenerateAuthRequest()
+	result, err := handler.GenerateAuthRequest()
+	if err != nil {
+		t.Fatalf("GenerateAuthRequest() error = %v", err)
+	}
 
 	// Should return copy without generating auth URI
 	if result.ExchangedAuthCredential != nil && result.ExchangedAuthCredential.OAuth2 != nil &&
@@ -98,7 +104,10 @@ func TestAuthHandler_GenerateAuthRequest_OAuth2_WithCredential(t *testing.T) {
 		},
 	}
 	handler := NewAuthHandler(cfg)
-	result := handler.GenerateAuthRequest()
+	result, err := handler.GenerateAuthRequest()
+	if err != nil {
+		t.Fatalf("GenerateAuthRequest() error = %v", err)
+	}
 
 	if result.ExchangedAuthCredential == nil {
 		t.Fatal("ExchangedAuthCredential should be set")
@@ -143,7 +152,10 @@ func TestAuthHandler_GenerateAuthRequest_OAuth2_ExistingAuthURI(t *testing.T) {
 		},
 	}
 	handler := NewAuthHandler(cfg)
-	result := handler.GenerateAuthRequest()
+	result, err := handler.GenerateAuthRequest()
+	if err != nil {
+		t.Fatalf("GenerateAuthRequest() error = %v", err)
+	}
 
 	if result.ExchangedAuthCredential.OAuth2.AuthURI != existingAuthURI {
 		t.Errorf("AuthURI = %q, want %q (should preserve existing)", result.ExchangedAuthCredential.OAuth2.AuthURI, existingAuthURI)
@@ -176,7 +188,10 @@ func TestAuthHandler_GenerateAuthURI_OpenIDConnect(t *testing.T) {
 	}
 
 	handler := NewAuthHandler(cfg)
-	cred := handler.generateAuthURI()
+	cred, err := handler.generateAuthURI()
+	if err != nil {
+		t.Fatalf("generateAuthURI() error = %v", err)
+	}
 	if cred == nil || cred.OAuth2 == nil {
 		t.Fatal("generateAuthURI() returned nil")
 	}
@@ -232,7 +247,10 @@ func TestAuthHandler_GenerateAuthURI_IncludesAudience(t *testing.T) {
 	}
 
 	handler := NewAuthHandler(cfg)
-	cred := handler.generateAuthURI()
+	cred, err := handler.generateAuthURI()
+	if err != nil {
+		t.Fatalf("generateAuthURI() error = %v", err)
+	}
 	if cred == nil {
 		t.Fatal("generateAuthURI() returned nil")
 	}
@@ -246,18 +264,15 @@ func TestAuthHandler_GenerateAuthURI_IncludesAudience(t *testing.T) {
 	}
 }
 
-func TestGenerateRandomState_PanicsOnError(t *testing.T) {
+func TestGenerateRandomState_Error(t *testing.T) {
 	t.Cleanup(func() { randRead = rand.Read })
 	randRead = func([]byte) (int, error) {
 		return 0, errors.New("entropy exhausted")
 	}
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("generateRandomState() did not panic on rand failure")
-		}
-	}()
-	_ = generateRandomState()
+	if _, err := generateRandomState(); err == nil {
+		t.Fatal("generateRandomState() did not return error on rand failure")
+	}
 }
 
 func TestAuthHandler_GetAuthResponse(t *testing.T) {

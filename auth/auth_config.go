@@ -15,9 +15,12 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strconv"
 )
 
 // AuthConfig combines auth scheme and credentials for a tool.
@@ -54,20 +57,20 @@ func NewAuthConfig(scheme AuthScheme, credential *AuthCredential) (*AuthConfig, 
 func (c *AuthConfig) generateCredentialKey() (string, error) {
 	var schemePart, credPart string
 	if c.AuthScheme != nil {
-		schemeJSON, err := json.Marshal(c.AuthScheme)
+		schemeJSON, err := stableJSON(c.AuthScheme)
 		if err != nil {
 			return "", fmt.Errorf("marshal auth scheme: %w", err)
 		}
 		schemeType := c.AuthScheme.GetType()
-		h := sha256.Sum256(schemeJSON)
+		h := sha256.Sum256([]byte(schemeJSON))
 		schemePart = fmt.Sprintf("%s_%x", schemeType, h[:8])
 	}
 	if c.RawAuthCredential != nil {
-		credJSON, err := json.Marshal(c.RawAuthCredential)
+		credJSON, err := stableJSON(c.RawAuthCredential)
 		if err != nil {
 			return "", fmt.Errorf("marshal auth credential: %w", err)
 		}
-		h := sha256.Sum256(credJSON)
+		h := sha256.Sum256([]byte(credJSON))
 		credPart = fmt.Sprintf("%s_%x", c.RawAuthCredential.AuthType, h[:8])
 	}
 	return fmt.Sprintf("adk_%s_%s", schemePart, credPart), nil
@@ -84,4 +87,74 @@ func (c *AuthConfig) Copy() *AuthConfig {
 		ExchangedAuthCredential: c.ExchangedAuthCredential.Copy(),
 		CredentialKey:           c.CredentialKey,
 	}
+}
+
+// stableJSON returns a deterministic JSON representation with sorted map keys.
+func stableJSON(v interface{}) (string, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	var data interface{}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&data); err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := encodeCanonical(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func encodeCanonical(buf *bytes.Buffer, v interface{}) error {
+	switch val := v.(type) {
+	case nil:
+		buf.WriteString("null")
+	case bool:
+		if val {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	case string:
+		buf.WriteString(strconv.Quote(val))
+	case json.Number:
+		buf.WriteString(val.String())
+	case float64:
+		buf.WriteString(strconv.FormatFloat(val, 'g', -1, 64))
+	case []interface{}:
+		buf.WriteByte('[')
+		for i, elem := range val {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			if err := encodeCanonical(buf, elem); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte(']')
+	case map[string]interface{}:
+		buf.WriteByte('{')
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for i, k := range keys {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			buf.WriteString(strconv.Quote(k))
+			buf.WriteByte(':')
+			if err := encodeCanonical(buf, val[k]); err != nil {
+				return err
+			}
+		}
+		buf.WriteByte('}')
+	default:
+		return fmt.Errorf("unsupported JSON canonicalization type %T", v)
+	}
+	return nil
 }

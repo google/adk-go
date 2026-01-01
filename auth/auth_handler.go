@@ -39,29 +39,29 @@ func NewAuthHandler(config *AuthConfig) *AuthHandler {
 
 // GenerateAuthRequest generates an AuthConfig with the auth_uri populated for
 // OAuth2/OIDC flows. The client uses this to redirect users for authorization.
-func (h *AuthHandler) GenerateAuthRequest() *AuthConfig {
+func (h *AuthHandler) GenerateAuthRequest() (*AuthConfig, error) {
 	// For non-OAuth schemes, return a copy as-is
 	if h.authConfig.AuthScheme == nil {
-		return h.authConfig.Copy()
+		return h.authConfig.Copy(), nil
 	}
 
 	schemeType := h.authConfig.AuthScheme.GetType()
 	if schemeType != SecuritySchemeTypeOAuth2 && schemeType != SecuritySchemeTypeOpenIDConnect {
-		return h.authConfig.Copy()
+		return h.authConfig.Copy(), nil
 	}
 
 	// If auth_uri already exists in exchanged credential, return as-is
 	if h.authConfig.ExchangedAuthCredential != nil &&
 		h.authConfig.ExchangedAuthCredential.OAuth2 != nil &&
 		h.authConfig.ExchangedAuthCredential.OAuth2.AuthURI != "" {
-		return h.authConfig.Copy()
+		return h.authConfig.Copy(), nil
 	}
 
 	// Check if raw_auth_credential exists with client credentials
 	if h.authConfig.RawAuthCredential == nil ||
 		h.authConfig.RawAuthCredential.OAuth2 == nil ||
 		h.authConfig.RawAuthCredential.OAuth2.ClientID == "" {
-		return h.authConfig.Copy()
+		return h.authConfig.Copy(), nil
 	}
 
 	// If auth_uri already in raw credential, copy to exchanged
@@ -71,13 +71,16 @@ func (h *AuthHandler) GenerateAuthRequest() *AuthConfig {
 			RawAuthCredential:       h.authConfig.RawAuthCredential,
 			ExchangedAuthCredential: h.authConfig.RawAuthCredential.Copy(),
 			CredentialKey:           h.authConfig.CredentialKey,
-		}
+		}, nil
 	}
 
 	// Generate new auth URI
-	exchangedCred := h.generateAuthURI()
+	exchangedCred, err := h.generateAuthURI()
+	if err != nil {
+		return nil, err
+	}
 	if exchangedCred == nil {
-		return h.authConfig.Copy()
+		return h.authConfig.Copy(), nil
 	}
 
 	return &AuthConfig{
@@ -85,19 +88,19 @@ func (h *AuthHandler) GenerateAuthRequest() *AuthConfig {
 		RawAuthCredential:       h.authConfig.RawAuthCredential,
 		ExchangedAuthCredential: exchangedCred,
 		CredentialKey:           h.authConfig.CredentialKey,
-	}
+	}, nil
 }
 
 // generateAuthURI generates the OAuth authorization URI.
-func (h *AuthHandler) generateAuthURI() *AuthCredential {
+func (h *AuthHandler) generateAuthURI() (*AuthCredential, error) {
 	cred := h.authConfig.RawAuthCredential
 	if cred == nil || cred.OAuth2 == nil {
-		return nil
+		return nil, nil
 	}
 
 	authURL, scopes := authorizationMetadata(h.authConfig.AuthScheme)
 	if authURL == "" {
-		return nil
+		return nil, nil
 	}
 
 	config := &oauth2.Config{
@@ -114,14 +117,17 @@ func (h *AuthHandler) generateAuthURI() *AuthCredential {
 		opts = append(opts, oauth2.SetAuthURLParam("audience", cred.OAuth2.Audience))
 	}
 
-	state := generateRandomState()
+	state, err := generateRandomState()
+	if err != nil {
+		return nil, err
+	}
 	authURI := config.AuthCodeURL(state, opts...)
 
 	exchanged := cred.Copy()
 	exchanged.OAuth2.AuthURI = authURI
 	exchanged.OAuth2.State = state
 
-	return exchanged
+	return exchanged, nil
 }
 
 // GetAuthResponse retrieves the auth response from session state.
@@ -136,12 +142,12 @@ func (h *AuthHandler) GetAuthResponse(stateGetter func(key string) interface{}) 
 }
 
 // generateRandomState generates a random state string for OAuth CSRF protection.
-func generateRandomState() string {
+func generateRandomState() (string, error) {
 	b := make([]byte, 16)
 	if _, err := randRead(b); err != nil {
-		panic(fmt.Sprintf("failed to generate random OAuth state: %v", err))
+		return "", fmt.Errorf("failed to generate random OAuth state: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 // authorizationMetadata returns the authorization endpoint and scopes for OAuth2/OIDC schemes.

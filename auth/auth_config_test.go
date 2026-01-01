@@ -110,6 +110,42 @@ func TestAuthConfig_generateCredentialKey_Different(t *testing.T) {
 	}
 }
 
+func TestAuthConfig_generateCredentialKey_ScopeOrder(t *testing.T) {
+	makeCfg := func(scopes map[string]string) *AuthConfig {
+		cfg, err := NewAuthConfig(&OAuth2Scheme{
+			Flows: &OAuthFlows{
+				AuthorizationCode: &OAuthFlowAuthorizationCode{
+					AuthorizationURL: "https://example.com/auth",
+					TokenURL:         "https://example.com/token",
+					Scopes:           scopes,
+				},
+			},
+		}, &AuthCredential{
+			AuthType: AuthCredentialTypeOAuth2,
+			OAuth2: &OAuth2Auth{
+				ClientID: "client",
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewAuthConfig() error = %v", err)
+		}
+		return cfg
+	}
+
+	cfg1 := makeCfg(map[string]string{
+		"read":  "Read",
+		"write": "Write",
+	})
+	cfg2 := makeCfg(map[string]string{
+		"write": "Write",
+		"read":  "Read",
+	})
+
+	if cfg1.CredentialKey != cfg2.CredentialKey {
+		t.Fatalf("credential keys differ for same scopes: %q vs %q", cfg1.CredentialKey, cfg2.CredentialKey)
+	}
+}
+
 func TestAuthConfig_Copy_Nil(t *testing.T) {
 	var cfg *AuthConfig
 	got := cfg.Copy()
