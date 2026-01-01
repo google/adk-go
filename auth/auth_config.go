@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+
+	"github.com/google/uuid"
 )
 
 // AuthConfig combines auth scheme and credentials for a tool.
@@ -39,6 +41,9 @@ type AuthConfig struct {
 // NewAuthConfig creates a new AuthConfig with the given scheme and credential.
 // If credentialKey is empty, it will be generated automatically.
 func NewAuthConfig(scheme AuthScheme, credential *AuthCredential) (*AuthConfig, error) {
+	if scheme == nil && credential == nil {
+		return nil, fmt.Errorf("auth scheme and credential cannot both be nil")
+	}
 	cfg := &AuthConfig{
 		AuthScheme:        scheme,
 		RawAuthCredential: credential,
@@ -72,6 +77,9 @@ func (c *AuthConfig) generateCredentialKey() (string, error) {
 		}
 		h := sha256.Sum256([]byte(credJSON))
 		credPart = fmt.Sprintf("%s_%x", c.RawAuthCredential.AuthType, h[:8])
+	}
+	if schemePart == "" && credPart == "" {
+		return "adk_" + uuid.NewString(), nil
 	}
 	return fmt.Sprintf("adk_%s_%s", schemePart, credPart), nil
 }

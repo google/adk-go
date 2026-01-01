@@ -35,6 +35,7 @@ type InvocationContextParams struct {
 	UserContent   *genai.Content
 	RunConfig     *agent.RunConfig
 	EndInvocation bool
+	Values        map[string]any
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
@@ -54,6 +55,18 @@ type InvocationContext struct {
 
 func (c *InvocationContext) Artifacts() agent.Artifacts {
 	return c.params.Artifacts
+}
+
+// Value returns the value associated with key in the invocation context.
+// Custom values provided via InvocationContextParams.Values take precedence;
+// otherwise fall back to the underlying context.
+func (c *InvocationContext) Value(key any) any {
+	if k, ok := key.(string); ok && c.params.Values != nil {
+		if v, found := c.params.Values[k]; found {
+			return v
+		}
+	}
+	return c.Context.Value(key)
 }
 
 func (c *InvocationContext) Agent() agent.Agent {
