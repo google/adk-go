@@ -16,6 +16,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 )
 
 // CredentialManager orchestrates the complete lifecycle of authentication
@@ -77,7 +78,10 @@ func (m *CredentialManager) GetAuthCredential(ctx context.Context, stateGetter f
 	if len(credentialService) > 0 && credentialService[0] != nil {
 		svc = credentialService[0]
 		if credential == nil {
-			loaded, _ := svc.LoadCredential(ctx, m.authConfig)
+			loaded, err := svc.LoadCredential(ctx, m.authConfig)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load credential: %w", err)
+			}
 			if loaded != nil && loaded.OAuth2 != nil && loaded.OAuth2.AccessToken != "" {
 				credential = loaded
 			}
@@ -112,7 +116,11 @@ func (m *CredentialManager) GetAuthCredential(ctx context.Context, stateGetter f
 	// Step 7: Refresh credential if expired
 	wasRefreshed := false
 	if !wasExchanged {
-		credential, wasRefreshed = m.refreshCredential(ctx, credential)
+		var err error
+		credential, wasRefreshed, err = m.refreshCredential(ctx, credential)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Step 8: Save credential if it was modified
@@ -120,7 +128,9 @@ func (m *CredentialManager) GetAuthCredential(ctx context.Context, stateGetter f
 		m.authConfig.ExchangedAuthCredential = credential
 		// Save to credential service for persistence across requests
 		if svc != nil {
-			svc.SaveCredential(ctx, m.authConfig)
+			if err := svc.SaveCredential(ctx, m.authConfig); err != nil {
+				return nil, fmt.Errorf("failed to save credential: %w", err)
+			}
 		}
 	}
 
@@ -178,11 +188,17 @@ func (m *CredentialManager) loadFromAuthResponse(stateGetter func(key string) in
 
 // isClientCredentialsFlow checks if the auth scheme uses client credentials flow.
 func (m *CredentialManager) isClientCredentialsFlow() bool {
-	oauth2Scheme, ok := m.authConfig.AuthScheme.(*OAuth2Scheme)
-	if !ok || oauth2Scheme.Flows == nil {
+	switch scheme := m.authConfig.AuthScheme.(type) {
+	case *OAuth2Scheme:
+		if scheme.Flows == nil {
+			return false
+		}
+		return scheme.Flows.ClientCredentials != nil
+	case *OpenIDConnectScheme:
+		return grantSupported(scheme.GrantTypesSupported, "client_credentials")
+	default:
 		return false
 	}
-	return oauth2Scheme.Flows.ClientCredentials != nil
 }
 
 // exchangeCredential exchanges credential if needed.
@@ -201,23 +217,22 @@ func (m *CredentialManager) exchangeCredential(ctx context.Context, cred *AuthCr
 }
 
 // refreshCredential refreshes credential if expired.
-func (m *CredentialManager) refreshCredential(ctx context.Context, cred *AuthCredential) (*AuthCredential, bool) {
+func (m *CredentialManager) refreshCredential(ctx context.Context, cred *AuthCredential) (*AuthCredential, bool, error) {
 	ref := m.refresherRegistry.Get(cred.AuthType)
 	if ref == nil {
-		return cred, false
+		return cred, false, nil
 	}
 
 	if !ref.IsRefreshNeeded(cred, m.authConfig.AuthScheme) {
-		return cred, false
+		return cred, false, nil
 	}
 
 	refreshed, err := ref.Refresh(ctx, cred, m.authConfig.AuthScheme)
 	if err != nil {
-		// On refresh failure, return original
-		return cred, false
+		return cred, false, fmt.Errorf("failed to refresh credential: %w", err)
 	}
 
-	return refreshed, true
+	return refreshed, true, nil
 }
 
 // GetAuthConfig accessor

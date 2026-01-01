@@ -15,6 +15,7 @@
 package auth
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -38,7 +39,10 @@ func TestNewAuthConfig(t *testing.T) {
 		},
 	}
 
-	cfg := NewAuthConfig(scheme, cred)
+	cfg, err := NewAuthConfig(scheme, cred)
+	if err != nil {
+		t.Fatalf("NewAuthConfig() error = %v", err)
+	}
 
 	if cfg.AuthScheme != scheme {
 		t.Error("AuthScheme not set correctly")
@@ -64,8 +68,14 @@ func TestAuthConfig_generateCredentialKey_Deterministic(t *testing.T) {
 		APIKey:   "test-key",
 	}
 
-	cfg1 := NewAuthConfig(scheme, cred)
-	cfg2 := NewAuthConfig(scheme, cred)
+	cfg1, err := NewAuthConfig(scheme, cred)
+	if err != nil {
+		t.Fatalf("NewAuthConfig() error = %v", err)
+	}
+	cfg2, err := NewAuthConfig(scheme, cred)
+	if err != nil {
+		t.Fatalf("NewAuthConfig() error = %v", err)
+	}
 
 	if cfg1.CredentialKey != cfg2.CredentialKey {
 		t.Errorf("generateCredentialKey not deterministic: %q != %q", cfg1.CredentialKey, cfg2.CredentialKey)
@@ -86,8 +96,14 @@ func TestAuthConfig_generateCredentialKey_Different(t *testing.T) {
 		APIKey:   "key-2",
 	}
 
-	cfg1 := NewAuthConfig(scheme, cred1)
-	cfg2 := NewAuthConfig(scheme, cred2)
+	cfg1, err := NewAuthConfig(scheme, cred1)
+	if err != nil {
+		t.Fatalf("NewAuthConfig() error = %v", err)
+	}
+	cfg2, err := NewAuthConfig(scheme, cred2)
+	if err != nil {
+		t.Fatalf("NewAuthConfig() error = %v", err)
+	}
 
 	if cfg1.CredentialKey == cfg2.CredentialKey {
 		t.Error("Different credentials should produce different keys")
@@ -144,4 +160,21 @@ func TestAuthConfig_Copy(t *testing.T) {
 	if diff := cmp.Diff(cfg, got); diff != "" {
 		t.Errorf("Copy() mismatch (-want +got):\n%s", diff)
 	}
+}
+
+func TestNewAuthConfig_MarshalError(t *testing.T) {
+	scheme := &badScheme{}
+	if _, err := NewAuthConfig(scheme, nil); err == nil {
+		t.Fatal("NewAuthConfig() did not return error for unmarshalable scheme")
+	}
+}
+
+type badScheme struct{}
+
+func (b *badScheme) GetType() SecuritySchemeType {
+	return SecuritySchemeType("bad")
+}
+
+func (b *badScheme) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("cannot marshal")
 }

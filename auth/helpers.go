@@ -16,6 +16,7 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 )
 
 // TokenToSchemeCredential creates an API key auth scheme and credential.
@@ -137,7 +138,7 @@ func OAuth2AuthorizationCode(clientID, clientSecret, authURL, tokenURL string, s
 }
 
 // ServiceAccountCredentials creates a service account auth scheme and credential.
-func ServiceAccountCredentials(credentialJSON []byte, scopes []string) (AuthScheme, *AuthCredential) {
+func ServiceAccountCredentials(credentialJSON []byte, scopes []string) (AuthScheme, *AuthCredential, error) {
 	scheme := &HTTPScheme{
 		Scheme:       "bearer",
 		BearerFormat: "JWT",
@@ -151,11 +152,12 @@ func ServiceAccountCredentials(credentialJSON []byte, scopes []string) (AuthSche
 	// Parse the JSON if provided
 	if len(credentialJSON) > 0 {
 		var saCred ServiceAccountCredential
-		if err := json.Unmarshal(credentialJSON, &saCred); err == nil {
-			cred.ServiceAccount.ServiceAccountCredential = &saCred
+		if err := json.Unmarshal(credentialJSON, &saCred); err != nil {
+			return nil, nil, fmt.Errorf("failed to parse service account credential: %w", err)
 		}
+		cred.ServiceAccount.ServiceAccountCredential = &saCred
 	}
-	return scheme, cred
+	return scheme, cred, nil
 }
 
 // DefaultCredentials creates a credential using Application Default Credentials.

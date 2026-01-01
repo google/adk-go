@@ -17,9 +17,11 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/clientcredentials"
 )
 
 // OAuth2Exchanger exchanges OAuth2 credentials.
@@ -65,51 +67,59 @@ const (
 )
 
 func (e *OAuth2Exchanger) determineGrantType(scheme AuthScheme) GrantType {
-	oauth2Scheme, ok := scheme.(*OAuth2Scheme)
-	if !ok {
-		return ""
+	switch s := scheme.(type) {
+	case *OAuth2Scheme:
+		if s.Flows == nil {
+			return ""
+		}
+		if s.Flows.ClientCredentials != nil {
+			return GrantTypeClientCredentials
+		}
+		if s.Flows.AuthorizationCode != nil {
+			return GrantTypeAuthorizationCode
+		}
+	case *OpenIDConnectScheme:
+		if grantSupported(s.GrantTypesSupported, "client_credentials") {
+			return GrantTypeClientCredentials
+		}
+		if grantSupported(s.GrantTypesSupported, "authorization_code") || s.AuthorizationEndpoint != "" {
+			return GrantTypeAuthorizationCode
+		}
 	}
-
-	if oauth2Scheme.Flows == nil {
-		return ""
-	}
-
-	if oauth2Scheme.Flows.ClientCredentials != nil {
-		return GrantTypeClientCredentials
-	}
-	if oauth2Scheme.Flows.AuthorizationCode != nil {
-		return GrantTypeAuthorizationCode
-	}
-
 	return ""
 }
 
 func (e *OAuth2Exchanger) exchangeClientCredentials(ctx context.Context, cred *AuthCredential, scheme AuthScheme) (*ExchangeResult, error) {
-	oauth2Scheme := scheme.(*OAuth2Scheme)
-	if oauth2Scheme.Flows == nil || oauth2Scheme.Flows.ClientCredentials == nil {
-		return nil, fmt.Errorf("client credentials flow not configured in scheme")
-	}
-
 	if cred.OAuth2 == nil {
 		return nil, fmt.Errorf("oauth2 credentials required")
 	}
 
-	config := &oauth2.Config{
-		ClientID:     cred.OAuth2.ClientID,
-		ClientSecret: cred.OAuth2.ClientSecret,
-		Endpoint: oauth2.Endpoint{
-			TokenURL: oauth2Scheme.Flows.ClientCredentials.TokenURL,
-		},
-		Scopes: scopeKeys(oauth2Scheme.Flows.ClientCredentials.Scopes),
+	tokenURL, scopes := clientCredentialsMetadata(scheme)
+	if tokenURL == "" {
+		return nil, fmt.Errorf("client credentials flow not configured in scheme")
 	}
 
-	// Use client credentials grant
-	token, err := config.Exchange(ctx, "", oauth2.SetAuthURLParam("grant_type", "client_credentials"))
+	conf := &clientcredentials.Config{
+		ClientID:     cred.OAuth2.ClientID,
+		ClientSecret: cred.OAuth2.ClientSecret,
+		TokenURL:     tokenURL,
+		Scopes:       scopes,
+	}
+
+	if cred.OAuth2.TokenEndpointAuthMethod == "client_secret_post" {
+		conf.AuthStyle = oauth2.AuthStyleInParams
+	}
+	if cred.OAuth2.Audience != "" {
+		conf.EndpointParams = map[string][]string{
+			"audience": {cred.OAuth2.Audience},
+		}
+	}
+
+	token, err := conf.Token(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange client credentials: %w", err)
 	}
 
-	// Update credential with tokens
 	newCred := cred.Copy()
 	newCred.OAuth2.AccessToken = token.AccessToken
 	newCred.OAuth2.RefreshToken = token.RefreshToken
@@ -122,13 +132,13 @@ func (e *OAuth2Exchanger) exchangeClientCredentials(ctx context.Context, cred *A
 }
 
 func (e *OAuth2Exchanger) exchangeAuthorizationCode(ctx context.Context, cred *AuthCredential, scheme AuthScheme) (*ExchangeResult, error) {
-	oauth2Scheme := scheme.(*OAuth2Scheme)
-	if oauth2Scheme.Flows == nil || oauth2Scheme.Flows.AuthorizationCode == nil {
-		return nil, fmt.Errorf("authorization code flow not configured in scheme")
-	}
-
 	if cred.OAuth2 == nil {
 		return nil, fmt.Errorf("oauth2 credentials required")
+	}
+
+	authURL, tokenURL, scopes := authorizationCodeMetadataFromScheme(scheme)
+	if authURL == "" || tokenURL == "" {
+		return nil, fmt.Errorf("authorization code flow not configured in scheme")
 	}
 
 	// Need auth_code to exchange
@@ -140,11 +150,11 @@ func (e *OAuth2Exchanger) exchangeAuthorizationCode(ctx context.Context, cred *A
 		ClientID:     cred.OAuth2.ClientID,
 		ClientSecret: cred.OAuth2.ClientSecret,
 		Endpoint: oauth2.Endpoint{
-			AuthURL:  oauth2Scheme.Flows.AuthorizationCode.AuthorizationURL,
-			TokenURL: oauth2Scheme.Flows.AuthorizationCode.TokenURL,
+			AuthURL:  authURL,
+			TokenURL: tokenURL,
 		},
 		RedirectURL: cred.OAuth2.RedirectURI,
-		Scopes:      scopeKeys(oauth2Scheme.Flows.AuthorizationCode.Scopes),
+		Scopes:      scopes,
 	}
 
 	token, err := config.Exchange(ctx, cred.OAuth2.AuthCode)
@@ -174,6 +184,75 @@ func scopeKeys(scopes map[string]string) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+func clientCredentialsMetadata(scheme AuthScheme) (string, []string) {
+	switch s := scheme.(type) {
+	case *OAuth2Scheme:
+		if s.Flows == nil || s.Flows.ClientCredentials == nil {
+			return "", nil
+		}
+		return s.Flows.ClientCredentials.TokenURL, scopeKeys(s.Flows.ClientCredentials.Scopes)
+	case *OpenIDConnectScheme:
+		if s.TokenEndpoint == "" {
+			return "", nil
+		}
+		if len(s.Scopes) == 0 {
+			return s.TokenEndpoint, []string{"openid"}
+		}
+		return s.TokenEndpoint, append([]string{}, s.Scopes...)
+	default:
+		return "", nil
+	}
+}
+
+func authorizationCodeMetadataFromScheme(scheme AuthScheme) (string, string, []string) {
+	switch s := scheme.(type) {
+	case *OAuth2Scheme:
+		if s.Flows == nil || s.Flows.AuthorizationCode == nil {
+			return "", "", nil
+		}
+		return s.Flows.AuthorizationCode.AuthorizationURL, s.Flows.AuthorizationCode.TokenURL,
+			scopeKeys(s.Flows.AuthorizationCode.Scopes)
+	case *OpenIDConnectScheme:
+		if s.AuthorizationEndpoint == "" || s.TokenEndpoint == "" {
+			return "", "", nil
+		}
+		if len(s.Scopes) == 0 {
+			return s.AuthorizationEndpoint, s.TokenEndpoint, []string{"openid"}
+		}
+		return s.AuthorizationEndpoint, s.TokenEndpoint, append([]string{}, s.Scopes...)
+	default:
+		return "", "", nil
+	}
+}
+
+func tokenEndpointFromScheme(scheme AuthScheme) string {
+	switch s := scheme.(type) {
+	case *OAuth2Scheme:
+		if s.Flows == nil {
+			return ""
+		}
+		if s.Flows.AuthorizationCode != nil {
+			return s.Flows.AuthorizationCode.TokenURL
+		}
+		if s.Flows.ClientCredentials != nil {
+			return s.Flows.ClientCredentials.TokenURL
+		}
+	case *OpenIDConnectScheme:
+		return s.TokenEndpoint
+	}
+	return ""
+}
+
+func grantSupported(grants []string, want string) bool {
+	want = strings.ToLower(want)
+	for _, g := range grants {
+		if strings.ToLower(g) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // OAuth2Refresher refreshes OAuth2 access tokens using refresh tokens.
@@ -207,18 +286,7 @@ func (r *OAuth2Refresher) Refresh(ctx context.Context, cred *AuthCredential, sch
 		return cred, nil
 	}
 
-	oauth2Scheme, ok := scheme.(*OAuth2Scheme)
-	if !ok || oauth2Scheme.Flows == nil {
-		return cred, nil
-	}
-
-	// Get token URL from appropriate flow
-	var tokenURL string
-	if oauth2Scheme.Flows.AuthorizationCode != nil {
-		tokenURL = oauth2Scheme.Flows.AuthorizationCode.TokenURL
-	} else if oauth2Scheme.Flows.ClientCredentials != nil {
-		tokenURL = oauth2Scheme.Flows.ClientCredentials.TokenURL
-	}
+	tokenURL := tokenEndpointFromScheme(scheme)
 
 	if tokenURL == "" {
 		return cred, nil

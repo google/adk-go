@@ -17,9 +17,12 @@ package auth
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 
 	"golang.org/x/oauth2"
 )
+
+var randRead = rand.Read
 
 // AuthHandler handles the OAuth flow orchestration including auth URI generation
 // and response parsing.
@@ -87,33 +90,16 @@ func (h *AuthHandler) GenerateAuthRequest() *AuthConfig {
 
 // generateAuthURI generates the OAuth authorization URI.
 func (h *AuthHandler) generateAuthURI() *AuthCredential {
-	oauth2Scheme, ok := h.authConfig.AuthScheme.(*OAuth2Scheme)
-	if !ok || oauth2Scheme.Flows == nil {
-		return nil
-	}
-
 	cred := h.authConfig.RawAuthCredential
-	if cred.OAuth2 == nil {
+	if cred == nil || cred.OAuth2 == nil {
 		return nil
 	}
 
-	// Get authorization URL and scopes from flows
-	var authURL string
-	var scopes []string
-
-	if oauth2Scheme.Flows.AuthorizationCode != nil {
-		authURL = oauth2Scheme.Flows.AuthorizationCode.AuthorizationURL
-		scopes = scopeKeys(oauth2Scheme.Flows.AuthorizationCode.Scopes)
-	} else if oauth2Scheme.Flows.Implicit != nil {
-		authURL = oauth2Scheme.Flows.Implicit.AuthorizationURL
-		scopes = scopeKeys(oauth2Scheme.Flows.Implicit.Scopes)
-	}
-
+	authURL, scopes := authorizationMetadata(h.authConfig.AuthScheme)
 	if authURL == "" {
 		return nil
 	}
 
-	// Create oauth2 config
 	config := &oauth2.Config{
 		ClientID:     cred.OAuth2.ClientID,
 		ClientSecret: cred.OAuth2.ClientSecret,
@@ -123,14 +109,14 @@ func (h *AuthHandler) generateAuthURI() *AuthCredential {
 		RedirectURL: cred.OAuth2.RedirectURI,
 		Scopes:      scopes,
 	}
+	opts := []oauth2.AuthCodeOption{oauth2.AccessTypeOffline}
+	if cred.OAuth2.Audience != "" {
+		opts = append(opts, oauth2.SetAuthURLParam("audience", cred.OAuth2.Audience))
+	}
 
-	// Generate random state
 	state := generateRandomState()
+	authURI := config.AuthCodeURL(state, opts...)
 
-	// Generate auth URL with offline access
-	authURI := config.AuthCodeURL(state, oauth2.AccessTypeOffline)
-
-	// Create exchanged credential with auth_uri
 	exchanged := cred.Copy()
 	exchanged.OAuth2.AuthURI = authURI
 	exchanged.OAuth2.State = state
@@ -152,6 +138,33 @@ func (h *AuthHandler) GetAuthResponse(stateGetter func(key string) interface{}) 
 // generateRandomState generates a random state string for OAuth CSRF protection.
 func generateRandomState() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := randRead(b); err != nil {
+		panic(fmt.Sprintf("failed to generate random OAuth state: %v", err))
+	}
 	return hex.EncodeToString(b)
+}
+
+// authorizationMetadata returns the authorization endpoint and scopes for OAuth2/OIDC schemes.
+func authorizationMetadata(scheme AuthScheme) (string, []string) {
+	switch v := scheme.(type) {
+	case *OAuth2Scheme:
+		if v == nil || v.Flows == nil {
+			return "", nil
+		}
+		if v.Flows.AuthorizationCode != nil {
+			return v.Flows.AuthorizationCode.AuthorizationURL, scopeKeys(v.Flows.AuthorizationCode.Scopes)
+		}
+		if v.Flows.Implicit != nil {
+			return v.Flows.Implicit.AuthorizationURL, scopeKeys(v.Flows.Implicit.Scopes)
+		}
+	case *OpenIDConnectScheme:
+		if v == nil {
+			return "", nil
+		}
+		if len(v.Scopes) == 0 {
+			return v.AuthorizationEndpoint, []string{"openid"}
+		}
+		return v.AuthorizationEndpoint, append([]string{}, v.Scopes...)
+	}
+	return "", nil
 }

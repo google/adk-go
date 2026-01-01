@@ -15,6 +15,9 @@
 package auth
 
 import (
+	"crypto/rand"
+	"errors"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -145,6 +148,116 @@ func TestAuthHandler_GenerateAuthRequest_OAuth2_ExistingAuthURI(t *testing.T) {
 	if result.ExchangedAuthCredential.OAuth2.AuthURI != existingAuthURI {
 		t.Errorf("AuthURI = %q, want %q (should preserve existing)", result.ExchangedAuthCredential.OAuth2.AuthURI, existingAuthURI)
 	}
+}
+
+func TestAuthHandler_GenerateAuthURI_OpenIDConnect(t *testing.T) {
+	t.Cleanup(func() { randRead = rand.Read })
+	randRead = func(b []byte) (int, error) {
+		for i := range b {
+			b[i] = byte(i)
+		}
+		return len(b), nil
+	}
+
+	cfg := &AuthConfig{
+		AuthScheme: &OpenIDConnectScheme{
+			AuthorizationEndpoint: "https://example.com/oauth2/authorize",
+			TokenEndpoint:         "https://example.com/oauth2/token",
+			Scopes:                []string{"openid", "profile"},
+		},
+		RawAuthCredential: &AuthCredential{
+			AuthType: AuthCredentialTypeOpenIDConnect,
+			OAuth2: &OAuth2Auth{
+				ClientID:     "client-id",
+				ClientSecret: "client-secret",
+				RedirectURI:  "https://localhost/callback",
+			},
+		},
+	}
+
+	handler := NewAuthHandler(cfg)
+	cred := handler.generateAuthURI()
+	if cred == nil || cred.OAuth2 == nil {
+		t.Fatal("generateAuthURI() returned nil")
+	}
+
+	parsed, err := url.Parse(cred.OAuth2.AuthURI)
+	if err != nil {
+		t.Fatalf("parse auth URI: %v", err)
+	}
+	q := parsed.Query()
+
+	if got := q.Get("client_id"); got != "client-id" {
+		t.Fatalf("client_id = %s, want client-id", got)
+	}
+	if got := q.Get("scope"); got != "openid profile" {
+		t.Fatalf("scope = %s, want 'openid profile'", got)
+	}
+	if got := q.Get("access_type"); got != "offline" {
+		t.Fatalf("access_type = %s, want offline", got)
+	}
+	if got := q.Get("state"); got != "000102030405060708090a0b0c0d0e0f" {
+		t.Fatalf("state = %s, want deterministic hex value", got)
+	}
+}
+
+func TestAuthHandler_GenerateAuthURI_IncludesAudience(t *testing.T) {
+	t.Cleanup(func() { randRead = rand.Read })
+	randRead = func(b []byte) (int, error) {
+		for i := range b {
+			b[i] = 0xAB
+		}
+		return len(b), nil
+	}
+
+	cfg := &AuthConfig{
+		AuthScheme: &OAuth2Scheme{
+			Flows: &OAuthFlows{
+				AuthorizationCode: &OAuthFlowAuthorizationCode{
+					AuthorizationURL: "https://example.com/oauth2/authorize",
+					TokenURL:         "https://example.com/oauth2/token",
+					Scopes:           map[string]string{"read": "Read access"},
+				},
+			},
+		},
+		RawAuthCredential: &AuthCredential{
+			AuthType: AuthCredentialTypeOAuth2,
+			OAuth2: &OAuth2Auth{
+				ClientID:     "client-id",
+				ClientSecret: "client-secret",
+				RedirectURI:  "https://localhost/callback",
+				Audience:     "https://example.com/audience",
+			},
+		},
+	}
+
+	handler := NewAuthHandler(cfg)
+	cred := handler.generateAuthURI()
+	if cred == nil {
+		t.Fatal("generateAuthURI() returned nil")
+	}
+
+	parsed, err := url.Parse(cred.OAuth2.AuthURI)
+	if err != nil {
+		t.Fatalf("parse auth URI: %v", err)
+	}
+	if got := parsed.Query().Get("audience"); got != "https://example.com/audience" {
+		t.Fatalf("audience = %s, want https://example.com/audience", got)
+	}
+}
+
+func TestGenerateRandomState_PanicsOnError(t *testing.T) {
+	t.Cleanup(func() { randRead = rand.Read })
+	randRead = func([]byte) (int, error) {
+		return 0, errors.New("entropy exhausted")
+	}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("generateRandomState() did not panic on rand failure")
+		}
+	}()
+	_ = generateRandomState()
 }
 
 func TestAuthHandler_GetAuthResponse(t *testing.T) {

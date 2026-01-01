@@ -35,35 +35,42 @@ type AuthConfig struct {
 
 // NewAuthConfig creates a new AuthConfig with the given scheme and credential.
 // If credentialKey is empty, it will be generated automatically.
-func NewAuthConfig(scheme AuthScheme, credential *AuthCredential) *AuthConfig {
+func NewAuthConfig(scheme AuthScheme, credential *AuthCredential) (*AuthConfig, error) {
 	cfg := &AuthConfig{
 		AuthScheme:        scheme,
 		RawAuthCredential: credential,
 	}
 	if cfg.CredentialKey == "" {
-		cfg.CredentialKey = cfg.generateCredentialKey()
+		key, err := cfg.generateCredentialKey()
+		if err != nil {
+			return nil, fmt.Errorf("generate credential key: %w", err)
+		}
+		cfg.CredentialKey = key
 	}
-	return cfg
+	return cfg, nil
 }
 
 // generateCredentialKey creates a unique key based on auth scheme and credential.
-func (c *AuthConfig) generateCredentialKey() string {
-	var schemePart string
+func (c *AuthConfig) generateCredentialKey() (string, error) {
+	var schemePart, credPart string
 	if c.AuthScheme != nil {
+		schemeJSON, err := json.Marshal(c.AuthScheme)
+		if err != nil {
+			return "", fmt.Errorf("marshal auth scheme: %w", err)
+		}
 		schemeType := c.AuthScheme.GetType()
-		schemeJSON, _ := json.Marshal(c.AuthScheme)
 		h := sha256.Sum256(schemeJSON)
 		schemePart = fmt.Sprintf("%s_%x", schemeType, h[:8])
 	}
-
-	var credPart string
 	if c.RawAuthCredential != nil {
-		credJSON, _ := json.Marshal(c.RawAuthCredential)
+		credJSON, err := json.Marshal(c.RawAuthCredential)
+		if err != nil {
+			return "", fmt.Errorf("marshal auth credential: %w", err)
+		}
 		h := sha256.Sum256(credJSON)
 		credPart = fmt.Sprintf("%s_%x", c.RawAuthCredential.AuthType, h[:8])
 	}
-
-	return fmt.Sprintf("adk_%s_%s", schemePart, credPart)
+	return fmt.Sprintf("adk_%s_%s", schemePart, credPart), nil
 }
 
 // Copy creates a deep copy of the AuthConfig.
