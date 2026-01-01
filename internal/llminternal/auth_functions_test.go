@@ -93,6 +93,29 @@ func TestParseAuthConfigFromMap(t *testing.T) {
 	}
 }
 
+func TestParseAuthConfigFromMap_CamelCase(t *testing.T) {
+	data := map[string]any{
+		"credentialKey": "camel-key",
+		"exchangedAuthCredential": map[string]any{
+			"authType": "oauth2",
+			"oauth2": map[string]any{
+				"accessToken": "camel_token",
+			},
+		},
+	}
+
+	config, err := parseAuthConfigFromMap(data)
+	if err != nil {
+		t.Fatalf("parseAuthConfigFromMap() error = %v", err)
+	}
+	if config.CredentialKey != "camel-key" {
+		t.Errorf("CredentialKey = %q, want %q", config.CredentialKey, "camel-key")
+	}
+	if got := config.ExchangedAuthCredential.OAuth2.AccessToken; got != "camel_token" {
+		t.Errorf("AccessToken = %q, want %q", got, "camel_token")
+	}
+}
+
 func TestParseAuthCredentialFromMap(t *testing.T) {
 	data := map[string]any{
 		"auth_type": "oauth2",
@@ -115,6 +138,30 @@ func TestParseAuthCredentialFromMap(t *testing.T) {
 	}
 	if cred.OAuth2.RefreshToken != "refresh" {
 		t.Errorf("RefreshToken = %q, want %q", cred.OAuth2.RefreshToken, "refresh")
+	}
+}
+
+func TestParseAuthCredentialFromMap_WithHyphenKeys(t *testing.T) {
+	data := map[string]any{
+		"auth-type": "oauth2",
+		"oauth2": map[string]any{
+			"access-token":  "hy-access",
+			"refresh-token": "hy-refresh",
+		},
+	}
+
+	cred, err := parseAuthCredentialFromMap(data)
+	if err != nil {
+		t.Fatalf("parseAuthCredentialFromMap() error = %v", err)
+	}
+	if cred.AuthType != auth.AuthCredentialTypeOAuth2 {
+		t.Errorf("AuthType = %v, want %v", cred.AuthType, auth.AuthCredentialTypeOAuth2)
+	}
+	if cred.OAuth2.AccessToken != "hy-access" {
+		t.Errorf("AccessToken = %q, want %q", cred.OAuth2.AccessToken, "hy-access")
+	}
+	if cred.OAuth2.RefreshToken != "hy-refresh" {
+		t.Errorf("RefreshToken = %q, want %q", cred.OAuth2.RefreshToken, "hy-refresh")
 	}
 }
 

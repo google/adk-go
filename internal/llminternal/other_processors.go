@@ -16,7 +16,10 @@ package llminternal
 
 import (
 	"fmt"
+	"strings"
+	"unicode"
 
+	"github.com/mitchellh/mapstructure"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/auth"
 	"google.golang.org/adk/model"
@@ -209,59 +212,56 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest) error 
 	return nil
 }
 
-// parseAuthConfigFromMap converts a map to AuthConfig.
+// parseAuthConfigFromMap converts any map-like auth_config payload into auth.AuthConfig.
 func parseAuthConfigFromMap(data any) (*auth.AuthConfig, error) {
-	// The response from OAuth flow should contain the credential
-	dataMap, ok := data.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("auth_config is not a map")
+	var config auth.AuthConfig
+	if err := decodeSnakeCompatibleMap(data, &config, "auth_config"); err != nil {
+		return nil, err
 	}
-
-	config := &auth.AuthConfig{}
-
-	if credKey, ok := dataMap["credential_key"].(string); ok {
-		config.CredentialKey = credKey
-	}
-
-	// Try to extract the exchanged credential
-	if credData, ok := dataMap["exchanged_auth_credential"]; ok {
-		cred, err := parseAuthCredentialFromMap(credData)
-		if err == nil {
-			config.ExchangedAuthCredential = cred
-		}
-	}
-
-	return config, nil
+	return &config, nil
 }
 
-// parseAuthCredentialFromMap converts a map to AuthCredential.
+// parseAuthCredentialFromMap converts any map-like auth credential payload into auth.AuthCredential.
 func parseAuthCredentialFromMap(data any) (*auth.AuthCredential, error) {
+	var cred auth.AuthCredential
+	if err := decodeSnakeCompatibleMap(data, &cred, "credential"); err != nil {
+		return nil, err
+	}
+	return &cred, nil
+}
+
+func decodeSnakeCompatibleMap(data any, target any, kind string) error {
 	dataMap, ok := data.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("credential is not a map")
+		return fmt.Errorf("%s is not a map", kind)
 	}
-
-	cred := &auth.AuthCredential{}
-
-	if authType, ok := dataMap["auth_type"].(string); ok {
-		cred.AuthType = auth.AuthCredentialType(authType)
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		TagName:          "json",
+		Result:           target,
+		WeaklyTypedInput: true,
+		MatchName: func(mapKey, fieldName string) bool {
+			return canonicalFieldName(mapKey) == canonicalFieldName(fieldName)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to build decoder: %w", err)
 	}
-
-	// Extract OAuth2 token if present
-	if oauth2Data, ok := dataMap["oauth2"].(map[string]any); ok {
-		cred.OAuth2 = &auth.OAuth2Auth{}
-		if accessToken, ok := oauth2Data["access_token"].(string); ok {
-			cred.OAuth2.AccessToken = accessToken
-		}
-		if refreshToken, ok := oauth2Data["refresh_token"].(string); ok {
-			cred.OAuth2.RefreshToken = refreshToken
-		}
-		if expiresAt, ok := oauth2Data["expires_at"].(float64); ok {
-			cred.OAuth2.ExpiresAt = int64(expiresAt)
-		}
+	if err := decoder.Decode(dataMap); err != nil {
+		return fmt.Errorf("failed to decode %s: %w", kind, err)
 	}
+	return nil
+}
 
-	return cred, nil
+func canonicalFieldName(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '_' || r == '-' {
+			continue
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
 }
 
 func nlPlanningResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {

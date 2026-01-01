@@ -118,7 +118,14 @@ func (c *toolContext) RequestCredential(config *auth.AuthConfig) {
 
 	// Generate auth request with auth_uri
 	handler := auth.NewAuthHandler(config)
-	authRequest := handler.GenerateAuthRequest()
+	authRequest, err := handler.GenerateAuthRequest()
+	if err != nil {
+		// TODO: log or surface the error once a logging strategy is defined.
+		return
+	}
+	if authRequest == nil {
+		return
+	}
 
 	// Add to RequestedAuthConfigs keyed by function call ID
 	c.eventActions.RequestedAuthConfigs[c.functionCallID] = authRequest
