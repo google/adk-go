@@ -831,7 +831,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 	}
 }
 
-func Test_databaseService_StateManagement(t *testing.T) {
+func Test_inMemoryService_StateManagement(t *testing.T) {
 	ctx := t.Context()
 	appName := "my_app"
 
