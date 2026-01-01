@@ -21,6 +21,7 @@ import (
 	"context"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/auth"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 )
@@ -51,6 +52,19 @@ type Context interface {
 	Actions() *session.EventActions
 	// SearchMemory performs a semantic search on the agent's memory.
 	SearchMemory(context.Context, string) (*memory.SearchResponse, error)
+
+	// RequestCredential requests user authorization for OAuth2.
+	// The auth config will be included in the event's RequestedAuthConfigs.
+	// The runner will send an adk_request_credential event to the client.
+	RequestCredential(config *auth.AuthConfig)
+
+	// GetAuthResponse retrieves the auth response from session state.
+	// Returns nil if no auth response is available.
+	GetAuthResponse(config *auth.AuthConfig) *auth.AuthCredential
+
+	// CredentialService returns the credential service for persistent storage.
+	// Returns nil if no credential service is configured.
+	CredentialService() auth.CredentialService
 }
 
 // Toolset is an interface for a collection of tools. It allows grouping

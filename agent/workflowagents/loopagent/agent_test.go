@@ -234,7 +234,7 @@ func TestNewLoopAgent(t *testing.T) {
 
 			ignoreFields := []cmp.Option{
 				cmpopts.IgnoreFields(session.Event{}, "ID", "InvocationID", "Timestamp"),
-				cmpopts.IgnoreFields(session.EventActions{}, "StateDelta"),
+				cmpopts.IgnoreFields(session.EventActions{}, "StateDelta", "RequestedAuthConfigs"),
 				cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
 				cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID"),
 			}
