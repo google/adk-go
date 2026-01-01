@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -305,5 +306,142 @@ func TestToolFilter(t *testing.T) {
 
 	if diff := cmp.Diff(wantToolNames, gotToolNames); diff != "" {
 		t.Errorf("tools mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestSessionValidationOnReuse verifies that the MCP toolset validates
+// cached sessions before reuse using Ping health check.
+func TestSessionValidationOnReuse(t *testing.T) {
+	const toolDescription = "returns weather in the given city"
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	// Create server instance.
+	server := mcp.NewServer(&mcp.Implementation{Name: "weather_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: toolDescription}, weatherFunc)
+	_, err := server.Connect(t.Context(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport: clientTransport,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	readonlyCtx := icontext.NewReadonlyContext(
+		icontext.NewInvocationContext(
+			t.Context(),
+			icontext.InvocationContextParams{},
+		),
+	)
+
+	// First call should establish a session and return tools.
+	tools, err := ts.Tools(readonlyCtx)
+	if err != nil {
+		t.Fatalf("First Tools() call failed: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Name() != "get_weather" {
+		t.Fatalf("Expected 1 tool named 'get_weather', got %d tools", len(tools))
+	}
+
+	// Second call should reuse the cached session (validated via Ping).
+	tools2, err := ts.Tools(readonlyCtx)
+	if err != nil {
+		t.Fatalf("Second Tools() call failed: %v", err)
+	}
+	if len(tools2) != 1 || tools2[0].Name() != "get_weather" {
+		t.Fatalf("Expected 1 tool named 'get_weather', got %d tools", len(tools2))
+	}
+}
+
+// reconnectableTransport wraps another transport and allows swapping it out
+// to simulate reconnection scenarios.
+type reconnectableTransport struct {
+	mu        sync.Mutex
+	transport mcp.Transport
+}
+
+func (r *reconnectableTransport) setTransport(t mcp.Transport) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.transport = t
+}
+
+func (r *reconnectableTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.transport.Connect(ctx)
+}
+
+// TestStaleSessionIsRecreated verifies that when a cached session becomes stale
+// (e.g., server closes the connection), the MCP toolset detects this via Ping
+// and automatically creates a new session.
+func TestStaleSessionIsRecreated(t *testing.T) {
+	const toolDescription = "returns weather in the given city"
+
+	// Create first transport pair.
+	clientTransport1, serverTransport1 := mcp.NewInMemoryTransports()
+
+	// Create server instance.
+	server := mcp.NewServer(&mcp.Implementation{Name: "weather_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: toolDescription}, weatherFunc)
+
+	// Capture the server-side session to be able to close it later.
+	serverSession, err := server.Connect(t.Context(), serverTransport1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a reconnectable transport that we can swap.
+	reconnectable := &reconnectableTransport{transport: clientTransport1}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport: reconnectable,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	readonlyCtx := icontext.NewReadonlyContext(
+		icontext.NewInvocationContext(
+			t.Context(),
+			icontext.InvocationContextParams{},
+		),
+	)
+
+	// First call should establish a session and return tools.
+	tools, err := ts.Tools(readonlyCtx)
+	if err != nil {
+		t.Fatalf("First Tools() call failed: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Name() != "get_weather" {
+		t.Fatalf("Expected 1 tool named 'get_weather', got %d tools", len(tools))
+	}
+
+	// Simulate connection drop by closing the server-side session.
+	if err := serverSession.Close(); err != nil {
+		t.Fatalf("Failed to close server session: %v", err)
+	}
+
+	// Create a new transport pair for reconnection.
+	clientTransport2, serverTransport2 := mcp.NewInMemoryTransports()
+	reconnectable.setTransport(clientTransport2)
+
+	// Create a new server session for the new transport.
+	_, err = server.Connect(t.Context(), serverTransport2, nil)
+	if err != nil {
+		t.Fatalf("Failed to create new server session: %v", err)
+	}
+
+	// Second call should detect the stale session via Ping, reconnect, and succeed.
+	tools2, err := ts.Tools(readonlyCtx)
+	if err != nil {
+		t.Fatalf("Second Tools() call failed after session drop: %v", err)
+	}
+	if len(tools2) != 1 || tools2[0].Name() != "get_weather" {
+		t.Fatalf("Expected 1 tool named 'get_weather' after reconnect, got %d tools", len(tools2))
 	}
 }
