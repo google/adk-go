@@ -198,6 +198,36 @@ func TestAuthConfig_Copy(t *testing.T) {
 	}
 }
 
+func TestAuthConfig_CopyDeepCopiesAuthScheme(t *testing.T) {
+	cfg := &AuthConfig{
+		AuthScheme: &OAuth2Scheme{
+			Description: "orig",
+			Flows: &OAuthFlows{
+				ClientCredentials: &OAuthFlowClientCredentials{
+					TokenURL: "https://example.com/token",
+					Scopes: map[string]string{
+						"repo": "read",
+					},
+				},
+			},
+		},
+	}
+
+	got := cfg.Copy()
+
+	orig := cfg.AuthScheme.(*OAuth2Scheme)
+	orig.Description = "mutated"
+	orig.Flows.ClientCredentials.Scopes["repo"] = "write"
+
+	copied := got.AuthScheme.(*OAuth2Scheme)
+	if copied.Description != "orig" {
+		t.Fatalf("copied.Description = %q, want %q", copied.Description, "orig")
+	}
+	if copied.Flows.ClientCredentials.Scopes["repo"] != "read" {
+		t.Fatalf("copied scope = %q, want %q", copied.Flows.ClientCredentials.Scopes["repo"], "read")
+	}
+}
+
 func TestNewAuthConfig_MarshalError(t *testing.T) {
 	scheme := &badScheme{}
 	if _, err := NewAuthConfig(scheme, nil); err == nil {

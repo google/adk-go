@@ -82,11 +82,125 @@ func (c *AuthConfig) Copy() *AuthConfig {
 		return nil
 	}
 	return &AuthConfig{
-		AuthScheme:              c.AuthScheme, // AuthScheme is typically immutable
+		AuthScheme:              cloneAuthScheme(c.AuthScheme),
 		RawAuthCredential:       c.RawAuthCredential.Copy(),
 		ExchangedAuthCredential: c.ExchangedAuthCredential.Copy(),
 		CredentialKey:           c.CredentialKey,
 	}
+}
+
+func cloneAuthScheme(s AuthScheme) AuthScheme {
+	switch v := s.(type) {
+	case *APIKeyScheme:
+		if v == nil {
+			return nil
+		}
+		cp := *v
+		return &cp
+	case *HTTPScheme:
+		if v == nil {
+			return nil
+		}
+		cp := *v
+		return &cp
+	case *OAuth2Scheme:
+		if v == nil {
+			return nil
+		}
+		return &OAuth2Scheme{
+			Flows:       cloneOAuthFlows(v.Flows),
+			Description: v.Description,
+		}
+	case *OpenIDConnectScheme:
+		if v == nil {
+			return nil
+		}
+		cp := &OpenIDConnectScheme{
+			OpenIDConnectURL:      v.OpenIDConnectURL,
+			AuthorizationEndpoint: v.AuthorizationEndpoint,
+			TokenEndpoint:         v.TokenEndpoint,
+			UserInfoEndpoint:      v.UserInfoEndpoint,
+			RevocationEndpoint:    v.RevocationEndpoint,
+			Description:           v.Description,
+		}
+		if len(v.GrantTypesSupported) > 0 {
+			cp.GrantTypesSupported = append([]string{}, v.GrantTypesSupported...)
+		}
+		if len(v.Scopes) > 0 {
+			cp.Scopes = append([]string{}, v.Scopes...)
+		}
+		return cp
+	default:
+		return v
+	}
+}
+
+func cloneOAuthFlows(flows *OAuthFlows) *OAuthFlows {
+	if flows == nil {
+		return nil
+	}
+	return &OAuthFlows{
+		Implicit:          cloneOAuthFlowImplicit(flows.Implicit),
+		Password:          cloneOAuthFlowPassword(flows.Password),
+		ClientCredentials: cloneOAuthFlowClientCredentials(flows.ClientCredentials),
+		AuthorizationCode: cloneOAuthFlowAuthorizationCode(flows.AuthorizationCode),
+	}
+}
+
+func cloneOAuthFlowImplicit(flow *OAuthFlowImplicit) *OAuthFlowImplicit {
+	if flow == nil {
+		return nil
+	}
+	return &OAuthFlowImplicit{
+		AuthorizationURL: flow.AuthorizationURL,
+		RefreshURL:       flow.RefreshURL,
+		Scopes:           cloneScopes(flow.Scopes),
+	}
+}
+
+func cloneOAuthFlowPassword(flow *OAuthFlowPassword) *OAuthFlowPassword {
+	if flow == nil {
+		return nil
+	}
+	return &OAuthFlowPassword{
+		TokenURL:   flow.TokenURL,
+		RefreshURL: flow.RefreshURL,
+		Scopes:     cloneScopes(flow.Scopes),
+	}
+}
+
+func cloneOAuthFlowClientCredentials(flow *OAuthFlowClientCredentials) *OAuthFlowClientCredentials {
+	if flow == nil {
+		return nil
+	}
+	return &OAuthFlowClientCredentials{
+		TokenURL:   flow.TokenURL,
+		RefreshURL: flow.RefreshURL,
+		Scopes:     cloneScopes(flow.Scopes),
+	}
+}
+
+func cloneOAuthFlowAuthorizationCode(flow *OAuthFlowAuthorizationCode) *OAuthFlowAuthorizationCode {
+	if flow == nil {
+		return nil
+	}
+	return &OAuthFlowAuthorizationCode{
+		AuthorizationURL: flow.AuthorizationURL,
+		TokenURL:         flow.TokenURL,
+		RefreshURL:       flow.RefreshURL,
+		Scopes:           cloneScopes(flow.Scopes),
+	}
+}
+
+func cloneScopes(scopes map[string]string) map[string]string {
+	if scopes == nil {
+		return nil
+	}
+	cp := make(map[string]string, len(scopes))
+	for k, v := range scopes {
+		cp[k] = v
+	}
+	return cp
 }
 
 // stableJSON returns a deterministic JSON representation with sorted map keys.
