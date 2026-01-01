@@ -16,6 +16,7 @@ package toolinternal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -142,6 +143,9 @@ func (c *toolContext) GetAuthResponse(config *auth.AuthConfig) (*auth.AuthCreden
 
 	val, err := c.invocationContext.Session().State().Get(key)
 	if err != nil {
+		if errors.Is(err, session.ErrStateKeyNotExist) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("get auth response: %w", err)
 	}
 	if val == nil {
