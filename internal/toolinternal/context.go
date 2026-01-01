@@ -16,6 +16,7 @@ package toolinternal
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 	"google.golang.org/genai"
@@ -110,48 +111,49 @@ func (c *toolContext) SearchMemory(ctx context.Context, query string) (*memory.S
 // RequestCredential requests user authorization for OAuth2.
 // The auth config will be included in the event's RequestedAuthConfigs,
 // which is converted to adk_request_credential function calls by GenerateAuthEvent.
-func (c *toolContext) RequestCredential(config *auth.AuthConfig) {
+func (c *toolContext) RequestCredential(config *auth.AuthConfig) error {
 
 	if config == nil {
-		return
+		return fmt.Errorf("auth config is nil")
 	}
 
 	// Generate auth request with auth_uri
 	handler := auth.NewAuthHandler(config)
 	authRequest, err := handler.GenerateAuthRequest()
 	if err != nil {
-		// TODO: log or surface the error once a logging strategy is defined.
-		return
+		return fmt.Errorf("generate auth request: %w", err)
 	}
 	if authRequest == nil {
-		return
+		return fmt.Errorf("generate auth request: empty result")
 	}
 
 	// Add to RequestedAuthConfigs keyed by function call ID
 	c.eventActions.RequestedAuthConfigs[c.functionCallID] = authRequest
+	return nil
 }
 
 // GetAuthResponse retrieves the auth response from session state.
 // Returns nil if no auth response is available.
-func (c *toolContext) GetAuthResponse(config *auth.AuthConfig) *auth.AuthCredential {
+func (c *toolContext) GetAuthResponse(config *auth.AuthConfig) (*auth.AuthCredential, error) {
 	if config == nil {
-		return nil
+		return nil, fmt.Errorf("auth config is nil")
 	}
 	key := session.KeyPrefixTemp + config.CredentialKey
 
 	val, err := c.invocationContext.Session().State().Get(key)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("get auth response: %w", err)
 	}
 	if val == nil {
-		return nil
+		return nil, nil
 	}
 
-	if cred, ok := val.(*auth.AuthCredential); ok {
-		return cred
+	cred, ok := val.(*auth.AuthCredential)
+	if !ok {
+		return nil, fmt.Errorf("unexpected auth response type %T", val)
 	}
 
-	return nil
+	return cred, nil
 }
 
 // CredentialService returns the credential service for persistent storage.

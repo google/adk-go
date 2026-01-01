@@ -56,11 +56,12 @@ type Context interface {
 	// RequestCredential requests user authorization for OAuth2.
 	// The auth config will be included in the event's RequestedAuthConfigs.
 	// The runner will send an adk_request_credential event to the client.
-	RequestCredential(config *auth.AuthConfig)
+	// Returns an error if the auth request could not be generated.
+	RequestCredential(config *auth.AuthConfig) error
 
 	// GetAuthResponse retrieves the auth response from session state.
 	// Returns nil if no auth response is available.
-	GetAuthResponse(config *auth.AuthConfig) *auth.AuthCredential
+	GetAuthResponse(config *auth.AuthConfig) (*auth.AuthCredential, error)
 
 	// CredentialService returns the credential service for persistent storage.
 	// Returns nil if no credential service is configured.
