@@ -125,6 +125,38 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		if ctx.Ended() {
 			return
 		}
+
+		// Check if auth preprocessor found tools that need to be re-executed.
+		// This implements the "Surgical Resumption" pattern from Python ADK.
+		if result := authPreprocessorResultFromContext(ctx); result != nil && result.OriginalEvent != nil && len(result.ToolIdsToResume) > 0 {
+			// Clear the result immediately to prevent re-processing
+			storeAuthPreprocessorResult(ctx, nil)
+
+			// Build tools map
+			tools := make(map[string]tool.Tool)
+			for k, v := range req.Tools {
+				if t, ok := v.(tool.Tool); ok {
+					tools[k] = t
+				}
+			}
+
+			// Execute function calls from the original event that match our tools_to_resume
+			// This matches Python's handle_function_calls_async with tools_to_resume filter
+			fnResponseEvent, err := f.handleFunctionCalls(ctx, tools, &result.OriginalEvent.LLMResponse, result.ToolIdsToResume)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if fnResponseEvent != nil {
+				if !yield(fnResponseEvent, nil) {
+					return
+				}
+			}
+
+			// Return after tool re-execution - Python does the same
+			return
+		}
+
 		spans := telemetry.StartTrace(ctx, "call_llm")
 		// Create event to pass to callback state delta
 		stateDelta := make(map[string]any)
@@ -163,10 +195,8 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
-			// TODO: generate and yield an auth event if needed.
 
 			// Handle function calls.
-
 			ev, err := f.handleFunctionCalls(ctx, tools, resp)
 			if err != nil {
 				yield(nil, err)
@@ -178,6 +208,14 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 			if !yield(ev, nil) {
 				return
+			}
+
+			// Generate and yield an auth event if needed.
+			// This converts RequestedAuthConfigs into adk_request_credential function calls.
+			if authEvent := GenerateAuthEvent(ctx, ev); authEvent != nil {
+				if !yield(authEvent, nil) {
+					return
+				}
 			}
 
 			// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
@@ -364,14 +402,25 @@ func findLongRunningFunctionCallIDs(c *genai.Content, tools map[string]tool.Tool
 }
 
 // handleFunctionCalls calls the functions and returns the function response event.
+// If toolsToResume is non-nil and non-empty, only function calls with IDs in the map are executed.
 //
-// TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
-func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse) (*session.Event, error) {
+func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolsToResume ...map[string]bool) (*session.Event, error) {
 	var fnResponseEvents []*session.Event
+
+	// Build filter map if provided
+	var filterMap map[string]bool
+	if len(toolsToResume) > 0 && toolsToResume[0] != nil && len(toolsToResume[0]) > 0 {
+		filterMap = toolsToResume[0]
+	}
 
 	fnCalls := utils.FunctionCalls(resp.Content)
 	for _, fnCall := range fnCalls {
+		// Skip function calls not in the filter (if filter is provided)
+		if filterMap != nil && !filterMap[fnCall.ID] {
+			continue
+		}
+
 		curTool, ok := toolsDict[fnCall.Name]
 		if !ok {
 			return nil, fmt.Errorf("unknown tool: %q", fnCall.Name)
@@ -380,6 +429,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		if !ok {
 			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
 		}
+
 		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)})
 		// toolCtx := tool.
 		spans := telemetry.StartTrace(ctx, "execute_tool "+fnCall.Name)
