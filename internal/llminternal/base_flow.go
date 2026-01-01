@@ -128,9 +128,9 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 
 		// Check if auth preprocessor found tools that need to be re-executed.
 		// This implements the "Surgical Resumption" pattern from Python ADK.
-		if result := CurrentAuthPreprocessorResult; result != nil && result.OriginalEvent != nil && len(result.ToolIdsToResume) > 0 {
+		if result := authPreprocessorResultFromContext(ctx); result != nil && result.OriginalEvent != nil && len(result.ToolIdsToResume) > 0 {
 			// Clear the result immediately to prevent re-processing
-			CurrentAuthPreprocessorResult = nil
+			storeAuthPreprocessorResult(ctx, nil)
 
 			// Build tools map
 			tools := make(map[string]tool.Tool)

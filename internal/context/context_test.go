@@ -15,6 +15,7 @@
 package context
 
 import (
+	"context"
 	"testing"
 
 	"google.golang.org/adk/agent"
@@ -38,5 +39,35 @@ func TestCallbackContext(t *testing.T) {
 	}
 	if got, ok := callback.(agent.InvocationContext); ok {
 		t.Errorf("CallbackContext(%+T) is unexpectedly an InvocationContext", got)
+	}
+}
+
+func TestInvocationContextValueLookup(t *testing.T) {
+	type ctxKey string
+	baseKey := ctxKey("base")
+
+	baseCtx := context.WithValue(t.Context(), baseKey, "base-value")
+	inv := NewInvocationContext(baseCtx, InvocationContextParams{
+		Values: map[string]any{
+			"custom": "initial",
+		},
+	})
+
+	if got := inv.Value("custom"); got != "initial" {
+		t.Fatalf("Value(custom) = %v, want %q", got, "initial")
+	}
+	if got := inv.Value(baseKey); got != "base-value" {
+		t.Fatalf("Value(baseKey) = %v, want %q", got, "base-value")
+	}
+
+	internal := inv.(*InvocationContext)
+	internal.SetInvocationValue("custom", "updated")
+	if got := inv.Value("custom"); got != "updated" {
+		t.Fatalf("Value(custom) after update = %v, want %q", got, "updated")
+	}
+
+	internal.SetInvocationValue("custom", nil)
+	if got := inv.Value("custom"); got != nil {
+		t.Fatalf("Value(custom) after delete = %v, want nil", got)
 	}
 }

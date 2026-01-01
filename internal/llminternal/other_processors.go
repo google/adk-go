@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
@@ -53,13 +54,70 @@ type AuthPreprocessorResult struct {
 	OriginalEvent *session.Event
 }
 
-// CurrentAuthPreprocessorResult holds the result of the last auth preprocessing.
-// This is set by authPreprocessor and read by Flow.runOneStep.
-var CurrentAuthPreprocessorResult *AuthPreprocessorResult
+const authPreprocessorResultKey = "llminternal:auth_result"
+const processedAuthEventPrefix = "processed_auth_event:"
+
+type authResultSetter interface {
+	SetInvocationValue(key string, value any)
+}
+
+func storeAuthPreprocessorResult(ctx agent.InvocationContext, result *AuthPreprocessorResult) {
+	if setter, ok := ctx.(authResultSetter); ok {
+		setter.SetInvocationValue(authPreprocessorResultKey, result)
+	}
+}
+
+func authPreprocessorResultFromContext(ctx agent.InvocationContext) *AuthPreprocessorResult {
+	if ctx == nil {
+		return nil
+	}
+	if val := ctx.Value(authPreprocessorResultKey); val != nil {
+		if result, ok := val.(*AuthPreprocessorResult); ok {
+			return result
+		}
+	}
+	return nil
+}
+
+func processedAuthEventKey(eventID string) string {
+	return session.KeyPrefixTemp + processedAuthEventPrefix + eventID
+}
+
+func authEventAlreadyProcessed(ctx agent.InvocationContext, eventID string) (bool, error) {
+	if ctx == nil || eventID == "" {
+		return false, nil
+	}
+	state := ctx.Session().State()
+	if state == nil {
+		return false, fmt.Errorf("session state unavailable")
+	}
+	_, err := state.Get(processedAuthEventKey(eventID))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, session.ErrStateKeyNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check processed auth event: %w", err)
+}
+
+func markAuthEventProcessed(ctx agent.InvocationContext, eventID string) error {
+	if ctx == nil || eventID == "" {
+		return nil
+	}
+	state := ctx.Session().State()
+	if state == nil {
+		return fmt.Errorf("session state unavailable")
+	}
+	if err := state.Set(processedAuthEventKey(eventID), true); err != nil {
+		return fmt.Errorf("mark auth event processed: %w", err)
+	}
+	return nil
+}
 
 func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	// Reset the result
-	CurrentAuthPreprocessorResult = nil
+	storeAuthPreprocessorResult(ctx, nil)
 
 	// This implements Python ADK's auth_preprocessor logic exactly.
 	// It checks SESSION EVENTS (not userContent) for auth responses.
@@ -83,6 +141,13 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest) error 
 
 	// Check if the last event with content is authored by user (Python lines 62-64)
 	if lastEventWithContent == nil || lastEventWithContent.Author != "user" {
+		return nil
+	}
+	alreadyProcessed, err := authEventAlreadyProcessed(ctx, lastEventWithContent.ID)
+	if err != nil {
+		return err
+	}
+	if alreadyProcessed {
 		return nil
 	}
 
@@ -202,8 +267,8 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest) error 
 				result.ToolIdsToResume = toolsToResume
 				result.OriginalEvent = originalEvent
 				result.CredentialsStored = true
-				CurrentAuthPreprocessorResult = result
-				return nil
+				storeAuthPreprocessorResult(ctx, result)
+				return markAuthEventProcessed(ctx, lastEventWithContent.ID)
 			}
 		}
 		return nil

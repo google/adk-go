@@ -171,27 +171,3 @@ func TestParseAuthCredentialFromMap_NotAMap(t *testing.T) {
 		t.Error("parseAuthCredentialFromMap() should error for non-map input")
 	}
 }
-
-func TestAuthPreprocessorResult_Init(t *testing.T) {
-	// Verify CurrentAuthPreprocessorResult starts as nil
-	if CurrentAuthPreprocessorResult != nil {
-		// Clear it for test isolation
-		CurrentAuthPreprocessorResult = nil
-	}
-
-	result := &AuthPreprocessorResult{
-		ToolIdsToResume:   make(map[string]bool),
-		CredentialsStored: true,
-		OriginalEvent:     &session.Event{},
-	}
-
-	if result.ToolIdsToResume == nil {
-		t.Error("ToolIdsToResume should not be nil")
-	}
-	if !result.CredentialsStored {
-		t.Error("CredentialsStored should be true")
-	}
-	if result.OriginalEvent == nil {
-		t.Error("OriginalEvent should not be nil")
-	}
-}
