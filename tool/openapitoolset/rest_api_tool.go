@@ -146,7 +146,10 @@ func (t *RestApiTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 			}
 
 			// Check for existing credential from auth response
-			authResponse := ctx.GetAuthResponse(authConfig)
+			authResponse, err := ctx.GetAuthResponse(authConfig)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch auth response: %w", err)
+			}
 			if authResponse != nil {
 				// User has completed OAuth flow - use the credential
 				t.authCredential = authResponse
