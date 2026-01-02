@@ -69,6 +69,7 @@ var (
 		// Code execution should be after contentsRequestProcessor as it mutates the contents
 		// to optimize data files.
 		codeExecutionRequestProcessor,
+		outputSchemaRequestProcessor,
 		AgentTransferRequestProcessor,
 		removeDisplayNameIfExists,
 	}
@@ -177,6 +178,13 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				continue
 			}
 			if !yield(ev, nil) {
+				return
+			}
+
+			// If the model response is structured, yield it as a final model response event.
+			outputSchemaResponse, err := retrieveStructuredModelResponse(ev)
+			if err == nil && outputSchemaResponse != "" {
+				yield(createFinalModelResponseEvent(ctx, outputSchemaResponse), nil)
 				return
 			}
 
