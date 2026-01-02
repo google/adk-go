@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"google.golang.org/adk/auth"
 	"google.golang.org/adk/model"
 )
 
@@ -134,7 +135,10 @@ func NewEvent(invocationID string) *Event {
 		ID:           uuid.NewString(),
 		InvocationID: invocationID,
 		Timestamp:    time.Now(),
-		Actions:      EventActions{StateDelta: make(map[string]any)},
+		Actions: EventActions{
+			StateDelta:           make(map[string]any),
+			RequestedAuthConfigs: make(map[string]*auth.AuthConfig),
+		},
 	}
 }
 
@@ -154,6 +158,11 @@ type EventActions struct {
 	TransferToAgent string
 	// The agent is escalating to a higher level agent.
 	Escalate bool
+
+	// RequestedAuthConfigs holds authentication configurations requested by tools.
+	// Key is the function call ID, value is the auth config.
+	// These are converted to adk_request_credential function calls by GenerateAuthEvent.
+	RequestedAuthConfigs map[string]*auth.AuthConfig
 }
 
 // Prefixes for defining session's state scopes
