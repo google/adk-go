@@ -93,6 +93,10 @@ func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.
 		return nil, err
 	}
 
+	if event.Partial {
+		updatePartsMetadata(parts, map[string]any{ToA2AMetaKey("partial"): true})
+	}
+
 	var result *a2a.TaskArtifactUpdateEvent
 	if p.responseID == "" {
 		result = a2a.NewArtifactEvent(p.reqCtx, parts...)
