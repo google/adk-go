@@ -15,9 +15,11 @@
 package gemini
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -186,6 +188,95 @@ func TestModel_TrackingHeaders(t *testing.T) {
 			t.Error("HTTP request was not intercepted; headers not verified")
 		}
 	})
+}
+
+func TestModel_Name(t *testing.T) {
+	model := &geminiModel{name: "gemini-2.5-flash"}
+	if got := model.Name(); got != "gemini-2.5-flash" {
+		t.Fatalf("Model.Name() = %v, want %v", got, "gemini-2.5-flash")
+	}
+}
+
+func TestModel_NewModelError(t *testing.T) {
+	t.Setenv("GOOGLE_API_KEY", "fakekey")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "fakeproject")
+
+	cfg := &genai.ClientConfig{
+		// Force env vars into mutual-exclusion logic
+		APIKey:  os.Getenv("GOOGLE_API_KEY"),
+		Project: os.Getenv("GOOGLE_CLOUD_PROJECT"),
+	}
+
+	_, err := NewModel(t.Context(), "gemini-2.5-flash", cfg)
+	if err == nil {
+		t.Fatal("expected mutually exclusive error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("got error %q, want containing 'mutually exclusive'", err)
+	}
+}
+
+func TestModel_NewModelWithEmptyName(t *testing.T) {
+	_, err := NewModel(t.Context(), "", &genai.ClientConfig{
+		APIKey: "fakekey",
+	})
+	if err == nil {
+		t.Fatal("NewModel() expected error for empty model name, got nil")
+	}
+	if !errors.Is(err, ErrEmptyModelName) {
+		t.Fatalf("NewModel() error = %v; want %v", err, ErrEmptyModelName)
+	}
+}
+
+func TestModel_MaybeAppendUserContent(t *testing.T) {
+	tests := []struct {
+		name            string
+		initialContents []*genai.Content
+		wantContents    []*genai.Content
+	}{
+		{
+			name:            "empty contents",
+			initialContents: []*genai.Content{},
+			wantContents:    []*genai.Content{genai.NewContentFromText(systemInstructionText, "user")},
+		},
+		{
+			name:            "last role is not user",
+			initialContents: []*genai.Content{{Role: genai.RoleModel}},
+			wantContents:    []*genai.Content{{Role: genai.RoleModel}, genai.NewContentFromText(continueProcessingText, "user")},
+		},
+		{
+			name:            "last role is user",
+			initialContents: []*genai.Content{{Role: genai.RoleUser}},
+			wantContents:    []*genai.Content{{Role: genai.RoleUser}},
+		},
+		{
+			name:            "last content from model, followed by nil",
+			initialContents: []*genai.Content{{Role: genai.RoleModel}, nil},
+			wantContents:    []*genai.Content{{Role: genai.RoleModel}, genai.NewContentFromText(continueProcessingText, "user")},
+		},
+		{
+			name:            "contents with only nil",
+			initialContents: []*genai.Content{nil},
+			wantContents:    []*genai.Content{genai.NewContentFromText(systemInstructionText, "user")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			newModel := &geminiModel{name: "gemini-2.5-flash"}
+			contents := make([]*genai.Content, len(tt.initialContents))
+			copy(contents, tt.initialContents)
+			req := &model.LLMRequest{
+				Contents: contents,
+			}
+			newModel.maybeAppendUserContent(req)
+
+			if diff := cmp.Diff(tt.wantContents, req.Contents); diff != "" {
+				t.Errorf("maybeAppendUserContent() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
 
 // newGeminiTestClientConfig returns the genai.ClientConfig configured for record and replay.
