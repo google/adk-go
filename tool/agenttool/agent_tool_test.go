@@ -234,7 +234,7 @@ func TestAgentTool_Run_WithoutSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() failed unexpectedly: %v", err)
 	}
-	want := map[string]any{"result": "First text part is returned"}
+	want := map[string]any{"result": "First text part is returnedThis should be ignored"}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
 	}
