@@ -15,6 +15,7 @@
 package loadartifactstool_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -292,4 +293,25 @@ func createToolContext(t *testing.T) tool.Context {
 	})
 
 	return toolinternal.NewToolContext(ctx, "", nil)
+}
+
+func TestLoadArtifactsTool_ProcessRequest_NilArtifactService(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Artifacts: nil,
+	})
+	tc := toolinternal.NewToolContext(ctx, "", nil)
+
+	llmRequest := &model.LLMRequest{}
+
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	err := requestProcessor.ProcessRequest(tc, llmRequest)
+if !errors.Is(err, loadartifactstool.ErrArtifactServiceNotInitialized) {
+		t.Errorf("ProcessRequest() with nil artifact service returned error = %v, want %v", err, loadartifactstool.ErrArtifactServiceNotInitialized)
+	}
 }
