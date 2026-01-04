@@ -15,14 +15,13 @@
 package adka2a
 
 import (
-	"net/http"
 	"testing"
 
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 )
 
-func TestNewHandler(t *testing.T) {
+func TestNewRequestHandler(t *testing.T) {
 	agent, err := newEventReplayAgent(nil, nil)
 	if err != nil {
 		t.Fatalf("newEventReplayAgent() error = %v", err)
@@ -39,12 +38,8 @@ func TestNewHandler(t *testing.T) {
 		},
 	}
 
-	handler := NewHandler(config)
+	handler := NewRequestHandler(config)
 	if handler == nil {
-		t.Fatal("NewHandler() returned nil")
-	}
-
-	if _, ok := handler.(http.Handler); !ok {
-		t.Fatal("NewHandler() did not return an http.Handler")
+		t.Fatal("NewRequestHandler() returned nil")
 	}
 }

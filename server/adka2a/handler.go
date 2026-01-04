@@ -14,13 +14,9 @@
 
 package adka2a
 
-import (
-	"net/http"
+import "github.com/a2aproject/a2a-go/a2asrv"
 
-	"github.com/a2aproject/a2a-go/a2asrv"
-)
-
-// HandlerConfig allows to configure the HTTP handler.
+// HandlerConfig allows to configure the A2A request handler.
 type HandlerConfig struct {
 	// ExecutorConfig is the configuration for the A2A executor.
 	ExecutorConfig ExecutorConfig
@@ -29,11 +25,10 @@ type HandlerConfig struct {
 	A2AOptions []a2asrv.RequestHandlerOption
 }
 
-// NewHandler creates and returns an http.Handler for the A2A JSON-RPC API.
-// This provides a convenient way to create an A2A handler without having to
-// manually create the executor and wrap it with a2asrv handlers.
-func NewHandler(config HandlerConfig) http.Handler {
+// NewRequestHandler creates a transport-agnostic A2A request handler.
+// Callers can wrap the returned handler with a transport implementation such as
+// a2asrv.NewJSONRPCHandler.
+func NewRequestHandler(config HandlerConfig) a2asrv.RequestHandler {
 	executor := NewExecutor(config.ExecutorConfig)
-	reqHandler := a2asrv.NewHandler(executor, config.A2AOptions...)
-	return a2asrv.NewJSONRPCHandler(reqHandler)
+	return a2asrv.NewHandler(executor, config.A2AOptions...)
 }
