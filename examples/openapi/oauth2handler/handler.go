@@ -44,20 +44,28 @@ const (
 
 // Handler handles OAuth2 flows for CLI applications.
 type Handler struct {
-	flowType FlowType
-	port     int // Fixed port for callback server
-	mu       sync.Mutex
-	server   *http.Server
-	authCode string
-	authErr  error
-	done     chan struct{}
+	flowType     FlowType
+	port         int
+	callbackPath string
+	mu           sync.Mutex
+	server       *http.Server
+	authCode     string
+	authErr      error
+	done         chan struct{}
 }
 
-// New creates a new OAuth2 handler with the specified port.
-func New(flowType FlowType, port int) *Handler {
+// New creates a new OAuth2 handler with the specified port and callback path.
+func New(flowType FlowType, port int, callbackPath string) *Handler {
+	if callbackPath == "" {
+		callbackPath = "/callback"
+	}
+	if !strings.HasPrefix(callbackPath, "/") {
+		callbackPath = "/" + callbackPath
+	}
 	return &Handler{
-		flowType: flowType,
-		port:     port,
+		flowType:     flowType,
+		port:         port,
+		callbackPath: callbackPath,
 	}
 }
 
@@ -89,7 +97,12 @@ func (h *Handler) handleAuthCodeFlow(ctx context.Context, authConfig *auth.AuthC
 
 	// Use configured port
 	port := h.port
-	redirectURI := fmt.Sprintf("http://localhost:%d/callback", port)
+	var redirectURI string
+	if h.callbackPath == "/" {
+		redirectURI = fmt.Sprintf("http://localhost:%d/", port)
+	} else {
+		redirectURI = fmt.Sprintf("http://localhost:%d%s", port, h.callbackPath)
+	}
 	oauth2Cred.RedirectURI = redirectURI
 
 	// Rebuild auth URI with updated redirect_uri
@@ -104,7 +117,7 @@ func (h *Handler) handleAuthCodeFlow(ctx context.Context, authConfig *auth.AuthC
 	// Setup HTTP server for callback
 	h.done = make(chan struct{})
 	mux := http.NewServeMux()
-	mux.HandleFunc("/callback", h.handleCallback)
+	mux.HandleFunc(h.callbackPath, h.handleCallback)
 
 	h.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),

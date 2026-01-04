@@ -48,26 +48,23 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
-	"strings"
 
-	"google.golang.org/genai"
-
-	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/auth"
 	"google.golang.org/adk/examples/openapi/oauth2handler"
+	"google.golang.org/adk/examples/openapi/support"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/openapitoolset"
+	"google.golang.org/genai"
 )
 
 // Command line flags
@@ -268,7 +265,7 @@ When asked about repositories, provide helpful summaries of the information.`,
 	} else {
 		flowType = oauth2handler.FlowTypeAuthCode
 	}
-	oauth2Handler := oauth2handler.New(flowType, *oauthPort)
+	oauth2Handler := oauth2handler.New(flowType, *oauthPort, "/callback")
 	defer oauth2Handler.Close()
 
 	// Create runner
@@ -288,175 +285,15 @@ When asked about repositories, provide helpful summaries of the information.`,
 	fmt.Printf("  Configure this URL in your OAuth provider's settings\n\n")
 
 	// Run interactive loop
-	if err := runInteractive(ctx, r, sessionService, oauth2Handler); err != nil {
+	if err := support.RunInteractive(
+		ctx,
+		"github_example",
+		"user123",
+		"GitHub Assistant (type 'quit' to exit)",
+		r,
+		sessionService,
+		oauth2Handler,
+	); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func runInteractive(ctx context.Context, r *runner.Runner, sessionService session.Service, oauth2Handler *oauth2handler.Handler) error {
-	scanner := bufio.NewScanner(os.Stdin)
-
-	// Create session
-	sess, err := sessionService.Create(ctx, &session.CreateRequest{
-		AppName: "github_example",
-		UserID:  "user123",
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create session: %w", err)
-	}
-
-	fmt.Println("GitHub Assistant (type 'quit' to exit)")
-
-	for {
-		fmt.Print("User -> ")
-		if !scanner.Scan() {
-			break
-		}
-
-		userInput := strings.TrimSpace(scanner.Text())
-		if userInput == "" {
-			continue
-		}
-		if userInput == "quit" || userInput == "exit" {
-			break
-		}
-
-		// Process user input (may include function responses from OAuth)
-		msg := &genai.Content{
-			Parts: []*genai.Part{{Text: userInput}},
-			Role:  "user",
-		}
-
-		if err := runAgentWithAuth(ctx, r, sess.Session, msg, oauth2Handler); err != nil {
-			fmt.Printf("Error: %v\n\n", err)
-		}
-
-		fmt.Println()
-	}
-
-	return nil
-}
-
-// runAgentWithAuth runs the agent and handles OAuth if needed
-func runAgentWithAuth(ctx context.Context, r *runner.Runner, sess session.Session, msg *genai.Content, oauth2Handler *oauth2handler.Handler) error {
-	// Collect auth requests during agent run
-	var pendingAuthCalls []*genai.FunctionCall
-
-	for event, err := range r.Run(ctx, sess.UserID(), sess.ID(), msg, agent.RunConfig{}) {
-		if err != nil {
-			return err
-		}
-
-		// Check for adk_request_credential function calls
-		if event.Content != nil {
-			for _, part := range event.Content.Parts {
-				if part.FunctionCall != nil && part.FunctionCall.Name == auth.RequestEUCFunctionCallName {
-					pendingAuthCalls = append(pendingAuthCalls, part.FunctionCall)
-				}
-			}
-		}
-
-		// Display agent responses
-		if event.Content != nil {
-			for _, part := range event.Content.Parts {
-				if part.Text != "" && !event.LLMResponse.Partial {
-					fmt.Printf("Agent -> %s\n", part.Text)
-				}
-			}
-		}
-	}
-
-	// No auth needed
-	if len(pendingAuthCalls) == 0 {
-		return nil
-	}
-
-	fmt.Println("\nOAuth2 authorization required.")
-
-	// Process each auth request
-	var authResponseParts []*genai.Part
-	for _, fc := range pendingAuthCalls {
-		authConfig := parseAuthConfigFromFunctionCall(fc)
-		if authConfig == nil {
-			continue
-		}
-
-		fmt.Printf("Processing: %s\n", authConfig.CredentialKey)
-
-		// Run OAuth2 flow
-		authCred, err := oauth2Handler.HandleAuthRequest(ctx, authConfig)
-		if err != nil {
-			fmt.Printf("Authorization failed: %v\n", err)
-			continue
-		}
-
-		// Create function response
-		authResponseParts = append(authResponseParts, &genai.Part{
-			FunctionResponse: &genai.FunctionResponse{
-				ID:   fc.ID,
-				Name: fc.Name,
-				Response: map[string]any{
-					"auth_config": map[string]any{
-						"credential_key": authConfig.CredentialKey,
-						"exchanged_auth_credential": map[string]any{
-							"auth_type": "oauth2",
-							"oauth2": map[string]any{
-								"access_token":  authCred.OAuth2.AccessToken,
-								"refresh_token": authCred.OAuth2.RefreshToken,
-								"expires_at":    authCred.OAuth2.ExpiresAt,
-							},
-						},
-					},
-				},
-			},
-		})
-	}
-
-	if len(authResponseParts) == 0 {
-		return fmt.Errorf("failed to obtain authorization")
-	}
-
-	fmt.Println("\nRetrying with credentials...")
-
-	// Send auth responses as next message and run agent again
-	authResponseMsg := &genai.Content{
-		Parts: authResponseParts,
-		Role:  "user",
-	}
-	return runAgentWithAuth(ctx, r, sess, authResponseMsg, oauth2Handler)
-}
-
-// parseAuthConfigFromFunctionCall extracts AuthConfig from adk_request_credential function call
-func parseAuthConfigFromFunctionCall(fc *genai.FunctionCall) *auth.AuthConfig {
-	if fc == nil || fc.Args == nil {
-		return nil
-	}
-
-	authConfigData, ok := fc.Args["auth_config"]
-	if !ok {
-		return nil
-	}
-
-	dataMap, ok := authConfigData.(*auth.AuthConfig)
-	if ok {
-		return dataMap
-	}
-
-	// Try to extract from a map (for generic cases)
-	configMap, ok := authConfigData.(map[string]any)
-	if !ok {
-		return nil
-	}
-
-	config := &auth.AuthConfig{}
-
-	if credKey, ok := configMap["credential_key"].(string); ok {
-		config.CredentialKey = credKey
-	}
-
-	// The AuthScheme is an interface, so we can't easily reconstruct it from a map
-	// However, the oauth2Handler will use the original AuthConfig passed via RequestedAuthConfigs
-	// which is embedded in the function call args as *auth.AuthConfig
-
-	return config
 }
