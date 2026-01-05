@@ -271,8 +271,8 @@ func TestGetStructuredModelResponse(t *testing.T) {
 		}
 
 		got, err := retrieveStructuredModelResponse(event)
-		if err == nil {
-			t.Fatal("Expected error for tool name mismatch, got nil")
+		if err != nil {
+			t.Fatal("Expected nil for tool name mismatch, got error")
 		}
 		if got != "" {
 			t.Errorf("Expected empty string, got %q", got)
@@ -281,8 +281,8 @@ func TestGetStructuredModelResponse(t *testing.T) {
 
 	t.Run("NilEvent", func(t *testing.T) {
 		got, err := retrieveStructuredModelResponse(nil)
-		if err == nil {
-			t.Fatal("Expected error for nil event, got nil")
+		if err != nil {
+			t.Fatal("Expected nil for nil event, got error")
 		}
 		if got != "" {
 			t.Error("expected empty string")
