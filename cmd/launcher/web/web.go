@@ -200,7 +200,7 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("server shutdown failed: %v", err)
 		}
-		return nil
+		return ctx.Err()
 	case err := <-errChan:
 		return fmt.Errorf("server failed: %v", err)
 	}
