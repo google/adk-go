@@ -184,12 +184,25 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		Handler:      router,
 	}
 
-	err := srv.ListenAndServe()
-	if err != nil {
+	errChan := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errChan <- err
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Println("Shutting down the web server...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("server shutdown failed: %v", err)
+		}
+		return nil
+	case err := <-errChan:
 		return fmt.Errorf("server failed: %v", err)
 	}
-
-	return nil
 }
 
 // SimpleDescription implements launcher.SubLauncher.
