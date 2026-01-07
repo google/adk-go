@@ -96,9 +96,25 @@ func main() {
 	}
 	mcpToolSet, err := mcptoolset.New(mcptoolset.Config{
 		Transport: transport,
-		// WARNING: we need to filter out "get_table_info" tool because of errors it causes ("reference to undefined schema at $defs.RangePartitioning.properties.range")
-		// we need now just 'execute_sql' tool
-		ToolFilter: tool.StringPredicate([]string{"execute_sql"}),
+		// ToolFilter: tool.StringPredicate([]string{"get_table_info"}),
+		// WARNING: we need to make a workaround for "get_table_info" tool because of errors in json schema that causes llm to fail ("reference to undefined schema at $defs.RangePartitioning.properties.range")
+		ToolTransformer: func(t *mcp.Tool) (*mcp.Tool, error) {
+			if t.Name != "get_table_info" {
+				return t, nil
+			}
+			// get_table_info
+			// return a tool without t.OutputSchema
+			res := &mcp.Tool{
+				Name:        t.Name,
+				Description: t.Description,
+				Meta:        t.Meta,
+				Annotations: t.Annotations,
+				InputSchema: t.InputSchema,
+				Title:       t.Title,
+				Icons:       t.Icons,
+			}
+			return res, nil
+		},
 	})
 	if err != nil {
 		log.Fatalf("Failed to create MCP tool set: %v", err)
