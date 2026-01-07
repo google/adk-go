@@ -33,6 +33,7 @@ var (
 	metadataEscalateKey        = ToA2AMetaKey("escalate")
 	metadataTransferToAgentKey = ToA2AMetaKey("transfer_to_agent")
 	metadataErrorCodeKey       = ToA2AMetaKey("error_code")
+	metadataCitationKey        = ToA2AMetaKey("citation_metadata")
 	metadataGroundingKey       = ToA2AMetaKey("grounding_metadata")
 	metadataUsageKey           = ToA2AMetaKey("usage_metadata")
 	metadataCustomMetaKey      = ToA2AMetaKey("custom_metadata")
@@ -94,7 +95,13 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 			result[ToA2AMetaKey(k)] = v
 		}
 	}
-
+	if event.CitationMetadata != nil {
+		v, err := converters.ToMapStructure(event.CitationMetadata)
+		if err != nil {
+			return nil, err
+		}
+		result[metadataCitationKey] = v
+	}
 	if event.GroundingMetadata != nil {
 		v, err := converters.ToMapStructure(event.GroundingMetadata)
 		if err != nil {
@@ -137,6 +144,14 @@ func setActionsMeta(meta map[string]any, actions session.EventActions) map[strin
 
 func processA2AMeta(a2aEvent a2a.Event, event *session.Event) error {
 	taskInfo, meta := a2aEvent.TaskInfo(), a2aEvent.Meta()
+
+	if cm, ok := meta[metadataCitationKey].(map[string]any); ok {
+		converted, err := converters.FromMapStructure[genai.CitationMetadata](cm)
+		if err != nil {
+			return err
+		}
+		event.CitationMetadata = converted
+	}
 
 	if gm, ok := meta[metadataGroundingKey].(map[string]any); ok {
 		converted, err := converters.FromMapStructure[genai.GroundingMetadata](gm)

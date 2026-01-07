@@ -307,6 +307,7 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{
 					LLMResponse: model.LLMResponse{
 						Content:           genai.NewContentFromText("hello", genai.RoleModel),
+						CitationMetadata:  &genai.CitationMetadata{Citations: []*genai.Citation{{Title: "Title1"}, {Title: "Title2"}}},
 						UsageMetadata:     &genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 12, ThoughtsTokenCount: 42},
 						GroundingMetadata: &genai.GroundingMetadata{SourceFlaggingUris: []*genai.GroundingMetadataSourceFlaggingURI{{SourceID: "id1"}}},
 						CustomMetadata:    map[string]any{"nested": map[string]any{"key": "value"}},
@@ -316,6 +317,7 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 			wantResponses: []model.LLMResponse{
 				{
 					Content:           genai.NewContentFromText("hello", genai.RoleModel),
+					CitationMetadata:  &genai.CitationMetadata{Citations: []*genai.Citation{{Title: "Title1"}, {Title: "Title2"}}},
 					UsageMetadata:     &genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 12, ThoughtsTokenCount: 42},
 					GroundingMetadata: &genai.GroundingMetadata{SourceFlaggingUris: []*genai.GroundingMetadataSourceFlaggingURI{{SourceID: "id1"}}},
 					CustomMetadata:    map[string]any{"nested": map[string]any{"key": "value"}},
