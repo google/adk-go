@@ -101,10 +101,11 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 	agent := config.AgentLoader.RootAgent()
 	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
-			AppName:         agent.Name(),
-			Agent:           agent,
-			SessionService:  config.SessionService,
-			ArtifactService: config.ArtifactService,
+			AppName:          agent.Name(),
+			Agent:            agent,
+			SessionService:   config.SessionService,
+			ArtifactService:  config.ArtifactService,
+			CompactionConfig: config.CompactionConfig,
 		},
 	})
 	reqHandler := a2asrv.NewHandler(executor, config.A2AOptions...)
