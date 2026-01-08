@@ -16,12 +16,10 @@ package adkrest
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/gorilla/mux"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/server/adkrest/controllers"
 	"google.golang.org/adk/server/adkrest/internal/routers"
@@ -29,7 +27,11 @@ import (
 )
 
 // NewHandler creates and returns an http.Handler for the ADK REST API.
-func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration) http.Handler {
+func NewHandler(config *Config) (http.Handler, error) {
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+
 	adkExporter := services.NewAPIServerSpanExporter()
 	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
 
@@ -38,13 +40,13 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration) http.Han
 	// where the ADK REST API will be served.
 	setupRouter(router,
 		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(config.SessionService)),
-		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(config.SessionService, config.AgentLoader, config.ArtifactService, sseWriteTimeout)),
+		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(config.SessionService, config.AgentLoader, config.ArtifactService, config.SSEWriteTimeout)),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(config.AgentLoader)),
 		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(config.SessionService, config.AgentLoader, adkExporter)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(config.ArtifactService)),
 		&routers.EvalAPIRouter{},
 	)
-	return router
+	return router, nil
 }
 
 func setupRouter(router *mux.Router, subrouters ...routers.Router) *mux.Router {
