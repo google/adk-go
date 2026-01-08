@@ -35,13 +35,22 @@ type InvocationContextParams struct {
 	UserContent   *genai.Content
 	RunConfig     *agent.RunConfig
 	EndInvocation bool
+	Values        map[string]any
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
+	var values map[string]any
+	if len(params.Values) > 0 {
+		values = make(map[string]any, len(params.Values))
+		for k, v := range params.Values {
+			values[k] = v
+		}
+	}
 	return &InvocationContext{
 		Context:      ctx,
 		params:       params,
 		invocationID: "e-" + uuid.NewString(),
+		values:       values,
 	}
 }
 
@@ -50,10 +59,39 @@ type InvocationContext struct {
 
 	params       InvocationContextParams
 	invocationID string
+	values       map[string]any
 }
 
 func (c *InvocationContext) Artifacts() agent.Artifacts {
 	return c.params.Artifacts
+}
+
+// Value returns the value associated with key in the invocation context.
+// Custom values provided via InvocationContextParams.Values take precedence;
+// otherwise fall back to the underlying context.
+func (c *InvocationContext) Value(key any) any {
+	if k, ok := key.(string); ok {
+		if v, found := c.values[k]; found {
+			return v
+		}
+	}
+	return c.Context.Value(key)
+}
+
+// SetInvocationValue stores a custom value scoped to this invocation.
+func (c *InvocationContext) SetInvocationValue(key string, value any) {
+	c.setValue(key, value)
+}
+
+func (c *InvocationContext) setValue(key string, value any) {
+	if value == nil {
+		delete(c.values, key)
+		return
+	}
+	if c.values == nil {
+		c.values = make(map[string]any)
+	}
+	c.values[key] = value
 }
 
 func (c *InvocationContext) Agent() agent.Agent {

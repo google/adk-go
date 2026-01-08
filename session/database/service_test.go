@@ -16,6 +16,7 @@ package database
 
 import (
 	"maps"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -29,6 +30,14 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
+
+// TestMain sets up the test environment.
+// We set time.Local to UTC to ensure consistent timestamp formatting in tests,
+// since the database stores timestamps without timezone info and tests expect UTC format.
+func TestMain(m *testing.M) {
+	time.Local = time.UTC
+	os.Exit(m.Run())
+}
 
 func Test_databaseService_Create(t *testing.T) {
 	tests := []struct {
