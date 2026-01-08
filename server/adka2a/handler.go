@@ -31,15 +31,15 @@ type HandlerConfig struct {
 	AgentCard *a2a.AgentCard
 }
 
-// NewJSONRPCHandler creates an http.Handler that serves A2A requests using JSON-RPC transport.
+// NewInvocationHandler creates an http.Handler that serves A2A requests using JSON-RPC transport.
 // This is the recommended way to expose an ADK agent via A2A for most use cases.
 //
 // The returned handler can be registered with any HTTP router:
 //
-//	http.Handle("/a2a/invoke", adka2a.NewJSONRPCHandler(config))
+//	http.Handle("/a2a/invoke", adka2a.NewInvocationHandler(config))
 //
 // For custom transport layers or advanced configurations, use NewRequestHandler instead.
-func NewJSONRPCHandler(config HandlerConfig, opts ...a2asrv.RequestHandlerOption) http.Handler {
+func NewInvocationHandler(config HandlerConfig, opts ...a2asrv.RequestHandlerOption) http.Handler {
 	executor := NewExecutor(config.ExecutorConfig)
 	requestHandler := a2asrv.NewHandler(executor, opts...)
 	return a2asrv.NewJSONRPCHandler(requestHandler)
@@ -59,7 +59,7 @@ func NewJSONRPCHandler(config HandlerConfig, opts ...a2asrv.RequestHandlerOption
 //	http.ListenAndServe(":8080", adka2a.NewServeMux(config))
 func NewServeMux(config HandlerConfig, opts ...a2asrv.RequestHandlerOption) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("/a2a/invoke", NewJSONRPCHandler(config, opts...))
+	mux.Handle("/a2a/invoke", NewInvocationHandler(config, opts...))
 	if config.AgentCard != nil {
 		mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(config.AgentCard))
 	}
@@ -70,7 +70,7 @@ func NewServeMux(config HandlerConfig, opts ...a2asrv.RequestHandlerOption) *htt
 // Use this when you need to wrap the handler with a custom transport layer
 // or when integrating with gRPC via a2agrpc.Handler.
 //
-// For most HTTP use cases, prefer NewJSONRPCHandler which returns a ready-to-use http.Handler.
+// For most HTTP use cases, prefer NewInvocationHandler which returns a ready-to-use http.Handler.
 //
 // Example with custom transport:
 //

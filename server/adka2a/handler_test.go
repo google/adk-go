@@ -29,7 +29,7 @@ import (
 	"google.golang.org/adk/session"
 )
 
-func TestNewJSONRPCHandler(t *testing.T) {
+func TestNewInvocationHandler(t *testing.T) {
 	agent, err := newEventReplayAgent(nil, nil)
 	if err != nil {
 		t.Fatalf("newEventReplayAgent() error = %v", err)
@@ -45,9 +45,9 @@ func TestNewJSONRPCHandler(t *testing.T) {
 		},
 	}
 
-	handler := NewJSONRPCHandler(config)
+	handler := NewInvocationHandler(config)
 	if handler == nil {
-		t.Fatal("NewJSONRPCHandler() returned nil")
+		t.Fatal("NewInvocationHandler() returned nil")
 	}
 
 	// Verify the handler responds to JSON-RPC requests
