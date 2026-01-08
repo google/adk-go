@@ -28,10 +28,10 @@ import (
 
 // NewHandler creates and returns an http.Handler for the ADK REST API.
 func NewHandler(config *Config) (http.Handler, error) {
-	err := config.Validate()
-	if err != nil {
+	if err := config.validate(); err != nil {
 		return nil, err
 	}
+
 	adkExporter := services.NewAPIServerSpanExporter()
 	telemetry.AddSpanProcessor(sdktrace.NewSimpleSpanProcessor(adkExporter))
 

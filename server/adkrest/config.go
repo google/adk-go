@@ -31,8 +31,8 @@ type Config struct {
 	SSEWriteTimeout time.Duration
 }
 
-// Validate validates the config
-func (c *Config) Validate() error {
+// validate validates the config
+func (c *Config) validate() error {
 	if c.SessionService == nil {
 		return errors.New("session service is required")
 	}
