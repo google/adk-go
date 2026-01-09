@@ -139,7 +139,15 @@ func (s *set) getSession(ctx context.Context) (*mcp.ClientSession, error) {
 	defer s.mu.Unlock()
 
 	if s.session != nil {
-		return s.session, nil
+		// Validate cached session with a Ping health check.
+		// If the connection was closed, clear the stale session and reconnect.
+		if err := s.session.Ping(ctx, nil); err != nil {
+			// Session is stale, close and clear it.
+			_ = s.session.Close() // Best effort close
+			s.session = nil
+		} else {
+			return s.session, nil
+		}
 	}
 
 	session, err := s.client.Connect(ctx, s.transport, nil)
