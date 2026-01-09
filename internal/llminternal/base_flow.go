@@ -69,6 +69,7 @@ var (
 		// Code execution should be after contentsRequestProcessor as it mutates the contents
 		// to optimize data files.
 		codeExecutionRequestProcessor,
+		outputSchemaRequestProcessor,
 		AgentTransferRequestProcessor,
 		removeDisplayNameIfExists,
 	}
@@ -180,6 +181,17 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				return
 			}
 
+			// If the model response is structured, yield it as a final model response event.
+			outputSchemaResponse, err := retrieveStructuredModelResponse(ev)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if outputSchemaResponse != "" {
+				if !yield(createFinalModelResponseEvent(ctx, outputSchemaResponse), nil) {
+					return
+				}
+			}
 			// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
 			// We are following python's execution flow which is
 			//   BaseLlmFlow._postprocess_async
