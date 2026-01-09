@@ -132,7 +132,7 @@ func (w *webLauncher) Parse(args []string) ([]string, error) {
 			// skip the keyword and move on
 			restArgs, err = sublauncher.Parse(restArgs[1:])
 			if err != nil {
-				return nil, fmt.Errorf("tha %q launcher cannot parse arguments: %v", keyword, err)
+				return nil, fmt.Errorf("the %q launcher cannot parse arguments: %v", keyword, err)
 			}
 			w.activeSublaunchers[keyword] = sublauncher
 		} else {
