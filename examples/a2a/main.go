@@ -24,7 +24,6 @@ import (
 	"os"
 
 	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -77,27 +76,26 @@ func startWeatherAgentServer() string {
 		ctx := context.Background()
 		agent := newWeatherAgent(ctx)
 
-		agentPath := "/invoke"
 		agentCard := &a2a.AgentCard{
 			Name:               agent.Name(),
 			Skills:             adka2a.BuildAgentSkills(agent),
 			PreferredTransport: a2a.TransportProtocolJSONRPC,
-			URL:                baseURL.JoinPath(agentPath).String(),
+			URL:                baseURL.JoinPath("/a2a/invoke").String(),
 			Capabilities:       a2a.AgentCapabilities{Streaming: true},
 		}
 
-		mux := http.NewServeMux()
-		mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(agentCard))
-
-		executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
-			RunnerConfig: runner.Config{
-				AppName:        agent.Name(),
-				Agent:          agent,
-				SessionService: session.InMemoryService(),
+		// Use NewServeMux for a complete A2A server setup with minimal code.
+		// This automatically registers both the agent card and JSON-RPC endpoints.
+		mux := adka2a.NewServeMux(adka2a.HandlerConfig{
+			ExecutorConfig: adka2a.ExecutorConfig{
+				RunnerConfig: runner.Config{
+					AppName:        agent.Name(),
+					Agent:          agent,
+					SessionService: session.InMemoryService(),
+				},
 			},
+			AgentCard: agentCard,
 		})
-		requestHandler := a2asrv.NewHandler(executor)
-		mux.Handle(agentPath, a2asrv.NewJSONRPCHandler(requestHandler))
 
 		err := http.Serve(listener, mux)
 
