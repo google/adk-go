@@ -190,6 +190,7 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
+		close(errChan)
 	}()
 
 	select {
