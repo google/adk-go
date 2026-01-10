@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/runner"
 	"google.golang.org/adk/tool"
 )
 
@@ -59,6 +60,14 @@ func (t *artifactsTool) Description() string {
 // IsLongRunning implements tool.Tool.
 func (t *artifactsTool) IsLongRunning() bool {
 	return false
+}
+
+// Validate implements runner.Validator.
+func (t *artifactsTool) Validate(cfg runner.Config) error {
+	if cfg.ArtifactService == nil {
+		return fmt.Errorf("tool %q requires ArtifactService to be configured in runner", t.name)
+	}
+	return nil
 }
 
 // Declaration returns the GenAI FunctionDeclaration for the load_artifacts tool.
