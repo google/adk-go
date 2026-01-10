@@ -20,12 +20,12 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	contextinternal "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/artifact"
+	contextinternal "github.com/sjzsdu/adk-go/internal/context"
+	"github.com/sjzsdu/adk-go/memory"
+	"github.com/sjzsdu/adk-go/session"
+	"github.com/sjzsdu/adk-go/tool"
 )
 
 type internalArtifacts struct {
