@@ -74,6 +74,76 @@ import (
 	"google.golang.org/adk/tool/mcptoolset"
 )
 
+type a2aMetadataCtxKey struct{}
+
+type A2AMetadata struct {
+	// RequestMetadata contains arbitrary metadata from the A2A request.
+	RequestMetadata map[string]any
+	// MessageMetadata contains metadata from the A2A message.
+	MessageMetadata map[string]any
+}
+
+// ContextWithA2AMetadata returns a new context with A2A metadata attached.
+// This can be used in BeforeExecuteCallback to attach A2A request metadata
+// to the context for downstream propagation to MCP tool calls.
+func ContextWithA2AMetadata(ctx context.Context, meta *A2AMetadata) context.Context {
+	return context.WithValue(ctx, a2aMetadataCtxKey{}, meta)
+}
+
+// A2AMetadataFromContext retrieves A2A metadata from the context.
+// Returns nil if no metadata is present.
+func A2AMetadataFromContext(ctx context.Context) *A2AMetadata {
+	meta, ok := ctx.Value(a2aMetadataCtxKey{}).(*A2AMetadata)
+	if !ok {
+		return nil
+	}
+	return meta
+}
+
+// A2AMetadataProvider creates a function that extracts A2A request metadata
+// from the context. The returned function can be used as mcptoolset.MetadataProvider
+// to forward A2A metadata to MCP tool calls.
+//
+// The forwarded metadata includes:
+//   - "a2a:task_id": The A2A task ID (if present)
+//   - "a2a:context_id": The A2A context ID (if present)
+//   - Any keys specified in forwardKeys from request/message metadata
+//
+// If forwardKeys is nil or empty, all request and message metadata keys are forwarded.
+// If forwardKeys is non-empty, only the specified keys are forwarded.
+func A2AMetadataProvider(forwardKeys []string) func(tool.Context) map[string]any {
+	keySet := make(map[string]bool)
+	for _, k := range forwardKeys {
+		keySet[k] = true
+	}
+
+	return func(ctx tool.Context) map[string]any {
+		a2aMeta := A2AMetadataFromContext(ctx)
+		if a2aMeta == nil {
+			return nil
+		}
+
+		result := make(map[string]any)
+
+		// Forward selected or all metadata keys
+		forwardMetadata := func(source map[string]any) {
+			for k, v := range source {
+				if len(keySet) == 0 || keySet[k] {
+					result[k] = v
+				}
+			}
+		}
+
+		forwardMetadata(a2aMeta.RequestMetadata)
+		forwardMetadata(a2aMeta.MessageMetadata)
+
+		if len(result) == 0 {
+			return nil
+		}
+		return result
+	}
+}
+
 // EchoInput defines the input schema for the echo tool.
 type EchoInput struct {
 	Message string `json:"message" jsonschema:"The message to echo back"`
