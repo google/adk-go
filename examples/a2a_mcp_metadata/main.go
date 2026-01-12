@@ -210,7 +210,7 @@ func createAgent(ctx context.Context) agent.Agent {
 		// MetadataProvider extracts A2A metadata from the context and forwards it to MCP tools.
 		// A2AMetadataProvider(nil) forwards all metadata fields.
 		// You can also specify specific keys to forward: A2AMetadataProvider([]string{"trace_id"})
-		MetadataProvider: adka2a.A2AMetadataProvider(nil),
+		MetadataProvider: A2AMetadataProvider(nil),
 	})
 	if err != nil {
 		log.Fatalf("Failed to create MCP tool set: %v", err)
@@ -268,10 +268,7 @@ func startA2AServer(ctx context.Context) string {
 				log.Printf("[A2A Server] Received request with TaskID: %s, ContextID: %s", reqCtx.TaskID, reqCtx.ContextID)
 
 				// Extract metadata from the A2A request
-				meta := &adka2a.A2AMetadata{
-					TaskID:    string(reqCtx.TaskID),
-					ContextID: reqCtx.ContextID,
-				}
+				meta := &A2AMetadata{}
 
 				// Include reqest-level metadata
 				if reqCtx.Metadata != nil {
@@ -285,7 +282,7 @@ func startA2AServer(ctx context.Context) string {
 					log.Printf("[A2A Server] Message metadata: %v", reqCtx.Message.Metadata)
 				}
 
-				return adka2a.ContextWithA2AMetadata(ctx, meta), nil
+				return ContextWithA2AMetadata(ctx, meta), nil
 			},
 		})
 
