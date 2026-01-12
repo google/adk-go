@@ -736,7 +736,11 @@ func mergeArtifactDeltas(dst, src map[string]int64) map[string]int64 {
 		dst = make(map[string]int64)
 	}
 	for key, value := range src {
-		dst[key] = max(dst[key], value)
+		if dstVal, ok := dst[key]; ok {
+			dst[key] = max(dstVal, value)
+		} else {
+			dst[key] = value
+		}
 	}
 	return dst
 }

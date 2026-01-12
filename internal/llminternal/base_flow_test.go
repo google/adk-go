@@ -568,6 +568,18 @@ func TestMergeEventActions(t *testing.T) {
 			},
 		},
 		{
+			name: "artifact deltas merged with negative version preserved",
+			base: &session.EventActions{
+				ArtifactDelta: nil,
+			},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": -1},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": -1},
+			},
+		},
+		{
 			name: "skip summarization merging - any true wins",
 			base: &session.EventActions{
 				SkipSummarization: false,
