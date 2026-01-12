@@ -510,7 +510,21 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.StateDelta != nil {
 		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
 	}
+	if other.ArtifactDelta != nil {
+		base.ArtifactDelta = mergeArtifactDeltas(base.ArtifactDelta, other.ArtifactDelta)
+	}
 	return base
+}
+
+// mergeArtifactDeltas merges artifact deltas, preferring higher versions
+func mergeArtifactDeltas(dst, src map[string]int64) map[string]int64 {
+	if dst == nil {
+		dst = make(map[string]int64)
+	}
+	for key, value := range src {
+		dst[key] = max(dst[key], value)
+	}
+	return dst
 }
 
 func deepMergeMap(dst, src map[string]any) map[string]any {
