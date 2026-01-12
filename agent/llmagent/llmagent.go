@@ -32,6 +32,12 @@ import (
 
 // New is a constructor for LLMAgent.
 func New(cfg Config) (agent.Agent, error) {
+	if cfg.ValidateFunc != nil {
+		if err := cfg.ValidateFunc(); err != nil {
+			return nil, fmt.Errorf("llmagent %q validation failed: %w", cfg.Name, err)
+		}
+	}
+
 	beforeModelCallbacks := make([]llminternal.BeforeModelCallback, 0, len(cfg.BeforeModelCallbacks))
 	for _, c := range cfg.BeforeModelCallbacks {
 		beforeModelCallbacks = append(beforeModelCallbacks, llminternal.BeforeModelCallback(c))
@@ -243,6 +249,10 @@ type Config struct {
 	// - Extracts agent reply for later use, such as in tools, callbacks, etc.
 	// - Connects agents to coordinate with each other.
 	OutputKey string
+
+	// ValidateFunc is an optional function that checks if the agent is
+	// configured correctly.
+	ValidateFunc func() error
 }
 
 // BeforeModelCallback that is called before sending a request to the model.

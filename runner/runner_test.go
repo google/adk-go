@@ -22,12 +22,12 @@ import (
 	"strings"
 	"testing"
 
-	"google.golang.org/genai"
-
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/genai"
 )
 
 func TestRunner_findAgentToRun(t *testing.T) {
@@ -311,6 +311,172 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 	expectedText := fmt.Sprintf("Uploaded file: %s. It has been saved to the artifacts", savedFileName)
 	if partWithBlob.Text != expectedText {
 		t.Errorf("unexpected text in placeholder part. got %q, want %q", partWithBlob.Text, expectedText)
+	}
+}
+
+func TestNew_ValidatesAgent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		validateErr error
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "agent validation passes",
+			validateErr: nil,
+			wantErr:     false,
+		},
+		{
+			name:        "agent validation fails",
+			validateErr: fmt.Errorf("validation failed"),
+			wantErr:     true,
+			errContains: "llmagent \"validating_agent\" validation failed: validation failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := llmagent.New(llmagent.Config{
+				Name: "validating_agent",
+				ValidateFunc: func() error {
+					return tt.validateErr
+				},
+			})
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("llmagent.New() expected error but got nil")
+					return
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("llmagent.New() error = %v, want error containing %q", err, tt.errContains)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("llmagent.New() unexpected error = %v", err)
+				}
+			}
+		})
+	}
+}
+
+type mockValidatorTool struct {
+	name         string
+	validateFunc func(Config) error
+}
+
+func (t *mockValidatorTool) Name() string { return t.name }
+func (t *mockValidatorTool) Description() string { return "mock tool" }
+func (t *mockValidatorTool) IsLongRunning() bool { return false }
+func (t *mockValidatorTool) Run(ctx tool.Context, args any) (map[string]any, error) { return nil, nil }
+func (t *mockValidatorTool) Validate(cfg Config) error {
+	if t.validateFunc != nil {
+		return t.validateFunc(cfg)
+	}
+	return nil
+}
+
+func TestNew_ValidatesTool(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		agent           agent.Agent
+		artifactService artifact.Service
+		wantErr         bool
+		errContains     string
+	}{
+		{
+			name: "error when tool validation fails",
+			agent: must(llmagent.New(llmagent.Config{
+				Name:  "test_agent",
+				Tools: []tool.Tool{
+					&mockValidatorTool{
+						name: "validation_tool",
+						validateFunc: func(cfg Config) error {
+							if cfg.ArtifactService == nil {
+								return fmt.Errorf("requires ArtifactService")
+							}
+							return nil
+						},
+					},
+				},
+			})),
+			artifactService: nil,
+			wantErr:         true,
+			errContains:     "requires ArtifactService",
+		},
+		{
+			name: "ok when tool validation passes",
+			agent: must(llmagent.New(llmagent.Config{
+				Name:  "test_agent",
+				Tools: []tool.Tool{
+					&mockValidatorTool{
+						name: "validation_tool",
+						validateFunc: func(cfg Config) error {
+							if cfg.ArtifactService == nil {
+								return fmt.Errorf("requires ArtifactService")
+							}
+							return nil
+						},
+					},
+				},
+			})),
+			artifactService: artifact.InMemoryService(),
+			wantErr:         false,
+		},
+		{
+			name: "error when nested tool validation fails",
+			agent: must(llmagent.New(llmagent.Config{
+				Name: "parent_agent",
+				SubAgents: []agent.Agent{
+					must(llmagent.New(llmagent.Config{
+						Name:  "child_agent",
+						Tools: []tool.Tool{
+							&mockValidatorTool{
+								name: "validation_tool",
+								validateFunc: func(cfg Config) error {
+									if cfg.ArtifactService == nil {
+										return fmt.Errorf("requires ArtifactService")
+									}
+									return nil
+								},
+							},
+						},
+					})),
+				},
+			})),
+			artifactService: nil,
+			wantErr:         true,
+			errContains:     "child_agent",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(Config{
+				AppName:         "testApp",
+				Agent:           tt.agent,
+				SessionService:  session.InMemoryService(),
+				ArtifactService: tt.artifactService,
+			})
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("New() expected error but got nil")
+					return
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("New() error = %v, want error containing %q", err, tt.errContains)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("New() unexpected error = %v", err)
+				}
+			}
+		})
 	}
 }
 

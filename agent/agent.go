@@ -48,6 +48,12 @@ type Agent interface {
 
 // New creates an Agent with a custom logic defined by Run function.
 func New(cfg Config) (Agent, error) {
+	if cfg.ValidateFunc != nil {
+		if err := cfg.ValidateFunc(); err != nil {
+			return nil, fmt.Errorf("agent %q validation failed: %w", cfg.Name, err)
+		}
+	}
+
 	subAgentSet := make(map[Agent]bool)
 	for _, subAgent := range cfg.SubAgents {
 		if _, ok := subAgentSet[subAgent]; ok {
@@ -99,6 +105,10 @@ type Config struct {
 	// created from the content or error of that callback and the remaining
 	// callbacks will be skipped.
 	AfterAgentCallbacks []AfterAgentCallback
+
+	// ValidateFunc is an optional function that checks if the agent is
+	// configured correctly.
+	ValidateFunc func() error
 }
 
 // Artifacts interface provides methods to work with artifacts of the current

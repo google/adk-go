@@ -65,6 +65,11 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)
 	}
 
+	// Validate that required services are configured for tools
+	if err := validateConfiguration(cfg); err != nil {
+		return nil, err
+	}
+
 	return &Runner{
 		appName:         cfg.AppName,
 		rootAgent:       cfg.Agent,
@@ -264,6 +269,51 @@ func findAgent(curAgent agent.Agent, targetName string) agent.Agent {
 	for _, subAgent := range curAgent.SubAgents() {
 		if agent := findAgent(subAgent, targetName); agent != nil {
 			return agent
+		}
+	}
+	return nil
+}
+
+// Validator is an optional interface that Agents and Tools can implement
+// to validate if the runner configuration meets their requirements.
+type Validator interface {
+	Validate(Config) error
+}
+
+// validateConfiguration checks that required services are available for tools.
+func validateConfiguration(cfg Config) error {
+	return walkAgentTree(cfg.Agent, func(a agent.Agent) error {
+		if v, ok := a.(Validator); ok {
+			if err := v.Validate(cfg); err != nil {
+				return fmt.Errorf("agent %q validation failed: %w", a.Name(), err)
+			}
+		}
+
+		llmAgent, ok := a.(llminternal.Agent)
+		if !ok {
+			return nil
+		}
+
+		state := llminternal.Reveal(llmAgent)
+		for _, t := range state.Tools {
+			if v, ok := t.(Validator); ok {
+				if err := v.Validate(cfg); err != nil {
+					return fmt.Errorf("agent %q tool %q validation failed: %w", a.Name(), t.Name(), err)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// walkAgentTree recursively walks the agent tree and applies fn to each agent.
+func walkAgentTree(a agent.Agent, fn func(agent.Agent) error) error {
+	if err := fn(a); err != nil {
+		return err
+	}
+	for _, sub := range a.SubAgents() {
+		if err := walkAgentTree(sub, fn); err != nil {
+			return err
 		}
 	}
 	return nil

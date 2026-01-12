@@ -15,6 +15,7 @@
 package toolinternal
 
 import (
+	"errors"
 	"testing"
 
 	"google.golang.org/adk/agent"
@@ -34,5 +35,47 @@ func TestToolContext(t *testing.T) {
 	}
 	if got, ok := toolCtx.(agent.InvocationContext); ok {
 		t.Errorf("ToolContext(%+T) is unexpectedly an InvocationContext", got)
+	}
+}
+
+func TestInternalArtifacts_NilSafe(t *testing.T) {
+	// Create invocation context without artifact service
+	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{
+		Artifacts: nil,
+	})
+	toolCtx := NewToolContext(inv, "fn1", &session.EventActions{})
+
+	artifacts := toolCtx.Artifacts()
+	// artifacts will be nil when service not configured
+
+	tests := []struct {
+		name string
+		call func() (any, error)
+	}{
+		{
+			name: "List",
+			call: func() (any, error) { return artifacts.List(t.Context()) },
+		},
+		{
+			name: "Load",
+			call: func() (any, error) { return artifacts.Load(t.Context(), "test.txt") },
+		},
+		{
+			name: "Save",
+			call: func() (any, error) { return artifacts.Save(t.Context(), "test.txt", nil) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name+" returns error", func(t *testing.T) {
+			_, err := tt.call()
+			if err == nil {
+				t.Error("Expected an error, got nil")
+				return
+			}
+			if !errors.Is(err, ErrArtifactServiceNotConfigured) {
+				t.Errorf("Expected ErrArtifactServiceNotConfigured, got: %v", err)
+			}
+		})
 	}
 }
