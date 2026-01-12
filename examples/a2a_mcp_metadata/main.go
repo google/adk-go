@@ -267,7 +267,6 @@ func startA2AServer(ctx context.Context) string {
 			BeforeExecuteCallback: func(ctx context.Context, reqCtx *a2asrv.RequestContext) (context.Context, error) {
 				log.Printf("[A2A Server] Received request with TaskID: %s, ContextID: %s", reqCtx.TaskID, reqCtx.ContextID)
 
-				// Extract metadata from the A2A request
 				meta := &A2AMetadata{}
 
 				// Include reqest-level metadata
