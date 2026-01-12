@@ -140,7 +140,7 @@ func createAgent(ctx context.Context) agent.Agent {
 		// MetadataProvider extracts A2A metadata from the context and forwards it to MCP tools.
 		// A2AMetadataProvider(nil) forwards all metadata fields.
 		// You can also specify specific keys to forward: A2AMetadataProvider([]string{"trace_id"})
-		MetadataProvider: mcptoolset.A2AMetadataProvider(nil),
+		MetadataProvider: adka2a.A2AMetadataProvider(nil),
 	})
 	if err != nil {
 		log.Fatalf("Failed to create MCP tool set: %v", err)

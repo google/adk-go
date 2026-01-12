@@ -15,75 +15,8 @@
 package mcptoolset
 
 import (
-	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/tool"
 )
-
-// A2AMetadataProvider creates a MetadataProvider that forwards A2A request metadata
-// to MCP tool calls. This is useful when an ADK agent is exposed via A2A and calls
-// downstream MCP tools.
-//
-// The forwarded metadata includes:
-//   - "a2a:task_id": The A2A task ID (if present)
-//   - "a2a:context_id": The A2A context ID (if present)
-//   - Any keys specified in forwardKeys from request/message metadata
-//
-// If forwardKeys is nil or empty, all request and message metadata keys are forwarded.
-// If forwardKeys is non-empty, only the specified keys are forwarded.
-//
-// Example usage:
-//
-//	// Forward all A2A metadata
-//	mcptoolset.New(mcptoolset.Config{
-//		Transport: transport,
-//		MetadataProvider: mcptoolset.A2AMetadataProvider(nil),
-//	})
-//
-//	// Forward only specific keys
-//	mcptoolset.New(mcptoolset.Config{
-//		Transport: transport,
-//		MetadataProvider: mcptoolset.A2AMetadataProvider([]string{"trace_id", "correlation_id"}),
-//	})
-func A2AMetadataProvider(forwardKeys []string) MetadataProvider {
-	keySet := make(map[string]bool)
-	for _, k := range forwardKeys {
-		keySet[k] = true
-	}
-
-	return func(ctx tool.Context) map[string]any {
-		a2aMeta := adka2a.A2AMetadataFromContext(ctx)
-		if a2aMeta == nil {
-			return nil
-		}
-
-		result := make(map[string]any)
-
-		// Always include task and context IDs if present
-		if a2aMeta.TaskID != "" {
-			result["a2a:task_id"] = a2aMeta.TaskID
-		}
-		if a2aMeta.ContextID != "" {
-			result["a2a:context_id"] = a2aMeta.ContextID
-		}
-
-		// Forward selected or all metadata keys
-		forwardMetadata := func(source map[string]any) {
-			for k, v := range source {
-				if len(keySet) == 0 || keySet[k] {
-					result[k] = v
-				}
-			}
-		}
-
-		forwardMetadata(a2aMeta.RequestMetadata)
-		forwardMetadata(a2aMeta.MessageMetadata)
-
-		if len(result) == 0 {
-			return nil
-		}
-		return result
-	}
-}
 
 // SessionStateMetadataProvider creates a MetadataProvider that reads metadata
 // from session state keys. This is useful for non-A2A scenarios where metadata
@@ -132,7 +65,7 @@ func SessionStateMetadataProvider(stateKeys map[string]string) MetadataProvider 
 //	mcptoolset.New(mcptoolset.Config{
 //		Transport: transport,
 //		MetadataProvider: mcptoolset.ChainMetadataProviders(
-//			mcptoolset.A2AMetadataProvider(nil),
+//			adka2a.A2AMetadataProvider(nil),
 //			mcptoolset.SessionStateMetadataProvider(map[string]string{
 //				"temp:custom_field": "custom-field",
 //			}),
