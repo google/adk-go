@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"log"
 	"sync"
 	"time"
 
@@ -72,6 +73,8 @@ func (s *MutableSession) Events() session.Events {
 		SessionID: s.storedSession.ID(),
 	})
 	if err != nil {
+		log.Printf("MutableSession: failed to fetch latest session (app=%s, user=%s, session=%s), using cached version: %v",
+			s.storedSession.AppName(), s.storedSession.UserID(), s.storedSession.ID(), err)
 		return s.storedSession.Events()
 	}
 

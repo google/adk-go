@@ -113,16 +113,11 @@ func RegisterTelemetry() {
 // That means that the spans are NOT recording/exporting
 // If the local tracer is not set, we'll set up tracer with all registered span processors.
 func getTracers() []trace.Tracer {
+	RegisterTelemetry()
+
 	localTracerMu.RLock()
 	tp := localTracer.tp
 	localTracerMu.RUnlock()
-
-	if tp == nil {
-		RegisterTelemetry()
-		localTracerMu.RLock()
-		tp = localTracer.tp
-		localTracerMu.RUnlock()
-	}
 
 	return []trace.Tracer{
 		tp.Tracer(systemName),
