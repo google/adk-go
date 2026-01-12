@@ -19,7 +19,10 @@ import (
 	"fmt"
 	"iter"
 	rand "math/rand/v2"
+	"net/http"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,12 +30,20 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/agent/workflowagents/loopagent"
 	"google.golang.org/adk/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/internal/httprr"
+	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 )
+
+const modelName = "gemini-2.0-flash-exp"
 
 func TestNewParallelAgent(t *testing.T) {
 	tests := []struct {
@@ -223,4 +234,135 @@ func customRun(id int, agentErr error) func(agent.InvocationContext) iter.Seq2[*
 			}, nil)
 		}
 	}
+}
+
+func TestParallelAgentWithTools(t *testing.T) {
+	agent1 := createAgentWithGemini(t, "agent1")
+	agent2 := createAgentWithGemini(t, "agent2")
+
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "parallel_test",
+			SubAgents: []agent.Agent{agent1, agent2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create parallel agent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, parallelAgent)
+	stream := runner.Run(t, "test_session", "Search for AI news")
+
+	events, err := testutil.CollectEvents(stream)
+	if err != nil {
+		t.Fatalf("Agent run failed: %v", err)
+	}
+
+	if len(events) < 2 {
+		t.Errorf("Expected at least 2 events from parallel agents, got %d", len(events))
+	}
+
+	// Count FunctionCall and FunctionResponse events per branch
+	branchCalls := make(map[string]int)
+	branchResponses := make(map[string]int)
+
+	for _, ev := range events {
+		branch := ev.Branch
+		if ev.LLMResponse.Content != nil {
+			for _, part := range ev.LLMResponse.Content.Parts {
+				if part.FunctionCall != nil {
+					branchCalls[branch]++
+				}
+				if part.FunctionResponse != nil {
+					branchResponses[branch]++
+				}
+			}
+		}
+	}
+
+	for branch, calls := range branchCalls {
+		responses := branchResponses[branch]
+		if calls > responses {
+			t.Errorf("Branch %s: session has %d FunctionCalls but only %d FunctionResponses. "+
+				"This indicates race condition: agent read session before FunctionResponse was appended.",
+				branch, calls, responses)
+		}
+	}
+}
+
+func createAgentWithGemini(t *testing.T, name string) agent.Agent {
+	t.Helper()
+
+	searchTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        fmt.Sprintf("search_tool_%s", name),
+			Description: "Search for information on the web",
+		},
+		func(ctx tool.Context, args struct{ Query string }) (string, error) {
+			return fmt.Sprintf("search result for '%s' from %s", args.Query, name), nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("Failed to create search tool: %v", err)
+	}
+
+	analyzeTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        fmt.Sprintf("analyze_tool_%s", name),
+			Description: "Analyze data and return insights",
+		},
+		func(ctx tool.Context, args struct{ Data string }) (string, error) {
+			return fmt.Sprintf("analysis result for '%s' from %s", args.Data, name), nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("Failed to create analyze tool: %v", err)
+	}
+
+	model := newGeminiModelForTest(t, modelName, name)
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:        name,
+		Description: fmt.Sprintf("Test agent %s that searches for information", name),
+		Model:       model,
+		Tools:       []tool.Tool{searchTool, analyzeTool},
+		Instruction: "Use the search tool to find information, then provide a brief response.",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create agent %s: %v", name, err)
+	}
+
+	return a
+}
+
+func newGeminiModelForTest(t *testing.T, modelName string, agentName string) model.LLM {
+	t.Helper()
+
+	trace := filepath.Join("testdata", fmt.Sprintf("%s_%s.httprr",
+		strings.ReplaceAll(t.Name(), "/", "_"), agentName))
+
+	apiKey := "fakeKey"
+	transport, recording := newGeminiTestTransport(t, trace)
+	if recording {
+		apiKey = ""
+	}
+
+	model, err := gemini.NewModel(t.Context(), modelName, &genai.ClientConfig{
+		HTTPClient: &http.Client{Transport: transport},
+		APIKey:     apiKey,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create Gemini model: %v", err)
+	}
+	return model
+}
+
+func newGeminiTestTransport(t *testing.T, rrfile string) (http.RoundTripper, bool) {
+	t.Helper()
+	rr, err := testutil.NewGeminiTransport(rrfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recording, _ := httprr.Recording(rrfile)
+	return rr, recording
 }
