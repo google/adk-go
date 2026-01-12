@@ -16,12 +16,15 @@ package toolinternal
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/auth"
 	contextinternal "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
@@ -53,10 +56,16 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 		functionCallID = uuid.NewString()
 	}
 	if actions == nil {
-		actions = &session.EventActions{StateDelta: make(map[string]any)}
+		actions = &session.EventActions{
+			StateDelta:           make(map[string]any),
+			RequestedAuthConfigs: make(map[string]*auth.AuthConfig),
+		}
 	}
 	if actions.StateDelta == nil {
 		actions.StateDelta = make(map[string]any)
+	}
+	if actions.RequestedAuthConfigs == nil {
+		actions.RequestedAuthConfigs = make(map[string]*auth.AuthConfig)
 	}
 	cbCtx := contextinternal.NewCallbackContextWithDelta(ctx, actions.StateDelta)
 
@@ -98,4 +107,62 @@ func (c *toolContext) AgentName() string {
 
 func (c *toolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	return c.invocationContext.Memory().Search(ctx, query)
+}
+
+// RequestCredential requests user authorization for OAuth2.
+// The auth config will be included in the event's RequestedAuthConfigs,
+// which is converted to adk_request_credential function calls by GenerateAuthEvent.
+func (c *toolContext) RequestCredential(config *auth.AuthConfig) error {
+
+	if config == nil {
+		return fmt.Errorf("auth config is nil")
+	}
+
+	// Generate auth request with auth_uri
+	handler := auth.NewAuthHandler(config)
+	authRequest, err := handler.GenerateAuthRequest()
+	if err != nil {
+		return fmt.Errorf("generate auth request: %w", err)
+	}
+	if authRequest == nil {
+		return fmt.Errorf("generate auth request: empty result")
+	}
+
+	// Add to RequestedAuthConfigs keyed by function call ID
+	c.eventActions.RequestedAuthConfigs[c.functionCallID] = authRequest
+	return nil
+}
+
+// GetAuthResponse retrieves the auth response from session state.
+// Returns nil if no auth response is available.
+func (c *toolContext) GetAuthResponse(config *auth.AuthConfig) (*auth.AuthCredential, error) {
+	if config == nil {
+		return nil, fmt.Errorf("auth config is nil")
+	}
+	key := session.KeyPrefixTemp + config.CredentialKey
+
+	val, err := c.invocationContext.Session().State().Get(key)
+	if err != nil {
+		if errors.Is(err, session.ErrStateKeyNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get auth response: %w", err)
+	}
+	if val == nil {
+		return nil, nil
+	}
+
+	cred, ok := val.(*auth.AuthCredential)
+	if !ok {
+		return nil, fmt.Errorf("unexpected auth response type %T", val)
+	}
+
+	return cred, nil
+}
+
+// CredentialService returns the credential service for persistent storage.
+// Returns nil as toolContext does not have a default credential service.
+// The InvocationContext or runner should provide a credential service if needed.
+func (c *toolContext) CredentialService() auth.CredentialService {
+	return nil
 }
