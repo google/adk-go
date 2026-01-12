@@ -95,13 +95,11 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
-	// Build CallToolParams with optional metadata
 	params := &mcp.CallToolParams{
 		Name:      t.name,
 		Arguments: args,
 	}
 
-	// Invoke MetadataProvider if configured
 	if t.metadataProvider != nil {
 		if meta := t.metadataProvider(ctx); meta != nil {
 			params.Meta = mcp.Meta(meta)

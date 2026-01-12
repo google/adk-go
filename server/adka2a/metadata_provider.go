@@ -29,18 +29,6 @@ import (
 //
 // If forwardKeys is nil or empty, all request and message metadata keys are forwarded.
 // If forwardKeys is non-empty, only the specified keys are forwarded.
-//
-// Example usage:
-//
-//	mcptoolset.New(mcptoolset.Config{
-//		Transport: transport,
-//		MetadataProvider: adka2a.A2AMetadataProvider(nil), // forward all
-//	})
-//
-//	mcptoolset.New(mcptoolset.Config{
-//		Transport: transport,
-//		MetadataProvider: adka2a.A2AMetadataProvider([]string{"trace_id"}), // forward specific keys
-//	})
 func A2AMetadataProvider(forwardKeys []string) func(tool.Context) map[string]any {
 	keySet := make(map[string]bool)
 	for _, k := range forwardKeys {
@@ -57,10 +45,10 @@ func A2AMetadataProvider(forwardKeys []string) func(tool.Context) map[string]any
 
 		// Always include task and context IDs if present
 		if a2aMeta.TaskID != "" {
-			result["a2a:task_id"] = a2aMeta.TaskID
+			result["task_id"] = a2aMeta.TaskID
 		}
 		if a2aMeta.ContextID != "" {
-			result["a2a:context_id"] = a2aMeta.ContextID
+			result["context_id"] = a2aMeta.ContextID
 		}
 
 		// Forward selected or all metadata keys

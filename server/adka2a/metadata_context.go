@@ -21,7 +21,7 @@ import (
 type a2aMetadataCtxKey struct{}
 
 // A2AMetadata contains metadata from A2A requests that can be propagated
-// through the context to downstream services like MCP tool servers.
+// through the context to downstream services.
 type A2AMetadata struct {
 	// TaskID is the A2A task identifier.
 	TaskID string
