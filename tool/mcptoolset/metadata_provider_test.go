@@ -38,27 +38,31 @@ type mockToolContext struct {
 
 var _ tool.Context = (*mockToolContext)(nil)
 
-func (m *mockToolContext) FunctionCallID() string                                               { return "test-function-call-id" }
-func (m *mockToolContext) Actions() *session.EventActions                                       { return nil }
-func (m *mockToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) { return nil, nil }
-func (m *mockToolContext) UserContent() *genai.Content                                          { return nil }
-func (m *mockToolContext) InvocationID() string                                                 { return "test-invocation-id" }
-func (m *mockToolContext) AgentName() string                                                    { return "test-agent" }
-func (m *mockToolContext) ReadonlyState() session.ReadonlyState                                 { return m.state }
-func (m *mockToolContext) UserID() string                                                       { return "test-user" }
-func (m *mockToolContext) AppName() string                                                      { return "test-app" }
-func (m *mockToolContext) SessionID() string                                                    { return "test-session" }
-func (m *mockToolContext) Branch() string                                                       { return "" }
-func (m *mockToolContext) Artifacts() agent.Artifacts                                           { return &mockArtifacts{} }
-func (m *mockToolContext) State() session.State                                                 { return m.state }
+func (m *mockToolContext) FunctionCallID() string         { return "test-function-call-id" }
+func (m *mockToolContext) Actions() *session.EventActions { return nil }
+func (m *mockToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
+	return nil, nil
+}
+func (m *mockToolContext) UserContent() *genai.Content          { return nil }
+func (m *mockToolContext) InvocationID() string                 { return "test-invocation-id" }
+func (m *mockToolContext) AgentName() string                    { return "test-agent" }
+func (m *mockToolContext) ReadonlyState() session.ReadonlyState { return m.state }
+func (m *mockToolContext) UserID() string                       { return "test-user" }
+func (m *mockToolContext) AppName() string                      { return "test-app" }
+func (m *mockToolContext) SessionID() string                    { return "test-session" }
+func (m *mockToolContext) Branch() string                       { return "" }
+func (m *mockToolContext) Artifacts() agent.Artifacts           { return &mockArtifacts{} }
+func (m *mockToolContext) State() session.State                 { return m.state }
 
 type mockArtifacts struct{}
 
 func (m *mockArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
 	return nil, nil
 }
-func (m *mockArtifacts) List(context.Context) (*artifact.ListResponse, error)                  { return nil, nil }
-func (m *mockArtifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) { return nil, nil }
+func (m *mockArtifacts) List(context.Context) (*artifact.ListResponse, error) { return nil, nil }
+func (m *mockArtifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {
+	return nil, nil
+}
 func (m *mockArtifacts) LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error) {
 	return nil, nil
 }
