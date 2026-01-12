@@ -31,7 +31,7 @@ import (
 
 type getSessionFunc func(ctx context.Context) (*mcp.ClientSession, error)
 
-func convertTool(t *mcp.Tool, getSessionFunc getSessionFunc) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, getSessionFunc getSessionFunc, metadataProvider MetadataProvider) (tool.Tool, error) {
 	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
@@ -39,7 +39,8 @@ func convertTool(t *mcp.Tool, getSessionFunc getSessionFunc) (tool.Tool, error) 
 			Name:        t.Name,
 			Description: t.Description,
 		},
-		getSessionFunc: getSessionFunc,
+		getSessionFunc:   getSessionFunc,
+		metadataProvider: metadataProvider,
 	}
 
 	// Since t.InputSchema and t.OutputSchema are pointers (*jsonschema.Schema) and the destination ResponseJsonSchema
@@ -61,7 +62,8 @@ type mcpTool struct {
 	description     string
 	funcDeclaration *genai.FunctionDeclaration
 
-	getSessionFunc getSessionFunc
+	getSessionFunc   getSessionFunc
+	metadataProvider MetadataProvider
 }
 
 // Name implements the tool.Tool.
@@ -93,11 +95,21 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
-	// TODO: add auth
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{
+	// Build CallToolParams with optional metadata
+	params := &mcp.CallToolParams{
 		Name:      t.name,
 		Arguments: args,
-	})
+	}
+
+	// Invoke MetadataProvider if configured
+	if t.metadataProvider != nil {
+		if meta := t.metadataProvider(ctx); meta != nil {
+			params.Meta = mcp.Meta(meta)
+		}
+	}
+
+	// TODO: add auth
+	res, err := session.CallTool(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call MCP tool %q with err: %w", t.name, err)
 	}
