@@ -24,6 +24,16 @@ import (
 	"google.golang.org/adk/tool"
 )
 
+// MetadataProvider is a callback function that extracts metadata from the tool context
+// to be forwarded to MCP tool calls. The returned map[string]any will be set as the
+// Meta field on mcp.CallToolParams.
+//
+// This allows forwarding request-scoped metadata (e.g., from A2A requests) to downstream
+// MCP servers for tracing, authentication, or other purposes.
+//
+// If the provider returns nil, no metadata is attached to the MCP call.
+type MetadataProvider func(ctx tool.Context) map[string]any
+
 // New returns MCP ToolSet.
 // MCP ToolSet connects to a MCP Server, retrieves MCP Tools into ADK Tools and
 // passes them to the LLM.
@@ -66,6 +76,9 @@ type Config struct {
 	// If ToolFilter is nil, then all tools are returned.
 	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.
 	ToolFilter tool.Predicate
+	// MetadataProvider is an optional callback that provides metadata to forward
+	// to MCP tool calls. If nil, no metadata is forwarded.
+	MetadataProvider MetadataProvider
 
 	// RequireConfirmation flags whether the tools from this toolset must always ask for user confirmation
 	// before execution. If set to true, the ADK framework will automatically initiate
