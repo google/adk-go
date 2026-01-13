@@ -733,7 +733,7 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 // mergeArtifactDeltas merges artifact deltas, preferring higher versions
 func mergeArtifactDeltas(dst, src map[string]int64) map[string]int64 {
 	if dst == nil {
-		dst = make(map[string]int64)
+		return maps.Clone(src)
 	}
 	for key, value := range src {
 		if dstVal, ok := dst[key]; ok {
