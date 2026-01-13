@@ -14,11 +14,21 @@
 package controllers
 
 import (
+	"errors"
 	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// errorCloser is a helper that wraps an io.Reader and returns an error on Close.
+type errorCloser struct {
+	io.Reader
+}
+
+func (errorCloser) Close() error {
+	return errors.New("persistent close error")
+}
 
 func TestDecodeRequestBody_DoesNotOverwriteDecodeErrorOnClose(t *testing.T) {
 	// Invalid JSON should produce a 400 error from decodeRequestBody.
@@ -29,5 +39,19 @@ func TestDecodeRequestBody_DoesNotOverwriteDecodeErrorOnClose(t *testing.T) {
 	_, err := decodeRequestBody(req)
 	if err == nil {
 		t.Fatalf("expected decodeRequestBody to return an error for invalid JSON, got nil")
+	}
+}
+
+func TestDecodeRequestBody_ReturnsErrorOnClose(t *testing.T) {
+	// Use valid JSON to ensure decoding succeeds.
+	const validJSON = `{"appName":"test-app","userId":"test-user","sessionId":"test-session","newMessage":{"parts":[{"text":"hello"}]}}`
+	req := httptest.NewRequest("POST", "http://example/runtime", errorCloser{strings.NewReader(validJSON)})
+
+	_, err := decodeRequestBody(req)
+	if err == nil {
+		t.Fatal("expected decodeRequestBody to return an error from Body.Close(), but got nil")
+	}
+	if !strings.Contains(err.Error(), "persistent close error") {
+		t.Fatalf("expected error to contain 'persistent close error', got: %v", err)
 	}
 }
