@@ -356,6 +356,7 @@ func TestCallTool(t *testing.T) {
 					currentError = tc.onToolErrorCallbacks[i]
 				}
 				p, err := plugin.New(plugin.Config{
+					Name:                fmt.Sprintf("plugin-%d", i),
 					BeforeToolCallback:  currentBefore,
 					AfterToolCallback:   currentAfter,
 					OnToolErrorCallback: currentError,
@@ -789,6 +790,7 @@ func TestModelCallbacks(t *testing.T) {
 					currentError = tc.onModelErrorCallback[i]
 				}
 				p, err := plugin.New(plugin.Config{
+					Name:                 fmt.Sprintf("plugin-%d", i),
 					BeforeModelCallback:  currentBefore,
 					AfterModelCallback:   currentAfter,
 					OnModelErrorCallback: currentError,
