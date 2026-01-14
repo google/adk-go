@@ -384,19 +384,25 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 
 	fnCalls := utils.FunctionCalls(resp.Content)
 	for _, fnCall := range fnCalls {
-		curTool, ok := toolsDict[fnCall.Name]
-		if !ok {
-			return nil, fmt.Errorf("unknown tool: %q", fnCall.Name)
-		}
-		funcTool, ok := curTool.(toolinternal.FunctionTool)
-		if !ok {
-			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
-		}
+		curTool, toolExists := toolsDict[fnCall.Name]
+		funcTool, toolIsFunction := curTool.(toolinternal.FunctionTool)
 		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)})
-		// toolCtx := tool.
 		spans := telemetry.StartTrace(ctx, "execute_tool "+fnCall.Name)
 
-		result := f.callTool(funcTool, fnCall.Args, toolCtx)
+		result, err := f.invokeBeforeToolCallbacks(funcTool, fnCall.Args, toolCtx)
+		if result == nil && err == nil {
+			if !toolExists {
+				return nil, fmt.Errorf("unknown tool: %q", fnCall.Name)
+			}
+			if !toolIsFunction {
+				return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
+			}
+			result, err = funcTool.Run(toolCtx, fnCall.Args)
+		}
+		result, err = f.invokeAfterToolCallbacks(funcTool, fnCall.Args, toolCtx, result, err)
+		if err != nil {
+			result = map[string]any{"error": err.Error()}
+		}
 
 		// TODO: agent.canonical_after_tool_callbacks
 		// TODO: handle long-running tool.
@@ -418,7 +424,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		ev.Author = ctx.Agent().Name()
 		ev.Branch = ctx.Branch()
 		ev.Actions = *toolCtx.Actions()
-		telemetry.TraceToolCall(spans, curTool, fnCall.Args, ev)
+		// TODO trace else for events created by callbacks
+		if curTool != nil {
+			telemetry.TraceToolCall(spans, curTool, fnCall.Args, ev)
+		}
 		fnResponseEvents = append(fnResponseEvents, ev)
 	}
 	mergedEvent, err := mergeParallelFunctionResponseEvents(fnResponseEvents)
@@ -429,18 +438,6 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	spans := telemetry.StartTrace(ctx, "execute_tool (merged)")
 	telemetry.TraceMergedToolCalls(spans, mergedEvent)
 	return mergedEvent, nil
-}
-
-func (f *Flow) callTool(tool toolinternal.FunctionTool, fArgs map[string]any, toolCtx tool.Context) map[string]any {
-	result, err := f.invokeBeforeToolCallbacks(tool, fArgs, toolCtx)
-	if result == nil && err == nil {
-		result, err = tool.Run(toolCtx, fArgs)
-	}
-	result, err = f.invokeAfterToolCallbacks(tool, fArgs, toolCtx, result, err)
-	if err != nil {
-		return map[string]any{"error": err.Error()}
-	}
-	return result
 }
 
 func (f *Flow) invokeBeforeToolCallbacks(tool toolinternal.FunctionTool, fArgs map[string]any, toolCtx tool.Context) (map[string]any, error) {
