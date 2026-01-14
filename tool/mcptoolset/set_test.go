@@ -26,6 +26,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
@@ -399,7 +400,27 @@ func (t *spyTransport) Connect(ctx context.Context) (mcp.Connection, error) {
 	t.connectCount++
 	conn, err := t.Transport.Connect(ctx)
 	t.lastConn = conn
-	return conn, err
+	return &errorTranslatingConnection{Connection: conn}, err
+}
+
+type errorTranslatingConnection struct {
+	mcp.Connection
+}
+
+func (c *errorTranslatingConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
+	msg, err := c.Connection.Read(ctx)
+	if err != nil && strings.Contains(err.Error(), "closed pipe") {
+		return nil, mcp.ErrConnectionClosed
+	}
+	return msg, err
+}
+
+func (c *errorTranslatingConnection) Write(ctx context.Context, msg jsonrpc.Message) error {
+	err := c.Connection.Write(ctx, msg)
+	if err != nil && strings.Contains(err.Error(), "closed pipe") {
+		return mcp.ErrConnectionClosed
+	}
+	return err
 }
 
 type reconnectableTransport struct {
