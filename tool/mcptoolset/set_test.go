@@ -16,7 +16,9 @@ package mcptoolset_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"log"
 	"net/http"
@@ -409,15 +411,17 @@ type errorTranslatingConnection struct {
 
 func (c *errorTranslatingConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
 	msg, err := c.Connection.Read(ctx)
-	if err != nil && strings.Contains(err.Error(), "closed pipe") {
-		return nil, mcp.ErrConnectionClosed
+	if err != nil {
+		if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "closed pipe") {
+			return nil, mcp.ErrConnectionClosed
+		}
 	}
 	return msg, err
 }
 
 func (c *errorTranslatingConnection) Write(ctx context.Context, msg jsonrpc.Message) error {
 	err := c.Connection.Write(ctx, msg)
-	if err != nil && strings.Contains(err.Error(), "closed pipe") {
+	if errors.Is(err, io.ErrClosedPipe) {
 		return mcp.ErrConnectionClosed
 	}
 	return err
