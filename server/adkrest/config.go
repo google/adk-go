@@ -20,6 +20,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 )
 
@@ -28,6 +29,7 @@ type Config struct {
 	SessionService  session.Service
 	ArtifactService artifact.Service
 	AgentLoader     agent.Loader
+	MemoryService   memory.Service
 	SSEWriteTimeout time.Duration
 }
 
@@ -41,6 +43,9 @@ func (c *Config) validate() error {
 	}
 	if c.AgentLoader == nil {
 		return errors.New("agent loader is required")
+	}
+	if c.MemoryService == nil {
+		return errors.New("memory service is required")
 	}
 	return nil
 }

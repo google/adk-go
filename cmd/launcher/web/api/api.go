@@ -75,6 +75,7 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		AgentLoader:     config.AgentLoader,
 		SessionService:  config.SessionService,
 		ArtifactService: config.ArtifactService,
+		MemoryService:   config.MemoryService,
 		SSEWriteTimeout: a.config.sseWriteTimeout,
 	}
 	// Create the ADK REST API handler

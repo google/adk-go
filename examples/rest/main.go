@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/server/adkrest"
 	"google.golang.org/adk/session"
@@ -64,6 +65,7 @@ func main() {
 		SessionService:  session.InMemoryService(),
 		ArtifactService: artifact.InMemoryService(),
 		AgentLoader:     agent.NewSingleLoader(a),
+		MemoryService:   memory.InMemoryService(),
 		SSEWriteTimeout: 120 * time.Second,
 	}
 
