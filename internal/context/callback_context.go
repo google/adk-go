@@ -56,14 +56,20 @@ func NewCallbackContextWithDelta(ctx agent.InvocationContext, stateDelta map[str
 func newCallbackContext(ctx agent.InvocationContext, stateDelta map[string]any) *callbackContext {
 	rCtx := NewReadonlyContext(ctx)
 	eventActions := &session.EventActions{StateDelta: stateDelta}
+
+	var artifacts *internalArtifacts
+	if ctx.Artifacts() != nil {
+		artifacts = &internalArtifacts{
+			Artifacts:    ctx.Artifacts(),
+			eventActions: eventActions,
+		}
+	}
+
 	return &callbackContext{
 		ReadonlyContext: rCtx,
 		invocationCtx:   ctx,
 		eventActions:    eventActions,
-		artifacts: &internalArtifacts{
-			Artifacts:    ctx.Artifacts(),
-			eventActions: eventActions,
-		},
+		artifacts:       artifacts,
 	}
 }
 
@@ -77,6 +83,9 @@ type callbackContext struct {
 }
 
 func (c *callbackContext) Artifacts() agent.Artifacts {
+	if c.artifacts == nil {
+		return nil
+	}
 	return c.artifacts
 }
 
