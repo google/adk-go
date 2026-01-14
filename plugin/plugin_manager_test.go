@@ -375,6 +375,9 @@ func TestCallTool(t *testing.T) {
 			ft, err := functiontool.New(functiontool.Config{
 				Name: "testTool",
 			}, tc.tool)
+			if err != nil {
+				t.Errorf("failed to function tool: %v", err)
+			}
 
 			onToolErrorCallbacksCalled := false
 			beforeToolCallbacksCalled := false

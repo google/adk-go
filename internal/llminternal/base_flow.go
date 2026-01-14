@@ -448,25 +448,20 @@ var _ tool.Tool = (*fakeTool)(nil)
 
 // newToolNotFoundError creates an error matching the specific Python format
 func newToolNotFoundError(toolName string, availableTools []string) error {
-	// Equivalent to: ', '.join(available)
 	joinedTools := strings.Join(availableTools, ", ")
 
-	// We use text concatenation (+) here to keep the code readable
-	// while strictly preserving the newlines (\n) and indentation
-	// required by your format.
-	return fmt.Errorf(
-		"Tool '%s' not found.\nAvailable tools: %s\n\n"+
-			"Possible causes:\n"+
-			"  1. LLM hallucinated the function name - review agent instruction clarity\n"+
-			"  2. Tool not registered - verify agent.tools list\n"+
-			"  3. Name mismatch - check for typos\n\n"+
-			"Suggested fixes:\n"+
-			"  - Review agent instruction to ensure tool usage is clear\n"+
-			"  - Verify tool is included in agent.tools list\n"+
-			"  - Check for typos in function name",
-		toolName,
-		joinedTools,
-	)
+	return fmt.Errorf(`tool '%s' not found.
+Available tools: %s
+
+Possible causes:
+  1. LLM hallucinated the function name - review agent instruction clarity
+  2. Tool not registered - verify agent.tools list
+  3. Name mismatch - check for typos
+
+Suggested fixes:
+  - Review agent instruction to ensure tool usage is clear
+  - Verify tool is included in agent.tools list
+  - Check for typos in function name`, toolName, joinedTools)
 }
 
 // handleFunctionCalls calls the functions and returns the function response event.
@@ -487,9 +482,15 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		if !found {
 			err := newToolNotFoundError(fnCall.Name, toolNames)
 			result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+			if err != nil {
+				result = map[string]any{"error": err.Error()}
+			}
 		} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
 			err := newToolNotFoundError(fnCall.Name, toolNames)
 			result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+			if err != nil {
+				result = map[string]any{"error": err.Error()}
+			}
 		} else {
 			result = f.callTool(toolCtx, funcTool, fnCall.Args)
 		}
@@ -605,7 +606,7 @@ func (f *Flow) invokeBeforeToolCallbacks(toolCtx tool.Context, tool tool.Tool, f
 	return nil, nil
 }
 
-func (f *Flow) invokeAfterToolCallbacks(toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs map[string]any, fResult map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeAfterToolCallbacks(toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.AfterToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fResult, fErr)
 		if err != nil {

@@ -76,11 +76,14 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)
 	}
 
-	pluginManager := plugininternal.NewPluginManager(plugininternal.PluginConfig{
+	pluginManager, err := plugininternal.NewPluginManager(plugininternal.PluginConfig{
 		Plugins:        cfg.PluginConfig.Plugins,
 		ExecutionOrder: cfg.PluginConfig.ExecutionOrder,
 		CloseTimeout:   cfg.PluginConfig.CloseTimeout,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create plugin manager: %w", err)
+	}
 
 	return &Runner{
 		appName:         cfg.AppName,

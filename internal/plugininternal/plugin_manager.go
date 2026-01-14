@@ -43,7 +43,7 @@ type PluginManager struct {
 }
 
 // NewPluginManager creates a new PluginManager.
-func NewPluginManager(cfg PluginConfig) *PluginManager {
+func NewPluginManager(cfg PluginConfig) (*PluginManager, error) {
 	pm := &PluginManager{
 		executionOrder: cfg.ExecutionOrder,
 		closeTimeout:   cfg.CloseTimeout,
@@ -52,10 +52,13 @@ func NewPluginManager(cfg PluginConfig) *PluginManager {
 
 	// Register plugins defined in the config
 	for _, p := range cfg.Plugins {
-		pm.RegisterPlugin(p)
+		err := pm.RegisterPlugin(p)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	return pm
+	return pm, nil
 }
 
 // RegisterPlugin adds a new plugin to the manager.
