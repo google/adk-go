@@ -335,10 +335,18 @@ func TestContentsRequestProcessor(t *testing.T) {
 						Content: genai.NewContentFromText("In branch 2", "user"),
 					},
 				},
+				{
+					Author: "user",
+					Branch: "",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("empty branch", "user"),
+					},
+				},
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("In branch 1", "user"),
 				genai.NewContentFromText("In branch 1 and task 1", "user"),
+				genai.NewContentFromText("empty branch", "user"),
 			},
 		},
 		{

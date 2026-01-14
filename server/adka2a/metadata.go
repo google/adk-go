@@ -20,7 +20,6 @@ import (
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/session"
@@ -33,6 +32,7 @@ var (
 	metadataEscalateKey        = ToA2AMetaKey("escalate")
 	metadataTransferToAgentKey = ToA2AMetaKey("transfer_to_agent")
 	metadataErrorCodeKey       = ToA2AMetaKey("error_code")
+	metadataCitationKey        = ToA2AMetaKey("citation_metadata")
 	metadataGroundingKey       = ToA2AMetaKey("grounding_metadata")
 	metadataUsageKey           = ToA2AMetaKey("usage_metadata")
 	metadataCustomMetaKey      = ToA2AMetaKey("custom_metadata")
@@ -95,19 +95,14 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 		}
 	}
 
-	if event.GroundingMetadata != nil {
-		v, err := converters.ToMapStructure(event.GroundingMetadata)
-		if err != nil {
-			return nil, err
-		}
-		result[metadataGroundingKey] = v
+	if err := addMeta(result, metadataCitationKey, event.CitationMetadata); err != nil {
+		return nil, err
 	}
-	if event.UsageMetadata != nil {
-		v, err := converters.ToMapStructure(event.UsageMetadata)
-		if err != nil {
-			return nil, err
-		}
-		result[metadataUsageKey] = v
+	if err := addMeta(result, metadataGroundingKey, event.GroundingMetadata); err != nil {
+		return nil, err
+	}
+	if err := addMeta(result, metadataUsageKey, event.UsageMetadata); err != nil {
+		return nil, err
 	}
 	if event.CustomMetadata != nil {
 		result[metadataCustomMetaKey] = event.CustomMetadata
@@ -138,20 +133,14 @@ func setActionsMeta(meta map[string]any, actions session.EventActions) map[strin
 func processA2AMeta(a2aEvent a2a.Event, event *session.Event) error {
 	taskInfo, meta := a2aEvent.TaskInfo(), a2aEvent.Meta()
 
-	if gm, ok := meta[metadataGroundingKey].(map[string]any); ok {
-		converted, err := converters.FromMapStructure[genai.GroundingMetadata](gm)
-		if err != nil {
-			return err
-		}
-		event.GroundingMetadata = converted
+	if err := processMeta(metadataCitationKey, meta, &event.CitationMetadata); err != nil {
+		return err
 	}
-
-	if um, ok := meta[metadataUsageKey].(map[string]any); ok {
-		converted, err := converters.FromMapStructure[genai.GenerateContentResponseUsageMetadata](um)
-		if err != nil {
-			return err
-		}
-		event.UsageMetadata = converted
+	if err := processMeta(metadataGroundingKey, meta, &event.GroundingMetadata); err != nil {
+		return err
+	}
+	if err := processMeta(metadataUsageKey, meta, &event.UsageMetadata); err != nil {
+		return err
 	}
 
 	event.CustomMetadata = ToCustomMetadata(taskInfo.TaskID, taskInfo.ContextID)
@@ -167,5 +156,32 @@ func processA2AMeta(a2aEvent a2a.Event, event *session.Event) error {
 	}
 
 	event.Actions = toEventActions(a2aEvent.Meta())
+	return nil
+}
+
+func addMeta(result map[string]any, key string, data any) error {
+	if data == nil {
+		return nil
+	}
+	v, err := converters.ToMapStructure(data)
+	if err != nil {
+		return err
+	}
+	if v == nil {
+		return nil
+	}
+
+	result[key] = v
+	return nil
+}
+
+func processMeta[T any](key string, meta map[string]any, target **T) error {
+	if m, ok := meta[key].(map[string]any); ok {
+		converted, err := converters.FromMapStructure[T](m)
+		if err != nil {
+			return err
+		}
+		*target = converted
+	}
 	return nil
 }

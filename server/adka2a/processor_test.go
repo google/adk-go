@@ -31,6 +31,12 @@ func modelResponseFromParts(parts ...*genai.Part) model.LLMResponse {
 	return model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: parts}}
 }
 
+func modelPartialResponseFromParts(parts ...*genai.Part) model.LLMResponse {
+	resp := modelResponseFromParts(parts...)
+	resp.Partial = true
+	return resp
+}
+
 func newArtifactLastChunkEvent(task *a2a.Task) *a2a.TaskArtifactUpdateEvent {
 	ev := a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID())
 	ev.LastChunk = true
@@ -294,6 +300,45 @@ func TestEventProcessor_Process(t *testing.T) {
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
 					map[string]any{ToA2AMetaKey("error_code"): "1", metadataEscalateKey: true, metadataTransferToAgentKey: "a-2"},
 				),
+			},
+		},
+		{
+			name: "partial events parts marked",
+			events: []*session.Event{
+				{
+					LLMResponse: modelPartialResponseFromParts(
+						genai.NewPartFromText("The answer is"),
+						genai.NewPartFromExecutableCode("get_the_answer()", genai.LanguagePython)),
+				},
+				{LLMResponse: modelPartialResponseFromParts(
+					genai.NewPartFromCodeExecutionResult(genai.OutcomeOK, "42"),
+					genai.NewPartFromText("42"),
+				)},
+			},
+			processed: []*a2a.TaskArtifactUpdateEvent{
+				a2a.NewArtifactEvent(task,
+					a2a.TextPart{Text: "The answer is", Metadata: map[string]any{ToA2AMetaKey("partial"): true}},
+					a2a.DataPart{
+						Data: map[string]any{"code": "get_the_answer()", "language": string(genai.LanguagePython)},
+						Metadata: map[string]any{
+							a2aDataPartMetaTypeKey:  a2aDataPartTypeCodeExecutableCode,
+							ToA2AMetaKey("partial"): true,
+						},
+					}),
+				a2a.NewArtifactUpdateEvent(task, artifactIDPlaceholder,
+					a2a.DataPart{
+						Data: map[string]any{"outcome": string(genai.OutcomeOK), "output": "42"},
+						Metadata: map[string]any{
+							a2aDataPartMetaTypeKey:  a2aDataPartTypeCodeExecResult,
+							ToA2AMetaKey("partial"): true,
+						},
+					},
+					a2a.TextPart{Text: "42", Metadata: map[string]any{ToA2AMetaKey("partial"): true}},
+				),
+			},
+			terminal: []a2a.Event{
+				newArtifactLastChunkEvent(task),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
 			},
 		},
 	}

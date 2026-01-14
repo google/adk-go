@@ -69,6 +69,7 @@ var (
 		// Code execution should be after contentsRequestProcessor as it mutates the contents
 		// to optimize data files.
 		codeExecutionRequestProcessor,
+		outputSchemaRequestProcessor,
 		AgentTransferRequestProcessor,
 		removeDisplayNameIfExists,
 	}
@@ -180,6 +181,17 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				return
 			}
 
+			// If the model response is structured, yield it as a final model response event.
+			outputSchemaResponse, err := retrieveStructuredModelResponse(ev)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if outputSchemaResponse != "" {
+				if !yield(createFinalModelResponseEvent(ctx, outputSchemaResponse), nil) {
+					return
+				}
+			}
 			// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
 			// We are following python's execution flow which is
 			//   BaseLlmFlow._postprocess_async
@@ -492,10 +504,6 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 
 func mergeEventActions(base, other *session.EventActions) *session.EventActions {
 	// flows/llm_flows/functions.py merge_parallel_function_response_events
-	//
-	// TODO: merge_parallel_function_response_events creates a "last one wins" scenario
-	// except parts and requested_auth_configs. Check with the ADK team about
-	// the intention.
 	if other == nil {
 		return base
 	}
@@ -512,7 +520,23 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		base.Escalate = true
 	}
 	if other.StateDelta != nil {
-		base.StateDelta = other.StateDelta
+		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
 	}
 	return base
+}
+
+func deepMergeMap(dst, src map[string]any) map[string]any {
+	if dst == nil {
+		dst = make(map[string]any)
+	}
+	for key, value := range src {
+		if srcMap, ok := value.(map[string]any); ok {
+			if dstMap, ok := dst[key].(map[string]any); ok {
+				dst[key] = deepMergeMap(dstMap, srcMap)
+				continue
+			}
+		}
+		dst[key] = value
+	}
+	return dst
 }

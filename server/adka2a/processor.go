@@ -85,12 +85,16 @@ func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.
 	if isInputRequired(event, resp.Content.Parts) {
 		ev := a2a.NewStatusUpdateEvent(p.reqCtx, a2a.TaskStateInputRequired, nil)
 		ev.Final = true
-		p.terminalEvents[a2a.TaskStateFailed] = ev
+		p.terminalEvents[a2a.TaskStateInputRequired] = ev
 	}
 
 	parts, err := ToA2AParts(resp.Content.Parts, event.LongRunningToolIDs)
 	if err != nil {
 		return nil, err
+	}
+
+	if event.Partial {
+		updatePartsMetadata(parts, map[string]any{ToA2AMetaKey("partial"): true})
 	}
 
 	var result *a2a.TaskArtifactUpdateEvent

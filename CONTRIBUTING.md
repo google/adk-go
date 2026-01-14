@@ -21,8 +21,13 @@ We'd love to accept your patches and contributions to this project.
 
 ### Sign our Contributor License Agreement
 
-Contributions to this project must be accompanied by a
-[Contributor License Agreement](https://cla.developers.google.com/about) (CLA).
+All submissions to this project need to follow Google’s [Contributor
+License Agreement (CLA)](https://cla.developers.google.com/about), which
+covers any original work of authorship included in the submission. This
+doesn't prohibit the use of coding assistance tools, including tool-,
+AI-, or machine-generated code, as long as these submissions abide by the
+CLA's requirements.
+
 You (or your employer) retain the copyright to your contribution; this simply
 gives us permission to use and redistribute your contributions as part of the
 project.

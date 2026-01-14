@@ -231,7 +231,6 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 	if err := processA2AMeta(task, event); err != nil {
 		return nil, fmt.Errorf("metadata processing failed: %w", err)
 	}
-	event.Partial = notTerminal
 	return event, nil
 }
 

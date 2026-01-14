@@ -18,6 +18,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -64,6 +65,36 @@ func ToA2AParts(parts []*genai.Part, longRunningToolIDs []string) ([]a2a.Part, e
 		}
 	}
 	return result, nil
+}
+
+func updatePartsMetadata(parts []a2a.Part, update map[string]any) {
+	for i, part := range parts {
+		var meta map[string]any
+		switch p := part.(type) {
+		case a2a.TextPart:
+			if p.Metadata == nil {
+				p.Metadata = make(map[string]any)
+				parts[i] = p
+			}
+			meta = p.Metadata
+		case a2a.FilePart:
+			if p.Metadata == nil {
+				p.Metadata = make(map[string]any)
+				parts[i] = p
+			}
+			meta = p.Metadata
+		case a2a.DataPart:
+			if p.Metadata == nil {
+				p.Metadata = make(map[string]any)
+				parts[i] = p
+			}
+			meta = p.Metadata
+		default:
+			// TODO: log unknown part type warning (should never happen)
+			continue
+		}
+		maps.Copy(meta, update)
+	}
 }
 
 func toA2AFilePart(v *genai.Part) (a2a.FilePart, error) {
