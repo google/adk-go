@@ -25,6 +25,8 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+const REQUEST_CONFIRMATION_FUNCTION_CALL_NAME = "adk_request_confirmation"
+
 // Session represents a series of interactions between a user and agents.
 //
 // When a user starts interacting with your agent, session holds everything

@@ -173,7 +173,7 @@ func runTurn(ctx context.Context, r *runner.Runner, sessionID string, content *g
 		if event.Content != nil {
 			for _, part := range event.Content.Parts {
 				fc := part.FunctionCall
-				if fc != nil && fc.Name == "adk_request_confirmation" {
+				if fc != nil && fc.Name == session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME {
 					originalCallRaw, ok := fc.Args["originalFunctionCall"]
 					if !ok {
 						continue
@@ -341,7 +341,7 @@ func processApproval(ctx context.Context, r *runner.Runner, sessionID string, re
 
 	payload := ConfirmationPayload{DaysApproved: daysApproved}
 	funcResponse := &genai.FunctionResponse{
-		Name: "adk_request_confirmation",
+		Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
 		ID:   req.CallID,
 		Response: map[string]any{
 			"confirmed": approved,

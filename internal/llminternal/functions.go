@@ -25,8 +25,6 @@ import (
 	"google.golang.org/adk/session"
 )
 
-const REQUEST_CONFIRMATION_FUNCTION_CALL_NAME = "adk_request_confirmation"
-
 // generateRequestConfirmationEvent creates a new Event containing
 // adk_request_confirmation function calls based on the requested confirmations.
 // NOTE: The trigger for this in ADK Go is usually a tool.Context.RequestConfirmation call,
@@ -66,7 +64,7 @@ func generateRequestConfirmationEvent(
 		}
 
 		requestConfirmationFC := &genai.FunctionCall{
-			Name: REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+			Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
 			Args: args,
 		}
 

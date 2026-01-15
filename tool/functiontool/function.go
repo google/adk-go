@@ -75,7 +75,7 @@ func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.T
 		provType := provVal.Type()
 
 		if provType.Kind() != reflect.Func {
-			return nil, fmt.Errorf("RequireConfirmationProvider must be a function")
+			return nil, fmt.Errorf("error RequireConfirmationProvider must be a function")
 		}
 		expectedType := reflect.TypeOf((*TArgs)(nil)).Elem()
 		if provType.NumIn() != 1 {
@@ -83,6 +83,12 @@ func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.T
 		}
 		if provType.In(0) != expectedType {
 			return nil, fmt.Errorf("argument mismatch for RequireConfirmationProvider: expected %v, got %v", expectedType, provType.In(0))
+		}
+		if provType.NumOut() != 1 {
+			return nil, fmt.Errorf("error RequireConfirmationProvider must return exactly 1 value (bool), got %d", provType.NumOut())
+		}
+		if provType.Out(0).Kind() != reflect.Bool {
+			return nil, fmt.Errorf("error RequireConfirmationProvider must return a boolean, got %v", provType.Out(0))
 		}
 		confirmWrapper = func(args TArgs) bool {
 			res := provVal.Call([]reflect.Value{reflect.ValueOf(args)})

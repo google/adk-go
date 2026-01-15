@@ -36,6 +36,7 @@ import (
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/toolconfirmation"
@@ -514,29 +515,30 @@ func stringify(v any) string {
 	return string(x)
 }
 
-type (
-	EmptyArgs   struct{}
-	EmptyResult struct{}
-)
+type SimpleArgs struct {
+	Num int
+}
 
-func okFunc(_ tool.Context, _ EmptyArgs) (string, error) {
+func okFunc(_ tool.Context, _ SimpleArgs) (string, error) {
 	return "ok", nil
 }
 
 func TestToolConfirmation(t *testing.T) {
 	testCases := []struct {
-		name         string
-		toolConfig   functiontool.Config
-		confirmation *genai.FunctionResponse // User's confirmation response
-		want         []*genai.Content
+		name                    string
+		toolConfig              functiontool.Config
+		args                    map[string]any
+		confirmFunctionResponse *genai.FunctionResponse // User's confirmation response
+		want                    []*genai.Content
 	}{
 		{
 			name: "No Confirmation Required",
 			toolConfig: functiontool.Config{
 				Name: "test_tool",
 			},
+			args: map[string]any{"Num": 1},
 			want: []*genai.Content{
-				genai.NewContentFromFunctionCall("test_tool", map[string]any{}, "model"),
+				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{"result": "ok"}, "user"),
 			},
 		},
@@ -546,11 +548,12 @@ func TestToolConfirmation(t *testing.T) {
 				Name:                "test_tool",
 				RequireConfirmation: true,
 			},
+			args: map[string]any{"Num": 1},
 			want: []*genai.Content{
-				genai.NewContentFromFunctionCall("test_tool", map[string]any{}, "model"),
-				genai.NewContentFromFunctionCall("adk_request_confirmation", map[string]any{
+				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
+				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
-						Args: map[string]any{},
+						Args: map[string]any{"Num": 1},
 						Name: "test_tool",
 					},
 					"toolConfirmation": toolconfirmation.ToolConfirmation{
@@ -562,12 +565,171 @@ func TestToolConfirmation(t *testing.T) {
 				}, "user"),
 			},
 		},
+		{
+			name: "Confirmation Required and is confirmed",
+			toolConfig: functiontool.Config{
+				Name:                "test_tool",
+				RequireConfirmation: true,
+			},
+			args:                    map[string]any{"Num": 1},
+			confirmFunctionResponse: &genai.FunctionResponse{Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, Response: map[string]any{"confirmed": true}},
+			want: []*genai.Content{
+				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
+				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
+					"originalFunctionCall": &genai.FunctionCall{
+						Args: map[string]any{"Num": 1},
+						Name: "test_tool",
+					},
+					"toolConfirmation": toolconfirmation.ToolConfirmation{
+						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+					},
+				}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("tool \"test_tool\" failed: error tool \"test_tool\" requires confirmation, please approve or reject"),
+				}, "user"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{"result": "ok"}, "user"),
+			},
+		},
+		{
+			name: "Confirmation Required and is rejected",
+			toolConfig: functiontool.Config{
+				Name:                "test_tool",
+				RequireConfirmation: true,
+			},
+			args:                    map[string]any{"Num": 1},
+			confirmFunctionResponse: &genai.FunctionResponse{Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, Response: map[string]any{"confirmed": false}},
+			want: []*genai.Content{
+				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
+				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
+					"originalFunctionCall": &genai.FunctionCall{
+						Args: map[string]any{"Num": 1},
+						Name: "test_tool",
+					},
+					"toolConfirmation": toolconfirmation.ToolConfirmation{
+						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+					},
+				}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("tool \"test_tool\" failed: error tool \"test_tool\" requires confirmation, please approve or reject"),
+				}, "user"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("tool \"test_tool\" failed: error tool \"test_tool\" call is rejected"),
+				}, "user"),
+			},
+		},
+		{
+			name: "Conditional Confirmation Not Required",
+			toolConfig: functiontool.Config{
+				Name: "test_tool",
+				RequireConfirmationProvider: func(args SimpleArgs) bool {
+					if args.Num < 5 {
+						return true
+					}
+					return false
+				},
+			},
+			args: map[string]any{"Num": 7},
+			want: []*genai.Content{
+				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 7}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{"result": "ok"}, "user"),
+			},
+		},
+		{
+			name: "Conditional Confirmation Required",
+			toolConfig: functiontool.Config{
+				Name: "test_tool",
+				RequireConfirmationProvider: func(args SimpleArgs) bool {
+					if args.Num < 5 {
+						return true
+					}
+					return false
+				},
+			},
+			args: map[string]any{"Num": 4},
+			want: []*genai.Content{
+				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
+				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
+					"originalFunctionCall": &genai.FunctionCall{
+						Args: map[string]any{"Num": 4},
+						Name: "test_tool",
+					},
+					"toolConfirmation": toolconfirmation.ToolConfirmation{
+						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+					},
+				}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("tool \"test_tool\" failed: error tool \"test_tool\" requires confirmation, please approve or reject"),
+				}, "user"),
+			},
+		},
+		{
+			name: "Conditional Confirmation Required and is confirmed",
+			toolConfig: functiontool.Config{
+				Name: "test_tool",
+				RequireConfirmationProvider: func(args SimpleArgs) bool {
+					if args.Num < 5 {
+						return true
+					}
+					return false
+				},
+			},
+			args:                    map[string]any{"Num": 4},
+			confirmFunctionResponse: &genai.FunctionResponse{Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, Response: map[string]any{"confirmed": true}},
+			want: []*genai.Content{
+				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
+				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
+					"originalFunctionCall": &genai.FunctionCall{
+						Args: map[string]any{"Num": 4},
+						Name: "test_tool",
+					},
+					"toolConfirmation": toolconfirmation.ToolConfirmation{
+						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+					},
+				}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("tool \"test_tool\" failed: error tool \"test_tool\" requires confirmation, please approve or reject"),
+				}, "user"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{"result": "ok"}, "user"),
+			},
+		},
+		{
+			name: "Conditional Confirmation Required and is rejected",
+			toolConfig: functiontool.Config{
+				Name: "test_tool",
+				RequireConfirmationProvider: func(args SimpleArgs) bool {
+					if args.Num < 5 {
+						return true
+					}
+					return false
+				},
+			},
+			args:                    map[string]any{"Num": 4},
+			confirmFunctionResponse: &genai.FunctionResponse{Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, Response: map[string]any{"confirmed": false}},
+			want: []*genai.Content{
+				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
+				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
+					"originalFunctionCall": &genai.FunctionCall{
+						Args: map[string]any{"Num": 4},
+						Name: "test_tool",
+					},
+					"toolConfirmation": toolconfirmation.ToolConfirmation{
+						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+					},
+				}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("tool \"test_tool\" failed: error tool \"test_tool\" requires confirmation, please approve or reject"),
+				}, "user"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("tool \"test_tool\" failed: error tool \"test_tool\" call is rejected"),
+				}, "user"),
+			},
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			mockModel := &testutil.MockModel{
 				Responses: []*genai.Content{
-					genai.NewContentFromFunctionCall("test_tool", map[string]any{}, genai.RoleModel),
+					genai.NewContentFromFunctionCall("test_tool", tc.args, genai.RoleModel),
 				},
 			}
 
@@ -591,6 +753,7 @@ func TestToolConfirmation(t *testing.T) {
 
 			ev := runner.Run(t, "id", "message")
 
+			var confirmFunctionCall *genai.FunctionCall
 			for got, err := range ev {
 				if err != nil && err.Error() == "no data" {
 					break
@@ -621,7 +784,56 @@ func TestToolConfirmation(t *testing.T) {
 					}), cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID")); diff != "" {
 					t.Errorf("LoopAgent Run() mismatch (-want +got):\n%s", diff)
 				}
+				for _, p := range got.Content.Parts {
+					if p.FunctionCall != nil && p.FunctionCall.Name == session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME {
+						confirmFunctionCall = p.FunctionCall
+					}
+				}
 				eventCount++
+			}
+
+			if confirmFunctionCall != nil && tc.confirmFunctionResponse != nil {
+				tc.confirmFunctionResponse.ID = confirmFunctionCall.ID
+				ev := runner.RunContent(t, "id", &genai.Content{
+					Parts: []*genai.Part{{FunctionResponse: tc.confirmFunctionResponse}},
+				})
+				for got, err := range ev {
+					if err != nil && err.Error() == "no data" {
+						break
+					}
+					if err != nil {
+						// Check if an error was expected
+						t.Fatalf("runner returned unexpected error: %v", err)
+						// If error was expected, we can stop here or check for a specific error type.
+						return
+					}
+
+					if eventCount >= len(tc.want) {
+						t.Fatalf("stream generated more values than the expected %d. Got: %+v", len(tc.want), got.Content)
+					}
+
+					if diff := cmp.Diff(tc.want[eventCount], got.Content, cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
+						cmp.Transformer("StringifyMapErrors", func(m map[string]any) map[string]any {
+							out := make(map[string]any, len(m))
+							for k, v := range m {
+								// Check if the value inside the map is an error
+								if err, ok := v.(error); ok {
+									out[k] = err.Error() // Convert to string
+								} else {
+									out[k] = v // Keep as is
+								}
+							}
+							return out
+						}), cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID")); diff != "" {
+						t.Errorf("LoopAgent Run() mismatch (-want +got):\n%s", diff)
+					}
+					for _, p := range got.Content.Parts {
+						if p.FunctionCall != nil && p.FunctionCall.Name == session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME {
+							confirmFunctionCall = p.FunctionCall
+						}
+					}
+					eventCount++
+				}
 			}
 
 			// Final check on the number of events
@@ -630,6 +842,115 @@ func TestToolConfirmation(t *testing.T) {
 			}
 
 			t.Skip("Full test implementation requires mocking ADK context and event flow, and exact type definitions.")
+		})
+	}
+}
+
+// Mock types for TArgs and TResults
+type TestArgs struct {
+	Name string
+}
+
+type TestResult struct {
+	Value int
+}
+
+func TestNew_RequireConfirmationProvider_Validation(t *testing.T) {
+	// A dummy handler to satisfy the function signature
+	dummyHandler := func(_ tool.Context, _ TestArgs) (TestResult, error) {
+		return TestResult{Value: 1}, nil
+	}
+
+	tests := []struct {
+		name          string
+		provider      any    // The RequireConfirmationProvider value to test
+		expectedError string // Substring expected in the error message; empty if no error expected
+	}{
+		// --- Happy Paths ---
+		{
+			name:          "Valid: Nil provider is allowed",
+			provider:      nil,
+			expectedError: "",
+		},
+		{
+			name:          "Valid: Correct function signature",
+			provider:      func(args TestArgs) bool { return true },
+			expectedError: "",
+		},
+
+		// --- Edge Cases / Validation Errors ---
+		{
+			name:          "Invalid: Provider is not a function (it's a struct)",
+			provider:      struct{}{},
+			expectedError: "RequireConfirmationProvider must be a function",
+		},
+		{
+			name:          "Invalid: Provider is not a function (it's a primitive)",
+			provider:      123,
+			expectedError: "RequireConfirmationProvider must be a function",
+		},
+		{
+			name:          "Invalid: Function has 0 arguments",
+			provider:      func() bool { return true },
+			expectedError: "expected 1 argument for RequireConfirmationProvider, got 0",
+		},
+		{
+			name:          "Invalid: Function has too many arguments (2)",
+			provider:      func(a TestArgs, b int) bool { return true },
+			expectedError: "expected 1 argument for RequireConfirmationProvider, got 2",
+		},
+		{
+			name:          "Invalid: Argument type mismatch (int instead of TestArgs)",
+			provider:      func(n int) bool { return true },
+			expectedError: fmt.Sprintf("argument mismatch for RequireConfirmationProvider: expected %T, got int", TestArgs{}),
+		},
+		{
+			name:          "Invalid: Argument type mismatch (pointer vs value)",
+			provider:      func(a *TestArgs) bool { return true },
+			expectedError: fmt.Sprintf("argument mismatch for RequireConfirmationProvider: expected %T, got %T", TestArgs{}, (*TestArgs)(nil)),
+		},
+		{
+			name:     "Invalid: Function returns nothing",
+			provider: func(args TestArgs) {},
+			// Adjust this string to match your specific error message
+			expectedError: "RequireConfirmationProvider must return exactly 1 value",
+		},
+		{
+			name:          "Invalid: Function returns too many values",
+			provider:      func(args TestArgs) (bool, error) { return true, nil },
+			expectedError: "RequireConfirmationProvider must return exactly 1 value",
+		},
+		{
+			name:          "Invalid: Return type mismatch (returns int instead of bool)",
+			provider:      func(args TestArgs) int { return 1 },
+			expectedError: "RequireConfirmationProvider must return a boolean",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Construct config with the provider under test
+			cfg := functiontool.Config{
+				RequireConfirmationProvider: tt.provider,
+			}
+
+			tool, err := functiontool.New(cfg, dummyHandler)
+
+			// Check results
+			if tt.expectedError == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if tool == nil {
+					t.Error("expected valid tool, got nil")
+				}
+			} else {
+				if err == nil {
+					t.Error("expected error but got nil")
+				} else if !strings.Contains(err.Error(), tt.expectedError) {
+					t.Errorf("error message mismatch.\nExpected substring: %q\nGot: %q", tt.expectedError, err.Error())
+				}
+			}
 		})
 	}
 }
