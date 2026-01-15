@@ -539,11 +539,11 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx tool.Context, tool tool.Tool, fAr
 	pluginManager := pluginManagerFromContext(toolCtx)
 	if pluginManager != nil {
 		result, err := pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
-		if result == nil && err == nil {
+		if result != nil && err != nil {
 			return result, err
 		}
 	}
-	return nil, err
+	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
 func (f *Flow) callTool(toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
@@ -624,7 +624,7 @@ func (f *Flow) invokeAfterToolCallbacks(toolCtx tool.Context, tool toolinternal.
 	return fResult, fErr
 }
 
-func (f *Flow) invokeOnToolErrorCallbacks(toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeOnToolErrorCallbacks(toolCtx tool.Context, tool tool.Tool, fArgs map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.OnToolErrorCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fErr)
 		if err != nil {
