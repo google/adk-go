@@ -17,6 +17,7 @@ package mcptoolset
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -154,7 +155,9 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 			// Connection is actually alive, don't refresh
 			return c.session, false, nil
 		}
-		c.session.Close()
+		if err := c.session.Close(); err != nil {
+			log.Printf("failed to close MCP session: %v", err)
+		}
 		c.session = nil
 	}
 

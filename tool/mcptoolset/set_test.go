@@ -332,7 +332,9 @@ func TestListToolsReconnection(t *testing.T) {
 	}
 
 	// Kill the transport by closing the connection.
-	spyTransport.lastConn.Close()
+	if err := spyTransport.lastConn.Close(); err != nil {
+		t.Fatalf("Failed to close connection: %v", err)
+	}
 
 	// Second call should detect the closed connection and reconnect.
 	_, err = ts.Tools(ctx)
@@ -371,7 +373,9 @@ func TestCallToolReconnection(t *testing.T) {
 	}
 
 	// Kill the transport by closing the connection.
-	spyTransport.lastConn.Close()
+	if err := spyTransport.lastConn.Close(); err != nil {
+		t.Fatalf("Failed to close connection: %v", err)
+	}
 
 	// Call the tool - should reconnect and succeed.
 	fnTool := tools[0].(toolinternal.FunctionTool)
@@ -408,7 +412,7 @@ type reconnectableTransport struct {
 
 func (rt *reconnectableTransport) Connect(ctx context.Context) (mcp.Connection, error) {
 	ct, st := mcp.NewInMemoryTransports()
-        _, err := rt.server.Connect(ctx, st, nil)
+	_, err := rt.server.Connect(ctx, st, nil)
 	if err != nil {
 		return nil, err
 	}

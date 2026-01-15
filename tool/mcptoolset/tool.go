@@ -90,7 +90,6 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		Name:      t.name,
 		Arguments: args,
 	})
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to call MCP tool %q with err: %w", t.name, err)
 	}
