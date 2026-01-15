@@ -15,12 +15,14 @@
 package plugininternal
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/session"
@@ -271,6 +273,6 @@ func (pm *PluginManager) Close() error {
 	return nil
 }
 
-var _ agent.PluginManager = (*PluginManager)(nil)
-
-var _ tool.PluginManager = (*PluginManager)(nil)
+func ToContext(ctx context.Context, cfg *PluginManager) context.Context {
+	return context.WithValue(ctx, plugincontext.PluginManagerCtxKey, cfg)
+}

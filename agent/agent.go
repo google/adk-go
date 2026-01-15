@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/adk/artifact"
 	agentinternal "google.golang.org/adk/internal/agent"
+	"google.golang.org/adk/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -169,7 +170,6 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			userContent:   ctx.UserContent(),
 			runConfig:     ctx.RunConfig(),
 			endInvocation: ctx.Ended(),
-			pluginManager: ctx.PluginManager(),
 		}
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
@@ -218,7 +218,7 @@ func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
 // then it skips agent run and returns callback result.
 func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
-	pluginManager := ctx.PluginManager()
+	pluginManager := pluginManagerFromContext(ctx)
 
 	callbackCtx := &callbackContext{
 		Context:           ctx,
@@ -280,7 +280,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 // then it create a new event with the new content and state delta.
 func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
-	pluginManager := ctx.PluginManager()
+	pluginManager := pluginManagerFromContext(ctx)
 
 	callbackCtx := &callbackContext{
 		Context:           ctx,
@@ -428,7 +428,6 @@ type invocationContext struct {
 	userContent   *genai.Content
 	runConfig     *RunConfig
 	endInvocation bool
-	pluginManager PluginManager
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -471,6 +470,16 @@ func (c *invocationContext) Ended() bool {
 	return c.endInvocation
 }
 
-func (c *invocationContext) PluginManager() PluginManager {
-	return c.pluginManager
+func pluginManagerFromContext(ctx context.Context) pluginManager {
+	a := ctx.Value(plugincontext.PluginManagerCtxKey)
+	m, ok := a.(pluginManager)
+	if !ok {
+		return nil
+	}
+	return m
+}
+
+type pluginManager interface {
+	RunBeforeAgentCallback(cctx CallbackContext) (*genai.Content, error)
+	RunAfterAgentCallback(cctx CallbackContext) (*genai.Content, error)
 }

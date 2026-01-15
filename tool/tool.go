@@ -51,8 +51,6 @@ type Context interface {
 	Actions() *session.EventActions
 	// SearchMemory performs a semantic search on the agent's memory.
 	SearchMemory(context.Context, string) (*memory.SearchResponse, error)
-
-	PluginManager() PluginManager
 }
 
 // Toolset is an interface for a collection of tools. It allows grouping
@@ -79,10 +77,4 @@ func StringPredicate(allowedTools []string) Predicate {
 	return func(ctx agent.ReadonlyContext, tool Tool) bool {
 		return m[tool.Name()]
 	}
-}
-
-type PluginManager interface {
-	RunBeforeToolCallback(ctx Context, t Tool, args map[string]any) (map[string]any, error)
-	RunAfterToolCallback(ctx Context, t Tool, args, result map[string]any, err error) (map[string]any, error)
-	RunOnToolErrorCallback(ctx Context, t Tool, args map[string]any, err error) (map[string]any, error)
 }

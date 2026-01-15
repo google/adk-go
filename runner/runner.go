@@ -138,6 +138,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 		})
+		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 
 		var artifacts agent.Artifacts
 		if r.artifactService != nil {
@@ -160,21 +161,20 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 
 		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-			Artifacts:     artifacts,
-			Memory:        memoryImpl,
-			Session:       sessioninternal.NewMutableSession(r.sessionService, storedSession),
-			Agent:         agentToRun,
-			UserContent:   msg,
-			RunConfig:     &cfg,
-			PluginManager: r.pluginManager,
+			Artifacts:   artifacts,
+			Memory:      memoryImpl,
+			Session:     sessioninternal.NewMutableSession(r.sessionService, storedSession),
+			Agent:       agentToRun,
+			UserContent: msg,
+			RunConfig:   &cfg,
 		})
-		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts)
+		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 
-		pluginManager := ctx.PluginManager()
+		pluginManager := r.pluginManager
 		if pluginManager != nil {
 			// Defer the after run callbacks to perform global cleanup tasks or finalizing logs and metrics data.
 			// This does NOT emit any event.
@@ -232,11 +232,10 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	}
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool) (agent.InvocationContext, error) {
+func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager) (agent.InvocationContext, error) {
 	if msg == nil {
 		return ctx, nil
 	}
-	pluginManager := ctx.PluginManager()
 	if pluginManager != nil {
 		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, msg)
 		if err != nil {
@@ -246,13 +245,12 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 			msg = modifiedMsg
 			// update ctx user message
 			ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-				Artifacts:     ctx.Artifacts(),
-				Memory:        ctx.Memory(),
-				Session:       ctx.Session(),
-				Agent:         ctx.Agent(),
-				UserContent:   msg,
-				RunConfig:     ctx.RunConfig(),
-				PluginManager: ctx.PluginManager(),
+				Artifacts:   ctx.Artifacts(),
+				Memory:      ctx.Memory(),
+				Session:     ctx.Session(),
+				Agent:       ctx.Agent(),
+				UserContent: msg,
+				RunConfig:   ctx.RunConfig(),
 			})
 		}
 	}
