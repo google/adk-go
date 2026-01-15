@@ -408,7 +408,7 @@ type reconnectableTransport struct {
 
 func (rt *reconnectableTransport) Connect(ctx context.Context) (mcp.Connection, error) {
 	ct, st := mcp.NewInMemoryTransports()
-	_, err := rt.server.Connect(context.Background(), st, nil)
+        _, err := rt.server.Connect(ctx, st, nil)
 	if err != nil {
 		return nil, err
 	}
