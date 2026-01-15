@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 
 	"google.golang.org/genai"
 )
@@ -32,6 +33,9 @@ func matchType(value any, schema *genai.Schema, isInput bool) (bool, error) {
 	if value == nil {
 		return false, nil
 	}
+
+	// Convert type to upper case to match the type in the schema.
+	schema.Type = genai.Type(strings.ToUpper(string(schema.Type)))
 
 	switch schema.Type {
 	case genai.TypeString:
