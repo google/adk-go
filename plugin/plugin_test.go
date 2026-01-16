@@ -39,7 +39,7 @@ func TestNew(t *testing.T) {
 				OnUserMessageCallback: mockOnUserMsg,
 			},
 			validate: func(t *testing.T, p *Plugin) {
-				if p.OnUserMessageCallback == nil {
+				if p.OnUserMessageCallback() == nil {
 					t.Error("OnUserMessageCallback was not mapped correctly")
 				}
 				// Verify Close() is safe even if we didn't provide a CloseFunc
