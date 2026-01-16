@@ -91,8 +91,12 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 							return
 						}
 					} else {
-						tempJSON, _ := json.Marshal(funcResp.Response)
-						err := json.Unmarshal(tempJSON, &tc)
+						tempJSON, err := json.Marshal(funcResp.Response)
+						if err != nil {
+							yield(nil, fmt.Errorf("error failed marshalling confirmation function response: %w", err))
+							return
+						}
+						err = json.Unmarshal(tempJSON, &tc)
 						if err != nil {
 							yield(nil, fmt.Errorf("error failed unmarshalling confirmation function response %w", err))
 							return

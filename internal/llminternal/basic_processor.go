@@ -35,14 +35,6 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 		if llmAgent == nil {
 			return // do nothing.
 		}
-		req.Config = clone(llmAgent.internal().GenerateContentConfig)
-		if req.Config == nil {
-			req.Config = &genai.GenerateContentConfig{}
-		}
-		if llmAgent.internal().OutputSchema != nil {
-			req.Config.ResponseSchema = llmAgent.internal().OutputSchema
-			req.Config.ResponseMIMEType = "application/json"
-		}
 
 		state := llmAgent.internal()
 

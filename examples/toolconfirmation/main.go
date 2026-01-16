@@ -80,8 +80,6 @@ func requestVacationDays(ctx tool.Context, args RequestVacationArgs) (*RequestVa
 	}
 
 	confirmation := ctx.ToolConfirmation()
-	js, _ := json.Marshal(confirmation)
-	fmt.Printf("\n--- %s ---\n", string(js))
 	if confirmation == nil {
 
 		requestID := fmt.Sprintf("req-%d", requestCounter)
