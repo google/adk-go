@@ -47,6 +47,7 @@ type tracerProviderConfig struct {
 var (
 	once              sync.Once
 	localTracer       tracerProviderHolder
+	localTracerMu     sync.RWMutex
 	localTracerConfig = tracerProviderConfig{
 		spanProcessors: []sdktrace.SpanProcessor{},
 		mu:             &sync.RWMutex{},
@@ -102,7 +103,10 @@ func RegisterTelemetry() {
 		for _, processor := range spanProcessors {
 			traceProvider.RegisterSpanProcessor(processor)
 		}
+
+		localTracerMu.Lock()
 		localTracer = tracerProviderHolder{tp: traceProvider}
+		localTracerMu.Unlock()
 	})
 }
 
@@ -110,11 +114,14 @@ func RegisterTelemetry() {
 // That means that the spans are NOT recording/exporting
 // If the local tracer is not set, we'll set up tracer with all registered span processors.
 func getTracers() []trace.Tracer {
-	if localTracer.tp == nil {
-		RegisterTelemetry()
-	}
+	RegisterTelemetry()
+
+	localTracerMu.RLock()
+	tp := localTracer.tp
+	localTracerMu.RUnlock()
+
 	return []trace.Tracer{
-		localTracer.tp.Tracer(systemName),
+		tp.Tracer(systemName),
 		otel.GetTracerProvider().Tracer(systemName),
 	}
 }
