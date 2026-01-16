@@ -28,13 +28,13 @@ import (
 // main defines an example of how to initialize a vertex ai reasoning engine
 func main() {
 	ctx := context.Background()
-	projectID := os.Getenv("CLOUD_PROJECT_ID")
+	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
 	if projectID == "" {
-		log.Fatalf("Env var CLOUD_PROJECT_ID is not set")
+		log.Fatalf("Env var GOOGLE_CLOUD_PROJECT is not set")
 	}
-	location := os.Getenv("CLOUD_LOCATION")
+	location := os.Getenv("GOOGLE_CLOUD_LOCATION")
 	if location == "" {
-		log.Fatalf("Env var CLOUD_LOCATION is not set")
+		log.Fatalf("Env var GOOGLE_CLOUD_LOCATION is not set")
 	}
 
 	err := createReasoningEngine(ctx, projectID, location, "adk-go", "A reasoning engine created by an adk go sample")

@@ -94,7 +94,7 @@ func main() {
 func generateImage(ctx tool.Context, input generateImageInput) (generateImageResult, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
-		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
+		Location: os.Getenv("GOOGLE_GOOGLE_CLOUD_LOCATION"),
 		Backend:  genai.BackendVertexAI,
 	})
 	if err != nil {
