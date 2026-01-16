@@ -16,14 +16,11 @@
 package mcptoolset
 
 import (
-	"context"
 	"fmt"
-	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/version"
 	"google.golang.org/adk/tool"
 )
 
@@ -50,13 +47,8 @@ import (
 //		},
 //	})
 func New(cfg Config) (tool.Toolset, error) {
-	client := cfg.Client
-	if client == nil {
-		client = mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, nil)
-	}
 	return &set{
-		client:     client,
-		transport:  cfg.Transport,
+		mcpClient:  newConnectionRefresher(cfg.Client, cfg.Transport),
 		toolFilter: cfg.ToolFilter,
 	}, nil
 }
@@ -75,12 +67,8 @@ type Config struct {
 }
 
 type set struct {
-	client     *mcp.Client
-	transport  mcp.Transport
+	mcpClient  MCPClient
 	toolFilter tool.Predicate
-
-	mu      sync.Mutex
-	session *mcp.ClientSession
 }
 
 func (*set) Name() string {
@@ -97,57 +85,24 @@ func (*set) IsLongRunning() bool {
 
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
 func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
-	session, err := s.getSession(ctx)
+	mcpTools, err := s.mcpClient.ListTools(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get MCP session: %w", err)
+		return nil, err
 	}
 
 	var adkTools []tool.Tool
-
-	cursor := ""
-	for {
-		resp, err := session.ListTools(ctx, &mcp.ListToolsParams{
-			Cursor: cursor,
-		})
+	for _, mcpTool := range mcpTools {
+		t, err := convertTool(mcpTool, s.mcpClient)
 		if err != nil {
-			return nil, fmt.Errorf("failed to list MCP tools: %w", err)
+			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}
 
-		for _, mcpTool := range resp.Tools {
-			t, err := convertTool(mcpTool, s.getSession)
-			if err != nil {
-				return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
-			}
-
-			if s.toolFilter != nil && !s.toolFilter(ctx, t) {
-				continue
-			}
-
-			adkTools = append(adkTools, t)
+		if s.toolFilter != nil && !s.toolFilter(ctx, t) {
+			continue
 		}
 
-		if resp.NextCursor == "" {
-			break
-		}
-		cursor = resp.NextCursor
+		adkTools = append(adkTools, t)
 	}
 
 	return adkTools, nil
-}
-
-func (s *set) getSession(ctx context.Context) (*mcp.ClientSession, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.session != nil {
-		return s.session, nil
-	}
-
-	session, err := s.client.Connect(ctx, s.transport, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to init MCP session: %w", err)
-	}
-
-	s.session = session
-	return s.session, nil
 }
