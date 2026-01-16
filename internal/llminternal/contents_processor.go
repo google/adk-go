@@ -17,6 +17,7 @@ package llminternal
 import (
 	"encoding/json"
 	"fmt"
+	"iter"
 	"reflect"
 	"slices"
 	"sort"
@@ -32,30 +33,32 @@ import (
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
 // the InvocationContext that includes the previous events.
-func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
-	llmAgent := asLLMAgent(ctx.Agent())
-	if llmAgent == nil {
-		// Do nothing.
-		return nil // In python, no error is yielded.
-	}
-	fn := buildContentsDefault // "" or "default".
-	if llmAgent.internal().IncludeContents == "none" {
-		// Include current turn context only (no conversation history)
-		fn = buildContentsCurrentTurnContextOnly
-	}
-	var events []*session.Event
-	if ctx.Session() != nil {
-		for e := range ctx.Session().Events().All() {
-			events = append(events, e)
+func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
+		llmAgent := asLLMAgent(ctx.Agent())
+		if llmAgent == nil {
+			// Do nothing.
+			return // In python, no error is yielded.
 		}
+		fn := buildContentsDefault // "" or "default".
+		if llmAgent.internal().IncludeContents == "none" {
+			// Include current turn context only (no conversation history)
+			fn = buildContentsCurrentTurnContextOnly
+		}
+		var events []*session.Event
+		if ctx.Session() != nil {
+			for e := range ctx.Session().Events().All() {
+				events = append(events, e)
+			}
+		}
+		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), events)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		req.Contents = append(req.Contents, contents...)
 	}
-	contents, err := fn(ctx.Agent().Name(), ctx.Branch(), events)
-	if err != nil {
-		return err
-	}
-	req.Contents = append(req.Contents, contents...)
-	return nil
 }
 
 // buildContentsDefault returns the contents for the LLM request by applying

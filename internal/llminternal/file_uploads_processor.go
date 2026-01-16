@@ -15,31 +15,35 @@
 package llminternal
 
 import (
+	"iter"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 )
 
 // The Gemini API (non-Vertex) backend does not support the display_name parameter for file uploads,
 // so it must be removed to prevent request failures.
-func removeDisplayNameIfExists(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	if req.Contents == nil {
-		return nil
-	}
-	for _, content := range req.Contents {
-		if content.Parts == nil {
-			continue
+func removeDisplayNameIfExists(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if req.Contents == nil {
+			return
 		}
-		if googlellm.GetGoogleLLMVariant() == googlellm.GoogleLLMVariantGeminiAPI {
-			for _, part := range content.Parts {
-				if part.InlineData != nil {
-					part.InlineData.DisplayName = ""
-				}
-				if part.FileData != nil {
-					part.FileData.DisplayName = ""
+		for _, content := range req.Contents {
+			if content.Parts == nil {
+				continue
+			}
+			if googlellm.GetGoogleLLMVariant() == googlellm.GoogleLLMVariantGeminiAPI {
+				for _, part := range content.Parts {
+					if part.InlineData != nil {
+						part.InlineData.DisplayName = ""
+					}
+					if part.FileData != nil {
+						part.FileData.DisplayName = ""
+					}
 				}
 			}
 		}
 	}
-	return nil
 }

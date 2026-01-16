@@ -22,7 +22,10 @@ import (
 	"github.com/google/uuid"
 
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
+
+const REQUEST_CONFIRMATION_FUNCTION_CALL_NAME = "adk_request_confirmation"
 
 // Session represents a series of interactions between a user and agents.
 //
@@ -146,6 +149,8 @@ type EventActions struct {
 	// Indicates that the event is updating an artifact. key is the filename,
 	// value is the version.
 	ArtifactDelta map[string]int64
+
+	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation
 
 	// If true, it won't call model to summarize function response.
 	// Only valid for function response event.

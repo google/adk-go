@@ -24,7 +24,7 @@ import (
 
 func TestToolContext(t *testing.T) {
 	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
-	toolCtx := NewToolContext(inv, "fn1", &session.EventActions{})
+	toolCtx := NewToolContext(inv, "fn1", &session.EventActions{}, nil)
 
 	if _, ok := toolCtx.(agent.ReadonlyContext); !ok {
 		t.Errorf("ToolContext(%+T) is unexpectedly not a ReadonlyContext", toolCtx)

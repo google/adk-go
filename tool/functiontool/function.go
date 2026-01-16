@@ -46,6 +46,10 @@ type Config struct {
 	OutputSchema *jsonschema.Schema
 	// IsLongRunning makes a FunctionTool a long-running operation.
 	IsLongRunning bool
+
+	RequireConfirmation bool
+
+	RequireConfirmationProvider any
 }
 
 // Func represents a Go function that can be wrapped in a tool.
@@ -59,7 +63,7 @@ var ErrInvalidArgument = errors.New("invalid argument")
 // Input schema is automatically inferred from the input and output types.
 func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
-	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
+	// https://github.com/modelcontextprotocol/go-sdk/discussions/37
 
 	var zeroArgs TArgs
 	argsType := reflect.TypeOf(zeroArgs)
@@ -79,11 +83,41 @@ func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.T
 		return nil, fmt.Errorf("failed to infer output schema: %w", err)
 	}
 
+	var confirmWrapper func(TArgs) bool
+
+	if cfg.RequireConfirmationProvider != nil {
+		provVal := reflect.ValueOf(cfg.RequireConfirmationProvider)
+		provType := provVal.Type()
+
+		if provType.Kind() != reflect.Func {
+			return nil, fmt.Errorf("error RequireConfirmationProvider must be a function")
+		}
+		expectedType := reflect.TypeOf((*TArgs)(nil)).Elem()
+		if provType.NumIn() != 1 {
+			return nil, fmt.Errorf("expected 1 argument for RequireConfirmationProvider, got %d", provType.NumIn())
+		}
+		if provType.In(0) != expectedType {
+			return nil, fmt.Errorf("argument mismatch for RequireConfirmationProvider: expected %v, got %v", expectedType, provType.In(0))
+		}
+		if provType.NumOut() != 1 {
+			return nil, fmt.Errorf("error RequireConfirmationProvider must return exactly 1 value (bool), got %d", provType.NumOut())
+		}
+		if provType.Out(0).Kind() != reflect.Bool {
+			return nil, fmt.Errorf("error RequireConfirmationProvider must return a boolean, got %v", provType.Out(0))
+		}
+		confirmWrapper = func(args TArgs) bool {
+			res := provVal.Call([]reflect.Value{reflect.ValueOf(args)})
+			return res[0].Bool()
+		}
+	}
+
 	return &functionTool[TArgs, TResults]{
-		cfg:          cfg,
-		inputSchema:  ischema,
-		outputSchema: oschema,
-		handler:      handler,
+		cfg:                         cfg,
+		inputSchema:                 ischema,
+		outputSchema:                oschema,
+		handler:                     handler,
+		requireConfirmation:         cfg.RequireConfirmation,
+		requireConfirmationProvider: confirmWrapper,
 	}, nil
 }
 
@@ -98,6 +132,10 @@ type functionTool[TArgs, TResults any] struct {
 
 	// handler is the Go function.
 	handler Func[TArgs, TResults]
+
+	requireConfirmation bool
+
+	requireConfirmationProvider func(TArgs) bool
 }
 
 // Description implements tool.Tool.
@@ -162,6 +200,26 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 	if err != nil {
 		return nil, err
 	}
+
+	requireConfirmation := false
+	if f.requireConfirmationProvider != nil {
+		requireConfirmation = f.requireConfirmationProvider(input)
+	}
+	if requireConfirmation || f.requireConfirmation {
+		if ctx.ToolConfirmation() == nil {
+			err := ctx.RequestConfirmation(
+				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+					f.Name()), nil)
+			if err != nil {
+				return nil, err
+			}
+			ctx.Actions().SkipSummarization = true
+			return nil, fmt.Errorf("error tool %q requires confirmation, please approve or reject", f.Name())
+		} else if !ctx.ToolConfirmation().Confirmed {
+			return nil, fmt.Errorf("error tool %q call is rejected", f.Name())
+		}
+	}
+
 	output, err := f.handler(ctx, input)
 	if err != nil {
 		return nil, err

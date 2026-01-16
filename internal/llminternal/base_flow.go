@@ -33,6 +33,7 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 var ErrModelNotConfigured = errors.New("model not configured; ensure Model is set in llmagent.Config")
@@ -48,7 +49,7 @@ type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args, result map[s
 type Flow struct {
 	Model model.LLM
 
-	RequestProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest) error
+	RequestProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]
 	ResponseProcessors   []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error
 	BeforeModelCallbacks []BeforeModelCallback
 	AfterModelCallbacks  []AfterModelCallback
@@ -57,9 +58,10 @@ type Flow struct {
 }
 
 var (
-	DefaultRequestProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest) error{
+	DefaultRequestProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{
 		basicRequestProcessor,
 		authPreprocessor,
+		RequestConfirmationRequestProcessor,
 		instructionsRequestProcessor,
 		identityRequestProcessor,
 		ContentsRequestProcessor,
@@ -119,9 +121,16 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		}
 
 		// Preprocess before calling the LLM.
-		if err := f.preprocess(ctx, req); err != nil {
-			yield(nil, err)
-			return
+		for ev, err := range f.preprocess(ctx, req) {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if ev != nil {
+				if !yield(ev, nil) {
+					return
+				}
+			}
 		}
 		if ctx.Ended() {
 			return
@@ -168,7 +177,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 
 			// Handle function calls.
 
-			ev, err := f.handleFunctionCalls(ctx, tools, resp)
+			ev, err := f.handleFunctionCalls(ctx, tools, resp, nil)
 			if err != nil {
 				yield(nil, err)
 				return
@@ -177,6 +186,14 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				// nothing to yield/process.
 				continue
 			}
+
+			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
+			if toolConfirmationEvent != nil {
+				if !yield(toolConfirmationEvent, nil) {
+					return
+				}
+			}
+
 			if !yield(ev, nil) {
 				return
 			}
@@ -214,31 +231,43 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 	}
 }
 
-func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	llmAgent, ok := ctx.Agent().(Agent)
-	if !ok {
-		return fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name())
-	}
-
-	// apply request processor functions to the request in the configured order.
-	for _, processor := range f.RequestProcessors {
-		if err := processor(ctx, req); err != nil {
-			return err
-		}
-	}
-
-	// run processors for tools.
-	tools := Reveal(llmAgent).Tools
-	for _, toolSet := range Reveal(llmAgent).Toolsets {
-		tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
-		if err != nil {
-			return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
+func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		llmAgent, ok := ctx.Agent().(Agent)
+		if !ok {
+			yield(nil, fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name()))
+			return
 		}
 
-		tools = append(tools, tsTools...)
-	}
+		// apply request processor functions to the request in the configured order.
+		for _, processor := range f.RequestProcessors {
+			for ev, err := range processor(ctx, req, f) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if ev != nil {
+					yield(ev, nil)
+				}
+			}
+		}
 
-	return toolPreprocess(ctx, req, tools)
+		// run processors for tools.
+		tools := Reveal(llmAgent).Tools
+		for _, toolSet := range Reveal(llmAgent).Toolsets {
+			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
+			if err != nil {
+				yield(nil, fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err))
+				return
+			}
+
+			tools = append(tools, tsTools...)
+		}
+
+		if err := toolPreprocess(ctx, req, tools); err != nil {
+			yield(nil, err)
+		}
+	}
 }
 
 // toolPreprocess runs tool preprocess on the given request
@@ -251,7 +280,7 @@ func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []
 			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
 		}
 		// TODO: how to prevent mutation on this?
-		toolCtx := toolinternal.NewToolContext(ctx, "", &session.EventActions{})
+		toolCtx := toolinternal.NewToolContext(ctx, "", &session.EventActions{}, nil)
 		if err := requestProcessor.ProcessRequest(toolCtx, req); err != nil {
 			return err
 		}
@@ -379,7 +408,7 @@ func findLongRunningFunctionCallIDs(c *genai.Content, tools map[string]tool.Tool
 //
 // TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
-func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse) (*session.Event, error) {
+func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation) (*session.Event, error) {
 	var fnResponseEvents []*session.Event
 
 	fnCalls := utils.FunctionCalls(resp.Content)
@@ -392,7 +421,11 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		if !ok {
 			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
 		}
-		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)})
+		var confirmation *toolconfirmation.ToolConfirmation
+		if toolConfirmations != nil {
+			confirmation = toolConfirmations[fnCall.ID]
+		}
+		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
 		// toolCtx := tool.
 		spans := telemetry.StartTrace(ctx, "execute_tool "+fnCall.Name)
 
@@ -521,6 +554,13 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	}
 	if other.StateDelta != nil {
 		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
+	}
+	// TODO add similar logic for state
+	if other.RequestedToolConfirmations != nil {
+		if base.RequestedToolConfirmations == nil {
+			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
+		}
+		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
 	}
 	return base
 }

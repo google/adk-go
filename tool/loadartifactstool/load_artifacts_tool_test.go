@@ -291,5 +291,5 @@ func createToolContext(t *testing.T) tool.Context {
 		Artifacts: artifacts,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", nil)
+	return toolinternal.NewToolContext(ctx, "", nil, nil)
 }

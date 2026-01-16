@@ -23,6 +23,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 // Tool defines the interface for a callable tool.
@@ -51,6 +52,10 @@ type Context interface {
 	Actions() *session.EventActions
 	// SearchMemory performs a semantic search on the agent's memory.
 	SearchMemory(context.Context, string) (*memory.SearchResponse, error)
+
+	ToolConfirmation() *toolconfirmation.ToolConfirmation
+
+	RequestConfirmation(hint string, payload any) error
 }
 
 // Toolset is an interface for a collection of tools. It allows grouping

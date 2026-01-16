@@ -15,28 +15,31 @@
 package llminternal
 
 import (
+	"iter"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 )
 
-func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
+func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/identity.py)
-	return nil
+	return func(yield func(*session.Event, error) bool) {}
 }
 
-func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
+func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_nl_plnning.py)
-	return nil
+	return func(yield func(*session.Event, error) bool) {}
 }
 
-func codeExecutionRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
+func codeExecutionRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_code_execution.py)
-	return nil
+	return func(yield func(*session.Event, error) bool) {}
 }
 
-func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
+func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	// TODO: implement (adk-python src/google/adk/auth/auth_preprocessor.py)
-	return nil
+	return func(yield func(*session.Event, error) bool) {}
 }
 
 func nlPlanningResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
