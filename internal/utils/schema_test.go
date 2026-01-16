@@ -172,7 +172,7 @@ func TestMatchType(t *testing.T) {
 			schema:    &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"foo": {Type: genai.TypeString}}},
 			isInput:   true,
 			wantMatch: false,
-			wantErr:   true, //This will fail ValidateMapOnSchema, which returns error
+			wantErr:   true, // This will fail ValidateMapOnSchema, which returns error
 		},
 		{
 			name:      "unsupported type",

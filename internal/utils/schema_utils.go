@@ -35,11 +35,7 @@ func matchType(value any, schema *genai.Schema, isInput bool) (bool, error) {
 	}
 
 	// Convert type to upper case to match the type in the schema.
-	localSchema := *schema
-	localSchema.Type = genai.Type(strings.ToUpper(string(schema.Type)))
-	schema = &localSchema
-
-	switch schema.Type {
+	switch genai.Type(strings.ToUpper(string(schema.Type))) {
 	case genai.TypeString:
 		_, ok := value.(string)
 		return ok, nil
