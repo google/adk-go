@@ -169,14 +169,14 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			}
 			return
 		}
-
-		for a2aEvent, a2aErr := range client.SendStreamingMessage(ctx, req) {
+		
+		processEvent := func(aEvent a2a.Event, aErr error) {
 			var err error
 			var event *session.Event
 			if cfg.Converter != nil {
-				event, err = cfg.Converter(icontext.NewReadonlyContext(ctx), req, a2aEvent, a2aErr)
+				event, err = cfg.Converter(icontext.NewReadonlyContext(ctx), req, aEvent, aErr)
 			} else {
-				event, err = processor.convertToSessionEvent(ctx, a2aEvent, a2aErr)
+				event, err = processor.convertToSessionEvent(ctx, aEvent, aErr)
 			}
 
 			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, event, err); cbResp != nil || cbErr != nil {
@@ -203,6 +203,16 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 					return
 				}
 			}
+		}
+
+		if ctx.RunConfig().StreamingMode == agent.StreamingModeNone {
+			a2aEvent, a2aErr := client.SendMessage(ctx, req)
+			processEvent(a2aEvent, a2aErr)
+			return
+		}
+
+		for a2aEvent, a2aErr := range client.SendStreamingMessage(ctx, req) {
+			processEvent(a2aEvent, a2aErr)
 		}
 	}
 }
