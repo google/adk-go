@@ -113,7 +113,8 @@ func TestAgentCallbacks(t *testing.T) {
 			}
 
 			ctx := &invocationContext{
-				agent: testAgent,
+				Context: t.Context(),
+				agent:   testAgent,
 			}
 			var gotEvents []*session.Event
 			for event, err := range testAgent.Run(ctx) {
@@ -159,6 +160,7 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 	}
 
 	ctx := &invocationContext{
+		Context:       t.Context(),
 		agent:         testAgent,
 		endInvocation: true,
 	}
@@ -192,7 +194,8 @@ func TestEndInvocation_EndsAfterMainCall(t *testing.T) {
 	}
 
 	ctx := &invocationContext{
-		agent: testAgent,
+		Context: t.Context(),
+		agent:   testAgent,
 	}
 	var gotEvents []*session.Event
 	for event, err := range testAgent.Run(ctx) {

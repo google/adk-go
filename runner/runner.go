@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -31,9 +32,11 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	imemory "google.golang.org/adk/internal/memory"
+	"google.golang.org/adk/internal/plugininternal"
 	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/session"
 )
 
@@ -48,6 +51,13 @@ type Config struct {
 	ArtifactService artifact.Service
 	// optional
 	MemoryService memory.Service
+	// optional
+	PluginConfig PluginConfig
+}
+
+type PluginConfig struct {
+	Plugins      []plugin.Plugin
+	CloseTimeout time.Duration
 }
 
 // New creates a new [Runner].
@@ -65,6 +75,14 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)
 	}
 
+	pluginManager, err := plugininternal.NewPluginManager(plugininternal.PluginConfig{
+		Plugins:      cfg.PluginConfig.Plugins,
+		CloseTimeout: cfg.PluginConfig.CloseTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create plugin manager: %w", err)
+	}
+
 	return &Runner{
 		appName:         cfg.AppName,
 		rootAgent:       cfg.Agent,
@@ -72,6 +90,7 @@ func New(cfg Config) (*Runner, error) {
 		artifactService: cfg.ArtifactService,
 		memoryService:   cfg.MemoryService,
 		parents:         parents,
+		pluginManager:   pluginManager,
 	}, nil
 }
 
@@ -85,7 +104,8 @@ type Runner struct {
 	artifactService artifact.Service
 	memoryService   memory.Service
 
-	parents parentmap.Map
+	parents       parentmap.Map
+	pluginManager *plugininternal.PluginManager
 }
 
 // Run runs the agent for the given user input, yielding events from agents.
@@ -106,9 +126,9 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
-		session := resp.Session
+		storedSession := resp.Session
 
-		agentToRun, err := r.findAgentToRun(session)
+		agentToRun, err := r.findAgentToRun(storedSession)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -118,14 +138,15 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 		})
+		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 
 		var artifacts agent.Artifacts
 		if r.artifactService != nil {
 			artifacts = &artifactinternal.Artifacts{
 				Service:   r.artifactService,
-				SessionID: session.ID(),
-				AppName:   session.AppName(),
-				UserID:    session.UserID(),
+				SessionID: storedSession.ID(),
+				AppName:   storedSession.AppName(),
+				UserID:    storedSession.UserID(),
 			}
 		}
 
@@ -133,24 +154,46 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		if r.memoryService != nil {
 			memoryImpl = &imemory.Memory{
 				Service:   r.memoryService,
-				SessionID: session.ID(),
-				UserID:    session.UserID(),
-				AppName:   session.AppName(),
+				SessionID: storedSession.ID(),
+				UserID:    storedSession.UserID(),
+				AppName:   storedSession.AppName(),
 			}
 		}
 
 		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 			Artifacts:   artifacts,
 			Memory:      memoryImpl,
-			Session:     sessioninternal.NewMutableSession(r.sessionService, session),
+			Session:     sessioninternal.NewMutableSession(r.sessionService, storedSession),
 			Agent:       agentToRun,
 			UserContent: msg,
 			RunConfig:   &cfg,
 		})
-
-		if err := r.appendMessageToSession(ctx, session, msg, cfg.SaveInputBlobsAsArtifacts); err != nil {
+		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager)
+		if err != nil {
 			yield(nil, err)
 			return
+		}
+
+		pluginManager := r.pluginManager
+		if pluginManager != nil {
+			// Defer the after run callbacks to perform global cleanup tasks or finalizing logs and metrics data.
+			// This does NOT emit any event.
+			defer pluginManager.RunAfterRunCallback(ctx)
+
+			earlyExitResult, err := pluginManager.RunBeforeRunCallback(ctx)
+			if earlyExitResult != nil || err != nil {
+				earlyExitEvent := session.NewEvent(ctx.InvocationID())
+				earlyExitEvent.Author = "user"
+				earlyExitEvent.LLMResponse = model.LLMResponse{
+					Content: msg,
+				}
+				if err := r.sessionService.AppendEvent(ctx, storedSession, earlyExitEvent); err != nil {
+					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+					return
+				}
+				yield(earlyExitEvent, err)
+				return
+			}
 		}
 
 		for event, err := range agentToRun.Run(ctx) {
@@ -161,9 +204,22 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				continue
 			}
 
+			if pluginManager != nil {
+				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
+				if err != nil {
+					if !yield(nil, err) {
+						return
+					}
+					continue
+				}
+				if modifiedEvent != nil {
+					event = modifiedEvent
+				}
+			}
+
 			// only commit non-partial event to a session service
 			if !event.LLMResponse.Partial {
-				if err := r.sessionService.AppendEvent(ctx, session, event); err != nil {
+				if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return
 				}
@@ -176,9 +232,27 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	}
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool) error {
+func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager) (agent.InvocationContext, error) {
 	if msg == nil {
-		return nil
+		return ctx, nil
+	}
+	if pluginManager != nil {
+		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, msg)
+		if err != nil {
+			return ctx, fmt.Errorf("error running on run user message callback : %w", err)
+		}
+		if modifiedMsg != nil {
+			msg = modifiedMsg
+			// update ctx user message
+			ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+				Artifacts:   ctx.Artifacts(),
+				Memory:      ctx.Memory(),
+				Session:     ctx.Session(),
+				Agent:       ctx.Agent(),
+				UserContent: msg,
+				RunConfig:   ctx.RunConfig(),
+			})
+		}
 	}
 
 	artifactsService := ctx.Artifacts()
@@ -189,7 +263,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 			}
 			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
 			if _, err := artifactsService.Save(ctx, fileName, part); err != nil {
-				return fmt.Errorf("failed to save artifact %s: %w", fileName, err)
+				return ctx, fmt.Errorf("failed to save artifact %s: %w", fileName, err)
 			}
 			// Replace the part with a text placeholder
 			msg.Parts[i] = &genai.Part{
@@ -206,9 +280,9 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 	}
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
-		return fmt.Errorf("failed to append event to sessionService: %w", err)
+		return ctx, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
-	return nil
+	return ctx, nil
 }
 
 // findAgentToRun returns the agent that should handle the next request based on

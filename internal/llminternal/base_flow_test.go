@@ -21,6 +21,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -67,15 +68,18 @@ func (m *mockFunctionTool) Declaration() *genai.FunctionDeclaration {
 	return nil
 }
 
+type testCase struct {
+	name                 string
+	tool                 toolinternal.FunctionTool
+	args                 map[string]any
+	beforeToolCallbacks  []BeforeToolCallback
+	afterToolCallbacks   []AfterToolCallback
+	onToolErrorCallbacks []OnToolErrorCallback
+	want                 map[string]any
+}
+
 func TestCallTool(t *testing.T) {
-	tests := []struct {
-		name                string
-		tool                toolinternal.FunctionTool
-		args                map[string]any
-		beforeToolCallbacks []BeforeToolCallback
-		afterToolCallbacks  []AfterToolCallback
-		want                map[string]any
-	}{
+	testCases := []testCase{
 		{
 			name: "tool runs successfully",
 			tool: &mockFunctionTool{
@@ -258,16 +262,140 @@ func TestCallTool(t *testing.T) {
 			},
 			want: map[string]any{"result": "error_handled_in_after"},
 		},
+		{
+			name: "before callback error passed to on tool error callback",
+			tool: &mockFunctionTool{
+				name: "testTool",
+				runFunc: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+					t.Error("tool should not be called")
+					return nil, nil
+				},
+			},
+			beforeToolCallbacks: []BeforeToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, errors.New("error_from_before")
+				},
+			},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					if err == nil || err.Error() != "error_from_before" {
+						t.Error("unexpected error in on tool error callback")
+						return nil, errors.New("unexpected error in on tool error callback")
+					}
+					return map[string]any{"result": "error_handled_in_on_tool_error_callback"}, nil
+				},
+			},
+			want: map[string]any{"result": "error_handled_in_on_tool_error_callback"},
+		},
+		{
+			name: "before callback error passed to on tool error callback and after tool called",
+			tool: &mockFunctionTool{
+				name: "testTool",
+				runFunc: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+					t.Error("tool should not be called")
+					return nil, nil
+				},
+			},
+			beforeToolCallbacks: []BeforeToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, errors.New("error_from_before")
+				},
+			},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					if err == nil || err.Error() != "error_from_before" {
+						t.Error("unexpected error in on tool error callback")
+						return nil, errors.New("unexpected error in on tool error callback")
+					}
+					return map[string]any{"result": "error_handled_in_on_tool_error_callback"}, nil
+				},
+			},
+			afterToolCallbacks: []AfterToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+					if err != nil {
+						return nil, errors.New("unexpected error in after callback")
+					}
+					return map[string]any{"result": "from_after"}, nil
+				},
+			},
+			want: map[string]any{"result": "from_after"},
+		},
+		{
+			name: "before callback error passed to on tool error callback and passed to after tool called",
+			tool: &mockFunctionTool{
+				name: "testTool",
+				runFunc: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+					t.Error("tool should not be called")
+					return nil, nil
+				},
+			},
+			beforeToolCallbacks: []BeforeToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, errors.New("error_from_before")
+				},
+			},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					if err == nil || err.Error() != "error_from_before" {
+						t.Error("unexpected error in on tool error callback")
+						return nil, errors.New("unexpected error in on tool error callback")
+					}
+					return nil, errors.New("error_from_on_tool_error")
+				},
+			},
+			afterToolCallbacks: []AfterToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+					if err == nil || err.Error() != "error_from_on_tool_error" {
+						return nil, errors.New("unexpected error in after callback")
+					}
+					return nil, errors.New("error_from_after_tool")
+				},
+			},
+			want: map[string]any{"error": "error_from_after_tool"},
+		},
+		{
+			name: "before callback error passed to on tool error callback and passed to after tool called and handled",
+			tool: &mockFunctionTool{
+				name: "testTool",
+				runFunc: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+					t.Error("tool should not be called")
+					return nil, nil
+				},
+			},
+			beforeToolCallbacks: []BeforeToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+					return nil, errors.New("error_from_before")
+				},
+			},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					if err == nil || err.Error() != "error_from_before" {
+						t.Error("unexpected error in on tool error callback")
+						return nil, errors.New("unexpected error in on tool error callback")
+					}
+					return nil, errors.New("error_from_on_tool_error")
+				},
+			},
+			afterToolCallbacks: []AfterToolCallback{
+				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+					if err == nil || err.Error() != "error_from_on_tool_error" {
+						return nil, errors.New("unexpected error in after callback")
+					}
+					return map[string]any{"result": "error_handled_in_on_tool_error_callback"}, nil
+				},
+			},
+			want: map[string]any{"result": "error_handled_in_on_tool_error_callback"},
+		},
 	}
-
-	for _, tc := range tests {
+	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &Flow{
-				BeforeToolCallbacks: tc.beforeToolCallbacks,
-				AfterToolCallbacks:  tc.afterToolCallbacks,
+				BeforeToolCallbacks:  tc.beforeToolCallbacks,
+				AfterToolCallbacks:   tc.afterToolCallbacks,
+				OnToolErrorCallbacks: tc.onToolErrorCallbacks,
 			}
-
-			got := f.callTool(tc.tool, tc.args, nil)
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			got := f.callTool(toolinternal.NewToolContext(ctx, "", nil), tc.tool, tc.args)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
 			}
