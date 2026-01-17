@@ -34,6 +34,7 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
@@ -305,5 +306,172 @@ func TestToolFilter(t *testing.T) {
 
 	if diff := cmp.Diff(wantToolNames, gotToolNames); diff != "" {
 		t.Errorf("tools mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestMetadataProvider(t *testing.T) {
+	var receivedMeta map[string]any
+
+	echoToolFunc := func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, struct{ Message string }, error) {
+		receivedMeta = req.Params.Meta
+		return nil, struct{ Message string }{Message: "ok"}, nil
+	}
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "echo_tool", Description: "echoes input"}, echoToolFunc)
+	_, err := server.Connect(t.Context(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testMetadata := map[string]any{
+		"request_id":  "test-123",
+		"user_id":     "user-456",
+		"nested_data": map[string]any{"key": "value"},
+	}
+	metadataProvider := func(ctx tool.Context) map[string]any {
+		return testMetadata
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport:        clientTransport,
+		MetadataProvider: metadataProvider,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	readonlyCtx := icontext.NewReadonlyContext(invCtx)
+	tools, err := ts.Tools(readonlyCtx)
+	if err != nil {
+		t.Fatalf("Failed to get tools: %v", err)
+	}
+
+	if len(tools) != 1 {
+		t.Fatalf("Expected 1 tool, got %d", len(tools))
+	}
+
+	fnTool, ok := tools[0].(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("Tool does not implement FunctionTool interface")
+	}
+
+	toolCtx := toolinternal.NewToolContext(invCtx, "", nil)
+	result, err := fnTool.Run(toolCtx, map[string]any{})
+	if err != nil {
+		t.Fatalf("Failed to run tool: %v", err)
+	}
+
+	if result == nil {
+		t.Fatal("Expected non-nil result")
+	}
+
+	if diff := cmp.Diff(testMetadata, receivedMeta); diff != "" {
+		t.Errorf("metadata mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestMetadataProviderNil(t *testing.T) {
+	echoToolFunc := func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, struct{ Message string }, error) {
+		if req.Params.Meta != nil {
+			t.Errorf("Expected nil metadata, got %v", req.Params.Meta)
+		}
+		return nil, struct{ Message string }{Message: "ok"}, nil
+	}
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "echo_tool", Description: "echoes input"}, echoToolFunc)
+	_, err := server.Connect(t.Context(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport: clientTransport,
+		// MetadataProvider is nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	readonlyCtx := icontext.NewReadonlyContext(invCtx)
+	tools, err := ts.Tools(readonlyCtx)
+	if err != nil {
+		t.Fatalf("Failed to get tools: %v", err)
+	}
+
+	fnTool, ok := tools[0].(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("Tool does not implement FunctionTool interface")
+	}
+
+	toolCtx := toolinternal.NewToolContext(invCtx, "", nil)
+	_, err = fnTool.Run(toolCtx, map[string]any{})
+	if err != nil {
+		t.Fatalf("Failed to run tool: %v", err)
+	}
+}
+
+func TestMetadataProviderReturnsNil(t *testing.T) {
+	var receivedMeta map[string]any
+	var metaCalled bool
+
+	echoToolFunc := func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, struct{ Message string }, error) {
+		metaCalled = true
+		receivedMeta = req.Params.Meta
+		return nil, struct{ Message string }{Message: "ok"}, nil
+	}
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "echo_tool", Description: "echoes input"}, echoToolFunc)
+	_, err := server.Connect(t.Context(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	metadataProvider := func(ctx tool.Context) map[string]any {
+		return nil
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport:        clientTransport,
+		MetadataProvider: metadataProvider,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	readonlyCtx := icontext.NewReadonlyContext(invCtx)
+	tools, err := ts.Tools(readonlyCtx)
+	if err != nil {
+		t.Fatalf("Failed to get tools: %v", err)
+	}
+
+	fnTool, ok := tools[0].(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("Tool does not implement FunctionTool interface")
+	}
+
+	toolCtx := toolinternal.NewToolContext(invCtx, "", nil)
+	_, err = fnTool.Run(toolCtx, map[string]any{})
+	if err != nil {
+		t.Fatalf("Failed to run tool: %v", err)
+	}
+
+	if !metaCalled {
+		t.Fatal("Tool was not called")
+	}
+
+	if receivedMeta != nil {
+		t.Errorf("Expected nil metadata when provider returns nil, got %v", receivedMeta)
 	}
 }
