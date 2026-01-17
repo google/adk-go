@@ -55,11 +55,14 @@ func New(cfg Config) (tool.Toolset, error) {
 		client = mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, nil)
 	}
 	return &set{
-		client:     client,
-		transport:  cfg.Transport,
-		toolFilter: cfg.ToolFilter,
+		client:          client,
+		transport:       cfg.Transport,
+		toolFilter:      cfg.ToolFilter,
+		toolTransformer: cfg.ToolTransformer,
 	}, nil
 }
+
+type ToolTransformer func(*mcp.Tool) (*mcp.Tool, error)
 
 // Config provides initial configuration for the MCP ToolSet.
 type Config struct {
@@ -72,12 +75,15 @@ type Config struct {
 	// If ToolFilter is nil, then all tools are returned.
 	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.
 	ToolFilter tool.Predicate
+
+	ToolTransformer ToolTransformer
 }
 
 type set struct {
-	client     *mcp.Client
-	transport  mcp.Transport
-	toolFilter tool.Predicate
+	client          *mcp.Client
+	transport       mcp.Transport
+	toolFilter      tool.Predicate
+	toolTransformer ToolTransformer
 
 	mu      sync.Mutex
 	session *mcp.ClientSession
@@ -114,6 +120,13 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 		}
 
 		for _, mcpTool := range resp.Tools {
+			if s.toolTransformer != nil {
+				mcpTool, err = s.toolTransformer(mcpTool)
+				if err != nil {
+					return nil, fmt.Errorf("failed to transform MCP tool %q: %w", mcpTool.Name, err)
+				}
+			}
+
 			t, err := convertTool(mcpTool, s.getSession)
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
