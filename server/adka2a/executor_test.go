@@ -475,14 +475,11 @@ func TestExecutor_Cancel_AfterEvent(t *testing.T) {
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				defer close(channel)
-				select {
-				case <-ctx.Done():
-					yield(nil, ctx.Err())
-				}
+				<-ctx.Done()
+				yield(nil, ctx.Err())
 			}
 		},
 	})
-
 	if err != nil {
 		t.Fatalf("agent.New() error = %v, want nil", err)
 	}
@@ -514,7 +511,8 @@ func TestExecutor_Cancel_AfterEvent(t *testing.T) {
 
 	result, sendErr := client.SendMessage(t.Context(), &a2a.MessageSendParams{
 		Message: &a2a.Message{ID: string(msgId), Parts: []a2a.Part{a2a.TextPart{Text: "TEST"}}, Role: a2a.MessageRoleUser},
-		Config:  &a2a.MessageSendConfig{Blocking: &blocking}})
+		Config:  &a2a.MessageSendConfig{Blocking: &blocking},
+	})
 
 	if sendErr != nil {
 		t.Fatalf("client.SendMessage() error = %v, want nil", sendErr)
