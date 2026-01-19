@@ -169,7 +169,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			}
 			return
 		}
-		
+
 		processEvent := func(aEvent a2a.Event, aErr error) {
 			var err error
 			var event *session.Event

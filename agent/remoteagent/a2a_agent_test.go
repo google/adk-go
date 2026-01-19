@@ -73,23 +73,10 @@ func newA2ARemoteAgent(t *testing.T, name string, server *httptest.Server) agent
 }
 
 func newInvocationContext(t *testing.T, events []*session.Event) agent.InvocationContext {
-	t.Helper()
-	ctx := t.Context()
-	service := session.InMemoryService()
-	resp, err := service.Create(ctx, &session.CreateRequest{AppName: t.Name(), UserID: "test"})
-	if err != nil {
-		t.Fatalf("sessionService.Create() error = %v", err)
-	}
-	for _, event := range events {
-		if err := service.AppendEvent(ctx, resp.Session, event); err != nil {
-			t.Fatalf("sessionService.AppendEvent() error = %v", err)
-		}
-	}
-	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Session: resp.Session})
-	return ic
+	return newInvocationContextWithStreamingMode(t, events, agent.StreamingModeSSE)
 }
 
-func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event, noStreaming bool) agent.InvocationContext {
+func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event, streamingMode agent.StreamingMode) agent.InvocationContext {
 	t.Helper()
 	ctx := t.Context()
 	service := session.InMemoryService()
@@ -101,11 +88,6 @@ func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event
 		if err := service.AppendEvent(ctx, resp.Session, event); err != nil {
 			t.Fatalf("sessionService.AppendEvent() error = %v", err)
 		}
-	}
-
-	streamingMode := agent.StreamingModeSSE
-	if noStreaming {
-		streamingMode = agent.StreamingModeNone
 	}
 
 	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
@@ -383,7 +365,11 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 			executor := newADKEventReplay(t, tc.remoteEvents)
 			remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
 
-			ictx := newInvocationContextWithStreamingMode(t, []*session.Event{newUserHello()}, tc.noStreaming)
+			mode := agent.StreamingModeSSE
+			if tc.noStreaming {
+				mode = agent.StreamingModeNone
+			}
+			ictx := newInvocationContextWithStreamingMode(t, []*session.Event{newUserHello()}, mode)
 			gotEvents, err := runAndCollect(ictx, remoteAgent)
 			if err != nil {
 				t.Fatalf("agent.Run() error = %v", err)
