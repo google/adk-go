@@ -524,20 +524,13 @@ func TestExecutor_Cancel_AfterEvent(t *testing.T) {
 
 	taskID := result.TaskInfo().TaskID
 
-	storedTask, err := client.GetTask(ctx, &a2a.TaskQueryParams{ID: taskID})
-	if err != nil {
-		t.Fatalf("client.GetTask() error = %v, want nil", err)
-	}
-
 	task, err := client.CancelTask(t.Context(), &a2a.TaskIDParams{ID: taskID})
 	if err != nil {
 		t.Fatalf("client.CancelTask() error = %v, want nil", err)
 	}
 
-	storedTask = task
-
-	if storedTask.Status.State != a2a.TaskStateCanceled {
-		t.Fatalf("executor.Cancel() state = %v, want %v", storedTask.Status.State, a2a.TaskStateCanceled)
+	if task.Status.State != a2a.TaskStateCanceled {
+		t.Fatalf("executor.Cancel() state = %v, want %v", task.Status.State, a2a.TaskStateCanceled)
 	}
 
 	// Verify that execution context is closed
