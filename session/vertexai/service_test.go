@@ -938,7 +938,7 @@ func Test_vertexaiService_AppendEvent(t *testing.T) {
 	}
 }
 
-func Test_vertexService_StateManagement(t *testing.T) {
+func Test_vertexaiService_StateManagement(t *testing.T) {
 	ctx := t.Context()
 	appName := EngineId
 

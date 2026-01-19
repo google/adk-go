@@ -17,7 +17,6 @@ package vertexai
 import (
 	"context"
 	"fmt"
-	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,7 +40,6 @@ import (
 const (
 	engineResourceTemplate  = "projects/%s/locations/%s/reasoningEngines/%s"
 	sessionResourceTemplate = engineResourceTemplate + "/sessions/%s"
-	connectionErrorTemplate = "could not establish connection to the aiplatform server: %s"
 )
 
 type vertexAiClient struct {
@@ -54,7 +52,7 @@ type vertexAiClient struct {
 func newVertexAiClient(ctx context.Context, location, projectID, reasoningEngine string, opts ...option.ClientOption) (*vertexAiClient, error) {
 	rpcClient, err := aiplatform.NewSessionClient(ctx, opts...)
 	if err != nil {
-		return nil, fmt.Errorf(connectionErrorTemplate, err.Error())
+		return nil, fmt.Errorf("could not establish connection to the aiplatform server: %w", err)
 	}
 	return &vertexAiClient{location, projectID, reasoningEngine, rpcClient}, nil
 }
@@ -90,7 +88,11 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 		return nil, fmt.Errorf("error creating session: %w", err)
 	}
 
-	createdSession, err := c.waitForOperation(ctx, req.AppName, req.UserID, sessionIDByOperationName(lro.Name()))
+	sessionID, err := sessionIDByOperationName(lro.Name())
+	if err != nil {
+		return nil, fmt.Errorf("error creating session: %w", err)
+	}
+	createdSession, err := c.waitForOperation(ctx, req.AppName, req.UserID, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("LRO for CreateSession failed: %w", err)
 	}
@@ -122,7 +124,6 @@ func (c *vertexAiClient) waitForOperation(ctx context.Context, appName, userId, 
 				if delay > maxDelay {
 					delay = maxDelay
 				}
-				log.Printf("GetOperation failed (attempt %d/%d), retrying in %v: %v\n", i+1, maxRetries, delay, err)
 				time.Sleep(delay)
 				continue
 			}
@@ -185,10 +186,14 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequ
 		if err != nil {
 			return nil, fmt.Errorf("error creating session list: %w", err)
 		}
+		id, err := sessionIdBySessionName(rpcResp.Name)
+		if err != nil {
+			return nil, fmt.Errorf("error creating session list: %w", err)
+		}
 		session := &localSession{
 			appName:   req.AppName,
 			userID:    rpcResp.UserId,
-			sessionID: sessionIdBySessionName(rpcResp.Name),
+			sessionID: id,
 			state:     filterNilValues(rpcResp.SessionState.AsMap()),
 			updatedAt: rpcResp.UpdateTime.AsTime(),
 		}
@@ -302,9 +307,13 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 		}
 
 		content := aiplatformToGenaiContent(rpcResp)
+		id, err := sessionIdBySessionName(rpcResp.Name)
+		if err != nil {
+			return nil, fmt.Errorf("error fetching session events: %w", err)
+		}
 
 		event := &session.Event{
-			ID:           sessionIdBySessionName(rpcResp.Name),
+			ID:           id,
 			Timestamp:    rpcResp.Timestamp.AsTime(),
 			InvocationID: rpcResp.InvocationId,
 			Author:       rpcResp.Author,
@@ -339,19 +348,59 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 	return events, nil
 }
 
-func sessionIdBySessionName(sn string) string {
-	return sn[strings.LastIndex(sn, "/")+1:]
+func sessionIdBySessionName(sn string) (string, error) {
+	idx := strings.LastIndex(sn, "/")
+	if idx == -1 {
+		return "", fmt.Errorf("invalid session name format %q: missing separator '/'", sn)
+	}
+
+	id := sn[idx+1:]
+	if id == "" {
+		return "", fmt.Errorf("invalid session name %q: empty session ID", sn)
+	}
+
+	return id, nil
 }
 
-func sessionIDByOperationName(on string) string {
-	return on[strings.LastIndex(on, "/sessions/")+10 : strings.LastIndex(on, "/operations/")]
+func sessionIDByOperationName(on string) (string, error) {
+	const sessionPrefix = "/sessions/"
+	const opsSuffix = "/operations/"
+
+	idxSession := strings.LastIndex(on, sessionPrefix)
+	if idxSession == -1 {
+		return "", fmt.Errorf("invalid operation name %q: missing %q", on, sessionPrefix)
+	}
+
+	// Calculate where the ID actually begins
+	idStart := idxSession + len(sessionPrefix)
+
+	idxOps := strings.LastIndex(on, opsSuffix)
+	if idxOps == -1 {
+		return "", fmt.Errorf("invalid operation name %q: missing %q", on, opsSuffix)
+	}
+
+	// ensure the start comes before the end
+	// If idStart > idxOps, it means "/operations/" appeared before "/sessions/"
+	// or they overlap in a weird way, which would cause a panic on slicing.
+	if idStart > idxOps {
+		return "", fmt.Errorf("invalid operation name %q: structure malformed or segments out of order", on)
+	}
+
+	id := on[idStart:idxOps]
+	if id == "" {
+		return "", fmt.Errorf("invalid operation name %q: empty session ID", on)
+	}
+
+	return id, nil
 }
 
 func sessionNameByID(id string, c *vertexAiClient, reasoningEngine string) string {
 	return fmt.Sprintf(sessionResourceTemplate, c.projectID, c.location, reasoningEngine, id)
 }
 
-var reasoningEnginePattern = regexp.MustCompile(`^projects/([a-zA-Z0-9-_]+)/locations/([a-zA-Z0-9-_]+)/reasoningEngines/(\d+)$`)
+// (?:...) tells Go "match this, but don't save it in the results array".
+// We keep the (\d+) at the end as a capturing group.
+var reasoningEnginePattern = regexp.MustCompile(`^projects/(?:[a-zA-Z0-9-_]+)/locations/(?:[a-zA-Z0-9-_]+)/reasoningEngines/(\d+)$`)
 
 func (c *vertexAiClient) getReasoningEngineID(appName string) (string, error) {
 	if c.reasoningEngine != "" {
@@ -359,20 +408,21 @@ func (c *vertexAiClient) getReasoningEngineID(appName string) (string, error) {
 	}
 
 	// Check if appName consists only of digits
-	_, err := strconv.Atoi(appName)
-	if err == nil {
+	if _, err := strconv.Atoi(appName); err == nil {
 		return appName, nil
 	}
 
-	// Regex pattern to match the full resource name
+	// Execute the Regex
 	matches := reasoningEnginePattern.FindStringSubmatch(appName)
 
-	if len(matches) == 0 {
-		return "", fmt.Errorf("app name %s is not valid. It should either be the full ReasoningEngine resource name, or the reasoning engine id", appName)
+	// With non-capturing groups, 'matches' will strictly have 2 elements if successful:
+	// matches[0]: The full string (e.g., "projects/my-p/locations/...")
+	// matches[1]: The first capturing group (the ID)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("app name %q is not valid. It should be the full ReasoningEngine resource name or the reasoning engine numeric ID", appName)
 	}
 
-	// The last group is the ID
-	return matches[len(matches)-1], nil
+	return matches[1], nil
 }
 
 func aiplatformToGenaiContent(rpcResp *aiplatformpb.SessionEvent) *genai.Content {
