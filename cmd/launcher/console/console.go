@@ -79,10 +79,11 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 	session := resp.Session
 
 	r, err := runner.New(runner.Config{
-		AppName:         appName,
-		Agent:           rootAgent,
-		SessionService:  sessionService,
-		ArtifactService: config.ArtifactService,
+		AppName:          appName,
+		Agent:            rootAgent,
+		SessionService:   sessionService,
+		ArtifactService:  config.ArtifactService,
+		CompactionConfig: config.CompactionConfig,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create runner: %v", err)
