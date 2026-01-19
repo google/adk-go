@@ -16,8 +16,11 @@ package mcptoolset
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -40,6 +43,12 @@ type connectionRefresher struct {
 
 	mu      sync.Mutex
 	session *mcp.ClientSession
+}
+
+// refreshableErrors is a list of errors that should trigger a connection refresh.
+var refreshableErrors = []error{
+	mcp.ErrConnectionClosed,
+	io.ErrClosedPipe,
 }
 
 // newConnectionRefresher creates a new connectionRefresher with the given client and transport.
@@ -111,21 +120,32 @@ func withRetry[T any](ctx context.Context, c *connectionRefresher, fn func(*mcp.
 
 	result, err := fn(session)
 	if err != nil {
-		// On any error, attempt to refresh the connection.
-		// refreshConnection uses ping to verify if reconnection is actually needed.
-		session, reconnected, refreshErr := c.refreshConnection(ctx)
+		if !shouldRefreshConnection(err) {
+			return zero, false, err
+		}
+		session, refreshErr := c.refreshConnection(ctx)
 		if refreshErr != nil {
 			return zero, false, fmt.Errorf("%w (reconnection also failed: %v)", err, refreshErr)
 		}
-		if !reconnected {
-			// The connection was alive, so the original error was not a connection issue.
-			// Do not retry, just return the original error.
-			return zero, false, err
-		}
 		result, err = fn(session)
-		return result, reconnected, err
+		return result, true, err
 	}
 	return result, false, err
+}
+
+// shouldRefreshConnection returns true if the error indicates we should
+// attempt to refresh the MCP connection.
+func shouldRefreshConnection(err error) bool {
+	for _, target := range refreshableErrors {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	// Temporary workaround for session not found errors.
+	if strings.Contains(err.Error(), "session not found") {
+		return true
+	}
+	return false
 }
 
 func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSession, error) {
@@ -145,15 +165,15 @@ func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSessio
 	return c.session, nil
 }
 
-func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.ClientSession, bool, error) {
+func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.ClientSession, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// First, try ping to confirm connection is dead
+	// Ping to verify the connection is actually dead before reconnecting.
+	// This handles the case where another goroutine already reconnected.
 	if c.session != nil {
 		if err := c.session.Ping(ctx, &mcp.PingParams{}); err == nil {
-			// Connection is actually alive, don't refresh
-			return c.session, false, nil
+			return c.session, nil
 		}
 		if err := c.session.Close(); err != nil {
 			log.Printf("failed to close MCP session: %v", err)
@@ -163,11 +183,11 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 
 	session, err := c.client.Connect(ctx, c.transport, nil)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to refresh MCP session: %w", err)
+		return nil, fmt.Errorf("failed to refresh MCP session: %w", err)
 	}
 
 	c.session = session
-	return c.session, true, nil
+	return c.session, nil
 }
 
 var _ MCPClient = (*connectionRefresher)(nil)
