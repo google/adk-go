@@ -511,10 +511,8 @@ func TestExecutor_Cancel_AfterEvent(t *testing.T) {
 
 	msgId := a2a.NewMessageID()
 	blocking := false
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-	defer cancel()
 
-	result, sendErr := client.SendMessage(ctx, &a2a.MessageSendParams{
+	result, sendErr := client.SendMessage(t.Context(), &a2a.MessageSendParams{
 		Message: &a2a.Message{ID: string(msgId), Parts: []a2a.Part{a2a.TextPart{Text: "TEST"}}, Role: a2a.MessageRoleUser},
 		Config:  &a2a.MessageSendConfig{Blocking: &blocking}})
 
