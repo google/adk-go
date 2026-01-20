@@ -24,7 +24,7 @@ import (
 	"time"
 )
 
-const copyrightHeaderTmpl = `// Copyright %s Google LLC
+const copyrightHeaderTmpl = `// Copyright %d Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -106,7 +106,7 @@ func addCopyrightHeader(path string) error {
 	if err != nil {
 		return err
 	}
-	currentYearHeader := fmt.Sprintf(copyrightHeaderTmpl, fmt.Sprintf("%d", time.Now().UTC().Year()))
+	currentYearHeader := fmt.Sprintf(copyrightHeaderTmpl, time.Now().UTC().Year())
 	newContent := []byte(currentYearHeader)
 	newContent = append(newContent, content...)
 	return os.WriteFile(path, newContent, 0o644)
