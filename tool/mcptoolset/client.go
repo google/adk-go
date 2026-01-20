@@ -141,7 +141,7 @@ func shouldRefreshConnection(err error) bool {
 			return true
 		}
 	}
-	// Temporary workaround for session not found errors.
+	// TODO: replace with mcp.ErrSessionMissing when it's available https://github.com/modelcontextprotocol/go-sdk/issues/715
 	if strings.Contains(err.Error(), "session not found") {
 		return true
 	}
