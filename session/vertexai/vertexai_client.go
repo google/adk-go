@@ -433,6 +433,8 @@ func aiplatformToGenaiContent(rpcResp *aiplatformpb.SessionEvent) *genai.Content
 		role := rpcResp.Content.Role
 		for _, respPart := range rpcResp.Content.Parts {
 			part := &genai.Part{}
+			part.Thought = respPart.Thought
+			part.ThoughtSignature = respPart.ThoughtSignature
 			switch v := respPart.Data.(type) {
 			case *aiplatformpb.Part_Text:
 				part.Text = v.Text
@@ -471,6 +473,8 @@ func createAiplatformpbContent(event *session.Event) (*aiplatformpb.Content, err
 		parts := make([]*aiplatformpb.Part, 0)
 		for _, part := range event.Content.Parts {
 			aiplatformPart := &aiplatformpb.Part{}
+			aiplatformPart.Thought = part.Thought
+			aiplatformPart.ThoughtSignature = part.ThoughtSignature
 			if part.Text != "" {
 				aiplatformPart.Data = &aiplatformpb.Part_Text{Text: part.Text}
 			}
