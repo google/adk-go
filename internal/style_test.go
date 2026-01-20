@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const copyrightHeaderTmpl = `// Copyright %s Google LLC
@@ -37,6 +38,8 @@ const copyrightHeaderTmpl = `// Copyright %s Google LLC
 // See the License for the specific language governing permissions and
 // limitations under the License.
 `
+
+const validStartYear = 2025
 
 var fixError = flag.Bool("fix", false, "fix detected problems (e.g. add missing copyright headers)")
 
@@ -87,9 +90,8 @@ func hasCopyrightHeader(path string) (bool, error) {
 		return false, err
 	}
 	contentStr := string(content)
-	validYears := []string{"2025", "2026"}
-
-	for _, year := range validYears {
+	currentYear := time.Now().UTC().Year()
+	for year := validStartYear; year <= currentYear; year++ {
 		expectedHeader := fmt.Sprintf(copyrightHeaderTmpl, year)
 		if strings.HasPrefix(contentStr, expectedHeader) {
 			return true, nil
@@ -104,7 +106,7 @@ func addCopyrightHeader(path string) error {
 	if err != nil {
 		return err
 	}
-	currentYearHeader := fmt.Sprintf(copyrightHeaderTmpl, "2026")
+	currentYearHeader := fmt.Sprintf(copyrightHeaderTmpl, fmt.Sprintf("%d", time.Now().UTC().Year()))
 	newContent := []byte(currentYearHeader)
 	newContent = append(newContent, content...)
 	return os.WriteFile(path, newContent, 0o644)
