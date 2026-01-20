@@ -210,7 +210,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 func newMessage(ctx agent.InvocationContext) (*a2a.Message, error) {
 	events := ctx.Session().Events()
 	if userFnCall := getUserFunctionCallAt(events, events.Len()-1); userFnCall != nil {
-		event := userFnCall.event
+		event := userFnCall.response
 		parts, err := adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
 		if err != nil {
 			return nil, fmt.Errorf("event part conversion failed: %w", err)

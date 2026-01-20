@@ -27,7 +27,7 @@ import (
 )
 
 type userFunctionCall struct {
-	event     *session.Event
+	response  *session.Event
 	taskID    a2a.TaskID
 	contextID string
 }
@@ -51,7 +51,7 @@ func getUserFunctionCallAt(events session.Events, index int) *userFunctionCall {
 		if !isFunctionCallEvent(event, fnCallID) {
 			continue
 		}
-		result := &userFunctionCall{event: candidate}
+		result := &userFunctionCall{response: candidate}
 		tid, ctxID := adka2a.GetA2ATaskInfo(event)
 		result.taskID = tid
 		result.contextID = ctxID
