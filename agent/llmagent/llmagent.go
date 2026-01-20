@@ -67,6 +67,7 @@ func New(cfg Config) (agent.Agent, error) {
 			GenerateContentConfig:    cfg.GenerateContentConfig,
 			Tools:                    cfg.Tools,
 			Toolsets:                 cfg.Toolsets,
+			Filter:                   cfg.Filter,
 			DisallowTransferToParent: cfg.DisallowTransferToParent,
 			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
 			InputSchema:              cfg.InputSchema,
@@ -236,6 +237,9 @@ type Config struct {
 	// Toolsets will be used by llmagent to extract tools and pass to the
 	// underlying LLM.
 	Toolsets []tool.Toolset
+
+	// Filter will be used by llmagent to filter tools that will not be used by this specific agent
+	Filter map[string]bool
 
 	// OutputKey is an optional parameter to specify the key in session state for the agent output.
 	//

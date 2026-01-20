@@ -936,6 +936,66 @@ func TestAgentTransfer(t *testing.T) {
 	//   - test_auto_to_loop
 }
 
+func TestToolFiltering(t *testing.T) {
+	model := newGeminiModel(t, modelName, nil)
+
+	type Args struct {
+		Int1 int `json:"int1"`
+		Int2 int `json:"int2"`
+	}
+	type Result struct {
+		Sum int `json:"sum"`
+	}
+
+	prompt := "what tools do you have?"
+	handlerCalled := false
+	handler := func(_ tool.Context, input Args) (Result, error) {
+		handlerCalled = true
+		return Result{Sum: input.Int1 + input.Int2}, nil
+	}
+
+	sumTool, _ := functiontool.New(functiontool.Config{
+		Name:        "sum",
+		Description: "Adds 2 numbers together",
+	}, handler)
+
+	agent, err := llmagent.New(llmagent.Config{
+		Name:        "agent",
+		Description: "math agent",
+		Model:       model,
+		Instruction: "only use the tools provided to output results",
+		// TODO(hakim): set to false when autoflow is implemented.
+		DisallowTransferToParent: true,
+		DisallowTransferToPeers:  true,
+		Tools:                    []tool.Tool{sumTool},
+		// The Filter's map values are ignored, but it has to be boolean.
+		Filter: map[string]bool{sumTool.Name(): true},
+	})
+	if err != nil {
+		t.Fatalf("failed to create LLM Agent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, agent)
+	stream := runner.Run(t, "session1", prompt)
+
+	ans, err := testutil.CollectTextParts(stream)
+	if err != nil {
+		t.Fatalf("failed to collect response: %v", err)
+	}
+
+	// Assert the handler was NOT called
+	if handlerCalled {
+		t.Fatalf("tool handler should NOT be called when filtered")
+	}
+
+	// Assert the LLM returned a normal text response
+	if len(ans) == 0 {
+		t.Fatalf("expected a text response, got nothing")
+	}
+
+	t.Logf("The agent returned: %v", ans)
+}
+
 func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper) model.LLM {
 	apiKey := "fakeKey"
 	if transport == nil { // use httprr

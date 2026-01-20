@@ -216,6 +216,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 
 func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) error {
 	llmAgent, ok := ctx.Agent().(Agent)
+
 	if !ok {
 		return fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name())
 	}
@@ -227,18 +228,47 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) er
 		}
 	}
 
-	// run processors for tools.
-	tools := Reveal(llmAgent).Tools
+	// TODO(cs168898): Add a dynamic filter where it can filter based on per request (for ratelimiting).
+	filter := Reveal(llmAgent).Filter
+	hasFilter := len(filter) > 0
+
+	// run processors for tools and filter
+	allTools := []tool.Tool{}
+	baseTools := Reveal(llmAgent).Tools
+
+	// Collect all the tools
+	allTools = append(allTools, baseTools...)
+
 	for _, toolSet := range Reveal(llmAgent).Toolsets {
+
 		tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
 		if err != nil {
 			return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
 		}
 
-		tools = append(tools, tsTools...)
+		allTools = append(allTools, tsTools...)
 	}
 
-	return toolPreprocess(ctx, req, tools)
+	// Check if filter is empty
+	if !hasFilter {
+		return toolPreprocess(ctx, req, allTools)
+	}
+
+	filteredTools := filterTools(filter, allTools)
+
+	return toolPreprocess(ctx, req, filteredTools)
+}
+
+func filterTools(filter map[string]bool, allTools []tool.Tool) []tool.Tool {
+	filteredTools := make([]tool.Tool, 0, len(allTools))
+	for _, tool := range allTools {
+		// we create a denylist which means we only add those that are NOT found in the filter
+		if _, found := filter[tool.Name()]; !found {
+			filteredTools = append(filteredTools, tool)
+		}
+	}
+
+	return filteredTools
 }
 
 // toolPreprocess runs tool preprocess on the given request
@@ -377,7 +407,6 @@ func findLongRunningFunctionCallIDs(c *genai.Content, tools map[string]tool.Tool
 
 // handleFunctionCalls calls the functions and returns the function response event.
 //
-// TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
 func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse) (*session.Event, error) {
 	var fnResponseEvents []*session.Event

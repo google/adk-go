@@ -1,0 +1,56 @@
+httprr trace v1
+432 1173
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 200
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"what tools do you have?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"only use the tools provided to output results"}],"role":"user"}}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+Content-Type: application/json; charset=UTF-8
+Date: Tue, 02 Dec 2025 09:13:17 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1085
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I have access to the following tools:\n\n*   **Calculator:** I can perform calculations.\n*   **Web Browser:** I can access and retrieve information from the internet.\n"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "avgLogprobs": -0.10833433512094859
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 14,
+    "candidatesTokenCount": 37,
+    "totalTokenCount": 51,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 14
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 37
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.0-flash",
+  "responseId": "rK0uafnEFcaM4-EPt-m4qQw"
+}
