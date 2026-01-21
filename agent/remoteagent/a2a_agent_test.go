@@ -58,12 +58,20 @@ func (e *mockA2AExecutor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestCont
 	return fmt.Errorf("not implemented")
 }
 
-func startA2AServer(agentExecutor a2asrv.AgentExecutor) *httptest.Server {
-	requestHandler := a2asrv.NewHandler(agentExecutor)
-	return httptest.NewServer(a2asrv.NewJSONRPCHandler(requestHandler))
+type testA2AServer struct {
+	*httptest.Server
+	handler a2asrv.RequestHandler
 }
 
-func newA2ARemoteAgent(t *testing.T, name string, server *httptest.Server) agent.Agent {
+func startA2AServer(agentExecutor a2asrv.AgentExecutor) *testA2AServer {
+	requestHandler := a2asrv.NewHandler(agentExecutor)
+	return &testA2AServer{
+		Server:  httptest.NewServer(a2asrv.NewJSONRPCHandler(requestHandler)),
+		handler: requestHandler,
+	}
+}
+
+func newA2ARemoteAgent(t *testing.T, name string, server *testA2AServer) agent.Agent {
 	t.Helper()
 	card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolJSONRPC, URL: server.URL, Capabilities: a2a.AgentCapabilities{Streaming: true}}
 	agent, err := NewA2A(A2AConfig{Name: name, AgentCard: card})
@@ -293,12 +301,12 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{Content: genai.NewContentFromText("Hello! I'll need your approval first:", genai.RoleModel)},
 				{Content: genai.NewContentFromParts(
 					[]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "create_ticket", ID: "abc-123"}}}, genai.RoleModel,
-				)},
+				), Partial: true},
 				{Content: genai.NewContentFromParts(
 					[]*genai.Part{{FunctionResponse: &genai.FunctionResponse{
 						Name: "create_ticket", ID: "abc-123", Response: map[string]any{"ticket_id": "123"},
 					}}}, genai.RoleModel,
-				)},
+				), Partial: true},
 				{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel), Partial: true},
 				// Only partial responses aggregated after the previous flush are included in the terminal event.
 				{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel)},

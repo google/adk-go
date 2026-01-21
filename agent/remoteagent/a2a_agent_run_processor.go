@@ -16,7 +16,6 @@ package remoteagent
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/genai"
@@ -34,8 +33,8 @@ type a2aAgentRunProcessor struct {
 	request *a2a.MessageSendParams
 
 	// partial event contents emitted before the terminal event
-	aggregatedText     []string
-	aggregatedThoughts []string
+	aggregatedText     string
+	aggregatedThoughts string
 	longRunningToolIDs []string
 }
 
@@ -48,27 +47,33 @@ func newRunProcessor(config A2AConfig, request *a2a.MessageSendParams) *a2aAgent
 func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, event *session.Event) *session.Event {
 	// Partial events are not stored in SessionStore, so we need to aggregate contents and emit them with the terminal event.
 	if event.Partial {
+		updatedAggregatedBlock := false
 		for _, part := range event.Content.Parts {
 			if part.Text == "" {
 				continue
 			}
 			if part.Thought {
-				p.aggregatedThoughts = append(p.aggregatedThoughts, part.Text)
+				p.aggregatedThoughts += part.Text
 			} else {
-				p.aggregatedText = append(p.aggregatedText, part.Text)
+				p.aggregatedText += part.Text
 			}
+			updatedAggregatedBlock = true
 		}
-		return nil
+		// do not return if event did not contain any text parts
+		// emit the aggregation as a single logical text block
+		if updatedAggregatedBlock {
+			return nil
+		}
 	}
 
 	parts := []*genai.Part{}
-	if len(p.aggregatedThoughts) != 0 {
-		parts = append(parts, &genai.Part{Thought: true, Text: strings.Join(p.aggregatedThoughts, "\n")})
-		p.aggregatedThoughts = nil
+	if p.aggregatedThoughts != "" {
+		parts = append(parts, &genai.Part{Thought: true, Text: p.aggregatedThoughts})
+		p.aggregatedThoughts = ""
 	}
-	if len(p.aggregatedText) != 0 {
-		parts = append(parts, &genai.Part{Text: strings.Join(p.aggregatedText, "\n")})
-		p.aggregatedText = nil
+	if p.aggregatedText != "" {
+		parts = append(parts, &genai.Part{Text: p.aggregatedText})
+		p.aggregatedText = ""
 	}
 	if len(parts) == 0 {
 		return nil
