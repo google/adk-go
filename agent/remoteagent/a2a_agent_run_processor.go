@@ -16,7 +16,7 @@ package remoteagent
 
 import (
 	"fmt"
-	"slices"
+	"strings"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/genai"
@@ -34,8 +34,8 @@ type a2aAgentRunProcessor struct {
 	request *a2a.MessageSendParams
 
 	// partial event contents emitted before the terminal event
-	aggregatedText     string
-	aggregatedThoughts string
+	aggregatedText     []string
+	aggregatedThoughts []string
 	longRunningToolIDs []string
 }
 
@@ -46,29 +46,29 @@ func newRunProcessor(config A2AConfig, request *a2a.MessageSendParams) *a2aAgent
 // aggregatePartial stores contents of partial events to emit them with the terminal event.
 // It can modify the original event or return a new event to emit before the provided event.
 func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, event *session.Event) *session.Event {
-	// Make sure long-running tool responses are stored in the SessionStore.
-	p.handleLongRunningTools(event)
-
 	// Partial events are not stored in SessionStore, so we need to aggregate contents and emit them with the terminal event.
 	if event.Partial {
 		for _, part := range event.Content.Parts {
+			if part.Text == "" {
+				continue
+			}
 			if part.Thought {
-				p.aggregatedThoughts += part.Text
+				p.aggregatedThoughts = append(p.aggregatedThoughts, part.Text)
 			} else {
-				p.aggregatedText += part.Text
+				p.aggregatedText = append(p.aggregatedText, part.Text)
 			}
 		}
 		return nil
 	}
 
 	parts := []*genai.Part{}
-	if p.aggregatedThoughts != "" {
-		parts = append(parts, &genai.Part{Thought: true, Text: p.aggregatedThoughts})
-		p.aggregatedThoughts = ""
+	if len(p.aggregatedThoughts) != 0 {
+		parts = append(parts, &genai.Part{Thought: true, Text: strings.Join(p.aggregatedThoughts, "\n")})
+		p.aggregatedThoughts = nil
 	}
-	if p.aggregatedText != "" {
-		parts = append(parts, &genai.Part{Text: p.aggregatedText})
-		p.aggregatedText = ""
+	if len(p.aggregatedText) != 0 {
+		parts = append(parts, &genai.Part{Text: strings.Join(p.aggregatedText, "\n")})
+		p.aggregatedText = nil
 	}
 	if len(parts) == 0 {
 		return nil
@@ -86,25 +86,6 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, eve
 	p.updateCustomMetadata(aggregatedEvent, nil)
 	aggregatedEvent.CustomMetadata[adka2a.ToADKMetaKey("aggregated")] = true
 	return aggregatedEvent
-}
-
-// handleLongRunningTools makes sure long-running tool calls and responses are not marked as Partial, as this
-// would prevent them from being stored in the SessionStore.
-func (p *a2aAgentRunProcessor) handleLongRunningTools(event *session.Event) {
-	if !event.Partial || event.Content == nil {
-		return
-	}
-	if len(event.LongRunningToolIDs) > 0 {
-		p.longRunningToolIDs = append(p.longRunningToolIDs, event.LongRunningToolIDs...)
-		event.Partial = false
-		return
-	}
-	for _, part := range event.Content.Parts {
-		if part.FunctionResponse != nil && slices.Contains(p.longRunningToolIDs, part.FunctionResponse.ID) {
-			event.Partial = false
-			return
-		}
-	}
 }
 
 // convertToSessionEvent converts A2A client SendStreamingMessage result to a session event. Returns nil if nothing should be emitted.
