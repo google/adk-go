@@ -110,7 +110,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create MCP tool set: %v", err)
 	}
-	defer mcpToolSet.Close()
+	defer func() {
+		if err := mcpToolSet.Close(); err != nil {
+			log.Printf("Failed to close MCP tool set: %v", err)
+		}
+	}()
 
 	// Create LLMAgent with MCP tool set
 	a, err := llmagent.New(llmagent.Config{
