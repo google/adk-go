@@ -294,12 +294,10 @@ type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]a
 // AfterToolCallback is a function type executed after a tool's Run method has completed,
 // regardless of whether the tool returned a result or an error.
 //
-// Parameters:
-//   - ctx:    The tool.Context for the tool execution.
-//   - tool:   The tool.Tool instance that was executed.
-//   - args:   The arguments originally passed to the tool.
-//   - result: The result returned by the tool's Run method.
-//   - err:    The error returned by the tool's Run method.
+// Callbacks are executed in the order they are provided.
+// If a callback returns a non-nil result or an error:
+//   - execution of remaining callbacks stops
+//   - the returned result and/or error is used as the final tool output
 type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
 // OnToolErrorCallback that is called when receiving an error response from tool execution.
