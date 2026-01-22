@@ -506,14 +506,6 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	toolNames := slices.Collect(maps.Keys(toolsDict))
 	var result map[string]any
 	for _, fnCall := range fnCalls {
-		curTool, ok := toolsDict[fnCall.Name]
-		if !ok {
-			return nil, fmt.Errorf("unknown tool: %q", fnCall.Name)
-		}
-		funcTool, ok := curTool.(toolinternal.FunctionTool)
-		if !ok {
-			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
-		}
 		var confirmation *toolconfirmation.ToolConfirmation
 		if toolConfirmations != nil {
 			confirmation = toolConfirmations[fnCall.ID]
