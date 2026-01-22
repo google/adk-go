@@ -16,9 +16,7 @@
 package mcptoolset
 
 import (
-	"context"
 	"fmt"
-	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -55,9 +53,11 @@ func New(cfg Config) (tool.Toolset, error) {
 		client = mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, nil)
 	}
 	return &set{
-		client:     client,
-		transport:  cfg.Transport,
-		toolFilter: cfg.ToolFilter,
+		client:         client,
+		transport:      cfg.Transport,
+		toolFilter:     cfg.ToolFilter,
+		headerProvider: cfg.HeaderProvider,
+		sessionManager: newSessionManager(client, cfg.Transport),
 	}, nil
 }
 
@@ -72,15 +72,19 @@ type Config struct {
 	// If ToolFilter is nil, then all tools are returned.
 	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.
 	ToolFilter tool.Predicate
+	// HeaderProvider provides per-request HTTP headers. Headers are part of the session
+	// pooling key, so prefer stable values (user/session IDs, tenant) over volatile ones
+	// (trace IDs, timestamps) or you will create a new session for every call.
+	HeaderProvider func(agent.ReadonlyContext) map[string]string
 }
 
 type set struct {
-	client     *mcp.Client
-	transport  mcp.Transport
-	toolFilter tool.Predicate
+	client         *mcp.Client
+	transport      mcp.Transport
+	toolFilter     tool.Predicate
+	headerProvider func(agent.ReadonlyContext) map[string]string
 
-	mu      sync.Mutex
-	session *mcp.ClientSession
+	sessionManager *sessionManager
 }
 
 func (*set) Name() string {
@@ -135,19 +139,12 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	return adkTools, nil
 }
 
-func (s *set) getSession(ctx context.Context) (*mcp.ClientSession, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *set) getSession(ctx agent.ReadonlyContext) (*mcp.ClientSession, error) {
+	var headers map[string]string
 
-	if s.session != nil {
-		return s.session, nil
+	if s.headerProvider != nil {
+		headers = s.headerProvider(ctx)
 	}
 
-	session, err := s.client.Connect(ctx, s.transport, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to init MCP session: %w", err)
-	}
-
-	s.session = session
-	return s.session, nil
+	return s.sessionManager.GetSession(ctx, headers)
 }

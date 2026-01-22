@@ -36,8 +36,8 @@ import (
 	"google.golang.org/adk/tool/mcptoolset"
 )
 
-// This example demonstrates 2 ways to use MCP tools with ADK:
-// To select between two, set AGENT_MODE="local" or "github" ("local" is default).
+// This example demonstrates 3 ways to use MCP tools with ADK:
+// To select between them, set AGENT_MODE="local", "github", or "custom-headers" ("local" is default).
 //
 // 1. in-memory MCP server:
 //   - define golang function (in this case -- GetWeather)
@@ -46,6 +46,12 @@ import (
 // 2. GitHub's remote MCP server (https://github.com/github/github-mcp-server):
 //   - create http.Client with authenticated transport. In this case it's oauth2 transport with GitHub personal access token.
 //   - use `export GITHUB_PAT=...` to set GitHub personal access token.
+//
+// 3. MCP server with custom headers using HeaderProvider:
+//   - demonstrates how HeaderProvider injects context-aware headers for a real HTTP transport
+//   - uses the same GitHub MCP endpoint but leaves HTTPClient nil for brevity
+//   - headers are generated per tool call (e.g., auth token + user/session IDs)
+//   - use `export GITHUB_PAT=...` and optionally `CUSTOM_API_KEY=...`
 
 type Input struct {
 	City string `json:"city" jsonschema:"city name"`
@@ -97,16 +103,44 @@ func main() {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
-	var transport mcp.Transport
-	if strings.ToLower(os.Getenv("AGENT_MODE")) == "github" {
-		transport = githubMCPTransport(ctx)
-	} else {
-		transport = localMCPTransport(ctx)
+	var mcpToolSet tool.Toolset
+	agentMode := strings.ToLower(os.Getenv("AGENT_MODE"))
+	if agentMode == "" {
+		agentMode = "local"
 	}
 
-	mcpToolSet, err := mcptoolset.New(mcptoolset.Config{
-		Transport: transport,
-	})
+	switch agentMode {
+	case "github":
+		mcpToolSet, err = mcptoolset.New(mcptoolset.Config{
+			Transport: githubMCPTransport(ctx),
+		})
+	case "custom-headers":
+		headerProvider := func(ctx agent.ReadonlyContext) map[string]string {
+			headers := make(map[string]string)
+
+			if pat := os.Getenv("GITHUB_PAT"); pat != "" {
+				headers["Authorization"] = "Bearer " + pat
+			}
+
+			if userID := ctx.UserID(); userID != "" {
+				headers["X-User-ID"] = userID
+			}
+
+			return headers
+		}
+
+		mcpToolSet, err = mcptoolset.New(mcptoolset.Config{
+			Transport: &mcp.StreamableClientTransport{
+				Endpoint: "https://api.githubcopilot.com/mcp/",
+			},
+			HeaderProvider: headerProvider,
+		})
+	default:
+		mcpToolSet, err = mcptoolset.New(mcptoolset.Config{
+			Transport: localMCPTransport(ctx),
+		})
+	}
+
 	if err != nil {
 		log.Fatalf("Failed to create MCP tool set: %v", err)
 	}

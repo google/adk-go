@@ -15,7 +15,6 @@
 package mcptoolset
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,13 +22,14 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
 
-type getSessionFunc func(ctx context.Context) (*mcp.ClientSession, error)
+type getSessionFunc func(ctx agent.ReadonlyContext) (*mcp.ClientSession, error)
 
 func convertTool(t *mcp.Tool, getSessionFunc getSessionFunc) (tool.Tool, error) {
 	mcp := &mcpTool{
