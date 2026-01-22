@@ -83,6 +83,7 @@ func TestMCPToolSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create MCP tool set: %v", err)
 	}
+	defer ts.Close()
 
 	agent, err := llmagent.New(llmagent.Config{
 		Name:        "weather_time_agent",
@@ -287,6 +288,7 @@ func TestToolFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create MCP tool set: %v", err)
 	}
+	defer ts.Close()
 
 	tools, err := ts.Tools(icontext.NewReadonlyContext(
 		icontext.NewInvocationContext(
@@ -322,6 +324,7 @@ func TestListToolsReconnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create MCP tool set: %v", err)
 	}
+	defer ts.Close()
 
 	ctx := icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}))
 
@@ -361,6 +364,7 @@ func TestCallToolReconnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create MCP tool set: %v", err)
 	}
+	defer ts.Close()
 
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	ctx := icontext.NewReadonlyContext(invCtx)
