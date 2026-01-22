@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -200,7 +200,9 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 func decodeRequestBody(req *http.Request) (decodedReq models.RunAgentRequest, err error) {
 	var runAgentRequest models.RunAgentRequest
 	defer func() {
-		err = req.Body.Close()
+		if cerr := req.Body.Close(); err == nil && cerr != nil {
+			err = cerr
+		}
 	}()
 	d := json.NewDecoder(req.Body)
 	d.DisallowUnknownFields()
