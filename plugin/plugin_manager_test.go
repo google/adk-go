@@ -341,7 +341,7 @@ func TestCallTool(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(fmt.Sprintf("%s_plugin", tc.name), func(t *testing.T) {
 			maxLen := max(len(tc.beforeToolCallbacks), len(tc.afterToolCallbacks), len(tc.onToolErrorCallbacks))
-			var plugins []plugin.Plugin
+			var plugins []*plugin.Plugin
 			for i := range maxLen {
 				var currentBefore llmagent.BeforeToolCallback
 				var currentAfter llmagent.AfterToolCallback
@@ -366,7 +366,7 @@ func TestCallTool(t *testing.T) {
 				if err != nil {
 					t.Errorf("failed to initialize plugin: %v", err)
 				}
-				plugins = append(plugins, *p)
+				plugins = append(plugins, p)
 			}
 
 			model := &testutil.MockModel{
@@ -775,7 +775,7 @@ func TestModelCallbacks(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			maxLen := max(len(tc.beforeModelCallbacks), len(tc.afterModelCallbacks), len(tc.onModelErrorCallback))
-			var plugins []plugin.Plugin
+			var plugins []*plugin.Plugin
 			for i := range maxLen {
 				var currentBefore llmagent.BeforeModelCallback
 				var currentAfter llmagent.AfterModelCallback
@@ -800,7 +800,7 @@ func TestModelCallbacks(t *testing.T) {
 				if err != nil {
 					t.Errorf("failed to initialize plugin: %v", err)
 				}
-				plugins = append(plugins, *p)
+				plugins = append(plugins, p)
 			}
 
 			onModelErrorCallbacksCalled := false

@@ -83,6 +83,9 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 		Agent:           rootAgent,
 		SessionService:  sessionService,
 		ArtifactService: config.ArtifactService,
+		PluginConfig: runner.PluginConfig{
+			Plugins: config.Plugins,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create runner: %v", err)
