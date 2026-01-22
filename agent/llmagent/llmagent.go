@@ -42,6 +42,11 @@ func New(cfg Config) (agent.Agent, error) {
 		afterModelCallbacks = append(afterModelCallbacks, llminternal.AfterModelCallback(c))
 	}
 
+	onModelErrorCallbacks := make([]llminternal.OnModelErrorCallback, 0, len(cfg.OnModelErrorCallbacks))
+	for _, c := range cfg.OnModelErrorCallbacks {
+		onModelErrorCallbacks = append(onModelErrorCallbacks, llminternal.OnModelErrorCallback(c))
+	}
+
 	beforeToolCallbacks := make([]llminternal.BeforeToolCallback, 0, len(cfg.BeforeToolCallbacks))
 	for _, c := range cfg.BeforeToolCallbacks {
 		beforeToolCallbacks = append(beforeToolCallbacks, llminternal.BeforeToolCallback(c))
@@ -52,15 +57,22 @@ func New(cfg Config) (agent.Agent, error) {
 		afterToolCallbacks = append(afterToolCallbacks, llminternal.AfterToolCallback(c))
 	}
 
+	onToolErrorCallback := make([]llminternal.OnToolErrorCallback, 0, len(cfg.OnToolErrorCallbacks))
+	for _, c := range cfg.OnToolErrorCallbacks {
+		onToolErrorCallback = append(onToolErrorCallback, llminternal.OnToolErrorCallback(c))
+	}
+
 	a := &llmAgent{
-		beforeModelCallbacks: beforeModelCallbacks,
-		model:                cfg.Model,
-		afterModelCallbacks:  afterModelCallbacks,
-		beforeToolCallbacks:  beforeToolCallbacks,
-		afterToolCallbacks:   afterToolCallbacks,
-		instruction:          cfg.Instruction,
-		inputSchema:          cfg.InputSchema,
-		outputSchema:         cfg.OutputSchema,
+		model:                 cfg.Model,
+		beforeModelCallbacks:  beforeModelCallbacks,
+		afterModelCallbacks:   afterModelCallbacks,
+		onModelErrorCallbacks: onModelErrorCallbacks,
+		beforeToolCallbacks:   beforeToolCallbacks,
+		afterToolCallbacks:    afterToolCallbacks,
+		onToolErrorCallbacks:  onToolErrorCallback,
+		instruction:           cfg.Instruction,
+		inputSchema:           cfg.InputSchema,
+		outputSchema:          cfg.OutputSchema,
 
 		State: llminternal.State{
 			Model:                    cfg.Model,
@@ -158,6 +170,8 @@ type Config struct {
 	// usage, or perform post-processing on the raw `LLMResponse`.
 	AfterModelCallbacks []AfterModelCallback
 
+	OnModelErrorCallbacks []OnModelErrorCallback
+
 	// Instruction is set for the LLM model guiding the agent's behavior.
 	//
 	// The string is treated as a template:
@@ -237,6 +251,8 @@ type Config struct {
 	// underlying LLM.
 	Toolsets []tool.Toolset
 
+	OnToolErrorCallbacks []OnToolErrorCallback
+
 	// OutputKey is an optional parameter to specify the key in session state for the agent output.
 	//
 	// Typical uses cases are:
@@ -257,6 +273,12 @@ type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRe
 // is replaced with the returned response/error.
 type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
+// OnModelErrorCallback that is called when receiving an error response from the llm model.
+//
+// If it returns non-nil LLMResponse or error, the actual model response/error
+// is replaced with the returned response/error.
+type OnModelErrorCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+
 // BeforeToolCallback is a function type executed before a tool's Run method is invoked.
 //
 // Parameters:
@@ -276,6 +298,12 @@ type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]a
 //   - err:    The error returned by the tool's Run method.
 type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
+// OnToolErrorCallback that is called when receiving an error response from tool execution.
+//
+// If it returns non-nil LLMResponse or error, the actual model response/error
+// is replaced with the returned response/error.
+type OnToolErrorCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
+
 // IncludeContents controls what parts of prior conversation history is received by llmagent.
 type IncludeContents string
 
@@ -291,13 +319,15 @@ type llmAgent struct {
 	llminternal.State
 	agentState
 
-	beforeModelCallbacks []llminternal.BeforeModelCallback
-	model                model.LLM
-	afterModelCallbacks  []llminternal.AfterModelCallback
-	instruction          string
+	beforeModelCallbacks  []llminternal.BeforeModelCallback
+	model                 model.LLM
+	afterModelCallbacks   []llminternal.AfterModelCallback
+	instruction           string
+	onModelErrorCallbacks []llminternal.OnModelErrorCallback
 
-	beforeToolCallbacks []llminternal.BeforeToolCallback
-	afterToolCallbacks  []llminternal.AfterToolCallback
+	beforeToolCallbacks  []llminternal.BeforeToolCallback
+	afterToolCallbacks   []llminternal.AfterToolCallback
+	onToolErrorCallbacks []llminternal.OnToolErrorCallback
 
 	inputSchema  *genai.Schema
 	outputSchema *genai.Schema
@@ -318,13 +348,15 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 	})
 
 	f := &llminternal.Flow{
-		Model:                a.model,
-		RequestProcessors:    llminternal.DefaultRequestProcessors,
-		ResponseProcessors:   llminternal.DefaultResponseProcessors,
-		BeforeModelCallbacks: a.beforeModelCallbacks,
-		AfterModelCallbacks:  a.afterModelCallbacks,
-		BeforeToolCallbacks:  a.beforeToolCallbacks,
-		AfterToolCallbacks:   a.afterToolCallbacks,
+		Model:                 a.model,
+		RequestProcessors:     llminternal.DefaultRequestProcessors,
+		ResponseProcessors:    llminternal.DefaultResponseProcessors,
+		BeforeModelCallbacks:  a.beforeModelCallbacks,
+		AfterModelCallbacks:   a.afterModelCallbacks,
+		OnModelErrorCallbacks: a.onModelErrorCallbacks,
+		BeforeToolCallbacks:   a.beforeToolCallbacks,
+		AfterToolCallbacks:    a.afterToolCallbacks,
+		OnToolErrorCallbacks:  a.onToolErrorCallbacks,
 	}
 
 	return func(yield func(*session.Event, error) bool) {

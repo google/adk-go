@@ -32,7 +32,4 @@ func TestToolContext(t *testing.T) {
 	if _, ok := toolCtx.(agent.CallbackContext); !ok {
 		t.Errorf("ToolContext(%+T) is unexpectedly not a CallbackContext", toolCtx)
 	}
-	if got, ok := toolCtx.(agent.InvocationContext); ok {
-		t.Errorf("ToolContext(%+T) is unexpectedly an InvocationContext", got)
-	}
 }

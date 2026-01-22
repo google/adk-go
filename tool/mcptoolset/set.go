@@ -67,6 +67,7 @@ type Config struct {
 	Client *mcp.Client
 	// Transport that will be used to connect to MCP server.
 	Transport mcp.Transport
+	// Deprecated: use tool.FilterToolset instead.
 	// ToolFilter selects tools for which tool.Predicate returns true.
 	// If ToolFilter is nil, then all tools are returned.
 	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.

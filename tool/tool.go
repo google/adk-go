@@ -83,3 +83,42 @@ func StringPredicate(allowedTools []string) Predicate {
 		return m[tool.Name()]
 	}
 }
+
+// FilterToolset returns a Toolset that filters the tools in the given Toolset
+// using the given predicate.
+func FilterToolset(toolset Toolset, predicate Predicate) Toolset {
+	if toolset == nil {
+		panic("toolset must not be nil")
+	}
+	if predicate == nil {
+		panic("predicate must not be nil")
+	}
+
+	return &filteredToolset{
+		toolset:   toolset,
+		predicate: predicate,
+	}
+}
+
+type filteredToolset struct {
+	toolset   Toolset
+	predicate Predicate
+}
+
+func (f *filteredToolset) Name() string {
+	return f.toolset.Name()
+}
+
+func (f *filteredToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
+	tools, err := f.toolset.Tools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var filtered []Tool
+	for _, tool := range tools {
+		if f.predicate(ctx, tool) {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered, nil
+}

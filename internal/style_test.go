@@ -16,13 +16,15 @@ package internal_test
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-const copyrightHeader = `// Copyright 2025 Google LLC
+const copyrightHeaderTmpl = `// Copyright %d Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,6 +38,8 @@ const copyrightHeader = `// Copyright 2025 Google LLC
 // See the License for the specific language governing permissions and
 // limitations under the License.
 `
+
+const validStartYear = 2025
 
 var fixError = flag.Bool("fix", false, "fix detected problems (e.g. add missing copyright headers)")
 
@@ -85,7 +89,16 @@ func hasCopyrightHeader(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return strings.HasPrefix(string(content), copyrightHeader), nil
+	contentStr := string(content)
+	currentYear := time.Now().UTC().Year()
+	for year := validStartYear; year <= currentYear; year++ {
+		expectedHeader := fmt.Sprintf(copyrightHeaderTmpl, year)
+		if strings.HasPrefix(contentStr, expectedHeader) {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func addCopyrightHeader(path string) error {
@@ -93,7 +106,8 @@ func addCopyrightHeader(path string) error {
 	if err != nil {
 		return err
 	}
-	newContent := []byte(copyrightHeader)
+	currentYearHeader := fmt.Sprintf(copyrightHeaderTmpl, time.Now().UTC().Year())
+	newContent := []byte(currentYearHeader)
 	newContent = append(newContent, content...)
 	return os.WriteFile(path, newContent, 0o644)
 }
