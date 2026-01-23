@@ -60,7 +60,7 @@ func NewPluginManager(cfg PluginConfig) (*PluginManager, error) {
 
 // RegisterPlugin adds a new plugin to the manager.
 func (pm *PluginManager) registerPlugin(plugin *plugin.Plugin) error {
-	if p == nil {
+	if plugin == nil {
 		return fmt.Errorf("cannot register nil plugin")
 	}
 	for _, p := range pm.plugins {
