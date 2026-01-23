@@ -108,7 +108,7 @@ func (p *inputRequiredProcessor) isResponseToLongRunning(id string) bool {
 
 // handleInputRequired checks if the input message contains responses to all function calls
 // that happened during the previous invocation and were recorded in the Task input-required state message.
-// If a non-nill event is returned the invoking code needs to use the event as the result of the execution
+// If a non-nil event is returned the invoking code needs to use the event as the result of the execution
 func handleInputRequired(reqCtx *a2asrv.RequestContext, content *genai.Content) (*a2a.TaskStatusUpdateEvent, error) {
 	if reqCtx.StoredTask == nil {
 		return nil, nil
