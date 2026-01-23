@@ -83,8 +83,7 @@ func New(cfg Config) (agent.Agent, error) {
 			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
 			InputSchema:              cfg.InputSchema,
 			OutputSchema:             cfg.OutputSchema,
-			// TODO: internal type for includeContents
-			IncludeContents:           string(cfg.IncludeContents),
+			IncludeContents:           cfg.IncludeContents,
 			Instruction:               cfg.Instruction,
 			InstructionProvider:       llminternal.InstructionProvider(cfg.InstructionProvider),
 			GlobalInstruction:         cfg.GlobalInstruction,
@@ -307,13 +306,13 @@ type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args, result map[s
 type OnToolErrorCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
 
 // IncludeContents controls what parts of prior conversation history is received by llmagent.
-type IncludeContents string
+type IncludeContents = llminternal.IncludeContents
 
 const (
 	// IncludeContentsNone makes the llmagent operate solely on its current turn (latest user input + any following agent events).
-	IncludeContentsNone IncludeContents = "none"
+	IncludeContentsNone = llminternal.IncludeContentsNone
 	// IncludeContentsDefault is enabled by default. The llmagent receives the relevant conversation history.
-	IncludeContentsDefault IncludeContents = "default"
+	IncludeContentsDefault = llminternal.IncludeContentsDefault
 )
 
 type llmAgent struct {
