@@ -49,6 +49,7 @@ type connectionRefresher struct {
 var refreshableErrors = []error{
 	mcp.ErrConnectionClosed,
 	io.ErrClosedPipe,
+	io.EOF,
 }
 
 // newConnectionRefresher creates a new connectionRefresher with the given client and transport.
