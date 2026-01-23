@@ -38,7 +38,7 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration) http.Han
 	// where the ADK REST API will be served.
 	setupRouter(router,
 		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(config.SessionService)),
-		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(config.SessionService, config.MemoryService, config.AgentLoader, config.ArtifactService, sseWriteTimeout)),
+		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(config.SessionService, config.MemoryService, config.AgentLoader, config.ArtifactService, sseWriteTimeout, config.Plugins)),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(config.AgentLoader)),
 		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(config.SessionService, config.AgentLoader, adkExporter)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(config.ArtifactService)),

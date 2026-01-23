@@ -56,7 +56,7 @@ type Config struct {
 }
 
 type PluginConfig struct {
-	Plugins      []plugin.Plugin
+	Plugins      []*plugin.Plugin
 	CloseTimeout time.Duration
 }
 

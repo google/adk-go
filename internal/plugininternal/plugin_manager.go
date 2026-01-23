@@ -30,13 +30,13 @@ import (
 )
 
 type PluginConfig struct {
-	Plugins      []plugin.Plugin
+	Plugins      []*plugin.Plugin
 	CloseTimeout time.Duration
 }
 
 // PluginManager manages the registration and execution of plugins.
 type PluginManager struct {
-	plugins      []plugin.Plugin
+	plugins      []*plugin.Plugin
 	closeTimeout time.Duration
 }
 
@@ -44,7 +44,7 @@ type PluginManager struct {
 func NewPluginManager(cfg PluginConfig) (*PluginManager, error) {
 	pm := &PluginManager{
 		closeTimeout: cfg.CloseTimeout,
-		plugins:      make([]plugin.Plugin, 0, len(cfg.Plugins)),
+		plugins:      make([]*plugin.Plugin, 0, len(cfg.Plugins)),
 	}
 
 	// Register plugins defined in the config
@@ -59,7 +59,10 @@ func NewPluginManager(cfg PluginConfig) (*PluginManager, error) {
 }
 
 // RegisterPlugin adds a new plugin to the manager.
-func (pm *PluginManager) registerPlugin(plugin plugin.Plugin) error {
+func (pm *PluginManager) registerPlugin(plugin *plugin.Plugin) error {
+	if plugin == nil {
+		return fmt.Errorf("cannot register nil plugin")
+	}
 	for _, p := range pm.plugins {
 		if p.Name() == plugin.Name() {
 			return fmt.Errorf("plugin with name '%s' already registered", plugin.Name())
