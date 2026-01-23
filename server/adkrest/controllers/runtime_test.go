@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"google.golang.org/adk/plugin"
+	"google.golang.org/adk/runner"
 )
 
 func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
@@ -61,13 +62,15 @@ func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
-			controller := NewRuntimeAPIController(nil, nil, nil, nil, 10*time.Second, tt.plugins)
+			controller := NewRuntimeAPIController(nil, nil, nil, nil, 10*time.Second, runner.PluginConfig{
+				Plugins: tt.plugins,
+			})
 
 			if controller == nil {
 				t.Fatal("NewRuntimeAPIController returned nil")
 			}
 
-			if got := len(controller.plugins); got != tt.wantPlugins {
+			if got := len(controller.pluginConfig.Plugins); got != tt.wantPlugins {
 				t.Errorf("NewRuntimeAPIController() plugins count = %v, want %v", got, tt.wantPlugins)
 			}
 		})

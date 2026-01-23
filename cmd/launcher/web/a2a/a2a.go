@@ -105,6 +105,7 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 			Agent:           agent,
 			SessionService:  config.SessionService,
 			ArtifactService: config.ArtifactService,
+			PluginConfig:    config.PluginConfig,
 		},
 	})
 	reqHandler := a2asrv.NewHandler(executor, config.A2AOptions...)
