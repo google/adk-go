@@ -24,7 +24,6 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/memory"
-	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adkrest/internal/models"
 	"google.golang.org/adk/session"
@@ -37,12 +36,12 @@ type RuntimeAPIController struct {
 	memoryService   memory.Service
 	artifactService artifact.Service
 	agentLoader     agent.Loader
-	plugins         []*plugin.Plugin
+	pluginConfig    runner.PluginConfig
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
-func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, plugins []*plugin.Plugin) *RuntimeAPIController {
-	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, plugins: plugins}
+func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, plugins runner.PluginConfig) *RuntimeAPIController {
+	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: plugins}
 }
 
 // RunAgent executes a non-streaming agent run for a given session and message.
@@ -184,9 +183,7 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 		SessionService:  c.sessionService,
 		MemoryService:   c.memoryService,
 		ArtifactService: c.artifactService,
-		PluginConfig: runner.PluginConfig{
-			Plugins: c.plugins,
-		},
+		PluginConfig:    c.pluginConfig,
 	},
 	)
 	if err != nil {
