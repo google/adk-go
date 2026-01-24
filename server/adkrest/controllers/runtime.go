@@ -36,11 +36,12 @@ type RuntimeAPIController struct {
 	memoryService   memory.Service
 	artifactService artifact.Service
 	agentLoader     agent.Loader
+	pluginConfig    runner.PluginConfig
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
-func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration) *RuntimeAPIController {
-	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout}
+func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig) *RuntimeAPIController {
+	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig}
 }
 
 // RunAgent executes a non-streaming agent run for a given session and message.
@@ -182,6 +183,7 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 		SessionService:  c.sessionService,
 		MemoryService:   c.memoryService,
 		ArtifactService: c.artifactService,
+		PluginConfig:    c.pluginConfig,
 	},
 	)
 	if err != nil {

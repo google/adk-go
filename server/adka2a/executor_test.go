@@ -18,9 +18,12 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	"github.com/google/go-cmp/cmp"
@@ -455,5 +458,82 @@ func TestExecutor_Callbacks(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func startA2AServer(agentExecutor a2asrv.AgentExecutor) *httptest.Server {
+	requestHandler := a2asrv.NewHandler(agentExecutor)
+	return httptest.NewServer(a2asrv.NewJSONRPCHandler(requestHandler))
+}
+
+func TestExecutor_Cancel_AfterEvent(t *testing.T) {
+	sessionService := session.InMemoryService()
+	channel := make(chan struct{})
+
+	agent, err := agent.New(agent.Config{
+		Name: "test",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				defer close(channel)
+				<-ctx.Done()
+				yield(nil, ctx.Err())
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v, want nil", err)
+	}
+
+	executor := NewExecutor(ExecutorConfig{
+		RunnerConfig: runner.Config{
+			AppName:        agent.Name(),
+			Agent:          agent,
+			SessionService: sessionService,
+		},
+	})
+
+	server := startA2AServer(executor)
+	defer server.Close()
+
+	card := &a2a.AgentCard{
+		Name:               "test",
+		URL:                server.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+
+	client, err := a2aclient.NewFromCard(t.Context(), card)
+	if err != nil {
+		t.Fatalf("a2aclient.NewFromCard() error = %v, want nil", err)
+	}
+
+	msgId := a2a.NewMessageID()
+	blocking := false
+
+	result, sendErr := client.SendMessage(t.Context(), &a2a.MessageSendParams{
+		Message: &a2a.Message{ID: string(msgId), Parts: []a2a.Part{a2a.TextPart{Text: "TEST"}}, Role: a2a.MessageRoleUser},
+		Config:  &a2a.MessageSendConfig{Blocking: &blocking},
+	})
+
+	if sendErr != nil {
+		t.Fatalf("client.SendMessage() error = %v, want nil", sendErr)
+	}
+
+	taskID := result.TaskInfo().TaskID
+
+	task, err := client.CancelTask(t.Context(), &a2a.TaskIDParams{ID: taskID})
+	if err != nil {
+		t.Fatalf("client.CancelTask() error = %v, want nil", err)
+	}
+
+	if task.Status.State != a2a.TaskStateCanceled {
+		t.Fatalf("executor.Cancel() state = %v, want %v", task.Status.State, a2a.TaskStateCanceled)
+	}
+
+	// Verify that execution context is closed
+	select {
+	case <-channel:
+		t.Log("Agent successfully unblocked")
+	case <-time.After(1 * time.Second):
+		t.Fatal("Agent did not unblock")
 	}
 }

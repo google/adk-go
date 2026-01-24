@@ -35,7 +35,7 @@ type storageSession struct {
 	UpdateTime time.Time `gorm:"precision:6"`
 
 	// Has-Many relationship: A session has many events.
-	Events []storageEvent `gorm:"foreignKey:AppName,UserID,SessionID;references:AppName,UserID,ID"`
+	Events []storageEvent `gorm:"foreignKey:AppName,UserID,SessionID;references:AppName,UserID,ID;constraint:OnDelete:CASCADE"`
 }
 
 // TableName explicitly sets the table name for the storageSession struct.

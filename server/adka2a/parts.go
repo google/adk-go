@@ -191,7 +191,7 @@ func toGenAIContent(msg *a2a.Message) (*genai.Content, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &genai.Content{Role: genai.RoleUser, Parts: parts}, nil
+	return &genai.Content{Role: string(toGenAIRole(msg.Role)), Parts: parts}, nil
 }
 
 // ToGenAIParts converts the provided A2A parts to genai equivalents.
