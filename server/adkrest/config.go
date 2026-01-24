@@ -21,6 +21,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/memory"
+	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 )
 
@@ -31,6 +32,7 @@ type Config struct {
 	AgentLoader     agent.Loader
 	MemoryService   memory.Service
 	SSEWriteTimeout time.Duration
+	PluginConfig    runner.PluginConfig
 }
 
 // validate validates the config
