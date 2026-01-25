@@ -21,30 +21,30 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-// GoogleSearch is a built-in tool that is automatically invoked by Gemini 2
-// models to retrieve search results from Google Search.
+// GoogleMaps is a built-in tool that is automatically invoked by Gemini 2
+// models to ground query results with Google Maps.
 // The tool operates internally within the model and does not require or
 // perform local code execution.
-type GoogleSearch struct{}
+type GoogleMaps struct{}
 
 // Name implements tool.Tool.
-func (s GoogleSearch) Name() string {
-	return "google_search"
+func (m GoogleMaps) Name() string {
+	return "google_maps"
 }
 
 // Description implements tool.Tool.
-func (s GoogleSearch) Description() string {
-	return "Performs a Google search to retrieve information from the web."
+func (m GoogleMaps) Description() string {
+	return "Grounds query results with Google Maps to provide location-based information."
 }
 
-// ProcessRequest adds the GoogleSearch tool to the LLM request.
-func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+// ProcessRequest adds the GoogleMaps tool to the LLM request.
+func (m GoogleMaps) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return setTool(req, &genai.Tool{
-		GoogleSearch: &genai.GoogleSearch{},
+		GoogleMaps: &genai.GoogleMaps{},
 	})
 }
 
 // IsLongRunning implements tool.Tool.
-func (s GoogleSearch) IsLongRunning() bool {
+func (m GoogleMaps) IsLongRunning() bool {
 	return false
 }

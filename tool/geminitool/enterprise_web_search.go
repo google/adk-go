@@ -21,30 +21,30 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-// GoogleSearch is a built-in tool that is automatically invoked by Gemini 2
-// models to retrieve search results from Google Search.
+// EnterpriseWebSearch is a built-in tool that is automatically invoked by
+// Gemini 2 models to perform web grounding with enterprise compliance.
 // The tool operates internally within the model and does not require or
 // perform local code execution.
-type GoogleSearch struct{}
+type EnterpriseWebSearch struct{}
 
 // Name implements tool.Tool.
-func (s GoogleSearch) Name() string {
-	return "google_search"
+func (s EnterpriseWebSearch) Name() string {
+	return "enterprise_web_search"
 }
 
 // Description implements tool.Tool.
-func (s GoogleSearch) Description() string {
-	return "Performs a Google search to retrieve information from the web."
+func (s EnterpriseWebSearch) Description() string {
+	return "Performs web search with enterprise compliance and security features."
 }
 
-// ProcessRequest adds the GoogleSearch tool to the LLM request.
-func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+// ProcessRequest adds the EnterpriseWebSearch tool to the LLM request.
+func (s EnterpriseWebSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return setTool(req, &genai.Tool{
-		GoogleSearch: &genai.GoogleSearch{},
+		EnterpriseWebSearch: &genai.EnterpriseWebSearch{},
 	})
 }
 
 // IsLongRunning implements tool.Tool.
-func (s GoogleSearch) IsLongRunning() bool {
+func (s EnterpriseWebSearch) IsLongRunning() bool {
 	return false
 }
