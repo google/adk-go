@@ -364,7 +364,7 @@ func TestCallToolReconnection(t *testing.T) {
 
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	ctx := icontext.NewReadonlyContext(invCtx)
-	toolCtx := toolinternal.NewToolContext(invCtx, "", nil)
+	toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
 
 	// Get tools first to establish a session.
 	tools, err := ts.Tools(ctx)
