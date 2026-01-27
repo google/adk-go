@@ -16,6 +16,7 @@ package controllers_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"google.golang.org/adk/server/adkrest/controllers"
 	"google.golang.org/adk/server/adkrest/internal/fakes"
 	"google.golang.org/adk/server/adkrest/internal/models"
+	"google.golang.org/adk/server/adkrest/validation"
 )
 
 func TestGetSession(t *testing.T) {
@@ -41,12 +43,13 @@ func TestGetSession(t *testing.T) {
 	}
 
 	tc := []struct {
-		name           string
-		storedSessions map[fakes.SessionKey]fakes.TestSession
-		sessionID      fakes.SessionKey
-		wantSession    models.Session
-		wantErr        error
-		wantStatus     int
+		name                string
+		storedSessions      map[fakes.SessionKey]fakes.TestSession
+		sessionID           fakes.SessionKey
+		wantSession         models.Session
+		wantErr             error
+		wantStatus          int
+		userAccessValidator validation.UserAccessValidator
 	}{
 		{
 			name: "session exists",
@@ -96,6 +99,23 @@ func TestGetSession(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
+			name: "user is unauthorized to access the user_id",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {
+					Id:            id,
+					SessionState:  fakes.TestState{"foo": "bar"},
+					SessionEvents: fakes.TestEvents{},
+					UpdatedAt:     time.Now(),
+				},
+			},
+			sessionID:  id,
+			wantErr:    fmt.Errorf("user access validation failed: user is unauthorized to access the user_id"),
+			wantStatus: http.StatusForbidden,
+			userAccessValidator: validation.UserAccessValidatorFunc(func(ctx context.Context, appName string, userID string, req *http.Request) error {
+				return fmt.Errorf("user is unauthorized to access the user_id")
+			}),
+		},
+		{
 			name: "session ID is missing",
 			storedSessions: map[fakes.SessionKey]fakes.TestSession{
 				id: {
@@ -117,7 +137,7 @@ func TestGetSession(t *testing.T) {
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
 			sessionService := fakes.FakeSessionService{Sessions: tt.storedSessions}
-			apiController := controllers.NewSessionsAPIController(&sessionService)
+			apiController := controllers.NewSessionsAPIController(&sessionService, tt.userAccessValidator)
 			req, err := http.NewRequest(http.MethodGet, "/apps/testApp/users/testUser/sessions/testSession", nil)
 			if err != nil {
 				t.Fatalf("new request: %v", err)
@@ -158,13 +178,14 @@ func TestCreateSession(t *testing.T) {
 	}
 
 	tc := []struct {
-		name             string
-		storedSessions   map[fakes.SessionKey]fakes.TestSession
-		sessionID        fakes.SessionKey
-		createRequestObj models.CreateSessionRequest
-		wantSession      models.Session
-		wantErr          error
-		wantStatus       int
+		name                string
+		storedSessions      map[fakes.SessionKey]fakes.TestSession
+		sessionID           fakes.SessionKey
+		createRequestObj    models.CreateSessionRequest
+		wantSession         models.Session
+		wantErr             error
+		wantStatus          int
+		userAccessValidator validation.UserAccessValidator
 	}{
 		{
 			name: "session exists",
@@ -225,12 +246,23 @@ func TestCreateSession(t *testing.T) {
 			wantStatus:       http.StatusBadRequest,
 			wantErr:          fmt.Errorf("user_id parameter is required"),
 		},
+		{
+			name:             "user is unauthorized to access the user_id",
+			storedSessions:   map[fakes.SessionKey]fakes.TestSession{},
+			sessionID:        id,
+			createRequestObj: models.CreateSessionRequest{},
+			wantStatus:       http.StatusForbidden,
+			wantErr:          fmt.Errorf("user access validation failed: user is unauthorized to access the user_id"),
+			userAccessValidator: validation.UserAccessValidatorFunc(func(ctx context.Context, appName string, userID string, req *http.Request) error {
+				return fmt.Errorf("user is unauthorized to access the user_id")
+			}),
+		},
 	}
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
 			sessionService := fakes.FakeSessionService{Sessions: tt.storedSessions}
-			apiController := controllers.NewSessionsAPIController(&sessionService)
+			apiController := controllers.NewSessionsAPIController(&sessionService, tt.userAccessValidator)
 			reqBytes, err := json.Marshal(tt.createRequestObj)
 			if err != nil {
 				t.Fatalf("marshal request: %v", err)
@@ -275,10 +307,11 @@ func TestDeleteSession(t *testing.T) {
 	}
 
 	tc := []struct {
-		name           string
-		storedSessions map[fakes.SessionKey]fakes.TestSession
-		sessionID      fakes.SessionKey
-		wantStatus     int
+		name                string
+		storedSessions      map[fakes.SessionKey]fakes.TestSession
+		sessionID           fakes.SessionKey
+		wantStatus          int
+		userAccessValidator validation.UserAccessValidator
 	}{
 		{
 			name: "session exists",
@@ -299,12 +332,21 @@ func TestDeleteSession(t *testing.T) {
 			sessionID:      id,
 			wantStatus:     http.StatusInternalServerError,
 		},
+		{
+			name:           "user is unauthorized to access the user_id",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID:      id,
+			wantStatus:     http.StatusForbidden,
+			userAccessValidator: validation.UserAccessValidatorFunc(func(ctx context.Context, appName string, userID string, req *http.Request) error {
+				return fmt.Errorf("user is unauthorized to access the user_id")
+			}),
+		},
 	}
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
 			sessionService := fakes.FakeSessionService{Sessions: tt.storedSessions}
-			apiController := controllers.NewSessionsAPIController(&sessionService)
+			apiController := controllers.NewSessionsAPIController(&sessionService, tt.userAccessValidator)
 			req, err := http.NewRequest(http.MethodDelete, "/apps/testApp/users/testUser/sessions/testSession", nil)
 			if err != nil {
 				t.Fatalf("new request: %v", err)
@@ -342,10 +384,12 @@ func TestListSessions(t *testing.T) {
 	}
 
 	tc := []struct {
-		name           string
-		storedSessions map[fakes.SessionKey]fakes.TestSession
-		wantSessions   []models.Session
-		wantStatus     int
+		name                string
+		storedSessions      map[fakes.SessionKey]fakes.TestSession
+		wantSessions        []models.Session
+		wantStatus          int
+		wantErr             error
+		userAccessValidator validation.UserAccessValidator
 	}{
 		{
 			name: "session exists",
@@ -401,12 +445,22 @@ func TestListSessions(t *testing.T) {
 			},
 			wantStatus: http.StatusOK,
 		},
+		{
+			name:           "user is unauthorized to access the user_id",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			wantSessions:   []models.Session{},
+			wantStatus:     http.StatusForbidden,
+			wantErr:        fmt.Errorf("user access validation failed: user is unauthorized to access the user_id"),
+			userAccessValidator: validation.UserAccessValidatorFunc(func(ctx context.Context, appName string, userID string, req *http.Request) error {
+				return fmt.Errorf("user is unauthorized to access the user_id")
+			}),
+		},
 	}
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
 			sessionService := fakes.FakeSessionService{Sessions: tt.storedSessions}
-			apiController := controllers.NewSessionsAPIController(&sessionService)
+			apiController := controllers.NewSessionsAPIController(&sessionService, tt.userAccessValidator)
 			req, err := http.NewRequest(http.MethodDelete, "/apps/testApp/users/testUser/sessions/testSession", nil)
 			if err != nil {
 				t.Fatalf("new request: %v", err)
@@ -421,6 +475,13 @@ func TestListSessions(t *testing.T) {
 			apiController.ListSessionsHandler(rr, req)
 			if status := rr.Code; status != tt.wantStatus {
 				t.Fatalf("handler returned wrong status code: got %v want %v", status, tt.wantStatus)
+			}
+			if tt.wantErr != nil {
+				respErr := strings.Trim(rr.Body.String(), "\n")
+				if tt.wantErr.Error() != respErr {
+					t.Errorf("ListSessions() mismatch (-want +got):\n%v, %v", tt.wantErr.Error(), respErr)
+				}
+				return
 			}
 			got := []models.Session{}
 			err = json.NewDecoder(rr.Body).Decode(&got)

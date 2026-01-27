@@ -27,12 +27,14 @@ import (
 	weblauncher "google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/server/adkrest"
+	"google.golang.org/adk/server/adkrest/validation"
 )
 
 // apiConfig contains parametres for lauching ADK REST API
 type apiConfig struct {
-	frontendAddress string
-	sseWriteTimeout time.Duration
+	frontendAddress     string
+	sseWriteTimeout     time.Duration
+	userAccessValidator validation.UserAccessValidator
 }
 
 // apiLauncher can launch ADK REST API
@@ -71,7 +73,7 @@ func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 // SetupSubrouters adds the API router to the parent router.
 func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
 	// Create the ADK REST API handler
-	apiHandler := adkrest.NewHandler(config, a.config.sseWriteTimeout)
+	apiHandler := adkrest.NewHandler(config, a.config.sseWriteTimeout, a.config.userAccessValidator)
 
 	// Wrap it with CORS middleware
 	corsHandler := corsWithArgs(a.config.frontendAddress)(apiHandler)

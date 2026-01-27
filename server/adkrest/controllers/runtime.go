@@ -26,22 +26,24 @@ import (
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adkrest/internal/models"
+	"google.golang.org/adk/server/adkrest/validation"
 	"google.golang.org/adk/session"
 )
 
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
-	sseTimeout      time.Duration
-	sessionService  session.Service
-	memoryService   memory.Service
-	artifactService artifact.Service
-	agentLoader     agent.Loader
-	pluginConfig    runner.PluginConfig
+	sseTimeout          time.Duration
+	sessionService      session.Service
+	memoryService       memory.Service
+	artifactService     artifact.Service
+	agentLoader         agent.Loader
+	pluginConfig        runner.PluginConfig
+	userAccessValidator validation.UserAccessValidator
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
-func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig) *RuntimeAPIController {
-	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig}
+func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig, userAccessValidator validation.UserAccessValidator) *RuntimeAPIController {
+	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig, userAccessValidator: userAccessValidator}
 }
 
 // RunAgent executes a non-streaming agent run for a given session and message.
@@ -49,6 +51,11 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
 		return err
+	}
+	if c.userAccessValidator != nil {
+		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, req); err != nil {
+			return newStatusError(fmt.Errorf("user access validation failed: %w", err), http.StatusUnauthorized)
+		}
 	}
 	sessionEvents, err := c.runAgent(req.Context(), runAgentRequest)
 	if err != nil {
@@ -103,6 +110,12 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
 		return err
+	}
+
+	if c.userAccessValidator != nil {
+		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, req); err != nil {
+			return newStatusError(fmt.Errorf("user access validation failed: %w", err), http.StatusUnauthorized)
+		}
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
