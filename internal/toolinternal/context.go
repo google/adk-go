@@ -61,15 +61,20 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 	}
 	cbCtx := contextinternal.NewCallbackContextWithDelta(ctx, actions.StateDelta)
 
+	var artifacts *internalArtifacts
+	if ctx.Artifacts() != nil {
+		artifacts = &internalArtifacts{
+			Artifacts:    ctx.Artifacts(),
+			eventActions: actions,
+		}
+	}
+
 	return &toolContext{
 		CallbackContext:   cbCtx,
 		invocationContext: ctx,
 		functionCallID:    functionCallID,
 		eventActions:      actions,
-		artifacts: &internalArtifacts{
-			Artifacts:    ctx.Artifacts(),
-			eventActions: actions,
-		},
+		artifacts:         artifacts,
 	}
 }
 
@@ -82,6 +87,9 @@ type toolContext struct {
 }
 
 func (c *toolContext) Artifacts() agent.Artifacts {
+	if c.artifacts == nil {
+		return nil
+	}
 	return c.artifacts
 }
 

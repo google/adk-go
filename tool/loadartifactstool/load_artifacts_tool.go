@@ -20,6 +20,7 @@ package loadartifactstool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"golang.org/x/sync/errgroup"
@@ -31,6 +32,8 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
+
+var ErrArtifactServiceNotInitialized = errors.New("artifact service is not initialized")
 
 // artifactsTool is a tool that loads artifacts and adds them to the session.
 type artifactsTool struct {
@@ -118,6 +121,9 @@ func (t *artifactsTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 // ProcessRequest processes the LLM request. It packs the tool, appends initial
 // instructions, and processes any load artifacts function calls.
 func (t *artifactsTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+	if ctx.Artifacts() == nil {
+		return ErrArtifactServiceNotInitialized
+	}
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}
