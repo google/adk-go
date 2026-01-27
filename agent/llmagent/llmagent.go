@@ -186,11 +186,18 @@ type Config struct {
 	// error. If you want to ignore the error, you can append a ? to the
 	// variable name as in {var?} to make it optional.
 	//
+	// If templating logic for {} chars is not desired, then InstructionProvider
+	// should be used.
 	Instruction string
 	// InstructionProvider allows to create instructions dynamically based on
 	// the agent context.
 	//
 	// It takes over the Instruction field if both are set.
+	//
+	// InstructionProvider does not automatically substitue values to {} and
+	// treats them as just a raw char.
+	// If you need to inject session state variables, use
+	// util/instructionutil.InjectSessionState helper.
 	InstructionProvider InstructionProvider
 
 	// GlobalInstruction is the instruction for all agents in the entire
