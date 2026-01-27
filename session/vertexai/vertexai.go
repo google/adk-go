@@ -37,8 +37,8 @@ type VertexAIServiceConfig struct {
 	// ReasoningEngine is the runtime in the agent engine which will store the
 	// sessions.
 	// Optimal way is to create reasoningEngine per app.
-	// As example, the reasoningEngine can be created via vertex-ai rest api at:
-	// projects.locations.reasoningEngines
+	// For example, a reasoningEngine can be created via the Vertex AI REST
+	// API's 'projects.locations.reasoningEngines.create' method.
 	ReasoningEngine string
 }
 
