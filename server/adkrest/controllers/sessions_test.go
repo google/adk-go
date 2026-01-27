@@ -16,7 +16,6 @@ package controllers_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -111,7 +110,7 @@ func TestGetSession(t *testing.T) {
 			sessionID:  id,
 			wantErr:    fmt.Errorf("user access validation failed: user is unauthorized to access the user_id"),
 			wantStatus: http.StatusForbidden,
-			userAccessValidator: validation.UserAccessValidatorFunc(func(ctx context.Context, appName string, userID string, req *http.Request) error {
+			userAccessValidator: validation.UserAccessValidatorFunc(func(req *http.Request, appName string, userID string) error {
 				return fmt.Errorf("user is unauthorized to access the user_id")
 			}),
 		},
@@ -253,7 +252,7 @@ func TestCreateSession(t *testing.T) {
 			createRequestObj: models.CreateSessionRequest{},
 			wantStatus:       http.StatusForbidden,
 			wantErr:          fmt.Errorf("user access validation failed: user is unauthorized to access the user_id"),
-			userAccessValidator: validation.UserAccessValidatorFunc(func(ctx context.Context, appName string, userID string, req *http.Request) error {
+			userAccessValidator: validation.UserAccessValidatorFunc(func(req *http.Request, appName string, userID string) error {
 				return fmt.Errorf("user is unauthorized to access the user_id")
 			}),
 		},
@@ -339,7 +338,7 @@ func TestDeleteSession(t *testing.T) {
 			sessionID:      id,
 			wantStatus:     http.StatusForbidden,
 			wantErr:        fmt.Errorf("user access validation failed: user is unauthorized to access the user_id"),
-			userAccessValidator: validation.UserAccessValidatorFunc(func(ctx context.Context, appName string, userID string, req *http.Request) error {
+			userAccessValidator: validation.UserAccessValidatorFunc(func(req *http.Request, appName string, userID string) error {
 				return fmt.Errorf("user is unauthorized to access the user_id")
 			}),
 		},
@@ -460,7 +459,7 @@ func TestListSessions(t *testing.T) {
 			wantSessions:   []models.Session{},
 			wantStatus:     http.StatusForbidden,
 			wantErr:        fmt.Errorf("user access validation failed: user is unauthorized to access the user_id"),
-			userAccessValidator: validation.UserAccessValidatorFunc(func(ctx context.Context, appName string, userID string, req *http.Request) error {
+			userAccessValidator: validation.UserAccessValidatorFunc(func(req *http.Request, appName string, userID string) error {
 				return fmt.Errorf("user is unauthorized to access the user_id")
 			}),
 		},

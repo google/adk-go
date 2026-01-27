@@ -224,7 +224,10 @@ func decodeRequestBody(req *http.Request) (decodedReq models.RunAgentRequest, er
 // checkUserAccess checks if the user has access.
 func (c *RuntimeAPIController) checkUserAccess(req *http.Request, appName string, userID string) error {
 	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), appName, userID, req); err != nil {
+		if err := c.userAccessValidator.ValidateUserAccess(req, appName, userID); err != nil {
+			if validationErr, ok := err.(validation.ValidationError); ok {
+				return newStatusError(validationErr.Err, validationErr.Status())
+			}
 			return newStatusError(fmt.Errorf("user access validation failed: %w", err), http.StatusUnauthorized)
 		}
 	}

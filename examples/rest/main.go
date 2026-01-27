@@ -70,7 +70,7 @@ func main() {
 	// UserAccessValidator is optional.
 	// This example allows all requests by default.
 	// Applications can provide a custom validator to enforce authorization.
-	apiHandler := adkrest.NewHandler(config, 120*time.Second, validation.UserAccessValidatorFunc(func(ctx context.Context, appName, userID string, r *http.Request) error {
+	apiHandler := adkrest.NewHandler(config, 120*time.Second, validation.UserAccessValidatorFunc(func(req *http.Request, appName, userID string) error {
 		return nil
 	}))
 

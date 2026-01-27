@@ -15,6 +15,7 @@
 package controllers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -197,8 +198,12 @@ func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, r
 // checkUserAccess checks if the user has access.
 func (c *ArtifactsAPIController) checkUserAccess(rw http.ResponseWriter, req *http.Request, appName string, userID string) bool {
 	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), appName, userID, req); err != nil {
-			http.Error(rw, err.Error(), http.StatusForbidden)
+		if err := c.userAccessValidator.ValidateUserAccess(req, appName, userID); err != nil {
+			if validationErr, ok := err.(validation.ValidationError); ok {
+				http.Error(rw, validationErr.Error(), validationErr.Status())
+				return false
+			}
+			http.Error(rw, fmt.Errorf("user access validation failed: %v", err).Error(), http.StatusForbidden)
 			return false
 		}
 	}

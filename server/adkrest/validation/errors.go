@@ -14,19 +14,22 @@
 
 package validation
 
-import (
-	"net/http"
-)
-
-// UserAccessValidator is an interface for user access validation
-type UserAccessValidator interface {
-	ValidateUserAccess(req *http.Request, appName, userID string) error
+// ValidationError is an error type for validation errors
+type ValidationError struct {
+	Err  error
+	Code int
 }
 
-// UserAccessValidatorFunc is an adapter to allow a function to be used as a UserAccessValidator
-type UserAccessValidatorFunc func(req *http.Request, appName, userID string) error
+func NewValidationError(err error, code int) ValidationError {
+	return ValidationError{Err: err, Code: code}
+}
 
-// ValidateUserAccess implements the UserAccessValidator interface for UserAccessValidatorFunc
-func (f UserAccessValidatorFunc) ValidateUserAccess(req *http.Request, appName, userID string) error {
-	return f(req, appName, userID)
+// Error returns an associated error
+func (ve ValidationError) Error() string {
+	return ve.Err.Error()
+}
+
+// Status returns an associated status code
+func (ve ValidationError) Status() int {
+	return ve.Code
 }
