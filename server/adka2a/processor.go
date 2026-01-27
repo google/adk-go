@@ -55,7 +55,11 @@ func newEventProcessor(reqCtx *a2asrv.RequestContext, meta invocationMeta) *even
 	}
 }
 
-func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.TaskArtifactUpdateEvent, error) {
+func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2a.TaskArtifactUpdateEvent, error) {
+	return p.processWithConverter(ctx, event, nil)
+}
+
+func (p *eventProcessor) processWithConverter(ctx context.Context, event *session.Event, converter GenAIToA2APartConverter) (*a2a.TaskArtifactUpdateEvent, error) {
 	if event == nil {
 		return nil, nil
 	}
@@ -86,7 +90,7 @@ func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.
 		return nil, fmt.Errorf("input required processing failed: %w", err)
 	}
 
-	parts, err := ToA2AParts(resp.Content.Parts, event.LongRunningToolIDs)
+	parts, err := ToA2APartsWithConverter(ctx, event, converter, resp.Content.Parts, event.LongRunningToolIDs)
 	if err != nil {
 		return nil, err
 	}
