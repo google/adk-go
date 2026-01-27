@@ -194,7 +194,7 @@ type Config struct {
 	//
 	// It takes over the Instruction field if both are set.
 	//
-	// InstructionProvider does not automatically substitue values to {} and
+	// InstructionProvider does not automatically substitute values to {} and
 	// treats them as just a raw char.
 	// If you need to inject session state variables, use
 	// util/instructionutil.InjectSessionState helper.
