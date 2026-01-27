@@ -48,11 +48,8 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), sessionID.AppName, sessionID.UserID, req); err != nil {
-			http.Error(rw, fmt.Errorf("user access validation failed: %w", err).Error(), http.StatusForbidden)
-			return
-		}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
+		return
 	}
 	createSessionRequest := models.CreateSessionRequest{}
 	// No state and no events, fails to decode req.Body failing with "EOF"
@@ -102,11 +99,8 @@ func (c *SessionsAPIController) DeleteSessionHandler(rw http.ResponseWriter, req
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), sessionID.AppName, sessionID.UserID, req); err != nil {
-			http.Error(rw, fmt.Errorf("user access validation failed: %w", err).Error(), http.StatusForbidden)
-			return
-		}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
+		return
 	}
 
 	err = c.service.Delete(req.Context(), &session.DeleteRequest{
@@ -133,11 +127,8 @@ func (c *SessionsAPIController) GetSessionHandler(rw http.ResponseWriter, req *h
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), sessionID.AppName, sessionID.UserID, req); err != nil {
-			http.Error(rw, fmt.Errorf("user access validation failed: %w", err).Error(), http.StatusForbidden)
-			return
-		}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
+		return
 	}
 	storedSession, err := c.service.Get(req.Context(), &session.GetRequest{
 		AppName:   sessionID.AppName,
@@ -164,11 +155,8 @@ func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req 
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), sessionID.AppName, sessionID.UserID, req); err != nil {
-			http.Error(rw, fmt.Errorf("user access validation failed: %w", err).Error(), http.StatusForbidden)
-			return
-		}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
+		return
 	}
 	var sessions []models.Session
 	resp, err := c.service.List(req.Context(), &session.ListRequest{
@@ -188,4 +176,15 @@ func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req 
 		sessions = append(sessions, respSession)
 	}
 	EncodeJSONResponse(sessions, http.StatusOK, rw)
+}
+
+// checkUserAccess checks if the user has access.
+func (c *SessionsAPIController) checkUserAccess(rw http.ResponseWriter, req *http.Request, appName string, userID string) bool {
+	if c.userAccessValidator != nil {
+		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), appName, userID, req); err != nil {
+			http.Error(rw, fmt.Errorf("user access validation failed: %v", err).Error(), http.StatusForbidden)
+			return false
+		}
+	}
+	return true
 }

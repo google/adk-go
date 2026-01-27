@@ -47,11 +47,8 @@ func (c *ArtifactsAPIController) ListArtifactsHandler(rw http.ResponseWriter, re
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), sessionID.AppName, sessionID.UserID, req); err != nil {
-			http.Error(rw, err.Error(), http.StatusForbidden)
-			return
-		}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
+		return
 	}
 	resp, err := c.artifactService.List(req.Context(), &artifact.ListRequest{
 		AppName:   sessionID.AppName,
@@ -81,11 +78,8 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), sessionID.AppName, sessionID.UserID, req); err != nil {
-			http.Error(rw, err.Error(), http.StatusForbidden)
-			return
-		}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
+		return
 	}
 	artifactName := vars["artifact_name"]
 	if artifactName == "" {
@@ -130,11 +124,8 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), sessionID.AppName, sessionID.UserID, req); err != nil {
-			http.Error(rw, err.Error(), http.StatusForbidden)
-			return
-		}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
+		return
 	}
 	artifactName := vars["artifact_name"]
 	if artifactName == "" {
@@ -182,11 +173,8 @@ func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, r
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), sessionID.AppName, sessionID.UserID, req); err != nil {
-			http.Error(rw, err.Error(), http.StatusForbidden)
-			return
-		}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
+		return
 	}
 	artifactName := vars["artifact_name"]
 	if artifactName == "" {
@@ -204,4 +192,15 @@ func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, r
 		return
 	}
 	EncodeJSONResponse(nil, http.StatusOK, rw)
+}
+
+// checkUserAccess checks if the user has access.
+func (c *ArtifactsAPIController) checkUserAccess(rw http.ResponseWriter, req *http.Request, appName string, userID string) bool {
+	if c.userAccessValidator != nil {
+		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), appName, userID, req); err != nil {
+			http.Error(rw, err.Error(), http.StatusForbidden)
+			return false
+		}
+	}
+	return true
 }

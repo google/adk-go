@@ -311,6 +311,7 @@ func TestDeleteSession(t *testing.T) {
 		storedSessions      map[fakes.SessionKey]fakes.TestSession
 		sessionID           fakes.SessionKey
 		wantStatus          int
+		wantErr             error
 		userAccessValidator validation.UserAccessValidator
 	}{
 		{
@@ -337,6 +338,7 @@ func TestDeleteSession(t *testing.T) {
 			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
 			sessionID:      id,
 			wantStatus:     http.StatusForbidden,
+			wantErr:        fmt.Errorf("user access validation failed: user is unauthorized to access the user_id"),
 			userAccessValidator: validation.UserAccessValidatorFunc(func(ctx context.Context, appName string, userID string, req *http.Request) error {
 				return fmt.Errorf("user is unauthorized to access the user_id")
 			}),
@@ -358,6 +360,13 @@ func TestDeleteSession(t *testing.T) {
 			apiController.DeleteSessionHandler(rr, req)
 			if status := rr.Code; status != tt.wantStatus {
 				t.Fatalf("handler returned wrong status code: got %v want %v", status, tt.wantStatus)
+			}
+			if tt.wantErr != nil {
+				respErr := strings.Trim(rr.Body.String(), "\n")
+				if tt.wantErr.Error() != respErr {
+					t.Errorf("DeleteSession() mismatch (-want +got):\n%v, %v", tt.wantErr.Error(), respErr)
+				}
+				return
 			}
 			if _, ok := sessionService.Sessions[tt.sessionID]; ok {
 				t.Errorf("session was not deleted")

@@ -52,10 +52,8 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 	if err != nil {
 		return err
 	}
-	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, req); err != nil {
-			return newStatusError(fmt.Errorf("user access validation failed: %w", err), http.StatusUnauthorized)
-		}
+	if err := c.checkUserAccess(req, runAgentRequest.AppName, runAgentRequest.UserId); err != nil {
+		return err
 	}
 	sessionEvents, err := c.runAgent(req.Context(), runAgentRequest)
 	if err != nil {
@@ -112,10 +110,8 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		return err
 	}
 
-	if c.userAccessValidator != nil {
-		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, req); err != nil {
-			return newStatusError(fmt.Errorf("user access validation failed: %w", err), http.StatusUnauthorized)
-		}
+	if err := c.checkUserAccess(req, runAgentRequest.AppName, runAgentRequest.UserId); err != nil {
+		return err
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
@@ -223,4 +219,14 @@ func decodeRequestBody(req *http.Request) (decodedReq models.RunAgentRequest, er
 		return runAgentRequest, newStatusError(fmt.Errorf("failed to decode request: %w", err), http.StatusBadRequest)
 	}
 	return runAgentRequest, nil
+}
+
+// checkUserAccess checks if the user has access.
+func (c *RuntimeAPIController) checkUserAccess(req *http.Request, appName string, userID string) error {
+	if c.userAccessValidator != nil {
+		if err := c.userAccessValidator.ValidateUserAccess(req.Context(), appName, userID, req); err != nil {
+			return newStatusError(fmt.Errorf("user access validation failed: %w", err), http.StatusUnauthorized)
+		}
+	}
+	return nil
 }
