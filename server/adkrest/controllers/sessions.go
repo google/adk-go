@@ -17,11 +17,13 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/server/adkrest/internal/models"
+	"google.golang.org/adk/server/adkrest/validation"
 	"google.golang.org/adk/session"
 )
 
@@ -29,12 +31,13 @@ import (
 
 // SessionsAPIController is the controller for the Sessions API.
 type SessionsAPIController struct {
-	service session.Service
+	service             session.Service
+	userAccessValidator validation.UserAccessValidator
 }
 
 // NewSessionsAPIController creates a new SessionsAPIController.
-func NewSessionsAPIController(service session.Service) *SessionsAPIController {
-	return &SessionsAPIController{service: service}
+func NewSessionsAPIController(service session.Service, userAccessValidator validation.UserAccessValidator) *SessionsAPIController {
+	return &SessionsAPIController{service: service, userAccessValidator: userAccessValidator}
 }
 
 // CreateSesssionHTTP is a HTTP handler for the create session API.
@@ -43,6 +46,9 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 	sessionID, err := models.SessionIDFromHTTPParameters(params)
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
 		return
 	}
 	createSessionRequest := models.CreateSessionRequest{}
@@ -93,6 +99,9 @@ func (c *SessionsAPIController) DeleteSessionHandler(rw http.ResponseWriter, req
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
+		return
+	}
 
 	err = c.service.Delete(req.Context(), &session.DeleteRequest{
 		AppName:   sessionID.AppName,
@@ -116,6 +125,9 @@ func (c *SessionsAPIController) GetSessionHandler(rw http.ResponseWriter, req *h
 	}
 	if sessionID.ID == "" {
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
 		return
 	}
 	storedSession, err := c.service.Get(req.Context(), &session.GetRequest{
@@ -143,6 +155,9 @@ func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req 
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
+		return
+	}
 	var sessions []models.Session
 	resp, err := c.service.List(req.Context(), &session.ListRequest{
 		AppName: sessionID.AppName,
@@ -161,4 +176,19 @@ func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req 
 		sessions = append(sessions, respSession)
 	}
 	EncodeJSONResponse(sessions, http.StatusOK, rw)
+}
+
+// checkUserAccess checks if the user has access.
+func (c *SessionsAPIController) checkUserAccess(rw http.ResponseWriter, req *http.Request, appName string, userID string) bool {
+	if c.userAccessValidator != nil {
+		if err := c.userAccessValidator.ValidateUserAccess(req, appName, userID); err != nil {
+			if validationErr, ok := err.(validation.ValidationError); ok {
+				http.Error(rw, validationErr.Error(), validationErr.Status())
+				return false
+			}
+			http.Error(rw, fmt.Errorf("user access validation failed: %v", err).Error(), http.StatusForbidden)
+			return false
+		}
+	}
+	return true
 }

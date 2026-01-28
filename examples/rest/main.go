@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/server/adkrest"
+	"google.golang.org/adk/server/adkrest/validation"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
@@ -66,7 +67,12 @@ func main() {
 	}
 
 	// Create the REST API handler - this returns a standard http.Handler
-	apiHandler := adkrest.NewHandler(config, 120*time.Second)
+	// UserAccessValidator is optional.
+	// This example allows all requests by default.
+	// Applications can provide a custom validator to enforce authorization.
+	apiHandler := adkrest.NewHandler(config, 120*time.Second, validation.UserAccessValidatorFunc(func(req *http.Request, appName, userID string) error {
+		return nil
+	}))
 
 	// Create a standard net/http ServeMux
 	mux := http.NewServeMux()
