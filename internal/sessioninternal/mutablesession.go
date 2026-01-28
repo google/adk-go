@@ -56,6 +56,10 @@ func (s *MutableSession) Events() session.Events {
 	return s.storedSession.Events()
 }
 
+func (s *MutableSession) CreatedTime() time.Time {
+	return s.storedSession.CreatedTime()
+}
+
 func (s *MutableSession) LastUpdateTime() time.Time {
 	return s.storedSession.LastUpdateTime()
 }

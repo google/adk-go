@@ -78,6 +78,7 @@ func Test_databaseService_Create(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setup(t)
+			st := time.Now()
 
 			got, err := s.Create(t.Context(), tt.req)
 			if (err != nil) != tt.wantErr {
@@ -95,6 +96,14 @@ func Test_databaseService_Create(t *testing.T) {
 
 			if got.Session.UserID() != tt.req.UserID {
 				t.Errorf("UserID got: %v, want: %v", got.Session.UserID(), tt.wantErr)
+			}
+
+			if got.Session.CreatedTime().Before(st) {
+				t.Errorf("CreatedTime got: %v, want after: %v", got.Session.CreatedTime(), st)
+			}
+
+			if got.Session.LastUpdateTime().Before(st) {
+				t.Errorf("LastUpdateTime got: %v, want after: %v", got.Session.CreatedTime(), st)
 			}
 
 			if tt.req.SessionID != "" {
@@ -350,7 +359,7 @@ func Test_databaseService_Get(t *testing.T) {
 			if tt.wantResponse != nil {
 				if diff := cmp.Diff(tt.wantResponse, got,
 					cmp.AllowUnexported(localSession{}),
-					cmpopts.IgnoreFields(localSession{}, "mu", "updatedAt")); diff != "" {
+					cmpopts.IgnoreFields(localSession{}, "mu", "createdAt", "updatedAt")); diff != "" {
 					t.Errorf("Get session mismatch: (-want +got):\n%s", diff)
 				}
 			}
@@ -460,7 +469,7 @@ func Test_databaseService_List(t *testing.T) {
 				// Sort slices for stable comparison
 				opts := []cmp.Option{
 					cmp.AllowUnexported(localSession{}),
-					cmpopts.IgnoreFields(localSession{}, "mu", "updatedAt"),
+					cmpopts.IgnoreFields(localSession{}, "mu", "createdAt", "updatedAt"),
 					cmpopts.SortSlices(func(a, b session.Session) bool {
 						return a.ID() < b.ID()
 					}),
@@ -751,7 +760,7 @@ func Test_databaseService_AppendEvent(t *testing.T) {
 			// Define comparison options
 			opts := []cmp.Option{
 				cmp.AllowUnexported(localSession{}),
-				cmpopts.IgnoreFields(localSession{}, "mu", "updatedAt"),
+				cmpopts.IgnoreFields(localSession{}, "mu", "createdAt", "updatedAt"),
 				cmpopts.IgnoreFields(session.Event{}, "Timestamp"),
 				// Add sorters if event order is not guaranteed
 				cmpopts.SortSlices(func(a, b *session.Event) bool {

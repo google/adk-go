@@ -212,6 +212,10 @@ func (s *testSession) State() session.State {
 	panic("not implemented")
 }
 
+func (s *testSession) CreatedTime() time.Time {
+	panic("not implemented")
+}
+
 func (s *testSession) LastUpdateTime() time.Time {
 	panic("not implemented")
 }

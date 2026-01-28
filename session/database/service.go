@@ -88,6 +88,7 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 		sessionID: sessionID,
 		state:     stateMap,
 		updatedAt: time.Now(),
+		createdAt: time.Now(),
 	}
 	createdSession, err := createStorageSession(val)
 	if err != nil {
@@ -127,6 +128,7 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 
 		val.state = mergeStates(storageApp.State, storageUser.State, sessionState)
 		val.updatedAt = createdSession.UpdateTime
+		val.createdAt = createdSession.CreateTime
 		return nil
 	})
 	if err != nil {

@@ -42,6 +42,8 @@ type Session interface {
 	Events() Events
 	// LastUpdateTime returns the time of the last update.
 	LastUpdateTime() time.Time
+	// CreatedTime returns the time of the session creation.
+	CreatedTime() time.Time
 }
 
 // State defines a standard interface for a key-value store.

@@ -63,6 +63,7 @@ func createSessionFromStorageSession(storage *storageSession) (*localSession, er
 		sessionID: storage.ID,
 		state:     storage.State,
 		updatedAt: storage.UpdateTime,
+		createdAt: storage.CreateTime,
 	}, nil
 }
 

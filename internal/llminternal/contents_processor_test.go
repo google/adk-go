@@ -932,6 +932,10 @@ func (s *fakeSession) UserID() string {
 	return ""
 }
 
+func (s *fakeSession) CreatedTime() time.Time {
+	return time.Time{}
+}
+
 func (s *fakeSession) LastUpdateTime() time.Time {
 	return time.Time{}
 }

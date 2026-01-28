@@ -75,6 +75,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 		id:        key,
 		state:     state,
 		updatedAt: time.Now(),
+		createdAt: time.Now(),
 	}
 
 	s.sessions.Set(encodedKey, val)
@@ -213,7 +214,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	stored_session, ok := s.sessions.Get(sess.id.Encode())
+	storedSession, ok := s.sessions.Get(sess.id.Encode())
 	if !ok {
 		return fmt.Errorf("session not found, cannot apply event")
 	}
@@ -224,13 +225,13 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 
 	// update the in-memory session service
-	stored_session.events = append(stored_session.events, event)
-	stored_session.updatedAt = event.Timestamp
+	storedSession.events = append(storedSession.events, event)
+	storedSession.updatedAt = event.Timestamp
 	if len(event.Actions.StateDelta) > 0 {
 		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
 		s.updateAppState(appDelta, curSession.AppName())
 		s.updateUserState(userDelta, curSession.AppName(), curSession.UserID())
-		maps.Copy(stored_session.state, sessionDelta)
+		maps.Copy(storedSession.state, sessionDelta)
 	}
 	return nil
 }
@@ -292,6 +293,7 @@ type session struct {
 	events    []*Event
 	state     map[string]any
 	updatedAt time.Time
+	createdAt time.Time
 }
 
 func (s *session) ID() string {
@@ -315,6 +317,13 @@ func (s *session) State() State {
 
 func (s *session) Events() Events {
 	return events(s.events)
+}
+
+func (s *session) CreatedTime() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.createdAt
 }
 
 func (s *session) LastUpdateTime() time.Time {
@@ -455,6 +464,7 @@ func copySessionWithoutStateAndEvents(sess *session) *session {
 			sessionID: sess.id.sessionID,
 		},
 		updatedAt: sess.updatedAt,
+		createdAt: sess.createdAt,
 	}
 }
 

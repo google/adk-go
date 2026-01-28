@@ -78,6 +78,7 @@ func Test_databaseService_Create(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setup(t)
+			st := time.Now()
 
 			got, err := s.Create(t.Context(), tt.req)
 			if (err != nil) != tt.wantErr {
@@ -95,6 +96,14 @@ func Test_databaseService_Create(t *testing.T) {
 
 			if got.Session.UserID() != tt.req.UserID {
 				t.Errorf("UserID got: %v, want: %v", got.Session.UserID(), tt.wantErr)
+			}
+
+			if got.Session.CreatedTime().Before(st) {
+				t.Errorf("CreatedTime got: %v, want after: %v", got.Session.CreatedTime(), st)
+			}
+
+			if got.Session.LastUpdateTime().Before(st) {
+				t.Errorf("LastUpdateTime got: %v, want after: %v", got.Session.CreatedTime(), st)
 			}
 
 			if tt.req.SessionID != "" {
@@ -355,7 +364,7 @@ func Test_databaseService_Get(t *testing.T) {
 				if diff := cmp.Diff(tt.wantResponse, got,
 					cmp.AllowUnexported(session{}),
 					cmp.AllowUnexported(id{}),
-					cmpopts.IgnoreFields(session{}, "mu", "updatedAt")); diff != "" {
+					cmpopts.IgnoreFields(session{}, "mu", "createdAt", "updatedAt")); diff != "" {
 					t.Errorf("Get session mismatch: (-want +got):\n%s", diff)
 				}
 			}

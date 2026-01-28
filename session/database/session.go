@@ -34,6 +34,7 @@ type localSession struct {
 	mu        sync.RWMutex
 	events    []*session.Event
 	state     map[string]any
+	createdAt time.Time
 	updatedAt time.Time
 }
 
@@ -58,6 +59,13 @@ func (s *localSession) State() session.State {
 
 func (s *localSession) Events() session.Events {
 	return events(s.events)
+}
+
+func (s *localSession) CreatedTime() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.createdAt
 }
 
 func (s *localSession) LastUpdateTime() time.Time {

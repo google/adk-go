@@ -71,6 +71,7 @@ type TestSession struct {
 	SessionState  TestState
 	SessionEvents TestEvents
 	UpdatedAt     time.Time
+	CreatedAt     time.Time
 }
 
 func (s TestSession) ID() string {
@@ -91,6 +92,10 @@ func (s TestSession) State() session.State {
 
 func (s TestSession) Events() session.Events {
 	return s.SessionEvents
+}
+
+func (s TestSession) CreatedTime() time.Time {
+	return s.CreatedAt
 }
 
 func (s TestSession) LastUpdateTime() time.Time {
