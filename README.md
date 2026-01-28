@@ -27,6 +27,8 @@ Agent Development Kit (ADK) is a flexible and modular framework that applies sof
 
 This Go version of ADK is ideal for developers building cloud-native agent applications, leveraging Go's strengths in concurrency and performance.
 
+Note: Function tools that accept primitive (non-struct) inputs are now automatically supported — such handlers will be exposed to models as a function taking an object with a single `"input"` property. See `CHANGELOG.md` for details.
+
 ---
 
 ## ✨ Key Features

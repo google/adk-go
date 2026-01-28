@@ -57,6 +57,10 @@ var ErrInvalidArgument = errors.New("invalid argument")
 
 // New creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
+//
+// If TArgs is a non-struct type (e.g., string, int), the tool is automatically wrapped
+// to handle the LLM's map[string]any format with an "input" key. This allows non-struct
+// function tools to work seamlessly with llmagent.
 func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
 	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
@@ -79,12 +83,7 @@ func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.T
 		return nil, fmt.Errorf("failed to infer output schema: %w", err)
 	}
 
-	return &functionTool[TArgs, TResults]{
-		cfg:          cfg,
-		inputSchema:  ischema,
-		outputSchema: oschema,
-		handler:      handler,
-	}, nil
+	return wrapNonStructInput(cfg, ischema, oschema, handler)
 }
 
 // functionTool wraps a Go function.

@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -874,6 +875,51 @@ func TestFunctionTool(t *testing.T) {
 	}
 	if got, want := strings.TrimSpace(ans[len(ans)-1]), "3"; got != want {
 		t.Errorf("unexpected result from agent = (%v, %v), want ([%q], nil)", ans, err, want)
+	}
+}
+
+func TestLLMAgent_StringFunctionToolIntegration(t *testing.T) {
+	// Simulate model that asks to call the "super_tool" with a primitive input
+	responses := []*genai.Content{
+		genai.NewContentFromFunctionCall("super_tool", map[string]any{"input": "callval"}, "model"),
+		genai.NewContentFromText("final", "model"),
+	}
+	mockModel := &testutil.MockModel{Responses: responses}
+
+	superTool, err := functiontool.New(functiontool.Config{Name: "super_tool", Description: "echo"}, functiontool.Func[string, string](
+		func(ctx tool.Context, input string) (string, error) {
+			return "Hello", nil
+		},
+	))
+	if err != nil {
+		t.Fatalf("failed to create tool: %v", err)
+	}
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:        "super_tool_caller",
+		Model:       mockModel,
+		Description: "Agent to invoke the super_tool",
+		Instruction: "Call the super_tool",
+		Tools:       []tool.Tool{superTool},
+	})
+	if err != nil {
+		t.Fatalf("failed to create llm agent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, a)
+	parts, err := testutil.CollectParts(runner.Run(t, "session1", "prompt"))
+	if err != nil {
+		t.Fatalf("failed to collect parts: %v", err)
+	}
+
+	wantParts := []*genai.Part{
+		genai.NewPartFromFunctionCall("super_tool", map[string]any{"input": "callval"}),
+		genai.NewPartFromFunctionResponse("super_tool", map[string]any{"result": "Hello"}),
+		genai.NewPartFromText("final"),
+	}
+
+	if diff := cmp.Diff(wantParts, parts, cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"), cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID")); diff != "" {
+		t.Fatalf("event parts mismatch (-want +got):\n%s", diff)
 	}
 }
 

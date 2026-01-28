@@ -537,6 +537,55 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 	})
 }
 
+func TestFunctionTool_StringInputWrapper(t *testing.T) {
+	// string identity function should be wrapped to accept {"input": string}
+	stringIdentityFunc := func(ctx tool.Context, input string) (string, error) {
+		return input, nil
+	}
+	stringIdentityTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "string_identity",
+			Description: "returns the input value",
+		},
+		stringIdentityFunc)
+	if err != nil {
+		t.Fatalf("New(function) failed: %v", err)
+	}
+
+	// Declaration should expect an object with an "input" property
+	funcTool, ok := stringIdentityTool.(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("stringIdentityTool does not implement FunctionTool")
+	}
+	decl := funcTool.Declaration()
+	if decl == nil || decl.ParametersJsonSchema == nil {
+		t.Fatalf("declaration or parameters schema is nil: %v", decl)
+	}
+	// Ensure the top-level type is object and contains "input" property
+	params := decl.ParametersJsonSchema
+	// marshal for easy substring checks
+	raw := stringify(params)
+	if !strings.Contains(raw, `"type": "object"`) {
+		t.Fatalf("expected object schema for parameters, got: %s", raw)
+	}
+	if !strings.Contains(raw, `"input"`) {
+		t.Fatalf("expected 'input' property in parameters schema, got: %s", raw)
+	}
+
+	// Run should accept map[string]any{"input": "value"}
+	result, err := funcTool.Run(nil, map[string]any{"input": "hello"})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	got, err := typeutil.ConvertToWithJSONSchema[map[string]any, map[string]string](result, nil)
+	if err != nil {
+		t.Fatalf("unexpected result type: %v", err)
+	}
+	if gotVal, ok := got["result"]; !ok || gotVal != "hello" {
+		t.Fatalf("unexpected run result = %v", got)
+	}
+}
+
 func toolDeclaration(cfg *genai.GenerateContentConfig) *genai.FunctionDeclaration {
 	if cfg == nil || len(cfg.Tools) == 0 {
 		return nil
