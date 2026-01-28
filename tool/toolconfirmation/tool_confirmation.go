@@ -24,7 +24,7 @@ import (
 	"google.golang.org/adk/internal/converters"
 )
 
-// toolconfirmation.FunctionCallName defines the specific name for the FunctionCall event
+// FunctionCallName defines the specific name for the FunctionCall event
 // emitted by ADK when a Human-in-the-Loop confirmation is required.
 //
 // The 'args' of this FunctionCall include:
