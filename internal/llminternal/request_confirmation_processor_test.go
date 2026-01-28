@@ -116,7 +116,7 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 						Parts: []*genai.Part{
 							{
 								FunctionCall: &genai.FunctionCall{
-									Name: toolconfirmation.RequestConfirmationFunctionCallName,
+									Name: toolconfirmation.FunctionCallName,
 									Args: toolConfirmationArgs,
 									ID:   mockConfirmationFunctionCallID,
 								},
@@ -132,7 +132,7 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 						Parts: []*genai.Part{
 							{
 								FunctionResponse: &genai.FunctionResponse{
-									Name:     toolconfirmation.RequestConfirmationFunctionCallName,
+									Name:     toolconfirmation.FunctionCallName,
 									ID:       mockConfirmationFunctionCallID,
 									Response: userConfirmationResponse,
 								},

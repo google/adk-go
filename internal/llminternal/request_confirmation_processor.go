@@ -65,7 +65,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				return
 			}
 			for _, funcResp := range responses {
-				if funcResp.Name != toolconfirmation.RequestConfirmationFunctionCallName {
+				if funcResp.Name != toolconfirmation.FunctionCallName {
 					continue
 				}
 				var tc toolconfirmation.ToolConfirmation

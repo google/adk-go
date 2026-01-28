@@ -63,7 +63,7 @@ func generateRequestConfirmationEvent(
 		}
 
 		requestConfirmationFC := &genai.FunctionCall{
-			Name: toolconfirmation.RequestConfirmationFunctionCallName,
+			Name: toolconfirmation.FunctionCallName,
 			Args: args,
 		}
 

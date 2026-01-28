@@ -24,7 +24,7 @@ import (
 	"google.golang.org/adk/internal/converters"
 )
 
-// RequestConfirmationFunctionCallName defines the specific name for the FunctionCall event
+// toolconfirmation.FunctionCallName defines the specific name for the FunctionCall event
 // emitted by ADK when a Human-in-the-Loop confirmation is required.
 //
 // The 'args' of this FunctionCall include:
@@ -43,7 +43,7 @@ import (
 //
 // Based on the boolean value in "confirmed", the ADK will either proceed to execute
 // the 'originalFunctionCall' or block it and return an error.
-const RequestConfirmationFunctionCallName = "adk_request_confirmation"
+const FunctionCallName = "adk_request_confirmation"
 
 // ToolConfirmation represents the state and details of a user confirmation request
 // for a tool execution.

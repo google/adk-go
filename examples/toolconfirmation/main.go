@@ -238,7 +238,7 @@ func runTurn(ctx context.Context, r *runner.Runner, sessionID string, content *g
 		if event.Content != nil {
 			for _, part := range event.Content.Parts {
 				fc := part.FunctionCall
-				if fc != nil && fc.Name == toolconfirmation.RequestConfirmationFunctionCallName {
+				if fc != nil && fc.Name == toolconfirmation.FunctionCallName {
 					originalFunctionCall, err := toolconfirmation.OriginalCallFrom(fc)
 					if err != nil {
 						continue
@@ -353,7 +353,7 @@ func processApproval(ctx context.Context, r *runner.Runner, sessionID, requestID
 
 	payload := ConfirmationPayload{DaysApproved: daysApproved}
 	funcResponse := &genai.FunctionResponse{
-		Name: toolconfirmation.RequestConfirmationFunctionCallName,
+		Name: toolconfirmation.FunctionCallName,
 		ID:   req.CallID,
 		Response: map[string]any{
 			"confirmed": approved,
