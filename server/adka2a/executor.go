@@ -38,15 +38,15 @@ type AfterEventCallback func(ctx ExecutorContext, event *session.Event, processe
 // AfterExecuteCallback is the callback which will be called after an execution resolved into a completed or failed task.
 type AfterExecuteCallback func(ctx ExecutorContext, finalEvent *a2a.TaskStatusUpdateEvent, err error) error
 
-// A2AToGenAIPartConverter is a custom converter for converting A2A parts to GenAI parts.
+// A2APartConverter is a custom converter for converting A2A parts to GenAI parts.
 // Implementations should generally remember to leverage adka2a.ToGenAiPart for default conversions
 // nil returns are considered intentionally dropped parts.
-type A2AToGenAIPartConverter func(ctx context.Context, a2aEvent a2a.Event, part a2a.Part) (*genai.Part, error)
+type A2APartConverter func(ctx context.Context, a2aEvent a2a.Event, part a2a.Part) (*genai.Part, error)
 
-// GenAIToA2APartConverter is a custom converter for converting GenAI parts to A2A parts.
+// GenAIPartConverter is a custom converter for converting GenAI parts to A2A parts.
 // Implementations should generally remember to leverage adka2a.ToA2APart for default conversions
 // nil returns are considered intentionally dropped parts.
-type GenAIToA2APartConverter func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (a2a.Part, error)
+type GenAIPartConverter func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (a2a.Part, error)
 
 // ExecutorConfig allows to configure Executor.
 type ExecutorConfig struct {
@@ -70,15 +70,15 @@ type ExecutorConfig struct {
 	// This gives an opportunity to enrich the event with additional metadata or log it.
 	AfterExecuteCallback AfterExecuteCallback
 
-	// A2AToGenAIPartConverter is a custom converter for converting A2A parts to GenAI parts.
-	// Implementations should generally remember to leverage adka2a.ToGenAiPart for default conversions
+	// A2APartConverter is a custom converter for converting A2A parts to GenAI parts.
+	// Implementations should generally remember to leverage [adka2a.ToGenAiPart] for default conversions
 	// nil returns are considered intentionally dropped parts.
-	A2AToGenAIPartConverter A2AToGenAIPartConverter
+	A2APartConverter A2APartConverter
 
-	// GenAIToA2APartConverter is a custom converter for converting GenAI parts to A2A parts.
-	// Implementations should generally remember to leverage adka2a.ToA2APart for default conversions
+	// GenAIPartConverter is a custom converter for converting GenAI parts to A2A parts.
+	// Implementations should generally remember to leverage [adka2a.ToA2APart] for default conversions
 	// nil returns are considered intentionally dropped parts.
-	GenAIToA2APartConverter GenAIToA2APartConverter
+	GenAIPartConverter GenAIPartConverter
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
@@ -106,7 +106,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 	if msg == nil {
 		return fmt.Errorf("message not provided")
 	}
-	content, err := toGenAIContent(ctx, msg, e.config.A2AToGenAIPartConverter)
+	content, err := toGenAIContent(ctx, msg, e.config.A2APartConverter)
 	if err != nil {
 		return fmt.Errorf("a2a message conversion failed: %w", err)
 	}
@@ -150,7 +150,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 		return err
 	}
 
-	processor := newEventProcessor(reqCtx, invocationMeta)
+	processor := newEventProcessor(reqCtx, invocationMeta, e.config.GenAIPartConverter)
 	executorContext := newExecutorContext(ctx, invocationMeta, session.State(), content)
 	return e.process(executorContext, r, processor, queue)
 }
@@ -170,7 +170,7 @@ func (e *Executor) process(ctx ExecutorContext, r *runner.Runner, processor *eve
 			return e.writeFinalTaskStatus(ctx, q, event, adkErr)
 		}
 
-		a2aEvent, pErr := processor.processWithConverter(ctx, adkEvent, e.config.GenAIToA2APartConverter)
+		a2aEvent, pErr := processor.process(ctx, adkEvent)
 		if pErr == nil && a2aEvent != nil && e.config.AfterEventCallback != nil {
 			pErr = e.config.AfterEventCallback(ctx, adkEvent, a2aEvent)
 		}

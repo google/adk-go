@@ -542,7 +542,7 @@ func TestExecutor_Converters(t *testing.T) {
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
 	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
 
-	t.Run("A2AToGenAIPartConverter", func(t *testing.T) {
+	t.Run("A2APartConverter", func(t *testing.T) {
 		t.Run("modify input", func(t *testing.T) {
 			var receivedText string
 			agent, err := agent.New(agent.Config{
@@ -560,7 +560,7 @@ func TestExecutor_Converters(t *testing.T) {
 
 			executor := NewExecutor(ExecutorConfig{
 				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
-				A2AToGenAIPartConverter: func(ctx context.Context, evt a2a.Event, part a2a.Part) (*genai.Part, error) {
+				A2APartConverter: func(ctx context.Context, evt a2a.Event, part a2a.Part) (*genai.Part, error) {
 					if p, ok := part.(a2a.TextPart); ok && p.Text == "hi" {
 						return genai.NewPartFromText("HELLO"), nil
 					}
@@ -593,7 +593,7 @@ func TestExecutor_Converters(t *testing.T) {
 
 			executor := NewExecutor(ExecutorConfig{
 				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
-				A2AToGenAIPartConverter: func(ctx context.Context, evt a2a.Event, part a2a.Part) (*genai.Part, error) {
+				A2APartConverter: func(ctx context.Context, evt a2a.Event, part a2a.Part) (*genai.Part, error) {
 					return nil, nil
 				},
 			})
@@ -609,7 +609,7 @@ func TestExecutor_Converters(t *testing.T) {
 		})
 	})
 
-	t.Run("GenAIToA2APartConverter", func(t *testing.T) {
+	t.Run("GenAIPartConverter", func(t *testing.T) {
 		agentEvents := []*session.Event{
 			{LLMResponse: model.LLMResponse{
 				Content: &genai.Content{Parts: []*genai.Part{genai.NewPartFromText("world")}},
@@ -624,7 +624,7 @@ func TestExecutor_Converters(t *testing.T) {
 
 			executor := NewExecutor(ExecutorConfig{
 				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
-				GenAIToA2APartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (a2a.Part, error) {
+				GenAIPartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (a2a.Part, error) {
 					if part.Text == "world" {
 						return a2a.TextPart{Text: "WORLD"}, nil
 					}
@@ -661,7 +661,7 @@ func TestExecutor_Converters(t *testing.T) {
 
 			executor := NewExecutor(ExecutorConfig{
 				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
-				GenAIToA2APartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (a2a.Part, error) {
+				GenAIPartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (a2a.Part, error) {
 					return nil, nil
 				},
 			})
