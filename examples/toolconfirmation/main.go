@@ -69,9 +69,11 @@ type VacationRequest struct {
 }
 
 var (
-	pendingRequests = make(map[string]*VacationRequest)
-	reqMap          = make(map[string]*VacationRequest)
-	requestCounter  = 0
+	// Stores the requests with a reqID key
+	requestsByReqID = make(map[string]*VacationRequest)
+	// Stores the requests with a callID key
+	requestsByCallID = make(map[string]*VacationRequest)
+	requestCounter   = 0
 )
 
 func main() {
@@ -144,8 +146,8 @@ func requestVacationDays(ctx tool.Context, args RequestVacationArgs) (*RequestVa
 		}
 
 		// Store the pending request
-		pendingRequests[requestID] = req
-		reqMap[ctx.FunctionCallID()] = req
+		requestsByReqID[requestID] = req
+		requestsByCallID[ctx.FunctionCallID()] = req
 
 		err := ctx.RequestConfirmation(
 			"Please approve or reject the tool call request_time_off() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
@@ -162,7 +164,7 @@ func requestVacationDays(ctx tool.Context, args RequestVacationArgs) (*RequestVa
 	}
 
 	// This part normally wouldn't be reached in the first call
-	req, ok := reqMap[ctx.FunctionCallID()]
+	req, ok := requestsByCallID[ctx.FunctionCallID()]
 	if !ok {
 		return nil, fmt.Errorf("unable to get request using payload %s and function call id %s", confirmation.Payload, ctx.FunctionCallID())
 	}
@@ -179,7 +181,7 @@ func requestVacationDays(ctx tool.Context, args RequestVacationArgs) (*RequestVa
 		approvedDays := min(payload.DaysApproved, args.Days)
 		req.Status = "APPROVED"
 		req.DaysApproved = payload.DaysApproved
-		pendingRequests[req.ID] = req // Update status
+		requestsByReqID[req.ID] = req // Update status
 		return &RequestVacationResults{
 			Status:       "The time off request is accepted.",
 			DaysApproved: approvedDays,
@@ -187,7 +189,7 @@ func requestVacationDays(ctx tool.Context, args RequestVacationArgs) (*RequestVa
 		}, nil
 	} else {
 		req.Status = "REJECTED"
-		pendingRequests[req.ID] = req // Update status
+		requestsByReqID[req.ID] = req // Update status
 		req.DaysApproved = 0
 		return &RequestVacationResults{
 			Status:       "The time off request is rejected.",
@@ -236,20 +238,12 @@ func runTurn(ctx context.Context, r *runner.Runner, sessionID string, content *g
 		if event.Content != nil {
 			for _, part := range event.Content.Parts {
 				fc := part.FunctionCall
-				if fc != nil && fc.Name == session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME {
-					originalCallRaw, ok := fc.Args["originalFunctionCall"]
-					if !ok {
-						continue
-					}
-					jsonBytes, err := json.Marshal(originalCallRaw)
+				if fc != nil && fc.Name == toolconfirmation.RequestConfirmationFunctionCallName {
+					originalFunctionCall, err := toolconfirmation.OriginalCallFrom(fc)
 					if err != nil {
 						continue
 					}
-					var originalFunctionCall genai.FunctionCall
-					if err := json.Unmarshal(jsonBytes, &originalFunctionCall); err != nil {
-						continue
-					}
-					req, ok := reqMap[originalFunctionCall.ID]
+					req, ok := requestsByCallID[originalFunctionCall.ID]
 					if !ok {
 						continue
 					}
@@ -325,18 +319,18 @@ func runVacationSession(ctx context.Context, vacationAgent agent.Agent, sessionS
 
 func displayVacationRequests() {
 	fmt.Println("\n--- Pending Vacation Requests ---")
-	if len(pendingRequests) == 0 {
+	if len(requestsByReqID) == 0 {
 		fmt.Println("No pending requests.")
 		return
 	}
-	for _, req := range pendingRequests {
+	for _, req := range requestsByReqID {
 		fmt.Printf("ID: %s, Call ID: %s, User: %s, Days: %d, Status: %s, Days Approved: %d\n", req.ID, req.CallID, req.UserID, req.Days, req.Status, req.DaysApproved)
 	}
 	fmt.Println("-------------------------------")
 }
 
 func processApproval(ctx context.Context, r *runner.Runner, sessionID, requestID string, approved bool, reader *bufio.Reader) {
-	req, exists := pendingRequests[requestID]
+	req, exists := requestsByReqID[requestID]
 	if !exists || req.Status != "PENDING" {
 		fmt.Printf("Request ID %s not found or not pending.\n", requestID)
 		return
@@ -359,7 +353,7 @@ func processApproval(ctx context.Context, r *runner.Runner, sessionID, requestID
 
 	payload := ConfirmationPayload{DaysApproved: daysApproved}
 	funcResponse := &genai.FunctionResponse{
-		Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+		Name: toolconfirmation.RequestConfirmationFunctionCallName,
 		ID:   req.CallID,
 		Response: map[string]any{
 			"confirmed": approved,

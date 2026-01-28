@@ -29,6 +29,11 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+type confirmedCall struct {
+	confirmation *toolconfirmation.ToolConfirmation
+	call         genai.FunctionCall
+}
+
 func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		llmAgent := asLLMAgent(ctx.Agent())
@@ -47,7 +52,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				events = append(events, e)
 			}
 		}
-		requestConfirmationFR := make(map[string]toolconfirmation.ToolConfirmation)
+		confirmationResponses := make(map[string]toolconfirmation.ToolConfirmation)
 		confirmationEventIndex := -1
 		for k := len(events) - 1; k >= 0; k-- {
 			event := events[k]
@@ -60,7 +65,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				return
 			}
 			for _, funcResp := range responses {
-				if funcResp.Name != session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME {
+				if funcResp.Name != toolconfirmation.RequestConfirmationFunctionCallName {
 					continue
 				}
 				var tc toolconfirmation.ToolConfirmation
@@ -91,13 +96,13 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 						}
 					}
 				}
-				requestConfirmationFR[funcResp.ID] = tc
+				confirmationResponses[funcResp.ID] = tc
 			}
 			confirmationEventIndex = k
 			break
 		}
 
-		if len(requestConfirmationFR) == 0 {
+		if len(confirmationResponses) == 0 {
 			return
 		}
 
@@ -109,35 +114,24 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			if len(calls) == 0 {
 				continue
 			}
-			toolsToResumeConfirmation := map[string]*toolconfirmation.ToolConfirmation{}
-			toolsToResumeWithArgs := map[string]genai.FunctionCall{}
+			toolsToResumeByFunctionCallID := map[string]*confirmedCall{}
 			for _, functionCall := range calls {
-				confirmation, ok := requestConfirmationFR[functionCall.ID]
+				confirmation, ok := confirmationResponses[functionCall.ID]
 				if !ok {
 					continue
 				}
-
-				originalCallRaw, ok := functionCall.Args["originalFunctionCall"]
-				if !ok {
-					continue
-				}
-
-				// Use JSON round-tripping to simulate Python's **kwargs unpacking
-				var originalFunctionCall genai.FunctionCall
-				jsonBytes, err := json.Marshal(originalCallRaw)
+				originalFunctionCall, err := toolconfirmation.OriginalCallFrom(functionCall)
 				if err != nil {
 					continue
 				}
 
-				if err := json.Unmarshal(jsonBytes, &originalFunctionCall); err != nil {
-					continue
+				toolsToResumeByFunctionCallID[originalFunctionCall.ID] = &confirmedCall{
+					confirmation: &confirmation,
+					call:         *originalFunctionCall,
 				}
-
-				toolsToResumeConfirmation[originalFunctionCall.ID] = &confirmation
-				toolsToResumeWithArgs[originalFunctionCall.ID] = originalFunctionCall
 			}
 
-			if len(toolsToResumeConfirmation) == 0 {
+			if len(toolsToResumeByFunctionCallID) == 0 {
 				continue
 			}
 
@@ -150,24 +144,21 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 					continue
 				}
 				for _, resp := range responses {
-					if _, ok := toolsToResumeConfirmation[resp.ID]; ok {
-						delete(toolsToResumeConfirmation, resp.ID)
-						delete(toolsToResumeWithArgs, resp.ID)
-					}
+					delete(toolsToResumeByFunctionCallID, resp.ID)
 				}
-				if len(toolsToResumeConfirmation) == 0 {
+				if len(toolsToResumeByFunctionCallID) == 0 {
 					break
 				}
 			}
-			if len(toolsToResumeConfirmation) == 0 {
+			if len(toolsToResumeByFunctionCallID) == 0 {
 				continue
 			}
 
 			parts := make([]*genai.Part, 0)
-			for callID, fc := range toolsToResumeWithArgs {
-				if _, ok := toolsToResumeConfirmation[callID]; ok {
-					parts = append(parts, &genai.Part{FunctionCall: &fc})
-				}
+			toolsToResumeConfirmation := make(map[string]*toolconfirmation.ToolConfirmation, len(toolsToResumeByFunctionCallID))
+			for callID, cc := range toolsToResumeByFunctionCallID {
+				parts = append(parts, &genai.Part{FunctionCall: &cc.call})
+				toolsToResumeConfirmation[callID] = cc.confirmation
 			}
 
 			ev, err := f.handleFunctionCalls(ctx, toolsmap, &model.LLMResponse{

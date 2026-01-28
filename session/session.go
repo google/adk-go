@@ -25,27 +25,6 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
-// REQUEST_CONFIRMATION_FUNCTION_CALL_NAME defines the specific name for the FunctionCall event
-// emitted by ADK when a Human-in-the-Loop confirmation is required.
-//
-// The 'args' of this FunctionCall include:
-//   - "toolConfirmation": A toolConfirmation with the hint.
-//   - "originalFunctionCall": The original FunctionCall (including its name and arguments) that the agent intended to execute.
-//
-// Client applications or frontends interacting with the ADK-powered agent must:
-// 1. Listen for events containing a FunctionCall with this name.
-// 2. Extract the details of the 'originalFunctionCall' from the arguments.
-// 3. Present a clear confirmation prompt to the human user, explaining the action and potential consequences.
-// 4. Capture the user's decision (e.g., true for yes/approve, false for no/deny).
-// 5. Send a FunctionResponse message back to the ADK. This FunctionResponse MUST:
-//   - Have the same 'id' as the received "adk_request_confirmation" FunctionCall.
-//   - Have the name set to "adk_request_confirmation".
-//   - Include a response payload, typically a map like {"confirmed": bool}.
-//
-// Based on the boolean value in "confirmed", the ADK will either proceed to execute
-// the 'originalFunctionCall' or block it and return an error.
-const REQUEST_CONFIRMATION_FUNCTION_CALL_NAME = "adk_request_confirmation"
-
 // Session represents a series of interactions between a user and agents.
 //
 // When a user starts interacting with your agent, session holds everything

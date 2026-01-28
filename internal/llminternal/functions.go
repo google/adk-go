@@ -23,6 +23,7 @@ import (
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 // generateRequestConfirmationEvent creates a new Event containing
@@ -45,10 +46,8 @@ func generateRequestConfirmationEvent(
 	parts := []*genai.Part{}
 	longRunningToolIDs := []string{}
 	functionCalls := make(map[string]*genai.FunctionCall, len(functionCallEvent.Content.Parts))
-	for _, part := range functionCallEvent.Content.Parts {
-		if part.FunctionCall != nil {
-			functionCalls[part.FunctionCall.ID] = part.FunctionCall
-		}
+	for _, call := range utils.FunctionCalls(functionCallEvent.Content) {
+		functionCalls[call.ID] = call
 	}
 
 	for funcID, confirmation := range functionResponseEvent.Actions.RequestedToolConfirmations {
@@ -64,7 +63,7 @@ func generateRequestConfirmationEvent(
 		}
 
 		requestConfirmationFC := &genai.FunctionCall{
-			Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+			Name: toolconfirmation.RequestConfirmationFunctionCallName,
 			Args: args,
 		}
 

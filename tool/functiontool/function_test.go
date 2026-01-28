@@ -36,7 +36,6 @@ import (
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/toolconfirmation"
@@ -597,7 +596,7 @@ func TestToolConfirmation(t *testing.T) {
 			args: map[string]any{"Num": 1},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
-				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
+				genai.NewContentFromFunctionCall(toolconfirmation.RequestConfirmationFunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 1},
 						Name: "test_tool",
@@ -618,10 +617,10 @@ func TestToolConfirmation(t *testing.T) {
 				RequireConfirmation: true,
 			},
 			args:                    map[string]any{"Num": 1},
-			confirmFunctionResponse: &genai.FunctionResponse{Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, Response: map[string]any{"confirmed": true}},
+			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.RequestConfirmationFunctionCallName, Response: map[string]any{"confirmed": true}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
-				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
+				genai.NewContentFromFunctionCall(toolconfirmation.RequestConfirmationFunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 1},
 						Name: "test_tool",
@@ -643,10 +642,10 @@ func TestToolConfirmation(t *testing.T) {
 				RequireConfirmation: true,
 			},
 			args:                    map[string]any{"Num": 1},
-			confirmFunctionResponse: &genai.FunctionResponse{Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, Response: map[string]any{"confirmed": false}},
+			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.RequestConfirmationFunctionCallName, Response: map[string]any{"confirmed": false}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
-				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
+				genai.NewContentFromFunctionCall(toolconfirmation.RequestConfirmationFunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 1},
 						Name: "test_tool",
@@ -688,7 +687,7 @@ func TestToolConfirmation(t *testing.T) {
 			args: map[string]any{"Num": 4},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
-				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
+				genai.NewContentFromFunctionCall(toolconfirmation.RequestConfirmationFunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 4},
 						Name: "test_tool",
@@ -711,10 +710,10 @@ func TestToolConfirmation(t *testing.T) {
 				},
 			},
 			args:                    map[string]any{"Num": 4},
-			confirmFunctionResponse: &genai.FunctionResponse{Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, Response: map[string]any{"confirmed": true}},
+			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.RequestConfirmationFunctionCallName, Response: map[string]any{"confirmed": true}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
-				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
+				genai.NewContentFromFunctionCall(toolconfirmation.RequestConfirmationFunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 4},
 						Name: "test_tool",
@@ -738,10 +737,10 @@ func TestToolConfirmation(t *testing.T) {
 				},
 			},
 			args:                    map[string]any{"Num": 4},
-			confirmFunctionResponse: &genai.FunctionResponse{Name: session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, Response: map[string]any{"confirmed": false}},
+			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.RequestConfirmationFunctionCallName, Response: map[string]any{"confirmed": false}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
-				genai.NewContentFromFunctionCall(session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, map[string]any{
+				genai.NewContentFromFunctionCall(toolconfirmation.RequestConfirmationFunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 4},
 						Name: "test_tool",
@@ -819,7 +818,7 @@ func TestToolConfirmation(t *testing.T) {
 					t.Errorf("LoopAgent Run() mismatch (-want +got):\n%s", diff)
 				}
 				for _, p := range got.Content.Parts {
-					if p.FunctionCall != nil && p.FunctionCall.Name == session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME {
+					if p.FunctionCall != nil && p.FunctionCall.Name == toolconfirmation.RequestConfirmationFunctionCallName {
 						confirmFunctionCall = p.FunctionCall
 					}
 				}
@@ -862,7 +861,7 @@ func TestToolConfirmation(t *testing.T) {
 						t.Errorf("LoopAgent Run() mismatch (-want +got):\n%s", diff)
 					}
 					for _, p := range got.Content.Parts {
-						if p.FunctionCall != nil && p.FunctionCall.Name == session.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME {
+						if p.FunctionCall != nil && p.FunctionCall.Name == toolconfirmation.RequestConfirmationFunctionCallName {
 							confirmFunctionCall = p.FunctionCall
 						}
 					}
