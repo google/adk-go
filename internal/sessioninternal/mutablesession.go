@@ -15,8 +15,11 @@
 package sessioninternal
 
 import (
+	"context"
 	"fmt"
 	"iter"
+	"log"
+	"sync"
 	"time"
 
 	"google.golang.org/adk/session"
@@ -26,6 +29,7 @@ import (
 type MutableSession struct {
 	service       session.Service
 	storedSession session.Session
+	mu            sync.RWMutex
 }
 
 // NewMutableSession creates and returns session.Session implementation.
@@ -41,26 +45,52 @@ func (s *MutableSession) State() session.State {
 }
 
 func (s *MutableSession) AppName() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.storedSession.AppName()
 }
 
 func (s *MutableSession) UserID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.storedSession.UserID()
 }
 
 func (s *MutableSession) ID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.storedSession.ID()
 }
 
 func (s *MutableSession) Events() session.Events {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx := context.Background()
+	resp, err := s.service.Get(ctx, &session.GetRequest{
+		AppName:   s.storedSession.AppName(),
+		UserID:    s.storedSession.UserID(),
+		SessionID: s.storedSession.ID(),
+	})
+	if err != nil {
+		log.Printf("MutableSession: failed to fetch latest session (app=%s, user=%s, session=%s), using cached version: %v",
+			s.storedSession.AppName(), s.storedSession.UserID(), s.storedSession.ID(), err)
+		return s.storedSession.Events()
+	}
+
+	s.storedSession = resp.Session
 	return s.storedSession.Events()
 }
 
 func (s *MutableSession) LastUpdateTime() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.storedSession.LastUpdateTime()
 }
 
 func (s *MutableSession) Get(key string) (any, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	value, err := s.storedSession.State().Get(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get key %q from state: %w", key, err)
@@ -69,10 +99,14 @@ func (s *MutableSession) Get(key string) (any, error) {
 }
 
 func (s *MutableSession) All() iter.Seq2[string, any] {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.storedSession.State().All()
 }
 
 func (s *MutableSession) Set(key string, value any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	mutableState, ok := s.storedSession.State().(MutableState)
 	if !ok {
 		return fmt.Errorf("this session state is not mutable")
