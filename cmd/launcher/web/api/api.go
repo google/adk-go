@@ -70,8 +70,19 @@ func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 
 // SetupSubrouters adds the API router to the parent router.
 func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
+	// Create the ADK REST API config
+	adkrestConfig := &adkrest.Config{
+		AgentLoader:     config.AgentLoader,
+		SessionService:  config.SessionService,
+		ArtifactService: config.ArtifactService,
+		MemoryService:   config.MemoryService,
+		SSEWriteTimeout: a.config.sseWriteTimeout,
+	}
 	// Create the ADK REST API handler
-	apiHandler := adkrest.NewHandler(config, a.config.sseWriteTimeout)
+	apiHandler, err := adkrest.NewHandler(adkrestConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create ADK REST API handler: %v", err)
+	}
 
 	// Wrap it with CORS middleware
 	corsHandler := corsWithArgs(a.config.frontendAddress)(apiHandler)
