@@ -26,7 +26,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/anthropics/anthropic-sdk-go/shared/constant"
-
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -47,21 +47,10 @@ func (builder *RequestBuilder) FromLLMRequest(req *model.LLMRequest) (*anthropic
 		messages = append(messages, message)
 	}
 
-	var params *anthropic.MessageNewParams
-	if req.Config != nil {
-		systemInstruction := builder.buildSystemInstruction(req.Config.SystemInstruction)
-		params = &anthropic.MessageNewParams{
-			Messages:  messages,
-			System:    systemInstruction,
-			Model:     anthropic.Model(builder.modelName),
-			MaxTokens: builder.maxTokens,
-		}
-	} else {
-		params = &anthropic.MessageNewParams{
-			Messages:  messages,
-			Model:     anthropic.Model(builder.modelName),
-			MaxTokens: builder.maxTokens,
-		}
+	params := &anthropic.MessageNewParams{
+		Messages:  messages,
+		Model:     anthropic.Model(builder.modelName),
+		MaxTokens: builder.maxTokens,
 	}
 	if err := builder.appendConfigOptions(params, req.Config); err != nil {
 		return nil, err
@@ -152,6 +141,9 @@ func (builder *RequestBuilder) appendConfigOptions(params *anthropic.MessageNewP
 	if len(cfg.StopSequences) > 0 {
 		params.StopSequences = cfg.StopSequences
 	}
+	if cfg.SystemInstruction != nil {
+		params.System = builder.buildSystemInstruction(cfg.SystemInstruction)
+	}
 
 	if len(cfg.Tools) > 0 {
 		toolParams := make([]anthropic.ToolUnionParam, 0)
@@ -179,10 +171,17 @@ func (builder *RequestBuilder) buildToToolParam(fn *genai.FunctionDeclaration) (
 		return anthropic.ToolUnionParam{}, fmt.Errorf("function declaration missing name")
 	}
 
-	inputSchema := anthropic.ToolInputSchemaParam{
-		Type: "object",
-	}
-	if fn.Parameters != nil && len(fn.Parameters.Properties) > 0 {
+	var inputSchema anthropic.ToolInputSchemaParam
+	if fn.ParametersJsonSchema != nil {
+		jsonSchema, ok := fn.ParametersJsonSchema.(*jsonschema.Schema)
+		if ok && jsonSchema != nil {
+			inputSchema = anthropic.ToolInputSchemaParam{
+				Type:       constant.Object(jsonSchema.Type),
+				Required:   jsonSchema.Required,
+				Properties: jsonSchema.Properties,
+			}
+		}
+	} else if fn.Parameters != nil && len(fn.Parameters.Properties) > 0 {
 		properties := make(map[string]any, len(fn.Parameters.Properties))
 		for key, property := range fn.Parameters.Properties {
 			propMap, err := schemaToMap(property)
