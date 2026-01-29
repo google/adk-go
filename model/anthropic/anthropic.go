@@ -13,7 +13,8 @@
 // limitations under the License.
 
 // Package anthropic implements the model.LLM interface backed by Claude models
-// served via Vertex AI.
+// accessible via multiple providers, including Vertex AI, the Anthropic API,
+// and AWS Bedrock.
 package anthropic
 
 import (
@@ -70,7 +71,7 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-type AnthropicModel struct {
+type anthropicModel struct {
 	client anthropic.Client
 
 	name      string
@@ -78,36 +79,6 @@ type AnthropicModel struct {
 }
 
 // NewModel returns [model.LLM] backed by the Anthropic API.
-//
-// For Vertex AI(default), ensure that the environment variables GOOGLE_CLOUD_PROJECT
-// and GOOGLE_CLOUD_LOCATION are set, and provide any necessary client options via cfg.ClientOptions.
-//
-// For Anthropic, use APIKey in cfg to authenticate:
-//
-// ```
-//
-//	cfg := &anthropic.Config{
-//	    Provider: anthropic.ProviderAnthropic,
-//	    APIKey: "your_api_key",
-//	}
-//
-// ```
-//
-// For AWS Bedrock, provide the necessary client options via cfg.ClientOptions,
-// such as bedrock.WithConfig() or bedrock.WithLoadDefaultConfig().
-//
-// ```
-//
-//		cfg := &anthropic.Config{
-//		    Provider: anthropic.ProviderAWSBedrock,
-//		    ClientOptions: []option.RequestOption{
-//		        bedrock.WithConfig(cfg),
-//		    },
-//	 }
-//
-// ```
-//
-// An error is returned if the model cannot be created.
 func NewModel(ctx context.Context, modelName string, cfg *Config) (model.LLM, error) {
 	if modelName == "" {
 		return nil, fmt.Errorf("model name must be provided")
@@ -127,7 +98,7 @@ func NewModel(ctx context.Context, modelName string, cfg *Config) (model.LLM, er
 		}
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
 	case ProviderAWSBedrock:
-		// Do nothing special for AWS Bedrock for now. User need to provide the client option
+		// Do nothing special for AWS Bedrock for now. Users need to provide the client option
 		// via `bedrock.WithConfig()` or `bedrock.WithLoadDefaultConfig()`.
 	default:
 		projectID := os.Getenv(envProjectID)
@@ -138,20 +109,20 @@ func NewModel(ctx context.Context, modelName string, cfg *Config) (model.LLM, er
 		opts = append(opts, vertex.WithGoogleAuth(ctx, location, projectID, defaultOAuthScope))
 	}
 
-	return &AnthropicModel{
+	return &anthropicModel{
 		name:      modelName,
 		maxTokens: cfg.MaxTokens,
 		client:    anthropic.NewClient(opts...),
 	}, nil
 }
 
-func (m *AnthropicModel) Name() string {
+func (m *anthropicModel) Name() string {
 	return m.name
 }
 
 // GenerateContent issues a Messages.New call. When stream is true, the Anthropic
 // streaming API is used to emit partial responses as they arrive.
-func (m *AnthropicModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *anthropicModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if stream {
 		return m.generateStream(ctx, req)
 	}
@@ -163,7 +134,7 @@ func (m *AnthropicModel) GenerateContent(ctx context.Context, req *model.LLMRequ
 	}
 }
 
-func (m *AnthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+func (m *anthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	if req == nil {
 		return nil, fmt.Errorf("llm request must not be empty")
 	}
@@ -183,7 +154,7 @@ func (m *AnthropicModel) generate(ctx context.Context, req *model.LLMRequest) (*
 	return responseBuilder.FromMessage(msg)
 }
 
-func (m *AnthropicModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
+func (m *anthropicModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		builder := RequestBuilder{modelName: m.name, maxTokens: m.maxTokens}
 		params, err := builder.FromLLMRequest(req)

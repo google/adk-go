@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package anthropic implements the model.LLM interface backed by Claude models
-// served via Vertex AI.
+// available via Vertex AI, Anthropic API, and AWS Bedrock.
 
 package anthropic
 
@@ -52,6 +52,7 @@ func parsePartialStreamEvent(event anthropic.MessageStreamEventUnion) *model.LLM
 		content := genai.NewContentFromParts([]*genai.Part{part}, genai.RoleModel)
 		return &model.LLMResponse{
 			Content: content,
+			Partial: true,
 		}
 	}
 	return nil
@@ -76,7 +77,7 @@ func (builder *ResponseBuilder) FromMessage(message *anthropic.Message) (*model.
 		Content:        content,
 		FinishReason:   builder.buildFinishReason(message.StopReason),
 		UsageMetadata:  builder.extractUsage(message.Usage),
-		CustomMetadata: make(map[string]any, 0),
+		CustomMetadata: make(map[string]any),
 	}
 	if message.StopReason != "" {
 		llmResponse.CustomMetadata["stop_reason"] = message.StopReason
