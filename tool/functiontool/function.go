@@ -198,11 +198,11 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 		return nil, err
 	}
 
-	requireConfirmation := false
+	requireConfirmation := f.requireConfirmation
 	if f.requireConfirmationProvider != nil {
 		requireConfirmation = f.requireConfirmationProvider(input)
 	}
-	if requireConfirmation || f.requireConfirmation {
+	if requireConfirmation {
 		if ctx.ToolConfirmation() == nil {
 			err := ctx.RequestConfirmation(
 				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",

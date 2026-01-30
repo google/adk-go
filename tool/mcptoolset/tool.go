@@ -91,11 +91,11 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 }
 
 func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
-	requireConfirmation := false
+	requireConfirmation := t.requireConfirmation
 	if t.requireConfirmationProvider != nil {
 		requireConfirmation = t.requireConfirmationProvider(args)
 	}
-	if requireConfirmation || t.requireConfirmation {
+	if requireConfirmation {
 		if ctx.ToolConfirmation() == nil {
 			err := ctx.RequestConfirmation(
 				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
