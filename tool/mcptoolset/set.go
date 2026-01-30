@@ -78,9 +78,9 @@ type Config struct {
 	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.
 	ToolFilter tool.Predicate
 
-	// RequireConfirmation flags whether this tool must always ask for user confirmation
+	// RequireConfirmation flags whether the tools from this toolset must always ask for user confirmation
 	// before execution. If set to true, the ADK framework will automatically initiate
-	// a Human-in-the-Loop (HITL) confirmation request when this tool is invoked.
+	// a Human-in-the-Loop (HITL) confirmation request when a tool is invoked.
 	RequireConfirmation bool
 
 	// RequireConfirmationProvider allows for dynamic determination of whether
