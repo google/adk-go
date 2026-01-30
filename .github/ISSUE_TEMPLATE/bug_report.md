@@ -12,8 +12,7 @@ assignees: ''
 
 ## 🔴 Required Information
 *Please ensure all items in this section are completed to allow for efficient
-triaging. Requests without complete information may be rejected / deprioritized.
-If an item is not applicable to you - please mark it as N/A*
+triaging. If an item is not applicable to you - please mark it as N/A*
 
 **Describe the Bug:**
 A clear and concise description of what the bug is.
@@ -34,7 +33,7 @@ What actually happened? Include error messages or crash stack traces here.
 **Environment Details:**
 
  - ADK Library Version:
- - OS:** [e.g., macOS, Linux, Windows]
+ - OS: [e.g., macOS, Linux, Windows]
  - Go Version:
 
 **Model Information:**
@@ -64,7 +63,7 @@ Add any other context about the problem here.
 
 **Minimal Reproduction Code:**
 Please provide a code snippet or a link to a Gist/repo that isolates the issue.
-```
+```go
 // Code snippet here
 ```
 
