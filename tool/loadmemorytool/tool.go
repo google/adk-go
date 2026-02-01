@@ -20,9 +20,9 @@ package loadmemorytool
 import (
 	"fmt"
 
-	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"

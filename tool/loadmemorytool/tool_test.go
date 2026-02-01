@@ -64,11 +64,6 @@ func TestLoadMemoryTool_BasicProperties(t *testing.T) {
 func TestLoadMemoryTool_Run(t *testing.T) {
 	tool := loadmemorytool.New()
 
-	toolImpl, ok := tool.(toolinternal.FunctionTool)
-	if !ok {
-		t.Fatal("loadMemoryTool does not implement FunctionTool")
-	}
-
 	tests := []struct {
 		name     string
 		args     map[string]any
@@ -127,7 +122,7 @@ func TestLoadMemoryTool_Run(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tc := createToolContext(t, &mockMemory{memories: tt.memories})
 
-			result, err := toolImpl.Run(tc, tt.args)
+			result, err := tool.Run(tc, tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Run() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -182,5 +177,5 @@ func createToolContext(t *testing.T, mem *mockMemory) tool.Context {
 		Memory: mem,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", nil)
+	return toolinternal.NewToolContext(ctx, "", nil, nil)
 }
