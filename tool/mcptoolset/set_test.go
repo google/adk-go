@@ -750,7 +750,7 @@ type TestResult struct {
 func TestNewToolSet_RequireConfirmationProvider_Validation(t *testing.T) {
 	tests := []struct {
 		name     string
-		provider func(name string, args any) bool // The RequireConfirmationProvider value to test
+		provider mcptoolset.ConfirmationProvider // The provider to test
 	}{
 		// --- Happy Paths ---
 		{
