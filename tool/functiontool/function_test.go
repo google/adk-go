@@ -30,12 +30,14 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent/llmagent"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/toolconfirmation"
@@ -62,6 +64,11 @@ func ExampleNew() {
 		panic(err)
 	}
 	_ = sumTool // use the tool
+}
+
+func createToolContext(t *testing.T) tool.Context {
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	return toolinternal.NewToolContext(invCtx, "", &session.EventActions{}, nil)
 }
 
 //go:generate go test -httprecord=.*
@@ -166,7 +173,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 			if !ok {
 				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
 			}
-			callResult, err := funcTool.Run(nil, resp.Args)
+			callResult, err := funcTool.Run(createToolContext(t), resp.Args)
 			if tc.isError {
 				if err == nil {
 					t.Fatalf("weatherReportTool.Run(%v) expected to fail but got success with result %v", resp.Args, callResult)
@@ -321,7 +328,7 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 			if !ok {
 				t.Fatal("weatherReportTool does not implement itype.RequestProcessor")
 			}
-			callResult, err := funcTool.Run(nil, tc.args)
+			callResult, err := funcTool.Run(createToolContext(t), tc.args)
 			if err != nil {
 				t.Fatalf("weatherReportTool.Run failed: %v", err)
 			}
@@ -361,7 +368,7 @@ func TestFunctionTool_MapInput(t *testing.T) {
 	if !ok {
 		t.Fatal("sumTool does not implement itype.RequestProcessor")
 	}
-	callResult, err := funcTool.Run(nil, map[string]any{"a": 2, "b": 3})
+	callResult, err := funcTool.Run(createToolContext(t), map[string]any{"a": 2, "b": 3})
 	if err != nil {
 		t.Fatalf("sumTool.Run failed: %v", err)
 	}
@@ -525,7 +532,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 				if !ok {
 					t.Fatal("inventoryTool does not implement itype.RequestProcessor")
 				}
-				ret, err := funcTool.Run(nil, tc.in)
+				ret, err := funcTool.Run(createToolContext(t), tc.in)
 				// ret is expected to be nil always.
 				if tc.wantErr && err == nil {
 					t.Errorf("inventoryTool.Run = (%v, %v), want error", ret, err)
@@ -1066,7 +1073,7 @@ func TestFunctionTool_PanicRecovery(t *testing.T) {
 		t.Fatal("panicTool does not implement toolinternal.FunctionTool")
 	}
 
-	result, err := funcTool.Run(nil, map[string]any{"value": "test"})
+	result, err := funcTool.Run(createToolContext(t), map[string]any{"value": "test"})
 	if err == nil {
 		t.Fatal("expected error from panic recovery, got nil")
 	}

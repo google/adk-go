@@ -48,8 +48,10 @@ import (
 //	})
 func New(cfg Config) (tool.Toolset, error) {
 	return &set{
-		mcpClient:  newConnectionRefresher(cfg.Client, cfg.Transport),
-		toolFilter: cfg.ToolFilter,
+		mcpClient:                   newConnectionRefresher(cfg.Client, cfg.Transport),
+		toolFilter:                  cfg.ToolFilter,
+		requireConfirmation:         cfg.RequireConfirmation,
+		requireConfirmationProvider: cfg.RequireConfirmationProvider,
 	}, nil
 }
 
@@ -64,11 +66,30 @@ type Config struct {
 	// If ToolFilter is nil, then all tools are returned.
 	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.
 	ToolFilter tool.Predicate
+
+	// RequireConfirmation flags whether the tools from this toolset must always ask for user confirmation
+	// before execution. If set to true, the ADK framework will automatically initiate
+	// a Human-in-the-Loop (HITL) confirmation request when a tool is invoked.
+	RequireConfirmation bool
+
+	// RequireConfirmationProvider allows for dynamic determination of whether
+	// user confirmation is needed. This field is a function called at runtime to decide if
+	// a confirmation request should be sent. The function takes the toolName and tool's input parameters as arguments.
+	// This provider offers more flexibility than the static RequireConfirmation flag,
+	// enabling conditional confirmation based on the invocation details.
+	// If set, this takes precedence over the RequireConfirmation flag.
+	//
+	// Required signature for a provider function:
+	// func(name string, toolInput any) bool
+	// Returning true means confirmation is required.
+	RequireConfirmationProvider ConfirmationProvider
 }
 
 type set struct {
-	mcpClient  MCPClient
-	toolFilter tool.Predicate
+	mcpClient                   MCPClient
+	toolFilter                  tool.Predicate
+	requireConfirmation         bool
+	requireConfirmationProvider ConfirmationProvider
 }
 
 func (*set) Name() string {
@@ -92,7 +113,7 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
-		t, err := convertTool(mcpTool, s.mcpClient)
+		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}
@@ -106,3 +127,11 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	return adkTools, nil
 }
+
+// ConfirmationProvider defines a function that dynamically determines whether
+// a specific tool execution requires user confirmation.
+//
+// It accepts the tool name and the input parameters as arguments.
+// Returning true signals that the system must wait for Human-in-the-Loop (HITL)
+// approval before proceeding with the execution.
+type ConfirmationProvider func(string, any) bool

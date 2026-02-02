@@ -198,12 +198,20 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 		return nil, err
 	}
 
-	requireConfirmation := false
-	if f.requireConfirmationProvider != nil {
-		requireConfirmation = f.requireConfirmationProvider(input)
-	}
-	if requireConfirmation || f.requireConfirmation {
-		if ctx.ToolConfirmation() == nil {
+	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
+		if !confirmation.Confirmed {
+			return nil, fmt.Errorf("error tool %q call is rejected", f.Name())
+		}
+	} else {
+		requireConfirmation := f.requireConfirmation
+
+		// Only run the potentially expensive provider if the static flag didn't already trigger it
+		// Provider takes precedence/overrides:
+		if f.requireConfirmationProvider != nil {
+			requireConfirmation = f.requireConfirmationProvider(input)
+		}
+
+		if requireConfirmation {
 			err := ctx.RequestConfirmation(
 				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					f.Name()), nil)
@@ -212,8 +220,6 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 			}
 			ctx.Actions().SkipSummarization = true
 			return nil, fmt.Errorf("error tool %q requires confirmation, please approve or reject", f.Name())
-		} else if !ctx.ToolConfirmation().Confirmed {
-			return nil, fmt.Errorf("error tool %q call is rejected", f.Name())
 		}
 	}
 
