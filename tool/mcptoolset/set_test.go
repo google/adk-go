@@ -499,10 +499,7 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 			name: "Conditional Confirmation Not Required For This Tool",
 			toolSetConfig: mcptoolset.Config{
 				RequireConfirmationProvider: func(name string, args any) bool {
-					if name == toolName {
-						return false
-					}
-					return true
+					return name != toolName
 				},
 			},
 			city: "Lisbon",
@@ -518,10 +515,7 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 			name: "Conditional Confirmation Required For This Tool",
 			toolSetConfig: mcptoolset.Config{
 				RequireConfirmationProvider: func(name string, args any) bool {
-					if name == toolName {
-						return true
-					}
-					return false
+					return name == toolName
 				},
 			},
 			city: "Lisbon",
