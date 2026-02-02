@@ -471,18 +471,9 @@ func (c *invocationContext) Ended() bool {
 }
 
 func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
-	return &invocationContext{
-		Context:       ctx,
-		agent:         c.agent,
-		artifacts:     c.artifacts,
-		memory:        c.memory,
-		session:       c.session,
-		invocationID:  c.invocationID,
-		branch:        c.branch,
-		userContent:   c.userContent,
-		runConfig:     c.runConfig,
-		endInvocation: c.endInvocation,
-	}
+	newCtx := *c
+	newCtx.Context = ctx
+	return &newCtx
 }
 
 func pluginManagerFromContext(ctx context.Context) pluginManager {

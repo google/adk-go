@@ -93,11 +93,9 @@ func (c *InvocationContext) Ended() bool {
 }
 
 func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
-	return &InvocationContext{
-		Context:      ctx,
-		params:       c.params,
-		invocationID: c.invocationID,
-	}
+	newCtx := *c
+	newCtx.Context = ctx
+	return &newCtx
 }
 
 var _ agent.InvocationContext = (*InvocationContext)(nil)
