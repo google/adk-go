@@ -47,22 +47,11 @@ import (
 //		},
 //	})
 func New(cfg Config) (tool.Toolset, error) {
-	var confirmFunc func(any) bool
-
-	if cfg.RequireConfirmationProvider != nil {
-		// Attempt to cast the interface directly to the function signature
-		fn, ok := cfg.RequireConfirmationProvider.(func(any) bool)
-		if !ok {
-			return nil, fmt.Errorf("error RequireConfirmationProvider must be a function with signature func(any) bool")
-		}
-		confirmFunc = fn
-	}
-
 	return &set{
 		mcpClient:                   newConnectionRefresher(cfg.Client, cfg.Transport),
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
-		requireConfirmationProvider: confirmFunc,
+		requireConfirmationProvider: cfg.RequireConfirmationProvider,
 	}, nil
 }
 
@@ -85,22 +74,22 @@ type Config struct {
 
 	// RequireConfirmationProvider allows for dynamic determination of whether
 	// user confirmation is needed. This field is a function called at runtime to decide if
-	// a confirmation request should be sent. The function takes the tool's input parameters as arguments.
+	// a confirmation request should be sent. The function takes the toolName and tool's input parameters as arguments.
 	// This provider offers more flexibility than the static RequireConfirmation flag,
 	// enabling conditional confirmation based on the invocation details.
-	// If set, this often takes precedence over the RequireConfirmation flag.
+	// If set, this takes precedence over the RequireConfirmation flag.
 	//
 	// Required signature for a provider function:
-	// func(toolInput any) (bool)
+	// func(name string, toolInput any) bool
 	// Returning true means confirmation is required.
-	RequireConfirmationProvider any
+	RequireConfirmationProvider ConfirmationProvider
 }
 
 type set struct {
 	mcpClient                   MCPClient
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
-	requireConfirmationProvider func(any) bool
+	requireConfirmationProvider ConfirmationProvider
 }
 
 func (*set) Name() string {
@@ -138,3 +127,5 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	return adkTools, nil
 }
+
+type ConfirmationProvider func(string, any) bool

@@ -28,7 +28,7 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider func(any) bool) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) (tool.Tool, error) {
 	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
@@ -64,7 +64,7 @@ type mcpTool struct {
 
 	requireConfirmation bool
 
-	requireConfirmationProvider func(any) bool
+	requireConfirmationProvider ConfirmationProvider
 }
 
 // Name implements the tool.Tool.
@@ -93,7 +93,7 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	requireConfirmation := t.requireConfirmation
 	if t.requireConfirmationProvider != nil {
-		requireConfirmation = t.requireConfirmationProvider(args)
+		requireConfirmation = t.requireConfirmationProvider(t.Name(), args)
 	}
 	if requireConfirmation {
 		if ctx.ToolConfirmation() == nil {
