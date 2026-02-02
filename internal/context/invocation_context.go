@@ -35,21 +35,23 @@ type InvocationContextParams struct {
 	UserContent   *genai.Content
 	RunConfig     *agent.RunConfig
 	EndInvocation bool
+	InvocationID  string
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
+	if params.InvocationID == "" {
+		params.InvocationID = "e-" + uuid.NewString()
+	}
 	return &InvocationContext{
-		Context:      ctx,
-		params:       params,
-		invocationID: "e-" + uuid.NewString(),
+		Context: ctx,
+		params:  params,
 	}
 }
 
 type InvocationContext struct {
 	context.Context
 
-	params       InvocationContextParams
-	invocationID string
+	params InvocationContextParams
 }
 
 func (c *InvocationContext) Artifacts() agent.Artifacts {
@@ -65,7 +67,7 @@ func (c *InvocationContext) Branch() string {
 }
 
 func (c *InvocationContext) InvocationID() string {
-	return c.invocationID
+	return c.params.InvocationID
 }
 
 func (c *InvocationContext) Memory() agent.Memory {
