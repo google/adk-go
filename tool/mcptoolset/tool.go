@@ -91,12 +91,20 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 }
 
 func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
-	requireConfirmation := t.requireConfirmation
-	if t.requireConfirmationProvider != nil {
-		requireConfirmation = t.requireConfirmationProvider(t.Name(), args)
-	}
-	if requireConfirmation {
-		if ctx.ToolConfirmation() == nil {
+	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
+		if !confirmation.Confirmed {
+			return nil, fmt.Errorf("error tool %q call is rejected", t.Name())
+		}
+	} else {
+		requireConfirmation := t.requireConfirmation
+
+		// Only run the potentially expensive provider if the static flag didn't already trigger it
+		// Provider takes precedence/overrides:
+		if t.requireConfirmationProvider != nil {
+			requireConfirmation = t.requireConfirmationProvider(t.Name(), args)
+		}
+
+		if requireConfirmation {
 			err := ctx.RequestConfirmation(
 				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					t.Name()), nil)
@@ -105,8 +113,6 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 			}
 			ctx.Actions().SkipSummarization = true
 			return nil, fmt.Errorf("error tool %q requires confirmation, please approve or reject", t.Name())
-		} else if !ctx.ToolConfirmation().Confirmed {
-			return nil, fmt.Errorf("error tool %q call is rejected", t.Name())
 		}
 	}
 

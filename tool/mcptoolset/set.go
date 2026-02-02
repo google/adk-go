@@ -128,4 +128,10 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	return adkTools, nil
 }
 
+// ConfirmationProvider defines a function that dynamically determines whether
+// a specific tool execution requires user confirmation.
+//
+// It accepts the tool name and the input parameters as arguments.
+// Returning true signals that the system must wait for Human-in-the-Loop (HITL)
+// approval before proceeding with the execution.
 type ConfirmationProvider func(string, any) bool
