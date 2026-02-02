@@ -91,3 +91,13 @@ func (c *InvocationContext) EndInvocation() {
 func (c *InvocationContext) Ended() bool {
 	return c.params.EndInvocation
 }
+
+func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
+	return &InvocationContext{
+		Context:      ctx,
+		params:       c.params,
+		invocationID: c.invocationID,
+	}
+}
+
+var _ agent.InvocationContext = (*InvocationContext)(nil)
