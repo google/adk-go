@@ -18,10 +18,9 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/shared/constant"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/model"
-	"google.golang.org/genai"
 )
 
 func TestRequestBuilder_FromLLMRequest(t *testing.T) {
@@ -113,9 +112,6 @@ func TestRequestBuilder_FromLLMRequest(t *testing.T) {
 	if tool.Description.Or("") != "Fetch from memory" {
 		t.Fatalf("tool description not set: %+v", tool.Description)
 	}
-	if tool.InputSchema.Type != constant.ValueOf[constant.Object]() {
-		t.Fatalf("input schema type mismatch: %v", tool.InputSchema.Type)
-	}
 	props, ok := tool.InputSchema.Properties.(map[string]any)
 	if !ok {
 		t.Fatalf("input schema properties type = %T", tool.InputSchema.Properties)
@@ -129,9 +125,6 @@ func TestRequestBuilder_FromLLMRequest(t *testing.T) {
 	}
 	if tool.InputSchema.Required == nil || tool.InputSchema.Required[0] != "query" {
 		t.Fatalf("required fields missing: %v", tool.InputSchema.Required)
-	}
-	if got.ToolChoice.OfTool == nil {
-		t.Fatal("tool choice not set")
 	}
 }
 

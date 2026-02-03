@@ -23,9 +23,9 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/model"
-	"google.golang.org/genai"
 )
 
 type mockDecoder struct {
@@ -133,6 +133,7 @@ func TestParsePartialStreamEvent(t *testing.T) {
 			raw:  `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`,
 			want: &model.LLMResponse{
 				Content: genai.NewContentFromText("partial", genai.RoleModel),
+				Partial: true,
 			},
 		},
 		{
@@ -143,6 +144,7 @@ func TestParsePartialStreamEvent(t *testing.T) {
 					[]*genai.Part{{Text: "reason", Thought: true}},
 					genai.RoleModel,
 				),
+				Partial: true,
 			},
 		},
 		{

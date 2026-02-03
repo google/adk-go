@@ -22,9 +22,9 @@ import (
 	"fmt"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/model"
-	"google.golang.org/genai"
 )
 
 func parsePartialStreamEvent(event anthropic.MessageStreamEventUnion) *model.LLMResponse {
