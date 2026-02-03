@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package main provides an example ADK agent that uses the load_memory tool
-// to search and retrieve memories from previous conversations.
+// Package main provides an example ADK agent that uses the load_memory and
+// preload_memory tools to retrieve memories from previous conversations.
 package main
 
 import (
@@ -34,6 +34,7 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/loadmemorytool"
+	"google.golang.org/adk/tool/preloadmemorytool"
 )
 
 func main() {
@@ -51,10 +52,12 @@ func main() {
 		Model:       model,
 		Description: "Agent that can recall information from memory.",
 		Instruction: "You are a helpful assistant with access to memory. " +
-			"When the user asks about something that might be in your memory, " +
-			"use the load_memory tool to search for relevant information. " +
+			"Relevant memory may be preloaded automatically for each request. " +
+			"If the preloaded context is not enough, use the load_memory tool " +
+			"to search for additional relevant information. " +
 			"If you find relevant memories, use them to provide informed responses.",
 		Tools: []tool.Tool{
+			preloadmemorytool.New(),
 			loadmemorytool.New(),
 		},
 	})
@@ -78,6 +81,7 @@ func main() {
 	}
 
 	fmt.Println("Memory populated with previous conversation about a trip to Tokyo.")
+	fmt.Println("Memories will be preloaded automatically for each request.")
 	fmt.Println("Try asking: 'What do you remember about my trip?'")
 
 	// Create a new session for the current conversation.
