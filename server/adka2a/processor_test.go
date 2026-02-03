@@ -220,7 +220,18 @@ func TestEventProcessor_Process(t *testing.T) {
 			},
 			terminal: []a2a.Event{
 				newArtifactLastChunkEvent(task),
-				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, nil),
+				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
+					Role: a2a.MessageRoleAgent,
+					Parts: []a2a.Part{
+						a2a.DataPart{
+							Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
+							Metadata: map[string]any{
+								a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
+								a2aDataPartMetaLongRunningKey: true,
+							},
+						},
+					},
+				}),
 			},
 		},
 		{
@@ -246,9 +257,74 @@ func TestEventProcessor_Process(t *testing.T) {
 				}),
 				a2a.NewArtifactUpdateEvent(task, artifactIDPlaceholder, a2a.TextPart{Text: "This will take a while"}),
 			},
+
 			terminal: []a2a.Event{
 				newArtifactLastChunkEvent(task),
-				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, nil),
+				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
+					Role: a2a.MessageRoleAgent,
+					Parts: []a2a.Part{
+						a2a.DataPart{
+							Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
+							Metadata: map[string]any{
+								a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
+								a2aDataPartMetaLongRunningKey: true,
+							},
+						},
+					},
+				}),
+			},
+		},
+		{
+			name: "long running tool response without ID",
+			events: []*session.Event{
+				{
+					LongRunningToolIDs: []string{"get_weather"},
+					LLMResponse: modelResponseFromParts(&genai.Part{
+						FunctionCall: &genai.FunctionCall{ID: "get_weather", Name: "weather", Args: map[string]any{"city": "Warsaw"}},
+					}),
+				},
+				{
+					// No LongRunningToolIDs here
+					LLMResponse: modelResponseFromParts(&genai.Part{
+						FunctionResponse: &genai.FunctionResponse{ID: "get_weather", Name: "weather", Response: map[string]any{"status": "pending"}},
+					}),
+				},
+			},
+			processed: []*a2a.TaskArtifactUpdateEvent{
+				a2a.NewArtifactEvent(task, a2a.DataPart{
+					Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
+					Metadata: map[string]any{
+						a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
+						a2aDataPartMetaLongRunningKey: true,
+					},
+				}),
+				a2a.NewArtifactUpdateEvent(task, artifactIDPlaceholder, a2a.DataPart{
+					Data: map[string]any{"id": "get_weather", "name": "weather", "response": map[string]any{"status": "pending"}},
+					Metadata: map[string]any{
+						a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionResponse,
+					},
+				}),
+			},
+			terminal: []a2a.Event{
+				newArtifactLastChunkEvent(task),
+				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
+					Role: a2a.MessageRoleAgent,
+					Parts: []a2a.Part{
+						a2a.DataPart{
+							Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
+							Metadata: map[string]any{
+								a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
+								a2aDataPartMetaLongRunningKey: true,
+							},
+						},
+						a2a.DataPart{
+							Data: map[string]any{"id": "get_weather", "name": "weather", "response": map[string]any{"status": "pending"}},
+							Metadata: map[string]any{
+								a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionResponse,
+							},
+						},
+					},
+				}),
 			},
 		},
 		{

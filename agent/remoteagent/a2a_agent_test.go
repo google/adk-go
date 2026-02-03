@@ -17,6 +17,7 @@ package remoteagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
@@ -57,12 +58,20 @@ func (e *mockA2AExecutor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestCont
 	return fmt.Errorf("not implemented")
 }
 
-func startA2AServer(agentExecutor a2asrv.AgentExecutor) *httptest.Server {
-	requestHandler := a2asrv.NewHandler(agentExecutor)
-	return httptest.NewServer(a2asrv.NewJSONRPCHandler(requestHandler))
+type testA2AServer struct {
+	*httptest.Server
+	handler a2asrv.RequestHandler
 }
 
-func newA2ARemoteAgent(t *testing.T, name string, server *httptest.Server) agent.Agent {
+func startA2AServer(agentExecutor a2asrv.AgentExecutor) *testA2AServer {
+	requestHandler := a2asrv.NewHandler(agentExecutor)
+	return &testA2AServer{
+		Server:  httptest.NewServer(a2asrv.NewJSONRPCHandler(requestHandler)),
+		handler: requestHandler,
+	}
+}
+
+func newA2ARemoteAgent(t *testing.T, name string, server *testA2AServer) agent.Agent {
 	t.Helper()
 	card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolJSONRPC, URL: server.URL, Capabilities: a2a.AgentCapabilities{Streaming: true}}
 	agent, err := NewA2A(A2AConfig{Name: name, AgentCard: card})
@@ -73,6 +82,10 @@ func newA2ARemoteAgent(t *testing.T, name string, server *httptest.Server) agent
 }
 
 func newInvocationContext(t *testing.T, events []*session.Event) agent.InvocationContext {
+	return newInvocationContextWithStreamingMode(t, events, agent.StreamingModeSSE)
+}
+
+func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event, streamingMode agent.StreamingMode) agent.InvocationContext {
 	t.Helper()
 	ctx := t.Context()
 	service := session.InMemoryService()
@@ -85,7 +98,13 @@ func newInvocationContext(t *testing.T, events []*session.Event) agent.Invocatio
 			t.Fatalf("sessionService.AppendEvent() error = %v", err)
 		}
 	}
-	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Session: resp.Session})
+
+	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Session: resp.Session,
+		RunConfig: &agent.RunConfig{
+			StreamingMode: streamingMode,
+		},
+	})
 	return ic
 }
 
@@ -163,6 +182,7 @@ func newA2AEventReplay(t *testing.T, events []a2a.Event) a2asrv.AgentExecutor {
 
 func newUserHello() *session.Event {
 	event := session.NewEvent("invocation")
+	event.Author = "user"
 	event.Content = genai.NewContentFromText("hello", genai.RoleUser)
 	return event
 }
@@ -183,6 +203,7 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 		wantResponses []model.LLMResponse
 		wantEscalate  bool
 		wantTransfer  string
+		noStreaming   bool
 	}{
 		{
 			name: "text streaming",
@@ -198,6 +219,19 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 					TurnComplete: true,
 				},
 			},
+		},
+		{
+			name: "text streaming - no streaming mode",
+			remoteEvents: []*session.Event{
+				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello world", genai.RoleModel)}},
+			},
+			wantResponses: []model.LLMResponse{
+				{
+					Content:      genai.NewContentFromText("hello world", genai.RoleModel),
+					TurnComplete: false,
+				},
+			},
+			noStreaming: true,
 		},
 		{
 			name: "code execution",
@@ -280,6 +314,7 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 							Name: "create_ticket", ID: "abc-123", Response: map[string]any{"ticket_id": "123"},
 						}}}, genai.RoleModel,
 					)},
+					LongRunningToolIDs: []string{"abc-123"},
 				},
 				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel)}},
 			},
@@ -290,15 +325,25 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{Content: genai.NewContentFromText("Hello! I'll need your approval first:", genai.RoleModel)},
 				{Content: genai.NewContentFromParts(
 					[]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "create_ticket", ID: "abc-123"}}}, genai.RoleModel,
-				)},
+				), Partial: true},
 				{Content: genai.NewContentFromParts(
 					[]*genai.Part{{FunctionResponse: &genai.FunctionResponse{
 						Name: "create_ticket", ID: "abc-123", Response: map[string]any{"ticket_id": "123"},
 					}}}, genai.RoleModel,
-				)},
+				), Partial: true},
 				{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel), Partial: true},
 				// Only partial responses aggregated after the previous flush are included in the terminal event.
-				{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel), TurnComplete: true},
+				{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel)},
+				{
+					Content: genai.NewContentFromParts(
+						[]*genai.Part{
+							{FunctionCall: &genai.FunctionCall{Name: "create_ticket", ID: "abc-123"}},
+							{FunctionResponse: &genai.FunctionResponse{Name: "create_ticket", ID: "abc-123", Response: map[string]any{"ticket_id": "123"}}},
+						},
+						genai.RoleModel,
+					),
+					TurnComplete: true,
+				},
 			},
 		},
 		{
@@ -340,7 +385,11 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 			executor := newADKEventReplay(t, tc.remoteEvents)
 			remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
 
-			ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+			mode := agent.StreamingModeSSE
+			if tc.noStreaming {
+				mode = agent.StreamingModeNone
+			}
+			ictx := newInvocationContextWithStreamingMode(t, []*session.Event{newUserHello()}, mode)
 			gotEvents, err := runAndCollect(ictx, remoteAgent)
 			if err != nil {
 				t.Fatalf("agent.Run() error = %v", err)
@@ -787,6 +836,173 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 			gotResponses := toLLMResponses(gotEvents)
 			if diff := cmp.Diff(tc.wantResponses, gotResponses); diff != "" {
 				t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
+			}
+		})
+	}
+}
+
+func TestRemoteAgent_RequestPayload(t *testing.T) {
+	remoteAgentName, notRemoteAgentName := "a2a", "not-a2a"
+	testCases := []struct {
+		name          string
+		sessionEvents []*session.Event
+		wantRequest   *a2a.MessageSendParams
+	}{
+		{
+			name:          "only user message",
+			sessionEvents: []*session.Event{newUserHello()},
+			wantRequest: &a2a.MessageSendParams{
+				Message: &a2a.Message{
+					Role:  a2a.MessageRoleUser,
+					Parts: []a2a.Part{a2a.TextPart{Text: "hello"}},
+				},
+			},
+		},
+		{
+			name: "history included",
+			sessionEvents: []*session.Event{
+				newUserHello(),
+				{
+					Author: notRemoteAgentName,
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("hi", genai.RoleModel),
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("how are you?", genai.RoleUser),
+					},
+				},
+			},
+			wantRequest: &a2a.MessageSendParams{
+				Message: &a2a.Message{
+					Role: a2a.MessageRoleUser,
+					Parts: []a2a.Part{
+						a2a.TextPart{Text: "hello"},
+						a2a.TextPart{Text: "For context:"},
+						a2a.TextPart{Text: fmt.Sprintf("[%s] said: hi", notRemoteAgentName)},
+						a2a.TextPart{Text: "how are you?"},
+					},
+				},
+			},
+		},
+		{
+			name: "history split by remote agent response",
+			sessionEvents: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("msg1", genai.RoleUser)}},
+				{Author: notRemoteAgentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("resp1", genai.RoleModel)}},
+				{
+					Author: remoteAgentName,
+					LLMResponse: model.LLMResponse{
+						Content:        genai.NewContentFromText("resp2", genai.RoleModel),
+						CustomMetadata: adka2a.ToCustomMetadata("", "ctx-123"),
+					},
+				},
+				// only data from this point should be included, because other parts should already be present
+				// in the remote agent's session
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("msg3", genai.RoleUser)}},
+				{Author: notRemoteAgentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("resp3", genai.RoleModel)}},
+			},
+			wantRequest: &a2a.MessageSendParams{
+				Message: &a2a.Message{
+					Role:      a2a.MessageRoleUser,
+					ContextID: "ctx-123",
+					Parts: []a2a.Part{
+						a2a.TextPart{Text: "msg3"},
+						a2a.TextPart{Text: "For context:"},
+						a2a.TextPart{Text: fmt.Sprintf("[%s] said: resp3", notRemoteAgentName)},
+					},
+				},
+			},
+		},
+		{
+			name: "function call response",
+			sessionEvents: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("start", genai.RoleUser)}},
+				{
+					Author: remoteAgentName,
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromParts([]*genai.Part{
+							{FunctionCall: &genai.FunctionCall{Name: "fn", ID: "call-1"}},
+						}, genai.RoleModel),
+						CustomMetadata: adka2a.ToCustomMetadata("task-1", "ctx-1"),
+					},
+					LongRunningToolIDs: []string{"call-1"},
+				},
+				{
+					Author: remoteAgentName,
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromParts([]*genai.Part{
+							{FunctionResponse: &genai.FunctionResponse{Name: "fn", ID: "call-1", Response: map[string]any{"status": "pending"}}},
+							genai.NewPartFromText("I'll need to wait for an approval first"),
+						}, genai.RoleModel),
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromParts([]*genai.Part{
+							genai.NewPartFromText("lgtm:"),
+							{FunctionResponse: &genai.FunctionResponse{Name: "fn", ID: "call-1", Response: map[string]any{"status": "approved"}}},
+						}, genai.RoleUser),
+					},
+				},
+			},
+			wantRequest: &a2a.MessageSendParams{
+				Message: &a2a.Message{
+					Role:      a2a.MessageRoleUser,
+					TaskID:    "task-1",
+					ContextID: "ctx-1",
+					Parts: []a2a.Part{
+						a2a.TextPart{Text: "lgtm:"},
+						a2a.DataPart{
+							Data: map[string]any{
+								"id":       "call-1",
+								"name":     "fn",
+								"response": map[string]any{"status": "approved"},
+							},
+							Metadata: map[string]any{"adk_type": "function_response"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	server := startA2AServer(newA2AEventReplay(t, []a2a.Event{}))
+	card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolJSONRPC, URL: server.URL, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			errRejected := errors.New("rejected")
+			var gotRequest *a2a.MessageSendParams
+			remoteAgent, err := NewA2A(A2AConfig{
+				Name:      remoteAgentName,
+				AgentCard: card,
+				BeforeRequestCallbacks: []BeforeA2ARequestCallback{
+					func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error) {
+						gotRequest = req
+						return nil, errRejected
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("remoteagent.NewA2A() error = %v", err)
+			}
+
+			ictx := newInvocationContext(t, tc.sessionEvents)
+			if _, err := runAndCollect(ictx, remoteAgent); !errors.Is(err, errRejected) {
+				t.Fatalf("agent.Run() error = %v, want %v", err, errRejected)
+			}
+
+			ignoreFields := []cmp.Option{
+				cmpopts.IgnoreFields(a2a.Message{}, "ID"),
+			}
+			if diff := cmp.Diff(tc.wantRequest, gotRequest, ignoreFields...); diff != "" {
+				t.Fatalf("agent.Run() sent unexpected request (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotRequest, tc.wantRequest, diff)
 			}
 		})
 	}

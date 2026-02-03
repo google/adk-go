@@ -18,11 +18,9 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -40,18 +38,20 @@ type eventProcessor struct {
 	// responseID is created once the first TaskArtifactUpdateEvent is sent. Used for subsequent artifact updates.
 	responseID a2a.ArtifactID
 
-	// terminalEvents is used to postpone sending a terminal event until the whole ADK response is saved as an A2A artifact.
-	// The highest-priority terminal event from this map is going to be send as the final Task status update, in the order of priority:
-	//  - failed
-	//  - input_required
-	terminalEvents map[a2a.TaskState]*a2a.TaskStatusUpdateEvent
+	// failedEvent is used to postpone sending a terminal event until the whole ADK response is saved as an A2A artifact.
+	// Will be sent as the final Task status update if not nil.
+	failedEvent *a2a.TaskStatusUpdateEvent
+
+	// inputRequiredProcessor is used to postpone sending input-required in response to long-running function tool calls.
+	// inputRequiredProcessor.event will be sent as the final Task status update if failedEvent is nil.
+	inputRequiredProcessor *inputRequiredProcessor
 }
 
 func newEventProcessor(reqCtx *a2asrv.RequestContext, meta invocationMeta) *eventProcessor {
 	return &eventProcessor{
-		reqCtx:         reqCtx,
-		meta:           meta,
-		terminalEvents: make(map[a2a.TaskState]*a2a.TaskStatusUpdateEvent),
+		inputRequiredProcessor: newInputRequiredProcessor(reqCtx),
+		reqCtx:                 reqCtx,
+		meta:                   meta,
 	}
 }
 
@@ -70,11 +70,11 @@ func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.
 	resp := event.LLMResponse
 	if resp.ErrorCode != "" {
 		// TODO(yarolegovich): consider merging responses if multiple errors can be produced during an invocation
-		if _, ok := p.terminalEvents[a2a.TaskStateFailed]; !ok {
+		if p.failedEvent == nil {
 			// terminal event might add additional keys to its metadata when it's dispatched and these changes should
 			// not be reflected in this event's metadata
 			terminalEventMeta := maps.Clone(eventMeta)
-			p.terminalEvents[a2a.TaskStateFailed] = toTaskFailedUpdateEvent(p.reqCtx, errorFromResponse(&resp), terminalEventMeta)
+			p.failedEvent = toTaskFailedUpdateEvent(p.reqCtx, errorFromResponse(&resp), terminalEventMeta)
 		}
 	}
 
@@ -82,10 +82,8 @@ func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.
 		return nil, nil
 	}
 
-	if isInputRequired(event, resp.Content.Parts) {
-		ev := a2a.NewStatusUpdateEvent(p.reqCtx, a2a.TaskStateInputRequired, nil)
-		ev.Final = true
-		p.terminalEvents[a2a.TaskStateInputRequired] = ev
+	if err := p.inputRequiredProcessor.process(event); err != nil {
+		return nil, fmt.Errorf("input required processing failed: %w", err)
 	}
 
 	parts, err := ToA2AParts(resp.Content.Parts, event.LongRunningToolIDs)
@@ -121,10 +119,10 @@ func (p *eventProcessor) makeFinalArtifactUpdate() (*a2a.TaskArtifactUpdateEvent
 }
 
 func (p *eventProcessor) makeFinalStatusUpdate() *a2a.TaskStatusUpdateEvent {
-	for _, s := range []a2a.TaskState{a2a.TaskStateFailed, a2a.TaskStateInputRequired} {
-		if ev, ok := p.terminalEvents[s]; ok {
-			ev.Metadata = setActionsMeta(ev.Metadata, p.terminalActions)
-			return ev
+	for _, event := range []*a2a.TaskStatusUpdateEvent{p.failedEvent, p.inputRequiredProcessor.event} {
+		if event != nil {
+			event.Metadata = setActionsMeta(event.Metadata, p.terminalActions)
+			return event
 		}
 	}
 
@@ -162,15 +160,6 @@ func toTaskFailedUpdateEvent(task a2a.TaskInfoProvider, cause error, meta map[st
 	ev.Metadata = meta
 	ev.Final = true
 	return ev
-}
-
-func isInputRequired(event *session.Event, parts []*genai.Part) bool {
-	for _, p := range parts {
-		if p.FunctionCall != nil && slices.Contains(event.LongRunningToolIDs, p.FunctionCall.ID) {
-			return true
-		}
-	}
-	return false
 }
 
 func errorFromResponse(resp *model.LLMResponse) error {

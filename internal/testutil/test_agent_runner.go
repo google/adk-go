@@ -117,6 +117,30 @@ func NewTestAgentRunner(t *testing.T, agent agent.Agent) *TestAgentRunner {
 	}
 }
 
+// NewTestAgentRunner creates a new TestAgentRunner for the given agent as root
+// initSessionState will be used to init all sessions created by this runner.
+func NewTestAgentRunnerWithPluginManager(t *testing.T, agent agent.Agent, pluginConfig runner.PluginConfig) *TestAgentRunner {
+	appName := "test_app"
+	sessionService := session.InMemoryService()
+
+	runner, err := runner.New(runner.Config{
+		AppName:        appName,
+		Agent:          agent,
+		SessionService: sessionService,
+		PluginConfig:   pluginConfig,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return &TestAgentRunner{
+		agent:          agent,
+		sessionService: sessionService,
+		appName:        appName,
+		runner:         runner,
+	}
+}
+
 type MockModel struct {
 	Requests             []*model.LLMRequest
 	Responses            []*genai.Content

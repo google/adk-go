@@ -257,6 +257,9 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 	if err := processA2AMeta(update, event); err != nil {
 		return nil, fmt.Errorf("metadata processing failed: %w", err)
 	}
+	if update.Status.Message != nil {
+		event.LongRunningToolIDs = getLongRunningToolIDs(update.Status.Message.Parts, parts)
+	}
 	event.TurnComplete = true
 	return event, nil
 }

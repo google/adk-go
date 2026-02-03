@@ -267,9 +267,9 @@ func (s *gcsService) fetchFilenamesFromPrefix(ctx context.Context, prefix string
 		if len(segments) < 2 {
 			return fmt.Errorf("error iterating blobs: incorrect number of segments in path %q", blob.Name)
 		}
-		// TODO agent can create files with multiple segments for example file a/b.txt
-		// This a/b.txt file will show as b.txt when listed and trying to load it will fail.
-		filename := segments[len(segments)-2] // appName/userId/sessionId/filename/version or appName/userId/user/filename/version
+		// Extract filename from path: appName/userId/sessionId/filename/version or appName/userId/user/filename/version
+		// Note: filenames with path separators are rejected during validation (see service.go Validate methods)
+		filename := segments[len(segments)-2]
 		filenamesSet[filename] = true
 	}
 

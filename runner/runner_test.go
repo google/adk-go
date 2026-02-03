@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
 
@@ -38,20 +39,18 @@ func TestRunner_findAgentToRun(t *testing.T) {
 	agentTree := agentTree(t)
 
 	tests := []struct {
-		name      string
-		rootAgent agent.Agent
-		session   session.Session
-		wantAgent agent.Agent
-		wantErr   bool
+		name        string
+		rootAgent   agent.Agent
+		session     session.Session
+		userMessage *genai.Content
+		wantAgent   agent.Agent
+		wantErr     bool
 	}{
 		{
 			name: "last event from agent allowing transfer",
 			session: createSession(t, t.Context(), appName, userID, sessionID, []*session.Event{
 				{
 					Author: "allows_transfer_agent",
-				},
-				{
-					Author: "user",
 				},
 			}),
 			rootAgent: agentTree.root,
@@ -63,22 +62,46 @@ func TestRunner_findAgentToRun(t *testing.T) {
 				{
 					Author: "no_transfer_agent",
 				},
-				{
-					Author: "user",
-				},
 			}),
 			rootAgent: agentTree.root,
 			wantAgent: agentTree.root,
 		},
 		{
-			name: "no events from agents, call root",
-			session: createSession(t, t.Context(), appName, userID, sessionID, []*session.Event{
-				{
-					Author: "user",
-				},
-			}),
+			name:      "no events from agents, call root",
+			session:   createSession(t, t.Context(), appName, userID, sessionID, []*session.Event{}),
 			rootAgent: agentTree.root,
 			wantAgent: agentTree.root,
+		},
+		{
+			name: "last event from user with function response",
+			session: createSession(t, t.Context(), appName, userID, sessionID, []*session.Event{
+				{
+					Author: agentTree.noTransferAgent.Name(),
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										Name: "fn_name",
+										ID:   "fn_id",
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Author: agentTree.root.Name(),
+				},
+			}),
+			userMessage: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{
+					Name: "fn_name",
+					ID:   "fn_id",
+				},
+			}}, genai.RoleUser),
+			rootAgent: agentTree.root,
+			wantAgent: agentTree.noTransferAgent,
 		},
 	}
 
@@ -87,7 +110,7 @@ func TestRunner_findAgentToRun(t *testing.T) {
 			r := &Runner{
 				rootAgent: tt.rootAgent,
 			}
-			gotAgent, err := r.findAgentToRun(tt.session)
+			gotAgent, err := r.findAgentToRun(tt.session, tt.userMessage)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Runner.findAgentToRun() error = %v, wantErr %v", err, tt.wantErr)
 				return

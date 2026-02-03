@@ -15,7 +15,6 @@
 package mcptoolset
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -29,9 +28,7 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-type getSessionFunc func(ctx context.Context) (*mcp.ClientSession, error)
-
-func convertTool(t *mcp.Tool, getSessionFunc getSessionFunc) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, client MCPClient) (tool.Tool, error) {
 	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
@@ -39,7 +36,7 @@ func convertTool(t *mcp.Tool, getSessionFunc getSessionFunc) (tool.Tool, error) 
 			Name:        t.Name,
 			Description: t.Description,
 		},
-		getSessionFunc: getSessionFunc,
+		mcpClient: client,
 	}
 
 	// Since t.InputSchema and t.OutputSchema are pointers (*jsonschema.Schema) and the destination ResponseJsonSchema
@@ -61,7 +58,7 @@ type mcpTool struct {
 	description     string
 	funcDeclaration *genai.FunctionDeclaration
 
-	getSessionFunc getSessionFunc
+	mcpClient MCPClient
 }
 
 // Name implements the tool.Tool.
@@ -88,13 +85,8 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 }
 
 func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
-	session, err := t.getSessionFunc(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get session: %w", err)
-	}
-
 	// TODO: add auth
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{
+	res, err := t.mcpClient.CallTool(ctx, &mcp.CallToolParams{
 		Name:      t.name,
 		Arguments: args,
 	})
