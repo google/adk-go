@@ -97,6 +97,8 @@ type InvocationContext interface {
 	Ended() bool
 
 	// WithContext returns a new instance of the context with overriden embedded context.
+	// NOTE: This is a temporary solution and will be removed later. The proper solution
+	// we plan is to stop embedding go context in adk context types and split it. 
 	WithContext(ctx context.Context) InvocationContext
 }
 
