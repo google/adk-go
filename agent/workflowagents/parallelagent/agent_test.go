@@ -335,7 +335,7 @@ func createAgentWithGemini(t *testing.T, name string) agent.Agent {
 	return a
 }
 
-func newGeminiModelForTest(t *testing.T, modelName string, agentName string) model.LLM {
+func newGeminiModelForTest(t *testing.T, modelName, agentName string) model.LLM {
 	t.Helper()
 
 	trace := filepath.Join("testdata", fmt.Sprintf("%s_%s.httprr",

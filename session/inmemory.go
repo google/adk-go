@@ -314,6 +314,8 @@ func (s *session) State() State {
 }
 
 func (s *session) Events() Events {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return events(s.events)
 }
 
@@ -328,6 +330,9 @@ func (s *session) appendEvent(event *Event) error {
 	if event.Partial {
 		return nil
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	processedEvent := trimTempDeltaState(event)
 	if err := updateSessionState(s, processedEvent); err != nil {
@@ -434,15 +439,11 @@ func updateSessionState(session *session, event *Event) error {
 		session.state = make(map[string]any)
 	}
 
-	state := session.State()
 	for key, value := range event.Actions.StateDelta {
 		if strings.HasPrefix(key, KeyPrefixTemp) {
 			continue
 		}
-		err := state.Set(key, value)
-		if err != nil {
-			return fmt.Errorf("error on updateSessionState state: %w", err)
-		}
+		session.state[key] = value
 	}
 	return nil
 }
