@@ -74,15 +74,30 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 		if len(v.Artifact.Parts) == 0 {
 			return nil, nil
 		}
+		if IsPartial(v.Metadata) && v.LastChunk {
+			// Partial ADK artifact reset
+			return nil, nil
+		}
 		event, err := artifactToEvent(ctx, v.Artifact)
 		if err != nil {
 			return nil, fmt.Errorf("artifact update event conversion failed: %w", err)
+		}
+		if len(event.Content.Parts) == 0 {
+			return nil, nil
 		}
 		event.LongRunningToolIDs = getLongRunningToolIDs(v.Artifact.Parts, event.Content.Parts)
 		if err := processA2AMeta(v, event); err != nil {
 			return nil, fmt.Errorf("metadata processing failed: %w", err)
 		}
-		event.Partial = true
+		if partial, ok := v.Metadata[metadataPartialKey].(bool); ok {
+			event.Partial = partial
+		} else {
+			// If an event is not marked as adk_partial we assume that the remoteagent does not have its
+			// own aggregating logic and is using artifact updates to stream respons chunks. It is the responsibility
+			// of ToSessionEvent callers to aggregate those into a single artifact and emit it before final event.
+			// If the final event is a Task the aggregation should be discarded.
+			event.Partial = true
+		}
 		return event, nil
 
 	case *a2a.TaskStatusUpdateEvent:

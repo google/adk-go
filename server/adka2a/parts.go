@@ -40,6 +40,16 @@ const (
 	a2aDataPartTypeCodeExecutableCode = "executable_code"
 )
 
+// IsPartial takes metadata of an A2A object (eg. a2a.Part, a2a.Artifact) and returs true if
+// it was marked as partial based on the ADK partial flag set on the original ADK object.
+func IsPartial(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	isPartial, _ := meta[metadataPartialKey].(bool)
+	return isPartial
+}
+
 // ToA2APart converts the provided genai part to A2A equivalent. Long running tool IDs are used for attaching metadata to
 // the relevant data parts.
 func ToA2APart(part *genai.Part, longRunningToolIDs []string) (a2a.Part, error) {
@@ -146,11 +156,11 @@ func toA2AFilePart(v *genai.Part) (a2a.FilePart, error) {
 	return part, nil
 }
 
-func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart, error) {
+func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.Part, error) {
 	if part.CodeExecutionResult != nil {
 		data, err := converters.ToMapStructure(part.CodeExecutionResult)
 		if err != nil {
-			return a2a.DataPart{}, err
+			return nil, err
 		}
 		return a2a.DataPart{
 			Data:     data,
@@ -161,7 +171,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	if part.FunctionResponse != nil {
 		data, err := converters.ToMapStructure(part.FunctionResponse)
 		if err != nil {
-			return a2a.DataPart{}, err
+			return nil, err
 		}
 		return a2a.DataPart{
 			Data:     data,
@@ -172,7 +182,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	if part.ExecutableCode != nil {
 		data, err := converters.ToMapStructure(part.ExecutableCode)
 		if err != nil {
-			return a2a.DataPart{}, err
+			return nil, err
 		}
 		return a2a.DataPart{
 			Data:     data,
@@ -183,7 +193,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	if part.FunctionCall != nil {
 		data, err := converters.ToMapStructure(part.FunctionCall)
 		if err != nil {
-			return a2a.DataPart{}, err
+			return nil, err
 		}
 		return a2a.DataPart{
 			Data: data,
@@ -194,7 +204,11 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 		}, nil
 	}
 
-	return a2a.DataPart{Data: map[string]any{}}, nil
+	mapStruct, err := converters.ToMapStructure(part)
+	if err != nil {
+		return nil, err
+	}
+	return a2a.DataPart{Data: mapStruct}, nil
 }
 
 func toGenAIContent(ctx context.Context, msg *a2a.Message, converter A2APartConverter) (*genai.Content, error) {
