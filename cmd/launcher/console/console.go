@@ -25,11 +25,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"time"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/cmd/launcher"
+	"google.golang.org/adk/cmd/launcher/telemetry"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/runner"
@@ -40,6 +42,8 @@ import (
 type consoleConfig struct {
 	streamingMode       agent.StreamingMode
 	streamingModeString string // command-line param to be converted to agent.StreamingMode
+	otelToCloud         bool
+	shutdownTimeout     time.Duration
 }
 
 // consoleLauncher allows to interact with an agent in console
@@ -55,7 +59,8 @@ func NewLauncher() launcher.SubLauncher {
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
 		fmt.Sprintf("defines streaming mode (%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE))
-
+	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to cloud")
+	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 15*time.Second, "Console shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
 	return &consoleLauncher{config: config, flags: fs}
 }
 
@@ -63,6 +68,18 @@ func NewLauncher() launcher.SubLauncher {
 func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
+
+	telemetry, err := telemetry.InitTelemetry(ctx, config, l.config.otelToCloud)
+	if err != nil {
+		return fmt.Errorf("telemetry initialization failed: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), l.config.shutdownTimeout)
+		defer cancel()
+		if err := telemetry.Shutdown(shutdownCtx); err != nil {
+			log.Printf("telemetry shutdown failed: %v", err)
+		}
+	}()
 
 	// userID and appName are not important at this moment, we can just use any
 	userID, appName := "console_user", "console_app"

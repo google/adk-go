@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,21 +12,77 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package telemetry allows to set up custom telemetry processors that the ADK events
-// will be emitted to.
+// Package telemetry contains OpenTelemetry related functionality for ADK.
 package telemetry
 
 import (
+	"context"
+
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	internaltelemetry "google.golang.org/adk/internal/telemetry"
+	internal "google.golang.org/adk/internal/telemetry"
 )
 
-// RegisterSpanProcessor registers the span processor to local trace provider instance.
+const (
+	SystemName = internal.SystemName
+)
+
+// Service wraps all telemetry providers and implements functions for telemetry lifecycle management.
+type Service interface {
+	// SetGlobalOtelProviders registers the configured providers as the global OTel providers.
+	SetGlobalOtelProviders()
+
+	// TraceProvider returns the configured TraceProvider or nil.
+	TraceProvider() *sdktrace.TracerProvider
+
+	// Shutdown shuts down underlying OTel providers.
+	Shutdown(ctx context.Context) error
+}
+
+// New initializes new telemetry and underlying providers - TraceProvider, LogProvider and MeterProvider.
+// Options can be used to customize the defaults, e.g. use custom credentials, add SpanProcessors or use preconfigured TraceProvider.
+// Telemetry providers have to be registered in otel global providers either manually or via [SetGlobalOtelProviders].
+//
+// # Usage
+//
+//	 func main() {
+//			telemetryService, err := telemetry.New(ctx,
+//				telemetry.WithOtelToCloud(true),
+//				telemetry.WithResource(resource.New(
+//					ctx,
+//					semconv.ServiceNameKey.String("my-service"),
+//					semconv.ServiceVersionKey.String("1.0.0"),
+//				)),
+//			)
+//			if err != nil {
+//				log.Fatal(err)
+//			}
+//			defer func() {
+//				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+//				defer cancel()
+//				telemetryService.Shutdown(ctx)
+//			}()
+//			telemetryService.SetGlobalOtelProviders()
+//
+//			// app code
+//		}
+//
+// The caller must call [Shutdown] method to gracefully shutdown underlying telemetry and release resources.
+func New(ctx context.Context, opts ...Option) (Service, error) {
+	cfg, err := configure(ctx, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return newInternal(cfg)
+}
+
+// RegisterLocalSpanProcessor registers the span processor to local trace provider instance.
 // Any processor should be registered BEFORE any of the events are emitted, otherwise
 // the registration will be ignored.
-// In addition to the RegisterSpanProcessor function, global trace provider configs
+// In addition to the RegisterLocalSpanProcessor function, global trace provider configs
 // are respected.
-func RegisterSpanProcessor(processor sdktrace.SpanProcessor) {
-	internaltelemetry.AddSpanProcessor(processor)
+//
+// Deprecated. Configure processors via [Option]s passed to [New].
+func RegisterLocalSpanProcessor(processor sdktrace.SpanProcessor) {
+	internal.AddSpanProcessor(processor)
 }

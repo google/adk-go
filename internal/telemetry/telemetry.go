@@ -54,7 +54,7 @@ var (
 )
 
 const (
-	systemName           = "gcp.vertex.agent"
+	SystemName           = "gcp.vertex.agent"
 	genAiOperationName   = "gen_ai.operation.name"
 	genAiToolDescription = "gen_ai.tool.description"
 	genAiToolName        = "gen_ai.tool.name"
@@ -114,8 +114,8 @@ func getTracers() []trace.Tracer {
 		RegisterTelemetry()
 	}
 	return []trace.Tracer{
-		localTracer.tp.Tracer(systemName),
-		otel.GetTracerProvider().Tracer(systemName),
+		localTracer.tp.Tracer(SystemName),
+		otel.GetTracerProvider().Tracer(SystemName),
 	}
 }
 
@@ -205,7 +205,7 @@ func TraceLLMCall(spans []trace.Span, agentCtx agent.InvocationContext, llmReque
 	sessionID := agentCtx.Session().ID()
 	for _, span := range spans {
 		attributes := []attribute.KeyValue{
-			attribute.String(genAiSystemName, systemName),
+			attribute.String(genAiSystemName, SystemName),
 			attribute.String(genAiRequestModelName, llmRequest.Model),
 			attribute.String(gcpVertexAgentInvocationID, event.InvocationID),
 			attribute.String(gcpVertexAgentSessionID, sessionID),
