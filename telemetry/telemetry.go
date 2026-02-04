@@ -20,8 +20,6 @@ import (
 
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-
-	internal "google.golang.org/adk/internal/telemetry"
 )
 
 // Providers wraps all telemetry providers and provides [Shutdown] function.
@@ -103,15 +101,4 @@ func New(ctx context.Context, opts ...Option) (*Providers, error) {
 		return nil, err
 	}
 	return newInternal(cfg)
-}
-
-// RegisterLocalSpanProcessor registers the span processor to local trace provider instance.
-// Any processor should be registered BEFORE any of the events are emitted, otherwise
-// the registration will be ignored.
-// In addition to the RegisterLocalSpanProcessor function, global trace provider configs
-// are respected.
-//
-// Deprecated: Configure processors via [Option]s passed to [New]. TODO(#479) remove this together with local tracer provider.
-func RegisterLocalSpanProcessor(processor sdktrace.SpanProcessor) {
-	internal.AddSpanProcessor(processor)
 }

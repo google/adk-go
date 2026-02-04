@@ -32,9 +32,6 @@ import (
 func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration) http.Handler {
 	adkExporter := services.NewAPIServerSpanExporter()
 	processor := sdktrace.NewSimpleSpanProcessor(adkExporter)
-	// TODO(#479) remove this together with local tracer provider.
-	// nolint:staticcheck
-	telemetry.RegisterLocalSpanProcessor(processor)
 	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(processor))
 
 	router := mux.NewRouter().StrictSlash(true)
