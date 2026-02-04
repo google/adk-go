@@ -23,10 +23,6 @@ import (
 	internal "google.golang.org/adk/internal/telemetry"
 )
 
-const (
-	SystemName = internal.SystemName
-)
-
 // Service wraps all telemetry providers and implements functions for telemetry lifecycle management.
 type Service interface {
 	// SetGlobalOtelProviders registers the configured providers as the global OTel providers.
@@ -45,24 +41,46 @@ type Service interface {
 //
 // # Usage
 //
+//	 import (
+//		"context"
+//		"log"
+//		"time"
+//
+//		"go.opentelemetry.io/otel/sdk/resource"
+//		semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
+//		"google.golang.org/adk/telemetry"
+//	 )
+//
 //	 func main() {
-//			telemetryService, err := telemetry.New(ctx,
-//				telemetry.WithOtelToCloud(true),
-//				telemetry.WithResource(resource.New(
-//					ctx,
+//			ctx := context.Background()
+//			res, err := resource.New(ctx,
+//				resource.WithAttributes(
 //					semconv.ServiceNameKey.String("my-service"),
 //					semconv.ServiceVersionKey.String("1.0.0"),
-//				)),
+//				),
+//			)
+//			if err != nil {
+//				log.Fatalf("failed to create resource: %v", err)
+//			}
+//
+//			telemetryService, err := telemetry.New(ctx,
+//				telemetry.WithOtelToCloud(true),
+//				telemetry.WithResource(res),
 //			)
 //			if err != nil {
 //				log.Fatal(err)
 //			}
 //			defer func() {
-//				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+//				shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 //				defer cancel()
-//				telemetryService.Shutdown(ctx)
+//				if err := telemetryService.Shutdown(shutdownCtx); err != nil {
+//					log.Printf("telemetry shutdown failed: %v", err)
+//				}
 //			}()
 //			telemetryService.SetGlobalOtelProviders()
+//
+//			tp := telemetryService.TracerProvider()
+//			mylib.SetTracerProvider(tp) // Set TracerProvider manually if your lib doesn't use the global provider.
 //
 //			// app code
 //		}
@@ -82,7 +100,7 @@ func New(ctx context.Context, opts ...Option) (Service, error) {
 // In addition to the RegisterLocalSpanProcessor function, global trace provider configs
 // are respected.
 //
-// Deprecated. Configure processors via [Option]s passed to [New].
+// Deprecated. Configure processors via [Option]s passed to [New]. TODO(#479) remove this together with local tracer provider.
 func RegisterLocalSpanProcessor(processor sdktrace.SpanProcessor) {
 	internal.AddSpanProcessor(processor)
 }

@@ -18,10 +18,12 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 
 	"go.opentelemetry.io/contrib/detectors/gcp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -75,16 +77,25 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 	var err error
 	if cfg.oTelToCloud {
 		// Load ADC if no credentials are provided in the config.
-		if cfg.credentials == nil {
-			cfg.credentials, err = applicationDefaultCredentials(ctx)
+		if cfg.googleCredentials == nil {
+			cfg.googleCredentials, err = applicationDefaultCredentials(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get application default credentials: %w", err)
 			}
 		}
 	}
-	cfg.resource, err = newResource(ctx, cfg)
+
+	if err := cfg.resolveQuotaProject(); err != nil {
+		return nil, err
+	}
+
+	if err := cfg.resolveResourceProject(); err != nil {
+		return nil, err
+	}
+
+	cfg.resource, err = resolveResource(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create resource: %w", err)
+		return nil, fmt.Errorf("failed to resolve resource: %w", err)
 	}
 
 	spanProcessors, err := configureProcessors(ctx, cfg)
@@ -96,16 +107,67 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 	return cfg, nil
 }
 
-// newResource creates a new resource with attributes specified in the following order (later attributes override earlier ones):
+// resolveQuotaProject determines the quota project for telemetry export in the following order:
+// 1. Quota project from config, if present.
+// 2. Project ID from credentials, if present.
+// 3. GOOGLE_CLOUD_PROJECT environment variable.
+// Returns an error if the quota project cannot be determined.
+func (c *config) resolveQuotaProject() error {
+	if c.quotaProject != "" {
+		return nil
+	}
+	if c.googleCredentials != nil && c.googleCredentials.ProjectID != "" {
+		c.quotaProject = c.googleCredentials.ProjectID
+	} else {
+		// The quota project wasn't set in credentials during testing, even when it's set in ADC JSON file.
+		// Using fallback to env variable to resolve the quota project as a workaround.
+		projectID, ok := os.LookupEnv("GOOGLE_CLOUD_PROJECT")
+		if !ok {
+			log.Println("telemetry.googleapis.com requires setting the quota project. Refer to telemetry.config for the available options to set the quota project")
+			return nil
+		}
+		c.quotaProject = projectID
+	}
+	return nil
+}
+
+// resolveResourceProject determines the resource project for telemetry export in the following order:
+// 1. Resource project from config, if present.
+// 2. Project ID from credentials, if present.
+// 3. GOOGLE_CLOUD_PROJECT environment variable.
+// Returns an error if the resource project cannot be determined.
+func (c *config) resolveResourceProject() error {
+	if c.resourceProject != "" {
+		return nil
+	}
+	if c.googleCredentials != nil && c.googleCredentials.ProjectID != "" {
+		c.resourceProject = c.googleCredentials.ProjectID
+	} else {
+		// The resource project wasn't set in credentials during testing, even when it's set in ADC JSON file.
+		// Using fallback to env variable to resolve the resource project as a workaround.
+		projectID, ok := os.LookupEnv("GOOGLE_CLOUD_PROJECT")
+		if !ok {
+			log.Println("telemetry.googleapis.com requires setting the resource project. Refer to telemetry.config for the available options to set the resource project")
+			return nil
+		}
+		c.resourceProject = projectID
+	}
+	return nil
+}
+
+// resolveResource creates a new resource with attributes specified in the following order (later attributes override earlier ones):
 //  1. [resource.Default()] populates the resource labels from environment variables like OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES.
 //  2. [projectIDDetector](.detector.go) populates `gcp.project_id` attribute needed by Cloud Trace.
 //  3. GCP detector adds runtime attributes if ADK runs on one of supported platforms (e.g. GCE, GKE, CloudRun).
 //  4. Resource from config, if present.
-func newResource(ctx context.Context, cfg *config) (*resource.Resource, error) {
+func resolveResource(ctx context.Context, cfg *config) (*resource.Resource, error) {
 	// Add GCP specific detectors.
 	gcpResource, err := resource.New(
 		ctx,
-		resource.WithDetectors(gcp.NewDetector(), newProjectIDDetector(cfg)),
+		resource.WithDetectors(gcp.NewDetector()),
+		resource.WithAttributes(
+			attribute.Key("gcp.project_id").String(cfg.resourceProject),
+		),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCP resource: %w", err)
@@ -142,7 +204,7 @@ func configureProcessors(ctx context.Context, cfg *config) ([]sdktrace.SpanProce
 		))
 	}
 	if cfg.oTelToCloud {
-		spanExporter, err := newGcpSpanExporter(ctx, cfg.credentials)
+		spanExporter, err := newGcpSpanExporter(ctx, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create GCP span exporter: %w", err)
 		}
@@ -177,21 +239,14 @@ func initTracerProvider(cfg *config) (*sdktrace.TracerProvider, error) {
 	return tp, nil
 }
 
-func newGcpSpanExporter(ctx context.Context, credentials *google.Credentials) (sdktrace.SpanExporter, error) {
-	// The quota project is not present in credentials, even when it's set in ADC JSON file.
-	// Use env variable to get the quota project as a workaround.
-	// Note - the quota project can be different that the OTel resource project, so we don't use the value from the config here.
-	projectID, ok := os.LookupEnv("GOOGLE_CLOUD_PROJECT")
-	if !ok {
-		return nil, fmt.Errorf("telemetry.googleapis.com requires setting the quota project. Please set the GOOGLE_CLOUD_PROJECT environment variable")
-	}
-	client := oauth2.NewClient(ctx, credentials.TokenSource)
+func newGcpSpanExporter(ctx context.Context, cfg *config) (sdktrace.SpanExporter, error) {
+	client := oauth2.NewClient(ctx, cfg.googleCredentials.TokenSource)
 	return otlptracehttp.New(ctx,
 		otlptracehttp.WithHTTPClient(client),
 		otlptracehttp.WithEndpointURL("https://telemetry.googleapis.com/v1/traces"),
 		// Pass the quota project id in headers to fix auth errors.
 		// https://cloud.google.com/docs/authentication/adc-troubleshooting/user-creds
 		otlptracehttp.WithHeaders(map[string]string{
-			"x-goog-user-project": projectID,
+			"x-goog-user-project": cfg.quotaProject,
 		}))
 }

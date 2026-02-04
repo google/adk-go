@@ -24,6 +24,12 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/oauth2/google"
+)
+
+const (
+	resourceProject = "resource-project"
+	quotaProject    = "quota-project"
 )
 
 func TestTelemetrySmoke(t *testing.T) {
@@ -31,7 +37,6 @@ func TestTelemetrySmoke(t *testing.T) {
 	ctx := t.Context()
 
 	// Initialize telemetry.
-	projectID := "test-project-id"
 	serviceName := "test-service"
 	serviceVersion := "1.2.3"
 	r, err := resource.New(ctx, resource.WithAttributes(
@@ -43,7 +48,8 @@ func TestTelemetrySmoke(t *testing.T) {
 	}
 	service, err := New(t.Context(),
 		WithSpanProcessors(sdktrace.NewSimpleSpanProcessor(exporter)),
-		WithResourceProjectID(projectID),
+		WithResourceProject(resourceProject),
+		WithQuotaProject(quotaProject),
 		WithResource(r),
 	)
 	if err != nil {
@@ -76,9 +82,9 @@ func TestTelemetrySmoke(t *testing.T) {
 	if gotSpan.Name != spanName {
 		t.Errorf("got span name %q, want %q", gotSpan.Name, spanName)
 	}
-	gotProjectID, gotServiceName, gotServiceVersion := extractResourceAttributes(gotSpan.Resource)
-	if gotProjectID != projectID {
-		t.Errorf("want 'gcp.project_id' attribute %q, got %q", projectID, gotProjectID)
+	gotResourceProject, gotServiceName, gotServiceVersion := extractResourceAttributes(gotSpan.Resource)
+	if gotResourceProject != resourceProject {
+		t.Errorf("want 'gcp.project_id' attribute %q, got %q", resourceProject, gotResourceProject)
 	}
 	if gotServiceName != serviceName {
 		t.Errorf("want 'service.name' attribute %q, got %q", serviceName, gotServiceName)
@@ -103,7 +109,11 @@ func TestTelemetryCustomProvider(t *testing.T) {
 	ctx := t.Context()
 
 	// Initialize telemetry with custom provider.
-	service, err := New(t.Context(), WithTracerProvider(tp))
+	service, err := New(t.Context(),
+		WithTracerProvider(tp),
+		WithResourceProject(resourceProject),
+		WithQuotaProject(quotaProject),
+	)
 	if err != nil {
 		t.Fatalf("failed to create telemetry: %v", err)
 	}
@@ -146,4 +156,118 @@ func extractResourceAttributes(res *resource.Resource) (projectID, serviceName, 
 		}
 	}
 	return
+}
+
+func TestResolveResourceProject(t *testing.T) {
+	testCases := []struct {
+		name          string
+		cfg           *config
+		envVar        string
+		wantProjectID string
+	}{
+		{
+			name: "projectID from config",
+			cfg: &config{
+				resourceProject:   "config-project",
+				googleCredentials: &google.Credentials{ProjectID: "cred-project"},
+			},
+			envVar:        "env-project",
+			wantProjectID: "config-project",
+		},
+		{
+			name: "projectID from credentials",
+			cfg: &config{
+				googleCredentials: &google.Credentials{ProjectID: "cred-project"},
+			},
+			envVar:        "env-project",
+			wantProjectID: "cred-project",
+		},
+		{
+			name:          "projectID from env var",
+			cfg:           &config{},
+			envVar:        "env-project",
+			wantProjectID: "env-project",
+		},
+		{
+			name: "no projectID",
+			cfg: &config{
+				googleCredentials: &google.Credentials{},
+			},
+			wantProjectID: "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.envVar != "" {
+				t.Setenv("GOOGLE_CLOUD_PROJECT", tc.envVar)
+			}
+
+			err := tc.cfg.resolveResourceProject()
+			if err != nil {
+				t.Fatalf("resolveResourceProject() error = %v", err)
+			}
+
+			if tc.cfg.resourceProject != tc.wantProjectID {
+				t.Errorf("resolveResourceProject() got = %v, want %v", tc.cfg.resourceProject, tc.wantProjectID)
+			}
+		})
+	}
+}
+
+func TestResolveQuotaProject(t *testing.T) {
+	testCases := []struct {
+		name          string
+		cfg           *config
+		envVar        string
+		wantProjectID string
+	}{
+		{
+			name: "projectID from config",
+			cfg: &config{
+				quotaProject:      "config-project",
+				googleCredentials: &google.Credentials{ProjectID: "cred-project"},
+			},
+			envVar:        "env-project",
+			wantProjectID: "config-project",
+		},
+		{
+			name: "projectID from credentials",
+			cfg: &config{
+				googleCredentials: &google.Credentials{ProjectID: "cred-project"},
+			},
+			envVar:        "env-project",
+			wantProjectID: "cred-project",
+		},
+		{
+			name:          "projectID from env var",
+			cfg:           &config{},
+			envVar:        "env-project",
+			wantProjectID: "env-project",
+		},
+		{
+			name: "no projectID",
+			cfg: &config{
+				googleCredentials: &google.Credentials{},
+			},
+			wantProjectID: "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.envVar != "" {
+				t.Setenv("GOOGLE_CLOUD_PROJECT", tc.envVar)
+			}
+
+			err := tc.cfg.resolveQuotaProject()
+			if err != nil {
+				t.Fatalf("resolveQuotaProject() error = %v", err)
+			}
+
+			if tc.cfg.quotaProject != tc.wantProjectID {
+				t.Errorf("resolveQuotaProject() got = %v, want %v", tc.cfg.quotaProject, tc.wantProjectID)
+			}
+		})
+	}
 }

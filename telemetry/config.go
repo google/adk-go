@@ -25,12 +25,16 @@ type config struct {
 	// Enables/disables telemetry export to GCP.
 	oTelToCloud bool
 
-	// resourceProjectID is used as the gcp.project.id resource attribute.
-	// If it's empty, the project will be read from GOOGLE_CLOUD_PROJECT env variable or ADC.
-	resourceProjectID string
+	// resourceProject is used as the gcp.project.id resource attribute.
+	// If it's empty, the project will be read from ADC or GOOGLE_CLOUD_PROJECT env variable.
+	resourceProject string
 
-	// credentials override the application default credentials.
-	credentials *google.Credentials
+	// quotaProject is used as the quota project for the telemetry export.
+	// If it's empty, the project will be read from ADC or GOOGLE_CLOUD_PROJECT env variable.
+	quotaProject string
+
+	// googleCredentials override the application default redentials.
+	googleCredentials *google.Credentials
 
 	// resource allows to customize OTel resource. It will be merged with default detectors.
 	resource *resource.Resource
@@ -60,10 +64,18 @@ func WithOtelToCloud(value bool) Option {
 	})
 }
 
-// WithResourceProjectID sets the gcp.project.id resource attribute.
-func WithResourceProjectID(projectID string) Option {
+// WithResourceProject sets the gcp.project.id resource attribute.
+func WithResourceProject(project string) Option {
 	return optionFunc(func(cfg *config) error {
-		cfg.resourceProjectID = projectID
+		cfg.resourceProject = project
+		return nil
+	})
+}
+
+// WithQuotaProject sets the quota project for the telemetry export.
+func WithQuotaProject(projectID string) Option {
+	return optionFunc(func(cfg *config) error {
+		cfg.quotaProject = projectID
 		return nil
 	})
 }
@@ -76,10 +88,10 @@ func WithResource(r *resource.Resource) Option {
 	})
 }
 
-// WithCredentials allows to pass custom credentials to OTel exporters.
-func WithCredentials(c *google.Credentials) Option {
+// WithGoogleCredentials allows to override the application default credentials.
+func WithGoogleCredentials(c *google.Credentials) Option {
 	return optionFunc(func(cfg *config) error {
-		cfg.credentials = c
+		cfg.googleCredentials = c
 		return nil
 	})
 }

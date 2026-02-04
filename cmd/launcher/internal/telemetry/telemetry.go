@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package telemetry contains the itenral shared logic for initializing telemetry in launchers.
+// Package telemetry contains the internal shared logic for initializing telemetry in launchers.
 package telemetry
 
 import (
