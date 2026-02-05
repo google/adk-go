@@ -325,6 +325,9 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 				resp = cbResp
 				err = cbErr
 			}
+			// Function call ID is optional in genai API and some models do not use the field.
+			// Set it in case after model callbacks use it.
+			utils.PopulateClientFunctionCallID(resp.Content)
 			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp, stateDelta, err)
 			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
 			if callbackErr != nil {
