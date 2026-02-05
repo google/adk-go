@@ -198,22 +198,38 @@ func TestPluginCallbackIntegration(t *testing.T) {
 				t.Fatalf("sessionService.Get failed: %v", err)
 			}
 
-			skillId, err := resp.Session.State().Get(fmt.Sprintf("%s/skill_id", fcId))
-			if err != nil {
-				if err != session.ErrStateKeyNotExist || tc.shouldHaveSkillState {
-					t.Fatalf("want skill_id nil, got %q", skillId)
+			skillIdKey := fmt.Sprintf("%s/skill_id", fcId)
+			skillId, err := resp.Session.State().Get(skillIdKey)
+			if tc.shouldHaveSkillState {
+				if err != nil {
+					t.Fatalf("State().Get(%q) unexpected error: %v", skillIdKey, err)
 				}
-			} else if skillId != tc.wantSkillStateValue {
-				t.Errorf("want skill_id %q, got %q", tc.wantSkillStateValue, skillId)
+				if skillId != tc.wantSkillStateValue {
+					t.Errorf("want skill_id %q, got %q", tc.wantSkillStateValue, skillId)
+				}
+			} else {
+				if err == nil {
+					t.Errorf("unexpectedly found skill_id in state with value: %q", skillId)
+				} else if err != session.ErrStateKeyNotExist {
+					t.Fatalf("State().Get(%q) unexpected error when expecting key not to exist: %v", skillIdKey, err)
+				}
 			}
 
-			rationale, err := resp.Session.State().Get(fmt.Sprintf("%s/rationale", fcId))
-			if err != nil {
-				if err != session.ErrStateKeyNotExist || tc.shouldHaveRationaleState {
-					t.Fatalf("want rationale nil, got %q", rationale)
+			rationaleKey := fmt.Sprintf("%s/rationale", fcId)
+			rationale, err := resp.Session.State().Get(rationaleKey)
+			if tc.shouldHaveRationaleState {
+				if err != nil {
+					t.Fatalf("State().Get(%q) unexpected error: %v", rationaleKey, err)
 				}
-			} else if rationale != tc.wantRationaleStateValue {
-				t.Errorf("want rationale %q, got %q", tc.wantRationaleStateValue, rationale)
+				if rationale != tc.wantRationaleStateValue {
+					t.Errorf("want rationale %q, got %q", tc.wantRationaleStateValue, rationale)
+				}
+			} else {
+				if err == nil {
+					t.Errorf("unexpectedly found rationale in state with value: %q", rationale)
+				} else if err != session.ErrStateKeyNotExist {
+					t.Fatalf("State().Get(%q) unexpected error when expecting key not to exist: %v", rationaleKey, err)
+				}
 			}
 		})
 	}
