@@ -17,6 +17,7 @@ package functioncallmodifier
 
 import (
 	"fmt"
+	"maps"
 
 	"google.golang.org/genai"
 
@@ -66,9 +67,8 @@ func beforeModelCallback(cfg FunctionCallModifierConfig) func(agent.CallbackCont
 						decl.Parameters.Properties = map[string]*genai.Schema{}
 					}
 
-					for name, schema := range cfg.Args {
-						decl.Parameters.Properties[name] = schema
-					}
+					maps.Copy(decl.Parameters.Properties, cfg.Args)
+
 					if cfg.OverrideDescription != nil {
 						decl.Description = cfg.OverrideDescription(decl.Description)
 					}
@@ -90,18 +90,18 @@ func afterModelCallback(cfg FunctionCallModifierConfig) func(agent.CallbackConte
 
 		for _, part := range llmResponse.Content.Parts {
 			if fc := part.FunctionCall; fc != nil {
-
-				shouldRemoveArgs := cfg.Predicate(fc.Name)
-				if shouldRemoveArgs {
-					for name := range cfg.Args {
-						arg, hasArg := fc.Args[name]
-						if hasArg {
-							delete(fc.Args, name)
-							stateKey := fmt.Sprintf("%s/%s", fc.ID, name)
-							if err := ctx.State().Set(stateKey, arg); err != nil {
-								return nil, fmt.Errorf("failed to set state: %w", err)
-							}
-						}
+				if !cfg.Predicate(fc.Name) {
+					continue
+				}
+				for name := range cfg.Args {
+					arg, hasArg := fc.Args[name]
+					if !hasArg {
+						continue
+					}
+					delete(fc.Args, name)
+					stateKey := fmt.Sprintf("%s/%s", fc.ID, name)
+					if err := ctx.State().Set(stateKey, arg); err != nil {
+						return nil, fmt.Errorf("failed to set state: %w", err)
 					}
 				}
 			}
