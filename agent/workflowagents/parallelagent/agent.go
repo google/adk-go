@@ -99,7 +99,12 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	}
 
 	go func() {
-		_ = errGroup.Wait() // this error is already sent to the user via iterator
+		if err := errGroup.Wait(); err != nil {
+			select {
+			case resultsChan <- result{err: err}:
+			case <-doneChan:
+			}
+		}
 		close(resultsChan)
 	}()
 
@@ -123,6 +128,10 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 
 func runSubAgent(ctx agent.InvocationContext, agent agent.Agent, results chan<- result, done <-chan bool) error {
 	for event, err := range agent.Run(ctx) {
+		if err != nil {
+			return err
+		}
+
 		ackChan := make(chan struct{})
 
 		select {
@@ -132,13 +141,8 @@ func runSubAgent(ctx agent.InvocationContext, agent agent.Agent, results chan<- 
 			return ctx.Err()
 		case results <- result{
 			event:   event,
-			err:     err,
 			ackChan: ackChan,
 		}:
-			if err != nil {
-				return err
-			}
-
 			// Wait for runner to finish processing before continuing to next iteration
 			select {
 			case <-ackChan:

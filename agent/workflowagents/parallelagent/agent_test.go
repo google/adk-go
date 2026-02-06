@@ -366,3 +366,97 @@ func newGeminiTestTransport(t *testing.T, rrfile string) (http.RoundTripper, boo
 	recording, _ := httprr.Recording(rrfile)
 	return rr, recording
 }
+
+// TestParallelAgent_PropagatesContextError verifies that if the context is canceled,
+// the iterator yields the error from errgroup.Wait().
+func TestParallelAgent_PropagatesContextError(t *testing.T) {
+	t.Parallel()
+
+	// Create a sub-agent that yields an event and then waits.
+	// We want to trigger runSubAgent returning ctx.Err().
+	subAgent := must(agent.New(agent.Config{
+		Name: "yielder",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// Yield one event so we engage runSubAgent logic
+				if !yield(&session.Event{
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("hello", genai.RoleModel),
+					},
+				}, nil) {
+					return
+				}
+
+				// Wait for context cancellation
+				<-ctx.Done()
+			}
+		},
+	}))
+
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "parallel_agent",
+			SubAgents: []agent.Agent{subAgent},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	spy := &spyAgent{Agent: parallelAgent}
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	sessionService := session.InMemoryService()
+	_, _ = sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   "test_app",
+		UserID:    "user_id",
+		SessionID: "session_id",
+	})
+
+	r, err := runner.New(runner.Config{
+		AppName:        "test_app",
+		Agent:          spy,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		// Wait a tiny bit to ensure we started
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+
+	for _, _ = range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}) {
+		// Simulate processing delay so that ackChan takes time,
+		// increasing chance runSubAgent is blocked on ackChan when cancel happens?
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if spy.yieldedError == nil {
+		t.Fatal("Expected parallelAgent to yield an error (e.g. context canceled), but it yielded nil")
+	}
+
+	t.Logf("Yielded error: %v", spy.yieldedError)
+}
+
+type spyAgent struct {
+	agent.Agent
+	yieldedError error
+}
+
+func (s *spyAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	next := s.Agent.Run(ctx)
+	return func(yield func(*session.Event, error) bool) {
+		for event, err := range next {
+			if err != nil {
+				s.yieldedError = err
+			}
+			if !yield(event, err) {
+				return
+			}
+		}
+	}
+}
