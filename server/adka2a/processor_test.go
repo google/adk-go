@@ -208,15 +208,7 @@ func TestEventProcessor_Process(t *testing.T) {
 					}),
 				},
 			},
-			processed: []*a2a.TaskArtifactUpdateEvent{
-				newNonPartialArtifactEvent(task, a2a.DataPart{
-					Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
-					Metadata: map[string]any{
-						a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
-						a2aDataPartMetaLongRunningKey: true,
-					},
-				}),
-			},
+			processed: nil,
 			terminal: []a2a.Event{
 				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
 					Role: a2a.MessageRoleAgent,
@@ -246,14 +238,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				newNonPartialArtifactEvent(task, a2a.DataPart{
-					Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
-					Metadata: map[string]any{
-						a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
-						a2aDataPartMetaLongRunningKey: true,
-					},
-				}),
-				newNonPartialArtifactUpdateEvent(task, a2a.TextPart{Text: "This will take a while"}),
+				newNonPartialArtifactEvent(task, a2a.TextPart{Text: "This will take a while"}),
 			},
 
 			terminal: []a2a.Event{
@@ -287,21 +272,7 @@ func TestEventProcessor_Process(t *testing.T) {
 					}),
 				},
 			},
-			processed: []*a2a.TaskArtifactUpdateEvent{
-				newNonPartialArtifactEvent(task, a2a.DataPart{
-					Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
-					Metadata: map[string]any{
-						a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
-						a2aDataPartMetaLongRunningKey: true,
-					},
-				}),
-				newNonPartialArtifactUpdateEvent(task, a2a.DataPart{
-					Data: map[string]any{"id": "get_weather", "name": "weather", "response": map[string]any{"status": "pending"}},
-					Metadata: map[string]any{
-						a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionResponse,
-					},
-				}),
-			},
+			processed: nil,
 			terminal: []a2a.Event{
 				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
 					Role: a2a.MessageRoleAgent,

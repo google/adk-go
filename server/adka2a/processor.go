@@ -89,7 +89,8 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		}
 	}
 
-	if err := p.inputRequiredProcessor.process(event); err != nil {
+	event, err = p.inputRequiredProcessor.process(event)
+	if err != nil {
 		return nil, fmt.Errorf("input required processing failed: %w", err)
 	}
 
