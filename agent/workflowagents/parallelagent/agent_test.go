@@ -429,7 +429,7 @@ func TestParallelAgent_PropagatesContextError(t *testing.T) {
 		cancel()
 	}()
 
-	for _, _ = range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}) {
+	for range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}) {
 		// Simulate processing delay so that ackChan takes time,
 		// increasing chance runSubAgent is blocked on ackChan when cancel happens?
 		time.Sleep(100 * time.Millisecond)
