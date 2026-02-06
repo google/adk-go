@@ -17,6 +17,7 @@ package llminternal
 import (
 	"bytes"
 	"fmt"
+	"iter"
 	"slices"
 
 	"github.com/google/safehtml/template"
@@ -27,6 +28,7 @@ import (
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
 
@@ -62,29 +64,35 @@ import (
 //
 // TODO: implement it in the runners package and update this doc.
 
-func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	// TODO: support agent types other than LLMAgent, that have parent/subagents?
-	agent := ctx.Agent()
-	if !shouldUseAutoFlow(agent) {
-		return nil
-	}
+func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		// TODO: support agent types other than LLMAgent, that have parent/subagents?
+		agent := ctx.Agent()
+		if !shouldUseAutoFlow(agent) {
+			return
+		}
 
-	parents := parentmap.FromContext(ctx)
+		parents := parentmap.FromContext(ctx)
 
-	targets := transferTargets(agent, parents[agent.Name()])
-	if len(targets) == 0 {
-		return nil
-	}
+		targets := transferTargets(agent, parents[agent.Name()])
+		if len(targets) == 0 {
+			return
+		}
 
-	// TODO(hyangah): why do we set this up in request processor
-	// instead of registering this as a normal function tool of the Agent?
-	transferToAgentTool := &TransferToAgentTool{}
-	si, err := instructionsForTransferToAgent(agent, parents[agent.Name()], targets, transferToAgentTool)
-	if err != nil {
-		return err
+		// TODO(hyangah): why do we set this up in request processor
+		// instead of registering this as a normal function tool of the Agent?
+		transferToAgentTool := &TransferToAgentTool{}
+		si, err := instructionsForTransferToAgent(agent, parents[agent.Name()], targets, transferToAgentTool)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		utils.AppendInstructions(req, si)
+		err = appendTools(req, transferToAgentTool)
+		if err != nil {
+			yield(nil, err)
+		}
 	}
-	utils.AppendInstructions(req, si)
-	return appendTools(req, transferToAgentTool)
 }
 
 type TransferToAgentTool struct{}

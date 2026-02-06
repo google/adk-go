@@ -30,8 +30,15 @@ type vertexAiService struct {
 }
 
 type VertexAIServiceConfig struct {
-	Location        string
-	ProjectID       string
+	// ProjectID with VertexAI API enabled.
+	ProjectID string
+	// Location where the reasoningEngine is running.
+	Location string
+	// ReasoningEngine is the runtime in the agent engine which will store the
+	// sessions.
+	// Optimal way is to create reasoningEngine per app.
+	// For example, a reasoningEngine can be created via the Vertex AI REST
+	// API's 'projects.locations.reasoningEngines.create' method.
 	ReasoningEngine string
 }
 

@@ -427,7 +427,7 @@ func TestEventProcessor_Process(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
-			processor := newEventProcessor(reqCtx, invocationMeta{})
+			processor := newEventProcessor(reqCtx, invocationMeta{}, nil)
 
 			var gotEvents []*a2a.TaskArtifactUpdateEvent
 			for _, event := range tc.events {
@@ -474,7 +474,7 @@ func TestEventProcessor_ArtifactUpdates(t *testing.T) {
 	}
 
 	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
-	processor := newEventProcessor(reqCtx, invocationMeta{})
+	processor := newEventProcessor(reqCtx, invocationMeta{}, nil)
 	got := make([]*a2a.TaskArtifactUpdateEvent, len(events))
 	for i, event := range events {
 		processed, err := processor.process(t.Context(), event)

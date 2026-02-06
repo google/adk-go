@@ -470,6 +470,12 @@ func (c *invocationContext) Ended() bool {
 	return c.endInvocation
 }
 
+func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
+	newCtx := *c
+	newCtx.Context = ctx
+	return &newCtx
+}
+
 func pluginManagerFromContext(ctx context.Context) pluginManager {
 	a := ctx.Value(plugincontext.PluginManagerCtxKey)
 	m, ok := a.(pluginManager)
@@ -483,3 +489,5 @@ type pluginManager interface {
 	RunBeforeAgentCallback(cctx CallbackContext) (*genai.Content, error)
 	RunAfterAgentCallback(cctx CallbackContext) (*genai.Content, error)
 }
+
+var _ InvocationContext = (*invocationContext)(nil)
