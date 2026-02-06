@@ -41,10 +41,13 @@ func TestNewLoopAgent(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		args       args
-		wantEvents []*session.Event
-		wantErr    bool
+		name        string
+		args        args
+		wantEvents  []*session.Event
+		wantErrOn   string
+		wantErr     bool
+		wantRunErr  bool
+		assertPanic bool
 	}{
 		{
 			name: "infinite loop",
@@ -139,17 +142,6 @@ func TestNewLoopAgent(t *testing.T) {
 						Escalate: true,
 					},
 				},
-				{
-					Author: "custom_agent_0",
-					LLMResponse: model.LLMResponse{
-						Content: &genai.Content{
-							Parts: []*genai.Part{
-								genai.NewPartFromText("hello 0"),
-							},
-							Role: genai.RoleModel,
-						},
-					},
-				},
 			},
 		},
 		{
@@ -176,6 +168,16 @@ func TestNewLoopAgent(t *testing.T) {
 					},
 				},
 			},
+		},
+		{
+			name: "loop agent with sub-agent error does not panic",
+			args: args{
+				maxIterations: 1,
+				subAgents:     []agent.Agent{newErrorAgent(t)},
+			},
+			wantEvents: nil,
+			wantErrOn:  "run",
+			wantRunErr: true,
 		},
 	}
 	for _, tt := range tests {
@@ -216,9 +218,11 @@ func TestNewLoopAgent(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			var gotErrs []error
 			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
 				if err != nil {
-					t.Errorf("got unexpected error: %v", err)
+					gotErrs = append(gotErrs, err)
+					continue
 				}
 
 				if tt.args.maxIterations == 0 && len(gotEvents) == len(tt.wantEvents) {
@@ -226,6 +230,10 @@ func TestNewLoopAgent(t *testing.T) {
 				}
 
 				gotEvents = append(gotEvents, event)
+			}
+
+			if (len(gotErrs) > 0) != tt.wantRunErr {
+				t.Errorf("runner.Run() errors = %v, wantRunErr %v", gotErrs, tt.wantRunErr)
 			}
 
 			if len(tt.wantEvents) != len(gotEvents) {
@@ -282,6 +290,30 @@ func (a *customAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, err
 				Content: genai.NewContentFromText(fmt.Sprintf("hello %v", a.id), genai.RoleModel),
 			},
 		}, nil)
+	}
+}
+
+func newErrorAgent(t *testing.T) agent.Agent {
+	t.Helper()
+
+	errorAgentImpl := &errorAgent{}
+
+	a, err := agent.New(agent.Config{
+		Name: "error_agent",
+		Run:  errorAgentImpl.Run,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return a
+}
+
+type errorAgent struct{}
+
+func (a *errorAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		yield(nil, fmt.Errorf("this agent always errors"))
 	}
 }
 
