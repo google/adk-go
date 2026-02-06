@@ -50,6 +50,16 @@ func IsPartial(meta map[string]any) bool {
 	return isPartial
 }
 
+// IsPartialFlagSet takes metadata of an A2A object (eg. a2a.Part, a2a.Artifact) and returs true if
+// the ADK partial flag was set on it.
+func IsPartialFlagSet(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	_, isSet := meta[metadataPartialKey].(bool)
+	return isSet
+}
+
 // ToA2APart converts the provided genai part to A2A equivalent. Long running tool IDs are used for attaching metadata to
 // the relevant data parts.
 func ToA2APart(part *genai.Part, longRunningToolIDs []string) (a2a.Part, error) {

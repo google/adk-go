@@ -111,7 +111,7 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 	}
 
 	if len(eventMeta) > 0 {
-		result.Metadata = eventMeta
+		maps.Copy(result.Metadata, eventMeta)
 	}
 
 	return result, nil

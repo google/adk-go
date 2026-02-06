@@ -412,6 +412,21 @@ func TestEventProcessor_Process(t *testing.T) {
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
 			},
 		},
+		{
+			name: "metadata merging",
+			events: []*session.Event{{
+				InvocationID: "test-invocation-id",
+				LLMResponse:  modelResponseFromParts(genai.NewPartFromText("Hello")),
+			}},
+			processed: []*a2a.TaskArtifactUpdateEvent{
+				func() *a2a.TaskArtifactUpdateEvent {
+					ev := newNonPartialArtifactEvent(task, a2a.TextPart{Text: "Hello"})
+					ev.Metadata[ToA2AMetaKey("invocation_id")] = "test-invocation-id"
+					return ev
+				}(),
+			},
+			terminal: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil)},
+		},
 	}
 
 	for _, tc := range testCases {
