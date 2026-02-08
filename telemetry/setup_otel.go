@@ -175,7 +175,7 @@ func initTracerProvider(cfg *config) (*sdktrace.TracerProvider, error) {
 }
 
 func newGcpSpanExporter(ctx context.Context, credentials *google.Credentials) (sdktrace.SpanExporter, error) {
-	// The quota poject is not present in credentials, even when it's set in ADC JSON file.
+	// The quota project is not present in credentials, even when it's set in ADC JSON file.
 	// Use env variable to get the quota project as a workaround.
 	// Note - the quota project can be different that the OTel resource project, so we don't use the value from the config here.
 	projectID, ok := os.LookupEnv("GOOGLE_CLOUD_PROJECT")
