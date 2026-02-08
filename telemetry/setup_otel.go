@@ -160,6 +160,9 @@ func applicationDefaultCredentials(ctx context.Context) (*google.Credentials, er
 }
 
 func initTracerProvider(cfg *config) (*sdktrace.TracerProvider, error) {
+	if cfg.tracerProvider != nil {
+		return cfg.tracerProvider, nil
+	}
 	if len(cfg.spanProcessors) == 0 {
 		return nil, nil
 	}

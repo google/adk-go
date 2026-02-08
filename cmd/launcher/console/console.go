@@ -31,7 +31,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/telemetry"
+	"google.golang.org/adk/cmd/launcher/internal/telemetry"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/runner"
@@ -59,8 +59,8 @@ func NewLauncher() launcher.SubLauncher {
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
 		fmt.Sprintf("defines streaming mode (%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE))
-	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to cloud")
-	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 15*time.Second, "Console shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
+	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 2*time.Second, "Console shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
+	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 	return &consoleLauncher{config: config, flags: fs}
 }
 
@@ -69,7 +69,7 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
 
-	telemetry, err := telemetry.InitTelemetry(ctx, config, l.config.otelToCloud)
+	telemetry, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, l.config.otelToCloud)
 	if err != nil {
 		return fmt.Errorf("telemetry initialization failed: %v", err)
 	}

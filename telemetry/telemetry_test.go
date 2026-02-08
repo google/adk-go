@@ -16,18 +16,18 @@ package telemetry
 
 import (
 	"context"
-	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
 func TestTelemetrySmoke(t *testing.T) {
-	exporter := newMockExporter()
+	exporter := tracetest.NewInMemoryExporter()
 	ctx := t.Context()
 
 	// Initialize telemetry.
@@ -73,23 +73,10 @@ func TestTelemetrySmoke(t *testing.T) {
 		t.Fatalf("got %d spans, want 1", len(spans))
 	}
 	gotSpan := spans[0]
-	if gotSpan.Name() != spanName {
-		t.Errorf("got span name %q, want %q", gotSpan.Name(), spanName)
+	if gotSpan.Name != spanName {
+		t.Errorf("got span name %q, want %q", gotSpan.Name, spanName)
 	}
-	gotProjectID := ""
-	gotServiceName := ""
-	gotServiceVersion := ""
-	for _, attr := range gotSpan.Resource().Attributes() {
-		if attr.Key == "gcp.project_id" {
-			gotProjectID = attr.Value.AsString()
-		}
-		if attr.Key == semconv.ServiceNameKey {
-			gotServiceName = attr.Value.AsString()
-		}
-		if attr.Key == semconv.ServiceVersionKey {
-			gotServiceVersion = attr.Value.AsString()
-		}
-	}
+	gotProjectID, gotServiceName, gotServiceVersion := extractResourceAttributes(gotSpan.Resource)
 	if gotProjectID != projectID {
 		t.Errorf("want 'gcp.project_id' attribute %q, got %q", projectID, gotProjectID)
 	}
@@ -103,43 +90,60 @@ func TestTelemetrySmoke(t *testing.T) {
 	if err := service.Shutdown(context.WithoutCancel(ctx)); err != nil {
 		t.Errorf("telemetry.Shutdown() failed: %v", err)
 	}
-	if exporter.running {
-		t.Errorf("Expected test exporter to be not running after shutdown")
+	if len(exporter.GetSpans()) != 0 {
+		t.Errorf("expected no spans after shutdown, got %d", len(exporter.GetSpans()))
 	}
 }
 
-func newMockExporter() *mockExporter {
-	return &mockExporter{
-		running: true,
+func TestTelemetryCustomProvider(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(exporter)),
+	)
+	ctx := t.Context()
+
+	// Initialize telemetry with custom provider.
+	service, err := New(t.Context(), WithTracerProvider(tp))
+	if err != nil {
+		t.Fatalf("failed to create telemetry: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.WithoutCancel(ctx)); err != nil {
+			t.Errorf("telemetry.Shutdown() failed: %v", err)
+		}
+	})
+	service.SetGlobalOtelProviders()
+
+	// Create test tracer and span.
+	tracer := otel.Tracer("test-tracer")
+	spanName := "test-span"
+	_, span := tracer.Start(ctx, spanName)
+	span.End()
+
+	if err := service.TraceProvider().ForceFlush(context.Background()); err != nil {
+		t.Fatalf("failed to flush spans: %v", err)
+	}
+
+	// Verify span was exported.
+	spans := exporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	if spans[0].Name != spanName {
+		t.Errorf("got span name %q, want %q", spans[0].Name, spanName)
 	}
 }
 
-// mockExporter is a simple in-memory span exporter for testing.
-type mockExporter struct {
-	mu      sync.Mutex
-	spans   []sdktrace.ReadOnlySpan
-	running bool
-}
-
-func (e *mockExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.running {
-		return nil
+func extractResourceAttributes(res *resource.Resource) (projectID, serviceName, serviceVersion string) {
+	for _, attr := range res.Attributes() {
+		switch attr.Key {
+		case "gcp.project_id":
+			projectID = attr.Value.AsString()
+		case semconv.ServiceNameKey:
+			serviceName = attr.Value.AsString()
+		case semconv.ServiceVersionKey:
+			serviceVersion = attr.Value.AsString()
+		}
 	}
-	e.spans = append(e.spans, spans...)
-	return nil
-}
-
-func (e *mockExporter) Shutdown(ctx context.Context) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.running = false
-	return nil
-}
-
-func (e *mockExporter) GetSpans() []sdktrace.ReadOnlySpan {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.spans
+	return
 }

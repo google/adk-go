@@ -28,7 +28,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/telemetry"
+	"google.golang.org/adk/cmd/launcher/internal/telemetry"
 	"google.golang.org/adk/cmd/launcher/universal"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/session"
@@ -196,7 +196,7 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		close(errChan)
 	}()
 
-	telemetryService, err := telemetry.InitTelemetry(ctx, config, w.config.otelToCloud)
+	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
 	if err != nil {
 		return fmt.Errorf("telemetry initialization failed: %v", err)
 	}
@@ -233,7 +233,7 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
 	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
 	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 15*time.Second, "Server shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
-	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to cloud")
+	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 
 	return &webLauncher{
 		config:       config,

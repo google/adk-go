@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package telemetry contains the shared logic for initializing telemetry in launchers.
+// Package telemetry contains the itenral shared logic for initializing telemetry in launchers.
 package telemetry
 
 import (
@@ -22,8 +22,8 @@ import (
 	"google.golang.org/adk/telemetry"
 )
 
-// InitTelemetry initializes telemetry for the launcher.
-func InitTelemetry(ctx context.Context, config *launcher.Config, otelToCloud bool) (telemetry.Service, error) {
+// InitAndSetGlobalOtelProviders initializes telemetry and sets the global OTel providers.
+func InitAndSetGlobalOtelProviders(ctx context.Context, config *launcher.Config, otelToCloud bool) (telemetry.Service, error) {
 	opts := append(config.TelemetryOptions, telemetry.WithOtelToCloud(otelToCloud))
 	telemetryService, err := telemetry.New(ctx, opts...)
 	if err != nil {
