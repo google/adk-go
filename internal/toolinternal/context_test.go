@@ -78,6 +78,14 @@ func TestRequestConfirmation_AutoGeneratesIDWhenEmpty(t *testing.T) {
 		t.Error("SkipSummarization should be set even with auto-generated function call ID")
 	}
 	if len(actions.RequestedToolConfirmations) != 1 {
-		t.Errorf("expected 1 confirmation entry, got %d", len(actions.RequestedToolConfirmations))
+		t.Fatalf("expected 1 confirmation entry, got %d", len(actions.RequestedToolConfirmations))
+	}
+	for _, tc := range actions.RequestedToolConfirmations {
+		if tc.Hint != "hint" {
+			t.Errorf("expected hint 'hint', got %q", tc.Hint)
+		}
+		if tc.Confirmed {
+			t.Error("expected Confirmed to be false")
+		}
 	}
 }
