@@ -91,22 +91,7 @@ func newInternal(cfg *config) (*Providers, error) {
 // 3. GOOGLE_CLOUD_PROJECT environment variable.
 // Returns the quota project or error if the quota project cannot be determined.
 func resolveGcpQuotaProject(cfg *config) (string, error) {
-	if cfg.gcpQuotaProject != "" {
-		return cfg.gcpQuotaProject, nil
-	}
-	if !cfg.oTelToCloud {
-		return "", nil
-	}
-	if cfg.googleCredentials != nil && cfg.googleCredentials.ProjectID != "" {
-		return cfg.googleCredentials.ProjectID, nil
-	}
-	// The quota project wasn't set in credentials during testing, even when it's set in ADC JSON file.
-	// Using fallback to env variable to resolve the quota project as a workaround.
-	project, ok := os.LookupEnv("GOOGLE_CLOUD_PROJECT")
-	if !ok && cfg.oTelToCloud {
-		return "", fmt.Errorf("telemetry.googleapis.com requires setting the quota project. Refer to telemetry.config for the available options to set the quota project")
-	}
-	return project, nil
+	return resolveProject(cfg.gcpQuotaProject, cfg.googleCredentials, cfg.oTelToCloud, "quota")
 }
 
 // resolveGcpResourceProject determines the resource project for telemetry export in the following order:
@@ -115,19 +100,23 @@ func resolveGcpQuotaProject(cfg *config) (string, error) {
 // 3. GOOGLE_CLOUD_PROJECT environment variable.
 // Returns the resource project or error if the resource project cannot be determined.
 func resolveGcpResourceProject(cfg *config) (string, error) {
-	if cfg.gcpResourceProject != "" {
-		return cfg.gcpResourceProject, nil
+	return resolveProject(cfg.gcpResourceProject, cfg.googleCredentials, cfg.oTelToCloud, "resource")
+}
+
+func resolveProject(configuredProject string, creds *google.Credentials, requireProject bool, projectType string) (string, error) {
+	if configuredProject != "" {
+		return configuredProject, nil
 	}
-	if cfg.googleCredentials != nil && cfg.googleCredentials.ProjectID != "" {
-		return cfg.googleCredentials.ProjectID, nil
+	if creds != nil && creds.ProjectID != "" {
+		return creds.ProjectID, nil
 	}
-	// The resource project wasn't set in credentials during testing, even when it's set in ADC JSON file.
-	// Using fallback to env variable to resolve the resource project as a workaround.
-	projectID, ok := os.LookupEnv("GOOGLE_CLOUD_PROJECT")
-	if !ok && cfg.oTelToCloud {
-		return "", fmt.Errorf("telemetry.googleapis.com requires setting the resource project. Refer to telemetry.config for the available options to set the resource project")
+	// The project was always empty during testing, even though it was set in ADC JSON file.
+	// Using fallback to env variable to resolve the project as a workaround.
+	project, ok := os.LookupEnv("GOOGLE_CLOUD_PROJECT")
+	if !ok && requireProject {
+		return "", fmt.Errorf("telemetry.googleapis.com requires setting the %s project. Refer to telemetry.config for the available options to set the %s project", projectType, projectType)
 	}
-	return projectID, nil
+	return project, nil
 }
 
 // resolveResource creates a new resource with attributes specified in the following order (later attributes override earlier ones):
