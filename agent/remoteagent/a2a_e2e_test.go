@@ -19,6 +19,7 @@ package remoteagent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"iter"
 	"net/http"
@@ -350,6 +351,32 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 			wantStatusContain: "Model Failed!",
 			wantState:         a2a.TaskStateFailed,
 			wantArtifactParts: a2a.ContentParts{},
+			wantPartial:       true,
+		},
+		{
+			name: "llm mid-response error",
+			agentFn: func(t *testing.T) agent.Agent {
+				event := 0
+				llmModel := newGeminiModel(t, "gemini-2.5-flash")
+				return utils.Must(llmagent.New(llmagent.Config{
+					Name:  "model-agent",
+					Model: llmModel,
+					AfterModelCallbacks: []llmagent.AfterModelCallback{
+						func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+							if event < 2 {
+								event++
+								return nil, nil
+							}
+							return nil, fmt.Errorf("connection error!")
+						},
+					},
+					Instruction: "You are a helpful assistant.",
+				}))
+			},
+			wantStatusContain: "connection error!",
+			wantState:         a2a.TaskStateFailed,
+			wantArtifactParts: a2a.ContentParts{},
+			wantPartial:       true,
 		},
 	}
 	for _, tc := range testCases {
@@ -392,8 +419,12 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 				return
 			}
 
-			if len(task.Artifacts) != 2 {
-				t.Fatalf("len(artifacts) = %d, want 2", len(nonPartialArtifacts))
+			wantArtifactCount := 1
+			if wantResponse {
+				wantArtifactCount++
+			}
+			if wantResponse && len(task.Artifacts) != wantArtifactCount {
+				t.Fatalf("len(artifacts) = %d, want %d", len(task.Artifacts), wantArtifactCount)
 			}
 			var partialArtifact *a2a.Artifact
 			if adka2a.IsPartial(task.Artifacts[0].Metadata) {

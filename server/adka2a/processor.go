@@ -144,16 +144,16 @@ func newPartialArtifactUpdate(task a2a.TaskInfoProvider, artifactID a2a.Artifact
 	return ev
 }
 
-func (p *eventProcessor) makeFinalArtifactUpdate() (*a2a.TaskArtifactUpdateEvent, bool) {
+func (p *eventProcessor) makeFinalArtifactUpdate() *a2a.TaskArtifactUpdateEvent {
 	// We could also send a LastChunk: true event for the main (non-partial) artifact,
 	// but there's currently no special handling for it and not all A2A SDK (eg. Java)
 	// implementations allow empty-part artifact updates.
 	if p.partialResponseID == "" {
-		return nil, false
+		return nil
 	}
 	ev := newPartialArtifactUpdate(p.reqCtx, p.partialResponseID, []a2a.Part{a2a.DataPart{Data: map[string]any{}}})
 	ev.LastChunk = true
-	return ev, true
+	return ev
 }
 
 func (p *eventProcessor) makeFinalStatusUpdate() *a2a.TaskStatusUpdateEvent {
