@@ -33,6 +33,7 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration) http.Han
 	adkExporter := services.NewAPIServerSpanExporter()
 	processor := sdktrace.NewSimpleSpanProcessor(adkExporter)
 	// TODO(#479) remove this together with local tracer provider.
+	// nolint:staticcheck
 	telemetry.RegisterLocalSpanProcessor(processor)
 	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(processor))
 

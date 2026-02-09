@@ -46,7 +46,7 @@ func TestTelemetrySmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create resource: %v", err)
 	}
-	service, err := New(t.Context(),
+	providers, err := New(t.Context(),
 		WithSpanProcessors(sdktrace.NewSimpleSpanProcessor(exporter)),
 		WithGcpResourceProject(resourceProject),
 		WithGcpQuotaProject(quotaProject),
@@ -56,11 +56,11 @@ func TestTelemetrySmoke(t *testing.T) {
 		t.Fatalf("failed to create telemetry: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := service.Shutdown(context.WithoutCancel(ctx)); err != nil {
+		if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
 			t.Errorf("telemetry.Shutdown() failed: %v", err)
 		}
 	})
-	service.SetGlobalOtelProviders()
+	providers.SetGlobalOtelProviders()
 
 	// Create test tracer.
 	tracer := otel.Tracer("test-tracer")
@@ -69,7 +69,7 @@ func TestTelemetrySmoke(t *testing.T) {
 	_, span := tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindServer))
 	span.End()
 
-	if err := service.TracerProvider().ForceFlush(context.Background()); err != nil {
+	if err := providers.TracerProvider.ForceFlush(context.Background()); err != nil {
 		t.Fatalf("failed to flush spans: %v", err)
 	}
 
@@ -93,7 +93,7 @@ func TestTelemetrySmoke(t *testing.T) {
 		t.Errorf("want 'service.version' attribute %q, got %q", serviceVersion, gotServiceVersion)
 	}
 
-	if err := service.Shutdown(context.WithoutCancel(ctx)); err != nil {
+	if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
 		t.Errorf("telemetry.Shutdown() failed: %v", err)
 	}
 	if len(exporter.GetSpans()) != 0 {
@@ -109,7 +109,7 @@ func TestTelemetryCustomProvider(t *testing.T) {
 	ctx := t.Context()
 
 	// Initialize telemetry with custom provider.
-	service, err := New(t.Context(),
+	providers, err := New(t.Context(),
 		WithTracerProvider(tp),
 		WithGcpResourceProject(resourceProject),
 		WithGcpQuotaProject(quotaProject),
@@ -118,11 +118,11 @@ func TestTelemetryCustomProvider(t *testing.T) {
 		t.Fatalf("failed to create telemetry: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := service.Shutdown(context.WithoutCancel(ctx)); err != nil {
+		if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
 			t.Errorf("telemetry.Shutdown() failed: %v", err)
 		}
 	})
-	service.SetGlobalOtelProviders()
+	providers.SetGlobalOtelProviders()
 
 	// Create test tracer and span.
 	tracer := otel.Tracer("test-tracer")
@@ -130,7 +130,7 @@ func TestTelemetryCustomProvider(t *testing.T) {
 	_, span := tracer.Start(ctx, spanName)
 	span.End()
 
-	if err := service.TracerProvider().ForceFlush(context.Background()); err != nil {
+	if err := providers.TracerProvider.ForceFlush(context.Background()); err != nil {
 		t.Fatalf("failed to flush spans: %v", err)
 	}
 

@@ -20,7 +20,6 @@ import (
 	"os"
 
 	"go.opentelemetry.io/contrib/detectors/gcp"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -28,27 +27,6 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
-
-type telemetryService struct {
-	tp *sdktrace.TracerProvider
-}
-
-func (t *telemetryService) TracerProvider() *sdktrace.TracerProvider {
-	return t.tp
-}
-
-func (t *telemetryService) Shutdown(ctx context.Context) error {
-	if t.tp != nil {
-		return t.tp.Shutdown(ctx)
-	}
-	return nil
-}
-
-func (t *telemetryService) SetGlobalOtelProviders() {
-	if t.tp != nil {
-		otel.SetTracerProvider(t.tp)
-	}
-}
 
 func configure(ctx context.Context, opts ...Option) (*config, error) {
 	cfg := &config{}
@@ -94,7 +72,7 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 	return cfg, nil
 }
 
-func newInternal(cfg *config) (*telemetryService, error) {
+func newInternal(cfg *config) (*Providers, error) {
 	tp, err := initTracerProvider(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize tracer provider: %w", err)
@@ -102,8 +80,8 @@ func newInternal(cfg *config) (*telemetryService, error) {
 	// TODO(#479) init logger provider
 	// TODO(#479) init meter provider
 
-	return &telemetryService{
-		tp: tp,
+	return &Providers{
+		TracerProvider: tp,
 	}, nil
 }
 

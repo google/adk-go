@@ -23,12 +23,12 @@ import (
 )
 
 // InitAndSetGlobalOtelProviders initializes telemetry and sets the global OTel providers.
-func InitAndSetGlobalOtelProviders(ctx context.Context, config *launcher.Config, otelToCloud bool) (telemetry.Service, error) {
+func InitAndSetGlobalOtelProviders(ctx context.Context, config *launcher.Config, otelToCloud bool) (*telemetry.Providers, error) {
 	opts := append(config.TelemetryOptions, telemetry.WithOtelToCloud(otelToCloud))
-	telemetryService, err := telemetry.New(ctx, opts...)
+	telemetryProviders, err := telemetry.New(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
-	telemetryService.SetGlobalOtelProviders()
-	return telemetryService, nil
+	telemetryProviders.SetGlobalOtelProviders()
+	return telemetryProviders, nil
 }

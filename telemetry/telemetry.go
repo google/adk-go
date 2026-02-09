@@ -18,26 +18,37 @@ package telemetry
 import (
 	"context"
 
+	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	internal "google.golang.org/adk/internal/telemetry"
 )
 
-// Service wraps all telemetry providers and implements functions for telemetry lifecycle management.
-type Service interface {
-	// SetGlobalOtelProviders registers the configured providers as the global OTel providers.
-	SetGlobalOtelProviders()
-
-	// TracerProvider returns the configured TracerProvider or nil.
-	TracerProvider() *sdktrace.TracerProvider
-
-	// Shutdown shuts down underlying OTel providers.
-	Shutdown(ctx context.Context) error
+// Providers wraps all telemetry providers and provides [Shutdown] function.
+type Providers struct {
+	// TracerProvider is the configured TracerProvider or nil.
+	TracerProvider *sdktrace.TracerProvider
 }
 
-// New initializes a new telemetry service and underlying providers: TraceProvider, LogProvider, and MeterProvider.
+// Shutdown shuts down underlying OTel providers.
+func (t *Providers) Shutdown(ctx context.Context) error {
+	if t.TracerProvider != nil {
+		return t.TracerProvider.Shutdown(ctx)
+	}
+	return nil
+}
+
+// SetGlobalOtelProviders registers the configured providers as the global OTel providers.
+func (t *Providers) SetGlobalOtelProviders() {
+	if t.TracerProvider != nil {
+		otel.SetTracerProvider(t.TracerProvider)
+	}
+}
+
+// New initializes telemetry providers: TraceProvider, LogProvider, and MeterProvider.
 // Options can be used to customize the defaults, e.g. use custom credentials, add SpanProcessors, or use preconfigured TraceProvider.
-// Telemetry providers have to be registered in the global OTel providers either manually or via [SetGlobalOtelProviders].
+// Telemetry providers have to be registered in the global OTel providers either manually or via [Providers.SetGlobalOtelProviders].
+// If your library doesn't use the global providers, you can use the providers directly and pass them to the instrumented libraries.
 //
 // # Usage
 //
@@ -63,7 +74,7 @@ type Service interface {
 //				log.Fatalf("failed to create resource: %v", err)
 //			}
 //
-//			telemetryService, err := telemetry.New(ctx,
+//			telemetryProviders, err := telemetry.New(ctx,
 //				telemetry.WithOtelToCloud(true),
 //				telemetry.WithResource(res),
 //			)
@@ -73,20 +84,20 @@ type Service interface {
 //			defer func() {
 //				shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 //				defer cancel()
-//				if err := telemetryService.Shutdown(shutdownCtx); err != nil {
+//				if err := telemetryProviders.Shutdown(shutdownCtx); err != nil {
 //					log.Printf("telemetry shutdown failed: %v", err)
 //				}
 //			}()
-//			telemetryService.SetGlobalOtelProviders()
+//			telemetryProviders.SetGlobalOtelProviders()
 //
-//			tp := telemetryService.TracerProvider()
+//			tp := telemetryProviders.TracerProvider
 //			instrumentedlib.SetTracerProvider(tp) // Set TracerProvider manually if your lib doesn't use the global provider.
 //
 //			// app code
 //		}
 //
-// The caller must call [Shutdown] method to gracefully shut down the underlying telemetry and release resources.
-func New(ctx context.Context, opts ...Option) (Service, error) {
+// The caller must call [Providers.Shutdown] method to gracefully shut down the underlying telemetry and release resources.
+func New(ctx context.Context, opts ...Option) (*Providers, error) {
 	cfg, err := configure(ctx, opts...)
 	if err != nil {
 		return nil, err
