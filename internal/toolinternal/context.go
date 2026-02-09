@@ -123,5 +123,11 @@ func (c *toolContext) RequestConfirmation(hint string, payload any) error {
 		Confirmed: false,
 		Payload:   payload,
 	}
+	// SkipSummarization stops the agent loop after this tool call. Without it,
+	// the function response event becomes lastEvent and IsFinalResponse() returns
+	// false (hasFunctionResponses == true), causing the loop to continue.
+	// This matches the behavior of the built-in RequireConfirmation path in
+	// functiontool (function.go).
+	c.eventActions.SkipSummarization = true
 	return nil
 }
