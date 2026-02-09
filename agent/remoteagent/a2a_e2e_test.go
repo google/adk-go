@@ -18,7 +18,7 @@ package remoteagent
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"iter"
 	"net/http"
@@ -525,7 +525,7 @@ func TestA2ARemoteAgentStreamingGeminiError(t *testing.T) {
 					eventCount++
 					return nil, nil
 				}
-				return nil, fmt.Errorf(errorMessage)
+				return nil, errors.New(errorMessage)
 			},
 		},
 	}))

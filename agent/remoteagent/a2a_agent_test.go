@@ -1131,12 +1131,3 @@ func TestRemoteAgent_ErrorEventOnServerError(t *testing.T) {
 		t.Fatal("event.ErrorMessage empty, want non-empty")
 	}
 }
-
-func logJSON(t *testing.T, v any) {
-	t.Helper()
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		t.Fatalf("json.Marshal() error = %v", err)
-	}
-	t.Log(string(data))
-}

@@ -366,7 +366,8 @@ func TestEventProcessor_Process(t *testing.T) {
 							a2aDataPartMetaTypeKey:  a2aDataPartTypeCodeExecutableCode,
 							ToA2AMetaKey("partial"): true,
 						},
-					}}),
+					},
+				}),
 				newPartialArtifactUpdate(task, artifactIDPlaceholder, []a2a.Part{
 					a2a.DataPart{
 						Data: map[string]any{"outcome": string(genai.OutcomeOK), "output": "42"},
