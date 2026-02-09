@@ -1,0 +1,62 @@
+httprr trace v1
+441 11724
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 195
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"tell me about the capital of Poland"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a helpful assistant."}],"role":"user"}}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Mon, 09 Feb 2026 09:23:23 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=7662
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"content": {"parts": [{"text": "Warsaw (Polish: Warszawa), located in central Poland on the Vistula River, is not only the country's capital and largest city but also a remarkable testament to human resilience and"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 38,"totalTokenCount": 1357,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " reconstruction. It's a vibrant metropolis that masterfully blends its tumultuous history with a dynamic modern future.\n\nHere's a closer look at Warsaw:\n\n1.  **A City Reborn – The Old Town:**\n    *   "}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 87,"totalTokenCount": 1406,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "**UNESCO World Heritage Site:** Its meticulously reconstructed Old Town, a UNESCO World Heritage site, is particularly renowned for its charming Market Square, the Royal Castle, and St. John's Archcathedral.\n    *   **A Symbol of"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 136,"totalTokenCount": 1455,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " Resilience:** What makes this area truly extraordinary is that it was almost entirely rebuilt after being deliberately razed to the ground by Nazi forces following the 1944 Warsaw Uprising. The painstaking reconstruction, often using old paintings and city plans"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 185,"totalTokenCount": 1504,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ", aimed to recreate its pre-war glory, making it a powerful symbol of the city's indomitable spirit.\n\n2.  **Rich and Tragic History:**\n    *   **Medieval Origins:** Warsaw grew from a small"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 234,"totalTokenCount": 1553,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " fishing village into a ducal town, eventually becoming the capital of the Polish-Lithuanian Commonwealth in the 16th century.\n    *   **World War II Devastation:** The city suffered catastrophic destruction during World War II"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 283,"totalTokenCount": 1602,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ", first during the German invasion in 1939, then the brutal suppression of the Ghetto Uprising in 1943, and finally the systematic destruction after the 1944 Warsaw Uprising, which left over"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 332,"totalTokenCount": 1651,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " 85% of the city in ruins.\n    *   **Post-War Reconstruction:** Under communist rule, massive reconstruction efforts began, not only rebuilding historical sites but also creating new residential areas and monumental structures.\n\n3.  **Cultural"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 381,"totalTokenCount": 1700,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " and Intellectual Hub:**\n    *   **Chopin's City:** Warsaw is deeply connected to Frédéric Chopin; his heart is even enshrined in the Holy Cross Church. The city hosts the prestigious International Chopin Piano Competition every five years.\n"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 428,"totalTokenCount": 1747,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "    *   **Museums:** It boasts an impressive array of museums, including:\n        *   **Warsaw Uprising Museum:** A deeply moving and immersive experience detailing the 1944 uprising.\n        *   **POL"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 476,"totalTokenCount": 1795,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "IN Museum of the History of Polish Jews:** An award-winning museum exploring the thousand-year history of Jews in Poland.\n        *   **Copernicus Science Centre:** One of Europe's most modern science museums.\n        *"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 525,"totalTokenCount": 1844,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "   **National Museum in Warsaw:** Home to extensive collections of Polish and foreign art.\n    *   **Theatres and Music:** Warsaw has a vibrant theatre scene, numerous music clubs, and hosts various festivals throughout the year.\n\n4.  **"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 575,"totalTokenCount": 1894,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "Modern Metropolis:**\n    *   **Economic Center:** Today, Warsaw is Poland's primary economic, financial, and business center, attracting international corporations and startups.\n    *   **Architecture:** The city's skyline is a fascinating"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 623,"totalTokenCount": 1942,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " blend of historical buildings, Soviet-era architecture (most notably the colossal Palace of Culture and Science, a controversial \"gift\" from the Soviet Union), and gleaming modern skyscrapers.\n    *   **Green Spaces:** Despite its urban feel, Warsaw is"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 673,"totalTokenCount": 1992,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " remarkably green, with numerous parks and gardens, including the beautiful Łazienki Park (Royal Baths Park) with its Palace on the Isle, and the sprawling Saxon Garden.\n\n5.  **Key Landmarks and Attractions:**\n    *   **Royal"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 725,"totalTokenCount": 2044,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " Castle:** The former residence of Polish monarchs.\n    *   **Old Town Market Square:** The heart of the Old Town, surrounded by colorful tenement houses.\n    *   **Barbican:** A fortified gateway that once protected the city"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 773,"totalTokenCount": 2092,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ".\n    *   **Łazienki Park:** A vast park with palaces, pavilions, and a statue of Chopin.\n    *   **Wilanów Palace:** A magnificent Baroque royal residence, one of the few historical buildings to"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 822,"totalTokenCount": 2141,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " survive the war mostly intact.\n    *   **Palace of Culture and Science:** An iconic and somewhat polarizing landmark offering panoramic views from its observation deck.\n    *   **Praga District:** On the east bank of the Vist"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 872,"totalTokenCount": 2191,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "ula, known for its pre-war buildings, artistic vibe, and vibrant nightlife.\n\nIn essence, Warsaw is a city of contrasts, forever marked by its past but constantly looking forward. It's a place where history resonates around every corner, yet"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 923,"totalTokenCount": 2242,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " it buzzes with the energy of a modern European capital."}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 15,"candidatesTokenCount": 935,"totalTokenCount": 2254,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 15}],"thoughtsTokenCount": 1304},"modelVersion": "gemini-2.5-flash","responseId": "g6eJafflLZKRkdUPoZCXmA0"}
+

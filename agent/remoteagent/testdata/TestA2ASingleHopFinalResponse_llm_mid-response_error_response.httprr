@@ -1,0 +1,30 @@
+httprr trace v1
+439 2498
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 193
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Tell me about the current weather"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a helpful assistant."}],"role":"user"}}HTTP/2.0 200 OK
+Connection: close
+Content-Disposition: attachment
+Content-Type: text/event-stream
+Date: Mon, 09 Feb 2026 09:23:05 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3273
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+data: {"candidates": [{"content": {"parts": [{"text": "I apologize, but as an AI, I don't have real-time access to live weather data or your current location. I can't \"look outside\" or check a live feed.\n\nHowever, if"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 14,"candidatesTokenCount": 44,"totalTokenCount": 621,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 14}],"thoughtsTokenCount": 563},"modelVersion": "gemini-2.5-flash","responseId": "dqeJadiqK-mXkdUPzrKpiQ4"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " you tell me your **city and state/country** (or zip/postal code), I can look up the current weather conditions and forecast for that specific area using publicly available weather data!\n\nAlternatively, you can easily check the current weather using"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 14,"candidatesTokenCount": 93,"totalTokenCount": 670,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 14}],"thoughtsTokenCount": 563},"modelVersion": "gemini-2.5-flash","responseId": "dqeJadiqK-mXkdUPzrKpiQ4"}
+
+data: {"candidates": [{"content": {"parts": [{"text": ":\n*   **A quick Google search:** Just type \"weather [your city]\"\n*   **Weather apps:** On your phone (e.g., AccuWeather, The Weather Channel, Google Weather)\n*   **Voice"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 14,"candidatesTokenCount": 142,"totalTokenCount": 719,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 14}],"thoughtsTokenCount": 563},"modelVersion": "gemini-2.5-flash","responseId": "dqeJadiqK-mXkdUPzrKpiQ4"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " assistants:** Ask Siri, Google Assistant, or Alexa \"What's the weather like?\"\n\nLet me know if you'd like me to look it up for a specific place!"}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 14,"candidatesTokenCount": 180,"totalTokenCount": 757,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 14}],"thoughtsTokenCount": 563},"modelVersion": "gemini-2.5-flash","responseId": "dqeJadiqK-mXkdUPzrKpiQ4"}
+

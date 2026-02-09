@@ -18,6 +18,7 @@ package remoteagent
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"iter"
 	"net/http"
@@ -260,12 +261,14 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 	}
 }
 
-func TestA2AFinalResponse(t *testing.T) {
+func TestA2ASingleHopFinalResponse(t *testing.T) {
 	testCases := []struct {
-		name        string
-		agentFn     func(*testing.T) agent.Agent
-		wantResult  a2a.ContentParts
-		wantPartial bool
+		name              string
+		agentFn           func(*testing.T) agent.Agent
+		wantArtifactParts a2a.ContentParts
+		wantState         a2a.TaskState
+		wantStatusContain string
+		wantPartial       bool
 	}{
 		{
 			name: "streaming",
@@ -285,7 +288,8 @@ func TestA2AFinalResponse(t *testing.T) {
 					AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{beep, boop}},
 				}))
 			},
-			wantResult: a2a.ContentParts{
+			wantState: a2a.TaskStateCompleted,
+			wantArtifactParts: a2a.ContentParts{
 				a2a.TextPart{Text: "Hello, I am beep!"},
 				a2a.TextPart{Text: "I am boop. We are here to help!"},
 			},
@@ -304,10 +308,48 @@ func TestA2AFinalResponse(t *testing.T) {
 					AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{beep, boop}},
 				}))
 			},
-			wantResult: a2a.ContentParts{
+			wantState: a2a.TaskStateCompleted,
+			wantArtifactParts: a2a.ContentParts{
 				a2a.TextPart{Text: "Hello, I am beep!"},
 				a2a.TextPart{Text: "I am boop. We are here to help!"},
 			},
+		},
+		{
+			name: "internal error",
+			agentFn: func(t *testing.T) agent.Agent {
+				return utils.Must(agent.New(agent.Config{
+					Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {}
+					},
+				}))
+			},
+			wantStatusContain: "app_name and user_id are required, got app_name: ",
+			wantState:         a2a.TaskStateFailed,
+			wantArtifactParts: a2a.ContentParts{},
+		},
+		{
+			name: "llm mid-response error response",
+			agentFn: func(t *testing.T) agent.Agent {
+				event := 0
+				llmModel := newGeminiModel(t, "gemini-2.5-flash")
+				return utils.Must(llmagent.New(llmagent.Config{
+					Name:  "model-agent",
+					Model: llmModel,
+					AfterModelCallbacks: []llmagent.AfterModelCallback{
+						func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+							if event < 2 {
+								event++
+								return nil, nil
+							}
+							return &model.LLMResponse{ErrorCode: "500", ErrorMessage: "Model Failed!"}, nil
+						},
+					},
+					Instruction: "You are a helpful assistant.",
+				}))
+			},
+			wantStatusContain: "Model Failed!",
+			wantState:         a2a.TaskStateFailed,
+			wantArtifactParts: a2a.ContentParts{},
 		},
 	}
 	for _, tc := range testCases {
@@ -317,22 +359,34 @@ func TestA2AFinalResponse(t *testing.T) {
 			defer server.Close()
 
 			client := newA2AClient(t, server)
-			msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "Perform important task!"})
+			msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "Tell me about the current weather"})
 			task := mustSendMessage(t, client, msg)
-			if task.Status.State != a2a.TaskStateCompleted {
-				t.Fatalf("client.SendMessage(Initial) result state = %q, want %q", task.Status.State, a2a.TaskStateInputRequired)
-			}
-			nonPartialArtifacts := adka2a.WithoutPartialArtifacts(task.Artifacts)
-			if len(nonPartialArtifacts) != 1 {
-				t.Fatalf("len(artifacts) = %d, want 1", len(nonPartialArtifacts))
+			if task.Status.State != tc.wantState {
+				t.Fatalf("client.SendMessage(Initial) result state = %q, want %q", task.Status.State, tc.wantState)
 			}
 
-			if diff := cmp.Diff(tc.wantResult, nonPartialArtifacts[0].Parts); diff != "" {
-				t.Fatalf("task wrong artifact parts (+got,-want) diff = %s", diff)
+			nonPartialArtifacts := adka2a.WithoutPartialArtifacts(task.Artifacts)
+			wantResponse := len(tc.wantArtifactParts) > 0
+			if wantResponse {
+				if len(nonPartialArtifacts) != 1 {
+					t.Fatalf("len(artifacts) = %d, want 1", len(nonPartialArtifacts))
+				}
+				if diff := cmp.Diff(tc.wantArtifactParts, nonPartialArtifacts[0].Parts); diff != "" {
+					t.Fatalf("task wrong artifact parts (+got,-want) diff = %s", diff)
+				}
+			}
+
+			if tc.wantStatusContain != "" {
+				if task.Status.Message == nil || len(task.Status.Message.Parts) != 1 {
+					t.Fatalf("got status message = %v, want message with one part", task.Status.Message)
+				}
+				if tp, ok := task.Status.Message.Parts[0].(a2a.TextPart); !ok || !strings.Contains(tp.Text, tc.wantStatusContain) {
+					t.Fatalf("got status message = %v, want text containing %q", task.Status.Message.Parts[0], tc.wantStatusContain)
+				}
 			}
 
 			if !tc.wantPartial {
-				if len(task.Artifacts) != 1 {
+				if wantResponse && len(task.Artifacts) != 1 {
 					t.Fatalf("len(artifacts) = %d, want 1", len(task.Artifacts))
 				}
 				return
@@ -453,6 +507,89 @@ func TestA2ARemoteAgentStreamingGeminiSuccess(t *testing.T) {
 	}
 	if diff := cmp.Diff(finalText, events.At(1).Content.Parts[0].Text); diff != "" {
 		t.Fatalf("got content event text different from A2A response (+got, -want), diff = %s", diff)
+	}
+}
+
+func TestA2ARemoteAgentStreamingGeminiError(t *testing.T) {
+	// Server B with replayable LLMAgent which fails after emitting some events
+	eventCount := 0
+	const errorMessage = "connection error!"
+	llmModel := newGeminiModel(t, "gemini-2.5-flash")
+	modelAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:        "model-agent",
+		Model:       llmModel,
+		Instruction: "You are a helpful assistant.",
+		AfterModelCallbacks: []llmagent.AfterModelCallback{
+			func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				if eventCount < 3 {
+					eventCount++
+					return nil, nil
+				}
+				return nil, fmt.Errorf(errorMessage)
+			},
+		},
+	}))
+	executorB := newAgentExecutor(modelAgent, nil)
+	serverB := startA2AServer(executorB)
+	defer serverB.Close()
+
+	// Server A with RemoteAgent
+	remoteAgent := newA2ARemoteAgent(t, "remote-agent", serverB)
+	serviceA := session.InMemoryService()
+	executorA := newAgentExecutor(remoteAgent, serviceA)
+	serverA := startA2AServer(executorA)
+	defer serverA.Close()
+
+	ctx := t.Context()
+	client := newA2AClient(t, serverA)
+	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "tell me about the capital of Poland"})
+	msg.ContextID = a2a.NewContextID()
+
+	// Make streaming request and aggregate results
+	var taskID a2a.TaskID
+	for event, err := range client.SendStreamingMessage(t.Context(), &a2a.MessageSendParams{Message: msg}) {
+		if err != nil {
+			t.Fatalf("client.SendStreamingMessage() error = %v", err)
+		}
+		taskID = event.TaskInfo().TaskID
+	}
+
+	// Check A2A Task state
+	task, err := client.GetTask(ctx, &a2a.TaskQueryParams{ID: taskID})
+	if err != nil {
+		t.Fatalf("client.GetTask() error = %v", err)
+	}
+	if task.Status.State != a2a.TaskStateFailed {
+		t.Fatalf("task state = %q, want %q", task.Status.State, a2a.TaskStateFailed)
+	}
+	if task.Status.Message == nil || len(task.Status.Message.Parts) != 1 {
+		t.Fatalf("task status message = %v, want 1 part", task.Status.Message)
+	}
+	if tp, ok := task.Status.Message.Parts[0].(a2a.TextPart); !ok || !strings.Contains(tp.Text, errorMessage) {
+		t.Fatalf("task status message = %v, want containing %q", task.Status.Message.Parts[0], errorMessage)
+	}
+	if len(task.Artifacts) != 1 || len(adka2a.WithoutPartialArtifacts(task.Artifacts)) != 0 {
+		t.Fatalf("task artifacts = %v, want single partial artifact", task.Artifacts)
+	}
+	if dp, ok := task.Artifacts[0].Parts[0].(a2a.DataPart); !ok || len(dp.Data) != 0 {
+		t.Fatalf("task artifact = %v, want reset partial artifact", task.Artifacts[0])
+	}
+
+	// Check Session Store state
+	fullSessionResp, err := serviceA.Get(ctx, &session.GetRequest{
+		AppName:   remoteAgent.Name(),
+		UserID:    "A2A_USER_" + msg.ContextID,
+		SessionID: msg.ContextID,
+	})
+	if err != nil {
+		t.Fatalf("serviceA.GetSession() error = %v", err)
+	}
+	events := fullSessionResp.Session.Events()
+	if events.Len() != 2 {
+		t.Fatalf("got event count = %d, want 2", events.Len())
+	}
+	if !strings.Contains(events.At(1).ErrorMessage, errorMessage) {
+		t.Fatalf("got event error message = %q, want containing %q", events.At(1).ErrorMessage, errorMessage)
 	}
 }
 

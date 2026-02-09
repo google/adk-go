@@ -79,7 +79,7 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 	}
 
 	resp := event.LLMResponse
-	if resp.ErrorCode != "" {
+	if resp.ErrorCode != "" || resp.ErrorMessage != "" {
 		// TODO(yarolegovich): consider merging responses if multiple errors can be produced during an invocation
 		if p.failedEvent == nil {
 			// terminal event might add additional keys to its metadata when it's dispatched and these changes should
