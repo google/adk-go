@@ -27,7 +27,7 @@ import (
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/plugin"
-	"google.golang.org/adk/plugins/functioncallmodifier"
+	"google.golang.org/adk/plugin/functioncallmodifier"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"

@@ -29,7 +29,7 @@ import (
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/plugins/functioncallmodifier"
+	"google.golang.org/adk/plugin/functioncallmodifier"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
