@@ -559,7 +559,7 @@ func TestEventProcessor_PartialEventsAreDiscardedAsAnArtifact(t *testing.T) {
 
 func makeTerminalEvents(processor *eventProcessor) []a2a.Event {
 	result := make([]a2a.Event, 0, 2)
-	if finalUpdate, ok := processor.makeFinalArtifactUpdate(); ok {
+	if finalUpdate := processor.makeFinalArtifactUpdate(); finalUpdate != nil {
 		result = append(result, finalUpdate)
 	}
 	result = append(result, processor.makeFinalStatusUpdate())
