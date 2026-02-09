@@ -18,10 +18,13 @@ package console
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"os/signal"
 
 	"google.golang.org/genai"
 
@@ -58,6 +61,9 @@ func NewLauncher() launcher.SubLauncher {
 
 // Run implements launcher.SubLauncher. It starts the console interaction loop.
 func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) error {
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+	defer cancel()
+
 	// userID and appName are not important at this moment, we can just use any
 	userID, appName := "console_user", "console_app"
 
@@ -89,58 +95,78 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 		return fmt.Errorf("failed to create runner: %v", err)
 	}
 
-	reader := bufio.NewReader(os.Stdin)
+	inputChan := make(chan string)
+	readErrChan := make(chan error, 1)
+
+	go func() {
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			userInput, err := reader.ReadString('\n')
+			if err != nil {
+				readErrChan <- err
+				return
+			}
+			inputChan <- userInput
+		}
+	}()
+
+	fmt.Print("\nUser -> ")
 
 	for {
-		fmt.Print("\nUser -> ")
-
-		userInput, err := reader.ReadString('\n')
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
-
-		streamingMode := l.config.streamingMode
-		if streamingMode == "" {
-			streamingMode = agent.StreamingModeSSE
-		}
-		fmt.Print("\nAgent -> ")
-		prevText := ""
-		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
-			StreamingMode: streamingMode,
-		}) {
-			if err != nil {
-				fmt.Printf("\nAGENT_ERROR: %v\n", err)
-			} else {
-				if event.LLMResponse.Content == nil {
-					continue
-				}
-
-				text := ""
-				for _, p := range event.LLMResponse.Content.Parts {
-					text += p.Text
-				}
-
-				if streamingMode != agent.StreamingModeSSE {
-					fmt.Print(text)
-					continue
-				}
-
-				// In SSE mode, always print partial responses and capture them.
-				if !event.IsFinalResponse() {
-					fmt.Print(text)
-					prevText += text
-					continue
-				}
-
-				// Only print final response if it doesn't match previously captured text.
-				if text != prevText {
-					fmt.Print(text)
-				}
-
-				prevText = ""
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-readErrChan:
+			if errors.Is(err, io.EOF) {
+				fmt.Println("\nEOF detected, exiting...")
+				return nil
 			}
+			log.Fatal(err)
+		case userInput := <-inputChan:
+			userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
+
+			streamingMode := l.config.streamingMode
+			if streamingMode == "" {
+				streamingMode = agent.StreamingModeSSE
+			}
+			fmt.Print("\nAgent -> ")
+			prevText := ""
+			for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
+				StreamingMode: streamingMode,
+			}) {
+				if err != nil {
+					fmt.Printf("\nAGENT_ERROR: %v\n", err)
+				} else {
+					if event.LLMResponse.Content == nil {
+						continue
+					}
+
+					text := ""
+					for _, p := range event.LLMResponse.Content.Parts {
+						text += p.Text
+					}
+
+					if streamingMode != agent.StreamingModeSSE {
+						fmt.Print(text)
+						continue
+					}
+
+					// In SSE mode, always print partial responses and capture them.
+					if !event.IsFinalResponse() {
+						fmt.Print(text)
+						prevText += text
+						continue
+					}
+
+					// Only print final response if it doesn't match previously captured text.
+					if text != prevText {
+						fmt.Print(text)
+					}
+
+					prevText = ""
+				}
+			}
+			fmt.Print("\nUser -> ")
 		}
 	}
 }

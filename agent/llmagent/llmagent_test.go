@@ -28,7 +28,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
@@ -1076,33 +1075,19 @@ func TestAgentTransfer(t *testing.T) {
 }
 
 func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper) model.LLM {
-	apiKey := "fakeKey"
+	cfg := &genai.ClientConfig{
+		HTTPClient: &http.Client{Transport: transport},
+		APIKey:     "fakeKey",
+	}
 	if transport == nil { // use httprr
 		trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
-		recording := false
-		transport, recording = newGeminiTestClientConfig(t, trace)
-		if recording { // if we are recording httprr trace, don't use the fakeKey.
-			apiKey = ""
-		}
+		cfg = testutil.NewGeminiTestClientConfig(t, trace)
 	}
-	model, err := gemini.NewModel(t.Context(), modelName, &genai.ClientConfig{
-		HTTPClient: &http.Client{Transport: transport},
-		APIKey:     apiKey,
-	})
+	model, err := gemini.NewModel(t.Context(), modelName, cfg)
 	if err != nil {
 		t.Fatalf("failed to create model: %v", err)
 	}
 	return model
-}
-
-func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, bool) {
-	t.Helper()
-	rr, err := testutil.NewGeminiTransport(rrfile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	recording, _ := httprr.Recording(rrfile)
-	return rr, recording
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)

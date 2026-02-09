@@ -67,7 +67,7 @@ func TestModel_Generate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			httpRecordFilename := filepath.Join("testdata", strings.ReplaceAll(t.Name(), "/", "_")+".httprr")
 
-			testModel, err := NewModel(t.Context(), tt.modelName, newGeminiTestClientConfig(t, httpRecordFilename))
+			testModel, err := NewModel(t.Context(), tt.modelName, testutil.NewGeminiTestClientConfig(t, httpRecordFilename))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -109,7 +109,7 @@ func TestModel_GenerateStream(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			httpRecordFilename := filepath.Join("testdata", strings.ReplaceAll(t.Name(), "/", "_")+".httprr")
 
-			model, err := NewModel(t.Context(), tt.modelName, newGeminiTestClientConfig(t, httpRecordFilename))
+			model, err := NewModel(t.Context(), tt.modelName, testutil.NewGeminiTestClientConfig(t, httpRecordFilename))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -186,23 +186,6 @@ func TestModel_TrackingHeaders(t *testing.T) {
 			t.Error("HTTP request was not intercepted; headers not verified")
 		}
 	})
-}
-
-// newGeminiTestClientConfig returns the genai.ClientConfig configured for record and replay.
-func newGeminiTestClientConfig(t *testing.T, rrfile string) *genai.ClientConfig {
-	t.Helper()
-	rr, err := testutil.NewGeminiTransport(rrfile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	apiKey := ""
-	if recording, _ := httprr.Recording(rrfile); !recording {
-		apiKey = "fakekey"
-	}
-	return &genai.ClientConfig{
-		HTTPClient: &http.Client{Transport: rr},
-		APIKey:     apiKey,
-	}
 }
 
 // TextResponse holds the concatenated text from a response stream,

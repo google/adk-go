@@ -1,0 +1,51 @@
+httprr trace v1
+687 1123
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 455
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools."}],"role":"user"},"tools":[{"functionDeclarations":[{"name":"other_tool","parametersJsonSchema":{"additionalProperties":false,"properties":{"Num":{"type":"integer"}},"required":["Num"],"type":"object"},"responseJsonSchema":{"type":"string"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Thu, 05 Feb 2026 13:47:58 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=566
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "2 + 2 = 4.",
+            "thoughtSignature": "Cq0BAb4+9vuqU735JXQTTJt8AzBNS1iKepi4iTBTFKLC3fvvFkNdDSWN/6bIGBAXgREnt6ZG/wxD3YhcN8jqYc52WjQ5TjLGqTLxz2hC+WMnfRBwIzWStGjerEnwcDQ+W160gNboakSZPFuG+tRSbASMHD9a59oiwSGPbC+FTPIzzFazgB69YsdprBXX8x+XkMHN7MqvmdDNRbjDhSKXU/SAgVs+rYXP3r9tOXCMbDg="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 59,
+    "candidatesTokenCount": 8,
+    "totalTokenCount": 99,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 59
+      }
+    ],
+    "thoughtsTokenCount": 32
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "jp-Ead7aA5r97M8Pwe_VoQ8"
+}
