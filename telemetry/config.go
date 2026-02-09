@@ -25,20 +25,20 @@ type config struct {
 	// Enables/disables telemetry export to GCP.
 	oTelToCloud bool
 
-	// resourceProject is used as the gcp.project.id resource attribute.
+	// gcpResourceProject is used as the gcp.project.id resource attribute.
 	// If it's empty, the project will be read from ADC or GOOGLE_CLOUD_PROJECT env variable.
-	resourceProject string
+	gcpResourceProject string
 
-	// quotaProject is used as the quota project for the telemetry export.
+	// gcpQuotaProject is used as the quota project for the telemetry export.
 	// If it's empty, the project will be read from ADC or GOOGLE_CLOUD_PROJECT env variable.
-	quotaProject string
+	gcpQuotaProject string
 
-	// googleCredentials override the application default redentials.
+	// googleCredentials override the application default credentials.
 	googleCredentials *google.Credentials
 
-	// resource allows to customize OTel resource. It will be merged with default detectors.
+	// resource customizes the OTel resource. It will be merged with default detectors.
 	resource *resource.Resource
-	// spanProcessors allow to register additional span processors, e.g. for custom span exporters.
+	// spanProcessors registers additional span processors, e.g. for custom span exporters.
 	spanProcessors []sdktrace.SpanProcessor
 
 	// tracerProvider overrides the default TracerProvider.
@@ -64,18 +64,18 @@ func WithOtelToCloud(value bool) Option {
 	})
 }
 
-// WithResourceProject sets the gcp.project.id resource attribute.
-func WithResourceProject(project string) Option {
+// WithGcpResourceProject sets the gcp.project.id resource attribute.
+func WithGcpResourceProject(project string) Option {
 	return optionFunc(func(cfg *config) error {
-		cfg.resourceProject = project
+		cfg.gcpResourceProject = project
 		return nil
 	})
 }
 
-// WithQuotaProject sets the quota project for the telemetry export.
-func WithQuotaProject(projectID string) Option {
+// WithGcpQuotaProject sets the quota project for the telemetry export.
+func WithGcpQuotaProject(projectID string) Option {
 	return optionFunc(func(cfg *config) error {
-		cfg.quotaProject = projectID
+		cfg.gcpQuotaProject = projectID
 		return nil
 	})
 }
@@ -88,7 +88,7 @@ func WithResource(r *resource.Resource) Option {
 	})
 }
 
-// WithGoogleCredentials allows to override the application default credentials.
+// WithGoogleCredentials overrides the application default credentials.
 func WithGoogleCredentials(c *google.Credentials) Option {
 	return optionFunc(func(cfg *config) error {
 		cfg.googleCredentials = c

@@ -48,8 +48,8 @@ func TestTelemetrySmoke(t *testing.T) {
 	}
 	service, err := New(t.Context(),
 		WithSpanProcessors(sdktrace.NewSimpleSpanProcessor(exporter)),
-		WithResourceProject(resourceProject),
-		WithQuotaProject(quotaProject),
+		WithGcpResourceProject(resourceProject),
+		WithGcpQuotaProject(quotaProject),
 		WithResource(r),
 	)
 	if err != nil {
@@ -69,7 +69,7 @@ func TestTelemetrySmoke(t *testing.T) {
 	_, span := tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindServer))
 	span.End()
 
-	if err := service.TraceProvider().ForceFlush(context.Background()); err != nil {
+	if err := service.TracerProvider().ForceFlush(context.Background()); err != nil {
 		t.Fatalf("failed to flush spans: %v", err)
 	}
 
@@ -111,8 +111,8 @@ func TestTelemetryCustomProvider(t *testing.T) {
 	// Initialize telemetry with custom provider.
 	service, err := New(t.Context(),
 		WithTracerProvider(tp),
-		WithResourceProject(resourceProject),
-		WithQuotaProject(quotaProject),
+		WithGcpResourceProject(resourceProject),
+		WithGcpQuotaProject(quotaProject),
 	)
 	if err != nil {
 		t.Fatalf("failed to create telemetry: %v", err)
@@ -130,7 +130,7 @@ func TestTelemetryCustomProvider(t *testing.T) {
 	_, span := tracer.Start(ctx, spanName)
 	span.End()
 
-	if err := service.TraceProvider().ForceFlush(context.Background()); err != nil {
+	if err := service.TracerProvider().ForceFlush(context.Background()); err != nil {
 		t.Fatalf("failed to flush spans: %v", err)
 	}
 
@@ -160,40 +160,53 @@ func extractResourceAttributes(res *resource.Resource) (projectID, serviceName, 
 
 func TestResolveResourceProject(t *testing.T) {
 	testCases := []struct {
-		name          string
-		cfg           *config
-		envVar        string
-		wantProjectID string
+		name        string
+		cfg         *config
+		envVar      string
+		wantProject string
+		wantErr     bool
 	}{
 		{
-			name: "projectID from config",
+			name: "project from config",
 			cfg: &config{
-				resourceProject:   "config-project",
+				oTelToCloud:        true,
+				gcpResourceProject: "config-project",
+				googleCredentials:  &google.Credentials{ProjectID: "cred-project"},
+			},
+			envVar:      "env-project",
+			wantProject: "config-project",
+		},
+		{
+			name: "project from credentials",
+			cfg: &config{
+				oTelToCloud:       true,
 				googleCredentials: &google.Credentials{ProjectID: "cred-project"},
 			},
-			envVar:        "env-project",
-			wantProjectID: "config-project",
+			envVar:      "env-project",
+			wantProject: "cred-project",
 		},
 		{
-			name: "projectID from credentials",
+			name: "project from env var",
 			cfg: &config{
-				googleCredentials: &google.Credentials{ProjectID: "cred-project"},
+				oTelToCloud: true,
 			},
-			envVar:        "env-project",
-			wantProjectID: "cred-project",
+			envVar:      "env-project",
+			wantProject: "env-project",
 		},
 		{
-			name:          "projectID from env var",
-			cfg:           &config{},
-			envVar:        "env-project",
-			wantProjectID: "env-project",
-		},
-		{
-			name: "no projectID",
+			name: "no project",
 			cfg: &config{
+				oTelToCloud:       true,
 				googleCredentials: &google.Credentials{},
 			},
-			wantProjectID: "",
+			wantErr: true,
+		},
+		{
+			name: "no project and otelToCloud disabled",
+			cfg: &config{
+				oTelToCloud: false,
+			},
+			wantProject: "",
 		},
 	}
 
@@ -203,13 +216,16 @@ func TestResolveResourceProject(t *testing.T) {
 				t.Setenv("GOOGLE_CLOUD_PROJECT", tc.envVar)
 			}
 
-			err := tc.cfg.resolveResourceProject()
+			gotProject, err := resolveGcpResourceProject(tc.cfg)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("resolveGcpResourceProject() error = %v, wantErr %v", err, tc.wantErr)
+			}
 			if err != nil {
-				t.Fatalf("resolveResourceProject() error = %v", err)
+				return
 			}
 
-			if tc.cfg.resourceProject != tc.wantProjectID {
-				t.Errorf("resolveResourceProject() got = %v, want %v", tc.cfg.resourceProject, tc.wantProjectID)
+			if gotProject != tc.wantProject {
+				t.Errorf("resolveGcpResourceProject() got = %v, want %v", gotProject, tc.wantProject)
 			}
 		})
 	}
@@ -217,40 +233,53 @@ func TestResolveResourceProject(t *testing.T) {
 
 func TestResolveQuotaProject(t *testing.T) {
 	testCases := []struct {
-		name          string
-		cfg           *config
-		envVar        string
-		wantProjectID string
+		name        string
+		cfg         *config
+		envVar      string
+		wantProject string
+		wantErr     bool
 	}{
 		{
-			name: "projectID from config",
+			name: "project from config",
 			cfg: &config{
-				quotaProject:      "config-project",
+				oTelToCloud:       true,
+				gcpQuotaProject:   "config-project",
 				googleCredentials: &google.Credentials{ProjectID: "cred-project"},
 			},
-			envVar:        "env-project",
-			wantProjectID: "config-project",
+			envVar:      "env-project",
+			wantProject: "config-project",
 		},
 		{
-			name: "projectID from credentials",
+			name: "project from credentials",
 			cfg: &config{
+				oTelToCloud:       true,
 				googleCredentials: &google.Credentials{ProjectID: "cred-project"},
 			},
-			envVar:        "env-project",
-			wantProjectID: "cred-project",
+			envVar:      "env-project",
+			wantProject: "cred-project",
 		},
 		{
-			name:          "projectID from env var",
-			cfg:           &config{},
-			envVar:        "env-project",
-			wantProjectID: "env-project",
-		},
-		{
-			name: "no projectID",
+			name: "project from env var",
 			cfg: &config{
+				oTelToCloud: true,
+			},
+			envVar:      "env-project",
+			wantProject: "env-project",
+		},
+		{
+			name: "no project",
+			cfg: &config{
+				oTelToCloud:       true,
 				googleCredentials: &google.Credentials{},
 			},
-			wantProjectID: "",
+			wantErr: true,
+		},
+		{
+			name: "no project and otelToCloud disabled",
+			cfg: &config{
+				oTelToCloud: false,
+			},
+			wantProject: "",
 		},
 	}
 
@@ -260,13 +289,16 @@ func TestResolveQuotaProject(t *testing.T) {
 				t.Setenv("GOOGLE_CLOUD_PROJECT", tc.envVar)
 			}
 
-			err := tc.cfg.resolveQuotaProject()
+			gotProject, err := resolveGcpQuotaProject(tc.cfg)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("resolveGcpQuotaProject() error = %v, wantErr %v", err, tc.wantErr)
+			}
 			if err != nil {
-				t.Fatalf("resolveQuotaProject() error = %v", err)
+				return
 			}
 
-			if tc.cfg.quotaProject != tc.wantProjectID {
-				t.Errorf("resolveQuotaProject() got = %v, want %v", tc.cfg.quotaProject, tc.wantProjectID)
+			if gotProject != tc.wantProject {
+				t.Errorf("resolveGcpQuotaProject() got = %v, want %v", gotProject, tc.wantProject)
 			}
 		})
 	}

@@ -28,16 +28,16 @@ type Service interface {
 	// SetGlobalOtelProviders registers the configured providers as the global OTel providers.
 	SetGlobalOtelProviders()
 
-	// TraceProvider returns the configured TraceProvider or nil.
-	TraceProvider() *sdktrace.TracerProvider
+	// TracerProvider returns the configured TracerProvider or nil.
+	TracerProvider() *sdktrace.TracerProvider
 
 	// Shutdown shuts down underlying OTel providers.
 	Shutdown(ctx context.Context) error
 }
 
-// New initializes new telemetry and underlying providers - TraceProvider, LogProvider and MeterProvider.
-// Options can be used to customize the defaults, e.g. use custom credentials, add SpanProcessors or use preconfigured TraceProvider.
-// Telemetry providers have to be registered in otel global providers either manually or via [SetGlobalOtelProviders].
+// New initializes a new telemetry service and underlying providers: TraceProvider, LogProvider, and MeterProvider.
+// Options can be used to customize the defaults, e.g. use custom credentials, add SpanProcessors, or use preconfigured TraceProvider.
+// Telemetry providers have to be registered in the global OTel providers either manually or via [SetGlobalOtelProviders].
 //
 // # Usage
 //
@@ -80,12 +80,12 @@ type Service interface {
 //			telemetryService.SetGlobalOtelProviders()
 //
 //			tp := telemetryService.TracerProvider()
-//			mylib.SetTracerProvider(tp) // Set TracerProvider manually if your lib doesn't use the global provider.
+//			instrumentedlib.SetTracerProvider(tp) // Set TracerProvider manually if your lib doesn't use the global provider.
 //
 //			// app code
 //		}
 //
-// The caller must call [Shutdown] method to gracefully shutdown underlying telemetry and release resources.
+// The caller must call [Shutdown] method to gracefully shut down the underlying telemetry and release resources.
 func New(ctx context.Context, opts ...Option) (Service, error) {
 	cfg, err := configure(ctx, opts...)
 	if err != nil {
@@ -100,7 +100,7 @@ func New(ctx context.Context, opts ...Option) (Service, error) {
 // In addition to the RegisterLocalSpanProcessor function, global trace provider configs
 // are respected.
 //
-// Deprecated. Configure processors via [Option]s passed to [New]. TODO(#479) remove this together with local tracer provider.
+// Deprecated: Configure processors via [Option]s passed to [New]. TODO(#479) remove this together with local tracer provider.
 func RegisterLocalSpanProcessor(processor sdktrace.SpanProcessor) {
 	internal.AddSpanProcessor(processor)
 }
