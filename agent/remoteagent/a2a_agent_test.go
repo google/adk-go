@@ -599,7 +599,7 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 				{Content: genai.NewContentFromText("2", genai.RoleModel), Partial: true},
 				{Content: genai.NewContentFromText("3", genai.RoleModel), Partial: true},
 				{Content: genai.NewContentFromText("4", genai.RoleModel), Partial: true},
-				{Content: genai.NewContentFromText("1234", genai.RoleModel)},
+				{Content: genai.NewContentFromText("34", genai.RoleModel)},
 				{Content: genai.NewContentFromText("5", genai.RoleModel), TurnComplete: true},
 			},
 		},
