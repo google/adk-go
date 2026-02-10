@@ -364,12 +364,12 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 // The generate_contenxt span should cover only calls to LLM. Plugins and callbacks should be outside of this span.
 func (f *Flow) generateContent(ctx agent.InvocationContext, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		spanCtx, span := telemetry.StartGenerateContent(ctx, telemetry.StartGenerateContentParams{
+		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
 			ModelName: f.Model.Name(),
 		})
 		ctx = ctx.WithContext(spanCtx)
 		yield, endSpan := telemetry.WrapYield(span, yield, func(span trace.Span, resp *model.LLMResponse, err error) {
-			telemetry.AfterGenerateContent(span, telemetry.AfterGenerateContentParams{
+			telemetry.TraceGenerateContentResult(span, telemetry.TraceGenerateContentResultParams{
 				Response: resp,
 				Error:    err,
 			})
@@ -521,20 +521,19 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	fnCalls := utils.FunctionCalls(resp.Content)
 	toolNames := slices.Collect(maps.Keys(toolsDict))
 	var result map[string]any
-	// Don't generate empty spans if there are no function calls.
-	if len(fnCalls) > 0 {
-		// this is needed for debug traces of parallel calls
+	// Merged span for parallel tool calls - create only if there is more than one tool call.
+	if len(fnCalls) > 1 {
 		mergedCtx, mergedToolCallSpan := telemetry.StartTrace(ctx, "execute_tool (merged)")
 		ctx = ctx.WithContext(mergedCtx)
 		defer func() {
-			telemetry.AfterMergedToolCalls(mergedToolCallSpan, mergedEvent, err)
+			telemetry.TraceMergedToolCallsResult(mergedToolCallSpan, mergedEvent, err)
 			mergedToolCallSpan.End()
 		}()
 	}
 	for _, fnCall := range fnCalls {
 		// Wrap function calls in anonymous func to limit the scope of the span.
 		func() {
-			sctx, span := telemetry.StartExecuteTool(ctx, telemetry.StartExecuteToolParams{
+			sctx, span := telemetry.StartExecuteToolSpan(ctx, telemetry.StartExecuteToolSpanParams{
 				ToolName: fnCall.Name,
 			})
 			defer span.End()
@@ -595,10 +594,8 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					toolErr = errors.New(errStr)
 				}
 			}
-			telemetry.AfterExecuteTool(span, telemetry.AfterExecuteToolParams{
-				Name:          traceTool.Name(),
+			telemetry.TraceToolResult(span, telemetry.TraceToolResultParams{
 				Description:   traceTool.Description(),
-				Args:          fnCall.Args,
 				ResponseEvent: ev,
 				Error:         toolErr,
 			})

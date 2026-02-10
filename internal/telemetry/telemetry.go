@@ -71,8 +71,8 @@ var tracer trace.Tracer = otel.GetTracerProvider().Tracer(
 	trace.WithSchemaURL(semconv.SchemaURL),
 )
 
-// StartInvokeAgentParams contains parameters for [StartInvokeAgent].
-type StartInvokeAgentParams struct {
+// StartInvokeAgentSpanParams contains parameters for [StartInvokeAgentSpan].
+type StartInvokeAgentSpanParams struct {
 	// AgentName is the name of the agent being invoked.
 	AgentName string
 	// AgentDescription is a brief description of the agent's purpose.
@@ -81,9 +81,9 @@ type StartInvokeAgentParams struct {
 	SessionID string
 }
 
-// StartInvokeAgent starts a new semconv invoke_agent span.
+// StartInvokeAgentSpan starts a new semconv invoke_agent span.
 // It returns a new context with the span and the span itself.
-func StartInvokeAgent(ctx context.Context, params StartInvokeAgentParams) (context.Context, trace.Span) {
+func StartInvokeAgentSpan(ctx context.Context, params StartInvokeAgentSpanParams) (context.Context, trace.Span) {
 	agentName := params.AgentName
 	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("invoke_agent %s", agentName), trace.WithAttributes(
 		semconv.GenAIOperationNameInvokeAgent,
@@ -95,24 +95,24 @@ func StartInvokeAgent(ctx context.Context, params StartInvokeAgentParams) (conte
 	return spanCtx, span
 }
 
-type AfterInvokeAgentParams struct {
+type TraceAgentResultParams struct {
 	ResponseEvent *session.Event
 	Error         error
 }
 
-// AfterInvokeAgent records the result of the agent invocation, including status and error.
-func AfterInvokeAgent(span trace.Span, params AfterInvokeAgentParams) {
+// TraceAgentResult records the result of the agent invocation, including status and error.
+func TraceAgentResult(span trace.Span, params TraceAgentResultParams) {
 	recordErrorAndStatus(span, params.Error)
 }
 
-// StartGenerateContentParams contains parameters for [StartGenerateContent].
-type StartGenerateContentParams struct {
+// StartGenerateContentSpanParams contains parameters for [StartGenerateContentSpan].
+type StartGenerateContentSpanParams struct {
 	// ModelName is the name of the model being used for generation.
 	ModelName string
 }
 
-// StartGenerateContent starts a new semconv generate_content span.
-func StartGenerateContent(ctx context.Context, params StartGenerateContentParams) (context.Context, trace.Span) {
+// StartGenerateContentSpan starts a new semconv generate_content span.
+func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSpanParams) (context.Context, trace.Span) {
 	modelName := params.ModelName
 	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(
 		semconv.GenAIOperationNameGenerateContent,
@@ -121,13 +121,13 @@ func StartGenerateContent(ctx context.Context, params StartGenerateContentParams
 	return spanCtx, span
 }
 
-type AfterGenerateContentParams struct {
+type TraceGenerateContentResultParams struct {
 	Response *model.LLMResponse
 	Error    error
 }
 
-// AfterGenerateContent records the result of the generate_content operation, including token usage and finish reason.
-func AfterGenerateContent(span trace.Span, params AfterGenerateContentParams) {
+// TraceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
+func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResultParams) {
 	recordErrorAndStatus(span, params.Error)
 	// TODO(#479): set gcp.vertex.agent.event_id
 	if params.Response == nil {
@@ -144,37 +144,37 @@ func AfterGenerateContent(span trace.Span, params AfterGenerateContentParams) {
 	}
 }
 
-// StartExecuteToolParams contains parameters for [StartExecuteTool].
-type StartExecuteToolParams struct {
+// StartExecuteToolSpanParams contains parameters for [StartExecuteToolSpan].
+type StartExecuteToolSpanParams struct {
 	// ToolName is the name of the tool being executed.
 	ToolName string
+	// Args is the arguments of the tool call.
+	Args map[string]any
 }
 
-// StartExecuteTool starts a new semconv execute_tool span.
-func StartExecuteTool(ctx context.Context, params StartExecuteToolParams) (context.Context, trace.Span) {
+// StartExecuteToolSpan starts a new semconv execute_tool span.
+func StartExecuteToolSpan(ctx context.Context, params StartExecuteToolSpanParams) (context.Context, trace.Span) {
 	toolName := params.ToolName
 	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("execute_tool %s", toolName), trace.WithAttributes(
 		semconv.GenAIOperationNameExecuteTool,
 		semconv.GenAIToolName(toolName),
-	))
+		gcpVertexAgentToolCallArgsName.String(safeSerialize(params.Args))))
 	return spanCtx, span
 }
 
-type AfterExecuteToolParams struct {
-	Name          string
+type TraceToolResultParams struct {
+	// ToolDescription is a brief description of the tool's purpose.
 	Description   string
-	Args          map[string]any
 	ResponseEvent *session.Event
 	Error         error
 }
 
-// AfterExecuteTool records the tool execution events.
-func AfterExecuteTool(span trace.Span, params AfterExecuteToolParams) {
+// TraceToolResult records the tool execution events.
+func TraceToolResult(span trace.Span, params TraceToolResultParams) {
 	recordErrorAndStatus(span, params.Error)
 
 	attributes := []attribute.KeyValue{
 		semconv.GenAIOperationNameKey.String(executeToolName),
-		semconv.GenAIToolNameKey.String(params.Name),
 		semconv.GenAIToolDescriptionKey.String(params.Description),
 		// TODO: add tool type
 
@@ -182,7 +182,6 @@ func AfterExecuteTool(span trace.Span, params AfterExecuteToolParams) {
 		// applicable for tool_response.
 		gcpVertexAgentLLMRequestName.String("{}"),
 		gcpVertexAgentLLMResponseName.String("{}"),
-		gcpVertexAgentToolCallArgsName.String(safeSerialize(params.Args)),
 	}
 
 	toolCallID := "<not specified>"
@@ -215,7 +214,6 @@ func AfterExecuteTool(span trace.Span, params AfterExecuteToolParams) {
 
 func recordErrorAndStatus(span trace.Span, err error) {
 	if err == nil {
-		span.SetStatus(codes.Ok, "")
 		return
 	}
 	span.RecordError(err)
@@ -256,8 +254,8 @@ func StartTrace(ctx context.Context, traceName string) (context.Context, trace.S
 	return tracer.Start(ctx, traceName)
 }
 
-// AfterMergedToolCalls records the result of the merged tool calls, including status and tool execution events.
-func AfterMergedToolCalls(span trace.Span, fnResponseEvent *session.Event, err error) {
+// TraceMergedToolCallsResult records the result of the merged tool calls, including status and tool execution events.
+func TraceMergedToolCallsResult(span trace.Span, fnResponseEvent *session.Event, err error) {
 	recordErrorAndStatus(span, err)
 	attributes := []attribute.KeyValue{
 		semconv.GenAIOperationNameKey.String(executeToolName),

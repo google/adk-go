@@ -107,25 +107,25 @@ var errTest = errors.New("test error")
 
 func TestInvokeAgent(t *testing.T) {
 	tests := []struct {
-		name        string
-		startParams StartInvokeAgentParams
-		afterParams AfterInvokeAgentParams
-		wantName    string
-		wantStatus  codes.Code
-		wantAttrs   map[attribute.Key]string
+		name         string
+		startParams  StartInvokeAgentSpanParams
+		resultParams TraceAgentResultParams
+		wantName     string
+		wantStatus   codes.Code
+		wantAttrs    map[attribute.Key]string
 	}{
 		{
 			name: "Success",
-			startParams: StartInvokeAgentParams{
+			startParams: StartInvokeAgentSpanParams{
 				AgentName:        "test-agent",
 				AgentDescription: "test-description",
 				SessionID:        "test-session",
 			},
-			afterParams: AfterInvokeAgentParams{
+			resultParams: TraceAgentResultParams{
 				ResponseEvent: session.NewEvent("test-invocation-id"),
 			},
 			wantName:   "invoke_agent test-agent",
-			wantStatus: codes.Ok,
+			wantStatus: codes.Unset,
 			wantAttrs: map[attribute.Key]string{
 				semconv.GenAIOperationNameKey:    "invoke_agent",
 				semconv.GenAIAgentNameKey:        "test-agent",
@@ -135,12 +135,12 @@ func TestInvokeAgent(t *testing.T) {
 		},
 		{
 			name: "Error",
-			startParams: StartInvokeAgentParams{
+			startParams: StartInvokeAgentSpanParams{
 				AgentName:        "test-agent",
 				AgentDescription: "test-description",
 				SessionID:        "test-session",
 			},
-			afterParams: AfterInvokeAgentParams{
+			resultParams: TraceAgentResultParams{
 				Error: errTest,
 			},
 			wantName:   "invoke_agent test-agent",
@@ -153,8 +153,8 @@ func TestInvokeAgent(t *testing.T) {
 			exporter := setupTestTracer(t)
 			ctx := t.Context()
 
-			_, span := StartInvokeAgent(ctx, tc.startParams)
-			AfterInvokeAgent(span, tc.afterParams)
+			_, span := StartInvokeAgentSpan(ctx, tc.startParams)
+			TraceAgentResult(span, tc.resultParams)
 			span.End()
 
 			spans := exporter.GetSpans()
@@ -169,9 +169,9 @@ func TestInvokeAgent(t *testing.T) {
 			if gotSpan.Status.Code != tc.wantStatus {
 				t.Errorf("expected status %v, got %v", tc.wantStatus, gotSpan.Status.Code)
 			}
-			if tc.afterParams.Error != nil {
-				if gotSpan.Status.Description != tc.afterParams.Error.Error() {
-					t.Errorf("expected status description %q, got %q", tc.afterParams.Error.Error(), gotSpan.Status.Description)
+			if tc.resultParams.Error != nil {
+				if gotSpan.Status.Description != tc.resultParams.Error.Error() {
+					t.Errorf("expected status description %q, got %q", tc.resultParams.Error.Error(), gotSpan.Status.Description)
 				}
 			}
 
@@ -189,19 +189,19 @@ func TestInvokeAgent(t *testing.T) {
 
 func TestGenerateContent(t *testing.T) {
 	tests := []struct {
-		name        string
-		startParams StartGenerateContentParams
-		afterParams AfterGenerateContentParams
-		wantName    string
-		wantStatus  codes.Code
-		wantAttrs   map[attribute.Key]string
+		name         string
+		startParams  StartGenerateContentSpanParams
+		resultParams TraceGenerateContentResultParams
+		wantName     string
+		wantStatus   codes.Code
+		wantAttrs    map[attribute.Key]string
 	}{
 		{
 			name: "Success",
-			startParams: StartGenerateContentParams{
+			startParams: StartGenerateContentSpanParams{
 				ModelName: "test-model",
 			},
-			afterParams: AfterGenerateContentParams{
+			resultParams: TraceGenerateContentResultParams{
 				Response: &model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 						PromptTokenCount: 10,
@@ -211,7 +211,7 @@ func TestGenerateContent(t *testing.T) {
 				},
 			},
 			wantName:   "generate_content test-model",
-			wantStatus: codes.Ok,
+			wantStatus: codes.Unset,
 			wantAttrs: map[attribute.Key]string{
 				semconv.GenAIOperationNameKey:         "generate_content",
 				semconv.GenAIRequestModelKey:          "test-model",
@@ -222,10 +222,10 @@ func TestGenerateContent(t *testing.T) {
 		},
 		{
 			name: "Error",
-			startParams: StartGenerateContentParams{
+			startParams: StartGenerateContentSpanParams{
 				ModelName: "test-model",
 			},
-			afterParams: AfterGenerateContentParams{
+			resultParams: TraceGenerateContentResultParams{
 				Error: errTest,
 			},
 			wantName:   "generate_content test-model",
@@ -238,8 +238,8 @@ func TestGenerateContent(t *testing.T) {
 			exporter := setupTestTracer(t)
 			ctx := t.Context()
 
-			_, span := StartGenerateContent(ctx, tc.startParams)
-			AfterGenerateContent(span, tc.afterParams)
+			_, span := StartGenerateContentSpan(ctx, tc.startParams)
+			TraceGenerateContentResult(span, tc.resultParams)
 			span.End()
 
 			spans := exporter.GetSpans()
@@ -254,9 +254,9 @@ func TestGenerateContent(t *testing.T) {
 			if gotSpan.Status.Code != tc.wantStatus {
 				t.Errorf("expected status %v, got %v", tc.wantStatus, gotSpan.Status.Code)
 			}
-			if tc.afterParams.Error != nil {
-				if gotSpan.Status.Description != tc.afterParams.Error.Error() {
-					t.Errorf("expected status description %q, got %q", tc.afterParams.Error.Error(), gotSpan.Status.Description)
+			if tc.resultParams.Error != nil {
+				if gotSpan.Status.Description != tc.resultParams.Error.Error() {
+					t.Errorf("expected status description %q, got %q", tc.resultParams.Error.Error(), gotSpan.Status.Description)
 				}
 			}
 
@@ -274,26 +274,25 @@ func TestGenerateContent(t *testing.T) {
 
 func TestExecuteTool(t *testing.T) {
 	tests := []struct {
-		name        string
-		startParams StartExecuteToolParams
-		afterParams AfterExecuteToolParams
-		wantName    string
-		wantStatus  codes.Code
-		wantAttrs   map[attribute.Key]string
+		name         string
+		startParams  StartExecuteToolSpanParams
+		resultParams TraceToolResultParams
+		wantName     string
+		wantStatus   codes.Code
+		wantAttrs    map[attribute.Key]string
 	}{
 		{
 			name: "Success",
-			startParams: StartExecuteToolParams{
+			startParams: StartExecuteToolSpanParams{
 				ToolName: "test-tool",
+				Args:     map[string]any{"arg": "val"},
 			},
-			afterParams: AfterExecuteToolParams{
-				Name:          "test-tool",
+			resultParams: TraceToolResultParams{
 				Description:   "tool-description",
-				Args:          map[string]any{"arg": "val"},
 				ResponseEvent: &session.Event{ID: "test-event"},
 			},
 			wantName:   "execute_tool test-tool",
-			wantStatus: codes.Ok,
+			wantStatus: codes.Unset,
 			wantAttrs: map[attribute.Key]string{
 				semconv.GenAIOperationNameKey:   "execute_tool",
 				semconv.GenAIToolNameKey:        "test-tool",
@@ -302,11 +301,10 @@ func TestExecuteTool(t *testing.T) {
 		},
 		{
 			name: "Error",
-			startParams: StartExecuteToolParams{
+			startParams: StartExecuteToolSpanParams{
 				ToolName: "test-tool",
 			},
-			afterParams: AfterExecuteToolParams{
-				Name:        "test-tool",
+			resultParams: TraceToolResultParams{
 				Description: "tool-description",
 				Error:       errTest,
 			},
@@ -320,8 +318,8 @@ func TestExecuteTool(t *testing.T) {
 			exporter := setupTestTracer(t)
 			ctx := t.Context()
 
-			_, span := StartExecuteTool(ctx, tc.startParams)
-			AfterExecuteTool(span, tc.afterParams)
+			_, span := StartExecuteToolSpan(ctx, tc.startParams)
+			TraceToolResult(span, tc.resultParams)
 			span.End()
 
 			spans := exporter.GetSpans()
@@ -336,9 +334,9 @@ func TestExecuteTool(t *testing.T) {
 			if gotSpan.Status.Code != tc.wantStatus {
 				t.Errorf("expected status %v, got %v", tc.wantStatus, gotSpan.Status.Code)
 			}
-			if tc.afterParams.Error != nil {
-				if gotSpan.Status.Description != tc.afterParams.Error.Error() {
-					t.Errorf("expected status description %q, got %q", tc.afterParams.Error.Error(), gotSpan.Status.Description)
+			if tc.resultParams.Error != nil {
+				if gotSpan.Status.Description != tc.resultParams.Error.Error() {
+					t.Errorf("expected status description %q, got %q", tc.resultParams.Error.Error(), gotSpan.Status.Description)
 				}
 			}
 
