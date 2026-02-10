@@ -171,10 +171,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			})
 		})
 		defer endSpan()
-		ctx = ctx.WithContext(spanCtx)
 		// TODO: verify&update the setup here. Should we branch etc.
 		ctx := &invocationContext{
-			Context:   ctx,
+			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
 			artifacts: ctx.Artifacts(),
 			memory:    ctx.Memory(),
