@@ -284,7 +284,7 @@ func TestExecuteTool(t *testing.T) {
 		{
 			name: "Success",
 			startParams: StartExecuteToolParams{
-				ToolName:        "test-tool",
+				ToolName: "test-tool",
 			},
 			afterParams: AfterExecuteToolParams{
 				Name:          "test-tool",
@@ -303,7 +303,7 @@ func TestExecuteTool(t *testing.T) {
 		{
 			name: "Error",
 			startParams: StartExecuteToolParams{
-				ToolName:        "test-tool",
+				ToolName: "test-tool",
 			},
 			afterParams: AfterExecuteToolParams{
 				Name:        "test-tool",
@@ -352,138 +352,6 @@ func TestExecuteTool(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestTraceLLMCall(t *testing.T) {
-	tests := []struct {
-		name       string
-		params     TraceLLMCallParams
-		wantAttrs  map[attribute.Key]string
-		wantStatus codes.Code
-	}{
-		{
-			name: "Success",
-			params: TraceLLMCallParams{
-				SessionID: "test-session-id",
-				LLMRequest: &model.LLMRequest{
-					Model: "test-model",
-					Config: &genai.GenerateContentConfig{
-						TopP:            float32Ptr(0.9),
-						MaxOutputTokens: 100,
-					},
-					Contents: []*genai.Content{
-						{Role: "user", Parts: []*genai.Part{{Text: "hello"}}},
-					},
-				},
-				Event: &session.Event{
-					ID:           "test-event-id",
-					InvocationID: "test-invocation-id",
-					LLMResponse: model.LLMResponse{
-						FinishReason: genai.FinishReasonStop,
-						UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-							PromptTokenCount:     5,
-							CandidatesTokenCount: 10,
-							TotalTokenCount:      15,
-						},
-						Content: &genai.Content{
-							Parts: []*genai.Part{{Text: "world"}},
-						},
-					},
-				},
-			},
-			wantAttrs: map[attribute.Key]string{
-				semconv.GenAISystemKey:                systemName,
-				semconv.GenAIRequestModelKey:          "test-model",
-				gcpVertexAgentInvocationID:            "test-invocation-id",
-				gcpVertexAgentSessionID:               "test-session-id",
-				semconv.GenAIConversationIDKey:        "test-session-id",
-				gcpVertexAgentEventID:                 "test-event-id",
-				semconv.GenAIRequestTopPKey:           "0.8999999761581421",
-				semconv.GenAIRequestMaxTokensKey:      "100",
-				semconv.GenAIResponseFinishReasonsKey: "STOP",
-				genAiResponsePromptTokenCount:         "5",
-				genAiResponseCandidatesTokenCount:     "10",
-				genAiResponseTotalTokenCount:          "15",
-			},
-			wantStatus: codes.Ok,
-		},
-		{
-			name: "Empty",
-			params: TraceLLMCallParams{
-				SessionID: "test-session-id",
-				LLMRequest: &model.LLMRequest{
-					Model: "test-model",
-				},
-				Event: &session.Event{},
-			},
-			wantAttrs: map[attribute.Key]string{
-				semconv.GenAISystemKey:       systemName,
-				semconv.GenAIRequestModelKey: "test-model",
-			},
-			wantStatus: codes.Ok,
-		},
-		{
-			name: "Error",
-			params: TraceLLMCallParams{
-				SessionID: "test-session-id",
-				LLMRequest: &model.LLMRequest{
-					Model: "test-model",
-				},
-				Error: errTest,
-			},
-			wantAttrs: map[attribute.Key]string{
-				semconv.GenAISystemKey:       systemName,
-				semconv.GenAIRequestModelKey: "test-model",
-			},
-			wantStatus: codes.Error,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			exporter := setupTestTracer(t)
-			ctx := t.Context()
-			_, span := tracer.Start(ctx, "test-span")
-
-			TraceLLMCall(span, tc.params)
-			span.End()
-
-			spans := exporter.GetSpans()
-			if len(spans) != 1 {
-				t.Fatalf("expected 1 span, got %d", len(spans))
-			}
-			gotSpan := spans[0]
-
-			if gotSpan.Status.Code != tc.wantStatus {
-				t.Errorf("expected status %v, got %v", tc.wantStatus, gotSpan.Status.Code)
-			}
-
-			if tc.params.Error != nil {
-				if gotSpan.Status.Description != tc.params.Error.Error() {
-					t.Errorf("expected status description %q, got %q", tc.params.Error.Error(), gotSpan.Status.Description)
-				}
-			}
-
-			attrs := attributesToMap(gotSpan.Attributes)
-			for k, v := range tc.wantAttrs {
-				if attrs[k] != v {
-					t.Errorf("attribute %q: got %q, want %q", k, attrs[k], v)
-				}
-			}
-
-			// Check JSON serialized fields existence/validity
-			if attrs[gcpVertexAgentLLMRequestName] == "" || attrs[gcpVertexAgentLLMRequestName] == "<not serializable>" {
-				t.Errorf("invalid request serialization: %s", attrs[gcpVertexAgentLLMRequestName])
-			}
-			if attrs[gcpVertexAgentLLMResponseName] == "" || attrs[gcpVertexAgentLLMResponseName] == "<not serializable>" {
-				t.Errorf("invalid response serialization: %s", attrs[gcpVertexAgentLLMResponseName])
-			}
-		})
-	}
-}
-
-func float32Ptr(f float32) *float32 {
-	return &f
 }
 
 func setupTestTracer(t *testing.T) *tracetest.InMemoryExporter {

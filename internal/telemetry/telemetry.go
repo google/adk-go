@@ -40,6 +40,13 @@ const (
 
 	executeToolName = "execute_tool"
 	mergeToolName   = "(merged tools)"
+
+	// TODO: remove together with CallLLM span.
+	genAiSystemName           = "gen_ai.system"
+	genAiRequestModelName     = "gen_ai.request.model"
+	genAiRequestMaxTokens     = "gen_ai.request.max_tokens"
+	genAiResponseFinishReason = "gen_ai.response.finish_reason"
+	genAiConversationID       = "gen_ai.conversation.id"
 )
 
 var (
@@ -244,8 +251,6 @@ func WrapYield[T any](span trace.Span, yield func(T, error) bool, finalizeSpan f
 	return wrapped, endSpan
 }
 
-// --- old tracing ---
-
 // StartTrace starts a new span with the given name.
 func StartTrace(ctx context.Context, traceName string) (context.Context, trace.Span) {
 	return tracer.Start(ctx, traceName)
@@ -271,59 +276,41 @@ func AfterMergedToolCalls(span trace.Span, fnResponseEvent *session.Event, err e
 	span.SetAttributes(attributes...)
 }
 
-// TraceLLMCallParams contains parameters for [TraceLLMCall].
-type TraceLLMCallParams struct {
-	SessionID  string
-	LLMRequest *model.LLMRequest
-	Event      *session.Event
-	Error      error
-}
-
 // TraceLLMCall fills the call_llm event details.
-func TraceLLMCall(span trace.Span, params TraceLLMCallParams) {
-	recordErrorAndStatus(span, params.Error)
+func TraceLLMCall(span trace.Span, sessionID string, llmRequest *model.LLMRequest, event *session.Event) {
 	attributes := []attribute.KeyValue{
-		semconv.GenAISystemKey.String(systemName),
-		semconv.GenAIRequestModelKey.String(params.LLMRequest.Model),
-		gcpVertexAgentSessionID.String(params.SessionID),
-		semconv.GenAIConversationIDKey.String(params.SessionID),
-		gcpVertexAgentLLMRequestName.String(safeSerialize(llmRequestToTrace(params.LLMRequest))),
+		attribute.String(genAiSystemName, systemName),
+		attribute.String(genAiRequestModelName, llmRequest.Model),
+		gcpVertexAgentInvocationID.String(event.InvocationID),
+		gcpVertexAgentSessionID.String(sessionID),
+		attribute.String(genAiConversationID, sessionID),
+		gcpVertexAgentEventID.String(event.ID),
+		gcpVertexAgentLLMRequestName.String(safeSerialize(llmRequestToTrace(llmRequest))),
+		gcpVertexAgentLLMResponseName.String(safeSerialize(event.LLMResponse)),
 	}
 
-	if params.Event != nil {
-		attributes = append(attributes,
-			gcpVertexAgentInvocationID.String(params.Event.InvocationID),
-			gcpVertexAgentEventID.String(params.Event.ID),
-			gcpVertexAgentLLMResponseName.String(safeSerialize(params.Event.LLMResponse)),
-		)
-		if params.Event.FinishReason != "" {
-			attributes = append(attributes, semconv.GenAIResponseFinishReasonsKey.String(string(params.Event.FinishReason)))
-		}
-		if params.Event.UsageMetadata != nil {
-			if params.Event.UsageMetadata.PromptTokenCount > 0 {
-				attributes = append(attributes, genAiResponsePromptTokenCount.Int(int(params.Event.UsageMetadata.PromptTokenCount)))
-			}
-			if params.Event.UsageMetadata.CandidatesTokenCount > 0 {
-				attributes = append(attributes, genAiResponseCandidatesTokenCount.Int(int(params.Event.UsageMetadata.CandidatesTokenCount)))
-			}
-			if params.Event.UsageMetadata.CachedContentTokenCount > 0 {
-				attributes = append(attributes, genAiResponseCachedContentTokenCount.Int(int(params.Event.UsageMetadata.CachedContentTokenCount)))
-			}
-			if params.Event.UsageMetadata.TotalTokenCount > 0 {
-				attributes = append(attributes, genAiResponseTotalTokenCount.Int(int(params.Event.UsageMetadata.TotalTokenCount)))
-			}
-		}
-	} else {
-		attributes = append(attributes, gcpVertexAgentLLMResponseName.String("{}"))
+	if llmRequest.Config.TopP != nil {
+		attributes = append(attributes, attribute.Float64("gen_ai.request.top_p", float64(*llmRequest.Config.TopP)))
 	}
 
-	if params.LLMRequest.Config != nil {
-		if params.LLMRequest.Config.TopP != nil {
-			attributes = append(attributes, semconv.GenAIRequestTopPKey.Float64(float64(*params.LLMRequest.Config.TopP)))
+	if llmRequest.Config.MaxOutputTokens != 0 {
+		attributes = append(attributes, attribute.Int(genAiRequestMaxTokens, int(llmRequest.Config.MaxOutputTokens)))
+	}
+	if event.FinishReason != "" {
+		attributes = append(attributes, attribute.String(genAiResponseFinishReason, string(event.FinishReason)))
+	}
+	if event.UsageMetadata != nil {
+		if event.UsageMetadata.PromptTokenCount > 0 {
+			attributes = append(attributes, genAiResponsePromptTokenCount.Int(int(event.UsageMetadata.PromptTokenCount)))
 		}
-
-		if params.LLMRequest.Config.MaxOutputTokens != 0 {
-			attributes = append(attributes, semconv.GenAIRequestMaxTokensKey.Int(int(params.LLMRequest.Config.MaxOutputTokens)))
+		if event.UsageMetadata.CandidatesTokenCount > 0 {
+			attributes = append(attributes, genAiResponseCandidatesTokenCount.Int(int(event.UsageMetadata.CandidatesTokenCount)))
+		}
+		if event.UsageMetadata.CachedContentTokenCount > 0 {
+			attributes = append(attributes, genAiResponseCachedContentTokenCount.Int(int(event.UsageMetadata.CachedContentTokenCount)))
+		}
+		if event.UsageMetadata.TotalTokenCount > 0 {
+			attributes = append(attributes, genAiResponseTotalTokenCount.Int(int(event.UsageMetadata.TotalTokenCount)))
 		}
 	}
 

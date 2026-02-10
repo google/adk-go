@@ -150,12 +150,6 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		callLLMCtx, callLLMSpan := telemetry.StartTrace(ctx, "call_llm")
 		ctx = ctx.WithContext(callLLMCtx)
 		yield, endSpan := telemetry.WrapYield(callLLMSpan, yield, func(span trace.Span, ev *session.Event, err error) {
-			telemetry.TraceLLMCall(span, telemetry.TraceLLMCallParams{
-				SessionID:  ctx.Session().ID(),
-				LLMRequest: req,
-				Event:      ev,
-				Error:      err,
-			})
 		})
 		defer endSpan()
 		// Create event to pass to callback state delta
@@ -191,6 +185,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 
 			// Build the event and yield.
 			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
+			telemetry.TraceLLMCall(callLLMSpan, ctx.Session().ID(), req, modelResponseEvent)
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
