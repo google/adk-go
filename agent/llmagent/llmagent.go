@@ -186,11 +186,18 @@ type Config struct {
 	// error. If you want to ignore the error, you can append a ? to the
 	// variable name as in {var?} to make it optional.
 	//
+	// If templating logic for {} chars is not desired, then InstructionProvider
+	// should be used.
 	Instruction string
 	// InstructionProvider allows to create instructions dynamically based on
 	// the agent context.
 	//
 	// It takes over the Instruction field if both are set.
+	//
+	// InstructionProvider does not automatically substitute values to {} and
+	// treats them as just a raw char.
+	// If you need to inject session state variables, use
+	// util/instructionutil.InjectSessionState helper.
 	InstructionProvider InstructionProvider
 
 	// GlobalInstruction is the instruction for all agents in the entire
@@ -340,13 +347,14 @@ type agentState = agentinternal.State
 func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	// TODO: branch context?
 	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:   ctx.Artifacts(),
-		Memory:      ctx.Memory(),
-		Session:     ctx.Session(),
-		Branch:      ctx.Branch(),
-		Agent:       a,
-		UserContent: ctx.UserContent(),
-		RunConfig:   ctx.RunConfig(),
+		Artifacts:    ctx.Artifacts(),
+		Memory:       ctx.Memory(),
+		Session:      ctx.Session(),
+		Branch:       ctx.Branch(),
+		Agent:        a,
+		UserContent:  ctx.UserContent(),
+		RunConfig:    ctx.RunConfig(),
+		InvocationID: ctx.InvocationID(),
 	})
 
 	f := &llminternal.Flow{

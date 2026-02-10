@@ -76,13 +76,12 @@ func (s *localSession) appendEvent(event *session.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	processedEvent := trimTempDeltaState(event)
-	if err := updateSessionState(s, processedEvent); err != nil {
+	if err := updateSessionState(s, event); err != nil {
 		return fmt.Errorf("failed to update localSession state: %w", err)
 	}
-
-	s.events = append(s.events, event)
-	s.updatedAt = event.Timestamp
+	processedEvent := trimTempDeltaState(event)
+	s.events = append(s.events, processedEvent)
+	s.updatedAt = processedEvent.Timestamp
 	return nil
 }
 
@@ -180,12 +179,7 @@ func updateSessionState(sess *localSession, event *session.Event) error {
 		sess.state = make(map[string]any)
 	}
 
-	for key, value := range event.Actions.StateDelta {
-		if strings.HasPrefix(key, session.KeyPrefixTemp) {
-			continue
-		}
-		sess.state[key] = value
-	}
+	maps.Copy(sess.state, event.Actions.StateDelta)
 
 	return nil
 }

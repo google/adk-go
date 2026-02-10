@@ -17,6 +17,7 @@ package llminternal
 import (
 	"encoding/json"
 	"fmt"
+	"iter"
 
 	"google.golang.org/genai"
 
@@ -38,28 +39,29 @@ const (
 )
 
 // outputSchemaRequestProcessor adds the set_model_response tool to handle structured output.
-func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	llmAgent := asLLMAgent(ctx.Agent())
-	if llmAgent == nil {
-		return nil
+func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		llmAgent := asLLMAgent(ctx.Agent())
+		if llmAgent == nil {
+			return
+		}
+
+		state := llmAgent.internal()
+		// Check if we need the processor in the first place.
+		if state.OutputSchema == nil || !needOutputSchemaProcessor(state) {
+			return
+		}
+
+		// Add the set_model_response tool to handle structured output
+		setResponseTool := &setModelResponseTool{schema: state.OutputSchema}
+		if err := toolutils.PackTool(req, setResponseTool); err != nil {
+			yield(nil, fmt.Errorf("failed to pack set_model_response tool: %w", err))
+			return
+		}
+
+		// Add instruction about using the set_model_response tool
+		utils.AppendInstructions(req, instructionForProcessor)
 	}
-
-	state := llmAgent.internal()
-	// Check if we need the processor in the first place.
-	if state.OutputSchema == nil || !needOutputSchemaProcessor(state) {
-		return nil
-	}
-
-	// Add the set_model_response tool to handle structured output
-	setResponseTool := &setModelResponseTool{schema: state.OutputSchema}
-	if err := toolutils.PackTool(req, setResponseTool); err != nil {
-		return fmt.Errorf("failed to pack set_model_response tool: %w", err)
-	}
-
-	// Add instruction about using the set_model_response tool
-	utils.AppendInstructions(req, instructionForProcessor)
-
-	return nil
 }
 
 // createFinalModelResponseEvent creates a final model response event from set_model_response JSON.

@@ -70,6 +70,8 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		Required: []string{"answer"},
 	}
 
+	f := &Flow{}
+
 	t.Run("InjectsToolAndInstructions", func(t *testing.T) {
 		baseAgent := utils.Must(agent.New(agent.Config{Name: "SchemaAgent"}))
 		mockAgent := &mockLLMAgent{
@@ -86,7 +88,8 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 			Agent: mockAgent,
 		})
 
-		if err := outputSchemaRequestProcessor(ctx, req); err != nil {
+		events := outputSchemaRequestProcessor(ctx, req, f)
+		for _, err := range events {
 			t.Fatalf("outputSchemaRequestProcessor() error = %v", err)
 		}
 
@@ -125,7 +128,8 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 			Agent: mockAgent,
 		})
 
-		if err := outputSchemaRequestProcessor(ctx, req); err != nil {
+		events := outputSchemaRequestProcessor(ctx, req, f)
+		for _, err := range events {
 			t.Fatalf("outputSchemaRequestProcessor() error = %v", err)
 		}
 
@@ -150,7 +154,8 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 			Agent: mockAgent,
 		})
 
-		if err := outputSchemaRequestProcessor(ctx, req); err != nil {
+		events := outputSchemaRequestProcessor(ctx, req, f)
+		for _, err := range events {
 			t.Fatalf("outputSchemaRequestProcessor() error = %v", err)
 		}
 
@@ -178,7 +183,8 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 			Agent: mockAgent,
 		})
 
-		if err := outputSchemaRequestProcessor(ctx, req); err != nil {
+		events := outputSchemaRequestProcessor(ctx, req, f)
+		for _, err := range events {
 			t.Fatalf("outputSchemaRequestProcessor() error = %v", err)
 		}
 
@@ -308,7 +314,7 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunSuccess", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := toolinternal.NewToolContext(invCtx, "", nil)
+		toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": 10.0} // JSON numbers often come as float64
 		got, err := toolInstance.Run(toolCtx, input)
@@ -322,7 +328,7 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunValidationFailure_Type", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := toolinternal.NewToolContext(invCtx, "", nil)
+		toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": "not a number"}
 		_, err := toolInstance.Run(toolCtx, input)
@@ -333,7 +339,7 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunValidationFailure_MissingRequired", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := toolinternal.NewToolContext(invCtx, "", nil)
+		toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"other": 123}
 		_, err := toolInstance.Run(toolCtx, input)

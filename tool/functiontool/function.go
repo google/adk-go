@@ -46,6 +46,24 @@ type Config struct {
 	OutputSchema *jsonschema.Schema
 	// IsLongRunning makes a FunctionTool a long-running operation.
 	IsLongRunning bool
+
+	// RequireConfirmation flags whether this tool must always ask for user confirmation
+	// before execution. If set to true, the ADK framework will automatically initiate
+	// a Human-in-the-Loop (HITL) confirmation request when this tool is invoked.
+	RequireConfirmation bool
+
+	// RequireConfirmationProvider allows for dynamic determination of whether
+	// user confirmation is needed. This field is a function called at runtime to decide if
+	// a confirmation request should be sent. The function takes the tool's input parameters as arguments.
+	// This provider offers more flexibility than the static RequireConfirmation flag,
+	// enabling conditional confirmation based on the invocation details.
+	// If set, this often takes precedence over the RequireConfirmation flag.
+	//
+	// Required signature for a provider function:
+	// func(toolInput ToolArgs) (bool)
+	// where ToolArgs is the input type of your go function
+	// Returning true means confirmation is required.
+	RequireConfirmationProvider any
 }
 
 // Func represents a Go function that can be wrapped in a tool.
@@ -59,7 +77,7 @@ var ErrInvalidArgument = errors.New("invalid argument")
 // Input schema is automatically inferred from the input and output types.
 func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
-	//  https://github.com/modelcontextprotocol/go-sdk/discussions/37
+	// https://github.com/modelcontextprotocol/go-sdk/discussions/37
 
 	var zeroArgs TArgs
 	argsType := reflect.TypeOf(zeroArgs)
@@ -79,11 +97,24 @@ func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.T
 		return nil, fmt.Errorf("failed to infer output schema: %w", err)
 	}
 
+	var confirmWrapper func(TArgs) bool
+
+	if cfg.RequireConfirmationProvider != nil {
+		// Attempt to cast the interface directly to the function signature
+		fn, ok := cfg.RequireConfirmationProvider.(func(TArgs) bool)
+		if !ok {
+			return nil, fmt.Errorf("error RequireConfirmationProvider must be a function with signature func(%T) bool", *new(TArgs))
+		}
+		confirmWrapper = fn
+	}
+
 	return &functionTool[TArgs, TResults]{
-		cfg:          cfg,
-		inputSchema:  ischema,
-		outputSchema: oschema,
-		handler:      handler,
+		cfg:                         cfg,
+		inputSchema:                 ischema,
+		outputSchema:                oschema,
+		handler:                     handler,
+		requireConfirmation:         cfg.RequireConfirmation,
+		requireConfirmationProvider: confirmWrapper,
 	}, nil
 }
 
@@ -98,6 +129,10 @@ type functionTool[TArgs, TResults any] struct {
 
 	// handler is the Go function.
 	handler Func[TArgs, TResults]
+
+	requireConfirmation bool
+
+	requireConfirmationProvider func(TArgs) bool
 }
 
 // Description implements tool.Tool.
@@ -162,6 +197,32 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 	if err != nil {
 		return nil, err
 	}
+
+	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
+		if !confirmation.Confirmed {
+			return nil, fmt.Errorf("error tool %q call is rejected", f.Name())
+		}
+	} else {
+		requireConfirmation := f.requireConfirmation
+
+		// Only run the potentially expensive provider if the static flag didn't already trigger it
+		// Provider takes precedence/overrides:
+		if f.requireConfirmationProvider != nil {
+			requireConfirmation = f.requireConfirmationProvider(input)
+		}
+
+		if requireConfirmation {
+			err := ctx.RequestConfirmation(
+				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+					f.Name()), nil)
+			if err != nil {
+				return nil, err
+			}
+			ctx.Actions().SkipSummarization = true
+			return nil, fmt.Errorf("error tool %q requires confirmation, please approve or reject", f.Name())
+		}
+	}
+
 	output, err := f.handler(ctx, input)
 	if err != nil {
 		return nil, err

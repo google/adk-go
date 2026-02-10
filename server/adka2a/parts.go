@@ -15,6 +15,7 @@
 package adka2a
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -38,6 +39,16 @@ const (
 	a2aDataPartTypeCodeExecResult     = "code_execution_result"
 	a2aDataPartTypeCodeExecutableCode = "executable_code"
 )
+
+// ToA2APart converts the provided genai part to A2A equivalent. Long running tool IDs are used for attaching metadata to
+// the relevant data parts.
+func ToA2APart(part *genai.Part, longRunningToolIDs []string) (a2a.Part, error) {
+	parts, err := ToA2AParts([]*genai.Part{part}, longRunningToolIDs)
+	if err != nil {
+		return nil, err
+	}
+	return parts[0], nil
+}
 
 // ToA2AParts converts the provided genai parts to A2A equivalents. Long running tool IDs are used for attaching metadata to
 // the relevant data parts.
@@ -186,12 +197,36 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	return a2a.DataPart{Data: map[string]any{}}, nil
 }
 
-func toGenAIContent(msg *a2a.Message) (*genai.Content, error) {
-	parts, err := ToGenAIParts(msg.Parts)
+func toGenAIContent(ctx context.Context, msg *a2a.Message, converter A2APartConverter) (*genai.Content, error) {
+	if converter == nil {
+		parts, err := ToGenAIParts(msg.Parts)
+		if err != nil {
+			return nil, err
+		}
+		return genai.NewContentFromParts(parts, toGenAIRole(msg.Role)), nil
+	}
+
+	parts := make([]*genai.Part, 0, len(msg.Parts))
+	for _, part := range msg.Parts {
+		cp, err := converter(ctx, a2a.Event(msg), part)
+		if err != nil {
+			return nil, err
+		}
+		if cp == nil {
+			continue
+		}
+		parts = append(parts, cp)
+	}
+	return genai.NewContentFromParts(parts, toGenAIRole(msg.Role)), nil
+}
+
+// ToGenAIPart converts the provided A2A part to a genai equivalent.
+func ToGenAIPart(part a2a.Part) (*genai.Part, error) {
+	parts, err := ToGenAIParts([]a2a.Part{part})
 	if err != nil {
 		return nil, err
 	}
-	return &genai.Content{Role: string(toGenAIRole(msg.Role)), Parts: parts}, nil
+	return parts[0], nil
 }
 
 // ToGenAIParts converts the provided A2A parts to genai equivalents.
