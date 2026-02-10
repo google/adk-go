@@ -862,6 +862,12 @@ func Test_databaseService_StateManagement(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to appendEvent: %v", err)
 		}
+		invocationSession := s1.Session.(*localSession)
+		wantInvocationState := map[string]any{"sk": "v2", "temp:k1": "v1"}
+		gotInvocationState := maps.Collect(invocationSession.State().All())
+		if diff := cmp.Diff(wantInvocationState, gotInvocationState); diff != "" {
+			t.Errorf("Invocation session state mismatch (-want +got):\n%s", diff)
+		}
 
 		s1_got, _ := s.Get(ctx, &session.GetRequest{AppName: appName, UserID: "u1", SessionID: "s1"})
 		wantState := map[string]any{"sk": "v2"}
@@ -1010,8 +1016,5 @@ func emptyService(t *testing.T) *databaseService {
 		}
 	})
 
-	if err != nil {
-		t.Fatalf("Failed to open GORM connection: %v", err)
-	}
 	return dbservice
 }

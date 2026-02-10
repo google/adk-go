@@ -405,6 +405,27 @@ func TestExecutor_Callbacks(t *testing.T) {
 			},
 		},
 		{
+			name: "can access session events",
+			events: []*session.Event{
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
+			},
+			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
+				eventCount := ctx.Events().Len()
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: fmt.Sprintf("event count = %d", eventCount)})
+				return nil
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
+				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}),
+				newArtifactLastChunkEvent(task),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted,
+					a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "event count = 3"}),
+				),
+			},
+		},
+		{
 			name: "abort execution",
 			events: []*session.Event{
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
@@ -536,4 +557,151 @@ func TestExecutor_Cancel_AfterEvent(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("Agent did not unblock")
 	}
+}
+
+func TestExecutor_Converters(t *testing.T) {
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
+
+	t.Run("A2APartConverter", func(t *testing.T) {
+		t.Run("modify input", func(t *testing.T) {
+			var receivedText string
+			agent, err := agent.New(agent.Config{
+				Name: "test",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					if parts := ctx.UserContent().Parts; len(parts) > 0 {
+						receivedText = parts[0].Text
+					}
+					return func(yield func(*session.Event, error) bool) {}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New() error = %v", err)
+			}
+
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
+				A2APartConverter: func(ctx context.Context, evt a2a.Event, part a2a.Part) (*genai.Part, error) {
+					if p, ok := part.(a2a.TextPart); ok && p.Text == "hi" {
+						return genai.NewPartFromText("HELLO"), nil
+					}
+					return nil, nil
+				},
+			})
+
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			if err := executor.Execute(t.Context(), reqCtx, newInMemoryQueue(t)); err != nil {
+				t.Fatalf("executor.Execute() error = %v", err)
+			}
+
+			if receivedText != "HELLO" {
+				t.Errorf("received text = %q, want %q", receivedText, "HELLO")
+			}
+		})
+
+		t.Run("filter input", func(t *testing.T) {
+			var receivedParts int
+			agent, err := agent.New(agent.Config{
+				Name: "test",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					receivedParts = len(ctx.UserContent().Parts)
+					return func(yield func(*session.Event, error) bool) {}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New() error = %v", err)
+			}
+
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
+				A2APartConverter: func(ctx context.Context, evt a2a.Event, part a2a.Part) (*genai.Part, error) {
+					return nil, nil
+				},
+			})
+
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			if err := executor.Execute(t.Context(), reqCtx, newInMemoryQueue(t)); err != nil {
+				t.Fatalf("executor.Execute() error = %v", err)
+			}
+
+			if receivedParts != 0 {
+				t.Errorf("received parts count = %d, want 0", receivedParts)
+			}
+		})
+	})
+
+	t.Run("GenAIPartConverter", func(t *testing.T) {
+		agentEvents := []*session.Event{
+			{LLMResponse: model.LLMResponse{
+				Content: &genai.Content{Parts: []*genai.Part{genai.NewPartFromText("world")}},
+			}},
+		}
+
+		t.Run("modify output", func(t *testing.T) {
+			agent, err := newEventReplayAgent(agentEvents, nil)
+			if err != nil {
+				t.Fatalf("newEventReplayAgent() error = %v", err)
+			}
+
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
+				GenAIPartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (a2a.Part, error) {
+					if part.Text == "world" {
+						return a2a.TextPart{Text: "WORLD"}, nil
+					}
+					return a2a.TextPart{Text: part.Text}, nil
+				},
+			})
+
+			queue := &testQueue{Queue: newInMemoryQueue(t)}
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			if err := executor.Execute(t.Context(), reqCtx, queue); err != nil {
+				t.Fatalf("executor.Execute() error = %v", err)
+			}
+
+			found := false
+			for _, e := range queue.events {
+				if ae, ok := e.(*a2a.TaskArtifactUpdateEvent); ok {
+					for _, p := range ae.Artifact.Parts {
+						if tp, ok := p.(a2a.TextPart); ok && tp.Text == "WORLD" {
+							found = true
+						}
+					}
+				}
+			}
+			if !found {
+				t.Errorf("did not find 'WORLD' in events: %v", queue.events)
+			}
+		})
+
+		t.Run("filter output", func(t *testing.T) {
+			agent, err := newEventReplayAgent(agentEvents, nil)
+			if err != nil {
+				t.Fatalf("newEventReplayAgent() error = %v", err)
+			}
+
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
+				GenAIPartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (a2a.Part, error) {
+					return nil, nil
+				},
+			})
+
+			queue := &testQueue{Queue: newInMemoryQueue(t)}
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			if err := executor.Execute(t.Context(), reqCtx, queue); err != nil {
+				t.Fatalf("executor.Execute() error = %v", err)
+			}
+
+			for _, e := range queue.events {
+				if ae, ok := e.(*a2a.TaskArtifactUpdateEvent); ok {
+					for _, p := range ae.Artifact.Parts {
+						if tp, ok := p.(a2a.TextPart); ok && tp.Text == "world" {
+							t.Errorf("found 'world' but expected it to be filtered")
+						}
+					}
+				}
+			}
+		})
+	})
 }

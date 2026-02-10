@@ -38,6 +38,8 @@ type ExecutorContext interface {
 	AgentName() string
 	// ReadonlyState provides a view of the current session state.
 	ReadonlyState() session.ReadonlyState
+	// Events provides a readonly view of the current session events.
+	Events() session.Events
 	// UserContent is a converted A2A message which is passed to runner.Run.
 	UserContent() *genai.Content
 	// RequestContext containts information about the original A2A Request, the current task and related tasks.
@@ -47,15 +49,15 @@ type ExecutorContext interface {
 type executorContext struct {
 	context.Context
 	meta        invocationMeta
-	session     session.ReadonlyState
+	plugin      *executorPlugin
 	userContent *genai.Content
 }
 
-func newExecutorContext(ctx context.Context, meta invocationMeta, session session.ReadonlyState, userContent *genai.Content) ExecutorContext {
+func newExecutorContext(ctx context.Context, meta invocationMeta, plugin *executorPlugin, userContent *genai.Content) ExecutorContext {
 	return &executorContext{
 		Context:     ctx,
 		meta:        meta,
-		session:     session,
+		plugin:      plugin,
 		userContent: userContent,
 	}
 }
@@ -73,7 +75,19 @@ func (ec *executorContext) AgentName() string {
 }
 
 func (ec *executorContext) ReadonlyState() session.ReadonlyState {
-	return ec.session
+	session := ec.plugin.invocationSession
+	if session == nil {
+		return emptySessionState{}
+	}
+	return session.State()
+}
+
+func (ec *executorContext) Events() session.Events {
+	session := ec.plugin.invocationSession
+	if session == nil {
+		return emptySessionEvents{}
+	}
+	return session.Events()
 }
 
 func (ec *executorContext) RequestContext() *a2asrv.RequestContext {
@@ -92,4 +106,18 @@ func (emptySessionState) Get(string) (any, error) {
 
 func (emptySessionState) All() iter.Seq2[string, any] {
 	return func(yield func(string, any) bool) {}
+}
+
+type emptySessionEvents struct{}
+
+func (emptySessionEvents) At(i int) *session.Event {
+	return nil
+}
+
+func (emptySessionEvents) All() iter.Seq[*session.Event] {
+	return func(yield func(*session.Event) bool) {}
+}
+
+func (emptySessionEvents) Len() int {
+	return 0
 }

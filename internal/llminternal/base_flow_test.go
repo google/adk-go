@@ -395,7 +395,7 @@ func TestCallTool(t *testing.T) {
 				OnToolErrorCallbacks: tc.onToolErrorCallbacks,
 			}
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-			got := f.callTool(toolinternal.NewToolContext(ctx, "", nil), tc.tool, tc.args)
+			got := f.callTool(toolinternal.NewToolContext(ctx, "", nil, nil), tc.tool, tc.args)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
 			}

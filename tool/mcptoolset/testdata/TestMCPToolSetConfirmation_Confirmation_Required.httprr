@@ -1,0 +1,57 @@
+httprr trace v1
+925 1424
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 693
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"what is the weather in Lisbon?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Fri, 30 Jan 2026 13:14:18 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=610
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "get_weather",
+              "args": {
+                "city": "Lisbon"
+              }
+            },
+            "thoughtSignature": "CoMCAXLI2nyLnjjZnSRJtbyYL2Zf11JqTWjrXZ4ncDgvk8IHmd+YSKjHfwoQLwXjdQ2f7hAiVeB0f0ZYYyl3sqoqlomwHTva2GlA9KoqUgXorG29jD0C0YAWJ5AwC9S4IxdqCaR9oKTfisNv2ApYqymg2WgZOx8IPP2SNZJhxi8ejiug29BEgC8hsKJM7ZOYtba7nDpgv2uAqF77sgsx5G8pnmmFLaZcJWs7KZNY/LHLveLTaAOb2xu+3EeSyTKBrtkIsdF6Iq16BMlzco4Uj7O9srRDoOASPEW9k1pTYsA5E12unP22SqqOmsoksb9AnOi6Zl01BTf6c40rfMYjubmGkXfO1w=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 113,
+    "candidatesTokenCount": 16,
+    "totalTokenCount": 187,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 113
+      }
+    ],
+    "thoughtsTokenCount": 58
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "qq58adq2E8Ttxs0Py437kAI"
+}

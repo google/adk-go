@@ -27,8 +27,9 @@ import (
 )
 
 type eventProcessor struct {
-	reqCtx *a2asrv.RequestContext
-	meta   invocationMeta
+	reqCtx        *a2asrv.RequestContext
+	meta          invocationMeta
+	partConverter GenAIPartConverter
 
 	// terminalActions is used to keep track of escalate and agent transfer actions on processed events.
 	// It is then gets passed to caller through with metadata of a terminal event.
@@ -47,15 +48,20 @@ type eventProcessor struct {
 	inputRequiredProcessor *inputRequiredProcessor
 }
 
-func newEventProcessor(reqCtx *a2asrv.RequestContext, meta invocationMeta) *eventProcessor {
+func newEventProcessor(
+	reqCtx *a2asrv.RequestContext,
+	meta invocationMeta,
+	converter GenAIPartConverter,
+) *eventProcessor {
 	return &eventProcessor{
 		inputRequiredProcessor: newInputRequiredProcessor(reqCtx),
+		partConverter:          converter,
 		reqCtx:                 reqCtx,
 		meta:                   meta,
 	}
 }
 
-func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.TaskArtifactUpdateEvent, error) {
+func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2a.TaskArtifactUpdateEvent, error) {
 	if event == nil {
 		return nil, nil
 	}
@@ -78,17 +84,16 @@ func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.
 		}
 	}
 
-	if resp.Content == nil || len(resp.Content.Parts) == 0 {
-		return nil, nil
-	}
-
 	if err := p.inputRequiredProcessor.process(event); err != nil {
 		return nil, fmt.Errorf("input required processing failed: %w", err)
 	}
 
-	parts, err := ToA2AParts(resp.Content.Parts, event.LongRunningToolIDs)
+	parts, err := p.convertParts(ctx, event)
 	if err != nil {
 		return nil, err
+	}
+	if len(parts) == 0 {
+		return nil, nil
 	}
 
 	if event.Partial {
@@ -152,6 +157,28 @@ func (p *eventProcessor) updateTerminalActions(event *session.Event) {
 	if event.Actions.TransferToAgent != "" {
 		p.terminalActions.TransferToAgent = event.Actions.TransferToAgent
 	}
+}
+
+func (p *eventProcessor) convertParts(ctx context.Context, event *session.Event) ([]a2a.Part, error) {
+	if event.Content == nil || len(event.Content.Parts) == 0 {
+		return nil, nil
+	}
+	parts := event.Content.Parts
+	if p.partConverter == nil {
+		return ToA2AParts(parts, event.LongRunningToolIDs)
+	}
+	converted := make([]a2a.Part, 0, len(parts))
+	for _, part := range parts {
+		cp, err := p.partConverter(ctx, event, part)
+		if err != nil {
+			return nil, err
+		}
+		if cp == nil {
+			continue
+		}
+		converted = append(converted, cp)
+	}
+	return converted, nil
 }
 
 func toTaskFailedUpdateEvent(task a2a.TaskInfoProvider, cause error, meta map[string]any) *a2a.TaskStatusUpdateEvent {

@@ -99,7 +99,7 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 	return createdSession, nil
 }
 
-func IsNotFoundError(err error) bool {
+func isNotFoundError(err error) bool {
 	// status.Code returns codes.Unknown if it's not a gRPC error,
 	// otherwise it returns the specific gRPC code.
 	return status.Code(err) == codes.NotFound
@@ -119,7 +119,7 @@ func (c *vertexAiClient) waitForOperation(ctx context.Context, appName, userId, 
 		ls, err := c.getSession(ctx, &session.GetRequest{AppName: appName, UserID: userId, SessionID: sessionID})
 		if err != nil {
 			// Basic retry on "not found" which might be due to propagation
-			if i < maxRetries-1 && IsNotFoundError(err) {
+			if i < maxRetries-1 && isNotFoundError(err) {
 				delay := time.Duration(i*i) * baseDelay
 				if delay > maxDelay {
 					delay = maxDelay
