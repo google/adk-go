@@ -15,6 +15,7 @@
 package llminternal_test
 
 import (
+	"bytes"
 	"iter"
 	"slices"
 	"strings"
@@ -243,6 +244,54 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 				t.Errorf("LLMRequest after contentsRequestProcessor mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestContentsRequestProcessor_PreservesThoughtSignature(t *testing.T) {
+	const agentName = "testAgent"
+	testModel := &testModel{}
+
+	sig := []byte("signature-bytes")
+	part := genai.NewPartFromFunctionCall("do_work", map[string]any{"a": "b"})
+	part.FunctionCall.ID = "call-1"
+	part.ThoughtSignature = append([]byte(nil), sig...)
+
+	events := []*session.Event{
+		{
+			Author: agentName,
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{part},
+				},
+			},
+		},
+	}
+
+	testAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:  agentName,
+		Model: testModel,
+	}))
+
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent: testAgent,
+		Session: &fakeSession{
+			events: events,
+		},
+	})
+
+	req := &model.LLMRequest{}
+	if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
+		t.Fatalf("ContentsRequestProcessor failed: %v", err)
+	}
+
+	if len(req.Contents) != 1 || len(req.Contents[0].Parts) != 1 {
+		t.Fatalf("unexpected contents length: got %d parts %d", len(req.Contents), len(req.Contents[0].Parts))
+	}
+
+	gotSig := req.Contents[0].Parts[0].ThoughtSignature
+	if !bytes.Equal(gotSig, sig) {
+		t.Fatalf("thought signature mismatch: got %v want %v", gotSig, sig)
 	}
 }
 
