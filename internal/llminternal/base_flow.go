@@ -540,8 +540,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		// Wrap function calls in anonymous func to limit the scope of the span.
 		func() {
 			sctx, span := telemetry.StartExecuteTool(ctx, telemetry.StartExecuteToolParams{
-				ToolName:        fnCall.Name,
-				ToolDescription: "", // TODO(#479): set tool description
+				ToolName: fnCall.Name,
 			})
 			defer span.End()
 			toolCallCtx := ctx.WithContext(sctx)

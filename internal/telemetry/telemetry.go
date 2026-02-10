@@ -110,7 +110,6 @@ func StartGenerateContent(ctx context.Context, params StartGenerateContentParams
 	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(
 		semconv.GenAIOperationNameGenerateContent,
 		semconv.GenAIRequestModel(modelName),
-		semconv.GenAIUsageInputTokens(123),
 	))
 	return spanCtx, span
 }
@@ -142,8 +141,6 @@ func AfterGenerateContent(span trace.Span, params AfterGenerateContentParams) {
 type StartExecuteToolParams struct {
 	// ToolName is the name of the tool being executed.
 	ToolName string
-	// ToolDescription is a brief description of the tool's functionality.
-	ToolDescription string
 }
 
 // StartExecuteTool starts a new semconv execute_tool span.
@@ -152,7 +149,6 @@ func StartExecuteTool(ctx context.Context, params StartExecuteToolParams) (conte
 	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("execute_tool %s", toolName), trace.WithAttributes(
 		semconv.GenAIOperationNameExecuteTool,
 		semconv.GenAIToolName(toolName),
-		semconv.GenAIToolDescription(params.ToolDescription),
 	))
 	return spanCtx, span
 }

@@ -285,7 +285,6 @@ func TestExecuteTool(t *testing.T) {
 			name: "Success",
 			startParams: StartExecuteToolParams{
 				ToolName:        "test-tool",
-				ToolDescription: "test-tool-desc",
 			},
 			afterParams: AfterExecuteToolParams{
 				Name:          "test-tool",
@@ -305,11 +304,10 @@ func TestExecuteTool(t *testing.T) {
 			name: "Error",
 			startParams: StartExecuteToolParams{
 				ToolName:        "test-tool",
-				ToolDescription: "test-tool-desc",
 			},
 			afterParams: AfterExecuteToolParams{
 				Name:        "test-tool",
-				Description: "test-description",
+				Description: "tool-description",
 				Error:       errTest,
 			},
 			wantName:   "execute_tool test-tool",
