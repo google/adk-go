@@ -55,14 +55,6 @@ func TestAPIServerSpanExporterExportSpans(t *testing.T) {
 		expectedEvent bool
 	}{
 		{
-			name:     "call_llm-with-event-id-saved",
-			spanName: "call_llm",
-			attributes: []attribute.KeyValue{
-				attribute.String("gcp.vertex.agent.event_id", "event-id"),
-			},
-			expectedEvent: true,
-		},
-		{
 			name:     "send_data-with-event-id-saved",
 			spanName: "send_data",
 			attributes: []attribute.KeyValue{
@@ -84,12 +76,6 @@ func TestAPIServerSpanExporterExportSpans(t *testing.T) {
 			attributes: []attribute.KeyValue{
 				attribute.String("gcp.vertex.agent.event_id", "event-id"),
 			},
-			expectedEvent: false,
-		},
-		{
-			name:          "call_llm-missing-event-id-ignored",
-			spanName:      "call_llm",
-			attributes:    []attribute.KeyValue{},
 			expectedEvent: false,
 		},
 	}

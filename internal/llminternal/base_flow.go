@@ -23,7 +23,6 @@ import (
 	"slices"
 	"strings"
 
-	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -147,11 +146,6 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		if ctx.Ended() {
 			return
 		}
-		callLLMCtx, callLLMSpan := telemetry.StartTrace(ctx, "call_llm")
-		ctx = ctx.WithContext(callLLMCtx)
-		yield, endSpan := telemetry.WrapYield(callLLMSpan, yield, func(span trace.Span, ev *session.Event, err error) {
-		})
-		defer endSpan()
 		// Create event to pass to callback state delta
 		stateDelta := make(map[string]any)
 		// Calls the LLM.
@@ -185,7 +179,6 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 
 			// Build the event and yield.
 			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
-			telemetry.TraceLLMCall(callLLMSpan, ctx.Session().ID(), req, modelResponseEvent)
 			if !yield(modelResponseEvent, nil) {
 				return
 			}

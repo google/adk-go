@@ -28,7 +28,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/internal/version"
 	"google.golang.org/adk/model"
@@ -243,75 +242,10 @@ func TraceMergedToolCallsResult(span trace.Span, fnResponseEvent *session.Event,
 	span.SetAttributes(attributes...)
 }
 
-// TraceLLMCall fills the call_llm event details.
-func TraceLLMCall(span trace.Span, sessionID string, llmRequest *model.LLMRequest, event *session.Event) {
-	attributes := []attribute.KeyValue{
-		attribute.String("gen_ai.system", systemName),
-		attribute.String("gen_ai.request.model", llmRequest.Model),
-		attribute.String("gcp.vertex.agent.invocation_id", event.InvocationID),
-		attribute.String("gcp.vertex.agent.session_id", sessionID),
-		attribute.String("gen_ai.conversation.id", sessionID),
-		gcpVertexAgentEventID.String(event.ID),
-		attribute.String("gcp.vertex.agent.llm_request", safeSerialize(llmRequestToTrace(llmRequest))),
-		attribute.String("gcp.vertex.agent.llm_response", safeSerialize(event.LLMResponse)),
-	}
-
-	if llmRequest.Config.TopP != nil {
-		attributes = append(attributes, attribute.Float64("gen_ai.request.top_p", float64(*llmRequest.Config.TopP)))
-	}
-
-	if llmRequest.Config.MaxOutputTokens != 0 {
-		attributes = append(attributes, attribute.Int("gen_ai.request.max_tokens", int(llmRequest.Config.MaxOutputTokens)))
-	}
-	if event.FinishReason != "" {
-		attributes = append(attributes, attribute.String("gen_ai.response.finish_reason", string(event.FinishReason)))
-	}
-	if event.UsageMetadata != nil {
-		if event.UsageMetadata.PromptTokenCount > 0 {
-			attributes = append(attributes, attribute.Int("gen_ai.response.prompt_token_count", int(event.UsageMetadata.PromptTokenCount)))
-		}
-		if event.UsageMetadata.CandidatesTokenCount > 0 {
-			attributes = append(attributes, attribute.Int("gen_ai.response.candidates_token_count", int(event.UsageMetadata.CandidatesTokenCount)))
-		}
-		if event.UsageMetadata.CachedContentTokenCount > 0 {
-			attributes = append(attributes, attribute.Int("gen_ai.response.cached_content_token_count", int(event.UsageMetadata.CachedContentTokenCount)))
-		}
-		if event.UsageMetadata.TotalTokenCount > 0 {
-			attributes = append(attributes, attribute.Int("gen_ai.response.total_token_count", int(event.UsageMetadata.TotalTokenCount)))
-		}
-	}
-
-	span.SetAttributes(attributes...)
-}
-
 func safeSerialize(obj any) string {
 	dump, err := json.Marshal(obj)
 	if err != nil {
 		return "<not serializable>"
 	}
 	return string(dump)
-}
-
-func llmRequestToTrace(llmRequest *model.LLMRequest) map[string]any {
-	result := map[string]any{
-		"config":  llmRequest.Config,
-		"model":   llmRequest.Model,
-		"content": []*genai.Content{},
-	}
-	for _, content := range llmRequest.Contents {
-		parts := []*genai.Part{}
-		// filter out InlineData part
-		for _, part := range content.Parts {
-			if part.InlineData != nil {
-				continue
-			}
-			parts = append(parts, part)
-		}
-		filteredContent := &genai.Content{
-			Role:  content.Role,
-			Parts: parts,
-		}
-		result["content"] = append(result["content"].([]*genai.Content), filteredContent)
-	}
-	return result
 }
