@@ -64,6 +64,11 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2a
 		return nil
 	}
 
+	if update, ok := a2aEvent.(*a2a.TaskArtifactUpdateEvent); ok && !update.Append {
+		p.aggregatedText = ""
+		p.aggregatedThoughts = ""
+	}
+
 	updatedAggregatedBlock := false
 	if event.Partial {
 		for _, part := range event.Content.Parts {
