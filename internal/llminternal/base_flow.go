@@ -316,7 +316,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
 
-		for resp, err := range f.generateContent(ctx, req, useStream) {
+		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
 				cbResp, cbErr := f.runOnModelErrorCallbacks(ctx, req, stateDelta, err)
 				if cbErr != nil {
@@ -362,20 +362,30 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 
 // generateContent wraps the LLM call with tracing.
 // The generate_contenxt span should cover only calls to LLM. Plugins and callbacks should be outside of this span.
-func (f *Flow) generateContent(ctx agent.InvocationContext, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
+func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
-			ModelName: f.Model.Name(),
+			ModelName: m.Name(),
 		})
 		ctx = ctx.WithContext(spanCtx)
-		yield, endSpan := telemetry.WrapYield(span, yield, func(span trace.Span, resp *model.LLMResponse, err error) {
+		var lastResponse *model.LLMResponse
+		var lastErr error
+		endSpanAndTrackResult := func() {
 			telemetry.TraceGenerateContentResult(span, telemetry.TraceGenerateContentResultParams{
-				Response: resp,
-				Error:    err,
+				Response: lastResponse,
+				Error:    lastErr,
 			})
-		})
-		defer endSpan()
-		for resp, err := range f.Model.GenerateContent(ctx, req, useStream) {
+			span.End()
+		}
+		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
+		defer endSpanAndTrackResult()
+		for resp, err := range m.GenerateContent(ctx, req, useStream) {
+			lastResponse = resp
+			lastErr = err
+			if err != nil || !resp.Partial {
+				// Complete the span immediately to avoid capturing the upstream yield processing time.
+				endSpanAndTrackResult()
+			}
 			if !yield(resp, err) {
 				return
 			}
