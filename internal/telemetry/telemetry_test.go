@@ -105,10 +105,21 @@ func TestWrapYield_MultipleCalls(t *testing.T) {
 
 var errTest = errors.New("test error")
 
+type mockAgent struct{}
+
+func (a *mockAgent) Name() string {
+	return "test-agent"
+}
+
+func (a *mockAgent) Description() string {
+	return "test-agent-description"
+}
+
 func TestInvokeAgent(t *testing.T) {
+	sessionID := "test-session"
+	agent := &mockAgent{}
 	tests := []struct {
 		name         string
-		startParams  StartInvokeAgentSpanParams
 		resultParams TraceAgentResultParams
 		wantName     string
 		wantStatus   codes.Code
@@ -116,11 +127,6 @@ func TestInvokeAgent(t *testing.T) {
 	}{
 		{
 			name: "Success",
-			startParams: StartInvokeAgentSpanParams{
-				AgentName:        "test-agent",
-				AgentDescription: "test-description",
-				SessionID:        "test-session",
-			},
 			resultParams: TraceAgentResultParams{
 				ResponseEvent: session.NewEvent("test-invocation-id"),
 			},
@@ -129,17 +135,12 @@ func TestInvokeAgent(t *testing.T) {
 			wantAttrs: map[attribute.Key]string{
 				semconv.GenAIOperationNameKey:    "invoke_agent",
 				semconv.GenAIAgentNameKey:        "test-agent",
-				semconv.GenAIAgentDescriptionKey: "test-description",
+				semconv.GenAIAgentDescriptionKey: "test-agent-description",
 				semconv.GenAIConversationIDKey:   "test-session",
 			},
 		},
 		{
 			name: "Error",
-			startParams: StartInvokeAgentSpanParams{
-				AgentName:        "test-agent",
-				AgentDescription: "test-description",
-				SessionID:        "test-session",
-			},
 			resultParams: TraceAgentResultParams{
 				Error: errTest,
 			},
@@ -153,7 +154,7 @@ func TestInvokeAgent(t *testing.T) {
 			exporter := setupTestTracer(t)
 			ctx := t.Context()
 
-			_, span := StartInvokeAgentSpan(ctx, tc.startParams)
+			_, span := StartInvokeAgentSpan(ctx, agent, sessionID)
 			TraceAgentResult(span, tc.resultParams)
 			span.End()
 

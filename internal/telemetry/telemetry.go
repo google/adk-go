@@ -55,25 +55,20 @@ var tracer trace.Tracer = otel.GetTracerProvider().Tracer(
 	trace.WithSchemaURL(semconv.SchemaURL),
 )
 
-// StartInvokeAgentSpanParams contains parameters for [StartInvokeAgentSpan].
-type StartInvokeAgentSpanParams struct {
-	// AgentName is the name of the agent being invoked.
-	AgentName string
-	// AgentDescription is a brief description of the agent's purpose.
-	AgentDescription string
-	// SessionID is the unique identifier for the current session.
-	SessionID string
+type agent interface {
+	Name() string
+	Description() string
 }
 
 // StartInvokeAgentSpan starts a new semconv invoke_agent span.
 // It returns a new context with the span and the span itself.
-func StartInvokeAgentSpan(ctx context.Context, params StartInvokeAgentSpanParams) (context.Context, trace.Span) {
-	agentName := params.AgentName
+func StartInvokeAgentSpan(ctx context.Context, agent agent, sessionID string) (context.Context, trace.Span) {
+	agentName := agent.Name()
 	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("invoke_agent %s", agentName), trace.WithAttributes(
 		semconv.GenAIOperationNameInvokeAgent,
-		semconv.GenAIAgentDescription(params.AgentDescription),
+		semconv.GenAIAgentDescription(agent.Description()),
 		semconv.GenAIAgentName(agentName),
-		semconv.GenAIConversationID(params.SessionID),
+		semconv.GenAIConversationID(sessionID),
 	))
 
 	return spanCtx, span
