@@ -370,12 +370,18 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		ctx = ctx.WithContext(spanCtx)
 		var lastResponse *model.LLMResponse
 		var lastErr error
+		spanEnded := false
 		endSpanAndTrackResult := func() {
+			if spanEnded {
+				// Return to avoid spamming the logs with "span already ended" errors.
+				return
+			}
 			telemetry.TraceGenerateContentResult(span, telemetry.TraceGenerateContentResultParams{
 				Response: lastResponse,
 				Error:    lastErr,
 			})
 			span.End()
+			spanEnded = true
 		}
 		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
 		defer endSpanAndTrackResult()
