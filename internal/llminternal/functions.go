@@ -17,6 +17,7 @@ package llminternal
 import (
 	"time"
 
+	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -84,6 +85,7 @@ func generateRequestConfirmationEvent(
 	utils.PopulateClientFunctionCallID(content)
 
 	return &session.Event{
+		ID:           uuid.NewString(),
 		InvocationID: invocationContext.InvocationID(),
 		Author:       invocationContext.Agent().Name(),
 		Branch:       invocationContext.Branch(),
