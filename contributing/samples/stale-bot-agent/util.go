@@ -1,3 +1,17 @@
+//    Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package main
 
 import (
@@ -76,7 +90,9 @@ func doRequest(req *http.Request) (*http.Response, error) {
 		}
 
 		if resp != nil {
-			resp.Body.Close()
+			if cerr := resp.Body.Close(); cerr != nil {
+				log.Printf("error closing response body: %v", cerr)
+			}
 		}
 
 		if attempt == maxRetries {
@@ -122,7 +138,11 @@ func GetRequest(rawURL string, params map[string]any) (any, error) {
 		log.Printf("GET request failed for %s: %v", rawURL, err)
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			log.Printf("error closing response body: %v", cerr)
+		}
+	}()
 
 	return decodeJSON(resp)
 }
@@ -130,7 +150,10 @@ func GetRequest(rawURL string, params map[string]any) (any, error) {
 func PostRequest(url string, payload any) (any, error) {
 	incrementAPICallCount()
 
-	body, _ := json.Marshal(payload)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal POST request payload: %w", err)
+	}
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, err
@@ -141,7 +164,11 @@ func PostRequest(url string, payload any) (any, error) {
 		log.Printf("POST request failed for %s: %v", url, err)
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("error closing response body: %v", err)
+		}
+	}()
 
 	return decodeJSON(resp)
 }
@@ -149,7 +176,10 @@ func PostRequest(url string, payload any) (any, error) {
 func PatchRequest(url string, payload any) (any, error) {
 	incrementAPICallCount()
 
-	body, _ := json.Marshal(payload)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal PATCH request payload: %w", err)
+	}
 	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, err
@@ -160,7 +190,11 @@ func PatchRequest(url string, payload any) (any, error) {
 		log.Printf("PATCH request failed for %s: %v", url, err)
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("error closing response body: %v", err)
+		}
+	}()
 
 	return decodeJSON(resp)
 }
@@ -178,7 +212,11 @@ func DeleteRequest(url string) (any, error) {
 		log.Printf("DELETE request failed for %s: %v", url, err)
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Printf("error closing response body: %v", err)
+		}
+	}()
 
 	if resp.StatusCode == 204 {
 		return map[string]any{

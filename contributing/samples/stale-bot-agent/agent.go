@@ -1,3 +1,17 @@
+//    Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package main
 
 import (
@@ -11,9 +25,7 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-var (
-	maintainersCache []string
-)
+var maintainersCache []string
 
 var BOT_ALERT_SIGNATURE = "**Notification:** The author has updated the issue description"
 
@@ -63,7 +75,7 @@ func getCachedMaintainers() ([]string, error) {
 	// Uses your util-layer retry + backoff logic
 	data, err := GetRequest(url, params)
 	if err != nil {
-		log.Printf("FATAL: Failed to verify repository maintainers. Error: %v", err)
+		log.Printf("ERROR: Failed to verify repository maintainers. Error: %v", err)
 		return nil, fmt.Errorf("maintainer verification failed: %w", err)
 	}
 
@@ -170,9 +182,12 @@ query($owner: String!, $name: String!, $number: Int!, $commentLimit: Int!, $time
 	}
 
 	if errs, ok := resp["errors"]; ok {
-		errList := errs.([]any)
-		firstErr := errList[0].(map[string]any)
-		return nil, fmt.Errorf("GraphQL Error: %v", firstErr["message"])
+		if errList, ok := errs.([]any); ok && len(errList) > 0 {
+			if firstErr, ok := errList[0].(map[string]any); ok {
+				return nil, fmt.Errorf("GraphQL Error: %v", firstErr["message"])
+			}
+		}
+		return nil, fmt.Errorf("GraphQL Error: unknown format")
 	}
 
 	data := resp["data"].(map[string]any)
@@ -180,7 +195,7 @@ query($owner: String!, $name: String!, $number: Int!, $commentLimit: Int!, $time
 	issue := repo["issue"]
 
 	if issue == nil {
-		return nil, fmt.Errorf("Issue #%d not found.", itemNumber)
+		return nil, fmt.Errorf("issue #%d not found", itemNumber)
 	}
 
 	return issue.(map[string]any), nil
@@ -385,13 +400,9 @@ func replayHistoryToFindState(history []TimelineEvent, maintainers []string, iss
 }
 
 // Helper to check if actor is in maintainers list
-func isMaintainer(actor string, maintainers []string) bool {
-	for _, m := range maintainers {
-		if actor == m {
-			return true
-		}
-	}
-	return false
+func isMaintainer(actor string, maintainers map[string]bool) bool {
+	_, ok := maintainers[actor]
+	return ok
 }
 
 func formatDays(hours float64) string {

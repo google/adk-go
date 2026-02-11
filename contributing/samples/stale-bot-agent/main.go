@@ -1,3 +1,17 @@
+//    Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package main
 
 import (
@@ -29,9 +43,11 @@ const (
 	UserID  = "stale_bot_user"
 )
 
-var rootAgent agent.Agent
-var PROMPT_TEMPLATE string
-var geminiModel = getEnv("GEMINI_MODEL", "gemini-2.5-pro")
+var (
+	rootAgent       agent.Agent
+	PROMPT_TEMPLATE string
+	geminiModel     = getEnv("GEMINI_MODEL", "gemini-2.5-pro")
+)
 
 // processSingleResult holds the return values for processSingleIssue
 type processSingleResult struct {
@@ -198,7 +214,7 @@ func main() {
 	instruction := formatPrompt(PROMPT_TEMPLATE, map[string]string{
 		"OWNER":                       Owner,
 		"REPO":                        Repo,
-		"STALE_LABEL_NAME":            STALE_LABEL_NAME,
+		"STALE_LABEL_NAME":            StaleLabelName,
 		"REQUEST_CLARIFICATION_LABEL": RequestClarificationLabel,
 		"stale_threshold_days":        fmt.Sprintf("%g", float64(STALE_HOURS_THRESHOLD)/24.0),
 		"close_threshold_days":        fmt.Sprintf("%g", float64(CLOSE_HOURS_AFTER_STALE_THRESHOLD)/24.0),
@@ -212,6 +228,9 @@ func main() {
 		Instruction: instruction,
 		Tools:       toolList,
 	})
+	if err != nil {
+		log.Fatalf("failed to create root agent: %v", err)
+	}
 
 	ResetAPICallCount()
 	filterDays := STALE_HOURS_THRESHOLD / 24.0

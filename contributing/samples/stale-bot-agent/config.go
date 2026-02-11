@@ -1,3 +1,17 @@
+//    Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package main
 
 import (
@@ -14,7 +28,7 @@ var (
 	Repo  string
 
 	// Labels
-	STALE_LABEL_NAME          = "stale"
+	StaleLabelName            = "stale"
 	RequestClarificationLabel = "request clarification"
 
 	// Thresholds (hours)
@@ -34,7 +48,6 @@ var (
 )
 
 func InitConfig() {
-
 	GitHubToken = os.Getenv("GITHUB_TOKEN")
 	log.Printf("GITHUB_TOKEN length: %d", len(GitHubToken))
 	if GitHubToken == "" {
@@ -60,9 +73,7 @@ func InitConfig() {
 	SleepBetweenChunks = getEnvFloat("SLEEP_BETWEEN_CHUNKS", 1.5)
 
 	// Sanity log
-	log.Printf(
-		"Config loaded → repo=%s/%s stale=%.2fh close=%.2fh", Owner, Repo, STALE_HOURS_THRESHOLD, CLOSE_HOURS_AFTER_STALE_THRESHOLD,
-	)
+	log.Printf("Config loaded → repo=%s/%s stale=%.2fh close=%.2fh", Owner, Repo, STALE_HOURS_THRESHOLD, CLOSE_HOURS_AFTER_STALE_THRESHOLD)
 }
 
 func getEnv(key, fallback string) string {
