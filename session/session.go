@@ -157,6 +157,10 @@ type EventActions struct {
 	TransferToAgent string
 	// The agent is escalating to a higher level agent.
 	Escalate bool
+	// If true, signals that the current loop should exit.
+	// Used by the exit_loop tool to break out of a LoopAgent without
+	// propagating to parent agents (unlike Escalate).
+	ExitLoop bool
 }
 
 // Prefixes for defining session's state scopes
