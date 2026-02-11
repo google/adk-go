@@ -309,6 +309,8 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
 
+		// Log request before calling the model.
+		telemetry.LogRequest(ctx, req)
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
 				cbResp, cbErr := f.runOnModelErrorCallbacks(ctx, req, stateDelta, err)
@@ -326,6 +328,10 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			// Function call ID is optional in genai API and some models do not use the field.
 			// Set it in case after model callbacks use it.
 			utils.PopulateClientFunctionCallID(resp.Content)
+			if !resp.Partial {
+				// Log the response after populating function call id.
+				telemetry.LogResponse(ctx, resp, err)
+			}
 			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp, stateDelta, err)
 			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
 			if callbackErr != nil {
@@ -354,7 +360,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 }
 
 // generateContent wraps the LLM call with tracing.
-// The generate_contenxt span should cover only calls to LLM. Plugins and callbacks should be outside of this span.
+// The generate_content span should cover only calls to LLM. Plugins and callbacks should be outside of this span.
 func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{

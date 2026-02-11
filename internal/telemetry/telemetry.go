@@ -14,7 +14,7 @@
 
 // Package telemetry implements telemetry for ADK.
 //
-// WARNING: telemetry provided by ADK (internaltelemetry package) may change (e.g. attributes and their names)
+// WARNING: telemetry provided by ADK (internal/telemetry package) may change (e.g. attributes and their names)
 // because we're in process to standardize and unify telemetry across all ADKs.
 package telemetry
 
