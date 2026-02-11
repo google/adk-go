@@ -40,28 +40,12 @@ const (
 
 	executeToolName = "execute_tool"
 	mergeToolName   = "(merged tools)"
-
-	// TODO: remove together with CallLLM span.
-	genAiSystemName           = "gen_ai.system"
-	genAiRequestModelName     = "gen_ai.request.model"
-	genAiRequestMaxTokens     = "gen_ai.request.max_tokens"
-	genAiResponseFinishReason = "gen_ai.response.finish_reason"
-	genAiConversationID       = "gen_ai.conversation.id"
 )
 
 var (
-	genAiResponsePromptTokenCount        = attribute.Key("gen_ai.response.prompt_token_count")
-	genAiResponseCandidatesTokenCount    = attribute.Key("gen_ai.response.candidates_token_count")
-	genAiResponseCachedContentTokenCount = attribute.Key("gen_ai.response.cached_content_token_count")
-	genAiResponseTotalTokenCount         = attribute.Key("gen_ai.response.total_token_count")
-
-	gcpVertexAgentLLMRequestName   = attribute.Key("gcp.vertex.agent.llm_request")
 	gcpVertexAgentToolCallArgsName = attribute.Key("gcp.vertex.agent.tool_call_args")
 	gcpVertexAgentEventID          = attribute.Key("gcp.vertex.agent.event_id")
 	gcpVertexAgentToolResponseName = attribute.Key("gcp.vertex.agent.tool_response")
-	gcpVertexAgentLLMResponseName  = attribute.Key("gcp.vertex.agent.llm_response")
-	gcpVertexAgentInvocationID     = attribute.Key("gcp.vertex.agent.invocation_id")
-	gcpVertexAgentSessionID        = attribute.Key("gcp.vertex.agent.session_id")
 )
 
 // tracer is the tracer instance for ADK go.
@@ -176,12 +160,6 @@ func TraceToolResult(span trace.Span, params TraceToolResultParams) {
 	attributes := []attribute.KeyValue{
 		semconv.GenAIOperationNameKey.String(executeToolName),
 		semconv.GenAIToolDescriptionKey.String(params.Description),
-		// TODO: add tool type
-
-		// Setting empty llm request and response (as UI expect these) while not
-		// applicable for tool_response.
-		gcpVertexAgentLLMRequestName.String("{}"),
-		gcpVertexAgentLLMResponseName.String("{}"),
 	}
 
 	toolCallID := "<not specified>"
@@ -261,10 +239,6 @@ func TraceMergedToolCallsResult(span trace.Span, fnResponseEvent *session.Event,
 		semconv.GenAIOperationNameKey.String(executeToolName),
 		semconv.GenAIToolNameKey.String(mergeToolName),
 		semconv.GenAIToolDescriptionKey.String(mergeToolName),
-		// Setting empty llm request and response (as UI expect these) while not
-		// applicable for tool_response.
-		gcpVertexAgentLLMRequestName.String("{}"),
-		gcpVertexAgentLLMResponseName.String("{}"),
 		gcpVertexAgentToolCallArgsName.String("N/A"),
 		gcpVertexAgentToolResponseName.String(safeSerialize(fnResponseEvent)),
 	}
@@ -277,14 +251,14 @@ func TraceMergedToolCallsResult(span trace.Span, fnResponseEvent *session.Event,
 // TraceLLMCall fills the call_llm event details.
 func TraceLLMCall(span trace.Span, sessionID string, llmRequest *model.LLMRequest, event *session.Event) {
 	attributes := []attribute.KeyValue{
-		attribute.String(genAiSystemName, systemName),
-		attribute.String(genAiRequestModelName, llmRequest.Model),
-		gcpVertexAgentInvocationID.String(event.InvocationID),
-		gcpVertexAgentSessionID.String(sessionID),
-		attribute.String(genAiConversationID, sessionID),
+		attribute.String("gen_ai.system", systemName),
+		attribute.String("gen_ai.request.model", llmRequest.Model),
+		attribute.String("gcp.vertex.agent.invocation_id", event.InvocationID),
+		attribute.String("gcp.vertex.agent.session_id", sessionID),
+		attribute.String("gen_ai.conversation.id", sessionID),
 		gcpVertexAgentEventID.String(event.ID),
-		gcpVertexAgentLLMRequestName.String(safeSerialize(llmRequestToTrace(llmRequest))),
-		gcpVertexAgentLLMResponseName.String(safeSerialize(event.LLMResponse)),
+		attribute.String("gcp.vertex.agent.llm_request", safeSerialize(llmRequestToTrace(llmRequest))),
+		attribute.String("gcp.vertex.agent.llm_response", safeSerialize(event.LLMResponse)),
 	}
 
 	if llmRequest.Config.TopP != nil {
@@ -292,23 +266,23 @@ func TraceLLMCall(span trace.Span, sessionID string, llmRequest *model.LLMReques
 	}
 
 	if llmRequest.Config.MaxOutputTokens != 0 {
-		attributes = append(attributes, attribute.Int(genAiRequestMaxTokens, int(llmRequest.Config.MaxOutputTokens)))
+		attributes = append(attributes, attribute.Int("gen_ai.request.max_tokens", int(llmRequest.Config.MaxOutputTokens)))
 	}
 	if event.FinishReason != "" {
-		attributes = append(attributes, attribute.String(genAiResponseFinishReason, string(event.FinishReason)))
+		attributes = append(attributes, attribute.String("gen_ai.response.finish_reason", string(event.FinishReason)))
 	}
 	if event.UsageMetadata != nil {
 		if event.UsageMetadata.PromptTokenCount > 0 {
-			attributes = append(attributes, genAiResponsePromptTokenCount.Int(int(event.UsageMetadata.PromptTokenCount)))
+			attributes = append(attributes, attribute.Int("gen_ai.response.prompt_token_count", int(event.UsageMetadata.PromptTokenCount)))
 		}
 		if event.UsageMetadata.CandidatesTokenCount > 0 {
-			attributes = append(attributes, genAiResponseCandidatesTokenCount.Int(int(event.UsageMetadata.CandidatesTokenCount)))
+			attributes = append(attributes, attribute.Int("gen_ai.response.candidates_token_count", int(event.UsageMetadata.CandidatesTokenCount)))
 		}
 		if event.UsageMetadata.CachedContentTokenCount > 0 {
-			attributes = append(attributes, genAiResponseCachedContentTokenCount.Int(int(event.UsageMetadata.CachedContentTokenCount)))
+			attributes = append(attributes, attribute.Int("gen_ai.response.cached_content_token_count", int(event.UsageMetadata.CachedContentTokenCount)))
 		}
 		if event.UsageMetadata.TotalTokenCount > 0 {
-			attributes = append(attributes, genAiResponseTotalTokenCount.Int(int(event.UsageMetadata.TotalTokenCount)))
+			attributes = append(attributes, attribute.Int("gen_ai.response.total_token_count", int(event.UsageMetadata.TotalTokenCount)))
 		}
 	}
 
