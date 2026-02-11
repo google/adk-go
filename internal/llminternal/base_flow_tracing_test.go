@@ -111,8 +111,7 @@ func TestGenerateContentTracing(t *testing.T) {
 
 	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
 
-	for _, err := range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
-		_ = err
+	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
 	}
 
 	// Verify that there is only single span.
@@ -167,8 +166,7 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 
 	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
 
-	for _, err := range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
-		_ = err
+	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
 	}
 
 	// Verify that there is only single span.
@@ -227,8 +225,7 @@ func TestGenerateContentTracingError(t *testing.T) {
 
 	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
 
-	for _, err := range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
-		_ = err
+	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
 	}
 
 	// Verify that there is only single span.
