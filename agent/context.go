@@ -95,6 +95,10 @@ type InvocationContext interface {
 	EndInvocation()
 	// Ended returns whether the invocation has ended.
 	Ended() bool
+
+	// LiveRequestQueue returns the queue for sending live requests.
+	// It returns nil if the invocation is not in live mode.
+	LiveRequestQueue() *LiveRequestQueue
 }
 
 // ReadonlyContext provides read-only access to invocation context data.

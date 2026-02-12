@@ -14,6 +14,8 @@
 
 package agent
 
+import "google.golang.org/genai"
+
 // StreamingMode defines the streaming mode for agent execution.
 type StreamingMode string
 
@@ -23,6 +25,8 @@ const (
 	// StreamingModeSSE enables server-sent events streaming, one-way, where
 	// LLM response parts are streamed immediately as they are generated.
 	StreamingModeSSE StreamingMode = "sse"
+	// StreamingModeBidi enables bidirectional streaming.
+	StreamingModeBidi StreamingMode = "bidi"
 )
 
 // RunConfig controls runtime behavior of an agent.
@@ -32,4 +36,10 @@ type RunConfig struct {
 	// If true, ADK runner will save each part of the user input that is a blob
 	// (e.g., images, files) as an artifact.
 	SaveInputBlobsAsArtifacts bool
+	// Optional. The requested modalities of the response. Represents the set of
+	// modalities that the model can return. Defaults to AUDIO if not specified.
+	ResponseModalities []genai.Modality `json:"responseModalities,omitempty"`
+
+	// Optional. The speech generation configuration.
+	SpeechConfig *genai.SpeechConfig `json:"speechConfig,omitempty"`
 }

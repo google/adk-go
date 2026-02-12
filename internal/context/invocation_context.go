@@ -35,6 +35,8 @@ type InvocationContextParams struct {
 	UserContent   *genai.Content
 	RunConfig     *agent.RunConfig
 	EndInvocation bool
+
+	LiveRequestQueue *agent.LiveRequestQueue
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
@@ -90,4 +92,8 @@ func (c *InvocationContext) EndInvocation() {
 
 func (c *InvocationContext) Ended() bool {
 	return c.params.EndInvocation
+}
+
+func (c *InvocationContext) LiveRequestQueue() *agent.LiveRequestQueue {
+	return c.params.LiveRequestQueue
 }

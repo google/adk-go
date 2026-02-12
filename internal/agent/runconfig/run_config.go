@@ -14,7 +14,11 @@
 
 package runconfig
 
-import "context"
+import (
+	"context"
+
+	"google.golang.org/genai"
+)
 
 type StreamingMode string
 
@@ -25,7 +29,8 @@ const (
 )
 
 type RunConfig struct {
-	StreamingMode StreamingMode
+	StreamingMode     StreamingMode
+	LiveConnectConfig *genai.LiveConnectConfig
 }
 
 func ToContext(ctx context.Context, cfg *RunConfig) context.Context {

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"strings"
 
 	"google.golang.org/genai"
 
@@ -86,6 +87,118 @@ type Runner struct {
 	memoryService   memory.Service
 
 	parents parentmap.Map
+}
+
+func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
+			AppName:   r.appName,
+			UserID:    userID,
+			SessionID: sessionID,
+		})
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
+		storedSession := resp.Session
+
+		agentToRun, err := r.findAgentToRun(storedSession)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
+		liveConnectConfig := &genai.LiveConnectConfig{
+			ResponseModalities: cfg.ResponseModalities,
+			SpeechConfig:       cfg.SpeechConfig,
+			// SystemInstruction: , // TODO(imre): where do we get this from?
+		}
+
+		ctx = parentmap.ToContext(ctx, r.parents)
+		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
+			StreamingMode:     runconfig.StreamingMode(cfg.StreamingMode),
+			LiveConnectConfig: liveConnectConfig,
+		})
+
+		var artifacts agent.Artifacts
+		if r.artifactService != nil {
+			artifacts = &artifactinternal.Artifacts{
+				Service:   r.artifactService,
+				SessionID: storedSession.ID(),
+				AppName:   storedSession.AppName(),
+				UserID:    storedSession.UserID(),
+			}
+		}
+
+		var memoryImpl agent.Memory = nil
+		if r.memoryService != nil {
+			memoryImpl = &imemory.Memory{
+				Service:   r.memoryService,
+				SessionID: storedSession.ID(),
+				UserID:    storedSession.UserID(),
+				AppName:   storedSession.AppName(),
+			}
+		}
+
+		invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+			Artifacts:        artifacts,
+			Memory:           memoryImpl,
+			Session:          sessioninternal.NewMutableSession(r.sessionService, storedSession),
+			Agent:            agentToRun,
+			RunConfig:        &cfg,
+			LiveRequestQueue: liveRequestQueue,
+		})
+
+		for event, err := range agentToRun.RunLive(invCtx) {
+
+			if err != nil {
+				log.Println(err)
+				if !yield(event, err) {
+					return
+				}
+				continue
+			}
+
+			// TODO only commit non-partial event to a session service
+			// if !event.LLMResponse.Partial {
+			// 	if err := r.sessionService.AppendEvent(ctx, session, event); err != nil {
+			// 		yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+			// 		return
+			// 	}
+			// }
+
+			// if r.shouldAppendEvent(event, true) {
+			// 	if err := r.sessionService.AppendEvent(invCtx, storedSession, event); err != nil {
+			// 		yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+			// 		return
+			// 	}
+			// }
+
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (r *Runner) shouldAppendEvent(event *session.Event, isLiveCall bool) bool {
+	if isLiveCall && isLiveModelAudioEventWithInlineData(event) {
+		return false
+	}
+	return !event.Partial
+}
+
+func isLiveModelAudioEventWithInlineData(event *session.Event) bool {
+	if event.Content == nil {
+		return false
+	}
+	for _, part := range event.Content.Parts {
+		if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
+			return true
+		}
+	}
+	return false
 }
 
 // Run runs the agent for the given user input, yielding events from agents.

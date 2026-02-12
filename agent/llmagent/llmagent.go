@@ -87,6 +87,7 @@ func New(cfg Config) (agent.Agent, error) {
 		SubAgents:            cfg.SubAgents,
 		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		Run:                  a.run,
+		RunLive:              a.runLive,
 		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
 	})
 	if err != nil {
@@ -329,6 +330,38 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 	return func(yield func(*session.Event, error) bool) {
 		for ev, err := range f.Run(ctx) {
+			a.maybeSaveOutputToState(ev)
+			if !yield(ev, err) {
+				return
+			}
+		}
+	}
+}
+
+func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:        ctx.Artifacts(),
+		Memory:           ctx.Memory(),
+		Session:          ctx.Session(),
+		Branch:           ctx.Branch(),
+		Agent:            a,
+		UserContent:      ctx.UserContent(),
+		RunConfig:        ctx.RunConfig(),
+		LiveRequestQueue: ctx.LiveRequestQueue(),
+	})
+
+	f := &llminternal.Flow{
+		Model:                a.model,
+		RequestProcessors:    llminternal.DefaultRequestProcessors,
+		ResponseProcessors:   llminternal.DefaultResponseProcessors,
+		BeforeModelCallbacks: a.beforeModelCallbacks,
+		AfterModelCallbacks:  a.afterModelCallbacks,
+		BeforeToolCallbacks:  a.beforeToolCallbacks,
+		AfterToolCallbacks:   a.afterToolCallbacks,
+	}
+
+	return func(yield func(*session.Event, error) bool) {
+		for ev, err := range f.RunLive(ctx) {
 			a.maybeSaveOutputToState(ev)
 			if !yield(ev, err) {
 				return
