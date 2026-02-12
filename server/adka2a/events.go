@@ -74,15 +74,30 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 		if len(v.Artifact.Parts) == 0 {
 			return nil, nil
 		}
+		if IsPartial(v.Metadata) && v.LastChunk {
+			// Partial ADK artifact reset
+			return nil, nil
+		}
 		event, err := artifactToEvent(ctx, v.Artifact)
 		if err != nil {
 			return nil, fmt.Errorf("artifact update event conversion failed: %w", err)
+		}
+		if len(event.Content.Parts) == 0 {
+			return nil, nil
 		}
 		event.LongRunningToolIDs = getLongRunningToolIDs(v.Artifact.Parts, event.Content.Parts)
 		if err := processA2AMeta(v, event); err != nil {
 			return nil, fmt.Errorf("metadata processing failed: %w", err)
 		}
-		event.Partial = true
+		if partial, ok := v.Metadata[metadataPartialKey].(bool); ok {
+			event.Partial = partial
+		} else {
+			// If an event is not marked as adk_partial we assume that the remoteagent does not have its
+			// own aggregating logic and is using artifact updates to stream respons chunks. It is the responsibility
+			// of ToSessionEvent callers to aggregate those into a single artifact and emit it before final event.
+			// If the final event is a Task the aggregation should be discarded.
+			event.Partial = true
+		}
 		return event, nil
 
 	case *a2a.TaskStatusUpdateEvent:
@@ -93,6 +108,7 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 			return nil, nil
 		}
 		event, err := messageToEvent(ctx, v.Status.Message)
+		event.TurnComplete = false
 		if err != nil {
 			return nil, fmt.Errorf("custom metadata conversion failed: %w", err)
 		}
@@ -164,6 +180,7 @@ func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message) (*session.Eve
 	if err := processA2AMeta(msg, event); err != nil {
 		return nil, fmt.Errorf("metadata processing failed: %w", err)
 	}
+	event.TurnComplete = true
 	return event, nil
 }
 
@@ -217,11 +234,10 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 		longRunningToolIDs = append(longRunningToolIDs, lrtIDs...)
 	}
 
-	notTerminal := !task.Status.State.Terminal() && task.Status.State != a2a.TaskStateInputRequired
-	if len(parts) == 0 && notTerminal {
+	isTerminal := task.Status.State.Terminal() || task.Status.State == a2a.TaskStateInputRequired
+	if len(parts) == 0 && !isTerminal {
 		return nil, nil
 	}
-
 	if len(parts) > 0 {
 		event.Content = genai.NewContentFromParts(parts, genai.RoleModel)
 	}
@@ -231,7 +247,7 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 	if err := processA2AMeta(task, event); err != nil {
 		return nil, fmt.Errorf("metadata processing failed: %w", err)
 	}
-	event.Partial = notTerminal
+	event.TurnComplete = isTerminal
 	return event, nil
 }
 
@@ -257,6 +273,9 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 	}
 	if err := processA2AMeta(update, event); err != nil {
 		return nil, fmt.Errorf("metadata processing failed: %w", err)
+	}
+	if update.Status.Message != nil {
+		event.LongRunningToolIDs = getLongRunningToolIDs(update.Status.Message.Parts, parts)
 	}
 	event.TurnComplete = true
 	return event, nil

@@ -15,11 +15,13 @@
 package llminternal
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"iter"
 	"maps"
 	"slices"
+	"strings"
 
 	"google.golang.org/genai"
 
@@ -27,12 +29,14 @@ import (
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
 	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 var ErrModelNotConfigured = errors.New("model not configured; ensure Model is set in llmagent.Config")
@@ -41,25 +45,34 @@ type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRe
 
 type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
+type OnModelErrorCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+
 type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
 type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
+type OnToolErrorCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
+
 type Flow struct {
 	Model model.LLM
 
-	RequestProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest) error
-	ResponseProcessors   []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error
-	BeforeModelCallbacks []BeforeModelCallback
-	AfterModelCallbacks  []AfterModelCallback
-	BeforeToolCallbacks  []BeforeToolCallback
-	AfterToolCallbacks   []AfterToolCallback
+	Tools                 []tool.Tool
+	RequestProcessors     []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]
+	ResponseProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error
+	BeforeModelCallbacks  []BeforeModelCallback
+	AfterModelCallbacks   []AfterModelCallback
+	OnModelErrorCallbacks []OnModelErrorCallback
+	BeforeToolCallbacks   []BeforeToolCallback
+	AfterToolCallbacks    []AfterToolCallback
+	OnToolErrorCallbacks  []OnToolErrorCallback
 }
 
 var (
-	DefaultRequestProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest) error{
+	DefaultRequestProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{
 		basicRequestProcessor,
+		toolProcessor,
 		authPreprocessor,
+		RequestConfirmationRequestProcessor,
 		instructionsRequestProcessor,
 		identityRequestProcessor,
 		ContentsRequestProcessor,
@@ -69,6 +82,7 @@ var (
 		// Code execution should be after contentsRequestProcessor as it mutates the contents
 		// to optimize data files.
 		codeExecutionRequestProcessor,
+		outputSchemaRequestProcessor,
 		AgentTransferRequestProcessor,
 		removeDisplayNameIfExists,
 	}
@@ -118,14 +132,20 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		}
 
 		// Preprocess before calling the LLM.
-		if err := f.preprocess(ctx, req); err != nil {
-			yield(nil, err)
-			return
+		for ev, err := range f.preprocess(ctx, req) {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if ev != nil {
+				if !yield(ev, nil) {
+					return
+				}
+			}
 		}
 		if ctx.Ended() {
 			return
 		}
-		spans := telemetry.StartTrace(ctx, "call_llm")
 		// Create event to pass to callback state delta
 		stateDelta := make(map[string]any)
 		// Calls the LLM.
@@ -159,7 +179,6 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 
 			// Build the event and yield.
 			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
-			telemetry.TraceLLMCall(spans, ctx, req, modelResponseEvent)
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
@@ -167,7 +186,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 
 			// Handle function calls.
 
-			ev, err := f.handleFunctionCalls(ctx, tools, resp)
+			ev, err := f.handleFunctionCalls(ctx, tools, resp, nil)
 			if err != nil {
 				yield(nil, err)
 				return
@@ -176,10 +195,29 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				// nothing to yield/process.
 				continue
 			}
+
+			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
+			if toolConfirmationEvent != nil {
+				if !yield(toolConfirmationEvent, nil) {
+					return
+				}
+			}
+
 			if !yield(ev, nil) {
 				return
 			}
 
+			// If the model response is structured, yield it as a final model response event.
+			outputSchemaResponse, err := retrieveStructuredModelResponse(ev)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if outputSchemaResponse != "" {
+				if !yield(createFinalModelResponseEvent(ctx, outputSchemaResponse), nil) {
+					return
+				}
+			}
 			// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
 			// We are following python's execution flow which is
 			//   BaseLlmFlow._postprocess_async
@@ -202,31 +240,27 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 	}
 }
 
-func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	llmAgent, ok := ctx.Agent().(Agent)
-	if !ok {
-		return fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name())
-	}
-
-	// apply request processor functions to the request in the configured order.
-	for _, processor := range f.RequestProcessors {
-		if err := processor(ctx, req); err != nil {
-			return err
-		}
-	}
-
-	// run processors for tools.
-	tools := Reveal(llmAgent).Tools
-	for _, toolSet := range Reveal(llmAgent).Toolsets {
-		tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
-		if err != nil {
-			return fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err)
+func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		// apply request processor functions to the request in the configured order.
+		for _, processor := range f.RequestProcessors {
+			for ev, err := range processor(ctx, req, f) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if ev != nil {
+					yield(ev, nil)
+				}
+			}
 		}
 
-		tools = append(tools, tsTools...)
+		if f.Tools != nil {
+			if err := toolPreprocess(ctx, req, f.Tools); err != nil {
+				yield(nil, err)
+			}
+		}
 	}
-
-	return toolPreprocess(ctx, req, tools)
 }
 
 // toolPreprocess runs tool preprocess on the given request
@@ -239,7 +273,7 @@ func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []
 			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
 		}
 		// TODO: how to prevent mutation on this?
-		toolCtx := toolinternal.NewToolContext(ctx, "", &session.EventActions{})
+		toolCtx := toolinternal.NewToolContext(ctx, "", &session.EventActions{}, nil)
 		if err := requestProcessor.ProcessRequest(toolCtx, req); err != nil {
 			return err
 		}
@@ -249,6 +283,16 @@ func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []
 
 func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, stateDelta map[string]any) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
+		pluginManager := pluginManagerFromContext(ctx)
+		if pluginManager != nil {
+			cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta)
+			callbackResponse, callbackErr := pluginManager.RunBeforeModelCallback(cctx, req)
+			if callbackResponse != nil || callbackErr != nil {
+				yield(callbackResponse, callbackErr)
+				return
+			}
+		}
+
 		for _, callback := range f.BeforeModelCallbacks {
 			cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta)
 			callbackResponse, callbackErr := callback(cctx, req)
@@ -265,7 +309,23 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
 
-		for resp, err := range f.Model.GenerateContent(ctx, req, useStream) {
+		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
+			if err != nil {
+				cbResp, cbErr := f.runOnModelErrorCallbacks(ctx, req, stateDelta, err)
+				if cbErr != nil {
+					yield(nil, cbErr)
+					return
+				}
+				if cbResp == nil {
+					yield(nil, err)
+					return
+				}
+				resp = cbResp
+				err = cbErr
+			}
+			// Function call ID is optional in genai API and some models do not use the field.
+			// Set it in case after model callbacks use it.
+			utils.PopulateClientFunctionCallID(resp.Content)
 			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp, stateDelta, err)
 			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
 			if callbackErr != nil {
@@ -293,10 +353,80 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 	}
 }
 
+// generateContent wraps the LLM call with tracing.
+// The generate_contenxt span should cover only calls to LLM. Plugins and callbacks should be outside of this span.
+func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
+			ModelName: m.Name(),
+		})
+		ctx = ctx.WithContext(spanCtx)
+		var lastResponse *model.LLMResponse
+		var lastErr error
+		spanEnded := false
+		endSpanAndTrackResult := func() {
+			if spanEnded {
+				// Return to avoid spamming the logs with "span already ended" errors.
+				return
+			}
+			telemetry.TraceGenerateContentResult(span, telemetry.TraceGenerateContentResultParams{
+				Response: lastResponse,
+				Error:    lastErr,
+			})
+			span.End()
+			spanEnded = true
+		}
+		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
+		defer endSpanAndTrackResult()
+		for resp, err := range m.GenerateContent(ctx, req, useStream) {
+			lastResponse = resp
+			lastErr = err
+			if err != nil || !resp.Partial {
+				// Complete the span immediately to avoid capturing the upstream yield processing time.
+				endSpanAndTrackResult()
+			}
+			if !yield(resp, err) {
+				return
+			}
+		}
+	}
+}
+
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, llmErr error) (*model.LLMResponse, error) {
+	pluginManager := pluginManagerFromContext(ctx)
+	if pluginManager != nil {
+		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta)
+		callbackResponse, callbackErr := pluginManager.RunAfterModelCallback(cctx, llmResp, llmErr)
+		if callbackResponse != nil || callbackErr != nil {
+			return callbackResponse, callbackErr
+		}
+	}
+
 	for _, callback := range f.AfterModelCallbacks {
 		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta)
 		callbackResponse, callbackErr := callback(cctx, llmResp, llmErr)
+
+		if callbackResponse != nil || callbackErr != nil {
+			return callbackResponse, callbackErr
+		}
+	}
+
+	return nil, nil
+}
+
+func (f *Flow) runOnModelErrorCallbacks(ctx agent.InvocationContext, llmReq *model.LLMRequest, stateDelta map[string]any, llmErr error) (*model.LLMResponse, error) {
+	pluginManager := pluginManagerFromContext(ctx)
+	if pluginManager != nil {
+		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta)
+		callbackResponse, callbackErr := pluginManager.RunOnModelErrorCallback(cctx, llmReq, llmErr)
+		if callbackResponse != nil || callbackErr != nil {
+			return callbackResponse, callbackErr
+		}
+	}
+
+	for _, callback := range f.OnModelErrorCallbacks {
+		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta)
+		callbackResponse, callbackErr := callback(cctx, llmReq, llmErr)
 
 		if callbackResponse != nil || callbackErr != nil {
 			return callbackResponse, callbackErr
@@ -363,75 +493,191 @@ func findLongRunningFunctionCallIDs(c *genai.Content, tools map[string]tool.Tool
 	return slices.Collect(maps.Keys(set))
 }
 
+type fakeTool struct {
+	name string
+}
+
+func (f *fakeTool) Name() string      { return f.name }
+func (*fakeTool) Description() string { return "Tool not found" }
+func (*fakeTool) IsLongRunning() bool { return false }
+
+var _ tool.Tool = (*fakeTool)(nil)
+
+// newToolNotFoundError creates an error matching the specific Python format
+func newToolNotFoundError(toolName string, availableTools []string) error {
+	joinedTools := strings.Join(availableTools, ", ")
+
+	return fmt.Errorf(`tool '%s' not found.
+Available tools: %s
+
+Possible causes:
+  1. LLM hallucinated the function name - review agent instruction clarity
+  2. Tool not registered - verify agent.tools list
+  3. Name mismatch - check for typos
+
+Suggested fixes:
+  - Review agent instruction to ensure tool usage is clear
+  - Verify tool is included in agent.tools list
+  - Check for typos in function name`, toolName, joinedTools)
+}
+
 // handleFunctionCalls calls the functions and returns the function response event.
 //
 // TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
-func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse) (*session.Event, error) {
+func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation) (mergedEvent *session.Event, err error) {
 	var fnResponseEvents []*session.Event
-
 	fnCalls := utils.FunctionCalls(resp.Content)
+	toolNames := slices.Collect(maps.Keys(toolsDict))
+	var result map[string]any
+	// Merged span for parallel tool calls - create only if there is more than one tool call.
+	if len(fnCalls) > 1 {
+		mergedCtx, mergedToolCallSpan := telemetry.StartTrace(ctx, "execute_tool (merged)")
+		ctx = ctx.WithContext(mergedCtx)
+		defer func() {
+			telemetry.TraceMergedToolCallsResult(mergedToolCallSpan, mergedEvent, err)
+			mergedToolCallSpan.End()
+		}()
+	}
 	for _, fnCall := range fnCalls {
-		curTool, ok := toolsDict[fnCall.Name]
-		if !ok {
-			return nil, fmt.Errorf("unknown tool: %q", fnCall.Name)
-		}
-		funcTool, ok := curTool.(toolinternal.FunctionTool)
-		if !ok {
-			return nil, fmt.Errorf("tool %q is not a function tool", curTool.Name())
-		}
-		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)})
-		// toolCtx := tool.
-		spans := telemetry.StartTrace(ctx, "execute_tool "+fnCall.Name)
+		// Wrap function calls in anonymous func to limit the scope of the span.
+		func() {
+			sctx, span := telemetry.StartExecuteToolSpan(ctx, telemetry.StartExecuteToolSpanParams{
+				ToolName: fnCall.Name,
+			})
+			defer span.End()
+			toolCallCtx := ctx.WithContext(sctx)
+			var confirmation *toolconfirmation.ToolConfirmation
+			if toolConfirmations != nil {
+				confirmation = toolConfirmations[fnCall.ID]
+			}
+			toolCtx := toolinternal.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
 
-		result := f.callTool(funcTool, fnCall.Args, toolCtx)
+			curTool, found := toolsDict[fnCall.Name]
+			if !found {
+				err := newToolNotFoundError(fnCall.Name, toolNames)
+				result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+				if err != nil {
+					result = map[string]any{"error": err.Error()}
+				}
+			} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
+				err := newToolNotFoundError(fnCall.Name, toolNames)
+				result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+				if err != nil {
+					result = map[string]any{"error": err.Error()}
+				}
+			} else {
+				result = f.callTool(toolCtx, funcTool, fnCall.Args)
+			}
 
-		// TODO: agent.canonical_after_tool_callbacks
-		// TODO: handle long-running tool.
-		ev := session.NewEvent(ctx.InvocationID())
-		ev.LLMResponse = model.LLMResponse{
-			Content: &genai.Content{
-				Role: "user",
-				Parts: []*genai.Part{
-					{
-						FunctionResponse: &genai.FunctionResponse{
-							ID:       fnCall.ID,
-							Name:     fnCall.Name,
-							Response: result,
+			// TODO: handle long-running tool.
+			ev := session.NewEvent(ctx.InvocationID())
+			ev.LLMResponse = model.LLMResponse{
+				Content: &genai.Content{
+					Role: "user",
+					Parts: []*genai.Part{
+						{
+							FunctionResponse: &genai.FunctionResponse{
+								ID:       fnCall.ID,
+								Name:     fnCall.Name,
+								Response: result,
+							},
 						},
 					},
 				},
-			},
-		}
-		ev.Author = ctx.Agent().Name()
-		ev.Branch = ctx.Branch()
-		ev.Actions = *toolCtx.Actions()
-		telemetry.TraceToolCall(spans, curTool, fnCall.Args, ev)
-		fnResponseEvents = append(fnResponseEvents, ev)
+			}
+			ev.Author = ctx.Agent().Name()
+			ev.Branch = ctx.Branch()
+			ev.Actions = *toolCtx.Actions()
+
+			traceTool := curTool
+			if traceTool == nil {
+				traceTool = &fakeTool{name: fnCall.Name}
+			}
+			var toolErr error
+			resultErr := result["error"]
+			if resultErr != nil {
+				if err, ok := resultErr.(error); ok {
+					toolErr = err
+				} else if errStr, ok := resultErr.(string); ok {
+					toolErr = errors.New(errStr)
+				}
+			}
+			telemetry.TraceToolResult(span, telemetry.TraceToolResultParams{
+				Description:   traceTool.Description(),
+				ResponseEvent: ev,
+				Error:         toolErr,
+			})
+
+			fnResponseEvents = append(fnResponseEvents, ev)
+		}()
 	}
-	mergedEvent, err := mergeParallelFunctionResponseEvents(fnResponseEvents)
+	mergedEvent, err = mergeParallelFunctionResponseEvents(fnResponseEvents)
 	if err != nil {
 		return mergedEvent, err
 	}
-	// this is needed for debug traces of parallel calls
-	spans := telemetry.StartTrace(ctx, "execute_tool (merged)")
-	telemetry.TraceMergedToolCalls(spans, mergedEvent)
 	return mergedEvent, nil
 }
 
-func (f *Flow) callTool(tool toolinternal.FunctionTool, fArgs map[string]any, toolCtx tool.Context) map[string]any {
-	result, err := f.invokeBeforeToolCallbacks(tool, fArgs, toolCtx)
-	if result == nil && err == nil {
-		result, err = tool.Run(toolCtx, fArgs)
+func (f *Flow) runOnToolErrorCallbacks(toolCtx tool.Context, tool tool.Tool, fArgs map[string]any, err error) (map[string]any, error) {
+	pluginManager := pluginManagerFromContext(toolCtx)
+	if pluginManager != nil {
+		result, err := pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
+		if result != nil || err != nil {
+			return result, err
+		}
 	}
-	result, err = f.invokeAfterToolCallbacks(tool, fArgs, toolCtx, result, err)
+	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
+}
+
+func (f *Flow) callTool(toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
+	var response map[string]any
+	var err error
+	pluginManager := pluginManagerFromContext(toolCtx)
+	if pluginManager != nil {
+		response, err = pluginManager.RunBeforeToolCallback(toolCtx, tool, fArgs)
+	}
+	if response == nil && err == nil {
+		response, err = f.invokeBeforeToolCallbacks(toolCtx, tool, fArgs)
+	}
+
+	if response == nil && err == nil {
+		response, err = tool.Run(toolCtx, fArgs)
+	}
+
+	var errorResponse map[string]any
+	var cbErr error
+	if err != nil && pluginManager != nil {
+		errorResponse, cbErr = pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
+	}
+	if err != nil && errorResponse == nil && cbErr == nil {
+		errorResponse, cbErr = f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
+	}
+	if errorResponse != nil || cbErr != nil {
+		response = errorResponse
+		err = cbErr
+	}
+
+	var alteredResponse map[string]any
+	var alteredErr error
+	if pluginManager != nil {
+		alteredResponse, alteredErr = pluginManager.RunAfterToolCallback(toolCtx, tool, fArgs, response, err)
+	}
+	if alteredResponse == nil && alteredErr == nil {
+		alteredResponse, alteredErr = f.invokeAfterToolCallbacks(toolCtx, tool, fArgs, response, err)
+	}
+	if alteredResponse != nil || alteredErr != nil {
+		response = alteredResponse
+		err = alteredErr
+	}
+
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
-	return result
+	return response
 }
 
-func (f *Flow) invokeBeforeToolCallbacks(tool toolinternal.FunctionTool, fArgs map[string]any, toolCtx tool.Context) (map[string]any, error) {
+func (f *Flow) invokeBeforeToolCallbacks(toolCtx tool.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
 	for _, callback := range f.BeforeToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs)
 		if err != nil {
@@ -446,7 +692,7 @@ func (f *Flow) invokeBeforeToolCallbacks(tool toolinternal.FunctionTool, fArgs m
 	return nil, nil
 }
 
-func (f *Flow) invokeAfterToolCallbacks(tool toolinternal.FunctionTool, fArgs map[string]any, toolCtx tool.Context, fResult map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeAfterToolCallbacks(toolCtx tool.Context, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.AfterToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fResult, fErr)
 		if err != nil {
@@ -460,6 +706,22 @@ func (f *Flow) invokeAfterToolCallbacks(tool toolinternal.FunctionTool, fArgs ma
 	}
 	// If no callback returned a result/error, return the original result/error.
 	return fResult, fErr
+}
+
+func (f *Flow) invokeOnToolErrorCallbacks(toolCtx tool.Context, tool tool.Tool, fArgs map[string]any, fErr error) (map[string]any, error) {
+	for _, callback := range f.OnToolErrorCallbacks {
+		result, err := callback(toolCtx, tool, fArgs, fErr)
+		if err != nil {
+			return nil, err
+		}
+		// When a list of callbacks is provided, the callbacks will be called in the
+		// order they are listed while a callback returns nil.
+		if result != nil {
+			return result, nil
+		}
+	}
+	// If no callback returned a result/error, return the original result/error.
+	return nil, fErr
 }
 
 func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Event, error) {
@@ -492,10 +754,6 @@ func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Even
 
 func mergeEventActions(base, other *session.EventActions) *session.EventActions {
 	// flows/llm_flows/functions.py merge_parallel_function_response_events
-	//
-	// TODO: merge_parallel_function_response_events creates a "last one wins" scenario
-	// except parts and requested_auth_configs. Check with the ADK team about
-	// the intention.
 	if other == nil {
 		return base
 	}
@@ -512,7 +770,47 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		base.Escalate = true
 	}
 	if other.StateDelta != nil {
-		base.StateDelta = other.StateDelta
+		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
+	}
+	// TODO add similar logic for state
+	if other.RequestedToolConfirmations != nil {
+		if base.RequestedToolConfirmations == nil {
+			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
+		}
+		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
 	}
 	return base
+}
+
+func deepMergeMap(dst, src map[string]any) map[string]any {
+	if dst == nil {
+		dst = make(map[string]any)
+	}
+	for key, value := range src {
+		if srcMap, ok := value.(map[string]any); ok {
+			if dstMap, ok := dst[key].(map[string]any); ok {
+				dst[key] = deepMergeMap(dstMap, srcMap)
+				continue
+			}
+		}
+		dst[key] = value
+	}
+	return dst
+}
+
+func pluginManagerFromContext(ctx context.Context) pluginManager {
+	m, ok := ctx.Value(plugincontext.PluginManagerCtxKey).(pluginManager)
+	if !ok {
+		return nil
+	}
+	return m
+}
+
+type pluginManager interface {
+	RunBeforeModelCallback(cctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+	RunAfterModelCallback(cctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+	RunOnModelErrorCallback(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+	RunBeforeToolCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error)
+	RunAfterToolCallback(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
+	RunOnToolErrorCallback(ctx tool.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error)
 }

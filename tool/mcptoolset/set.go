@@ -16,14 +16,11 @@
 package mcptoolset
 
 import (
-	"context"
 	"fmt"
-	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/version"
 	"google.golang.org/adk/tool"
 )
 
@@ -50,14 +47,11 @@ import (
 //		},
 //	})
 func New(cfg Config) (tool.Toolset, error) {
-	client := cfg.Client
-	if client == nil {
-		client = mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, nil)
-	}
 	return &set{
-		client:     client,
-		transport:  cfg.Transport,
-		toolFilter: cfg.ToolFilter,
+		mcpClient:                   newConnectionRefresher(cfg.Client, cfg.Transport),
+		toolFilter:                  cfg.ToolFilter,
+		requireConfirmation:         cfg.RequireConfirmation,
+		requireConfirmationProvider: cfg.RequireConfirmationProvider,
 	}, nil
 }
 
@@ -67,19 +61,35 @@ type Config struct {
 	Client *mcp.Client
 	// Transport that will be used to connect to MCP server.
 	Transport mcp.Transport
+	// Deprecated: use tool.FilterToolset instead.
 	// ToolFilter selects tools for which tool.Predicate returns true.
 	// If ToolFilter is nil, then all tools are returned.
 	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.
 	ToolFilter tool.Predicate
+
+	// RequireConfirmation flags whether the tools from this toolset must always ask for user confirmation
+	// before execution. If set to true, the ADK framework will automatically initiate
+	// a Human-in-the-Loop (HITL) confirmation request when a tool is invoked.
+	RequireConfirmation bool
+
+	// RequireConfirmationProvider allows for dynamic determination of whether
+	// user confirmation is needed. This field is a function called at runtime to decide if
+	// a confirmation request should be sent. The function takes the toolName and tool's input parameters as arguments.
+	// This provider offers more flexibility than the static RequireConfirmation flag,
+	// enabling conditional confirmation based on the invocation details.
+	// If set, this takes precedence over the RequireConfirmation flag.
+	//
+	// Required signature for a provider function:
+	// func(name string, toolInput any) bool
+	// Returning true means confirmation is required.
+	RequireConfirmationProvider ConfirmationProvider
 }
 
 type set struct {
-	client     *mcp.Client
-	transport  mcp.Transport
-	toolFilter tool.Predicate
-
-	mu      sync.Mutex
-	session *mcp.ClientSession
+	mcpClient                   MCPClient
+	toolFilter                  tool.Predicate
+	requireConfirmation         bool
+	requireConfirmationProvider ConfirmationProvider
 }
 
 func (*set) Name() string {
@@ -96,57 +106,32 @@ func (*set) IsLongRunning() bool {
 
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
 func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
-	session, err := s.getSession(ctx)
+	mcpTools, err := s.mcpClient.ListTools(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get MCP session: %w", err)
+		return nil, err
 	}
 
 	var adkTools []tool.Tool
-
-	cursor := ""
-	for {
-		resp, err := session.ListTools(ctx, &mcp.ListToolsParams{
-			Cursor: cursor,
-		})
+	for _, mcpTool := range mcpTools {
+		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
 		if err != nil {
-			return nil, fmt.Errorf("failed to list MCP tools: %w", err)
+			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}
 
-		for _, mcpTool := range resp.Tools {
-			t, err := convertTool(mcpTool, s.getSession)
-			if err != nil {
-				return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
-			}
-
-			if s.toolFilter != nil && !s.toolFilter(ctx, t) {
-				continue
-			}
-
-			adkTools = append(adkTools, t)
+		if s.toolFilter != nil && !s.toolFilter(ctx, t) {
+			continue
 		}
 
-		if resp.NextCursor == "" {
-			break
-		}
-		cursor = resp.NextCursor
+		adkTools = append(adkTools, t)
 	}
 
 	return adkTools, nil
 }
 
-func (s *set) getSession(ctx context.Context) (*mcp.ClientSession, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.session != nil {
-		return s.session, nil
-	}
-
-	session, err := s.client.Connect(ctx, s.transport, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to init MCP session: %w", err)
-	}
-
-	s.session = session
-	return s.session, nil
-}
+// ConfirmationProvider defines a function that dynamically determines whether
+// a specific tool execution requires user confirmation.
+//
+// It accepts the tool name and the input parameters as arguments.
+// Returning true signals that the system must wait for Human-in-the-Loop (HITL)
+// approval before proceeding with the execution.
+type ConfirmationProvider func(string, any) bool

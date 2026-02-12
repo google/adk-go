@@ -19,10 +19,13 @@ import (
 	"fmt"
 	"iter"
 
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/artifact"
 	agentinternal "google.golang.org/adk/internal/agent"
+	"google.golang.org/adk/internal/plugininternal/plugincontext"
+	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -156,9 +159,17 @@ func (a *agent) SubAgents() []Agent {
 
 func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		spanCtx, span := telemetry.StartInvokeAgentSpan(ctx, a, ctx.Session().ID())
+		yield, endSpan := telemetry.WrapYield(span, yield, func(span trace.Span, event *session.Event, err error) {
+			telemetry.TraceAgentResult(span, telemetry.TraceAgentResultParams{
+				ResponseEvent: event,
+				Error:         err,
+			})
+		})
+		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
 		ctx := &invocationContext{
-			Context:   ctx,
+			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
 			artifacts: ctx.Artifacts(),
 			memory:    ctx.Memory(),
@@ -170,7 +181,6 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			runConfig:     ctx.RunConfig(),
 			endInvocation: ctx.Ended(),
 		}
-
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
 			if !yield(event, err) {
@@ -218,11 +228,30 @@ func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
 // then it skips agent run and returns callback result.
 func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
+	pluginManager := pluginManagerFromContext(ctx)
 
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
 		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+	}
+
+	if pluginManager != nil {
+		content, err := pluginManager.RunBeforeAgentCallback(callbackCtx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to run plugin before agent callback: %w", err)
+		}
+		if content != nil {
+			event := session.NewEvent(ctx.InvocationID())
+			event.LLMResponse = model.LLMResponse{
+				Content: content,
+			}
+			event.Author = agent.Name()
+			event.Branch = ctx.Branch()
+			event.Actions = *callbackCtx.actions
+			ctx.EndInvocation()
+			return event, nil
+		}
 	}
 
 	for _, callback := range ctx.Agent().internal().beforeAgentCallbacks {
@@ -261,11 +290,29 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 // then it create a new event with the new content and state delta.
 func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
+	pluginManager := pluginManagerFromContext(ctx)
 
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
 		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+	}
+
+	if pluginManager != nil {
+		content, err := pluginManager.RunAfterAgentCallback(callbackCtx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to run plugin after agent callback: %w", err)
+		}
+		if content != nil {
+			event := session.NewEvent(ctx.InvocationID())
+			event.LLMResponse = model.LLMResponse{
+				Content: content,
+			}
+			event.Author = agent.Name()
+			event.Branch = ctx.Branch()
+			event.Actions = *callbackCtx.actions
+			return event, nil
+		}
 	}
 
 	for _, callback := range agent.internal().afterAgentCallbacks {
@@ -432,3 +479,25 @@ func (c *invocationContext) EndInvocation() {
 func (c *invocationContext) Ended() bool {
 	return c.endInvocation
 }
+
+func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
+	newCtx := *c
+	newCtx.Context = ctx
+	return &newCtx
+}
+
+func pluginManagerFromContext(ctx context.Context) pluginManager {
+	a := ctx.Value(plugincontext.PluginManagerCtxKey)
+	m, ok := a.(pluginManager)
+	if !ok {
+		return nil
+	}
+	return m
+}
+
+type pluginManager interface {
+	RunBeforeAgentCallback(cctx CallbackContext) (*genai.Content, error)
+	RunAfterAgentCallback(cctx CallbackContext) (*genai.Content, error)
+}
+
+var _ InvocationContext = (*invocationContext)(nil)

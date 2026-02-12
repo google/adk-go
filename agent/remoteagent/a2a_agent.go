@@ -27,7 +27,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
 )
@@ -150,9 +149,10 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		}
 
 		req := &a2a.MessageSendParams{Message: msg, Config: cfg.MessageSendConfig}
+		processor := newRunProcessor(cfg, req)
 
-		if bcbResp, bcbErr := runBeforeA2ARequestCallbacks(ctx, cfg, req); bcbResp != nil || bcbErr != nil {
-			if acbResp, acbErr := runAfterA2ARequestCallbacks(ctx, cfg, req, bcbResp, bcbErr); acbResp != nil || acbErr != nil {
+		if bcbResp, bcbErr := processor.runBeforeA2ARequestCallbacks(ctx); bcbResp != nil || bcbErr != nil {
+			if acbResp, acbErr := processor.runAfterA2ARequestCallbacks(ctx, bcbResp, bcbErr); acbResp != nil || acbErr != nil {
 				yield(acbResp, acbErr)
 			} else {
 				yield(bcbResp, bcbErr)
@@ -162,7 +162,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 
 		if len(msg.Parts) == 0 {
 			resp := adka2a.NewRemoteAgentEvent(ctx)
-			if cbResp, cbErr := runAfterA2ARequestCallbacks(ctx, cfg, req, resp, err); cbResp != nil || cbErr != nil {
+			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, resp, err); cbResp != nil || cbErr != nil {
 				yield(cbResp, cbErr)
 			} else {
 				yield(resp, nil)
@@ -170,60 +170,80 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return
 		}
 
-		for a2aEvent, a2aErr := range client.SendStreamingMessage(ctx, req) {
+		processEvent := func(a2aEvent a2a.Event, a2aErr error) bool {
 			var err error
 			var event *session.Event
 			if cfg.Converter != nil {
 				event, err = cfg.Converter(icontext.NewReadonlyContext(ctx), req, a2aEvent, a2aErr)
 			} else {
-				event, err = convertToSessionEvent(ctx, req, a2aEvent, a2aErr)
+				event, err = processor.convertToSessionEvent(ctx, a2aEvent, a2aErr)
 			}
 
-			if cbResp, cbErr := runAfterA2ARequestCallbacks(ctx, cfg, req, event, err); cbResp != nil || cbErr != nil {
+			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, event, err); cbResp != nil || cbErr != nil {
 				if cbErr != nil {
-					yield(nil, cbErr)
-					return
+					return yield(nil, cbErr)
 				}
-				if !yield(cbResp, nil) {
-					return
-				}
-				continue
+				event = cbResp
+				err = nil
 			}
 
 			if err != nil {
-				yield(nil, err)
-				return
+				return yield(nil, err)
 			}
 
 			if event != nil { // an event might be skipped
-				if !yield(event, nil) {
-					return
+				if intermediate := processor.aggregatePartial(ctx, a2aEvent, event); intermediate != nil {
+					if !yield(intermediate, nil) {
+						return false
+					}
 				}
+				if !yield(event, nil) {
+					return false
+				}
+			}
+			return true
+		}
+
+		if ctx.RunConfig().StreamingMode == agent.StreamingModeNone {
+			a2aEvent, a2aErr := client.SendMessage(ctx, req)
+			processEvent(a2aEvent, a2aErr)
+			return
+		}
+
+		for a2aEvent, a2aErr := range client.SendStreamingMessage(ctx, req) {
+			if !processEvent(a2aEvent, a2aErr) {
+				return
 			}
 		}
 	}
 }
 
-// Converts A2A client SendStreamingMessage result to a session event. Returns nil if nothing should be emitted.
-func convertToSessionEvent(ctx agent.InvocationContext, req *a2a.MessageSendParams, a2aEvent a2a.Event, err error) (*session.Event, error) {
-	if err != nil {
-		event := toErrorEvent(ctx, err)
-		updateCustomMetadata(event, req, nil)
-		return event, nil
+func newMessage(ctx agent.InvocationContext) (*a2a.Message, error) {
+	events := ctx.Session().Events()
+	if userFnCall := getUserFunctionCallAt(events, events.Len()-1); userFnCall != nil {
+		event := userFnCall.response
+		parts, err := adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
+		if err != nil {
+			return nil, fmt.Errorf("event part conversion failed: %w", err)
+		}
+		msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
+		msg.TaskID = userFnCall.taskID
+		msg.ContextID = userFnCall.contextID
+		return msg, nil
 	}
 
-	event, err := adka2a.ToSessionEvent(ctx, a2aEvent)
-	if err != nil {
-		event := toErrorEvent(ctx, fmt.Errorf("failed to convert a2aEvent: %w", err))
-		updateCustomMetadata(event, req, nil)
-		return event, nil
-	}
+	parts, contextID := toMissingRemoteSessionParts(ctx, events)
+	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
+	msg.ContextID = contextID
+	return msg, nil
+}
 
-	if event != nil {
-		updateCustomMetadata(event, req, a2aEvent)
-	}
-
-	return event, nil
+func toErrorEvent(ctx agent.InvocationContext, err error) *session.Event {
+	event := adka2a.NewRemoteAgentEvent(ctx)
+	event.ErrorMessage = err.Error()
+	event.CustomMetadata = map[string]any{adka2a.ToADKMetaKey("error"): err.Error()}
+	event.TurnComplete = true
+	return event
 }
 
 func resolveAgentCard(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.AgentCard, error) {
@@ -244,84 +264,14 @@ func resolveAgentCard(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.AgentCar
 		return nil, fmt.Errorf("failed to read agent card from %q: %w", cfg.AgentCardSource, err)
 	}
 
-	var card *a2a.AgentCard
-	if err := json.Unmarshal(fileBytes, card); err != nil {
+	var card a2a.AgentCard
+	if err := json.Unmarshal(fileBytes, &card); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal an agent card: %w", err)
 	}
-
-	return card, nil
-}
-
-func newMessage(ctx agent.InvocationContext) (*a2a.Message, error) {
-	events := ctx.Session().Events()
-	if userFnCall := getUserFunctionCallAt(events, events.Len()-1); userFnCall != nil {
-		event := userFnCall.event
-		parts, err := adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
-		if err != nil {
-			return nil, fmt.Errorf("event part conversion failed: %w", err)
-		}
-		msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
-		msg.TaskID = userFnCall.taskID
-		msg.ContextID = userFnCall.contextID
-		return msg, nil
-	}
-
-	parts, contextID := toMissingRemoteSessionParts(ctx, events)
-	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
-	msg.ContextID = contextID
-	return msg, nil
-}
-
-func toErrorEvent(ctx agent.InvocationContext, err error) *session.Event {
-	event := adka2a.NewRemoteAgentEvent(ctx)
-	event.ErrorMessage = err.Error()
-	event.CustomMetadata = map[string]any{
-		adka2a.ToADKMetaKey("error"): err.Error(),
-	}
-	return event
-}
-
-func updateCustomMetadata(event *session.Event, request *a2a.MessageSendParams, response a2a.Event) {
-	if request == nil && response == nil {
-		return
-	}
-	if event.CustomMetadata == nil {
-		event.CustomMetadata = map[string]any{}
-	}
-	for k, v := range map[string]any{"request": request, "response": response} {
-		if v == nil {
-			continue
-		}
-		payload, err := converters.ToMapStructure(request)
-		if err == nil {
-			event.CustomMetadata[adka2a.ToADKMetaKey(k)] = payload
-		} else {
-			event.CustomMetadata[adka2a.ToADKMetaKey(k+"_codec_error")] = err.Error()
-		}
-	}
+	return &card, nil
 }
 
 func destroy(client *a2aclient.Client) {
 	// TODO(yarolegovich): log ignored error
 	_ = client.Destroy()
-}
-
-func runBeforeA2ARequestCallbacks(ctx agent.InvocationContext, cfg A2AConfig, req *a2a.MessageSendParams) (*session.Event, error) {
-	cctx := icontext.NewCallbackContext(ctx)
-	for _, callback := range cfg.BeforeRequestCallbacks {
-		if cbResp, cbErr := callback(cctx, req); cbResp != nil || cbErr != nil {
-			return cbResp, cbErr
-		}
-	}
-	return nil, nil
-}
-
-func runAfterA2ARequestCallbacks(ctx agent.InvocationContext, cfg A2AConfig, req *a2a.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
-	cctx := icontext.NewCallbackContext(ctx)
-	for _, callback := range cfg.AfterRequestCallbacks {
-		if cbEvent, cbErr := callback(cctx, req, resp, err); cbEvent != nil || cbErr != nil {
-			return cbEvent, cbErr
-		}
-	}
-	return nil, nil
 }

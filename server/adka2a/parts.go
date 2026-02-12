@@ -15,9 +15,11 @@
 package adka2a
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -37,6 +39,36 @@ const (
 	a2aDataPartTypeCodeExecResult     = "code_execution_result"
 	a2aDataPartTypeCodeExecutableCode = "executable_code"
 )
+
+// IsPartial takes metadata of an A2A object (eg. a2a.Part, a2a.Artifact) and returs true if
+// it was marked as partial based on the ADK partial flag set on the original ADK object.
+func IsPartial(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	isPartial, _ := meta[metadataPartialKey].(bool)
+	return isPartial
+}
+
+// IsPartialFlagSet takes metadata of an A2A object (eg. a2a.Part, a2a.Artifact) and returs true if
+// the ADK partial flag was set on it.
+func IsPartialFlagSet(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	_, isSet := meta[metadataPartialKey].(bool)
+	return isSet
+}
+
+// ToA2APart converts the provided genai part to A2A equivalent. Long running tool IDs are used for attaching metadata to
+// the relevant data parts.
+func ToA2APart(part *genai.Part, longRunningToolIDs []string) (a2a.Part, error) {
+	parts, err := ToA2AParts([]*genai.Part{part}, longRunningToolIDs)
+	if err != nil {
+		return nil, err
+	}
+	return parts[0], nil
+}
 
 // ToA2AParts converts the provided genai parts to A2A equivalents. Long running tool IDs are used for attaching metadata to
 // the relevant data parts.
@@ -64,6 +96,36 @@ func ToA2AParts(parts []*genai.Part, longRunningToolIDs []string) ([]a2a.Part, e
 		}
 	}
 	return result, nil
+}
+
+func updatePartsMetadata(parts []a2a.Part, update map[string]any) {
+	for i, part := range parts {
+		var meta map[string]any
+		switch p := part.(type) {
+		case a2a.TextPart:
+			if p.Metadata == nil {
+				p.Metadata = make(map[string]any)
+				parts[i] = p
+			}
+			meta = p.Metadata
+		case a2a.FilePart:
+			if p.Metadata == nil {
+				p.Metadata = make(map[string]any)
+				parts[i] = p
+			}
+			meta = p.Metadata
+		case a2a.DataPart:
+			if p.Metadata == nil {
+				p.Metadata = make(map[string]any)
+				parts[i] = p
+			}
+			meta = p.Metadata
+		default:
+			// TODO: log unknown part type warning (should never happen)
+			continue
+		}
+		maps.Copy(meta, update)
+	}
 }
 
 func toA2AFilePart(v *genai.Part) (a2a.FilePart, error) {
@@ -104,11 +166,11 @@ func toA2AFilePart(v *genai.Part) (a2a.FilePart, error) {
 	return part, nil
 }
 
-func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart, error) {
+func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.Part, error) {
 	if part.CodeExecutionResult != nil {
 		data, err := converters.ToMapStructure(part.CodeExecutionResult)
 		if err != nil {
-			return a2a.DataPart{}, err
+			return nil, err
 		}
 		return a2a.DataPart{
 			Data:     data,
@@ -119,7 +181,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	if part.FunctionResponse != nil {
 		data, err := converters.ToMapStructure(part.FunctionResponse)
 		if err != nil {
-			return a2a.DataPart{}, err
+			return nil, err
 		}
 		return a2a.DataPart{
 			Data:     data,
@@ -130,7 +192,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	if part.ExecutableCode != nil {
 		data, err := converters.ToMapStructure(part.ExecutableCode)
 		if err != nil {
-			return a2a.DataPart{}, err
+			return nil, err
 		}
 		return a2a.DataPart{
 			Data:     data,
@@ -141,7 +203,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 	if part.FunctionCall != nil {
 		data, err := converters.ToMapStructure(part.FunctionCall)
 		if err != nil {
-			return a2a.DataPart{}, err
+			return nil, err
 		}
 		return a2a.DataPart{
 			Data: data,
@@ -152,15 +214,43 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (a2a.DataPart,
 		}, nil
 	}
 
-	return a2a.DataPart{Data: map[string]any{}}, nil
-}
-
-func toGenAIContent(msg *a2a.Message) (*genai.Content, error) {
-	parts, err := ToGenAIParts(msg.Parts)
+	mapStruct, err := converters.ToMapStructure(part)
 	if err != nil {
 		return nil, err
 	}
-	return &genai.Content{Role: genai.RoleUser, Parts: parts}, nil
+	return a2a.DataPart{Data: mapStruct}, nil
+}
+
+func toGenAIContent(ctx context.Context, msg *a2a.Message, converter A2APartConverter) (*genai.Content, error) {
+	if converter == nil {
+		parts, err := ToGenAIParts(msg.Parts)
+		if err != nil {
+			return nil, err
+		}
+		return genai.NewContentFromParts(parts, toGenAIRole(msg.Role)), nil
+	}
+
+	parts := make([]*genai.Part, 0, len(msg.Parts))
+	for _, part := range msg.Parts {
+		cp, err := converter(ctx, a2a.Event(msg), part)
+		if err != nil {
+			return nil, err
+		}
+		if cp == nil {
+			continue
+		}
+		parts = append(parts, cp)
+	}
+	return genai.NewContentFromParts(parts, toGenAIRole(msg.Role)), nil
+}
+
+// ToGenAIPart converts the provided A2A part to a genai equivalent.
+func ToGenAIPart(part a2a.Part) (*genai.Part, error) {
+	parts, err := ToGenAIParts([]a2a.Part{part})
+	if err != nil {
+		return nil, err
+	}
+	return parts[0], nil
 }
 
 // ToGenAIParts converts the provided A2A parts to genai equivalents.
