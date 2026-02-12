@@ -78,14 +78,12 @@ func TestLogRequest(t *testing.T) {
 				{
 					name: "gen_ai.system.message",
 					body: map[string]any{
-						"role":    "system",
 						"content": "System instruction part 1\nSystem instruction part 2",
 					},
 				},
 				{
 					name: "gen_ai.user.message",
 					body: map[string]any{
-						"role": "user",
 						"content": map[string]any{
 							"role": "user",
 							"parts": []any{
@@ -98,7 +96,6 @@ func TestLogRequest(t *testing.T) {
 				{
 					name: "gen_ai.user.message",
 					body: map[string]any{
-						"role": "agent",
 						"content": map[string]any{
 							"role": "agent",
 							"parts": []any{
@@ -111,7 +108,6 @@ func TestLogRequest(t *testing.T) {
 				{
 					name: "gen_ai.user.message",
 					body: map[string]any{
-						"role": "user",
 						"content": map[string]any{
 							"role": "user",
 							"parts": []any{
@@ -133,7 +129,6 @@ func TestLogRequest(t *testing.T) {
 				{
 					name: "gen_ai.system.message",
 					body: map[string]any{
-						"role":    "system",
 						"content": nil,
 					},
 				},
@@ -154,14 +149,12 @@ func TestLogRequest(t *testing.T) {
 				{
 					name: "gen_ai.system.message",
 					body: map[string]any{
-						"role":    "system",
 						"content": nil,
 					},
 				},
 				{
 					name: "gen_ai.user.message",
 					body: map[string]any{
-						"role": "user",
 						"content": map[string]any{
 							"role": "user",
 						},
@@ -189,14 +182,12 @@ func TestLogRequest(t *testing.T) {
 				{
 					name: "gen_ai.system.message",
 					body: map[string]any{
-						"role":    "system",
 						"content": "<elided>",
 					},
 				},
 				{
 					name: "gen_ai.user.message",
 					body: map[string]any{
-						"role":    "user",
 						"content": "<elided>",
 					},
 				},
@@ -213,7 +204,6 @@ func TestLogRequest(t *testing.T) {
 				{
 					name: "gen_ai.system.message",
 					body: map[string]any{
-						"role":    "system",
 						"content": "<elided>",
 					},
 				},
@@ -235,14 +225,12 @@ func TestLogRequest(t *testing.T) {
 				{
 					name: "gen_ai.system.message",
 					body: map[string]any{
-						"role":    "system",
 						"content": "<elided>",
 					},
 				},
 				{
 					name: "gen_ai.user.message",
 					body: map[string]any{
-						"role":    "user",
 						"content": "<elided>",
 					},
 				},
@@ -305,14 +293,11 @@ func TestLogResponse(t *testing.T) {
 			wantBody: map[string]any{
 				"index":         int64(0),
 				"finish_reason": "STOP",
-				"message": map[string]any{
+				"content": map[string]any{
 					"role": "model",
-					"content": map[string]any{
-						"role": "model",
-						"parts": []any{
-							map[string]any{"text": "Text part 1"},
-							map[string]any{"text": "Text part 2"},
-						},
+					"parts": []any{
+						map[string]any{"text": "Text part 1"},
+						map[string]any{"text": "Text part 2"},
 					},
 				},
 			},
@@ -334,44 +319,23 @@ func TestLogResponse(t *testing.T) {
 			wantBody: map[string]any{
 				"index":         int64(0),
 				"finish_reason": "STOP",
-				"message": map[string]any{
+				"content": map[string]any{
 					"role": "model",
-					"content": map[string]any{
-						"role": "model",
-						"parts": []any{
-							map[string]any{
-								"text":    "Call tools",
-								"thought": true,
-							},
-							map[string]any{"functionCall": map[string]any{
-								"name": "myTool1",
-								"id":   "id1",
-								"args": map[string]any{"arg1": "val1"},
-							}},
-							map[string]any{"functionCall": map[string]any{
-								"name": "myTool2",
-								"id":   "id2",
-								"args": map[string]any{"arg2": "val2"},
-							}},
-						},
-					},
-					"tool_calls": []any{
+					"parts": []any{
 						map[string]any{
+							"text":    "Call tools",
+							"thought": true,
+						},
+						map[string]any{"functionCall": map[string]any{
+							"name": "myTool1",
 							"id":   "id1",
-							"type": "function",
-							"function": map[string]any{
-								"name":      "myTool1",
-								"arguments": `{"arg1":"val1"}`,
-							},
-						},
-						map[string]any{
+							"args": map[string]any{"arg1": "val1"},
+						}},
+						map[string]any{"functionCall": map[string]any{
+							"name": "myTool2",
 							"id":   "id2",
-							"type": "function",
-							"function": map[string]any{
-								"name":      "myTool2",
-								"arguments": `{"arg2":"val2"}`,
-							},
-						},
+							"args": map[string]any{"arg2": "val2"},
+						}},
 					},
 				},
 			},
@@ -381,10 +345,8 @@ func TestLogResponse(t *testing.T) {
 			resp:     nil,
 			wantName: "gen_ai.choice",
 			wantBody: map[string]any{
-				"index": int64(0),
-				"message": map[string]any{
-					"content": nil,
-				},
+				"index":   int64(0),
+				"content": nil,
 			},
 		},
 		{
@@ -404,10 +366,7 @@ func TestLogResponse(t *testing.T) {
 			wantBody: map[string]any{
 				"index":         int64(0),
 				"finish_reason": "STOP",
-				"message": map[string]any{
-					"role":    "model",
-					"content": "<elided>",
-				},
+				"content":       "<elided>",
 			},
 		},
 		{
@@ -416,10 +375,8 @@ func TestLogResponse(t *testing.T) {
 			elide:    true,
 			wantName: "gen_ai.choice",
 			wantBody: map[string]any{
-				"index": int64(0),
-				"message": map[string]any{
-					"content": "<elided>",
-				},
+				"index":   int64(0),
+				"content": "<elided>",
 			},
 		},
 	}

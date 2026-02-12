@@ -47,6 +47,7 @@ var logger = global.GetLoggerProvider().Logger(
 
 // LogRequest logs the request to the model - the system message and user messages.
 // It iterates over the request contents and logs each as a separate event.
+// Check [logSystemMessage] and [logUserMessage] for emitted event details.
 func LogRequest(ctx context.Context, req *model.LLMRequest) {
 	logSystemMessage(ctx, req)
 	for _, content := range req.Contents {
@@ -55,39 +56,27 @@ func LogRequest(ctx context.Context, req *model.LLMRequest) {
 }
 
 // LogResponse logs the inference result.
-// It follows the format defined in https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aichoice.
+// Semconv reference: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aichoice.
+// NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
+// * The spec embeds the "content" field to be under the "message" key, but it's added directly in body.
+// * The "tool_calls" field is required if available in the spec, but it's omitted.
 func LogResponse(ctx context.Context, resp *model.LLMResponse, err error) {
 	record := log.Record{}
 	record.SetEventName("gen_ai.choice")
 
-	var messageKvs []log.KeyValue
 	var finishReason string
-
 	var content *genai.Content
-	var toolCalls []log.Value
-	var role string
 	if resp != nil {
 		finishReason = string(resp.FinishReason)
 		if resp.Content != nil {
 			content = resp.Content
-			role = resp.Content.Role
-			toolCalls = extractToolCalls(content)
 		}
-	}
-	messageKvs = append(messageKvs,
-		log.KeyValue{Key: "content", Value: contentToLogValue(content)},
-	)
-	if len(toolCalls) > 0 {
-		messageKvs = append(messageKvs, log.Slice("tool_calls", toolCalls...))
-	}
-	if role != "" {
-		messageKvs = append(messageKvs, log.String("role", role))
 	}
 
 	kvs := []log.KeyValue{
-		// Gemini only returns one choice, hardcoding to 0.
+		// ADK internal data model only supports single candidate, even though the implementations can return multiple candidates. Hardcoding index to 0.
 		log.Int("index", 0),
-		{Key: "message", Value: log.MapValue(messageKvs...)},
+		{Key: "content", Value: contentToLogValue(content)},
 	}
 
 	if finishReason != "" {
@@ -99,12 +88,13 @@ func LogResponse(ctx context.Context, resp *model.LLMResponse, err error) {
 }
 
 // logSystemMessage logs the system message from the request.
-// It follows the format defined in https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aisystemmessage.
+// Semconv reference: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aisystemmessage.
+// NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
+// * The spec requires a "role" body field, but it's ommited.
 func logSystemMessage(ctx context.Context, req *model.LLMRequest) {
 	record := log.Record{}
 	record.SetEventName("gen_ai.system.message")
 	record.SetBody(log.MapValue(
-		log.String("role", "system"),
 		log.KeyValue{Key: "content", Value: extractSystemMessage(req)},
 	))
 	record.AddAttributes(
@@ -114,22 +104,15 @@ func logSystemMessage(ctx context.Context, req *model.LLMRequest) {
 }
 
 // logUserMessage logs the user message from the request.
-// It follows the format defined in https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aiusermessage.
+// Semconv reference: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aiusermessage.
+// NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
+// * The spec requires a "role" body field, but it's ommited. If the role is set in [genai.Content], then it will be available in body.content.role.
 func logUserMessage(ctx context.Context, content *genai.Content) {
 	record := log.Record{}
 	record.SetEventName("gen_ai.user.message")
-
-	var kvs []log.KeyValue
-	var role string
-	if content != nil {
-		role = content.Role
-	}
-	if role != "" {
-		kvs = append(kvs, log.String("role", role))
-	}
-	v := contentToJSONValue(content)
-	kvs = append(kvs, log.KeyValue{Key: "content", Value: mapToLogValue(v)})
-	record.SetBody(log.MapValue(kvs...))
+	record.SetBody(log.MapValue(
+		log.KeyValue{Key: "content", Value: mapToLogValue(contentToJSONLikeValue(content))},
+	))
 	record.AddAttributes(
 		aiSystemAttribute(),
 	)
@@ -176,32 +159,12 @@ func extractSystemMessage(req *model.LLMRequest) log.Value {
 	return log.StringValue(content)
 }
 
-func extractToolCalls(content *genai.Content) []log.Value {
-	if content == nil {
-		return nil
-	}
-	var toolCalls []log.Value
-	for _, part := range content.Parts {
-		if part.FunctionCall != nil {
-			argsStr := safeSerialize(part.FunctionCall.Args)
-			toolCalls = append(toolCalls, log.MapValue(
-				log.String("id", part.FunctionCall.ID),
-				log.String("type", "function"),
-				log.KeyValue{Key: "function", Value: log.MapValue(
-					log.String("name", part.FunctionCall.Name),
-					log.String("arguments", argsStr),
-				)},
-			))
-		}
-	}
-	return toolCalls
-}
-
 func contentToLogValue(c *genai.Content) log.Value {
-	return mapToLogValue(contentToJSONValue(c))
+	return mapToLogValue(contentToJSONLikeValue(c))
 }
 
-func contentToJSONValue(c *genai.Content) any {
+// contentToJSONLikeValue converts a genai.Content to a JSON, which is then converted to a log.Value.
+func contentToJSONLikeValue(c *genai.Content) any {
 	if elideMessageContent {
 		return elidedContent
 	}
