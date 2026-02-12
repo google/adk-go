@@ -26,8 +26,8 @@ type mockTool struct {
 	name string
 }
 
-func (m *mockTool) Name() string          { return m.name }
-func (m *mockTool) Description() string   { return "" }
+func (m *mockTool) Name() string        { return m.name }
+func (m *mockTool) Description() string { return "" }
 func (m *mockTool) IsLongRunning() bool { return false }
 
 type mockContext struct {
@@ -39,9 +39,9 @@ func (m *mockContext) InvocationID() string { return m.invocationID }
 
 func TestNewOptions(t *testing.T) {
 	tests := []struct {
-		name                 string
-		opts                 []PluginOption
-		wantErr              bool
+		name    string
+		opts    []PluginOption
+		wantErr bool
 	}{
 		{
 			name: "defaults",
@@ -180,9 +180,9 @@ func TestRetryAndReflect_MaxRetries(t *testing.T) {
 
 func TestRetryAndReflect_ErrorIfRetryExceeded(t *testing.T) {
 	r := &retryAndReflect{
-		maxRetries:           1,
-		errorIfRetryExceeded: true,
-		scope:                Invocation,
+		maxRetries:            1,
+		errorIfRetryExceeded:  true,
+		scope:                 Invocation,
 		scopedFailureCounters: make(map[string]map[string]int),
 	}
 
