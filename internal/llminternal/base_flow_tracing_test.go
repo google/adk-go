@@ -55,7 +55,7 @@ var (
 )
 
 func TestGenerateContentTracing(t *testing.T) {
-	exporter := setupTestTracer(t)
+	setupTestTracer(t)
 
 	modelMock := &mockModelForTest{
 		name: "test-model",
@@ -72,8 +72,9 @@ func TestGenerateContentTracing(t *testing.T) {
 					return
 				}
 				// Verify span NOT ended.
-				if len(exporter.GetSpans()) != 0 {
-					t.Errorf("expected 0 spans after partial response, got %d", len(exporter.GetSpans()))
+				gotSpans := testExporter.GetSpans()
+				if len(gotSpans) != 0 {
+					t.Errorf("expected 0 spans after partial response, got %d", len(gotSpans))
 				}
 
 				// Yield final response.
@@ -87,8 +88,9 @@ func TestGenerateContentTracing(t *testing.T) {
 					return
 				}
 				// Verify span ENDED.
-				if len(exporter.GetSpans()) != 1 {
-					t.Errorf("expected 1 span after final response, got %d", len(exporter.GetSpans()))
+				gotSpans = testExporter.GetSpans()
+				if len(gotSpans) != 1 {
+					t.Errorf("expected 1 span after final response, got %d", len(gotSpans))
 				}
 
 				// Yield final response - should not panic.
@@ -102,8 +104,9 @@ func TestGenerateContentTracing(t *testing.T) {
 					return
 				}
 				// Verify there is no new span.
-				if len(exporter.GetSpans()) != 1 {
-					t.Errorf("expected 1 span after final response, got %d", len(exporter.GetSpans()))
+				gotSpans = testExporter.GetSpans()
+				if len(gotSpans) != 1 {
+					t.Errorf("expected 1 span after final response, got %d", len(gotSpans))
 				}
 			}
 		},
@@ -115,19 +118,19 @@ func TestGenerateContentTracing(t *testing.T) {
 	}
 
 	// Verify that there is only single span.
-	spans := exporter.GetSpans()
-	if len(spans) != 1 {
-		t.Fatalf("expected 1 span, got %d", len(spans))
+	gotSpans := testExporter.GetSpans()
+	if len(gotSpans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(gotSpans))
 	}
-	span := spans[0]
+	gotSpan := gotSpans[0]
 
-	if span.Name != "generate_content test-model" {
-		t.Errorf("expected span name %q, got %q", "generate_content test-model", span.Name)
+	if gotSpan.Name != "generate_content test-model" {
+		t.Errorf("expected span name %q, got %q", "generate_content test-model", gotSpan.Name)
 	}
 
 	// Verify span attributes.
 	attrs := make(map[attribute.Key]string)
-	for _, kv := range span.Attributes {
+	for _, kv := range gotSpan.Attributes {
 		attrs[kv.Key] = kv.Value.Emit()
 	}
 
@@ -140,7 +143,7 @@ func TestGenerateContentTracing(t *testing.T) {
 }
 
 func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
-	exporter := setupTestTracer(t)
+	setupTestTracer(t)
 
 	modelMock := &mockModelForTest{
 		name: "test-model",
@@ -157,8 +160,9 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 					return
 				}
 				// Verify span NOT ended.
-				if len(exporter.GetSpans()) != 0 {
-					t.Errorf("expected 0 spans after partial response, got %d", len(exporter.GetSpans()))
+				gotSpans := testExporter.GetSpans()
+				if len(gotSpans) != 0 {
+					t.Errorf("expected 0 spans after partial response, got %d", len(gotSpans))
 				}
 			}
 		},
@@ -170,19 +174,19 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 	}
 
 	// Verify that there is only single span.
-	spans := exporter.GetSpans()
-	if len(spans) != 1 {
-		t.Fatalf("expected 1 span, got %d", len(spans))
+	gotSpans := testExporter.GetSpans()
+	if len(gotSpans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(gotSpans))
 	}
-	span := spans[0]
+	gotSpan := gotSpans[0]
 
-	if span.Name != "generate_content test-model" {
-		t.Errorf("expected span name %q, got %q", "generate_content test-model", span.Name)
+	if gotSpan.Name != "generate_content test-model" {
+		t.Errorf("expected span name %q, got %q", "generate_content test-model", gotSpan.Name)
 	}
 
 	// Verify span attributes.
 	attrs := make(map[attribute.Key]string)
-	for _, kv := range span.Attributes {
+	for _, kv := range gotSpan.Attributes {
 		attrs[kv.Key] = kv.Value.Emit()
 	}
 
@@ -195,7 +199,7 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 }
 
 func TestGenerateContentTracingError(t *testing.T) {
-	exporter := setupTestTracer(t)
+	setupTestTracer(t)
 
 	modelMock := &mockModelForTest{
 		name: "test-model",
@@ -216,8 +220,9 @@ func TestGenerateContentTracingError(t *testing.T) {
 				yield(nil, errors.New("test error"))
 
 				// Verify span ended.
-				if len(exporter.GetSpans()) != 1 {
-					t.Errorf("expected 1 span after error, got %d", len(exporter.GetSpans()))
+				gotSpans := testExporter.GetSpans()
+				if len(gotSpans) != 1 {
+					t.Errorf("expected 1 span after error, got %d", len(gotSpans))
 				}
 			}
 		},
@@ -229,36 +234,39 @@ func TestGenerateContentTracingError(t *testing.T) {
 	}
 
 	// Verify that there is only single span.
-	spans := exporter.GetSpans()
-	if len(spans) != 1 {
-		t.Fatalf("expected 1 span, got %d", len(spans))
+	gotSpans := testExporter.GetSpans()
+	if len(gotSpans) != 1 {
+		t.Fatalf("expected 1 span, got %d", len(gotSpans))
 	}
-	span := spans[0]
+	gotSpan := gotSpans[0]
 
-	if span.Name != "generate_content test-model" {
-		t.Errorf("expected span name %q, got %q", "generate_content test-model", span.Name)
-	}
-
-	if span.Status.Code != codes.Error {
-		t.Errorf("expected span status %q, got %q", codes.Error, span.Status.Code)
+	if gotSpan.Name != "generate_content test-model" {
+		t.Errorf("expected span name %q, got %q", "generate_content test-model", gotSpan.Name)
 	}
 
-	if span.Status.Description != "test error" {
-		t.Errorf("expected span status description %q, got %q", "test error", span.Status.Description)
+	if gotSpan.Status.Code != codes.Error {
+		t.Errorf("expected span status %q, got %q", codes.Error, gotSpan.Status.Code)
+	}
+
+	if gotSpan.Status.Description != "test error" {
+		t.Errorf("expected span status description %q, got %q", "test error", gotSpan.Status.Description)
 	}
 }
 
-func setupTestTracer(t *testing.T) *tracetest.InMemoryExporter {
+func setupTestTracer(t *testing.T) {
 	t.Helper()
 	initTracer.Do(func() {
+		// internal/telemetry initializes the global tracer provider once at startup.
+		// Subsequent calls to otel.SetTracerProvider don't update existing tracer providers, so we can override only once.
 		testExporter = tracetest.NewInMemoryExporter()
 		tp := sdktrace.NewTracerProvider(
 			sdktrace.WithSyncer(testExporter),
 		)
 		otel.SetTracerProvider(tp)
 	})
+	// Reset the exporter before each test to avoid flakiness.
+	testExporter.Reset()
 	t.Cleanup(func() {
 		testExporter.Reset()
 	})
-	return testExporter
 }
