@@ -25,8 +25,8 @@ import (
 	"strings"
 	"sync"
 
-	"google.golang.org/adk/plugin/plugin"
-	"google.golang.org/adk/adk/tool/tool"
+	"google.golang.org/adk/plugin"
+	"google.golang.org/adk/tool"
 )
 
 const (
@@ -77,18 +77,24 @@ func WithTrackingScope(scope TrackingScope) PluginOption {
 }
 
 // New creates a new reflect and retry tool plugin.
-func New(maxRetries int, errorIfRetryExceeded bool, scope TrackingScope) (*plugin.Plugin, error) {
-	if maxRetries < 0 {
-		return nil, fmt.Errorf("maxRetries must be a non-negative integer")
-	}
+func New(opts ...PluginOption) (*plugin.Plugin, error) {
 	r := &retryAndReflect{
-		maxRetries:            maxRetries,
-		errorIfRetryExceeded:  errorIfRetryExceeded,
-		scope:                 scope,
+		maxRetries:            3, // A sensible default
+		errorIfRetryExceeded:  false,
+		scope:                 Invocation,
 		scopedFailureCounters: make(map[string]map[string]int),
 	}
+
+	for _, opt := range opts {
+		opt(r)
+	}
+
+	if r.maxRetries < 0 {
+		return nil, fmt.Errorf("maxRetries must be a non-negative integer")
+	}
+
 	return plugin.New(plugin.Config{
-		Name:                "ReflectAndRetryToolPlugin",
+		Name:                "RetryAndReflectPlugin",
 		AfterToolCallback:   r.afterTool,
 		OnToolErrorCallback: r.onToolError,
 	})
@@ -165,12 +171,16 @@ func (r *retryAndReflect) formatErrorDetails(err error) string {
 	return fmt.Sprintf("%T: %v", err, err)
 }
 
-func (r *retryAndReflect) createToolReflectionResponse(tool tool.Tool, toolArgs map[string]any, toolErr error, retryCount int) map[string]any {
+func (r *retryAndReflect) formatToolArgs(toolArgs map[string]any) string {
 	argsBytes, err := json.MarshalIndent(toolArgs, "", "  ")
-	argsSummary := string(argsBytes)
 	if err != nil {
-		argsSummary = fmt.Sprintf("%+v", toolArgs)
+		return fmt.Sprintf("%+v", toolArgs)
 	}
+	return string(argsBytes)
+}
+
+func (r *retryAndReflect) createToolReflectionResponse(tool tool.Tool, toolArgs map[string]any, toolErr error, retryCount int) map[string]any {
+	argsSummary := r.formatToolArgs(toolArgs)
 	errorDetails := r.formatErrorDetails(toolErr)
 
 	var msg strings.Builder
@@ -196,11 +206,7 @@ func (r *retryAndReflect) createToolReflectionResponse(tool tool.Tool, toolArgs 
 }
 
 func (r *retryAndReflect) createToolRetryExceedMsg(tool tool.Tool, toolArgs map[string]any, toolErr error) map[string]any {
-	argsBytes, err := json.MarshalIndent(toolArgs, "", "  ")
-	argsSummary := string(argsBytes)
-	if err != nil {
-		argsSummary = fmt.Sprintf("%+v", toolArgs)
-	}
+	argsSummary := r.formatToolArgs(toolArgs)
 	errorDetails := r.formatErrorDetails(toolErr)
 
 	var msg strings.Builder
