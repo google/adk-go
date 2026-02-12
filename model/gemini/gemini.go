@@ -27,6 +27,7 @@ import (
 
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/llminternal/converters"
+	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/internal/version"
 	"google.golang.org/adk/model"
 )
@@ -141,3 +142,9 @@ func (m *geminiModel) maybeAppendUserContent(req *model.LLMRequest) {
 		req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
 	}
 }
+
+func (g *geminiModel) GetGoogleLLMVariant() string {
+	return googlellm.GoogleLLMVariantGeminiAPI
+}
+
+var _ googlellm.GoogleLLM = &geminiModel{}

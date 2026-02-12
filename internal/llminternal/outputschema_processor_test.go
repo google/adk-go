@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -50,6 +51,8 @@ type mockLLM struct {
 }
 
 func (m *mockLLM) Name() string { return m.name }
+
+func (m *mockLLM) GetGoogleLLMVariant() string { return googlellm.GoogleLLMVariantGeminiAPI }
 
 // mockLLMAgent satisfies both agent.Agent (via embedding) and llminternal.Agent (via internal() implementation)
 type mockLLMAgent struct {

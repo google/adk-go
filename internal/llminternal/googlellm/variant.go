@@ -20,12 +20,14 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"google.golang.org/adk/model"
 )
 
 const (
-	// For using credentials from Google Vertex AI
+	// GoogleLLMVariantVertexAI is returned for Google Vertex AI API models
 	GoogleLLMVariantVertexAI = "VERTEX_AI"
-	// For using API Key from Google AI Studio
+	// GoogleLLMVariantGeminiAPI is returned for models from Google AI Studio
 	GoogleLLMVariantGeminiAPI = "GEMINI_API"
 )
 
@@ -33,22 +35,26 @@ var geminiModelVersionRegex = regexp.MustCompile(`^gemini-(\d+(\.\d+)?)`)
 
 // GetGoogleLLMVariant returns the Google LLM variant to use.
 // see https://google.github.io/adk-docs/get-started/quickstart/#set-up-the-model
-func GetGoogleLLMVariant() string {
+func GetGoogleLLMVariant(llm model.LLM) string {
 	useVertexAI, _ := os.LookupEnv("GOOGLE_GENAI_USE_VERTEXAI")
 	if slices.Contains([]string{"1", "true"}, useVertexAI) {
 		return GoogleLLMVariantVertexAI
 	}
-	return GoogleLLMVariantGeminiAPI
+
+	if llm == nil {
+		return ""
+	}
+
+	i, ok := llm.(GoogleLLM)
+	if !ok {
+		return ""
+	}
+	return i.GetGoogleLLMVariant()
 }
 
-// IsVertexVariant returns true if the variant is Vertex AI.
-func IsVertexVariant() bool {
-	return GetGoogleLLMVariant() == GoogleLLMVariantVertexAI
-}
-
-// IsGeminiVariant returns true if the variant is Gemini API.
-func IsGeminiVariant() bool {
-	return GetGoogleLLMVariant() == GoogleLLMVariantGeminiAPI
+// GoogleLLM is an interface which allows to distinguish between Vertex AI and Gemini API models.
+type GoogleLLM interface {
+	GetGoogleLLMVariant() string
 }
 
 // IsGeminiModel returns true if the model is a Gemini model.
@@ -56,8 +62,9 @@ func IsGeminiModel(model string) bool {
 	return strings.HasPrefix(extractModelName(model), "gemini-")
 }
 
-// IsGemini2OrAbove returns true if the model is a Gemini 2.0 or above.
-func IsGemini2OrAbove(model string) bool {
+// IsGemini25Less returns true if the model is a Gemini 2.5 or less.
+// These models do not support output schema with tools natively, so we need to use a processor to handle it.
+func IsGemini25Less(model string) bool {
 	model = extractModelName(model)
 	// extract the model version from model name - e.g. turn gemini-2.5-flash or gemini-2.5-flash-lite into 2.5
 	matches := geminiModelVersionRegex.FindStringSubmatch(model)
@@ -68,12 +75,21 @@ func IsGemini2OrAbove(model string) bool {
 	if err != nil {
 		return false
 	}
-	return version >= 2.0
+	return version <= 2.5
 }
 
-// CanGeminiModelUseOutputSchemaWithTools returns true if the model is a Gemini model and the variant is Vertex AI and the model is a Gemini 2.x+ .
-func CanGeminiModelUseOutputSchemaWithTools(model string) bool {
-	return IsGeminiModel(model) && IsVertexVariant() && IsGemini2OrAbove(model)
+// IsGeminiAPIVariant returns true if the model is a Gemini API model (not Vertex AI).
+func IsGeminiAPIVariant(llm model.LLM) bool {
+	return GetGoogleLLMVariant(llm) == GoogleLLMVariantGeminiAPI
+}
+
+// NeedsOutputSchemaProcessor returns true if the Gemini model doesn't support output schema with tools natively and requires a processor to handle it.
+// Only Gemini 2.5 models and lower and only in Gemini API don't support natively, so we enable the processor for them.
+func NeedsOutputSchemaProcessor(llm model.LLM) bool {
+	if llm == nil {
+		return false
+	}
+	return IsGeminiModel(llm.Name()) && IsGeminiAPIVariant(llm) && IsGemini25Less(llm.Name())
 }
 
 func extractModelName(model string) string {
