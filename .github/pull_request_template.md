@@ -29,7 +29,7 @@ for all PRs that are not small documentation or typo fixes._
 - [ ] I have added or updated unit tests for my change.
 - [ ] All unit tests pass locally.
 
-_Please include a summary of passed test results._
+_Please include a summary of passed go test results._
 
 **Manual End-to-End (E2E) Tests:**
 
