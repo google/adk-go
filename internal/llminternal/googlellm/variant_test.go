@@ -17,8 +17,9 @@ package googlellm
 import (
 	"testing"
 
-	"google.golang.org/adk/model"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/model"
 )
 
 func TestIsGemini25Less(t *testing.T) {
