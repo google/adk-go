@@ -143,8 +143,11 @@ func (m *geminiModel) maybeAppendUserContent(req *model.LLMRequest) {
 	}
 }
 
-func (g *geminiModel) GetGoogleLLMVariant() string {
-	return googlellm.GoogleLLMVariantGeminiAPI
+func (g *geminiModel) GetGoogleLLMVariant() genai.Backend {
+	if g == nil || g.client == nil {
+		return genai.BackendUnspecified
+	}
+	return g.client.ClientConfig().Backend
 }
 
 var _ googlellm.GoogleLLM = &geminiModel{}

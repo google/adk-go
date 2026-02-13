@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"google.golang.org/adk/model"
+	"google.golang.org/genai"
 )
 
 func TestIsGemini25Less(t *testing.T) {
@@ -68,14 +69,16 @@ func TestNeedsOutputSchemaProcessor(t *testing.T) {
 	testCases := []struct {
 		name    string
 		model   string
-		variant string
+		variant genai.Backend
 		want    bool
 	}{
-		{"Gemini2.0_Vertex", "gemini-2.0-flash", GoogleLLMVariantVertexAI, false},
-		{"Gemini2.0_GeminiAPI", "gemini-2.0-flash", GoogleLLMVariantGeminiAPI, true},
-		{"NonGemini_Vertex", "not-a-gemini", GoogleLLMVariantVertexAI, false},
-		{"Gemini3.0_GeminiAPI", "gemini-3.0", GoogleLLMVariantGeminiAPI, false},
-		{"Gemini3.0_Vertex", "gemini-3.0", GoogleLLMVariantVertexAI, false},
+		{"Gemini2.0_Vertex", "gemini-2.0-flash", genai.BackendVertexAI, false},
+		{"Gemini2.0_GeminiAPI", "gemini-2.0-flash", genai.BackendGeminiAPI, true},
+		{"NonGemini_Vertex", "not-a-gemini", genai.BackendVertexAI, false},
+		{"Gemini3.0_GeminiAPI", "gemini-3.0", genai.BackendGeminiAPI, false},
+		{"Gemini3.0_Vertex", "gemini-3.0", genai.BackendVertexAI, false},
+		{"CustomGemini2", "gemini-2.0-hack", genai.BackendUnspecified, false},
+		{"CustomGemini3", "gemini-3.0-hack", genai.BackendUnspecified, false},
 	}
 
 	for _, tc := range testCases {
@@ -89,26 +92,15 @@ func TestNeedsOutputSchemaProcessor(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("GeminiAPI_with_Vertex_env_var_override", func(t *testing.T) {
-		t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
-		got := NeedsOutputSchemaProcessor(&mockGoogleLLM{
-			variant: GoogleLLMVariantGeminiAPI,
-			nameVal: "gemini-2.0-flash",
-		})
-		if got { // want false
-			t.Errorf("NeedsOutputSchemaProcessor() = %v, want %v with GOOGLE_GENAI_USE_VERTEXAI set", got, false)
-		}
-	})
 }
 
 type mockGoogleLLM struct {
 	model.LLM
-	variant string
+	variant genai.Backend
 	nameVal string
 }
 
-func (m *mockGoogleLLM) GetGoogleLLMVariant() string {
+func (m *mockGoogleLLM) GetGoogleLLMVariant() genai.Backend {
 	return m.variant
 }
 

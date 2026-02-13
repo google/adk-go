@@ -25,7 +25,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -47,12 +46,18 @@ func (m *mockTool) Run(ctx tool.Context, args any) (map[string]any, error) { ret
 
 type mockLLM struct {
 	model.LLM
-	name string
+	name    string
+	variant *genai.Backend
 }
 
 func (m *mockLLM) Name() string { return m.name }
 
-func (m *mockLLM) GetGoogleLLMVariant() string { return googlellm.GoogleLLMVariantGeminiAPI }
+func (m *mockLLM) GetGoogleLLMVariant() genai.Backend {
+	if m.variant != nil {
+		return *m.variant
+	}
+	return genai.BackendGeminiAPI
+}
 
 // mockLLMAgent satisfies both agent.Agent (via embedding) and llminternal.Agent (via internal() implementation)
 type mockLLMAgent struct {
@@ -169,13 +174,16 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 
 	t.Run("NoOpWhenNativeSupportAvailable", func(t *testing.T) {
 		// Native support = Vertex AI + Gemini 2.0+
-		t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "1")
+		llm := &mockLLM{
+			name:    "gemini-2.0-flash",
+			variant: func() *genai.Backend { x := genai.BackendVertexAI; return &x }(),
+		}
 
 		baseAgent := utils.Must(agent.New(agent.Config{Name: "VertexGemini2Agent"}))
 		mockAgent := &mockLLMAgent{
 			Agent: baseAgent,
 			s: &State{
-				Model:        &mockLLM{name: "gemini-2.0-flash"},
+				Model:        llm,
 				OutputSchema: schema,
 				Tools:        []tool.Tool{&mockTool{name: "other_tool"}},
 			},
