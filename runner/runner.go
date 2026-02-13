@@ -108,16 +108,13 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			yield(nil, err)
 			return
 		}
-
-		liveConnectConfig := &genai.LiveConnectConfig{
-			ResponseModalities: cfg.ResponseModalities,
-			SpeechConfig:       cfg.SpeechConfig,
-		}
-
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
-			StreamingMode:     runconfig.StreamingMode(cfg.StreamingMode),
-			LiveConnectConfig: liveConnectConfig,
+			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
+			LiveConnectConfig: &genai.LiveConnectConfig{
+				ResponseModalities: cfg.ResponseModalities,
+				SpeechConfig:       cfg.SpeechConfig,
+			},
 		})
 
 		var artifacts agent.Artifacts

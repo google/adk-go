@@ -119,6 +119,13 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	poemAgentModel, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+		APIKey: apiKey,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create model: %v", err)
+	}
+
 	type Input struct {
 		LineCount int `json:"lineCount"`
 	}
@@ -139,7 +146,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	poemAgent, err := llmagent.New(llmagent.Config{
 		Name:        "poem_agent",
-		Model:       model,
+		Model:       poemAgentModel,
 		Description: "returns poem",
 		Instruction: "You return poems.",
 		Tools: []tool.Tool{
@@ -154,7 +161,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		Name:        "live_agent",
 		Model:       model,
 		Description: "A live agent that echoes what you say and generates poems.",
-		Instruction: "You are a live assistant. Respond briefly to the user. If asked for a poem, use the poem tool.",
+		Instruction: "You are a live assistant. Respond briefly to the user. If asked for a poem, use the poem_agent to generate a poem.",
 		Tools: []tool.Tool{
 			agenttool.New(poemAgent, nil),
 		},
