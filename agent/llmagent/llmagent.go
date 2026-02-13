@@ -65,6 +65,7 @@ func New(cfg Config) (agent.Agent, error) {
 		State: llminternal.State{
 			Model:                    cfg.Model,
 			GenerateContentConfig:    cfg.GenerateContentConfig,
+			LiveConnectConfig:        cfg.LiveConnectConfig,
 			Tools:                    cfg.Tools,
 			Toolsets:                 cfg.Toolsets,
 			DisallowTransferToParent: cfg.DisallowTransferToParent,
@@ -140,6 +141,11 @@ type Config struct {
 	// For example: use this config to adjust model temperature, configure
 	// safety settings, etc.
 	GenerateContentConfig *genai.GenerateContentConfig
+
+	// LiveConnectConfig configures live connection settings for the agent.
+	//
+	// If this is set, the agent will use live connection to the model.
+	LiveConnectConfig *genai.LiveConnectConfig
 
 	// BeforeModelCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil LLMResponse or error. Then

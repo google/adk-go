@@ -29,7 +29,8 @@ const (
 )
 
 type RunConfig struct {
-	StreamingMode     StreamingMode
+	StreamingMode StreamingMode
+
 	LiveConnectConfig *genai.LiveConnectConfig
 }
 

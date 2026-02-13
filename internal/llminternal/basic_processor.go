@@ -41,8 +41,16 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) e
 		req.Config.ResponseSchema = llmAgent.internal().OutputSchema
 		req.Config.ResponseMIMEType = "application/json"
 	}
+
 	// TODO: missing features
 	//  populate LLMRequest LiveConnectConfig setting
+	// req.LiveConnectConfig = clone(llmAgent.internal().LiveConnectConfig)
+	// if req.LiveConnectConfig == nil {
+	// 	req.LiveConnectConfig = &genai.LiveConnectConfig{}
+	// }
+	// if llmAgent.internal().OutputSchema != nil {
+	// 	return fmt.Errorf("live api doesn't support agent's output schema")
+	// }
 	return nil
 }
 

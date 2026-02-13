@@ -36,6 +36,7 @@ type State struct {
 	IncludeContents string
 
 	GenerateContentConfig *genai.GenerateContentConfig
+	LiveConnectConfig     *genai.LiveConnectConfig
 
 	Instruction               string
 	InstructionProvider       InstructionProvider

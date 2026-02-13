@@ -112,7 +112,6 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 		liveConnectConfig := &genai.LiveConnectConfig{
 			ResponseModalities: cfg.ResponseModalities,
 			SpeechConfig:       cfg.SpeechConfig,
-			// SystemInstruction: , // TODO(imre): where do we get this from?
 		}
 
 		ctx = parentmap.ToContext(ctx, r.parents)
