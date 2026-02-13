@@ -22,7 +22,7 @@ import (
 	"google.golang.org/adk/model"
 )
 
-func TestIsGemini25Less(t *testing.T) {
+func TestIsGemini25OrLower(t *testing.T) {
 	testCases := []struct {
 		model string
 		want  bool
@@ -41,9 +41,9 @@ func TestIsGemini25Less(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		got := IsGemini25Less(tc.model)
+		got := IsGemini25OrLower(tc.model)
 		if got != tc.want {
-			t.Errorf("IsGemini25Less(%q) = %v, want %v", tc.model, got, tc.want)
+			t.Errorf("IsGemini25OrLower(%q) = %v, want %v", tc.model, got, tc.want)
 		}
 	}
 }

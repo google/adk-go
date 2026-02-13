@@ -45,9 +45,9 @@ func IsGeminiModel(model string) bool {
 	return strings.HasPrefix(extractModelName(model), "gemini-")
 }
 
-// IsGemini25Less returns true if the model is a Gemini 2.5 or less.
+// IsGemini25OrLower returns true if the model is a Gemini 2.5 or less.
 // These models do not support output schema with tools natively, so we need to use a processor to handle it.
-func IsGemini25Less(model string) bool {
+func IsGemini25OrLower(model string) bool {
 	model = extractModelName(model)
 	// extract the model version from model name - e.g. turn gemini-2.5-flash or gemini-2.5-flash-lite into 2.5
 	matches := geminiModelVersionRegex.FindStringSubmatch(model)
@@ -72,7 +72,7 @@ func NeedsOutputSchemaProcessor(llm model.LLM) bool {
 	if llm == nil {
 		return false
 	}
-	return IsGeminiModel(llm.Name()) && IsGeminiAPIVariant(llm) && IsGemini25Less(llm.Name())
+	return IsGeminiModel(llm.Name()) && IsGeminiAPIVariant(llm) && IsGemini25OrLower(llm.Name())
 }
 
 func extractModelName(model string) string {
