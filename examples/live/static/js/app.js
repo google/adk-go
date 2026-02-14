@@ -14,16 +14,24 @@ let is_audio = false;
 
 // Get checkbox elements for RunConfig options
 const enableProactivityCheckbox = document.getElementById("enableProactivity");
-const enableAffectiveDialogCheckbox = document.getElementById("enableAffectiveDialog");
+const enableAffectiveDialogCheckbox = document.getElementById(
+  "enableAffectiveDialog",
+);
 
 // Reconnect WebSocket when RunConfig options change
 function handleRunConfigChange() {
   if (websocket && websocket.readyState === WebSocket.OPEN) {
     addSystemMessage("Reconnecting with updated settings...");
-    addConsoleEntry('outgoing', 'Reconnecting due to settings change', {
-      proactivity: enableProactivityCheckbox.checked,
-      affective_dialog: enableAffectiveDialogCheckbox.checked
-    }, '🔄', 'system');
+    addConsoleEntry(
+      "outgoing",
+      "Reconnecting due to settings change",
+      {
+        proactivity: enableProactivityCheckbox.checked,
+        affective_dialog: enableAffectiveDialogCheckbox.checked,
+      },
+      "🔄",
+      "system",
+    );
     websocket.close();
     // connectWebsocket() will be called by onclose handler after delay
   }
@@ -37,7 +45,14 @@ enableAffectiveDialogCheckbox.addEventListener("change", handleRunConfigChange);
 function getWebSocketUrl() {
   // Use wss:// for HTTPS pages, ws:// for HTTP (localhost development)
   const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const baseUrl = wsProtocol + "//" + window.location.host + "/ws/" + userId + "/" + sessionId;
+  const baseUrl =
+    wsProtocol +
+    "//" +
+    window.location.host +
+    "/ws/" +
+    userId +
+    "/" +
+    sessionId;
   const params = new URLSearchParams();
 
   // Add proactivity option if checked
@@ -70,17 +85,19 @@ let currentInputTranscriptionElement = null;
 let currentOutputTranscriptionId = null;
 let currentOutputTranscriptionElement = null;
 let inputTranscriptionFinished = false; // Track if input transcription is complete for this turn
+let accumulatedAudioChunks = []; // Accumulate audio chunks for the current turn
 
 // Helper function to clean spaces between CJK characters
 // Removes spaces between Japanese/Chinese/Korean characters while preserving spaces around Latin text
 function cleanCJKSpaces(text) {
   // CJK Unicode ranges: Hiragana, Katakana, Kanji, CJK Unified Ideographs, Fullwidth forms
-  const cjkPattern = /[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf\uff00-\uffef]/;
+  const cjkPattern =
+    /[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf\uff00-\uffef]/;
 
   // Remove spaces between two CJK characters
   return text.replace(/(\S)\s+(?=\S)/g, (match, char1) => {
     // Get the character after the space(s)
-    const nextCharMatch = text.match(new RegExp(char1 + '\\s+(.)', 'g'));
+    const nextCharMatch = text.match(new RegExp(char1 + "\\s+(.)", "g"));
     if (nextCharMatch && nextCharMatch.length > 0) {
       const char2 = nextCharMatch[0].slice(-1);
       // If both characters are CJK, remove the space
@@ -95,10 +112,24 @@ function cleanCJKSpaces(text) {
 // Console logging functionality
 function formatTimestamp() {
   const now = new Date();
-  return now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+  return now.toLocaleTimeString("en-US", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 3,
+  });
 }
 
-function addConsoleEntry(type, content, data = null, emoji = null, author = null, isAudio = false) {
+function addConsoleEntry(
+  type,
+  content,
+  data = null,
+  emoji = null,
+  author = null,
+  isAudio = false,
+  audioData = null,
+) {
   // Skip audio events if checkbox is unchecked
   if (isAudio && !showAudioEventsCheckbox.checked) {
     return;
@@ -128,7 +159,12 @@ function addConsoleEntry(type, content, data = null, emoji = null, author = null
 
   const typeLabel = document.createElement("span");
   typeLabel.className = "console-entry-type";
-  typeLabel.textContent = type === 'outgoing' ? '↑ Upstream' : type === 'incoming' ? '↓ Downstream' : '⚠ Error';
+  typeLabel.textContent =
+    type === "outgoing"
+      ? "↑ Upstream"
+      : type === "incoming"
+        ? "↓ Downstream"
+        : "⚠ Error";
 
   leftSection.appendChild(expandIcon);
   leftSection.appendChild(typeLabel);
@@ -138,8 +174,54 @@ function addConsoleEntry(type, content, data = null, emoji = null, author = null
     const authorBadge = document.createElement("span");
     authorBadge.className = "console-entry-author";
     authorBadge.textContent = author;
-    authorBadge.setAttribute('data-author', author);
+    authorBadge.setAttribute("data-author", author);
     leftSection.appendChild(authorBadge);
+  }
+
+  // Add play button for audio entries
+  if (audioData) {
+    const playButton = document.createElement("button");
+    playButton.className = "console-play-btn";
+    playButton.textContent = "▶ Play";
+    playButton.title = "Play audio";
+    let currentSource = null;
+    let currentContext = null;
+
+    playButton.addEventListener("click", async (e) => {
+      e.stopPropagation(); // Prevent expanding/collapsing
+
+      if (playButton.textContent === "■ Stop") {
+        if (currentSource) {
+          currentSource.stop();
+          currentSource = null;
+        }
+        if (currentContext) {
+          currentContext.close();
+          currentContext = null;
+        }
+        playButton.textContent = "▶ Play";
+        return;
+      }
+
+      playButton.textContent = "■ Stop";
+      try {
+        const { source, audioContext } = await playPcmAudio(audioData);
+        currentSource = source;
+        currentContext = audioContext;
+        currentSource.onended = () => {
+          playButton.textContent = "▶ Play";
+          currentSource = null;
+          if (currentContext) {
+            currentContext.close();
+            currentContext = null;
+          }
+        };
+      } catch (err) {
+        console.error("Error playing audio:", err);
+        playButton.textContent = "▶ Play";
+      }
+    });
+    leftSection.appendChild(playButton);
   }
 
   const timestamp = document.createElement("span");
@@ -192,11 +274,11 @@ function addConsoleEntry(type, content, data = null, emoji = null, author = null
 }
 
 function clearConsole() {
-  consoleContent.innerHTML = '';
+  consoleContent.innerHTML = "";
 }
 
 // Clear console button handler
-clearConsoleBtn.addEventListener('click', clearConsole);
+clearConsoleBtn.addEventListener("click", clearConsole);
 
 // Update connection status UI
 function updateConnectionStatus(connected) {
@@ -294,7 +376,7 @@ function sanitizeEventForDisplay(event) {
 
   // Check for audio data in content.parts
   if (sanitized.content && sanitized.content.parts) {
-    sanitized.content.parts = sanitized.content.parts.map(part => {
+    sanitized.content.parts = sanitized.content.parts.map((part) => {
       if (part.inlineData && part.inlineData.data) {
         // Calculate byte size (base64 string length / 4 * 3, roughly)
         const byteSize = Math.floor(part.inlineData.data.length * 0.75);
@@ -302,8 +384,8 @@ function sanitizeEventForDisplay(event) {
           ...part,
           inlineData: {
             ...part.inlineData,
-            data: `(${byteSize.toLocaleString()} bytes)`
-          }
+            data: `(${byteSize.toLocaleString()} bytes)`,
+          },
         };
       }
       return part;
@@ -326,11 +408,17 @@ function connectWebsocket() {
     addSystemMessage("Connected to ADK streaming server");
 
     // Log to console
-    addConsoleEntry('incoming', 'WebSocket Connected', {
-      userId: userId,
-      sessionId: sessionId,
-      url: ws_url
-    }, '🔌', 'system');
+    addConsoleEntry(
+      "incoming",
+      "WebSocket Connected",
+      {
+        userId: userId,
+        sessionId: sessionId,
+        url: ws_url,
+      },
+      "🔌",
+      "system",
+    );
 
     // Enable the Send button
     document.getElementById("sendButton").disabled = false;
@@ -344,32 +432,43 @@ function connectWebsocket() {
     console.log("[AGENT TO CLIENT] ", adkEvent);
 
     // Log to console panel
-    let eventSummary = 'Event';
-    let eventEmoji = '📨'; // Default emoji
-    const author = adkEvent.author || 'system';
+    let eventSummary = "Event";
+    let eventEmoji = "📨"; // Default emoji
+    const author = adkEvent.author || "system";
 
     if (adkEvent.turnComplete) {
-      eventSummary = 'Turn Complete';
-      eventEmoji = '✅';
+      // Calculate total audio size for this turn
+      const totalAudioBytes = accumulatedAudioChunks.reduce(
+        (sum, chunk) => sum + Math.floor(chunk.length * 0.75),
+        0,
+      );
+      if (totalAudioBytes > 0) {
+        eventSummary = `Turn Complete (${totalAudioBytes.toLocaleString()} bytes audio)`;
+      } else {
+        eventSummary = "Turn Complete";
+      }
+      eventEmoji = "✅";
     } else if (adkEvent.interrupted) {
-      eventSummary = 'Interrupted';
-      eventEmoji = '⏸️';
+      eventSummary = "Interrupted";
+      eventEmoji = "⏸️";
     } else if (adkEvent.inputTranscription) {
       // Show transcription text in summary
-      const transcriptionText = adkEvent.inputTranscription.text || '';
-      const truncated = transcriptionText.length > 60
-        ? transcriptionText.substring(0, 60) + '...'
-        : transcriptionText;
+      const transcriptionText = adkEvent.inputTranscription.text || "";
+      const truncated =
+        transcriptionText.length > 60
+          ? transcriptionText.substring(0, 60) + "..."
+          : transcriptionText;
       eventSummary = `Input Transcription: "${truncated}"`;
-      eventEmoji = '📝';
+      eventEmoji = "📝";
     } else if (adkEvent.outputTranscription) {
       // Show transcription text in summary
-      const transcriptionText = adkEvent.outputTranscription.text || '';
-      const truncated = transcriptionText.length > 60
-        ? transcriptionText.substring(0, 60) + '...'
-        : transcriptionText;
+      const transcriptionText = adkEvent.outputTranscription.text || "";
+      const truncated =
+        transcriptionText.length > 60
+          ? transcriptionText.substring(0, 60) + "..."
+          : transcriptionText;
       eventSummary = `Output Transcription: "${truncated}"`;
-      eventEmoji = '📝';
+      eventEmoji = "📝";
     } else if (adkEvent.usageMetadata) {
       // Show token usage information
       const usage = adkEvent.usageMetadata;
@@ -377,86 +476,138 @@ function connectWebsocket() {
       const responseTokens = usage.candidatesTokenCount || 0;
       const totalTokens = usage.totalTokenCount || 0;
       eventSummary = `Token Usage: ${totalTokens.toLocaleString()} total (${promptTokens.toLocaleString()} prompt + ${responseTokens.toLocaleString()} response)`;
-      eventEmoji = '📊';
+      eventEmoji = "📊";
     } else if (adkEvent.content && adkEvent.content.parts) {
-      const hasText = adkEvent.content.parts.some(p => p.text);
-      const hasAudio = adkEvent.content.parts.some(p => p.inlineData);
-      const hasExecutableCode = adkEvent.content.parts.some(p => p.executableCode);
-      const hasCodeExecutionResult = adkEvent.content.parts.some(p => p.codeExecutionResult);
+      const hasText = adkEvent.content.parts.some((p) => p.text);
+      const hasAudio = adkEvent.content.parts.some((p) => p.inlineData);
+      const hasExecutableCode = adkEvent.content.parts.some(
+        (p) => p.executableCode,
+      );
+      const hasCodeExecutionResult = adkEvent.content.parts.some(
+        (p) => p.codeExecutionResult,
+      );
 
       if (hasExecutableCode) {
         // Show executable code
-        const codePart = adkEvent.content.parts.find(p => p.executableCode);
+        const codePart = adkEvent.content.parts.find((p) => p.executableCode);
         if (codePart && codePart.executableCode) {
-          const code = codePart.executableCode.code || '';
-          const language = codePart.executableCode.language || 'unknown';
-          const truncated = code.length > 60
-            ? code.substring(0, 60).replace(/\n/g, ' ') + '...'
-            : code.replace(/\n/g, ' ');
+          const code = codePart.executableCode.code || "";
+          const language = codePart.executableCode.language || "unknown";
+          const truncated =
+            code.length > 60
+              ? code.substring(0, 60).replace(/\n/g, " ") + "..."
+              : code.replace(/\n/g, " ");
           eventSummary = `Executable Code (${language}): ${truncated}`;
-          eventEmoji = '💻';
+          eventEmoji = "💻";
         }
       }
 
       if (hasCodeExecutionResult) {
         // Show code execution result
-        const resultPart = adkEvent.content.parts.find(p => p.codeExecutionResult);
+        const resultPart = adkEvent.content.parts.find(
+          (p) => p.codeExecutionResult,
+        );
         if (resultPart && resultPart.codeExecutionResult) {
-          const outcome = resultPart.codeExecutionResult.outcome || 'UNKNOWN';
-          const output = resultPart.codeExecutionResult.output || '';
-          const truncatedOutput = output.length > 60
-            ? output.substring(0, 60).replace(/\n/g, ' ') + '...'
-            : output.replace(/\n/g, ' ');
+          const outcome = resultPart.codeExecutionResult.outcome || "UNKNOWN";
+          const output = resultPart.codeExecutionResult.output || "";
+          const truncatedOutput =
+            output.length > 60
+              ? output.substring(0, 60).replace(/\n/g, " ") + "..."
+              : output.replace(/\n/g, " ");
           eventSummary = `Code Execution Result (${outcome}): ${truncatedOutput}`;
-          eventEmoji = outcome === 'OUTCOME_OK' ? '✅' : '❌';
+          eventEmoji = outcome === "OUTCOME_OK" ? "✅" : "❌";
         }
       }
 
       if (hasText) {
         // Show text preview in summary
-        const textPart = adkEvent.content.parts.find(p => p.text);
+        const textPart = adkEvent.content.parts.find((p) => p.text);
         if (textPart && textPart.text) {
           const text = textPart.text;
-          const truncated = text.length > 80
-            ? text.substring(0, 80) + '...'
-            : text;
+          const truncated =
+            text.length > 80 ? text.substring(0, 80) + "..." : text;
           eventSummary = `Text: "${truncated}"`;
-          eventEmoji = '💭';
+          eventEmoji = "💭";
         } else {
-          eventSummary = 'Text Response';
-          eventEmoji = '💭';
+          eventSummary = "Text Response";
+          eventEmoji = "💭";
         }
       }
 
       if (hasAudio) {
-        // Extract audio info for summary
-        const audioPart = adkEvent.content.parts.find(p => p.inlineData);
+        // Extract audio info for summary and accumulate for turn playback
+        const audioPart = adkEvent.content.parts.find((p) => p.inlineData);
         if (audioPart && audioPart.inlineData) {
-          const mimeType = audioPart.inlineData.mimeType || 'unknown';
-          const dataLength = audioPart.inlineData.data ? audioPart.inlineData.data.length : 0;
+          const mimeType = audioPart.inlineData.mimeType || "unknown";
+          const dataLength = audioPart.inlineData.data
+            ? audioPart.inlineData.data.length
+            : 0;
           // Base64 string length / 4 * 3 gives approximate bytes
           const byteSize = Math.floor(dataLength * 0.75);
           eventSummary = `Audio Response: ${mimeType} (${byteSize.toLocaleString()} bytes)`;
-          eventEmoji = '🔊';
-        } else {
-          eventSummary = 'Audio Response';
-          eventEmoji = '🔊';
-        }
+          eventEmoji = "🔊";
 
-        // Log audio event with isAudio flag (filtered by checkbox)
-        const sanitizedEvent = sanitizeEventForDisplay(adkEvent);
-        addConsoleEntry('incoming', eventSummary, sanitizedEvent, eventEmoji, author, true);
+          // Accumulate audio chunk for turn playback
+          accumulatedAudioChunks.push(audioPart.inlineData.data);
+
+          // Log audio event without individual play button (play button will be on turn complete)
+          const sanitizedEvent = sanitizeEventForDisplay(adkEvent);
+          addConsoleEntry(
+            "incoming",
+            eventSummary,
+            sanitizedEvent,
+            eventEmoji,
+            author,
+            true,
+          );
+        } else {
+          eventSummary = "Audio Response";
+          eventEmoji = "🔊";
+
+          // Log audio event without playback data
+          const sanitizedEvent = sanitizeEventForDisplay(adkEvent);
+          addConsoleEntry(
+            "incoming",
+            eventSummary,
+            sanitizedEvent,
+            eventEmoji,
+            author,
+            true,
+          );
+        }
       }
     }
 
     // Create a sanitized version for console display (replace large audio data with summary)
     // Skip if already logged as audio event above
-    const isAudioOnlyEvent = adkEvent.content && adkEvent.content.parts &&
-      adkEvent.content.parts.some(p => p.inlineData) &&
-      !adkEvent.content.parts.some(p => p.text);
+    const isAudioOnlyEvent =
+      adkEvent.content &&
+      adkEvent.content.parts &&
+      adkEvent.content.parts.some((p) => p.inlineData) &&
+      !adkEvent.content.parts.some((p) => p.text);
     if (!isAudioOnlyEvent) {
       const sanitizedEvent = sanitizeEventForDisplay(adkEvent);
-      addConsoleEntry('incoming', eventSummary, sanitizedEvent, eventEmoji, author);
+      // For turn complete, pass accumulated audio for playback
+      if (adkEvent.turnComplete && accumulatedAudioChunks.length > 0) {
+        const combinedAudio = accumulatedAudioChunks.join("");
+        addConsoleEntry(
+          "incoming",
+          eventSummary,
+          sanitizedEvent,
+          eventEmoji,
+          author,
+          false,
+          combinedAudio,
+        );
+      } else {
+        addConsoleEntry(
+          "incoming",
+          eventSummary,
+          sanitizedEvent,
+          eventEmoji,
+          author,
+        );
+      }
     }
 
     // Handle turn complete event
@@ -471,7 +622,8 @@ function connectWebsocket() {
       }
       // Remove typing indicator from current output transcription
       if (currentOutputTranscriptionElement) {
-        const textElement = currentOutputTranscriptionElement.querySelector(".bubble-text");
+        const textElement =
+          currentOutputTranscriptionElement.querySelector(".bubble-text");
         const typingIndicator = textElement.querySelector(".typing-indicator");
         if (typingIndicator) {
           typingIndicator.remove();
@@ -482,6 +634,7 @@ function connectWebsocket() {
       currentOutputTranscriptionId = null;
       currentOutputTranscriptionElement = null;
       inputTranscriptionFinished = false; // Reset for next turn
+      accumulatedAudioChunks = []; // Reset audio accumulator for next turn
       return;
     }
 
@@ -508,7 +661,8 @@ function connectWebsocket() {
 
       // Keep the partial output transcription but mark it as interrupted
       if (currentOutputTranscriptionElement) {
-        const textElement = currentOutputTranscriptionElement.querySelector(".bubble-text");
+        const textElement =
+          currentOutputTranscriptionElement.querySelector(".bubble-text");
 
         // Remove typing indicator
         const typingIndicator = textElement.querySelector(".typing-indicator");
@@ -526,6 +680,7 @@ function connectWebsocket() {
       currentOutputTranscriptionId = null;
       currentOutputTranscriptionElement = null;
       inputTranscriptionFinished = false; // Reset for next turn
+      accumulatedAudioChunks = []; // Reset audio accumulator
       return;
     }
 
@@ -545,7 +700,11 @@ function connectWebsocket() {
           currentInputTranscriptionId = Math.random().toString(36).substring(7);
           // Clean spaces between CJK characters
           const cleanedText = cleanCJKSpaces(transcriptionText);
-          currentInputTranscriptionElement = createMessageBubble(cleanedText, true, !isFinished);
+          currentInputTranscriptionElement = createMessageBubble(
+            cleanedText,
+            true,
+            !isFinished,
+          );
           currentInputTranscriptionElement.id = currentInputTranscriptionId;
 
           // Add a special class to indicate it's a transcription
@@ -555,19 +714,35 @@ function connectWebsocket() {
         } else {
           // Update existing transcription bubble only if model hasn't started responding
           // This prevents late partial transcriptions from overwriting complete ones
-          if (currentOutputTranscriptionId == null && currentMessageId == null) {
+          if (
+            currentOutputTranscriptionId == null &&
+            currentMessageId == null
+          ) {
             if (isFinished) {
               // Final transcription contains the complete text, replace entirely
               const cleanedText = cleanCJKSpaces(transcriptionText);
-              updateMessageBubble(currentInputTranscriptionElement, cleanedText, false);
+              updateMessageBubble(
+                currentInputTranscriptionElement,
+                cleanedText,
+                false,
+              );
             } else {
               // Partial transcription - append to existing text
-              const existingText = currentInputTranscriptionElement.querySelector(".bubble-text").textContent;
+              const existingText =
+                currentInputTranscriptionElement.querySelector(
+                  ".bubble-text",
+                ).textContent;
               // Remove typing indicator if present
-              const cleanText = existingText.replace(/\.\.\.$/, '');
+              const cleanText = existingText.replace(/\.\.\.$/, "");
               // Clean spaces between CJK characters before updating
-              const accumulatedText = cleanCJKSpaces(cleanText + transcriptionText);
-              updateMessageBubble(currentInputTranscriptionElement, accumulatedText, true);
+              const accumulatedText = cleanCJKSpaces(
+                cleanText + transcriptionText,
+              );
+              updateMessageBubble(
+                currentInputTranscriptionElement,
+                accumulatedText,
+                true,
+              );
             }
           }
         }
@@ -590,10 +765,15 @@ function connectWebsocket() {
 
       if (transcriptionText) {
         // Finalize any active input transcription when server starts responding
-        if (currentInputTranscriptionId != null && currentOutputTranscriptionId == null) {
+        if (
+          currentInputTranscriptionId != null &&
+          currentOutputTranscriptionId == null
+        ) {
           // This is the first output transcription - finalize input transcription
-          const textElement = currentInputTranscriptionElement.querySelector(".bubble-text");
-          const typingIndicator = textElement.querySelector(".typing-indicator");
+          const textElement =
+            currentInputTranscriptionElement.querySelector(".bubble-text");
+          const typingIndicator =
+            textElement.querySelector(".typing-indicator");
           if (typingIndicator) {
             typingIndicator.remove();
           }
@@ -605,8 +785,14 @@ function connectWebsocket() {
 
         if (currentOutputTranscriptionId == null) {
           // Create new transcription bubble for agent
-          currentOutputTranscriptionId = Math.random().toString(36).substring(7);
-          currentOutputTranscriptionElement = createMessageBubble(transcriptionText, false, !isFinished);
+          currentOutputTranscriptionId = Math.random()
+            .toString(36)
+            .substring(7);
+          currentOutputTranscriptionElement = createMessageBubble(
+            transcriptionText,
+            false,
+            !isFinished,
+          );
           currentOutputTranscriptionElement.id = currentOutputTranscriptionId;
 
           // Add a special class to indicate it's a transcription
@@ -617,13 +803,24 @@ function connectWebsocket() {
           // Update existing transcription bubble
           if (isFinished) {
             // Final transcription contains the complete text, replace entirely
-            updateMessageBubble(currentOutputTranscriptionElement, transcriptionText, false);
+            updateMessageBubble(
+              currentOutputTranscriptionElement,
+              transcriptionText,
+              false,
+            );
           } else {
             // Partial transcription - append to existing text
-            const existingText = currentOutputTranscriptionElement.querySelector(".bubble-text").textContent;
+            const existingText =
+              currentOutputTranscriptionElement.querySelector(
+                ".bubble-text",
+              ).textContent;
             // Remove typing indicator if present
-            const cleanText = existingText.replace(/\.\.\.$/, '');
-            updateMessageBubble(currentOutputTranscriptionElement, cleanText + transcriptionText, true);
+            const cleanText = existingText.replace(/\.\.\.$/, "");
+            updateMessageBubble(
+              currentOutputTranscriptionElement,
+              cleanText + transcriptionText,
+              true,
+            );
           }
         }
 
@@ -642,9 +839,14 @@ function connectWebsocket() {
       const parts = adkEvent.content.parts;
 
       // Finalize any active input transcription when server starts responding with content
-      if (currentInputTranscriptionId != null && currentMessageId == null && currentOutputTranscriptionId == null) {
+      if (
+        currentInputTranscriptionId != null &&
+        currentMessageId == null &&
+        currentOutputTranscriptionId == null
+      ) {
         // This is the first content event - finalize input transcription
-        const textElement = currentInputTranscriptionElement.querySelector(".bubble-text");
+        const textElement =
+          currentInputTranscriptionElement.querySelector(".bubble-text");
         const typingIndicator = textElement.querySelector(".typing-indicator");
         if (typingIndicator) {
           typingIndicator.remove();
@@ -676,10 +878,15 @@ function connectWebsocket() {
             messagesDiv.appendChild(currentBubbleElement);
           } else {
             // Update the existing message bubble with accumulated text
-            const existingText = currentBubbleElement.querySelector(".bubble-text").textContent;
+            const existingText =
+              currentBubbleElement.querySelector(".bubble-text").textContent;
             // Remove the "..." if present
-            const cleanText = existingText.replace(/\.\.\.$/, '');
-            updateMessageBubble(currentBubbleElement, cleanText + part.text, true);
+            const cleanText = existingText.replace(/\.\.\.$/, "");
+            updateMessageBubble(
+              currentBubbleElement,
+              cleanText + part.text,
+              true,
+            );
           }
 
           // Scroll down to the bottom of the messagesDiv
@@ -697,20 +904,32 @@ function connectWebsocket() {
     addSystemMessage("Connection closed. Reconnecting in 5 seconds...");
 
     // Log to console
-    addConsoleEntry('error', 'WebSocket Disconnected', {
-      status: 'Connection closed',
-      reconnecting: true,
-      reconnectDelay: '5 seconds'
-    }, '🔌', 'system');
+    addConsoleEntry(
+      "error",
+      "WebSocket Disconnected",
+      {
+        status: "Connection closed",
+        reconnecting: true,
+        reconnectDelay: "5 seconds",
+      },
+      "🔌",
+      "system",
+    );
 
     setTimeout(function () {
       console.log("Reconnecting...");
 
       // Log reconnection attempt to console
-      addConsoleEntry('outgoing', 'Reconnecting to ADK server...', {
-        userId: userId,
-        sessionId: sessionId
-      }, '🔄', 'system');
+      addConsoleEntry(
+        "outgoing",
+        "Reconnecting to ADK server...",
+        {
+          userId: userId,
+          sessionId: sessionId,
+        },
+        "🔄",
+        "system",
+      );
 
       connectWebsocket();
     }, 5000);
@@ -721,10 +940,16 @@ function connectWebsocket() {
     updateConnectionStatus(false);
 
     // Log to console
-    addConsoleEntry('error', 'WebSocket Error', {
-      error: e.type,
-      message: 'Connection error occurred'
-    }, '⚠️', 'system');
+    addConsoleEntry(
+      "error",
+      "WebSocket Error",
+      {
+        error: e.type,
+        message: "Connection error occurred",
+      },
+      "⚠️",
+      "system",
+    );
   };
 }
 connectWebsocket();
@@ -756,12 +981,12 @@ function sendMessage(message) {
   if (websocket && websocket.readyState == WebSocket.OPEN) {
     const jsonMessage = JSON.stringify({
       type: "text",
-      text: message
+      text: message,
     });
     websocket.send(jsonMessage);
 
     // Log to console panel
-    addConsoleEntry('outgoing', 'User Message: ' + message, null, '💬', 'user');
+    addConsoleEntry("outgoing", "User Message: " + message, null, "💬", "user");
   }
 }
 
@@ -770,11 +995,11 @@ function sendMessage(message) {
 function base64ToArray(base64) {
   // Convert base64url to standard base64
   // Replace URL-safe characters: - with +, _ with /
-  let standardBase64 = base64.replace(/-/g, '+').replace(/_/g, '/');
+  let standardBase64 = base64.replace(/-/g, "+").replace(/_/g, "/");
 
   // Add padding if needed
   while (standardBase64.length % 4) {
-    standardBase64 += '=';
+    standardBase64 += "=";
   }
 
   const binaryString = window.atob(standardBase64);
@@ -784,6 +1009,34 @@ function base64ToArray(base64) {
     bytes[i] = binaryString.charCodeAt(i);
   }
   return bytes.buffer;
+}
+
+// Play PCM audio from base64 data
+async function playPcmAudio(base64Data, sampleRate = 24000) {
+  const audioContext = new AudioContext({ sampleRate });
+  const arrayBuffer = base64ToArray(base64Data);
+
+  // Convert PCM Int16 to Float32
+  const int16Array = new Int16Array(arrayBuffer);
+  const float32Array = new Float32Array(int16Array.length);
+  for (let i = 0; i < int16Array.length; i++) {
+    float32Array[i] = int16Array[i] / 32768.0;
+  }
+
+  // Create audio buffer and play
+  const audioBuffer = audioContext.createBuffer(
+    1,
+    float32Array.length,
+    sampleRate,
+  );
+  audioBuffer.getChannelData(0).set(float32Array);
+
+  const source = audioContext.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(audioContext.destination);
+  source.start();
+
+  return { source, audioContext };
 }
 
 /**
@@ -807,25 +1060,30 @@ async function openCameraPreview() {
       video: {
         width: { ideal: 768 },
         height: { ideal: 768 },
-        facingMode: 'user'
-      }
+        facingMode: "user",
+      },
     });
 
     // Set the stream to the video element
     cameraPreview.srcObject = cameraStream;
 
     // Show the modal
-    cameraModal.classList.add('show');
-
+    cameraModal.classList.add("show");
   } catch (error) {
-    console.error('Error accessing camera:', error);
+    console.error("Error accessing camera:", error);
     addSystemMessage(`Failed to access camera: ${error.message}`);
 
     // Log to console
-    addConsoleEntry('error', 'Camera access failed', {
-      error: error.message,
-      name: error.name
-    }, '⚠️', 'system');
+    addConsoleEntry(
+      "error",
+      "Camera access failed",
+      {
+        error: error.message,
+        name: error.name,
+      },
+      "⚠️",
+      "system",
+    );
   }
 }
 
@@ -833,7 +1091,7 @@ async function openCameraPreview() {
 function closeCameraPreview() {
   // Stop the camera stream
   if (cameraStream) {
-    cameraStream.getTracks().forEach(track => track.stop());
+    cameraStream.getTracks().forEach((track) => track.stop());
     cameraStream = null;
   }
 
@@ -841,28 +1099,28 @@ function closeCameraPreview() {
   cameraPreview.srcObject = null;
 
   // Hide the modal
-  cameraModal.classList.remove('show');
+  cameraModal.classList.remove("show");
 }
 
 // Capture image from the live preview
 function captureImageFromPreview() {
   if (!cameraStream) {
-    addSystemMessage('No camera stream available');
+    addSystemMessage("No camera stream available");
     return;
   }
 
   try {
     // Create canvas to capture the frame
-    const canvas = document.createElement('canvas');
+    const canvas = document.createElement("canvas");
     canvas.width = cameraPreview.videoWidth;
     canvas.height = cameraPreview.videoHeight;
-    const context = canvas.getContext('2d');
+    const context = canvas.getContext("2d");
 
     // Draw current video frame to canvas
     context.drawImage(cameraPreview, 0, 0, canvas.width, canvas.height);
 
     // Convert canvas to data URL for display
-    const imageDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    const imageDataUrl = canvas.toDataURL("image/jpeg", 0.85);
 
     // Display the captured image in the chat
     const imageBubble = createImageBubble(imageDataUrl, true);
@@ -870,35 +1128,50 @@ function captureImageFromPreview() {
     scrollToBottom();
 
     // Convert canvas to blob for sending to server
-    canvas.toBlob((blob) => {
-      // Convert blob to base64 for sending to server
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64data = reader.result.split(',')[1]; // Remove data:image/jpeg;base64, prefix
-        sendImage(base64data);
-      };
-      reader.readAsDataURL(blob);
+    canvas.toBlob(
+      (blob) => {
+        // Convert blob to base64 for sending to server
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64data = reader.result.split(",")[1]; // Remove data:image/jpeg;base64, prefix
+          sendImage(base64data);
+        };
+        reader.readAsDataURL(blob);
 
-      // Log to console
-      addConsoleEntry('outgoing', `Image captured: ${blob.size} bytes (JPEG)`, {
-        size: blob.size,
-        type: 'image/jpeg',
-        dimensions: `${canvas.width}x${canvas.height}`
-      }, '📷', 'user');
-    }, 'image/jpeg', 0.85);
+        // Log to console
+        addConsoleEntry(
+          "outgoing",
+          `Image captured: ${blob.size} bytes (JPEG)`,
+          {
+            size: blob.size,
+            type: "image/jpeg",
+            dimensions: `${canvas.width}x${canvas.height}`,
+          },
+          "📷",
+          "user",
+        );
+      },
+      "image/jpeg",
+      0.85,
+    );
 
     // Close the camera modal
     closeCameraPreview();
-
   } catch (error) {
-    console.error('Error capturing image:', error);
+    console.error("Error capturing image:", error);
     addSystemMessage(`Failed to capture image: ${error.message}`);
 
     // Log to console
-    addConsoleEntry('error', 'Image capture failed', {
-      error: error.message,
-      name: error.name
-    }, '⚠️', 'system');
+    addConsoleEntry(
+      "error",
+      "Image capture failed",
+      {
+        error: error.message,
+        name: error.name,
+      },
+      "⚠️",
+      "system",
+    );
   }
 }
 
@@ -908,7 +1181,7 @@ function sendImage(base64Image) {
     const jsonMessage = JSON.stringify({
       type: "image",
       data: base64Image,
-      mimeType: "image/jpeg"
+      mimeType: "image/jpeg",
     });
     websocket.send(jsonMessage);
     console.log("[CLIENT TO AGENT] Sent image");
@@ -955,7 +1228,7 @@ function startAudio() {
       audioRecorderNode = node;
       audioRecorderContext = ctx;
       micStream = stream;
-    }
+    },
   );
 }
 
@@ -969,10 +1242,16 @@ startAudioButton.addEventListener("click", () => {
   addSystemMessage("Audio mode enabled - you can now speak to the agent");
 
   // Log to console
-  addConsoleEntry('outgoing', 'Audio Mode Enabled', {
-    status: 'Audio worklets started',
-    message: 'Microphone active - audio input will be sent to agent'
-  }, '🎤', 'system');
+  addConsoleEntry(
+    "outgoing",
+    "Audio Mode Enabled",
+    {
+      status: "Audio worklets started",
+      message: "Microphone active - audio input will be sent to agent",
+    },
+    "🎤",
+    "system",
+  );
 });
 
 // Audio recorder handler
@@ -980,10 +1259,12 @@ function audioRecorderHandler(pcmData) {
   if (websocket && websocket.readyState === WebSocket.OPEN && is_audio) {
     // Send audio as binary WebSocket frame (more efficient than base64 JSON)
     websocket.send(pcmData);
-    console.log("[CLIENT TO AGENT] Sent audio chunk: %s bytes", pcmData.byteLength);
+    console.log(
+      "[CLIENT TO AGENT] Sent audio chunk: %s bytes",
+      pcmData.byteLength,
+    );
 
     // Log to console panel (optional, can be noisy with frequent audio chunks)
     // addConsoleEntry('outgoing', `Audio chunk: ${pcmData.byteLength} bytes`);
   }
 }
-

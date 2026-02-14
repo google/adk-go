@@ -22,7 +22,9 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
   background-color: var(--bg-color);
   color: #202124;
   line-height: 1.6;
@@ -108,7 +110,8 @@ h1 {
 }
 
 @keyframes pulse {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
   }
   50% {
@@ -225,7 +228,7 @@ h1 {
 }
 
 .message.interrupted .bubble::after {
-  content: 'interrupted';
+  content: "interrupted";
   display: block;
   font-size: 0.75rem;
   color: #5f6368;
@@ -240,7 +243,7 @@ h1 {
 }
 
 .message.transcription.user .bubble::before {
-  content: '🎤';
+  content: "🎤";
   opacity: 0.8;
   margin-right: 0.25rem;
 }
@@ -253,19 +256,21 @@ h1 {
 }
 
 .typing-indicator::after {
-  content: '...';
+  content: "...";
   animation: ellipsis 1.5s infinite;
 }
 
 @keyframes ellipsis {
-  0%, 20% {
-    content: '.';
+  0%,
+  20% {
+    content: ".";
   }
   40% {
-    content: '..';
+    content: "..";
   }
-  60%, 100% {
-    content: '...';
+  60%,
+  100% {
+    content: "...";
   }
 }
 
@@ -407,7 +412,8 @@ button {
   flex-direction: column;
   background-color: #1e1e1e;
   color: #d4d4d4;
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+  font-family:
+    "Monaco", "Menlo", "Ubuntu Mono", "Consolas", "source-code-pro", monospace;
   overflow: hidden;
 }
 
@@ -509,7 +515,7 @@ button {
 }
 
 .console-entry.expandable:hover {
-  background-color: rgba(255, 255, 255, 0.10);
+  background-color: rgba(255, 255, 255, 0.1);
 }
 
 .console-entry.expanded {
@@ -595,6 +601,29 @@ button {
   background-color: rgba(133, 133, 133, 0.2);
   color: #b0b0b0;
   border-color: rgba(133, 133, 133, 0.3);
+}
+
+/* Audio play button in console */
+.console-play-btn {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.65rem;
+  font-weight: 500;
+  background-color: #34a853;
+  color: white;
+  border: none;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-left: 0.5rem;
+}
+
+.console-play-btn:hover {
+  background-color: #2d8e47;
+  transform: scale(1.05);
+}
+
+.console-play-btn:active {
+  transform: scale(0.95);
 }
 
 .console-entry-timestamp {
