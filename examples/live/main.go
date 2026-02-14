@@ -217,6 +217,8 @@ func (s *Server) websocketHandler() http.HandlerFunc {
 					},
 				},
 			},
+			InputAudioTranscription:  &genai.AudioTranscriptionConfig{},
+			OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
 		}
 
 		// Phase 2 - 4

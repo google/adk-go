@@ -42,4 +42,10 @@ type RunConfig struct {
 
 	// Optional. The speech generation configuration.
 	SpeechConfig *genai.SpeechConfig `json:"speechConfig,omitempty"`
+
+	// Optional. The transcription of the input aligns with the input audio language.
+	InputAudioTranscription *genai.AudioTranscriptionConfig `json:"inputAudioTranscription,omitempty"`
+	// Optional. The transcription of the output aligns with the language code
+	// specified for the output audio.
+	OutputAudioTranscription *genai.AudioTranscriptionConfig `json:"outputAudioTranscription,omitempty"`
 }

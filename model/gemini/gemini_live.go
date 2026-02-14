@@ -54,6 +54,7 @@ func (c *liveConnection) Receive() (*model.LLMResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	log.Debug().Interface("message", msg).Msg("checking received message")
 
 	resp := &model.LLMResponse{}
 
@@ -64,6 +65,20 @@ func (c *liveConnection) Receive() (*model.LLMResponse, error) {
 		}
 		resp.TurnComplete = msg.ServerContent.TurnComplete
 		resp.Interrupted = msg.ServerContent.Interrupted
+	}
+
+	if msg.UsageMetadata != nil {
+		resp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+			CacheTokensDetails:         msg.UsageMetadata.CacheTokensDetails,
+			CachedContentTokenCount:    msg.UsageMetadata.CachedContentTokenCount,
+			PromptTokenCount:           msg.UsageMetadata.PromptTokenCount,
+			PromptTokensDetails:        msg.UsageMetadata.PromptTokensDetails,
+			ThoughtsTokenCount:         msg.UsageMetadata.ThoughtsTokenCount,
+			ToolUsePromptTokenCount:    msg.UsageMetadata.ToolUsePromptTokenCount,
+			ToolUsePromptTokensDetails: msg.UsageMetadata.ToolUsePromptTokensDetails,
+			TotalTokenCount:            msg.UsageMetadata.TotalTokenCount,
+			TrafficType:                msg.UsageMetadata.TrafficType,
+		}
 	}
 
 	if msg.ToolCall != nil {

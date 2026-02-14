@@ -19,9 +19,10 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"log"
+
 	"strings"
 
+	"github.com/rs/zerolog/log"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -112,8 +113,10 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 			LiveConnectConfig: &genai.LiveConnectConfig{
-				ResponseModalities: cfg.ResponseModalities,
-				SpeechConfig:       cfg.SpeechConfig,
+				ResponseModalities:       cfg.ResponseModalities,
+				SpeechConfig:             cfg.SpeechConfig,
+				InputAudioTranscription:  cfg.InputAudioTranscription,
+				OutputAudioTranscription: cfg.OutputAudioTranscription,
 			},
 		})
 
@@ -149,7 +152,6 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 		for event, err := range agentToRun.RunLive(invCtx) {
 
 			if err != nil {
-				log.Println(err)
 				if !yield(event, err) {
 					return
 				}
@@ -164,12 +166,12 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			// 	}
 			// }
 
-			// if r.shouldAppendEvent(event, true) {
-			// 	if err := r.sessionService.AppendEvent(invCtx, storedSession, event); err != nil {
-			// 		yield(nil, fmt.Errorf("failed to add event to session: %w", err))
-			// 		return
-			// 	}
-			// }
+			if r.shouldAppendEvent(event, true) {
+				if err := r.sessionService.AppendEvent(invCtx, storedSession, event); err != nil {
+					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+					return
+				}
+			}
 
 			if !yield(event, nil) {
 				return
