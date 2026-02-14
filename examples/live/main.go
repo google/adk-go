@@ -25,6 +25,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -33,8 +34,10 @@ import (
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/session/database"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
+	"gorm.io/driver/postgres"
 )
 
 var upgrader = websocket.Upgrader{
@@ -56,71 +59,22 @@ func main() {
 		log.Fatal("GOOGLE_API_KEY environment variable is not set")
 	}
 
-	r := mux.NewRouter()
-
-	// WebSocket handler with userId and sessionId parameters
-	r.HandleFunc("/ws/{userId}/{sessionId}", wsHandler)
-
-	// Static file server with no-cache headers
-	staticDir := "static"
-	fileServer := http.FileServer(http.Dir(staticDir))
-	noCacheHandler := func(h http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.Header().Set("Pragma", "no-cache")
-			w.Header().Set("Expires", "0")
-			h.ServeHTTP(w, r)
-		})
-	}
-	r.PathPrefix("/static/").Handler(noCacheHandler(http.StripPrefix("/static/", fileServer)))
-	r.PathPrefix("/").Handler(noCacheHandler(fileServer))
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	fmt.Printf("Server starting on http://localhost:%s\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, r))
-}
-
-func wsHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	userID := vars["userId"]
-	sessionID := vars["sessionId"]
-
-	conn, err := upgrader.Upgrade(w, r, nil)
+	dsn := fmt.Sprintf("host=127.0.0.1 user=adk password=adk dbname=adk port=5432 sslmode=disable")
+	sessionService, err := database.NewSessionService(postgres.Open(dsn))
 	if err != nil {
-		log.Printf("Failed to upgrade connection: %v", err)
+		log.Printf("Failed to create session service: %v", err)
 		return
 	}
-	defer conn.Close()
+
+	if err := database.AutoMigrate(sessionService); err != nil {
+		log.Printf("Failed to auto migrate session service: %v", err)
+		return
+	}
 
 	ctx := context.Background()
-	apiKey := os.Getenv("GOOGLE_API_KEY")
-
-	// cred, err := google.FindDefaultCredentials(ctx, "https://www.googleapis.com/auth/cloud-platform")
-	// if err != nil {
-	// 	log.Fatal("failed to find default credentials")
-
-	// }
-
-	// // create a new http client with otel tracing
-	// otelHTTPClient := &http.Client{
-	// 	Transport: otelhttp.NewTransport(http.DefaultTransport),
-	// }
-	// // set the http client to the context
-	// ctx = context.WithValue(ctx, oauth2.HTTPClient, otelHTTPClient)
-	// // create a new oauth2 client with the context
-	// httpClient := oauth2.NewClient(ctx, oauth2.ReuseTokenSource(nil, cred.TokenSource))
 
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash-native-audio-preview-09-2025", &genai.ClientConfig{
 		APIKey: apiKey,
-		// Project:  "imrenagi-gemini-experiment",
-		// Location: "global",
-		// Backend:  genai.BackendVertexAI,
-		// // HTTPClient: httpClient,
-		// HTTPOptions: genai.HTTPOptions{APIVersion: "v1beta"},
 	})
 	if err != nil {
 		log.Printf("Failed to create model: %v", err)
@@ -179,7 +133,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionService := session.InMemoryService()
 	runn, err := runner.New(runner.Config{
 		AppName:        "live_sample",
 		Agent:          a,
@@ -190,125 +143,179 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create session for the user
-	_, err = sessionService.Create(ctx, &session.CreateRequest{
-		AppName:   "live_sample",
-		UserID:    userID,
-		SessionID: sessionID,
-	})
-	if err != nil {
-		log.Printf("Session creation (might already exist): %v", err)
+	server := &Server{
+		sessionService: sessionService,
+		runner:         runn,
 	}
 
-	// Phase 2 - 3
-	runConfig := agent.RunConfig{
-		StreamingMode:      agent.StreamingModeBidi,
-		ResponseModalities: []genai.Modality{genai.ModalityAudio},
-		SpeechConfig: &genai.SpeechConfig{
-			VoiceConfig: &genai.VoiceConfig{
-				PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
-					VoiceName: "Aoede",
-				},
-			},
-		},
+	r := mux.NewRouter()
+
+	// WebSocket handler with userId and sessionId parameters
+	r.HandleFunc("/ws/{userId}/{sessionId}", server.websocketHandler())
+
+	// Static file server with no-cache headers
+	staticDir := "static"
+	fileServer := http.FileServer(http.Dir(staticDir))
+	noCacheHandler := func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Expires", "0")
+			h.ServeHTTP(w, r)
+		})
+	}
+	r.PathPrefix("/static/").Handler(noCacheHandler(http.StripPrefix("/static/", fileServer)))
+	r.PathPrefix("/").Handler(noCacheHandler(fileServer))
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
 	}
 
-	// Phase 2 - 4
-	liveRequestQueue := agent.NewLiveRequestQueue()
+	fmt.Printf("Server starting on http://localhost:%s\n", port)
+	log.Fatal(http.ListenAndServe(":"+port, r))
+}
 
-	// Channel to signal the reading loop to stop
-	done := make(chan struct{})
+type Server struct {
+	sessionService session.Service
+	runner         *runner.Runner
+}
 
-	// Start receiving ADK events and sending them to the WebSocket
-	go func() {
-		defer close(done)
+func (s *Server) websocketHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		userID := vars["userId"]
+		sessionID := vars["sessionId"]
 
-		// Phase 2 - 5
-		for ev, err := range runn.RunLive(ctx, userID, sessionID, liveRequestQueue, runConfig) {
-			if err != nil {
-				log.Printf("Runner error: %v", err)
-				return
-			}
-
-			// Convert ADK event to JSON and send to client
-			evJSON, err := json.Marshal(models.FromSessionEvent(*ev))
-			if err != nil {
-				log.Printf("Failed to marshal event: %v", err)
-				continue
-			}
-
-			if err := conn.WriteMessage(websocket.TextMessage, evJSON); err != nil {
-				log.Printf("WebSocket write error: %v", err)
-				return
-			}
-		}
-	}()
-
-	// Read from WebSocket and send to the ADK LiveRequestQueue
-	for {
-		messageType, p, err := conn.ReadMessage()
+		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			log.Printf("WebSocket read error: %v", err)
-			break
+			log.Printf("Failed to upgrade connection: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		ctx := context.Background()
+
+		// Create session for the user
+		_, err = s.sessionService.Create(ctx, &session.CreateRequest{
+			AppName:   "live_sample",
+			UserID:    userID,
+			SessionID: sessionID,
+		})
+		if err != nil {
+			log.Printf("Session creation (might already exist): %v", err)
 		}
 
-		if messageType == websocket.BinaryMessage {
-			log.Printf("Received binary message: %d bytes", len(p))
-			// Binary data is assumed to be PCM audio from the client
-			err := liveRequestQueue.SendContent(&genai.Content{
-				Role: "user",
-				Parts: []*genai.Part{
-					{
-						InlineData: &genai.Blob{
-							MIMEType: "audio/pcm;rate=16000",
-							Data:     p,
-						},
+		// Phase 2 - 3
+		runConfig := agent.RunConfig{
+			StreamingMode:      agent.StreamingModeBidi,
+			ResponseModalities: []genai.Modality{genai.ModalityAudio},
+			SpeechConfig: &genai.SpeechConfig{
+				VoiceConfig: &genai.VoiceConfig{
+					PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
+						VoiceName: "Aoede",
 					},
 				},
-			})
-			if err != nil {
-				log.Printf("Error sending audio to queue: %v", err)
-			}
-		} else if messageType == websocket.TextMessage {
-			var msg ClientMessage
-			if err := json.Unmarshal(p, &msg); err != nil {
-				log.Printf("Failed to unmarshal text message: %v", err)
-				continue
-			}
+			},
+		}
 
-			switch msg.Type {
-			case "text":
-				// Phase 3 Send content / Send real time
-				err := liveRequestQueue.SendContent(genai.NewContentFromText(msg.Text, genai.RoleUser))
+		// Phase 2 - 4
+		liveRequestQueue := agent.NewLiveRequestQueue()
+
+		// Channel to signal the reading loop to stop
+		done := make(chan struct{})
+
+		// Start receiving ADK events and sending them to the WebSocket
+		go func() {
+			defer close(done)
+
+			// Phase 2 - 5
+			for ev, err := range s.runner.RunLive(ctx, userID, sessionID, liveRequestQueue, runConfig) {
 				if err != nil {
-					log.Printf("Error sending text to queue: %v", err)
+					log.Printf("Runner error: %v", err)
+					return
 				}
-			case "image":
-				data, err := base64.StdEncoding.DecodeString(msg.Data)
+
+				// Convert ADK event to JSON and send to client
+				evJSON, err := json.Marshal(models.FromSessionEvent(*ev))
 				if err != nil {
-					log.Printf("Failed to decode base64 image: %v", err)
+					log.Printf("Failed to marshal event: %v", err)
 					continue
 				}
-				// Phase 3 Send content / Send real time
-				err = liveRequestQueue.SendRealtimeInput(&genai.LiveRealtimeInput{
-					Media: &genai.Blob{
-						Data:     data,
-						MIMEType: msg.MimeType,
+
+				if err := conn.WriteMessage(websocket.TextMessage, evJSON); err != nil {
+					log.Printf("WebSocket write error: %v", err)
+					return
+				}
+			}
+		}()
+
+		// Read from WebSocket and send to the ADK LiveRequestQueue
+		for {
+			messageType, p, err := conn.ReadMessage()
+			if err != nil {
+				log.Printf("WebSocket read error: %v", err)
+				break
+			}
+
+			if messageType == websocket.BinaryMessage {
+				log.Printf("Received binary message: %d bytes", len(p))
+				// Binary data is assumed to be PCM audio from the client
+				err := liveRequestQueue.SendContent(&genai.Content{
+					Role: "user",
+					Parts: []*genai.Part{
+						{
+							InlineData: &genai.Blob{
+								MIMEType: "audio/pcm;rate=16000",
+								Data:     p,
+							},
+						},
 					},
 				})
 				if err != nil {
-					log.Printf("Error sending image to queue: %v", err)
+					log.Printf("Error sending audio to queue: %v", err)
 				}
+			} else if messageType == websocket.TextMessage {
+				var msg ClientMessage
+				if err := json.Unmarshal(p, &msg); err != nil {
+					log.Printf("Failed to unmarshal text message: %v", err)
+					continue
+				}
+
+				switch msg.Type {
+				case "text":
+					// Phase 3 Send content / Send real time
+					err := liveRequestQueue.SendContent(genai.NewContentFromText(msg.Text, genai.RoleUser))
+					if err != nil {
+						log.Printf("Error sending text to queue: %v", err)
+					}
+				case "image":
+					data, err := base64.StdEncoding.DecodeString(msg.Data)
+					if err != nil {
+						log.Printf("Failed to decode base64 image: %v", err)
+						continue
+					}
+					// Phase 3 Send content / Send real time
+					err = liveRequestQueue.SendRealtimeInput(&genai.LiveRealtimeInput{
+						Media: &genai.Blob{
+							Data:     data,
+							MIMEType: msg.MimeType,
+						},
+					})
+					if err != nil {
+						log.Printf("Error sending image to queue: %v", err)
+					}
+				}
+			}
+
+			select {
+			case <-done:
+				return
+			default:
 			}
 		}
 
-		select {
-		case <-done:
-			return
-		default:
-		}
+		log.Printf("Closing queue")
+		liveRequestQueue.Close()
 	}
-
-	log.Printf("Closing queue")
-	liveRequestQueue.Close()
 }

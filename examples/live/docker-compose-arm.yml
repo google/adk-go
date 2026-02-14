@@ -1,0 +1,3 @@
+services:
+  postgres:
+    platform: linux/x86_64
