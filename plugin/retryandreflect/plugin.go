@@ -62,7 +62,9 @@ func WithMaxRetries(maxRetries int) PluginOption {
 	}
 }
 
-// WithErrorIfRetryExceeded sets whether to throw an exception if the retry limit is exceeded.
+// WithErrorIfRetryExceeded sets whether to return an error if the retry limit is exceeded.
+// If set to true, then the original error is returned, otherwise instead of the original error,
+// the plugin will return a new instruction "createToolRetryExceedMsg" telling LLM to stop using this tool for the current task.
 func WithErrorIfRetryExceeded(errorIfRetryExceeded bool) PluginOption {
 	return func(r *retryAndReflect) {
 		r.errorIfRetryExceeded = errorIfRetryExceeded
