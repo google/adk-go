@@ -22,7 +22,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -36,7 +35,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
-	"google.golang.org/adk/tool/functiontool"
 )
 
 var upgrader = websocket.Upgrader{
@@ -142,26 +140,26 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	type Output struct {
 		Poem string `json:"poem"`
 	}
-	handler := func(ctx tool.Context, input Input) (Output, error) {
-		return Output{
-			Poem: strings.Repeat("A line of a poem,", input.LineCount) + "\n",
-		}, nil
-	}
-	poemTool, err := functiontool.New(functiontool.Config{
-		Name:        "poem",
-		Description: "Returns poem",
-	}, handler)
-	if err != nil {
-		log.Fatalf("Failed to create tool: %v", err)
-	}
+	// handler := func(ctx tool.Context, input Input) (Output, error) {
+	// 	return Output{
+	// 		Poem: strings.Repeat("A line of a poem,", input.LineCount) + "\n",
+	// 	}, nil
+	// }
+	// poemTool, err := functiontool.New(functiontool.Config{
+	// 	Name:        "poem",
+	// 	Description: "Returns poem",
+	// }, handler)
+	// if err != nil {
+	// 	log.Fatalf("Failed to create tool: %v", err)
+	// }
 	poemAgent, err := llmagent.New(llmagent.Config{
 		Name:        "poem_agent",
 		Model:       poemAgentModel,
-		Description: "returns poem",
-		Instruction: "You return poems.",
-		Tools: []tool.Tool{
-			poemTool,
-		},
+		Description: "Generate a love poem about cats.",
+		Instruction: "Generate a love poem about cats.",
+		// Tools: []tool.Tool{
+		// 	poemTool,
+		// },
 	})
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
@@ -171,7 +169,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		Name:        "live_agent",
 		Model:       model,
 		Description: "A live agent that echoes what you say and generates poems.",
-		Instruction: "You are a live assistant. Respond briefly to the user. If asked for a poem, use the poem_agent to generate a poem.",
+		Instruction: "You are a live assistant. Respond briefly to the user. If asked for a poem, use the poem_agent to generate a poem and read it.",
 		Tools: []tool.Tool{
 			agenttool.New(poemAgent, nil),
 		},
