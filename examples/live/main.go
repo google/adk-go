@@ -30,6 +30,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/examples/live/models"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
@@ -62,10 +63,19 @@ func main() {
 	// WebSocket handler with userId and sessionId parameters
 	r.HandleFunc("/ws/{userId}/{sessionId}", wsHandler)
 
-	// Static file server
+	// Static file server with no-cache headers
 	staticDir := "static"
-	r.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
-	r.PathPrefix("/").Handler(http.FileServer(http.Dir(staticDir)))
+	fileServer := http.FileServer(http.Dir(staticDir))
+	noCacheHandler := func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Expires", "0")
+			h.ServeHTTP(w, r)
+		})
+	}
+	r.PathPrefix("/static/").Handler(noCacheHandler(http.StripPrefix("/static/", fileServer)))
+	r.PathPrefix("/").Handler(noCacheHandler(fileServer))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -223,7 +233,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Convert ADK event to JSON and send to client
-			evJSON, err := json.Marshal(ev)
+			evJSON, err := json.Marshal(models.FromSessionEvent(*ev))
 			if err != nil {
 				log.Printf("Failed to marshal event: %v", err)
 				continue
