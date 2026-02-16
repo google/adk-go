@@ -39,7 +39,7 @@ const elidedContent = "<elided>"
 // guessedGenAISystem is the AI system we are using.
 var guessedGenAISystem = guessAISystem()
 
-var logger = global.GetLoggerProvider().Logger(
+var otelLogger = global.GetLoggerProvider().Logger(
 	systemName,
 	log.WithSchemaURL(semconv.SchemaURL),
 	log.WithInstrumentationVersion(version.Version),
@@ -84,7 +84,7 @@ func LogResponse(ctx context.Context, resp *model.LLMResponse, err error) {
 	}
 	record.SetBody(log.MapValue(kvs...))
 
-	logger.Emit(ctx, record)
+	otelLogger.Emit(ctx, record)
 }
 
 // logSystemMessage logs the system message from the request.
@@ -100,7 +100,7 @@ func logSystemMessage(ctx context.Context, req *model.LLMRequest) {
 	record.AddAttributes(
 		aiSystemAttribute(),
 	)
-	logger.Emit(ctx, record)
+	otelLogger.Emit(ctx, record)
 }
 
 // logUserMessage logs the user message from the request.
@@ -117,7 +117,7 @@ func logUserMessage(ctx context.Context, content *genai.Content) {
 		aiSystemAttribute(),
 	)
 
-	logger.Emit(ctx, record)
+	otelLogger.Emit(ctx, record)
 }
 
 func isEnvVarTrue(name string) bool {

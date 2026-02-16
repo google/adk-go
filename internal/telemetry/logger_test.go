@@ -413,10 +413,10 @@ func setup(t *testing.T, elided bool) *inMemoryExporter {
 	provider := sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)),
 	)
-	originalLogger := logger
-	logger = provider.Logger("test")
+	originalLogger := otelLogger
+	otelLogger = provider.Logger("test")
 	t.Cleanup(func() {
-		logger = originalLogger
+		otelLogger = originalLogger
 	})
 
 	original := elideMessageContent
