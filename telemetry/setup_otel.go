@@ -22,6 +22,7 @@ import (
 
 	"go.opentelemetry.io/contrib/detectors/gcp"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -61,12 +62,12 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 		return nil, fmt.Errorf("failed to resolve resource: %w", err)
 	}
 
-	spanProcessors, err := configureExporters(ctx, cfg)
+	spanProcessors, logProcessors, err := configureExporters(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure exporters: %w", err)
 	}
 	cfg.spanProcessors = append(cfg.spanProcessors, spanProcessors...)
-
+	cfg.logProcessors = append(cfg.logProcessors, logProcessors...)
 	return cfg, nil
 }
 
@@ -84,12 +85,9 @@ func configFromOpts(opts ...Option) (*config, error) {
 }
 
 func newInternal(cfg *config) (*Providers, error) {
-	tp, err := initTracerProvider(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize tracer provider: %w", err)
-	}
-
+	tp := initTracerProvider(cfg)
 	lp := initLoggerProvider(cfg)
+
 	// TODO(#479) init meter provider
 
 	return &Providers{
@@ -172,15 +170,17 @@ func resolveResource(ctx context.Context, cfg *config) (*resource.Resource, erro
 }
 
 // configureExporters initializes OTel exporters from environment variables and otelToCloud.
-func configureExporters(ctx context.Context, cfg *config) ([]sdktrace.SpanProcessor, error) {
+func configureExporters(ctx context.Context, cfg *config) ([]sdktrace.SpanProcessor, []sdklog.Processor, error) {
 	var spanProcessors []sdktrace.SpanProcessor
+	var logProcessors []sdklog.Processor
 
 	_, otelEndpointExists := os.LookupEnv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	// Tracing section.
 	_, otelTracesEndpointExists := os.LookupEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
 	if otelEndpointExists || otelTracesEndpointExists {
 		exporter, err := otlptracehttp.New(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create OTLP HTTP exporter: %w", err)
+			return nil, nil, fmt.Errorf("failed to create OTLP HTTP exporter: %w", err)
 		}
 		spanProcessors = append(spanProcessors, sdktrace.NewBatchSpanProcessor(
 			exporter,
@@ -189,19 +189,31 @@ func configureExporters(ctx context.Context, cfg *config) ([]sdktrace.SpanProces
 	if cfg.oTelToCloud {
 		spanExporter, err := newGcpSpanExporter(ctx, cfg)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create GCP span exporter: %w", err)
+			return nil, nil, fmt.Errorf("failed to create GCP span exporter: %w", err)
 		}
 		spanProcessors = append(spanProcessors, sdktrace.NewBatchSpanProcessor(spanExporter))
 	}
-	return spanProcessors, nil
+	// Logs section.
+	_, otelLogsEndpointExists := os.LookupEnv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+	if otelEndpointExists || otelLogsEndpointExists {
+		exporter, err := otlploghttp.New(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create OTLP HTTP log exporter: %w", err)
+		}
+		logProcessors = append(logProcessors, sdklog.NewBatchProcessor(
+			exporter,
+		))
+	}
+	// Golang OTel exporter to CloudLogging is not yet available.
+	return spanProcessors, logProcessors, nil
 }
 
-func initTracerProvider(cfg *config) (*sdktrace.TracerProvider, error) {
+func initTracerProvider(cfg *config) *sdktrace.TracerProvider {
 	if cfg.tracerProvider != nil {
-		return cfg.tracerProvider, nil
+		return cfg.tracerProvider
 	}
 	if len(cfg.spanProcessors) == 0 {
-		return nil, nil
+		return nil
 	}
 	opts := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(cfg.resource),
@@ -211,11 +223,13 @@ func initTracerProvider(cfg *config) (*sdktrace.TracerProvider, error) {
 	}
 	tp := sdktrace.NewTracerProvider(opts...)
 
-	return tp, nil
+	return tp
 }
 
-// TODO(#479) finish the implementation and add the default exporter if env vars are set.
 func initLoggerProvider(cfg *config) *sdklog.LoggerProvider {
+	if cfg.loggerProvider != nil {
+		return cfg.loggerProvider
+	}
 	if len(cfg.logProcessors) == 0 {
 		return nil
 	}

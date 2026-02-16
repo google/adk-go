@@ -19,6 +19,8 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/log"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -34,6 +36,7 @@ const (
 
 func TestTelemetrySmoke(t *testing.T) {
 	exporter := tracetest.NewInMemoryExporter()
+	logExporter := &inMemoryLogExporter{}
 	ctx := t.Context()
 
 	// Initialize telemetry.
@@ -48,6 +51,7 @@ func TestTelemetrySmoke(t *testing.T) {
 	}
 	providers, err := New(t.Context(),
 		WithSpanProcessors(sdktrace.NewSimpleSpanProcessor(exporter)),
+		WithLogRecordProcessors(sdklog.NewSimpleProcessor(logExporter)),
 		WithGcpResourceProject(resourceProject),
 		WithGcpQuotaProject(quotaProject),
 		WithResource(r),
@@ -69,8 +73,19 @@ func TestTelemetrySmoke(t *testing.T) {
 	_, span := tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindServer))
 	span.End()
 
+	// Create test logger and log.
+	logger := providers.LoggerProvider.Logger("test-logger")
+	logBody := "test-log"
+
+	var record log.Record
+	record.SetBody(log.StringValue(logBody))
+	logger.Emit(ctx, record)
+
 	if err := providers.TracerProvider.ForceFlush(context.Background()); err != nil {
 		t.Fatalf("failed to flush spans: %v", err)
+	}
+	if err := providers.LoggerProvider.ForceFlush(context.Background()); err != nil {
+		t.Fatalf("failed to flush logs: %v", err)
 	}
 
 	// Check exporter contains the span.
@@ -93,6 +108,15 @@ func TestTelemetrySmoke(t *testing.T) {
 		t.Errorf("want 'service.version' attribute %q, got %q", serviceVersion, gotServiceVersion)
 	}
 
+	// Check exporter contains the log.
+	if len(logExporter.records) != 1 {
+		t.Fatalf("got %d log records, want 1", len(logExporter.records))
+	}
+	gotLog := logExporter.records[0]
+	if gotLog.Body().AsString() != logBody {
+		t.Errorf("got log body %q, want %q", gotLog.Body().AsString(), logBody)
+	}
+
 	if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
 		t.Errorf("telemetry.Shutdown() failed: %v", err)
 	}
@@ -106,13 +130,13 @@ func TestTelemetryCustomProvider(t *testing.T) {
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(exporter)),
 	)
+	unusedExporter := tracetest.NewInMemoryExporter()
 	ctx := t.Context()
 
 	// Initialize telemetry with custom provider.
 	providers, err := New(t.Context(),
 		WithTracerProvider(tp),
-		WithGcpResourceProject(resourceProject),
-		WithGcpQuotaProject(quotaProject),
+		WithSpanProcessors(sdktrace.NewSimpleSpanProcessor(unusedExporter)),
 	)
 	if err != nil {
 		t.Fatalf("failed to create telemetry: %v", err)
@@ -141,6 +165,60 @@ func TestTelemetryCustomProvider(t *testing.T) {
 	}
 	if spans[0].Name != spanName {
 		t.Errorf("got span name %q, want %q", spans[0].Name, spanName)
+	}
+
+	// Unused exporter should not have any spans.
+	if len(unusedExporter.GetSpans()) != 0 {
+		t.Fatalf("got %d spans, want 0", len(unusedExporter.GetSpans()))
+	}
+}
+
+func TestTelemetryCustomLoggerProvider(t *testing.T) {
+	logExporter := &inMemoryLogExporter{}
+	lp := sdklog.NewLoggerProvider(
+		sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExporter)),
+	)
+	unusedLogExporter := &inMemoryLogExporter{}
+	ctx := t.Context()
+
+	// Initialize telemetry with custom logger provider.
+	providers, err := New(t.Context(),
+		WithLoggerProvider(lp),
+		WithLogRecordProcessors(sdklog.NewSimpleProcessor(unusedLogExporter)),
+	)
+	if err != nil {
+		t.Fatalf("failed to create telemetry: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
+			t.Errorf("telemetry.Shutdown() failed: %v", err)
+		}
+	})
+	providers.SetGlobalOtelProviders()
+
+	// Create test logger and emit.
+	logger := providers.LoggerProvider.Logger("test-logger")
+	logBody := "test-log"
+
+	var record log.Record
+	record.SetBody(log.StringValue(logBody))
+	logger.Emit(ctx, record)
+
+	if err := providers.LoggerProvider.ForceFlush(context.Background()); err != nil {
+		t.Fatalf("failed to flush logs: %v", err)
+	}
+
+	// Verify log was exported.
+	if len(logExporter.records) != 1 {
+		t.Fatalf("got %d logs, want 1", len(logExporter.records))
+	}
+	if logExporter.records[0].Body().AsString() != logBody {
+		t.Errorf("got log body %q, want %q", logExporter.records[0].Body().AsString(), logBody)
+	}
+
+	// Unused exporter should not have any logs.
+	if len(unusedLogExporter.records) != 0 {
+		t.Fatalf("got %d logs, want 0", len(unusedLogExporter.records))
 	}
 }
 
@@ -349,6 +427,113 @@ func TestResolveQuotaProject(t *testing.T) {
 
 			if gotProject != tc.wantProject {
 				t.Errorf("resolveGcpQuotaProject() got = %v, want %v", gotProject, tc.wantProject)
+			}
+		})
+	}
+}
+
+type inMemoryLogExporter struct {
+	records []sdklog.Record
+}
+
+func (e *inMemoryLogExporter) Export(_ context.Context, records []sdklog.Record) error {
+	e.records = append(e.records, records...)
+	return nil
+}
+
+func (e *inMemoryLogExporter) Shutdown(context.Context) error   { return nil }
+func (e *inMemoryLogExporter) ForceFlush(context.Context) error { return nil }
+
+func TestConfigureExporters(t *testing.T) {
+	testCases := []struct {
+		name    string
+		envVars map[string]string
+		opts    []Option
+		// The client address is nested deep inside the http client of the exporter, which is nested in a processor.
+		// Accessing it via reflection is too brittle. The best thing we can do is a smoke test, which checks the number of created processors.
+		wantSpanProcessors int
+		wantLogProcessors  int
+	}{
+		{
+			name:               "no processors",
+			envVars:            map[string]string{},
+			wantSpanProcessors: 0,
+			wantLogProcessors:  0,
+		},
+		{
+			name: "OTEL_EXPORTER_OTLP_ENDPOINT",
+			envVars: map[string]string{
+				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+			},
+			wantSpanProcessors: 1,
+			wantLogProcessors:  1,
+		},
+		{
+			name: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+			envVars: map[string]string{
+				"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://localhost:4318/v1/traces",
+			},
+			wantSpanProcessors: 1,
+			wantLogProcessors:  0,
+		},
+		{
+			name: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+			envVars: map[string]string{
+				"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://localhost:4318/v1/logs",
+			},
+			wantSpanProcessors: 0,
+			wantLogProcessors:  1,
+		},
+		{
+			name: "OTEL_EXPORTER_OTLP_ENDPOINT and otel_to_cloud",
+			envVars: map[string]string{
+				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+			},
+			opts:               []Option{WithOtelToCloud(true)},
+			wantSpanProcessors: 2,
+			wantLogProcessors:  1,
+		},
+		{
+			name: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and otel_to_cloud",
+			envVars: map[string]string{
+				"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://localhost:4318/v1/traces",
+			},
+			opts:               []Option{WithOtelToCloud(true)},
+			wantSpanProcessors: 2,
+			wantLogProcessors:  0,
+		},
+		{
+			name: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT and otel_to_cloud",
+			envVars: map[string]string{
+				"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://localhost:4318/v1/logs",
+			},
+			opts:               []Option{WithOtelToCloud(true)},
+			wantSpanProcessors: 1,
+			wantLogProcessors:  1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.envVars {
+				t.Setenv(k, v)
+			}
+			// Set the quota project needed to configure GCP exporters.
+			t.Setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+			ctx := t.Context()
+			cfg, err := configure(ctx, tc.opts...)
+			if err != nil {
+				t.Fatalf("configure() unexpected error: %v", err)
+			}
+			spanProcessors, logProcessors, err := configureExporters(ctx, cfg)
+			if err != nil {
+				t.Fatalf("configureExporters() unexpected error: %v", err)
+			}
+			if len(spanProcessors) != tc.wantSpanProcessors {
+				t.Errorf("got %d span processors, want %d", len(spanProcessors), tc.wantSpanProcessors)
+			}
+			if len(logProcessors) != tc.wantLogProcessors {
+				t.Errorf("got %d log processors, want %d", len(logProcessors), tc.wantLogProcessors)
 			}
 		})
 	}

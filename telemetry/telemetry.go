@@ -22,6 +22,7 @@ import (
 	internal "google.golang.org/adk/internal/telemetry"
 
 	"go.opentelemetry.io/otel"
+	logglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
@@ -56,6 +57,9 @@ func (t *Providers) SetGlobalOtelProviders() {
 	internal.SetGenAICaptureMessageContent(t.genAICaptureMessageContent)
 	if t.TracerProvider != nil {
 		otel.SetTracerProvider(t.TracerProvider)
+	}
+	if t.LoggerProvider != nil {
+		logglobal.SetLoggerProvider(t.LoggerProvider)
 	}
 }
 
