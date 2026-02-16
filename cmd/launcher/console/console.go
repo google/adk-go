@@ -127,7 +127,7 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 			inputChan <- userInput
 		}
 	}()
-	// Ensure final output is newline-terminated so PTY/exec setups flush without extra input.
+	// Print an initial newline to work around PTY/exec buffering issues in some environments.
 	fmt.Println()
 
 	fmt.Print("\nUser -> ")
