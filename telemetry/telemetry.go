@@ -17,8 +17,10 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 
 	"go.opentelemetry.io/otel"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -26,14 +28,24 @@ import (
 type Providers struct {
 	// TracerProvider is the configured TracerProvider or nil.
 	TracerProvider *sdktrace.TracerProvider
+	// LoggerProvider is the configured LoggerProvider or nil.
+	LoggerProvider *sdklog.LoggerProvider
 }
 
 // Shutdown shuts down underlying OTel providers.
 func (t *Providers) Shutdown(ctx context.Context) error {
+	var err error
 	if t.TracerProvider != nil {
-		return t.TracerProvider.Shutdown(ctx)
+		if tpErr := t.TracerProvider.Shutdown(ctx); tpErr != nil {
+			err = errors.Join(err, tpErr)
+		}
 	}
-	return nil
+	if t.LoggerProvider != nil {
+		if lpErr := t.LoggerProvider.Shutdown(ctx); lpErr != nil {
+			err = errors.Join(err, lpErr)
+		}
+	}
+	return err
 }
 
 // SetGlobalOtelProviders registers the configured providers as the global OTel providers.

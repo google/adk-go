@@ -16,6 +16,7 @@
 package telemetry
 
 import (
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/oauth2/google"
@@ -40,6 +41,9 @@ type config struct {
 	resource *resource.Resource
 	// spanProcessors registers additional span processors, e.g. for custom span exporters.
 	spanProcessors []sdktrace.SpanProcessor
+
+	// logProcessors registers additional log processors, e.g. for custom log exporters.
+	logProcessors []sdklog.Processor
 
 	// tracerProvider overrides the default TracerProvider.
 	tracerProvider *sdktrace.TracerProvider
@@ -100,6 +104,14 @@ func WithGoogleCredentials(c *google.Credentials) Option {
 func WithSpanProcessors(p ...sdktrace.SpanProcessor) Option {
 	return optionFunc(func(cfg *config) error {
 		cfg.spanProcessors = append(cfg.spanProcessors, p...)
+		return nil
+	})
+}
+
+// WithLogRecordProcessors registers additional log processors.
+func WithLogRecordProcessors(p ...sdklog.Processor) Option {
+	return optionFunc(func(cfg *config) error {
+		cfg.logProcessors = append(cfg.logProcessors, p...)
 		return nil
 	})
 }
