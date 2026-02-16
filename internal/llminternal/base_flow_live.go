@@ -13,6 +13,7 @@ import (
 	"google.golang.org/genai"
 )
 
+// RunLive runs the flow in live mode, connecting to the model and handling live interactions.
 func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if f.Model == nil {
