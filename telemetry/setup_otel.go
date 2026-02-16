@@ -78,7 +78,7 @@ func newInternal(cfg *config) (*Providers, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize tracer provider: %w", err)
 	}
-	
+
 	lp, err := initLoggerProvider(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize logger provider: %w", err)

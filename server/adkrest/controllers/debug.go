@@ -31,33 +31,56 @@ import (
 type DebugAPIController struct {
 	sessionService session.Service
 	agentloader    agent.Loader
-	spansExporter  *services.APIServerSpanExporter
+	debugTelemetry *services.DebugTelemetry
 }
 
 // NewDebugAPIController creates the controller for the Debug API.
-func NewDebugAPIController(sessionService session.Service, agentLoader agent.Loader, spansExporter *services.APIServerSpanExporter) *DebugAPIController {
+func NewDebugAPIController(sessionService session.Service, agentLoader agent.Loader, spansExporter *services.DebugTelemetry) *DebugAPIController {
 	return &DebugAPIController{
 		sessionService: sessionService,
 		agentloader:    agentLoader,
-		spansExporter:  spansExporter,
+		debugTelemetry: spansExporter,
 	}
 }
 
-// TraceDictHandler returns the debug information for the session in form of dictionary.
-func (c *DebugAPIController) TraceDictHandler(rw http.ResponseWriter, req *http.Request) {
+// EventSpanHandler returns the debug span for the event.
+func (c *DebugAPIController) EventSpanHandler(rw http.ResponseWriter, req *http.Request) {
 	params := mux.Vars(req)
 	eventID := params["event_id"]
 	if eventID == "" {
 		http.Error(rw, "event_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	traceDict := c.spansExporter.GetTraceDict()
-	eventDict, ok := traceDict[eventID]
-	if !ok {
-		http.Error(rw, fmt.Sprintf("event not found: %s", eventID), http.StatusNotFound)
+	spans := c.debugTelemetry.GetSpansByEventID(eventID)
+	for _, span := range spans {
+		opName := span.Attributes["genai.operation.name"]
+		if opName == "execute_tool" || opName == "generate_content" {
+			EncodeJSONResponse(span, http.StatusOK, rw)
+			return
+		}
+	}
+	http.Error(rw, fmt.Sprintf("event not found: %s", eventID), http.StatusNotFound)
+}
+
+// SessionSpansHandler returns the debug spans for the session.
+func (c *DebugAPIController) SessionSpansHandler(rw http.ResponseWriter, req *http.Request) {
+	params := mux.Vars(req)
+	sessionID := params["session_id"]
+	if sessionID == "" {
+		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	EncodeJSONResponse(eventDict, http.StatusOK, rw)
+	spans := c.debugTelemetry.GetSpansBySessionID(sessionID)
+	result := Result{
+		SchemaVersion: 2,
+		Spans:         spans,
+	}
+	EncodeJSONResponse(result, http.StatusOK, rw)
+}
+
+type Result struct {
+	SchemaVersion int                  `json:"schema_version"`
+	Spans         []services.DebugSpan `json:"spans"`
 }
 
 // EventGraphHandler returns the debug information for the session and session events in form of graph.
