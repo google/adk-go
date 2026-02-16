@@ -14,6 +14,7 @@ func (m *geminiModel) Connect(ctx context.Context, req *model.LLMRequest) (model
 	log.Debug().Interface("tools", req.LiveConnectConfig.Tools).
 		Str("system_instructions", req.LiveConnectConfig.SystemInstruction.Parts[0].Text).
 		Msg("Connecting to Gemini Live model")
+
 	session, err := m.client.Live.Connect(ctx, m.name, req.LiveConnectConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to live model: %w", err)
@@ -54,7 +55,6 @@ func (c *liveConnection) Receive() (*model.LLMResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	log.Debug().Interface("message", msg).Msg("checking received message")
 
 	resp := &model.LLMResponse{}
 
@@ -65,6 +65,10 @@ func (c *liveConnection) Receive() (*model.LLMResponse, error) {
 		}
 		resp.TurnComplete = msg.ServerContent.TurnComplete
 		resp.Interrupted = msg.ServerContent.Interrupted
+
+		if msg.ServerContent.GroundingMetadata != nil {
+			resp.GroundingMetadata = msg.ServerContent.GroundingMetadata
+		}
 	}
 
 	if msg.UsageMetadata != nil {

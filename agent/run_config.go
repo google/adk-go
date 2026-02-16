@@ -38,14 +38,38 @@ type RunConfig struct {
 	SaveInputBlobsAsArtifacts bool
 	// Optional. The requested modalities of the response. Represents the set of
 	// modalities that the model can return. Defaults to AUDIO if not specified.
-	ResponseModalities []genai.Modality `json:"responseModalities,omitempty"`
-
+	ResponseModalities []genai.Modality
+	// Optional. Configures the realtime input behavior in BidiGenerateContent.
+	RealtimeInputConfig *genai.RealtimeInputConfig
 	// Optional. The speech generation configuration.
-	SpeechConfig *genai.SpeechConfig `json:"speechConfig,omitempty"`
-
+	SpeechConfig *genai.SpeechConfig
 	// Optional. The transcription of the input aligns with the input audio language.
-	InputAudioTranscription *genai.AudioTranscriptionConfig `json:"inputAudioTranscription,omitempty"`
+	InputAudioTranscription *genai.AudioTranscriptionConfig
 	// Optional. The transcription of the output aligns with the language code
 	// specified for the output audio.
-	OutputAudioTranscription *genai.AudioTranscriptionConfig `json:"outputAudioTranscription,omitempty"`
+	OutputAudioTranscription *genai.AudioTranscriptionConfig
+	// Enable automatic reconnection and resumption of live sessions in case of transient network issues or interruptions.
+	SessionResumption *genai.SessionResumptionConfig
+	// Optional. Configures context window compression mechanism.
+	// If included, server will compress context window to fit into given length.
+	ContextWindowCompression *genai.ContextWindowCompressionConfig
+	// Optional. Configures the proactivity of the model. This allows the model to respond
+	// proactively to the input and to ignore irrelevant input.
+	Proactivity *genai.ProactivityConfig
+	// Optional. Configures the explicit VAD signal. If enabled, the client will send
+	// vad_signal to indicate the start and end of speech. This allows the server
+	// to process the audio more efficiently.
+	ExplicitVADSignal bool
+	// This parameter controls whether audio and video streams are persisted to ADK's session and
+	// artifact services for debugging, compliance, and quality assurance purposes.
+	SaveLiveBlob bool
+	// This parameter caps the total number of LLM invocations allowed per invocation context,
+	// providing protection against runaway costs and infinite agent loops.
+	MaxLLMCalls int
+	// Attach metadata to invocation events
+	CustomMetadata map[string]any
+	// Enable compositional function calling
+	SupportCFC bool
+	// Optional. If enabled, the model will detect emotions and adapt its responses accordingly.
+	EnableAffectiveDialog bool
 }
