@@ -33,13 +33,14 @@ func TestLogRequest(t *testing.T) {
 		body any // can be map[string]any or string (for elided)
 	}
 	tests := []struct {
-		name       string
-		req        *model.LLMRequest
-		elide      bool
-		wantEvents []wantEvent
+		name                  string
+		captureMessageContent bool
+		req                   *model.LLMRequest
+		wantEvents            []wantEvent
 	}{
 		{
-			name: "RequestWithSystemAndUserMessages",
+			name:                  "RequestWithSystemAndUserMessages",
+			captureMessageContent: true,
 			req: &model.LLMRequest{
 				Config: &genai.GenerateContentConfig{
 					SystemInstruction: &genai.Content{
@@ -120,7 +121,8 @@ func TestLogRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "RequestWithNilConfigAndContents",
+			name:                  "RequestWithNilConfigAndContents",
+			captureMessageContent: true,
 			req: &model.LLMRequest{
 				Config:   nil,
 				Contents: nil,
@@ -135,7 +137,8 @@ func TestLogRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "RequestWithEmptyConfigAndUserContentWithoutParts",
+			name:                  "RequestWithEmptyConfigAndUserContentWithoutParts",
+			captureMessageContent: true,
 			req: &model.LLMRequest{
 				Config: &genai.GenerateContentConfig{
 					// Config without system instruction.
@@ -163,7 +166,8 @@ func TestLogRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "ElidedRequest",
+			name:                  "ElidedRequest",
+			captureMessageContent: false,
 			req: &model.LLMRequest{
 				Config: &genai.GenerateContentConfig{
 					SystemInstruction: &genai.Content{
@@ -177,7 +181,6 @@ func TestLogRequest(t *testing.T) {
 					{Role: "user", Parts: []*genai.Part{{Text: "Hello"}}},
 				},
 			},
-			elide: true,
 			wantEvents: []wantEvent{
 				{
 					name: "gen_ai.system.message",
@@ -194,12 +197,12 @@ func TestLogRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "ElidedRequestWithNilConfigAndContents",
+			name:                  "ElidedRequestWithNilConfigAndContents",
+			captureMessageContent: false,
 			req: &model.LLMRequest{
 				Config:   nil,
 				Contents: nil,
 			},
-			elide: true,
 			wantEvents: []wantEvent{
 				{
 					name: "gen_ai.system.message",
@@ -210,7 +213,8 @@ func TestLogRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "ElidedRequestWithEmptyConfigAndUserContentWithoutParts",
+			name:                  "ElidedRequestWithEmptyConfigAndUserContentWithoutParts",
+			captureMessageContent: false,
 			req: &model.LLMRequest{
 				Config: &genai.GenerateContentConfig{
 					// Config without system instruction.
@@ -220,7 +224,6 @@ func TestLogRequest(t *testing.T) {
 					{Role: "user"},
 				},
 			},
-			elide: true,
 			wantEvents: []wantEvent{
 				{
 					name: "gen_ai.system.message",
@@ -241,7 +244,7 @@ func TestLogRequest(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
-			exporter := setup(t, tc.elide)
+			exporter := setup(t, tc.captureMessageContent)
 
 			LogRequest(ctx, tc.req)
 
@@ -271,14 +274,15 @@ func TestLogRequest(t *testing.T) {
 
 func TestLogResponse(t *testing.T) {
 	tests := []struct {
-		name     string
-		resp     *model.LLMResponse
-		elide    bool
-		wantName string
-		wantBody map[string]any
+		name                  string
+		resp                  *model.LLMResponse
+		captureMessageContent bool
+		wantName              string
+		wantBody              map[string]any
 	}{
 		{
-			name: "Response",
+			name:                  "Response",
+			captureMessageContent: true,
 			resp: &model.LLMResponse{
 				FinishReason: genai.FinishReasonStop,
 				Content: &genai.Content{
@@ -303,7 +307,8 @@ func TestLogResponse(t *testing.T) {
 			},
 		},
 		{
-			name: "ResponseWithFunctionCall",
+			name:                  "ResponseWithFunctionCall",
+			captureMessageContent: true,
 			resp: &model.LLMResponse{
 				FinishReason: genai.FinishReasonStop,
 				Content: &genai.Content{
@@ -341,16 +346,18 @@ func TestLogResponse(t *testing.T) {
 			},
 		},
 		{
-			name:     "NilResponse",
-			resp:     nil,
-			wantName: "gen_ai.choice",
+			name:                  "NilResponse",
+			captureMessageContent: true,
+			resp:                  nil,
+			wantName:              "gen_ai.choice",
 			wantBody: map[string]any{
 				"index":   int64(0),
 				"content": nil,
 			},
 		},
 		{
-			name: "ElidedResponse",
+			name:                  "ElidedResponse",
+			captureMessageContent: false,
 			resp: &model.LLMResponse{
 				FinishReason: genai.FinishReasonStop,
 				Content: &genai.Content{
@@ -361,7 +368,6 @@ func TestLogResponse(t *testing.T) {
 					},
 				},
 			},
-			elide:    true,
 			wantName: "gen_ai.choice",
 			wantBody: map[string]any{
 				"index":         int64(0),
@@ -370,10 +376,10 @@ func TestLogResponse(t *testing.T) {
 			},
 		},
 		{
-			name:     "ElidedNilResponse",
-			resp:     nil,
-			elide:    true,
-			wantName: "gen_ai.choice",
+			name:                  "ElidedNilResponse",
+			captureMessageContent: false,
+			resp:                  nil,
+			wantName:              "gen_ai.choice",
 			wantBody: map[string]any{
 				"index":   int64(0),
 				"content": "<elided>",
@@ -383,7 +389,7 @@ func TestLogResponse(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			exporter := setup(t, tc.elide)
+			exporter := setup(t, tc.captureMessageContent)
 
 			LogResponse(t.Context(), tc.resp, nil)
 
@@ -419,10 +425,10 @@ func setup(t *testing.T, elided bool) *inMemoryExporter {
 		otelLogger = originalLogger
 	})
 
-	original := elideMessageContent
-	elideMessageContent = elided
+	original := getGenAICaptureMessageContent()
+	SetGenAICaptureMessageContent(elided)
 	t.Cleanup(func() {
-		elideMessageContent = original
+		SetGenAICaptureMessageContent(original)
 	})
 	return exporter
 }

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
@@ -30,9 +31,18 @@ import (
 	"google.golang.org/adk/model"
 )
 
-// Message content is not logged by default. Set the following env variable to enable logging of prompt/response content.
-// OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
-var elideMessageContent = !isEnvVarTrue("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT")
+// genAICaptureMessageContent is true if message content should be elided. False by default.
+var genAICaptureMessageContent atomic.Bool
+
+// SetGenAICaptureMessageContent sets whether message content should be elided.
+func SetGenAICaptureMessageContent(capture bool) {
+	genAICaptureMessageContent.Store(capture)
+}
+
+// getGenAICaptureMessageContent returns whether message content should be elided.
+func getGenAICaptureMessageContent() bool {
+	return genAICaptureMessageContent.Load()
+}
 
 const elidedContent = "<elided>"
 
@@ -143,7 +153,7 @@ func aiSystemAttribute() log.KeyValue {
 // extractSystemMessage extracts the system message from the request config and concatenates it into a single string.
 // If the content is elided, it returns the elided content string.
 func extractSystemMessage(req *model.LLMRequest) log.Value {
-	if elideMessageContent {
+	if !getGenAICaptureMessageContent() {
 		return log.StringValue(elidedContent)
 	}
 	if req == nil || req.Config == nil || req.Config.SystemInstruction == nil {
@@ -165,7 +175,7 @@ func contentToLogValue(c *genai.Content) log.Value {
 
 // contentToJSONLikeValue converts a genai.Content to a JSON, which is then converted to a log.Value.
 func contentToJSONLikeValue(c *genai.Content) any {
-	if elideMessageContent {
+	if !getGenAICaptureMessageContent() {
 		return elidedContent
 	}
 	if c == nil {

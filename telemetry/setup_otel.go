@@ -71,7 +71,9 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 }
 
 func configFromOpts(opts ...Option) (*config, error) {
-	cfg := &config{}
+	cfg := &config{
+		genAICaptureMessageContent: strings.TrimSpace(os.Getenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT")) == "true",
+	}
 
 	for _, opt := range opts {
 		if err := opt.apply(cfg); err != nil {
