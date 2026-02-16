@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
 	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/internal/toolinternal"
@@ -362,8 +363,9 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 			ModelName: m.Name(),
 		})
 		ctx = ctx.WithContext(spanCtx)
+		backend := googlellm.GetGoogleLLMVariant(m)
 		// Log request before calling the model.
-		telemetry.LogRequest(ctx, req)
+		telemetry.LogRequest(ctx, req, backend)
 
 		var lastResponse *model.LLMResponse
 		var lastErr error
@@ -390,7 +392,7 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 				endSpanAndTrackResult()
 			} else if !resp.Partial {
 				// Log only final responses.
-				telemetry.LogResponse(ctx, resp, nil)
+				telemetry.LogResponse(ctx, resp, backend)
 				endSpanAndTrackResult()
 			}
 			if !yield(resp, err) {

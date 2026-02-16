@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"sync/atomic"
 
@@ -46,9 +45,6 @@ func getGenAICaptureMessageContent() bool {
 
 const elidedContent = "<elided>"
 
-// guessedGenAISystem is the AI system we are using.
-var guessedGenAISystem = guessAISystem()
-
 var otelLogger = global.GetLoggerProvider().Logger(
 	systemName,
 	log.WithSchemaURL(semconv.SchemaURL),
@@ -58,10 +54,11 @@ var otelLogger = global.GetLoggerProvider().Logger(
 // LogRequest logs the request to the model - the system message and user messages.
 // It iterates over the request contents and logs each as a separate event.
 // Check [logSystemMessage] and [logUserMessage] for emitted event details.
-func LogRequest(ctx context.Context, req *model.LLMRequest) {
-	logSystemMessage(ctx, req)
+func LogRequest(ctx context.Context, req *model.LLMRequest, backend genai.Backend) {
+	genAISystem := variantToGenAISystem(backend)
+	logSystemMessage(ctx, req, genAISystem)
 	for _, content := range req.Contents {
-		logUserMessage(ctx, content)
+		logUserMessage(ctx, content, genAISystem)
 	}
 }
 
@@ -70,7 +67,7 @@ func LogRequest(ctx context.Context, req *model.LLMRequest) {
 // NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
 // * The spec embeds the "content" field to be under the "message" key, but it's added directly in body.
 // * The "tool_calls" field is required if available in the spec, but it's omitted.
-func LogResponse(ctx context.Context, resp *model.LLMResponse, err error) {
+func LogResponse(ctx context.Context, resp *model.LLMResponse, backend genai.Backend) {
 	record := log.Record{}
 	record.SetEventName("gen_ai.choice")
 
@@ -94,6 +91,11 @@ func LogResponse(ctx context.Context, resp *model.LLMResponse, err error) {
 	}
 	record.SetBody(log.MapValue(kvs...))
 
+	genAISystem := variantToGenAISystem(backend)
+	if genAISystem != nil {
+		record.AddAttributes(*genAISystem)
+	}
+
 	otelLogger.Emit(ctx, record)
 }
 
@@ -101,15 +103,15 @@ func LogResponse(ctx context.Context, resp *model.LLMResponse, err error) {
 // Semconv reference: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aisystemmessage.
 // NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
 // * The spec requires a "role" body field, but it's ommited.
-func logSystemMessage(ctx context.Context, req *model.LLMRequest) {
+func logSystemMessage(ctx context.Context, req *model.LLMRequest, genAISystem *log.KeyValue) {
 	record := log.Record{}
 	record.SetEventName("gen_ai.system.message")
 	record.SetBody(log.MapValue(
 		log.KeyValue{Key: "content", Value: extractSystemMessage(req)},
 	))
-	record.AddAttributes(
-		aiSystemAttribute(),
-	)
+	if genAISystem != nil {
+		record.AddAttributes(*genAISystem)
+	}
 	otelLogger.Emit(ctx, record)
 }
 
@@ -117,37 +119,30 @@ func logSystemMessage(ctx context.Context, req *model.LLMRequest) {
 // Semconv reference: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aiusermessage.
 // NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
 // * The spec requires a "role" body field, but it's ommited. If the role is set in [genai.Content], then it will be available in body.content.role.
-func logUserMessage(ctx context.Context, content *genai.Content) {
+func logUserMessage(ctx context.Context, content *genai.Content, genAISystem *log.KeyValue) {
 	record := log.Record{}
 	record.SetEventName("gen_ai.user.message")
 	record.SetBody(log.MapValue(
 		log.KeyValue{Key: "content", Value: mapToLogValue(contentToJSONLikeValue(content))},
 	))
-	record.AddAttributes(
-		aiSystemAttribute(),
-	)
+	if genAISystem != nil {
+		record.AddAttributes(*genAISystem)
+	}
 
 	otelLogger.Emit(ctx, record)
 }
 
-func isEnvVarTrue(name string) bool {
-	val, ok := os.LookupEnv(name)
-	if !ok {
-		return false
+// Ref: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/registry/attributes/gen-ai.md#gen-ai-system well-known values.
+func variantToGenAISystem(variant genai.Backend) *log.KeyValue {
+	if variant == genai.BackendVertexAI {
+		val := log.KeyValueFromAttribute(semconv.GenAISystemGCPVertexAI)
+		return &val
 	}
-	val = strings.ToLower(val)
-	return val == "true" || val == "1"
-}
-
-func guessAISystem() string {
-	if isEnvVarTrue("GOOGLE_GENAI_USE_VERTEXAI") {
-		return semconv.GenAISystemGCPVertexAI.Value.AsString()
+	if variant == genai.BackendGeminiAPI {
+		val := log.KeyValueFromAttribute(semconv.GenAISystemGCPGemini)
+		return &val
 	}
-	return semconv.GenAISystemGCPGenAI.Value.AsString()
-}
-
-func aiSystemAttribute() log.KeyValue {
-	return log.String(string(semconv.GenAISystemKey), guessedGenAISystem)
+	return nil
 }
 
 // extractSystemMessage extracts the system message from the request config and concatenates it into a single string.

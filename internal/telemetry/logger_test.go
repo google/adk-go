@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/model"
@@ -29,11 +30,13 @@ import (
 
 func TestLogRequest(t *testing.T) {
 	type wantEvent struct {
-		name string
-		body any // can be map[string]any or string (for elided)
+		name  string
+		body  any // can be map[string]any or string (for elided)
+		attrs []log.KeyValue
 	}
 	tests := []struct {
 		name                  string
+		backend               genai.Backend
 		captureMessageContent bool
 		req                   *model.LLMRequest
 		wantEvents            []wantEvent
@@ -132,6 +135,46 @@ func TestLogRequest(t *testing.T) {
 					name: "gen_ai.system.message",
 					body: map[string]any{
 						"content": nil,
+					},
+				},
+			},
+		},
+		{
+			name:                  "RequestWithNilContentsGeminiBackend",
+			captureMessageContent: true,
+			backend:               genai.BackendGeminiAPI,
+			req: &model.LLMRequest{
+				Config:   nil,
+				Contents: nil,
+			},
+			wantEvents: []wantEvent{
+				{
+					name: "gen_ai.system.message",
+					body: map[string]any{
+						"content": nil,
+					},
+					attrs: []log.KeyValue{
+						log.KeyValueFromAttribute(semconv.GenAISystemGCPGemini),
+					},
+				},
+			},
+		},
+		{
+			name:                  "RequestWithNilContentsVertexBackend",
+			captureMessageContent: true,
+			backend:               genai.BackendVertexAI,
+			req: &model.LLMRequest{
+				Config:   nil,
+				Contents: nil,
+			},
+			wantEvents: []wantEvent{
+				{
+					name: "gen_ai.system.message",
+					body: map[string]any{
+						"content": nil,
+					},
+					attrs: []log.KeyValue{
+						log.KeyValueFromAttribute(semconv.GenAISystemGCPVertexAI),
 					},
 				},
 			},
@@ -246,7 +289,7 @@ func TestLogRequest(t *testing.T) {
 			ctx := t.Context()
 			exporter := setup(t, tc.captureMessageContent)
 
-			LogRequest(ctx, tc.req)
+			LogRequest(ctx, tc.req, tc.backend)
 
 			if len(exporter.records) != len(tc.wantEvents) {
 				var records strings.Builder
@@ -267,6 +310,15 @@ func TestLogRequest(t *testing.T) {
 				if diff := cmp.Diff(want.body, gotBody); diff != "" {
 					t.Errorf("record[%d] body mismatch (-want +got):\n%s", i, diff)
 				}
+
+				var gotAttrs []log.KeyValue
+				gotRecord.WalkAttributes(func(kv log.KeyValue) bool {
+					gotAttrs = append(gotAttrs, kv)
+					return true
+				})
+				if diff := cmp.Diff(want.attrs, gotAttrs); diff != "" {
+					t.Errorf("record[%d] attributes mismatch (-want +got):\n%s", i, diff)
+				}
 			}
 		})
 	}
@@ -276,9 +328,11 @@ func TestLogResponse(t *testing.T) {
 	tests := []struct {
 		name                  string
 		resp                  *model.LLMResponse
+		backend               genai.Backend
 		captureMessageContent bool
 		wantName              string
 		wantBody              map[string]any
+		wantAttrs             []log.KeyValue
 	}{
 		{
 			name:                  "Response",
@@ -304,6 +358,64 @@ func TestLogResponse(t *testing.T) {
 						map[string]any{"text": "Text part 2"},
 					},
 				},
+			},
+		},
+		{
+			name:                  "ResponseGeminiBackend",
+			captureMessageContent: true,
+			backend:               genai.BackendGeminiAPI,
+			resp: &model.LLMResponse{
+				FinishReason: genai.FinishReasonStop,
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "Text"},
+					},
+				},
+			},
+			wantName: "gen_ai.choice",
+			wantBody: map[string]any{
+				"index":         int64(0),
+				"finish_reason": "STOP",
+				"content": map[string]any{
+					"role": "model",
+					"parts": []any{
+						map[string]any{"text": "Text"},
+					},
+				},
+			},
+			wantAttrs: []log.KeyValue{
+				log.KeyValueFromAttribute(semconv.GenAISystemGCPGemini),
+			},
+		},
+		{
+			name:                  "ResponseVertexBackend",
+			captureMessageContent: true,
+			backend:               genai.BackendVertexAI,
+			resp: &model.LLMResponse{
+				FinishReason: genai.FinishReasonStop,
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "Text part 1"},
+						{Text: "Text part 2"},
+					},
+				},
+			},
+			wantName: "gen_ai.choice",
+			wantBody: map[string]any{
+				"index":         int64(0),
+				"finish_reason": "STOP",
+				"content": map[string]any{
+					"role": "model",
+					"parts": []any{
+						map[string]any{"text": "Text part 1"},
+						map[string]any{"text": "Text part 2"},
+					},
+				},
+			},
+			wantAttrs: []log.KeyValue{
+				log.KeyValueFromAttribute(semconv.GenAISystemGCPVertexAI),
 			},
 		},
 		{
@@ -391,7 +503,7 @@ func TestLogResponse(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			exporter := setup(t, tc.captureMessageContent)
 
-			LogResponse(t.Context(), tc.resp, nil)
+			LogResponse(t.Context(), tc.resp, tc.backend)
 
 			if len(exporter.records) != 1 {
 				var records strings.Builder
@@ -409,6 +521,15 @@ func TestLogResponse(t *testing.T) {
 			got := toGoValue(record.Body())
 			if diff := cmp.Diff(tc.wantBody, got); diff != "" {
 				t.Errorf("Body mismatch (-want +got):\n%s", diff)
+			}
+
+			var gotAttrs []log.KeyValue
+			record.WalkAttributes(func(kv log.KeyValue) bool {
+				gotAttrs = append(gotAttrs, kv)
+				return true
+			})
+			if diff := cmp.Diff(tc.wantAttrs, gotAttrs); diff != "" {
+				t.Errorf("attributes mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
