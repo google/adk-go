@@ -118,6 +118,8 @@ type InvocationContext interface {
 	ClearInputRealtimeCache()
 	// ClearOutputRealtimeCache clears the output audio cache.
 	ClearOutputRealtimeCache()
+	// SetLiveSessionResumptionHandle sets the handle for live session resumption.
+	SetLiveSessionResumptionHandle(handle string)
 }
 
 // ReadonlyContext provides read-only access to invocation context data.

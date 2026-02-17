@@ -3,13 +3,13 @@ package llminternal
 import (
 	"fmt"
 	"iter"
+	"strings"
 
 	"github.com/rs/zerolog/log"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/runconfig"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -144,38 +144,65 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				}
 			}()
 
+			getAuthorForEvent := func(llmResponse *model.LLMResponse) string {
+				if llmResponse != nil && llmResponse.Content != nil && llmResponse.Content.Role == "user" {
+					return "user"
+				}
+				return ctx.Agent().Name()
+			}
+
 			resps, errs := conn.Receive(ctx)
 			for {
 				select {
 				case resp, ok := <-resps:
 					if !ok {
-						resps = nil
-						if errs == nil {
-							return
-						}
-						continue
+						break
 					}
-					for ev, err := range f.postprocessLive(ctx, req, resp, session.NewEvent(ctx.InvocationID())) {
+
+					if resp.LiveSessionResumptionUpdate != nil {
+						log.Info().Str("handle", resp.LiveSessionResumptionUpdate.NewHandle).Msg("Live session resumption update")
+						ctx.SetLiveSessionResumptionHandle(resp.LiveSessionResumptionUpdate.NewHandle)
+					}
+
+					modelResponseEvent := session.NewEvent(ctx.InvocationID())
+					modelResponseEvent.Content = resp.Content
+					modelResponseEvent.Author = getAuthorForEvent(resp)
+
+					for ev, err := range f.postprocessLive(ctx, req, resp, modelResponseEvent) {
 						if err != nil {
 							yield(nil, err)
 							return
 						}
+
+						if ctx.RunConfig().SaveLiveBlob &&
+							ev.Content != nil &&
+							ev.Content.Parts != nil &&
+							ev.Content.Parts[0].InlineData != nil &&
+							strings.HasPrefix(ev.Content.Parts[0].InlineData.MIMEType, "audio/") {
+
+							audioBlob := &genai.Blob{
+								Data:     ev.Content.Parts[0].InlineData.Data,
+								MIMEType: ev.Content.Parts[0].InlineData.MIMEType,
+							}
+							if err := f.AudioCacheManager.CacheAudio(ctx, audioBlob, "output"); err != nil {
+								log.Error().Err(err).Msg("Failed to cache audio")
+							}
+						}
+
 						if !yield(ev, nil) {
 							return
 						}
+
 					}
 				case err, ok := <-errs:
-					if ok && err != nil {
+					if !ok {
+						break
+					}
+					if err != nil {
 						yield(nil, err)
 						return
 					}
-					if !ok {
-						errs = nil
-						if resps == nil {
-							return
-						}
-						continue
-					}
+
 				case <-ctx.Done():
 					return
 				}
@@ -234,27 +261,17 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 			}
 		}
 
-		// TODO: temporarily convert
-		tools := make(map[string]tool.Tool)
-		for k, v := range llmRequest.Tools {
-			tool, ok := v.(tool.Tool)
-			if !ok {
-				if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
-					return
-				}
-			}
-			tools[k] = tool
-		}
-
 		// Builds the event.
-		modelResponseEvent = f.finalizeModelResponseEvent(ctx, llmResponse, tools, modelResponseEvent.Actions.StateDelta)
+		modelResponseEvent = f.finalizeLiveModelResponseEvent(ctx, llmRequest, llmResponse, modelResponseEvent)
 		yield(modelResponseEvent, nil)
 
+		// TODO: handle function calls
 	}
 }
 
-func (f *Flow) sentToLiveModel(ctx agent.InvocationContext, conn model.LiveConnection) {
-
+func (f *Flow) finalizeLiveModelResponseEvent(ctx agent.InvocationContext, llmRequest *model.LLMRequest, llmResponse *model.LLMResponse, modelResponseEvent *session.Event) *session.Event {
+	// TODO: not sure what to modify here
+	return modelResponseEvent
 }
 
 // handleControlEventFlush flushes audio caches based on control events using configurable settings

@@ -97,13 +97,13 @@ func (c *liveConnection) receive(ctx context.Context) (<-chan *genai.LiveServerM
 	return out, errChan
 }
 
-func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServerMessage) (<-chan *model.LLMResponse, <-chan error) {
+func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServerMessage) <-chan *model.LLMResponse {
 	out := make(chan *model.LLMResponse, 100)
-	errChan := make(chan error, 1)
+	// errChan := make(chan error, 1)
 
 	go func() {
 		defer close(out)
-		defer close(errChan)
+		// defer close(errChan)
 
 		send := func(resp *model.LLMResponse) bool {
 			select {
@@ -319,13 +319,12 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 					}
 				}
 			case <-ctx.Done():
-				errChan <- ctx.Err()
+				// errChan <- ctx.Err()
 				return
 			}
 		}
 	}()
-
-	return out, errChan
+	return out
 }
 
 func (c *liveConnection) buildFullTextResponse(text string) *model.LLMResponse {
@@ -341,7 +340,7 @@ func (c *liveConnection) buildFullTextResponse(text string) *model.LLMResponse {
 
 func (c *liveConnection) Receive(ctx context.Context) (<-chan *model.LLMResponse, <-chan error) {
 	msgs, errs1 := c.receive(ctx)
-	resps, errs2 := c.process(ctx, msgs)
+	resps := c.process(ctx, msgs)
 
 	errChan := make(chan error, 1)
 	go func() {
@@ -359,22 +358,11 @@ func (c *liveConnection) Receive(ctx context.Context) (<-chan *model.LLMResponse
 				if !ok {
 					errs1 = nil
 				}
-			case err, ok := <-errs2:
-				if ok && err != nil {
-					select {
-					case errChan <- err:
-					case <-ctx.Done():
-					}
-					return
-				}
-				if !ok {
-					errs2 = nil
-				}
 			case <-ctx.Done():
 				return
 			}
 
-			if errs1 == nil && errs2 == nil {
+			if errs1 == nil {
 				return
 			}
 		}

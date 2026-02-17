@@ -139,3 +139,7 @@ func (c *InvocationContext) ClearInputRealtimeCache() {
 func (c *InvocationContext) ClearOutputRealtimeCache() {
 	c.params.OutputRealtimeCache = nil
 }
+
+func (c *InvocationContext) SetLiveSessionResumptionHandle(handle string) {
+	c.params.LiveSessionResumptionHandle = handle
+}
