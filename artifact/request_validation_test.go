@@ -325,6 +325,59 @@ func TestVersionsRequest_Validate(t *testing.T) {
 	executeValidatorTestCases(t, "VersionsRequest", testCases)
 }
 
+// Test suite for the GetArtifactVersionRequest Validate method
+func TestGetArtifactVersionRequest_Validate(t *testing.T) {
+	// Define test cases
+	testCases := []ValidatorTestCase{
+		{
+			name: "Valid request",
+			req: &GetArtifactVersionRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+			},
+			wantErr: false,
+		},
+		{
+			name: "Missing AppName",
+			req: &GetArtifactVersionRequest{
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid get artifact version request: missing required fields: AppName",
+		},
+		{
+			name: "Missing multiple fields",
+			req: &GetArtifactVersionRequest{
+				AppName: "MyApp",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid get artifact version request: missing required fields: UserID, SessionID, FileName",
+		},
+		{
+			name:       "Completely empty request",
+			req:        &GetArtifactVersionRequest{},
+			wantErr:    true,
+			wantErrMsg: "invalid get artifact version request: missing required fields: AppName, UserID, SessionID, FileName",
+		},
+		{
+			name: "FileName with path separator",
+			req: &GetArtifactVersionRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "folder/file.txt",
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid name: filename cannot contain path separators",
+		},
+	}
+	executeValidatorTestCases(t, "GetArtifactVersionRequest", testCases)
+}
+
 func executeValidatorTestCases(t *testing.T, requestTypeName string, testCases []ValidatorTestCase) {
 	// Run the tests
 	for _, tc := range testCases {

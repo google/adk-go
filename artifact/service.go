@@ -42,6 +42,8 @@ type Service interface {
 	List(ctx context.Context, req *ListRequest) (*ListResponse, error)
 	// Versions lists all versions of an artifact.
 	Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error)
+	// GetVersion gets the metadata for a specific version of an artifact.
+	GetArtifactVersion(ctx context.Context, req *GetArtifactVersionRequest) (*GetArtifactVersionResponse, error)
 }
 
 // requiredField is an internal type to use on validate operations
@@ -258,4 +260,52 @@ func (req *VersionsRequest) Validate() error {
 // VersionsResponse is the parameter for [ArtifactService.Versions].
 type VersionsResponse struct {
 	Versions []int64
+}
+
+// ArtifactVersion contains metadata describing a specific version of an artifact.
+type ArtifactVersion struct {
+	Version        int64
+	CanonicalURI   string
+	CustomMetadata map[string]any
+	CreateTime     float64
+	MimeType       string
+}
+
+// GetArtifactVersionRequest is the parameter for [ArtifactService.GetArtifactVersion].
+type GetArtifactVersionRequest struct {
+	AppName, UserID, SessionID, FileName string
+
+	// Below are optional fields.
+	Version int64
+}
+
+// Validate checks if the struct is valid or if it is missing a field.
+func (req *GetArtifactVersionRequest) Validate() error {
+	// Define the fields to check in the desired order
+	fieldsToCheck := []requiredField{
+		{Name: "AppName", Value: req.AppName},
+		{Name: "UserID", Value: req.UserID},
+		{Name: "SessionID", Value: req.SessionID},
+		{Name: "FileName", Value: req.FileName},
+	}
+
+	// Use the helper function for all required string fields
+	missingFields := validateRequiredStrings(fieldsToCheck)
+
+	// If the slice has any items, it means fields were missing.
+	if len(missingFields) > 0 {
+		return fmt.Errorf("invalid get artifact version request: missing required fields: %s", strings.Join(missingFields, ", "))
+	}
+
+	// Validate that FileName doesn't contain path separators
+	if err := validateFileName(req.FileName); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// GetArtifactVersionResponse is the return type of [ArtifactService.GetArtifactVersion].
+type GetArtifactVersionResponse struct {
+	ArtifactVersion *ArtifactVersion
 }

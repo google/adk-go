@@ -285,4 +285,43 @@ func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*
 	return &VersionsResponse{Versions: versions}, nil
 }
 
+// GetArtifactVersion implements [artifact.Service] and returns the metadata for a specific version.
+func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifactVersionRequest) (*GetArtifactVersionResponse, error) {
+	err := req.Validate()
+	if err != nil {
+		return nil, fmt.Errorf("request validation failed: %w", err)
+	}
+	appName, userID, sessionID, fileName, version := req.AppName, req.UserID, req.SessionID, req.FileName, req.Version
+	if fileHasUserNamespace(fileName) {
+		sessionID = userScopedArtifactKey
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var artifact *genai.Part
+	var ok bool
+	if version > 0 {
+		artifact, ok = s.get(appName, userID, sessionID, fileName, version)
+	} else {
+		version, artifact, ok = s.find(appName, userID, sessionID, fileName)
+	}
+
+	if !ok {
+		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
+	}
+
+	mimeType := "text/plain"
+	if artifact != nil && artifact.InlineData != nil {
+		mimeType = artifact.InlineData.MIMEType
+	}
+
+	return &GetArtifactVersionResponse{
+		ArtifactVersion: &ArtifactVersion{
+			Version:  version,
+			MimeType: mimeType,
+		},
+	}, nil
+}
+
 var _ Service = (*inMemoryService)(nil)
