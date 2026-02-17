@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -37,7 +36,7 @@ type DebugTelemetry struct {
 func NewDebugTelemetry() *DebugTelemetry {
 	spanExporter := tracetest.NewInMemoryExporter()
 	logExporter := &InMemoryLogExporter{
-		records: make([]sdklog.Record, 0),
+		logsBySpanID: make(map[string][]DebugLog),
 	}
 	return &DebugTelemetry{
 		spanExporter: spanExporter,
@@ -72,71 +71,15 @@ func (d *DebugTelemetry) getSpansFilterByAttrs(filter func(span tracetest.SpanSt
 	var debugSpans []DebugSpan
 	spans := d.spanExporter.GetSpans()
 
-	logsBySpanID := make(map[string][]sdklog.Record)
-	for _, log := range d.logExporter.GetRecords() {
-		if !log.SpanID().IsValid() {
-			continue
-		}
-		spanID := log.SpanID().String()
-		prev, ok := logsBySpanID[spanID]
-		if !ok {
-			prev = nil
-		}
-		logsBySpanID[spanID] = append(prev, log)
-	}
-
 	for _, span := range spans {
 		attrs := convertAttrs(span.Attributes)
 		if filter(span, attrs) {
 			debugSpan := convert(span, attrs)
-			debugSpan.Logs = convertLogs(logsBySpanID[span.SpanContext.SpanID().String()])
+			debugSpan.Logs = d.logExporter.GetLogsBySpanID(span.SpanContext.SpanID().String())
 			debugSpans = append(debugSpans, debugSpan)
 		}
 	}
 	return debugSpans
-}
-
-func convertLogs(records []sdklog.Record) []DebugLog {
-	var spanLogs []DebugLog
-	for _, l := range records {
-		spanLogs = append(spanLogs, DebugLog{
-			Body:              convertLogValue(l.Body()),
-			ObservedTimestamp: l.ObservedTimestamp().Format(time.RFC3339),
-			TraceID:           l.TraceID().String(),
-			SpanID:            l.SpanID().String(),
-			EventName:         l.EventName(),
-		})
-	}
-	return spanLogs
-}
-
-func convertLogValue(v log.Value) any {
-	switch v.Kind() {
-	case log.KindBool:
-		return v.AsBool()
-	case log.KindFloat64:
-		return v.AsFloat64()
-	case log.KindInt64:
-		return v.AsInt64()
-	case log.KindString:
-		return v.AsString()
-	case log.KindBytes:
-		return v.AsBytes()
-	case log.KindSlice:
-		var res []any
-		for _, item := range v.AsSlice() {
-			res = append(res, convertLogValue(item))
-		}
-		return res
-	case log.KindMap:
-		res := make(map[string]any)
-		for _, kv := range v.AsMap() {
-			res[kv.Key] = convertLogValue(kv.Value)
-		}
-		return res
-	default:
-		return nil
-	}
 }
 
 func convertAttrs(in []attribute.KeyValue) map[string]string {
@@ -179,7 +122,7 @@ type DebugSpan struct {
 
 // DebugLog represents a log in the span.
 type DebugLog struct {
-	Body Body `json:"body"`
+	Body any `json:"body"`
 	// RFC 3339 format timestamp  e.g. "2025-12-02T09:45:36.115239Z"
 	ObservedTimestamp string `json:"observed_timestamp"`
 	// base16 0x + 32 characters  e.g. "0x6bd725d0f21eb3117ae8cfaa709694b1"
@@ -188,12 +131,10 @@ type DebugLog struct {
 	EventName string `json:"event_name"`
 }
 
-type Body any
-
 // InMemoryLogExporter stores logs in memory for debug telemetry.
 type InMemoryLogExporter struct {
-	mu      sync.Mutex
-	records []sdklog.Record
+	mu           sync.Mutex
+	logsBySpanID map[string][]DebugLog
 }
 
 // Export implements sdklog.Exporter.
@@ -201,7 +142,22 @@ func (e *InMemoryLogExporter) Export(ctx context.Context, records []sdklog.Recor
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, r := range records {
-		e.records = append(e.records, r.Clone())
+		if !r.SpanID().IsValid() {
+			// Drop the logs without spanID - we'll never join them with any span.
+			continue
+		}
+		spanID := r.SpanID().String()
+		prev, ok := e.logsBySpanID[spanID]
+		if !ok {
+			prev = nil
+		}
+		e.logsBySpanID[spanID] = append(prev, DebugLog{
+			Body:              r.Body().String(),
+			ObservedTimestamp: r.ObservedTimestamp().Format(time.RFC3339),
+			TraceID:           r.TraceID().String(),
+			SpanID:            r.SpanID().String(),
+			EventName:         r.EventName(),
+		})
 	}
 	return nil
 }
@@ -216,9 +172,8 @@ func (e *InMemoryLogExporter) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// GetRecords returns a copy of the stored records.
-func (e *InMemoryLogExporter) GetRecords() []sdklog.Record {
+func (e *InMemoryLogExporter) GetLogsBySpanID(spanID string) []DebugLog {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.records
+	return e.logsBySpanID[spanID]
 }

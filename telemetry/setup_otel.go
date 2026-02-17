@@ -79,10 +79,7 @@ func newInternal(cfg *config) (*Providers, error) {
 		return nil, fmt.Errorf("failed to initialize tracer provider: %w", err)
 	}
 
-	lp, err := initLoggerProvider(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize logger provider: %w", err)
-	}
+	lp := initLoggerProvider(cfg)
 	// TODO(#479) init meter provider
 
 	return &Providers{
@@ -205,9 +202,10 @@ func initTracerProvider(cfg *config) (*sdktrace.TracerProvider, error) {
 	return tp, nil
 }
 
+// TODO(#479) finish the implementation and add the default exporter if env vars are set.
 func initLoggerProvider(cfg *config) *sdklog.LoggerProvider {
 	if len(cfg.logProcessors) == 0 {
-		return nil, nil
+		return nil
 	}
 	opts := []sdklog.LoggerProviderOption{
 		sdklog.WithResource(cfg.resource),
@@ -217,7 +215,7 @@ func initLoggerProvider(cfg *config) *sdklog.LoggerProvider {
 	}
 	lp := sdklog.NewLoggerProvider(opts...)
 
-	return lp, nil
+	return lp
 }
 
 func newGcpSpanExporter(ctx context.Context, cfg *config) (sdktrace.SpanExporter, error) {

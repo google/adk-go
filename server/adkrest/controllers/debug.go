@@ -17,8 +17,10 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/gorilla/mux"
+	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -52,9 +54,13 @@ func (c *DebugAPIController) EventSpanHandler(rw http.ResponseWriter, req *http.
 		return
 	}
 	spans := c.debugTelemetry.GetSpansByEventID(eventID)
+	key := string(semconv.GenAIOperationNameKey)
+	// Return only generate content and execute tool spans.
+	wantedOperations := []string{"execute_tool", "generate_content"}
 	for _, span := range spans {
-		opName := span.Attributes["genai.operation.name"]
-		if opName == "execute_tool" || opName == "generate_content" {
+		opName := span.Attributes[key]
+		if slices.Contains(wantedOperations, opName) {
+			// Return the first span that matches the wanted operations - single event should contain only a single generate content or execute tool span.
 			EncodeJSONResponse(span, http.StatusOK, rw)
 			return
 		}
@@ -71,14 +77,14 @@ func (c *DebugAPIController) SessionSpansHandler(rw http.ResponseWriter, req *ht
 		return
 	}
 	spans := c.debugTelemetry.GetSpansBySessionID(sessionID)
-	result := Result{
+	result := SessionTelemetry{
 		SchemaVersion: 2,
 		Spans:         spans,
 	}
 	EncodeJSONResponse(result, http.StatusOK, rw)
 }
 
-type Result struct {
+type SessionTelemetry struct {
 	SchemaVersion int                  `json:"schema_version"`
 	Spans         []services.DebugSpan `json:"spans"`
 }
