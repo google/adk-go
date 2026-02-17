@@ -137,6 +137,9 @@ func main() {
 		AppName:        "live_sample",
 		Agent:          a,
 		SessionService: sessionService,
+		ResumabilityConfig: &agent.ResumabilityConfig{
+			IsResumable: false,
+		},
 	})
 	if err != nil {
 		log.Printf("Failed to create runner: %v", err)
@@ -210,13 +213,7 @@ func (s *Server) websocketHandler() http.HandlerFunc {
 		runConfig := agent.RunConfig{
 			StreamingMode:      agent.StreamingModeBidi,
 			ResponseModalities: []genai.Modality{genai.ModalityAudio},
-			SpeechConfig: &genai.SpeechConfig{
-				VoiceConfig: &genai.VoiceConfig{
-					PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
-						VoiceName: "Aoede",
-					},
-				},
-			},
+
 			InputAudioTranscription:  &genai.AudioTranscriptionConfig{},
 			OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
 		}

@@ -50,6 +50,8 @@ type Config struct {
 	ArtifactService artifact.Service
 	// optional
 	MemoryService memory.Service
+
+	ResumabilityConfig *agent.ResumabilityConfig
 }
 
 // New creates a new [Runner].
@@ -68,12 +70,13 @@ func New(cfg Config) (*Runner, error) {
 	}
 
 	return &Runner{
-		appName:         cfg.AppName,
-		rootAgent:       cfg.Agent,
-		sessionService:  cfg.SessionService,
-		artifactService: cfg.ArtifactService,
-		memoryService:   cfg.MemoryService,
-		parents:         parents,
+		appName:            cfg.AppName,
+		rootAgent:          cfg.Agent,
+		sessionService:     cfg.SessionService,
+		artifactService:    cfg.ArtifactService,
+		memoryService:      cfg.MemoryService,
+		parents:            parents,
+		resumabilityConfig: cfg.ResumabilityConfig,
 	}, nil
 }
 
@@ -87,11 +90,88 @@ type Runner struct {
 	artifactService artifact.Service
 	memoryService   memory.Service
 
-	parents parentmap.Map
+	parents            parentmap.Map
+	resumabilityConfig *agent.ResumabilityConfig
 }
 
+/*
+Runs the agent in live mode (experimental feature).
+
+The `run_live` method yields a stream of `Event` objects, but not all
+yielded events are saved to the session. Here's a breakdown:
+
+**Events Yielded to Callers:**
+  - **Live Model Audio Events with Inline Data:** Events containing raw
+    audio `Blob` data(`inline_data`).
+  - **Live Model Audio Events with File Data:** Both input and ouput audio
+    data are aggregated into an audio file saved into artifacts. The
+    reference to the file is saved in the event as `file_data`.
+  - **Usage Metadata:** Events containing token usage.
+  - **Transcription Events:** Both partial and non-partial transcription
+    events are yielded.
+  - **Function Call and Response Events:** Always saved.
+  - **Other Control Events:** Most control events are saved.
+
+**Events Saved to the Session:**
+  - **Live Model Audio Events with File Data:** Both input and ouput audio
+    data are aggregated into an audio file saved into artifacts. The
+    reference to the file is saved as event in the `file_data` to session
+    if RunConfig.save_live_model_audio_to_session is True.
+  - **Usage Metadata Events:** Saved to the session.
+  - **Non-Partial Transcription Events:** Non-partial transcription events
+    are saved.
+  - **Function Call and Response Events:** Always saved.
+  - **Other Control Events:** Most control events are saved.
+
+**Events Not Saved to the Session:**
+  - **Live Model Audio Events with Inline Data:** Events containing raw
+    audio `Blob` data are **not** saved to the session.
+
+Args:
+
+	user_id: The user ID for the session. Required if `session` is None.
+	session_id: The session ID for the session. Required if `session` is
+		None.
+	live_request_queue: The queue for live requests.
+	run_config: The run config for the agent.
+
+Yields:
+
+	AsyncGenerator[Event, None]: An asynchronous generator that yields
+	`Event`
+	objects as they are produced by the agent during its live execution.
+
+.. warning::
+
+	This feature is **experimental** and its API or behavior may change
+	in future releases.
+*/
 func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		if len(cfg.ResponseModalities) == 0 {
+			cfg.ResponseModalities = []genai.Modality{genai.ModalityAudio}
+		}
+
+		if cfg.SpeechConfig == nil {
+			cfg.SpeechConfig = &genai.SpeechConfig{
+				VoiceConfig: &genai.VoiceConfig{
+					PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
+						VoiceName: "Aoede",
+					},
+				},
+			}
+		}
+
+		if strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" {
+			yield(nil, fmt.Errorf("userID and sessionID must be provided."))
+			return
+		}
+
+		if liveRequestQueue == nil {
+			yield(nil, fmt.Errorf("live request queue must be provided"))
+			return
+		}
+
 		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
 			AppName:   r.appName,
 			UserID:    userID,
@@ -102,6 +182,26 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			return
 		}
 
+		// For live multi-agents system, we need model's text transcription as
+		// context for the transferred agent.
+		if len(r.rootAgent.SubAgents()) > 0 {
+			found := false
+			for _, modality := range cfg.ResponseModalities {
+				if modality == genai.ModalityAudio {
+					found = true
+					break
+				}
+			}
+			if found {
+				if cfg.InputAudioTranscription == nil {
+					cfg.InputAudioTranscription = &genai.AudioTranscriptionConfig{}
+				}
+				if cfg.OutputAudioTranscription == nil {
+					cfg.OutputAudioTranscription = &genai.AudioTranscriptionConfig{}
+				}
+			}
+		}
+
 		storedSession := resp.Session
 
 		agentToRun, err := r.findAgentToRun(storedSession)
@@ -109,62 +209,16 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			yield(nil, err)
 			return
 		}
-		ctx = parentmap.ToContext(ctx, r.parents)
-		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
-			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
-			LiveConnectConfig: &genai.LiveConnectConfig{
-				ResponseModalities:       cfg.ResponseModalities,
-				SpeechConfig:             cfg.SpeechConfig,
-				InputAudioTranscription:  cfg.InputAudioTranscription,
-				OutputAudioTranscription: cfg.OutputAudioTranscription,
-			},
-		})
 
-		var artifacts agent.Artifacts
-		if r.artifactService != nil {
-			artifacts = &artifactinternal.Artifacts{
-				Service:   r.artifactService,
-				SessionID: storedSession.ID(),
-				AppName:   storedSession.AppName(),
-				UserID:    storedSession.UserID(),
-			}
-		}
-
-		var memoryImpl agent.Memory = nil
-		if r.memoryService != nil {
-			memoryImpl = &imemory.Memory{
-				Service:   r.memoryService,
-				SessionID: storedSession.ID(),
-				UserID:    storedSession.UserID(),
-				AppName:   storedSession.AppName(),
-			}
-		}
-
-		invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-			Artifacts:        artifacts,
-			Memory:           memoryImpl,
-			Session:          sessioninternal.NewMutableSession(r.sessionService, storedSession),
-			Agent:            agentToRun,
-			RunConfig:        &cfg,
-			LiveRequestQueue: liveRequestQueue,
-		})
+		invCtx := r.newInvocationContextForLive(ctx, userID, sessionID, liveRequestQueue, cfg, agentToRun, storedSession)
 
 		for event, err := range agentToRun.RunLive(invCtx) {
-
 			if err != nil {
 				if !yield(event, err) {
 					return
 				}
 				continue
 			}
-
-			// TODO only commit non-partial event to a session service
-			// if !event.LLMResponse.Partial {
-			// 	if err := r.sessionService.AppendEvent(ctx, session, event); err != nil {
-			// 		yield(nil, fmt.Errorf("failed to add event to session: %w", err))
-			// 		return
-			// 	}
-			// }
 
 			if r.shouldAppendEvent(event, true) {
 				if err := r.sessionService.AppendEvent(invCtx, storedSession, event); err != nil {
@@ -178,6 +232,73 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 			}
 		}
 	}
+}
+
+func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig, agentToRun agent.Agent, session session.Session) agent.InvocationContext {
+	liveConnectConfig := &genai.LiveConnectConfig{
+		ResponseModalities:       cfg.ResponseModalities,
+		SpeechConfig:             cfg.SpeechConfig,
+		InputAudioTranscription:  cfg.InputAudioTranscription,
+		OutputAudioTranscription: cfg.OutputAudioTranscription,
+		RealtimeInputConfig:      cfg.RealtimeInputConfig,
+		ContextWindowCompression: cfg.ContextWindowCompression,
+		Proactivity:              cfg.Proactivity,
+	}
+
+	if cfg.ExplicitVADSignal {
+		liveConnectConfig.ExplicitVADSignal = &cfg.ExplicitVADSignal
+	}
+	if cfg.EnableAffectiveDialog {
+		liveConnectConfig.EnableAffectiveDialog = &cfg.EnableAffectiveDialog
+	}
+
+	if r.resumabilityConfig != nil && r.resumabilityConfig.IsResumable {
+		if cfg.SessionResumption != nil {
+			liveConnectConfig.SessionResumption = cfg.SessionResumption
+		} else {
+			liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{
+				Handle:      fmt.Sprintf("%s_%s", sessionID, userID),
+				Transparent: true,
+			}
+		}
+	}
+
+	ctx = parentmap.ToContext(ctx, r.parents)
+	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
+		StreamingMode:     runconfig.StreamingMode(cfg.StreamingMode),
+		LiveConnectConfig: liveConnectConfig,
+	})
+
+	var artifacts agent.Artifacts
+	if r.artifactService != nil {
+		artifacts = &artifactinternal.Artifacts{
+			Service:   r.artifactService,
+			SessionID: session.ID(),
+			AppName:   session.AppName(),
+			UserID:    session.UserID(),
+		}
+	}
+
+	var memoryImpl agent.Memory = nil
+	if r.memoryService != nil {
+		memoryImpl = &imemory.Memory{
+			Service:   r.memoryService,
+			SessionID: session.ID(),
+			UserID:    session.UserID(),
+			AppName:   session.AppName(),
+		}
+	}
+
+	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:                   artifacts,
+		Memory:                      memoryImpl,
+		Session:                     sessioninternal.NewMutableSession(r.sessionService, session),
+		Agent:                       agentToRun,
+		RunConfig:                   &cfg,
+		LiveRequestQueue:            liveRequestQueue,
+		LiveSessionResumptionHandle: "", //TODO how we get this from session?
+	})
+	return invCtx
 }
 
 func (r *Runner) shouldAppendEvent(event *session.Event, isLiveCall bool) bool {

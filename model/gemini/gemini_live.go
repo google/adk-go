@@ -4,17 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rs/zerolog/log"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
 
 // Connect establishes a bidirectional streaming connection to the model.
 func (m *geminiModel) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
-	log.Debug().Interface("tools", req.LiveConnectConfig.Tools).
-		Str("system_instructions", req.LiveConnectConfig.SystemInstruction.Parts[0].Text).
-		Msg("Connecting to Gemini Live model")
-
 	session, err := m.client.Live.Connect(ctx, m.name, req.LiveConnectConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to live model: %w", err)

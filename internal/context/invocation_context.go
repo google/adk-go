@@ -37,6 +37,12 @@ type InvocationContextParams struct {
 	EndInvocation bool
 
 	LiveRequestQueue *agent.LiveRequestQueue
+
+	TranscriptionCache          []agent.TranscriptionEntry
+	InputRealtimeCache          []agent.RealtimeCacheEntry
+	OutputRealtimeCache         []agent.RealtimeCacheEntry
+	ResumabilityConfig          *agent.ResumabilityConfig
+	LiveSessionResumptionHandle string
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
@@ -96,4 +102,24 @@ func (c *InvocationContext) Ended() bool {
 
 func (c *InvocationContext) LiveRequestQueue() *agent.LiveRequestQueue {
 	return c.params.LiveRequestQueue
+}
+
+func (c *InvocationContext) TranscriptionCache() []agent.TranscriptionEntry {
+	return c.params.TranscriptionCache
+}
+
+func (c *InvocationContext) LiveSessionResumptionHandle() string {
+	return c.params.LiveSessionResumptionHandle
+}
+
+func (c *InvocationContext) InputRealtimeCache() []agent.RealtimeCacheEntry {
+	return c.params.InputRealtimeCache
+}
+
+func (c *InvocationContext) OutputRealtimeCache() []agent.RealtimeCacheEntry {
+	return c.params.OutputRealtimeCache
+}
+
+func (c *InvocationContext) ResumabilityConfig() *agent.ResumabilityConfig {
+	return c.params.ResumabilityConfig
 }

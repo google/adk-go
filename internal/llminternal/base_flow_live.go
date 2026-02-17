@@ -5,6 +5,7 @@ import (
 	"iter"
 	"log/slog"
 
+	"github.com/rs/zerolog/log"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/runconfig"
 	"google.golang.org/adk/model"
@@ -38,127 +39,150 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			return
 		}
 
-		// Connect to the model
-		conn, err := f.Model.Connect(ctx, req)
-		if err != nil {
-			yield(nil, fmt.Errorf("failed to connect to live model: %w", err))
-			return
-		}
-		defer conn.Close()
-
-		queue := ctx.LiveRequestQueue()
-		if queue == nil {
-			yield(nil, fmt.Errorf("LiveRequestQueue not found in context"))
-			return
-		}
-
-		// Start sender goroutine
-		go func() {
-			ch := queue.Channel()
-			for {
-				select {
-				case liveReq, ok := <-ch:
-					if !ok {
-						return // Queue closed
-					}
-					if err := conn.Send(liveReq); err != nil {
-						// TODO: Handle send error. Maybe log or signal main loop?
-						// For now we just log/ignore as the main loop might catch connection issues too.
-						fmt.Printf("Error sending to live connection: %v\n", err)
-						return
-					}
-					if liveReq.Close {
-						return
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-
-		// Main receive loop
+		attempt := 0
 		for {
-			resp, err := conn.Receive()
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-
-			if resp == nil {
-				continue
-			}
-
-			// Prepare event
-			stateDelta := make(map[string]any)
-
-			// Resolve tools
-			// TODO: Reuse tool resolution logic or cache it?
-			tools := make(map[string]tool.Tool)
-			for k, v := range req.Tools {
-				tool, ok := v.(tool.Tool)
-				if !ok {
-					yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k))
-					return
+			// On subsequent attempts, use the saved token to reconnect
+			if ctx.LiveSessionResumptionHandle() != "" {
+				log.Info().Int("attempt", attempt).
+					Str("handle", ctx.LiveSessionResumptionHandle()).
+					Msg("Attempting to reconnect live session with handle")
+				attempt++
+				if req.LiveConnectConfig == nil {
+					req.LiveConnectConfig = &genai.LiveConnectConfig{}
 				}
-				tools[k] = tool
+				if req.LiveConnectConfig.SessionResumption == nil {
+					req.LiveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{
+						Handle: ctx.LiveSessionResumptionHandle(),
+					}
+				}
+				req.LiveConnectConfig.SessionResumption.Handle = ctx.LiveSessionResumptionHandle()
+				req.LiveConnectConfig.SessionResumption.Transparent = true
 			}
 
-			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
+			// TODO pindahin connect to model ke dalam for loop ini
+			// Connect to the model
+			conn, err := f.Model.Connect(ctx, req)
+			if err != nil {
+				yield(nil, fmt.Errorf("failed to connect to live model: %w", err))
+				return
+			}
+			defer conn.Close()
 
-			// Trace?
-			// telemetry.TraceLLMCall(callLLMSpan, ctx, req, modelResponseEvent)
-
-			if !yield(modelResponseEvent, nil) {
+			queue := ctx.LiveRequestQueue()
+			if queue == nil {
+				yield(nil, fmt.Errorf("LiveRequestQueue not found in context"))
 				return
 			}
 
-			// Handle function calls
-			if resp.Content != nil {
-				ev, err := f.handleFunctionCalls(ctx, tools, resp)
+			// Start sender goroutine
+			go func() {
+				ch := queue.Channel()
+				for {
+					select {
+					case liveReq, ok := <-ch:
+						if !ok {
+							return // Queue closed
+						}
+						if err := conn.Send(liveReq); err != nil {
+							// TODO: Handle send error. Maybe log or signal main loop?
+							// For now we just log/ignore as the main loop might catch connection issues too.
+							fmt.Printf("Error sending to live connection: %v\n", err)
+							return
+						}
+						if liveReq.Close {
+							return
+						}
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+
+			// Main receive loop
+			for {
+				resp, err := conn.Receive()
 				if err != nil {
 					yield(nil, err)
 					return
 				}
 
-				if ev != nil {
-					slog.Info("Function calls handled", "event", ev)
-					// Yield the function response event (execution result)
-					if !yield(ev, nil) {
+				if resp == nil {
+					continue
+				}
+
+				// Prepare event
+				stateDelta := make(map[string]any)
+
+				// Resolve tools
+				// TODO: Reuse tool resolution logic or cache it?
+				tools := make(map[string]tool.Tool)
+				for k, v := range req.Tools {
+					tool, ok := v.(tool.Tool)
+					if !ok {
+						yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k))
+						return
+					}
+					tools[k] = tool
+				}
+
+				modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
+
+				// Trace?
+				// telemetry.TraceLLMCall(callLLMSpan, ctx, req, modelResponseEvent)
+
+				if !yield(modelResponseEvent, nil) {
+					return
+				}
+
+				// Handle function calls
+				if resp.Content != nil {
+					ev, err := f.handleFunctionCalls(ctx, tools, resp)
+					if err != nil {
+						yield(nil, err)
 						return
 					}
 
-					// Send tool response back to model
-					// We need to extract the parts and construct a LiveRequest
-					if ev.LLMResponse.Content != nil {
-						toolResponses := &genai.LiveToolResponseInput{
-							FunctionResponses: make([]*genai.FunctionResponse, 0),
+					if ev != nil {
+						slog.Info("Function calls handled", "event", ev)
+						// Yield the function response event (execution result)
+						if !yield(ev, nil) {
+							return
 						}
-						for _, part := range ev.LLMResponse.Content.Parts {
-							if part.FunctionResponse != nil {
-								toolResponses.FunctionResponses = append(toolResponses.FunctionResponses, part.FunctionResponse)
+
+						// Send tool response back to model
+						// We need to extract the parts and construct a LiveRequest
+						if ev.LLMResponse.Content != nil {
+							toolResponses := &genai.LiveToolResponseInput{
+								FunctionResponses: make([]*genai.FunctionResponse, 0),
 							}
-						}
+							for _, part := range ev.LLMResponse.Content.Parts {
+								if part.FunctionResponse != nil {
+									toolResponses.FunctionResponses = append(toolResponses.FunctionResponses, part.FunctionResponse)
+								}
+							}
 
-						if len(toolResponses.FunctionResponses) > 0 {
-							slog.Info("Sending tool responses", "toolResponses", toolResponses)
-							// Send directly to connection (bypass queue to avoid latency/ordering issues mixed with user input?)
-							// Typically tool outputs corresponding to model calls should go ASAP.
-							// But using queue ensures serialization if necessary.
-							// ADK Python sends it directly or via queue?
-							// Let's use the queue's helper if available or just construct request.
-							// The queue is thread safe.
+							if len(toolResponses.FunctionResponses) > 0 {
+								// Send directly to connection (bypass queue to avoid latency/ordering issues mixed with user input?)
+								// Typically tool outputs corresponding to model calls should go ASAP.
+								// But using queue ensures serialization if necessary.
+								// ADK Python sends it directly or via queue?
+								// Let's use the queue's helper if available or just construct request.
+								// The queue is thread safe.
 
-							queue.SendToolResponse(toolResponses)
+								queue.SendToolResponse(toolResponses)
+							}
 						}
 					}
 				}
+
+				// Check for interruptions or turn completion if needed
+				// The loop continues until error or context cancel.
+				if ctx.Err() != nil {
+					return
+				}
 			}
 
-			// Check for interruptions or turn completion if needed
-			// The loop continues until error or context cancel.
-			if ctx.Err() != nil {
-				return
-			}
 		}
+
 	}
 }

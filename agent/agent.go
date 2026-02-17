@@ -168,12 +168,17 @@ func (a *agent) RunLive(ctx InvocationContext) iter.Seq2[*session.Event, error] 
 			memory:    ctx.Memory(),
 			session:   ctx.Session(),
 
-			invocationID:     ctx.InvocationID(),
-			branch:           ctx.Branch(),
-			userContent:      ctx.UserContent(),
-			runConfig:        ctx.RunConfig(),
-			endInvocation:    ctx.Ended(),
-			liveRequestQueue: ctx.LiveRequestQueue(),
+			invocationID:                ctx.InvocationID(),
+			branch:                      ctx.Branch(),
+			userContent:                 ctx.UserContent(),
+			runConfig:                   ctx.RunConfig(),
+			endInvocation:               ctx.Ended(),
+			liveRequestQueue:            ctx.LiveRequestQueue(),
+			transcriptionCache:          ctx.TranscriptionCache(),
+			inputRealtimeCache:          ctx.InputRealtimeCache(),
+			outputRealtimeCache:         ctx.OutputRealtimeCache(),
+			resumabilityConfig:          ctx.ResumabilityConfig(),
+			liveSessionResumptionHandle: ctx.LiveSessionResumptionHandle(),
 		}
 
 		if a.runLive == nil {
@@ -430,7 +435,12 @@ type invocationContext struct {
 	runConfig     *RunConfig
 	endInvocation bool
 
-	liveRequestQueue *LiveRequestQueue
+	liveRequestQueue            *LiveRequestQueue
+	transcriptionCache          []TranscriptionEntry
+	inputRealtimeCache          []RealtimeCacheEntry
+	outputRealtimeCache         []RealtimeCacheEntry
+	resumabilityConfig          *ResumabilityConfig
+	liveSessionResumptionHandle string
 }
 
 func (c *invocationContext) Agent() Agent {
@@ -475,4 +485,24 @@ func (c *invocationContext) Ended() bool {
 
 func (c *invocationContext) LiveRequestQueue() *LiveRequestQueue {
 	return c.liveRequestQueue
+}
+
+func (c *invocationContext) TranscriptionCache() []TranscriptionEntry {
+	return c.transcriptionCache
+}
+
+func (c *invocationContext) LiveSessionResumptionHandle() string {
+	return c.liveSessionResumptionHandle
+}
+
+func (c *invocationContext) InputRealtimeCache() []RealtimeCacheEntry {
+	return c.inputRealtimeCache
+}
+
+func (c *invocationContext) OutputRealtimeCache() []RealtimeCacheEntry {
+	return c.outputRealtimeCache
+}
+
+func (c *invocationContext) ResumabilityConfig() *ResumabilityConfig {
+	return c.resumabilityConfig
 }
