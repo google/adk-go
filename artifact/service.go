@@ -42,7 +42,7 @@ type Service interface {
 	List(ctx context.Context, req *ListRequest) (*ListResponse, error)
 	// Versions lists all versions of an artifact.
 	Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error)
-	// GetVersion gets the metadata for a specific version of an artifact.
+	// GetArtifactVersion gets the metadata for a specific version of an artifact.
 	GetArtifactVersion(ctx context.Context, req *GetArtifactVersionRequest) (*GetArtifactVersionResponse, error)
 }
 
