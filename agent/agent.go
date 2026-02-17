@@ -506,3 +506,19 @@ func (c *invocationContext) OutputRealtimeCache() []RealtimeCacheEntry {
 func (c *invocationContext) ResumabilityConfig() *ResumabilityConfig {
 	return c.resumabilityConfig
 }
+
+func (c *invocationContext) AppendInputRealtimeCache(entry RealtimeCacheEntry) {
+	c.inputRealtimeCache = append(c.inputRealtimeCache, entry)
+}
+
+func (c *invocationContext) AppendOutputRealtimeCache(entry RealtimeCacheEntry) {
+	c.outputRealtimeCache = append(c.outputRealtimeCache, entry)
+}
+
+func (c *invocationContext) ClearInputRealtimeCache() {
+	c.inputRealtimeCache = nil
+}
+
+func (c *invocationContext) ClearOutputRealtimeCache() {
+	c.outputRealtimeCache = nil
+}

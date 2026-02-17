@@ -186,3 +186,41 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 	}
 }
+
+func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LLMRequest, llmResponse *model.LLMResponse, modelResponseEvent *session.Event) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if err := f.postprocess(ctx, llmRequest, llmResponse); err != nil {
+			yield(nil, err)
+			return
+		}
+
+		if llmResponse.Content == nil &&
+			llmResponse.ErrorCode == "" &&
+			!llmResponse.Interrupted &&
+			!llmResponse.TurnComplete &&
+			llmResponse.InputTranscription == nil &&
+			llmResponse.OutputTranscription == nil &&
+			llmResponse.UsageMetadata == nil {
+			return
+		}
+
+		if llmResponse.InputTranscription != nil {
+			modelResponseEvent.InputTranscription = llmResponse.InputTranscription
+			modelResponseEvent.Partial = llmResponse.Partial
+			yield(modelResponseEvent, nil)
+			return
+		}
+
+		if llmResponse.OutputTranscription != nil {
+			modelResponseEvent.OutputTranscription = llmResponse.OutputTranscription
+			modelResponseEvent.Partial = llmResponse.Partial
+			yield(modelResponseEvent, nil)
+			return
+		}
+
+		if ctx.RunConfig().SaveLiveBlob {
+			// TODO: 
+		}
+
+	}
+}

@@ -123,3 +123,19 @@ func (c *InvocationContext) OutputRealtimeCache() []agent.RealtimeCacheEntry {
 func (c *InvocationContext) ResumabilityConfig() *agent.ResumabilityConfig {
 	return c.params.ResumabilityConfig
 }
+
+func (c *InvocationContext) AppendInputRealtimeCache(entry agent.RealtimeCacheEntry) {
+	c.params.InputRealtimeCache = append(c.params.InputRealtimeCache, entry)
+}
+
+func (c *InvocationContext) AppendOutputRealtimeCache(entry agent.RealtimeCacheEntry) {
+	c.params.OutputRealtimeCache = append(c.params.OutputRealtimeCache, entry)
+}
+
+func (c *InvocationContext) ClearInputRealtimeCache() {
+	c.params.InputRealtimeCache = nil
+}
+
+func (c *InvocationContext) ClearOutputRealtimeCache() {
+	c.params.OutputRealtimeCache = nil
+}

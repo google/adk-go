@@ -109,6 +109,15 @@ type InvocationContext interface {
 	OutputRealtimeCache() []RealtimeCacheEntry
 	// ResumabilityConfig that applies to all agents under this invocation.
 	ResumabilityConfig() *ResumabilityConfig
+
+	// AppendInputRealtimeCache appends an audio chunk to the input cache.
+	AppendInputRealtimeCache(entry RealtimeCacheEntry)
+	// AppendOutputRealtimeCache appends an audio chunk to the output cache.
+	AppendOutputRealtimeCache(entry RealtimeCacheEntry)
+	// ClearInputRealtimeCache clears the input audio cache.
+	ClearInputRealtimeCache()
+	// ClearOutputRealtimeCache clears the output audio cache.
+	ClearOutputRealtimeCache()
 }
 
 // ReadonlyContext provides read-only access to invocation context data.

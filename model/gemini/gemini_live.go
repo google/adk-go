@@ -67,6 +67,7 @@ func (c *liveConnection) Receive() (*model.LLMResponse, error) {
 	}
 
 	if msg.UsageMetadata != nil {
+		// we use generate content response usage metadata for now
 		resp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
 			CacheTokensDetails:         msg.UsageMetadata.CacheTokensDetails,
 			CachedContentTokenCount:    msg.UsageMetadata.CachedContentTokenCount,

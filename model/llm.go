@@ -64,6 +64,10 @@ type LLMResponse struct {
 	ErrorMessage string
 	FinishReason genai.FinishReason
 	AvgLogprobs  float64
+
+	LiveSessionResumptionUpdate *genai.LiveServerSessionResumptionUpdate
+	InputTranscription          *genai.Transcription
+	OutputTranscription         *genai.Transcription
 }
 
 // LiveRequest is the request to be sent to the model in the live stream.
