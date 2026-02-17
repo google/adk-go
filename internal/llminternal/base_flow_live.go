@@ -9,6 +9,7 @@ import (
 	"google.golang.org/adk/internal/agent/runconfig"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -142,12 +143,43 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					}
 				}
 			}()
-			
+
+			resps, errs := conn.Receive(ctx)
 			for {
-				conn.Receive()
+				select {
+				case resp, ok := <-resps:
+					if !ok {
+						resps = nil
+						if errs == nil {
+							return
+						}
+						continue
+					}
+					for ev, err := range f.postprocessLive(ctx, req, resp, session.NewEvent(ctx.InvocationID())) {
+						if err != nil {
+							yield(nil, err)
+							return
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				case err, ok := <-errs:
+					if ok && err != nil {
+						yield(nil, err)
+						return
+					}
+					if !ok {
+						errs = nil
+						if resps == nil {
+							return
+						}
+						continue
+					}
+				case <-ctx.Done():
+					return
+				}
 			}
-
-
 
 		}
 
@@ -202,8 +234,20 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 			}
 		}
 
+		// TODO: temporarily convert
+		tools := make(map[string]tool.Tool)
+		for k, v := range llmRequest.Tools {
+			tool, ok := v.(tool.Tool)
+			if !ok {
+				if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
+					return
+				}
+			}
+			tools[k] = tool
+		}
+
 		// Builds the event.
-		modelResponseEvent = f.finalizeModelResponseEvent(ctx, llmRequest, llmResponse, modelResponseEvent)
+		modelResponseEvent = f.finalizeModelResponseEvent(ctx, llmResponse, tools, modelResponseEvent.Actions.StateDelta)
 		yield(modelResponseEvent, nil)
 
 	}
