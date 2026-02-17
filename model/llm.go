@@ -83,6 +83,6 @@ type LiveRequest struct {
 // LiveConnection represents a bidirectional streaming connection to the LLM.
 type LiveConnection interface {
 	Send(req *LiveRequest) error
-	Receive() (*LLMResponse, error)
+	Receive(ctx context.Context) (<-chan *LLMResponse, <-chan error)
 	Close() error
 }

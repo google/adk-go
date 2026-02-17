@@ -54,6 +54,8 @@ type Flow struct {
 	AfterModelCallbacks  []AfterModelCallback
 	BeforeToolCallbacks  []BeforeToolCallback
 	AfterToolCallbacks   []AfterToolCallback
+
+	AudioCacheManager *AudioCacheManager
 }
 
 var (

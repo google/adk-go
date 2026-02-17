@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/rs/zerolog/log"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -28,13 +29,35 @@ func (c *liveConnection) Send(req *model.LiveRequest) error {
 	if req.Close {
 		return c.Close()
 	}
-	if req.Content != nil {
-		// Wrap single content in slice as LiveClientContentInput expects turns
-		turnComplete := true
-		return c.session.SendClientContent(genai.LiveClientContentInput{
-			Turns:        []*genai.Content{req.Content},
-			TurnComplete: &turnComplete,
+	if req.ActivityStart != nil {
+		return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
+			ActivityStart: req.ActivityStart,
 		})
+	}
+	if req.ActivityEnd != nil {
+		return c.session.SendRealtimeInput(genai.LiveSendRealtimeInputParameters{
+			ActivityEnd: req.ActivityEnd,
+		})
+	}
+	if req.Content != nil {
+		content := req.Content
+		if content.Parts != nil && content.Parts[0].FunctionResponse != nil {
+			var functionResponses []*genai.FunctionResponse
+			for _, part := range content.Parts {
+				if part.FunctionResponse != nil {
+					functionResponses = append(functionResponses, part.FunctionResponse)
+				}
+			}
+			return c.session.SendToolResponse(genai.LiveToolResponseInput{
+				FunctionResponses: functionResponses,
+			})
+		} else {
+			turnComplete := true
+			return c.session.SendClientContent(genai.LiveClientContentInput{
+				Turns:        []*genai.Content{req.Content},
+				TurnComplete: &turnComplete,
+			})
+		}
 	}
 	if req.RealtimeInput != nil {
 		return c.session.SendRealtimeInput(*req.RealtimeInput)
@@ -45,61 +68,83 @@ func (c *liveConnection) Send(req *model.LiveRequest) error {
 	return nil
 }
 
-func (c *liveConnection) Receive() (*model.LLMResponse, error) {
-	msg, err := c.session.Receive()
-	if err != nil {
-		return nil, err
-	}
+func (c *liveConnection) Receive(ctx context.Context) (<-chan *model.LLMResponse, <-chan error) {
+	out := make(chan *model.LLMResponse, 100)
+	errChan := make(chan error)
+	go func() {
+		defer close(out)
+		defer close(errChan)
+		for {
+			msg, err := c.session.Receive()
+			if err != nil {
+				errChan <- err
+				return
+			}
 
-	resp := &model.LLMResponse{}
+			if msg.UsageMetadata != nil {
+				resp := &model.LLMResponse{}
+				// we use generate content response usage metadata for now
+				resp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+					CacheTokensDetails:         msg.UsageMetadata.CacheTokensDetails,
+					CachedContentTokenCount:    msg.UsageMetadata.CachedContentTokenCount,
+					PromptTokenCount:           msg.UsageMetadata.PromptTokenCount,
+					PromptTokensDetails:        msg.UsageMetadata.PromptTokensDetails,
+					ThoughtsTokenCount:         msg.UsageMetadata.ThoughtsTokenCount,
+					ToolUsePromptTokenCount:    msg.UsageMetadata.ToolUsePromptTokenCount,
+					ToolUsePromptTokensDetails: msg.UsageMetadata.ToolUsePromptTokensDetails,
+					TotalTokenCount:            msg.UsageMetadata.TotalTokenCount,
+					TrafficType:                msg.UsageMetadata.TrafficType,
+				}
+				out <- resp
+			}
 
-	if msg.ServerContent != nil {
-		// Map ServerContent to model.LLMResponse
-		if msg.ServerContent.ModelTurn != nil {
-			resp.Content = msg.ServerContent.ModelTurn
+			if msg.ServerContent != nil {
+				resp := &model.LLMResponse{}
+				// Map ServerContent to model.LLMResponse
+				if msg.ServerContent.ModelTurn != nil {
+					resp.Content = msg.ServerContent.ModelTurn
+				}
+				resp.TurnComplete = msg.ServerContent.TurnComplete
+				resp.Interrupted = msg.ServerContent.Interrupted
+
+				if msg.ServerContent.GroundingMetadata != nil {
+					resp.GroundingMetadata = msg.ServerContent.GroundingMetadata
+				}
+				out <- resp
+			}
+
+			if msg.ToolCall != nil {
+				resp := &model.LLMResponse{}
+				// Map ToolCall to model.LLMResponse content parts
+				parts := make([]*genai.Part, 0)
+				for _, fc := range msg.ToolCall.FunctionCalls {
+					parts = append(parts, &genai.Part{
+						FunctionCall: fc,
+					})
+				}
+				if resp.Content == nil {
+					resp.Content = &genai.Content{Role: "model"}
+				}
+				resp.Content.Parts = append(resp.Content.Parts, parts...)
+				out <- resp
+			}
+
+			if msg.SessionResumptionUpdate != nil {
+				log.Debug().Interface("session_resumption_update", msg.SessionResumptionUpdate).Msg("Received session resumption update")
+				resp := &model.LLMResponse{
+					LiveSessionResumptionUpdate: msg.SessionResumptionUpdate,
+				}
+				out <- resp
+			}
+
+			select {
+			case out <- msg:
+			case <-ctx.Done():
+				return
+			}
 		}
-		resp.TurnComplete = msg.ServerContent.TurnComplete
-		resp.Interrupted = msg.ServerContent.Interrupted
-
-		if msg.ServerContent.GroundingMetadata != nil {
-			resp.GroundingMetadata = msg.ServerContent.GroundingMetadata
-		}
-	}
-
-	if msg.UsageMetadata != nil {
-		// we use generate content response usage metadata for now
-		resp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
-			CacheTokensDetails:         msg.UsageMetadata.CacheTokensDetails,
-			CachedContentTokenCount:    msg.UsageMetadata.CachedContentTokenCount,
-			PromptTokenCount:           msg.UsageMetadata.PromptTokenCount,
-			PromptTokensDetails:        msg.UsageMetadata.PromptTokensDetails,
-			ThoughtsTokenCount:         msg.UsageMetadata.ThoughtsTokenCount,
-			ToolUsePromptTokenCount:    msg.UsageMetadata.ToolUsePromptTokenCount,
-			ToolUsePromptTokensDetails: msg.UsageMetadata.ToolUsePromptTokensDetails,
-			TotalTokenCount:            msg.UsageMetadata.TotalTokenCount,
-			TrafficType:                msg.UsageMetadata.TrafficType,
-		}
-	}
-
-	if msg.ToolCall != nil {
-		// Map ToolCall to model.LLMResponse content parts
-		parts := make([]*genai.Part, 0)
-		for _, fc := range msg.ToolCall.FunctionCalls {
-			parts = append(parts, &genai.Part{
-				FunctionCall: fc,
-			})
-		}
-		if resp.Content == nil {
-			resp.Content = &genai.Content{Role: "model"}
-		}
-		resp.Content.Parts = append(resp.Content.Parts, parts...)
-	}
-
-	if msg.ToolCallCancellation != nil {
-		// TODO: Handle cancellation? Maybe just return empty response or specific error?
-	}
-
-	return resp, nil
+	}()
+	return out, errChan
 }
 
 func (c *liveConnection) Close() error {

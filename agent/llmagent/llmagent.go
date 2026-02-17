@@ -358,6 +358,7 @@ func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event
 
 	f := &llminternal.Flow{
 		Model:                a.model,
+		AudioCacheManager:    llminternal.NewAudioCacheManager(nil),
 		RequestProcessors:    llminternal.DefaultRequestProcessors,
 		ResponseProcessors:   llminternal.DefaultResponseProcessors,
 		BeforeModelCallbacks: a.beforeModelCallbacks,

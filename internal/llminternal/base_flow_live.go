@@ -3,14 +3,12 @@ package llminternal
 import (
 	"fmt"
 	"iter"
-	"log/slog"
 
 	"github.com/rs/zerolog/log"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/runconfig"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -59,7 +57,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				req.LiveConnectConfig.SessionResumption.Transparent = true
 			}
 
-			// TODO pindahin connect to model ke dalam for loop ini
 			// Connect to the model
 			conn, err := f.Model.Connect(ctx, req)
 			if err != nil {
@@ -83,104 +80,74 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						if !ok {
 							return // Queue closed
 						}
-						if err := conn.Send(liveReq); err != nil {
-							// TODO: Handle send error. Maybe log or signal main loop?
-							// For now we just log/ignore as the main loop might catch connection issues too.
-							fmt.Printf("Error sending to live connection: %v\n", err)
+						if liveReq.Close {
+							conn.Close()
 							return
 						}
-						if liveReq.Close {
-							return
+
+						if liveReq.ActivityStart != nil || liveReq.ActivityEnd != nil {
+							if err := conn.Send(liveReq); err != nil {
+								// TODO: Handle send error.
+								fmt.Printf("Error sending to live connection: %v\n", err)
+								return
+							}
+						} else if liveReq.RealtimeInput != nil && liveReq.RealtimeInput.Audio != nil {
+							err := f.AudioCacheManager.CacheAudio(
+								ctx,
+								liveReq.RealtimeInput.Audio,
+								"input",
+							)
+							if err != nil {
+								// TODO: Handle send error.
+								fmt.Printf("Error caching audio: %v\n", err)
+							}
+							if err := conn.Send(liveReq); err != nil {
+								// TODO: Handle send error.
+								fmt.Printf("Error sending to live connection: %v\n", err)
+								return
+							}
+						}
+
+						if liveReq.Content != nil {
+							content := liveReq.Content
+							// Persist user text content to session (similar to non-live mode)
+							// Skip function responses - they are already handled separately
+							isFunctionResponse := false
+							for _, part := range content.Parts {
+								if part.FunctionResponse != nil {
+									isFunctionResponse = true
+									break
+								}
+							}
+							if !isFunctionResponse {
+								if content.Role == "" {
+									content.Role = "user"
+								}
+								userContentEvent := session.NewEvent(ctx.InvocationID())
+								userContentEvent.Content = content
+								userContentEvent.Author = "user"
+
+								yield(userContentEvent, nil)
+
+								if err := conn.Send(liveReq); err != nil {
+									// TODO: Handle send error.
+									fmt.Printf("Error sending to live connection: %v\n", err)
+									return
+								}
+							}
+
 						}
 					case <-ctx.Done():
 						return
 					}
 				}
 			}()
-
-			// Main receive loop
+			
 			for {
-				resp, err := conn.Receive()
-				if err != nil {
-					yield(nil, err)
-					return
-				}
-
-				if resp == nil {
-					continue
-				}
-
-				// Prepare event
-				stateDelta := make(map[string]any)
-
-				// Resolve tools
-				// TODO: Reuse tool resolution logic or cache it?
-				tools := make(map[string]tool.Tool)
-				for k, v := range req.Tools {
-					tool, ok := v.(tool.Tool)
-					if !ok {
-						yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k))
-						return
-					}
-					tools[k] = tool
-				}
-
-				modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
-
-				// Trace?
-				// telemetry.TraceLLMCall(callLLMSpan, ctx, req, modelResponseEvent)
-
-				if !yield(modelResponseEvent, nil) {
-					return
-				}
-
-				// Handle function calls
-				if resp.Content != nil {
-					ev, err := f.handleFunctionCalls(ctx, tools, resp)
-					if err != nil {
-						yield(nil, err)
-						return
-					}
-
-					if ev != nil {
-						slog.Info("Function calls handled", "event", ev)
-						// Yield the function response event (execution result)
-						if !yield(ev, nil) {
-							return
-						}
-
-						// Send tool response back to model
-						// We need to extract the parts and construct a LiveRequest
-						if ev.LLMResponse.Content != nil {
-							toolResponses := &genai.LiveToolResponseInput{
-								FunctionResponses: make([]*genai.FunctionResponse, 0),
-							}
-							for _, part := range ev.LLMResponse.Content.Parts {
-								if part.FunctionResponse != nil {
-									toolResponses.FunctionResponses = append(toolResponses.FunctionResponses, part.FunctionResponse)
-								}
-							}
-
-							if len(toolResponses.FunctionResponses) > 0 {
-								// Send directly to connection (bypass queue to avoid latency/ordering issues mixed with user input?)
-								// Typically tool outputs corresponding to model calls should go ASAP.
-								// But using queue ensures serialization if necessary.
-								// ADK Python sends it directly or via queue?
-								// Let's use the queue's helper if available or just construct request.
-								// The queue is thread safe.
-
-								queue.SendToolResponse(toolResponses)
-							}
-						}
-					}
-				}
-
-				// Check for interruptions or turn completion if needed
-				// The loop continues until error or context cancel.
-				if ctx.Err() != nil {
-					return
-				}
+				conn.Receive()
 			}
+
+
 
 		}
 
@@ -218,9 +185,53 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 			return
 		}
 
+		// Flush audio caches based on control events using configurable settings
 		if ctx.RunConfig().SaveLiveBlob {
-			// TODO: 
+			flushedEvents := f.handleControlEventFlush(ctx, llmResponse)
+			for _, ev := range flushedEvents {
+				yield(ev, nil)
+			}
+			if len(flushedEvents) > 0 {
+				// NOTE below return is O.K. for now, because currently we only flush
+				// events on interrupted or turn_complete. turn_complete is a pure
+				// control event and interrupted is not with content but those content
+				// is ignorable because model is already interrupted. If we have other
+				// case to flush events in the future that are not pure control events,
+				// we should not return here.
+				return
+			}
 		}
 
+		// Builds the event.
+		modelResponseEvent = f.finalizeModelResponseEvent(ctx, llmRequest, llmResponse, modelResponseEvent)
+		yield(modelResponseEvent, nil)
+
 	}
+}
+
+func (f *Flow) sentToLiveModel(ctx agent.InvocationContext, conn model.LiveConnection) {
+
+}
+
+// handleControlEventFlush flushes audio caches based on control events using configurable settings
+func (f *Flow) handleControlEventFlush(ctx agent.InvocationContext, llmResponse *model.LLMResponse) []*session.Event {
+	stats := f.AudioCacheManager.GetCacheStats(ctx)
+	log.Debug().Interface("stats", stats).Msg("audio cache stats")
+
+	if llmResponse.Interrupted {
+		events, err := f.AudioCacheManager.FlushCaches(ctx, false, true)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to flush audio caches")
+		}
+		return events
+	} else if llmResponse.TurnComplete {
+		events, err := f.AudioCacheManager.FlushCaches(ctx, true, true)
+		if err != nil {
+			log.Error().Err(err).Msg("failed to flush audio caches")
+		}
+		return events
+	}
+	// TODO: Once generation_complete is surfaced on LlmResponse, we can flush
+	// model audio here (flush_user_audio=False, flush_model_audio=True).
+	return nil
 }
