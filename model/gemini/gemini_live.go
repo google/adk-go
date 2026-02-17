@@ -55,6 +55,7 @@ func (c *liveConnection) Send(req *model.LiveRequest) error {
 				FunctionResponses: functionResponses,
 			})
 		} else {
+			log.Info().Interface("content", req.Content).Msg("Sending content to live connection")
 			turnComplete := true
 			return c.session.SendClientContent(genai.LiveClientContentInput{
 				Turns:        []*genai.Content{req.Content},
@@ -89,6 +90,7 @@ func (c *liveConnection) receive(ctx context.Context) (<-chan *genai.LiveServerM
 			}
 			select {
 			case out <- msg:
+				log.Info().Interface("msg", msg).Msg("Received the actual message from live api")
 			case <-ctx.Done():
 				return
 			}

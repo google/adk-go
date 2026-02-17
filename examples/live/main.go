@@ -19,17 +19,22 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
+
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/examples/live/models"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
@@ -54,9 +59,29 @@ type ClientMessage struct {
 }
 
 func main() {
+
+	var stdOut io.Writer = os.Stdout
+	writers := []io.Writer{stdOut}
+	var runLogFile *os.File
+
+	runLogFile, err := os.OpenFile(
+		"test.log",
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+		0666,
+	)
+	if err != nil {
+		log.Fatal().Err(err).Msg("unable to open log file")
+	}
+
+	writers = append(writers, runLogFile)
+
+	zerolog.TimeFieldFormat = time.RFC3339Nano
+
+	multi := zerolog.MultiLevelWriter(writers...)
+	log.Logger = zerolog.New(multi).With().Timestamp().Logger()
 	apiKey := os.Getenv("GOOGLE_API_KEY")
 	if apiKey == "" {
-		log.Fatal("GOOGLE_API_KEY environment variable is not set")
+		log.Fatal().Msg("GOOGLE_API_KEY environment variable is not set")
 	}
 
 	dsn := fmt.Sprintf("host=127.0.0.1 user=adk password=adk dbname=adk port=5432 sslmode=disable")
@@ -85,7 +110,7 @@ func main() {
 		APIKey: apiKey,
 	})
 	if err != nil {
-		log.Fatalf("Failed to create model: %v", err)
+		log.Fatal().Msgf("Failed to create model: %v", err)
 	}
 
 	type Input struct {
@@ -116,7 +141,7 @@ func main() {
 		// },
 	})
 	if err != nil {
-		log.Fatalf("Failed to create agent: %v", err)
+		log.Fatal().Msgf("Failed to create agent: %v", err)
 	}
 
 	a, err := llmagent.New(llmagent.Config{
@@ -140,6 +165,7 @@ func main() {
 		ResumabilityConfig: &agent.ResumabilityConfig{
 			IsResumable: false,
 		},
+		ArtifactService: artifact.InMemoryService(),
 	})
 	if err != nil {
 		log.Printf("Failed to create runner: %v", err)
@@ -176,7 +202,9 @@ func main() {
 	}
 
 	fmt.Printf("Server starting on http://localhost:%s\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, r))
+	if err := http.ListenAndServe(":"+port, r); err != nil {
+		log.Fatal().Err(err).Msg("Server failed")
+	}
 }
 
 type Server struct {
@@ -211,11 +239,12 @@ func (s *Server) websocketHandler() http.HandlerFunc {
 
 		// Phase 2 - 3
 		runConfig := agent.RunConfig{
-			StreamingMode:      agent.StreamingModeBidi,
-			ResponseModalities: []genai.Modality{genai.ModalityAudio},
-
-			InputAudioTranscription:  &genai.AudioTranscriptionConfig{},
-			OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
+			StreamingMode:             agent.StreamingModeBidi,
+			ResponseModalities:        []genai.Modality{genai.ModalityAudio},
+			InputAudioTranscription:   &genai.AudioTranscriptionConfig{},
+			OutputAudioTranscription:  &genai.AudioTranscriptionConfig{},
+			SaveLiveBlob:              true,
+			SaveInputBlobsAsArtifacts: true,
 		}
 
 		// Phase 2 - 4

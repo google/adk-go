@@ -35,7 +35,6 @@ import (
 	imemory "google.golang.org/adk/internal/memory"
 	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
 
@@ -220,12 +219,12 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 				continue
 			}
 
-			if r.shouldAppendEvent(event, true) {
-				if err := r.sessionService.AppendEvent(invCtx, storedSession, event); err != nil {
-					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
-					return
-				}
+			// if r.shouldAppendEvent(event, true) {
+			if err := r.sessionService.AppendEvent(invCtx, storedSession, event); err != nil {
+				yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+				return
 			}
+			// }
 
 			if !yield(event, nil) {
 				return
@@ -380,11 +379,6 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			RunConfig:   &cfg,
 		})
 
-		if err := r.appendMessageToSession(ctx, session, msg, cfg.SaveInputBlobsAsArtifacts); err != nil {
-			yield(nil, err)
-			return
-		}
-
 		for event, err := range agentToRun.Run(ctx) {
 			if err != nil {
 				if !yield(event, err) {
@@ -406,41 +400,6 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 	}
-}
-
-func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool) error {
-	if msg == nil {
-		return nil
-	}
-
-	artifactsService := ctx.Artifacts()
-	if artifactsService != nil && saveInputBlobsAsArtifacts {
-		for i, part := range msg.Parts {
-			if part.InlineData == nil {
-				continue
-			}
-			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
-			if _, err := artifactsService.Save(ctx, fileName, part); err != nil {
-				return fmt.Errorf("failed to save artifact %s: %w", fileName, err)
-			}
-			// Replace the part with a text placeholder
-			msg.Parts[i] = &genai.Part{
-				Text: fmt.Sprintf("Uploaded file: %s. It has been saved to the artifacts", fileName),
-			}
-		}
-	}
-
-	event := session.NewEvent(ctx.InvocationID())
-
-	event.Author = "user"
-	event.LLMResponse = model.LLMResponse{
-		Content: msg,
-	}
-
-	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
-		return fmt.Errorf("failed to append event to sessionService: %w", err)
-	}
-	return nil
 }
 
 // findAgentToRun returns the agent that should handle the next request based on

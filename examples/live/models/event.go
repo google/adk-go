@@ -31,20 +31,22 @@ type EventActions struct {
 
 // Event represents a single event in a session.
 type Event struct {
-	ID                 string                   `json:"id"`
-	Time               int64                    `json:"time"`
-	InvocationID       string                   `json:"invocationId"`
-	Branch             string                   `json:"branch"`
-	Author             string                   `json:"author"`
-	Partial            bool                     `json:"partial"`
-	LongRunningToolIDs []string                 `json:"longRunningToolIds"`
-	Content            *genai.Content           `json:"content"`
-	GroundingMetadata  *genai.GroundingMetadata `json:"groundingMetadata"`
-	TurnComplete       bool                     `json:"turnComplete"`
-	Interrupted        bool                     `json:"interrupted"`
-	ErrorCode          string                   `json:"errorCode"`
-	ErrorMessage       string                   `json:"errorMessage"`
-	Actions            EventActions             `json:"actions"`
+	ID                  string                   `json:"id"`
+	Time                int64                    `json:"time"`
+	InvocationID        string                   `json:"invocationId"`
+	Branch              string                   `json:"branch"`
+	Author              string                   `json:"author"`
+	Partial             bool                     `json:"partial"`
+	LongRunningToolIDs  []string                 `json:"longRunningToolIds"`
+	Content             *genai.Content           `json:"content"`
+	GroundingMetadata   *genai.GroundingMetadata `json:"groundingMetadata"`
+	TurnComplete        bool                     `json:"turnComplete"`
+	Interrupted         bool                     `json:"interrupted"`
+	ErrorCode           string                   `json:"errorCode"`
+	ErrorMessage        string                   `json:"errorMessage"`
+	Actions             EventActions             `json:"actions"`
+	InputTranscription  *genai.Transcription     `json:"inputTranscription"`
+	OutputTranscription *genai.Transcription     `json:"outputTranscription"`
 }
 
 // ToSessionEvent maps Event data struct to session.Event
@@ -57,13 +59,15 @@ func ToSessionEvent(event Event) *session.Event {
 		Author:             event.Author,
 		LongRunningToolIDs: event.LongRunningToolIDs,
 		LLMResponse: model.LLMResponse{
-			Content:           event.Content,
-			GroundingMetadata: event.GroundingMetadata,
-			Partial:           event.Partial,
-			TurnComplete:      event.TurnComplete,
-			Interrupted:       event.Interrupted,
-			ErrorCode:         event.ErrorCode,
-			ErrorMessage:      event.ErrorMessage,
+			Content:             event.Content,
+			GroundingMetadata:   event.GroundingMetadata,
+			Partial:             event.Partial,
+			TurnComplete:        event.TurnComplete,
+			Interrupted:         event.Interrupted,
+			ErrorCode:           event.ErrorCode,
+			ErrorMessage:        event.ErrorMessage,
+			InputTranscription:  event.InputTranscription,
+			OutputTranscription: event.OutputTranscription,
 		},
 		Actions: session.EventActions{
 			StateDelta:    event.Actions.StateDelta,
@@ -75,19 +79,21 @@ func ToSessionEvent(event Event) *session.Event {
 // FromSessionEvent maps session.Event to Event data struct
 func FromSessionEvent(event session.Event) Event {
 	return Event{
-		ID:                 event.ID,
-		Time:               event.Timestamp.Unix(),
-		InvocationID:       event.InvocationID,
-		Branch:             event.Branch,
-		Author:             event.Author,
-		Partial:            event.Partial,
-		LongRunningToolIDs: event.LongRunningToolIDs,
-		Content:            event.LLMResponse.Content,
-		GroundingMetadata:  event.LLMResponse.GroundingMetadata,
-		TurnComplete:       event.LLMResponse.TurnComplete,
-		Interrupted:        event.LLMResponse.Interrupted,
-		ErrorCode:          event.LLMResponse.ErrorCode,
-		ErrorMessage:       event.LLMResponse.ErrorMessage,
+		ID:                  event.ID,
+		Time:                event.Timestamp.Unix(),
+		InvocationID:        event.InvocationID,
+		Branch:              event.Branch,
+		Author:              event.Author,
+		Partial:             event.Partial,
+		LongRunningToolIDs:  event.LongRunningToolIDs,
+		Content:             event.LLMResponse.Content,
+		GroundingMetadata:   event.LLMResponse.GroundingMetadata,
+		TurnComplete:        event.LLMResponse.TurnComplete,
+		Interrupted:         event.LLMResponse.Interrupted,
+		ErrorCode:           event.LLMResponse.ErrorCode,
+		ErrorMessage:        event.LLMResponse.ErrorMessage,
+		InputTranscription:  event.LLMResponse.InputTranscription,
+		OutputTranscription: event.LLMResponse.OutputTranscription,
 		Actions: EventActions{
 			StateDelta:    event.Actions.StateDelta,
 			ArtifactDelta: event.Actions.ArtifactDelta,

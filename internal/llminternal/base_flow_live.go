@@ -159,6 +159,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						break
 					}
 
+					log.Info().Interface("resp", resp).Msg("Received response from conn.Receive")
+
 					if resp.LiveSessionResumptionUpdate != nil {
 						log.Info().Str("handle", resp.LiveSessionResumptionUpdate.NewHandle).Msg("Live session resumption update")
 						ctx.SetLiveSessionResumptionHandle(resp.LiveSessionResumptionUpdate.NewHandle)
@@ -167,6 +169,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					modelResponseEvent := session.NewEvent(ctx.InvocationID())
 					modelResponseEvent.Content = resp.Content
 					modelResponseEvent.Author = getAuthorForEvent(resp)
+					modelResponseEvent.OutputTranscription = resp.OutputTranscription
+					modelResponseEvent.InputTranscription = resp.InputTranscription
 
 					for ev, err := range f.postprocessLive(ctx, req, resp, modelResponseEvent) {
 						if err != nil {
@@ -184,10 +188,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								Data:     ev.Content.Parts[0].InlineData.Data,
 								MIMEType: ev.Content.Parts[0].InlineData.MIMEType,
 							}
+
 							if err := f.AudioCacheManager.CacheAudio(ctx, audioBlob, "output"); err != nil {
 								log.Error().Err(err).Msg("Failed to cache audio")
 							}
+							log.Info().Int("audioblob_length", len(audioBlob.Data)).Msg("Cached audio")
 						}
+
+						log.Info().Interface("ev", ev).Msg("Yielding event")
 
 						if !yield(ev, nil) {
 							return

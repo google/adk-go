@@ -60,9 +60,7 @@ type RunConfig struct {
 	// vad_signal to indicate the start and end of speech. This allows the server
 	// to process the audio more efficiently.
 	ExplicitVADSignal bool
-	// This parameter controls whether audio and video streams are persisted to ADK's session and
-	// artifact services for debugging, compliance, and quality assurance purposes.
-	SaveLiveBlob bool
+	SaveLiveBlob      bool
 	// This parameter caps the total number of LLM invocations allowed per invocation context,
 	// providing protection against runaway costs and infinite agent loops.
 	MaxLLMCalls int
