@@ -105,6 +105,50 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			event:          createTestEvent("testagent", "Test response", true),
 			wantStateDelta: map[string]any{},
 		},
+		{
+			name:        "skips for function call events",
+			agentConfig: Config{Name: "test_agent", OutputKey: "result"},
+			event: &session.Event{
+				InvocationID: "test_invocation",
+				Author:       "test_agent",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{FunctionCall: &genai.FunctionCall{
+								Name: "get_weather",
+								Args: map[string]any{"city": "NYC"},
+							}},
+						},
+					},
+					Partial: false,
+				},
+				Actions: session.EventActions{StateDelta: make(map[string]any)},
+			},
+			wantStateDelta: map[string]any{},
+		},
+		{
+			name:        "skips for function response events",
+			agentConfig: Config{Name: "test_agent", OutputKey: "result"},
+			event: &session.Event{
+				InvocationID: "test_invocation",
+				Author:       "test_agent",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{
+							{FunctionResponse: &genai.FunctionResponse{
+								Name:     "get_weather",
+								Response: map[string]any{"temperature": "72F"},
+							}},
+						},
+					},
+					Partial: false,
+				},
+				Actions: session.EventActions{StateDelta: make(map[string]any)},
+			},
+			wantStateDelta: map[string]any{},
+		},
 		// TODO tests with OutputSchema
 	}
 
