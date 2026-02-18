@@ -205,7 +205,7 @@ func initTracerProvider(cfg *config) (*sdktrace.TracerProvider, error) {
 	return tp, nil
 }
 
-func initLoggerProvider(cfg *config) (*sdklog.LoggerProvider, error) {
+func initLoggerProvider(cfg *config) *sdklog.LoggerProvider {
 	if len(cfg.logProcessors) == 0 {
 		return nil, nil
 	}
