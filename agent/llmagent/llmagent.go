@@ -389,7 +389,7 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
 		return
 	}
-	if a.OutputKey != "" && !event.Partial && event.Content != nil && len(event.Content.Parts) > 0 {
+	if a.OutputKey != "" && !event.IsFinalResponse() && event.Content != nil && len(event.Content.Parts) > 0 {
 		var sb strings.Builder
 		for _, part := range event.Content.Parts {
 			if part.Text != "" && !part.Thought {
