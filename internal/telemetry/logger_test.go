@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
@@ -532,6 +533,46 @@ func TestLogResponse(t *testing.T) {
 				t.Errorf("attributes mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestSpanIDPropagation(t *testing.T) {
+	ctx, span := otel.Tracer("test").Start(context.Background(), "test")
+	defer span.End()
+
+	exporter := setup(t, false)
+
+	req := &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{
+			SystemInstruction: &genai.Content{
+				Role: "system",
+				Parts: []*genai.Part{
+					{Text: "You are a helpful assistant."},
+				},
+			},
+		},
+		Contents: []*genai.Content{
+			{
+				Role: "user",
+				Parts: []*genai.Part{
+					{Text: "Hello"},
+				},
+			},
+		},
+	}
+
+	LogRequest(ctx, req, genai.BackendVertexAI)
+	LogResponse(ctx, &model.LLMResponse{}, genai.BackendVertexAI)
+
+	if len(exporter.records) != 3 {
+		t.Fatalf("expected 3 records, got %d", len(exporter.records))
+	}
+
+	wantSpanID := span.SpanContext().SpanID()
+	for _, record := range exporter.records {
+		if got := record.SpanID(); got != wantSpanID {
+			t.Errorf("expected span ID %q, got %q", wantSpanID, got)
+		}
 	}
 }
 
