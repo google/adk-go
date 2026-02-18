@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/memory"
@@ -29,7 +31,6 @@ import (
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/adk/tool/loadartifactstool"
 	"google.golang.org/adk/tool/toolconfirmation"
-	"google.golang.org/genai"
 )
 
 func TestTypes(t *testing.T) {
@@ -121,10 +122,12 @@ type testContext struct {
 func (c *testContext) ToolConfirmation() *toolconfirmation.ToolConfirmation {
 	return c.toolConfirmationResult
 }
+
 func (c *testContext) RequestConfirmation(string, any) error {
 	c.requestConfirmationCalled = true
 	return nil
 }
+
 func (c *testContext) Actions() *session.EventActions {
 	if c.eventActions == nil {
 		c.eventActions = &session.EventActions{}

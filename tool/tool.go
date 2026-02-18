@@ -21,13 +21,14 @@ import (
 	"context"
 	"fmt"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool/toolconfirmation"
-	"google.golang.org/genai"
 )
 
 // Tool defines the interface for a callable tool.
@@ -221,10 +222,6 @@ type runnableTool interface {
 	Tool
 	Declaration() *genai.FunctionDeclaration
 	Run(ctx Context, args any) (result map[string]any, err error)
-}
-
-type requestProcessor interface {
-	ProcessRequest(ctx Context, req *model.LLMRequest) error
 }
 
 func (t *confirmationTool) Declaration() *genai.FunctionDeclaration {
