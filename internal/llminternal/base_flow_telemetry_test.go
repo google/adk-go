@@ -24,9 +24,12 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/log/global"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	icontext "google.golang.org/adk/internal/context"
@@ -273,4 +276,99 @@ func setupTestTracer(t *testing.T) {
 	t.Cleanup(func() {
 		testExporter.Reset()
 	})
+}
+
+type inMemoryLogExporter struct {
+	records []sdklog.Record
+}
+
+func (e *inMemoryLogExporter) Export(ctx context.Context, records []sdklog.Record) error {
+	e.records = append(e.records, records...)
+	return nil
+}
+func (e *inMemoryLogExporter) Shutdown(ctx context.Context) error   { return nil }
+func (e *inMemoryLogExporter) ForceFlush(ctx context.Context) error { return nil }
+
+func TestLoggingSpanIDPropagation(t *testing.T) {
+	setupTestTracer(t)
+	logExporter := setupLoggerProvider(t)
+
+	var wantSpanID trace.SpanID
+	modelMock := &mockModelForTest{
+		name: "test-model",
+		generateContent: func(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+			// Capture the span ID.
+			wantSpanID = trace.SpanFromContext(ctx).SpanContext().SpanID()
+			if !wantSpanID.IsValid() {
+				t.Fatalf("expected span ID to be valid, got %q", wantSpanID)
+			}
+			return func(yield func(*model.LLMResponse, error) bool) {
+				yield(&model.LLMResponse{
+					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+						PromptTokenCount: 1,
+						TotalTokenCount:  2,
+					},
+					Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{Text: "Response"}},
+					},
+				}, nil)
+			}
+		},
+	}
+
+	req := &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{
+			SystemInstruction: &genai.Content{
+				Role: "system",
+				Parts: []*genai.Part{
+					{Text: "You are a helpful assistant."},
+				},
+			},
+		},
+		Contents: []*genai.Content{
+			{
+				Role: "user",
+				Parts: []*genai.Part{
+					{Text: "Hello"},
+				},
+			},
+		},
+	}
+
+	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+	for range generateContent(ctx, modelMock, req, true) {
+	}
+
+	if len(logExporter.records) != 3 {
+		t.Fatalf("expected 3 log records, got %d", len(logExporter.records))
+	}
+
+	wantEvents := []string{
+		"gen_ai.system.message",
+		"gen_ai.user.message",
+		"gen_ai.choice",
+	}
+
+	for i, record := range logExporter.records {
+		if got := record.SpanID(); got != wantSpanID {
+			t.Errorf("record[%d]: expected span ID %q, got %q", i, wantSpanID, got)
+		}
+		if got := record.EventName(); got != wantEvents[i] {
+			t.Errorf("record[%d]: expected event name %q, got %q", i, wantEvents[i], got)
+		}
+	}
+}
+
+func setupLoggerProvider(t *testing.T) *inMemoryLogExporter {
+	logExporter := &inMemoryLogExporter{}
+	provider := sdklog.NewLoggerProvider(
+		sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExporter)),
+	)
+	originalProvider := global.GetLoggerProvider()
+	global.SetLoggerProvider(provider)
+	t.Cleanup(func() {
+		global.SetLoggerProvider(originalProvider)
+	})
+	return logExporter
 }
