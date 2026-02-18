@@ -3,7 +3,6 @@ package agent
 import (
 	"errors"
 	"sync"
-	"time"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
@@ -83,19 +82,8 @@ func (q *LiveRequestQueue) sendLocked(req *model.LiveRequest) error {
 	return nil
 }
 
-// Next returns the next request from the queue.
-// It returns nil, false if the queue is closed and empty.
-func (q *LiveRequestQueue) Next(ctxTimeout time.Duration) (*model.LiveRequest, bool) {
-	select {
-	case req, ok := <-q.queue:
-		return req, ok
-	case <-time.After(ctxTimeout):
-		// This is just a helper, caller might use select on channel directly.
-		return nil, true // Keep alive?
-	}
-}
-
-// Channel returns the underlying channel for reading.
+// Channel returns the underlying channel for reading. Callers can use this
+// with a select statement for better control over timeouts and cancellation.
 func (q *LiveRequestQueue) Channel() <-chan *model.LiveRequest {
 	return q.queue
 }
