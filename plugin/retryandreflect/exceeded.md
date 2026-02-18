@@ -1,5 +1,5 @@
 
-The tool `{{.ToolName}}` has failed consecutively {self.max_retries} times and the retry limit has been exceeded.
+The tool `{{.ToolName}}` has failed consecutively {{.MaxRetries}} times and the retry limit has been exceeded.
 
 **Last Error:**
 ```

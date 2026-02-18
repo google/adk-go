@@ -41,6 +41,15 @@ func NewPlugin(cfg FunctionCallModifierConfig) (*plugin.Plugin, error) {
 	})
 }
 
+// MustNewPlugin is like NewPlugin but panics if there is an error.
+func MustNewPlugin(cfg FunctionCallModifierConfig) *plugin.Plugin {
+	p, err := NewPlugin(cfg)
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
 func beforeModelCallback(cfg FunctionCallModifierConfig) func(agent.CallbackContext, *model.LLMRequest) (*model.LLMResponse, error) {
 	return func(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
 		if req.Config == nil || len(req.Config.Tools) == 0 {

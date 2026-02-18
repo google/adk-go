@@ -114,6 +114,15 @@ func New(opts ...PluginOption) (*plugin.Plugin, error) {
 	})
 }
 
+// MustNew creates a new reflect and retry tool plugin and panics if it fails.
+func MustNew(opts ...PluginOption) *plugin.Plugin {
+	p, err := New(opts...)
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
 func (r *retryAndReflect) afterTool(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err == nil {
 		isReflectResponse := false
