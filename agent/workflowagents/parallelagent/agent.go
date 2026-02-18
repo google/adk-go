@@ -81,13 +81,14 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		subAgent := sa
 		errGroup.Go(func() error {
 			subCtx := icontext.NewInvocationContext(errGroupCtx, icontext.InvocationContextParams{
-				Artifacts:   ctx.Artifacts(),
-				Memory:      ctx.Memory(),
-				Session:     ctx.Session(),
-				Branch:      branch,
-				Agent:       subAgent,
-				UserContent: ctx.UserContent(),
-				RunConfig:   ctx.RunConfig(),
+				Artifacts:    ctx.Artifacts(),
+				Memory:       ctx.Memory(),
+				Session:      ctx.Session(),
+				Branch:       branch,
+				Agent:        subAgent,
+				UserContent:  ctx.UserContent(),
+				RunConfig:    ctx.RunConfig(),
+				InvocationID: ctx.InvocationID(),
 			})
 
 			if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan); err != nil {

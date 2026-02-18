@@ -22,7 +22,7 @@ import (
 )
 
 // APIServerSpanExporter is a custom SpanExporter that stores relevant span data.
-// Stores attributes of specific spans (call_llm, send_data, execute_tool) keyed by `gcp.vertex.agent.event_id`.
+// Stores attributes of specific spans (send_data, execute_tool) keyed by `gcp.vertex.agent.event_id`.
 // This is used for debugging individual events.
 // APIServerSpanExporter implements sdktrace.SpanExporter interface.
 type APIServerSpanExporter struct {
@@ -44,7 +44,7 @@ func (s *APIServerSpanExporter) GetTraceDict() map[string]map[string]string {
 // ExportSpans implements custom export function for sdktrace.SpanExporter.
 func (s *APIServerSpanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	for _, span := range spans {
-		if span.Name() == "call_llm" || span.Name() == "send_data" || strings.HasPrefix(span.Name(), "execute_tool") {
+		if span.Name() == "send_data" || strings.HasPrefix(span.Name(), "execute_tool") {
 			spanAttributes := span.Attributes()
 			attributes := make(map[string]string)
 			for _, attribute := range spanAttributes {

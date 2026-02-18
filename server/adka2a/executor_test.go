@@ -18,9 +18,12 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	"github.com/google/go-cmp/cmp"
@@ -139,7 +142,6 @@ func TestExecutor_Execute(t *testing.T) {
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
 				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}),
-				newArtifactLastChunkEvent(task),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
 			},
 		},
@@ -154,7 +156,6 @@ func TestExecutor_Execute(t *testing.T) {
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
 				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}),
-				newArtifactLastChunkEvent(task),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
 			},
 		},
@@ -176,7 +177,6 @@ func TestExecutor_Execute(t *testing.T) {
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
 				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}),
-				newArtifactLastChunkEvent(task),
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "418", ErrorMessage: "I'm a teapot"}),
 					map[string]any{ToA2AMetaKey("error_code"): "418"},
@@ -397,8 +397,27 @@ func TestExecutor_Callbacks(t *testing.T) {
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}, a2a.TextPart{Text: " (enriched)"}),
 				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}, a2a.TextPart{Text: " (enriched)"}),
-				newArtifactLastChunkEvent(task),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
+			},
+		},
+		{
+			name: "can access session events",
+			events: []*session.Event{
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
+			},
+			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
+				eventCount := ctx.Events().Len()
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: fmt.Sprintf("event count = %d", eventCount)})
+				return nil
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
+				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted,
+					a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "event count = 3"}),
+				),
 			},
 		},
 		{
@@ -456,4 +475,228 @@ func TestExecutor_Callbacks(t *testing.T) {
 			}
 		})
 	}
+}
+
+func startA2AServer(agentExecutor a2asrv.AgentExecutor) *httptest.Server {
+	requestHandler := a2asrv.NewHandler(agentExecutor)
+	return httptest.NewServer(a2asrv.NewJSONRPCHandler(requestHandler))
+}
+
+func TestExecutor_Cancel_AfterEvent(t *testing.T) {
+	sessionService := session.InMemoryService()
+	channel := make(chan struct{})
+
+	agent, err := agent.New(agent.Config{
+		Name: "test",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				defer close(channel)
+				<-ctx.Done()
+				yield(nil, ctx.Err())
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v, want nil", err)
+	}
+
+	executor := NewExecutor(ExecutorConfig{
+		RunnerConfig: runner.Config{
+			AppName:        agent.Name(),
+			Agent:          agent,
+			SessionService: sessionService,
+		},
+	})
+
+	server := startA2AServer(executor)
+	defer server.Close()
+
+	card := &a2a.AgentCard{
+		Name:               "test",
+		URL:                server.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+
+	client, err := a2aclient.NewFromCard(t.Context(), card)
+	if err != nil {
+		t.Fatalf("a2aclient.NewFromCard() error = %v, want nil", err)
+	}
+
+	msgId := a2a.NewMessageID()
+	blocking := false
+
+	result, sendErr := client.SendMessage(t.Context(), &a2a.MessageSendParams{
+		Message: &a2a.Message{ID: string(msgId), Parts: []a2a.Part{a2a.TextPart{Text: "TEST"}}, Role: a2a.MessageRoleUser},
+		Config:  &a2a.MessageSendConfig{Blocking: &blocking},
+	})
+
+	if sendErr != nil {
+		t.Fatalf("client.SendMessage() error = %v, want nil", sendErr)
+	}
+
+	taskID := result.TaskInfo().TaskID
+
+	task, err := client.CancelTask(t.Context(), &a2a.TaskIDParams{ID: taskID})
+	if err != nil {
+		t.Fatalf("client.CancelTask() error = %v, want nil", err)
+	}
+
+	if task.Status.State != a2a.TaskStateCanceled {
+		t.Fatalf("executor.Cancel() state = %v, want %v", task.Status.State, a2a.TaskStateCanceled)
+	}
+
+	// Verify that execution context is closed
+	select {
+	case <-channel:
+		t.Log("Agent successfully unblocked")
+	case <-time.After(1 * time.Second):
+		t.Fatal("Agent did not unblock")
+	}
+}
+
+func TestExecutor_Converters(t *testing.T) {
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
+
+	t.Run("A2APartConverter", func(t *testing.T) {
+		t.Run("modify input", func(t *testing.T) {
+			var receivedText string
+			agent, err := agent.New(agent.Config{
+				Name: "test",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					if parts := ctx.UserContent().Parts; len(parts) > 0 {
+						receivedText = parts[0].Text
+					}
+					return func(yield func(*session.Event, error) bool) {}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New() error = %v", err)
+			}
+
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
+				A2APartConverter: func(ctx context.Context, evt a2a.Event, part a2a.Part) (*genai.Part, error) {
+					if p, ok := part.(a2a.TextPart); ok && p.Text == "hi" {
+						return genai.NewPartFromText("HELLO"), nil
+					}
+					return nil, nil
+				},
+			})
+
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			if err := executor.Execute(t.Context(), reqCtx, newInMemoryQueue(t)); err != nil {
+				t.Fatalf("executor.Execute() error = %v", err)
+			}
+
+			if receivedText != "HELLO" {
+				t.Errorf("received text = %q, want %q", receivedText, "HELLO")
+			}
+		})
+
+		t.Run("filter input", func(t *testing.T) {
+			var receivedParts int
+			agent, err := agent.New(agent.Config{
+				Name: "test",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					receivedParts = len(ctx.UserContent().Parts)
+					return func(yield func(*session.Event, error) bool) {}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New() error = %v", err)
+			}
+
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
+				A2APartConverter: func(ctx context.Context, evt a2a.Event, part a2a.Part) (*genai.Part, error) {
+					return nil, nil
+				},
+			})
+
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			if err := executor.Execute(t.Context(), reqCtx, newInMemoryQueue(t)); err != nil {
+				t.Fatalf("executor.Execute() error = %v", err)
+			}
+
+			if receivedParts != 0 {
+				t.Errorf("received parts count = %d, want 0", receivedParts)
+			}
+		})
+	})
+
+	t.Run("GenAIPartConverter", func(t *testing.T) {
+		agentEvents := []*session.Event{
+			{LLMResponse: model.LLMResponse{
+				Content: &genai.Content{Parts: []*genai.Part{genai.NewPartFromText("world")}},
+			}},
+		}
+
+		t.Run("modify output", func(t *testing.T) {
+			agent, err := newEventReplayAgent(agentEvents, nil)
+			if err != nil {
+				t.Fatalf("newEventReplayAgent() error = %v", err)
+			}
+
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
+				GenAIPartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (a2a.Part, error) {
+					if part.Text == "world" {
+						return a2a.TextPart{Text: "WORLD"}, nil
+					}
+					return a2a.TextPart{Text: part.Text}, nil
+				},
+			})
+
+			queue := &testQueue{Queue: newInMemoryQueue(t)}
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			if err := executor.Execute(t.Context(), reqCtx, queue); err != nil {
+				t.Fatalf("executor.Execute() error = %v", err)
+			}
+
+			found := false
+			for _, e := range queue.events {
+				if ae, ok := e.(*a2a.TaskArtifactUpdateEvent); ok {
+					for _, p := range ae.Artifact.Parts {
+						if tp, ok := p.(a2a.TextPart); ok && tp.Text == "WORLD" {
+							found = true
+						}
+					}
+				}
+			}
+			if !found {
+				t.Errorf("did not find 'WORLD' in events: %v", queue.events)
+			}
+		})
+
+		t.Run("filter output", func(t *testing.T) {
+			agent, err := newEventReplayAgent(agentEvents, nil)
+			if err != nil {
+				t.Fatalf("newEventReplayAgent() error = %v", err)
+			}
+
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
+				GenAIPartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (a2a.Part, error) {
+					return nil, nil
+				},
+			})
+
+			queue := &testQueue{Queue: newInMemoryQueue(t)}
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			if err := executor.Execute(t.Context(), reqCtx, queue); err != nil {
+				t.Fatalf("executor.Execute() error = %v", err)
+			}
+
+			for _, e := range queue.events {
+				if ae, ok := e.(*a2a.TaskArtifactUpdateEvent); ok {
+					for _, p := range ae.Artifact.Parts {
+						if tp, ok := p.(a2a.TextPart); ok && tp.Text == "world" {
+							t.Errorf("found 'world' but expected it to be filtered")
+						}
+					}
+				}
+			}
+		})
+	})
 }

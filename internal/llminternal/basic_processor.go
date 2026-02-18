@@ -16,42 +16,43 @@ package llminternal
 
 import (
 	"fmt"
+	"iter"
 	"reflect"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 )
 
 // basicRequestProcessor populates the LLMRequest
 // with the agent's LLM generation configs.
-func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
+func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	// reference: adk-python src/google/adk/flows/llm_flows/basic.py
+	return func(yield func(*session.Event, error) bool) {
+		llmAgent := asLLMAgent(ctx.Agent())
+		if llmAgent == nil {
+			return // do nothing.
+		}
 
-	llmAgent := asLLMAgent(ctx.Agent())
-	if llmAgent == nil {
-		return nil // do nothing.
-	}
-	req.Config = clone(llmAgent.internal().GenerateContentConfig)
-	if req.Config == nil {
-		req.Config = &genai.GenerateContentConfig{}
-	}
-	if llmAgent.internal().OutputSchema != nil {
-		req.Config.ResponseSchema = llmAgent.internal().OutputSchema
-		req.Config.ResponseMIMEType = "application/json"
-	}
+		state := llmAgent.internal()
 
-	// TODO: missing features
-	//  populate LLMRequest LiveConnectConfig setting
-	// req.LiveConnectConfig = clone(llmAgent.internal().LiveConnectConfig)
-	// if req.LiveConnectConfig == nil {
-	// 	req.LiveConnectConfig = &genai.LiveConnectConfig{}
-	// }
-	// if llmAgent.internal().OutputSchema != nil {
-	// 	return fmt.Errorf("live api doesn't support agent's output schema")
-	// }
-	return nil
+		req.Config = clone(state.GenerateContentConfig)
+		if req.Config == nil {
+			req.Config = &genai.GenerateContentConfig{}
+		}
+
+		// Set OutputSchema directly if no tools are present or native combo support exists.
+		// Otherwise, OutputSchemaRequestProcessor will be used to provide a tool-based workaround.
+		if state.OutputSchema != nil && !needOutputSchemaProcessor(state) {
+			req.Config.ResponseSchema = state.OutputSchema
+			req.Config.ResponseMIMEType = "application/json"
+		}
+
+		// TODO: missing features
+		//  populate LLMRequest LiveConnectConfig setting
+	}
 }
 
 // clone returns a deep copy of the src.

@@ -18,19 +18,18 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
 
 type eventProcessor struct {
-	reqCtx *a2asrv.RequestContext
-	meta   invocationMeta
+	reqCtx        *a2asrv.RequestContext
+	meta          invocationMeta
+	partConverter GenAIPartConverter
 
 	// terminalActions is used to keep track of escalate and agent transfer actions on processed events.
 	// It is then gets passed to caller through with metadata of a terminal event.
@@ -39,23 +38,35 @@ type eventProcessor struct {
 
 	// responseID is created once the first TaskArtifactUpdateEvent is sent. Used for subsequent artifact updates.
 	responseID a2a.ArtifactID
+	// partialResponseID is created once the first TaskArtifactUpdateEvent created from a partial ADK event is sent.
+	// Partial updates are not saved in the ADK session store. There is no concept of a partial event in A2A so instead
+	// we're updating an "ephemeral" artifact while an agent is running. The artifact gets reset at the end of the
+	// invocation effectively erasing its parts.
+	partialResponseID a2a.ArtifactID
 
-	// terminalEvents is used to postpone sending a terminal event until the whole ADK response is saved as an A2A artifact.
-	// The highest-priority terminal event from this map is going to be send as the final Task status update, in the order of priority:
-	//  - failed
-	//  - input_required
-	terminalEvents map[a2a.TaskState]*a2a.TaskStatusUpdateEvent
+	// failedEvent is used to postpone sending a terminal event until the whole ADK response is saved as an A2A artifact.
+	// Will be sent as the final Task status update if not nil.
+	failedEvent *a2a.TaskStatusUpdateEvent
+
+	// inputRequiredProcessor is used to postpone sending input-required in response to long-running function tool calls.
+	// inputRequiredProcessor.event will be sent as the final Task status update if failedEvent is nil.
+	inputRequiredProcessor *inputRequiredProcessor
 }
 
-func newEventProcessor(reqCtx *a2asrv.RequestContext, meta invocationMeta) *eventProcessor {
+func newEventProcessor(
+	reqCtx *a2asrv.RequestContext,
+	meta invocationMeta,
+	converter GenAIPartConverter,
+) *eventProcessor {
 	return &eventProcessor{
-		reqCtx:         reqCtx,
-		meta:           meta,
-		terminalEvents: make(map[a2a.TaskState]*a2a.TaskStatusUpdateEvent),
+		inputRequiredProcessor: newInputRequiredProcessor(reqCtx),
+		partConverter:          converter,
+		reqCtx:                 reqCtx,
+		meta:                   meta,
 	}
 }
 
-func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.TaskArtifactUpdateEvent, error) {
+func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2a.TaskArtifactUpdateEvent, error) {
 	if event == nil {
 		return nil, nil
 	}
@@ -68,63 +79,88 @@ func (p *eventProcessor) process(_ context.Context, event *session.Event) (*a2a.
 	}
 
 	resp := event.LLMResponse
-	if resp.ErrorCode != "" {
+	if resp.ErrorCode != "" || resp.ErrorMessage != "" {
 		// TODO(yarolegovich): consider merging responses if multiple errors can be produced during an invocation
-		if _, ok := p.terminalEvents[a2a.TaskStateFailed]; !ok {
+		if p.failedEvent == nil {
 			// terminal event might add additional keys to its metadata when it's dispatched and these changes should
 			// not be reflected in this event's metadata
 			terminalEventMeta := maps.Clone(eventMeta)
-			p.terminalEvents[a2a.TaskStateFailed] = toTaskFailedUpdateEvent(p.reqCtx, errorFromResponse(&resp), terminalEventMeta)
+			p.failedEvent = toTaskFailedUpdateEvent(p.reqCtx, errorFromResponse(&resp), terminalEventMeta)
 		}
 	}
 
-	if resp.Content == nil || len(resp.Content.Parts) == 0 {
-		return nil, nil
+	event, err = p.inputRequiredProcessor.process(event)
+	if err != nil {
+		return nil, fmt.Errorf("input required processing failed: %w", err)
 	}
 
-	if isInputRequired(event, resp.Content.Parts) {
-		ev := a2a.NewStatusUpdateEvent(p.reqCtx, a2a.TaskStateInputRequired, nil)
-		ev.Final = true
-		p.terminalEvents[a2a.TaskStateInputRequired] = ev
-	}
-
-	parts, err := ToA2AParts(resp.Content.Parts, event.LongRunningToolIDs)
+	parts, err := p.convertParts(ctx, event)
 	if err != nil {
 		return nil, err
 	}
-
-	if event.Partial {
-		updatePartsMetadata(parts, map[string]any{ToA2AMetaKey("partial"): true})
+	if len(parts) == 0 {
+		return nil, nil
 	}
 
 	var result *a2a.TaskArtifactUpdateEvent
-	if p.responseID == "" {
-		result = a2a.NewArtifactEvent(p.reqCtx, parts...)
-		p.responseID = result.Artifact.ID
+	if event.Partial {
+		result = newPartialArtifactUpdate(p.reqCtx, p.partialResponseID, parts)
+		p.partialResponseID = result.Artifact.ID
 	} else {
-		result = a2a.NewArtifactUpdateEvent(p.reqCtx, p.responseID, parts...)
+		result = newArtifactUpdate(p.reqCtx, p.responseID, parts)
+		p.responseID = result.Artifact.ID
 	}
+
 	if len(eventMeta) > 0 {
-		result.Metadata = eventMeta
+		maps.Copy(result.Metadata, eventMeta)
 	}
 
 	return result, nil
 }
 
-func (p *eventProcessor) makeFinalArtifactUpdate() (*a2a.TaskArtifactUpdateEvent, bool) {
-	if p.responseID == "" {
-		return nil, false
+func newArtifactUpdate(task a2a.TaskInfoProvider, id a2a.ArtifactID, parts []a2a.Part) *a2a.TaskArtifactUpdateEvent {
+	var result *a2a.TaskArtifactUpdateEvent
+	if id == "" {
+		result = a2a.NewArtifactEvent(task, parts...)
+	} else {
+		result = a2a.NewArtifactUpdateEvent(task, id, parts...)
 	}
-	ev := a2a.NewArtifactUpdateEvent(p.reqCtx, p.responseID)
+	// Explicitely mark and Artifact update as non-partial ADK event so that consumer side
+	// does not run its own aggregation logic.
+	result.Metadata = map[string]any{metadataPartialKey: false}
+	return result
+}
+
+func newPartialArtifactUpdate(task a2a.TaskInfoProvider, artifactID a2a.ArtifactID, parts []a2a.Part) *a2a.TaskArtifactUpdateEvent {
+	ev := newArtifactUpdate(task, artifactID, parts)
+	updatePartsMetadata(parts, map[string]any{metadataPartialKey: true})
+	if ev.Artifact.Metadata == nil {
+		ev.Artifact.Metadata = map[string]any{metadataPartialKey: true}
+	} else {
+		ev.Artifact.Metadata[metadataPartialKey] = true
+	}
+	ev.Metadata[metadataPartialKey] = true
+	ev.Append = false // discard partial events
+	return ev
+}
+
+func (p *eventProcessor) makeFinalArtifactUpdate() *a2a.TaskArtifactUpdateEvent {
+	// We could also send a LastChunk: true event for the main (non-partial) artifact,
+	// but there's currently no special handling for it and not all A2A SDK (eg. Java)
+	// implementations allow empty-part artifact updates.
+	if p.partialResponseID == "" {
+		return nil
+	}
+	ev := newPartialArtifactUpdate(p.reqCtx, p.partialResponseID, []a2a.Part{a2a.DataPart{Data: map[string]any{}}})
 	ev.LastChunk = true
-	return ev, true
+	return ev
 }
 
 func (p *eventProcessor) makeFinalStatusUpdate() *a2a.TaskStatusUpdateEvent {
-	for _, s := range []a2a.TaskState{a2a.TaskStateFailed, a2a.TaskStateInputRequired} {
-		if ev, ok := p.terminalEvents[s]; ok {
-			ev.Metadata = setActionsMeta(ev.Metadata, p.terminalActions)
-			return ev
+	for _, event := range []*a2a.TaskStatusUpdateEvent{p.failedEvent, p.inputRequiredProcessor.event} {
+		if event != nil {
+			event.Metadata = setActionsMeta(event.Metadata, p.terminalActions)
+			return event
 		}
 	}
 
@@ -156,21 +192,34 @@ func (p *eventProcessor) updateTerminalActions(event *session.Event) {
 	}
 }
 
+func (p *eventProcessor) convertParts(ctx context.Context, event *session.Event) ([]a2a.Part, error) {
+	if event.Content == nil || len(event.Content.Parts) == 0 {
+		return nil, nil
+	}
+	parts := event.Content.Parts
+	if p.partConverter == nil {
+		return ToA2AParts(parts, event.LongRunningToolIDs)
+	}
+	converted := make([]a2a.Part, 0, len(parts))
+	for _, part := range parts {
+		cp, err := p.partConverter(ctx, event, part)
+		if err != nil {
+			return nil, err
+		}
+		if cp == nil {
+			continue
+		}
+		converted = append(converted, cp)
+	}
+	return converted, nil
+}
+
 func toTaskFailedUpdateEvent(task a2a.TaskInfoProvider, cause error, meta map[string]any) *a2a.TaskStatusUpdateEvent {
 	msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.TextPart{Text: cause.Error()})
 	ev := a2a.NewStatusUpdateEvent(task, a2a.TaskStateFailed, msg)
 	ev.Metadata = meta
 	ev.Final = true
 	return ev
-}
-
-func isInputRequired(event *session.Event, parts []*genai.Part) bool {
-	for _, p := range parts {
-		if p.FunctionCall != nil && slices.Contains(event.LongRunningToolIDs, p.FunctionCall.ID) {
-			return true
-		}
-	}
-	return false
 }
 
 func errorFromResponse(resp *model.LLMResponse) error {

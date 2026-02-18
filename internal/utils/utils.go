@@ -36,9 +36,14 @@ const afFunctionCallIDPrefix = "adk-"
 func PopulateClientFunctionCallID(c *genai.Content) {
 	for _, fn := range FunctionCalls(c) {
 		if fn.ID == "" {
-			fn.ID = afFunctionCallIDPrefix + uuid.NewString()
+			fn.ID = GenerateFunctionCallID()
 		}
 	}
+}
+
+// GenerateFunctionCallID generates a new function call ID.
+func GenerateFunctionCallID() string {
+	return afFunctionCallIDPrefix + uuid.NewString()
 }
 
 // RemoveClientFunctionCallID removes the function call ID field that was set
