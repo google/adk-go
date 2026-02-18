@@ -20,14 +20,26 @@
 package retryandreflect
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
+	"text/template"
 
 	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/tool"
+
+	_ "embed"
 )
+
+//go:embed reflection.md
+var reflection string
+var reflectionTemplate = template.Must(template.New("ReflectionTemplate").Parse(reflection))
+
+//go:embed exceeded.md
+var exceeded string
+var exceededTemplate = template.Must(template.New("ExceededTemplate").Parse(exceeded))
 
 const (
 	reflectAndRetryResponseType = "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN"
@@ -181,29 +193,39 @@ func (r *retryAndReflect) formatToolArgs(toolArgs map[string]any) string {
 	return string(argsBytes)
 }
 
+// templateData represents the variables in the templates.
+type templateData struct {
+	ToolName     string
+	ErrorDetails string
+	ArgsSummary  string
+	RetryCount   int
+	MaxRetries   int
+}
+
 func (r *retryAndReflect) createToolReflectionResponse(tool tool.Tool, toolArgs map[string]any, toolErr error, retryCount int) map[string]any {
 	argsSummary := r.formatToolArgs(toolArgs)
 	errorDetails := r.formatErrorDetails(toolErr)
 
-	var msg strings.Builder
-	fmt.Fprintf(&msg, "\nThe call to tool `%s` failed.\n\n", tool.Name())
-	fmt.Fprintf(&msg, "**Error Details:**\n```\n%s\n```\n\n", errorDetails)
-	fmt.Fprintf(&msg, "**Tool Arguments Used:**\n```json\n%s\n```\n\n", argsSummary)
-	fmt.Fprintf(&msg, "**Reflection Guidance:**\n")
-	fmt.Fprintf(&msg, "This is retry attempt **%d of %d**. Analyze the error and the arguments you provided. Do not repeat the exact same call. Consider the following before your next attempt:\n\n", retryCount, r.maxRetries)
-	fmt.Fprintf(&msg, "1.  **Invalid Parameters**: Does the error suggest that one or more arguments are incorrect, badly formatted, or missing? Review the tool's schema and your arguments.\n")
-	fmt.Fprintf(&msg, "2.  **State or Preconditions**: Did a previous step fail or not produce the necessary state/resource for this tool to succeed?\n")
-	fmt.Fprintf(&msg, "3.  **Alternative Approach**: Is this the right tool for the job? Could another tool or a different sequence of steps achieve the goal?\n")
-	fmt.Fprintf(&msg, "4.  **Simplify the Task**: Can you break the problem down into smaller, simpler steps?\n")
-	fmt.Fprintf(&msg, "5.  **Wrong Function Name**: Does the error indicate the tool is not found? Please check again and only use available tools.\n\n")
-	fmt.Fprintf(&msg, "Formulate a new plan based on your analysis and try a corrected or different approach.\n")
+	d := templateData{
+		ToolName:     tool.Name(),
+		ErrorDetails: errorDetails,
+		ArgsSummary:  argsSummary,
+		RetryCount:   retryCount,
+		MaxRetries:   r.maxRetries,
+	}
+
+	var buf bytes.Buffer
+	err := reflectionTemplate.Execute(&buf, d)
+	if err != nil {
+		return nil
+	}
 
 	return map[string]any{
 		"response_type":       reflectAndRetryResponseType,
 		"error_type":          fmt.Sprintf("%T", toolErr),
 		"error_details":       toolErr.Error(),
 		"retry_count":         retryCount,
-		"reflection_guidance": strings.TrimSpace(msg.String()),
+		"reflection_guidance": strings.TrimSpace(buf.String()),
 	}
 }
 
@@ -211,18 +233,23 @@ func (r *retryAndReflect) createToolRetryExceedMsg(tool tool.Tool, toolArgs map[
 	argsSummary := r.formatToolArgs(toolArgs)
 	errorDetails := r.formatErrorDetails(toolErr)
 
-	var msg strings.Builder
-	fmt.Fprintf(&msg, "\nThe tool `%s` has failed consecutively %d times and the retry limit has been exceeded.\n\n", tool.Name(), r.maxRetries)
-	fmt.Fprintf(&msg, "**Last Error:**\n```\n%s\n```\n\n", errorDetails)
-	fmt.Fprintf(&msg, "**Last Arguments Used:**\n```json\n%s\n```\n\n", argsSummary)
-	fmt.Fprintf(&msg, "**Final Instruction:**\n")
-	fmt.Fprintf(&msg, "**Do not attempt to use the `%s` tool again for this task.** You must now try a different approach. Acknowledge the failure and devise a new strategy, potentially using other available tools or informing the user that the task cannot be completed.\n", tool.Name())
+	d := templateData{
+		ToolName:     tool.Name(),
+		ErrorDetails: errorDetails,
+		ArgsSummary:  argsSummary,
+	}
+
+	var buf bytes.Buffer
+	err := exceededTemplate.Execute(&buf, d)
+	if err != nil {
+		return nil
+	}
 
 	return map[string]any{
 		"response_type":       reflectAndRetryResponseType,
 		"error_type":          fmt.Sprintf("%T", toolErr),
 		"error_details":       toolErr.Error(),
 		"retry_count":         r.maxRetries,
-		"reflection_guidance": strings.TrimSpace(msg.String()),
+		"reflection_guidance": strings.TrimSpace(buf.String()),
 	}
 }
