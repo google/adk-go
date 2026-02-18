@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,11 +19,15 @@ package tool
 
 import (
 	"context"
+	"fmt"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/memory"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/genai"
 )
 
 // Tool defines the interface for a callable tool.
@@ -152,4 +156,110 @@ func (f *filteredToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 		}
 	}
 	return filtered, nil
+}
+
+// ConfirmationProvider defines a function that dynamically determines whether
+// a specific tool execution requires user confirmation.
+//
+// It accepts the tool name and the input parameters as arguments.
+// Returning true signals that the system must wait for Human-in-the-Loop (HITL)
+// approval before proceeding with the execution.
+type ConfirmationProvider func(toolName string, toolInput any) bool
+
+// WithConfirmation wraps a toolset to inject confirmation logic in each tool.
+// Only tools within the provided Toolset that implement the `runnableTool` interface
+// (i.e., provide a FunctionDeclaration and a Run method) will be wrapped with
+// confirmation logic. Other tools will be included in the returned Toolset without
+// modification.
+func WithConfirmation(ts Toolset, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) Toolset {
+	return &confirmationToolset{
+		toolset:                     ts,
+		requireConfirmation:         requireConfirmation,
+		requireConfirmationProvider: requireConfirmationProvider,
+	}
+}
+
+type confirmationToolset struct {
+	toolset                     Toolset
+	requireConfirmation         bool
+	requireConfirmationProvider ConfirmationProvider
+}
+
+func (c *confirmationToolset) Name() string { return c.toolset.Name() }
+
+func (c *confirmationToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
+	tools, err := c.toolset.Tools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	wrappedTools := make([]Tool, 0, len(tools))
+	for _, t := range tools {
+		if _, ok := t.(runnableTool); ok {
+			wrappedTools = append(wrappedTools, &confirmationTool{
+				Tool:                t,
+				requireConfirmation: c.requireConfirmation,
+				provider:            c.requireConfirmationProvider,
+			})
+		} else {
+			// Tools that are not runnableTool are not wrapped.
+			wrappedTools = append(wrappedTools, t)
+		}
+	}
+
+	return wrappedTools, nil
+}
+
+// confirmationTool is a wrapper around a tool that adds confirmation logic.
+// It implements tool.Tool and adk/internal/toolinternal.FunctionTool and adk/internal/toolinternal.RequestProcessor.
+type confirmationTool struct {
+	Tool
+	requireConfirmation bool
+	provider            ConfirmationProvider
+}
+
+type runnableTool interface {
+	Tool
+	Declaration() *genai.FunctionDeclaration
+	Run(ctx Context, args any) (result map[string]any, err error)
+}
+
+type requestProcessor interface {
+	ProcessRequest(ctx Context, req *model.LLMRequest) error
+}
+
+func (t *confirmationTool) Declaration() *genai.FunctionDeclaration {
+	return t.Tool.(runnableTool).Declaration()
+}
+
+func (t *confirmationTool) ProcessRequest(ctx Context, req *model.LLMRequest) error {
+	return toolutils.PackTool(req, t)
+}
+
+func (t *confirmationTool) Run(ctx Context, args any) (map[string]any, error) {
+	ft := t.Tool.(runnableTool)
+
+	// Check for Human-in-the-Loop confirmation.
+	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
+		if !confirmation.Confirmed {
+			return nil, fmt.Errorf("tool %q call is rejected", t.Tool.Name())
+		}
+	} else {
+		requireConfirmation := t.requireConfirmation
+		if t.provider != nil {
+			requireConfirmation = t.provider(t.Name(), args)
+		}
+
+		if requireConfirmation {
+			err := ctx.RequestConfirmation(
+				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+					t.Name()), nil)
+			if err != nil {
+				return nil, err
+			}
+			ctx.Actions().SkipSummarization = true
+			return nil, fmt.Errorf("tool %q requires confirmation, please approve or reject", t.Name())
+		}
+	}
+
+	return ft.Run(ctx, args)
 }
