@@ -88,8 +88,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 						if liveReq.ActivityStart != nil || liveReq.ActivityEnd != nil {
 							if err := conn.Send(liveReq); err != nil {
-								// TODO: Handle send error.
-								fmt.Printf("Error sending to live connection: %v\n", err)
+								yield(nil, fmt.Errorf("failed to send to live connection: %w", err))
 								return
 							}
 						} else if liveReq.RealtimeInput != nil && liveReq.RealtimeInput.Audio != nil {
@@ -99,12 +98,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								"input",
 							)
 							if err != nil {
-								// TODO: Handle send error.
-								fmt.Printf("Error caching audio: %v\n", err)
+								yield(nil, fmt.Errorf("failed to cache audio: %w", err))
+								return
 							}
 							if err := conn.Send(liveReq); err != nil {
-								// TODO: Handle send error.
-								fmt.Printf("Error sending to live connection: %v\n", err)
+								yield(nil, fmt.Errorf("failed to send to live connection: %w", err))
 								return
 							}
 						}
@@ -128,11 +126,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 								userContentEvent.Content = content
 								userContentEvent.Author = "user"
 
-								yield(userContentEvent, nil)
+								if !yield(userContentEvent, nil) {
+									return
+								}
 
 								if err := conn.Send(liveReq); err != nil {
-									// TODO: Handle send error.
-									fmt.Printf("Error sending to live connection: %v\n", err)
+									yield(nil, fmt.Errorf("failed to send to live connection: %w", err))
 									return
 								}
 							}
