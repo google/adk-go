@@ -248,7 +248,7 @@ func (s *Server) websocketHandler() http.HandlerFunc {
 		}
 
 		// Phase 2 - 4
-		liveRequestQueue := agent.NewLiveRequestQueue()
+		liveRequestQueue := agent.NewLiveRequestQueue(agent.DefaultLiveRequestQueueSize)
 
 		// Channel to signal the reading loop to stop
 		done := make(chan struct{})

@@ -15,10 +15,17 @@ type LiveRequestQueue struct {
 	mu     sync.Mutex
 }
 
-// NewLiveRequestQueue creates a new LiveRequestQueue.
-func NewLiveRequestQueue() *LiveRequestQueue {
+// DefaultLiveRequestQueueSize is the default buffer size for the LiveRequestQueue.
+const DefaultLiveRequestQueueSize = 100
+
+// NewLiveRequestQueue creates a new LiveRequestQueue with the specified buffer size.
+// If bufferSize is less than or equal to 0, DefaultLiveRequestQueueSize will be used.
+func NewLiveRequestQueue(bufferSize int) *LiveRequestQueue {
+	if bufferSize <= 0 {
+		bufferSize = DefaultLiveRequestQueueSize
+	}
 	return &LiveRequestQueue{
-		queue: make(chan *model.LiveRequest, 100), // Buffered channel to prevent blocking on small bursts
+		queue: make(chan *model.LiveRequest, bufferSize), // Buffered channel to prevent blocking on small bursts
 	}
 }
 
