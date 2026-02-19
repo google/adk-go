@@ -145,6 +145,8 @@ type agent struct {
 	afterAgentCallbacks  []AfterAgentCallback
 }
 
+var _ Agent = (*agent)(nil)
+
 func (a *agent) Name() string {
 	return a.name
 }
@@ -440,6 +442,8 @@ type invocationContext struct {
 	endInvocation bool
 }
 
+var _ InvocationContext = (*invocationContext)(nil)
+
 func (c *invocationContext) Agent() Agent {
 	return c.agent
 }
@@ -499,5 +503,3 @@ type pluginManager interface {
 	RunBeforeAgentCallback(cctx CallbackContext) (*genai.Content, error)
 	RunAfterAgentCallback(cctx CallbackContext) (*genai.Content, error)
 }
-
-var _ InvocationContext = (*invocationContext)(nil)

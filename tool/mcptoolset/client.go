@@ -45,6 +45,8 @@ type connectionRefresher struct {
 	session *mcp.ClientSession
 }
 
+var _ MCPClient = (*connectionRefresher)(nil)
+
 // refreshableErrors is a list of errors that should trigger a connection refresh.
 var refreshableErrors = []error{
 	mcp.ErrConnectionClosed,
@@ -190,5 +192,3 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 	c.session = session
 	return c.session, nil
 }
-
-var _ MCPClient = (*connectionRefresher)(nil)

@@ -25,6 +25,8 @@ type SessionsAPIRouter struct {
 	sessionController *controllers.SessionsAPIController
 }
 
+var _ Router = (*SessionsAPIRouter)(nil)
+
 // NewSessionsAPIRouter creates a new SessionsAPIRouter.
 func NewSessionsAPIRouter(controller *controllers.SessionsAPIController) *SessionsAPIRouter {
 	return &SessionsAPIRouter{sessionController: controller}

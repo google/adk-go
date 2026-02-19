@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -45,6 +46,11 @@ type preloadMemoryTool struct {
 	name        string
 	description string
 }
+
+var (
+	_ tool.Tool                     = (*preloadMemoryTool)(nil)
+	_ toolinternal.RequestProcessor = (*preloadMemoryTool)(nil)
+)
 
 // New creates a new preloadMemoryTool.
 func New() *preloadMemoryTool {

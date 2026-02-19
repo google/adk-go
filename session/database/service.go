@@ -28,10 +28,12 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// databaseService is an database implementation of sessionService.Service.
+// databaseService is an database implementation of [session.Service].
 type databaseService struct {
 	db *gorm.DB
 }
+
+var _ session.Service = (*databaseService)(nil)
 
 // NewSessionService creates a new [session.Service] implementation that uses a
 // relational database (e.g., PostgreSQL, Spanner, SQLite) via the GORM library.
