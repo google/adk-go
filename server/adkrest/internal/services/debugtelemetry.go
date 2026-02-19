@@ -16,98 +16,65 @@ package services
 
 import (
 	"context"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"google.golang.org/adk/internal/telemetry"
 )
 
 // DebugTelemetry stores the in memory spans and logs, grouped by session and event.
 type DebugTelemetry struct {
-	spanExporter *tracetest.InMemoryExporter
-	logExporter  *InMemoryLogExporter
+	store *spanStore
 }
 
-// NewDebugTelemetry returns a DebugTelemetry instance
+// NewDebugTelemetry returns a new DebugTelemetry instance.
 func NewDebugTelemetry() *DebugTelemetry {
-	spanExporter := tracetest.NewInMemoryExporter()
-	logExporter := &InMemoryLogExporter{
-		logsBySpanID: make(map[string][]DebugLog),
-	}
 	return &DebugTelemetry{
-		spanExporter: spanExporter,
-		logExporter:  logExporter,
+		store: newSpanStore(),
 	}
 }
 
 func (d *DebugTelemetry) SpanProcessor() sdktrace.SpanProcessor {
-	return sdktrace.NewSimpleSpanProcessor(d.spanExporter)
+	return sdktrace.NewBatchSpanProcessor(d.store)
 }
 
 func (d *DebugTelemetry) LogProcessor() sdklog.Processor {
-	return sdklog.NewSimpleProcessor(d.logExporter)
+	return sdklog.NewBatchProcessor(d.store)
 }
 
-// GetSpansByEventID returns stored event traces.
+// GetSpansByEventID returns spans associated with the given event ID.
 func (d *DebugTelemetry) GetSpansByEventID(eventID string) []DebugSpan {
-	return d.getSpansFilterByAttrs(func(span tracetest.SpanStub, attrs map[string]string) bool {
-		return attrs["gcp.vertex.agent.event_id"] == eventID
-	})
+	records := d.store.getByEventID(eventID)
+	return convertRecords(records)
 }
 
-// GetSpansBySessionID returns stored session traces.
+// GetSpansBySessionID returns spans associated with the given session ID.
 func (d *DebugTelemetry) GetSpansBySessionID(sessionID string) []DebugSpan {
-	sessionIDKey := string(semconv.GenAIConversationIDKey)
-	spansByTrace := make(map[string][]tracetest.SpanStub)
-	matchingTraceIDs := make(map[string]struct{})
-
-	// TODO refactor to do more efficient lookup and avoid iterating over all spans.
-	for _, s := range d.spanExporter.GetSpans() {
-		traceID := s.SpanContext.TraceID().String()
-		spansByTrace[traceID] = append(spansByTrace[traceID], s)
-		if attrs := convertAttrs(s.Attributes); attrs[sessionIDKey] == sessionID {
-			matchingTraceIDs[traceID] = struct{}{}
-		}
-	}
-
-	var debugSpans []DebugSpan
-	for traceID := range matchingTraceIDs {
-		for _, s := range spansByTrace[traceID] {
-			attrs := convertAttrs(s.Attributes)
-			debugSpan := convert(s, attrs)
-			debugSpan.Logs = d.logExporter.GetLogsBySpanID(s.SpanContext.SpanID().String())
-			debugSpans = append(debugSpans, debugSpan)
-		}
-	}
-
-	sort.Slice(debugSpans, func(i, j int) bool {
-		return debugSpans[i].StartTime < debugSpans[j].StartTime
-	})
-	return debugSpans
+	records := d.store.getBySessionID(sessionID)
+	return convertRecords(records)
 }
 
-func (d *DebugTelemetry) getSpansFilterByAttrs(filter func(span tracetest.SpanStub, attrs map[string]string) bool) []DebugSpan {
-	var debugSpans []DebugSpan
-	spans := d.spanExporter.GetSpans()
-
-	for _, span := range spans {
-		attrs := convertAttrs(span.Attributes)
-		if filter(span, attrs) {
-			debugSpan := convert(span, attrs)
-			debugSpan.Logs = d.logExporter.GetLogsBySpanID(span.SpanContext.SpanID().String())
-			debugSpans = append(debugSpans, debugSpan)
+func convertRecords(records []*spanRecord) []DebugSpan {
+	debugSpans := make([]DebugSpan, len(records))
+	for i, r := range records {
+		debugSpans[i] = DebugSpan{
+			Name:         r.Span.Name,
+			StartTime:    r.Span.StartTime.UnixNano(),
+			EndTime:      r.Span.EndTime.UnixNano(),
+			TraceID:      r.Span.Context.TraceID().String(),
+			SpanID:       r.Span.Context.SpanID().String(),
+			ParentSpanID: r.Span.ParentSpanID.String(),
+			Attributes:   r.Span.Attributes,
+			Logs:         r.Logs,
 		}
 	}
-	sort.Slice(debugSpans, func(i, j int) bool {
-		return debugSpans[i].StartTime < debugSpans[j].StartTime
-	})
 	return debugSpans
 }
 
@@ -119,24 +86,13 @@ func convertAttrs(in []attribute.KeyValue) map[string]string {
 	return out
 }
 
-func convert(span tracetest.SpanStub, attrs map[string]string) DebugSpan {
-	return DebugSpan{
-		Name:         span.Name,
-		StartTime:    span.StartTime.UnixNano(),
-		EndTime:      span.EndTime.UnixNano(),
-		TraceID:      span.SpanContext.TraceID().String(),
-		SpanID:       span.SpanContext.SpanID().String(),
-		ParentSpanID: span.Parent.SpanID().String(),
-		Attributes:   attrs,
-	}
-}
-
+// SpanContext uniquely identifies a span.
 type SpanContext struct {
 	TraceID string `json:"trace_id"`
 	SpanID  string `json:"span_id"`
 }
 
-// Span represents a span in the trace.
+// DebugSpan represents a span in the trace.
 type DebugSpan struct {
 	Name         string            `json:"name"`
 	StartTime    int64             `json:"start_time"`
@@ -150,58 +106,166 @@ type DebugSpan struct {
 
 // DebugLog represents a log in the span.
 type DebugLog struct {
-	Body any `json:"body"`
-	// RFC 3339 format timestamp  e.g. "2025-12-02T09:45:36.115239Z"
+	Body              any    `json:"body"`
 	ObservedTimestamp string `json:"observed_timestamp"`
-	// base16 0x + 32 characters  e.g. "0x6bd725d0f21eb3117ae8cfaa709694b1"
-	TraceID   string `json:"trace_id"`
-	SpanID    string `json:"span_id"`
-	EventName string `json:"event_name"`
+	TraceID           string `json:"trace_id"`
+	SpanID            string `json:"span_id"`
+	EventName         string `json:"event_name"`
 }
 
-// InMemoryLogExporter stores logs in memory for debug telemetry.
-type InMemoryLogExporter struct {
-	mu           sync.Mutex
-	logsBySpanID map[string][]DebugLog
+// spanRecord stores a span and its associated logs.
+type spanRecord struct {
+	Span *inMemorySpan
+	Logs []DebugLog
+}
+
+// inMemorySpan stores spans in memory for debug telemetry.
+type inMemorySpan struct {
+	Name         string
+	StartTime    time.Time
+	EndTime      time.Time
+	Context      trace.SpanContext
+	ParentSpanID trace.SpanID
+	Attributes   map[string]string
+}
+
+// spanStore stores spans and logs in memory for debug telemetry.
+type spanStore struct {
+	mu sync.RWMutex
+	// recordsBySpanID stores spans indexed by span id.
+	recordsBySpanID map[string]*spanRecord
+	// traceIDsBySessionID stores trace ids indexed by session id for easy lookup.
+	traceIDsBySessionID map[string]map[string]struct{}
+	// recordsByEventID stores spans indexed by event id for easy lookup.
+	recordsByEventID map[string][]*spanRecord
+	// recordsByTraceID stores spans indexed by trace id for easy lookup.
+	recordsByTraceID map[string][]*spanRecord
+}
+
+func newSpanStore() *spanStore {
+	return &spanStore{
+		recordsBySpanID:     make(map[string]*spanRecord),
+		traceIDsBySessionID: make(map[string]map[string]struct{}),
+		recordsByEventID:    make(map[string][]*spanRecord),
+		recordsByTraceID:    make(map[string][]*spanRecord),
+	}
+}
+
+func (s *spanStore) getByEventID(id string) []*spanRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	// Create a copy of the slice to avoid race conditions.
+	src := s.recordsByEventID[id]
+	dst := make([]*spanRecord, len(src))
+	copy(dst, src)
+	return filterNilsAndSort(dst)
+}
+
+func (s *spanStore) getBySessionID(sessionID string) []*spanRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	traces := s.traceIDsBySessionID[sessionID]
+	var records []*spanRecord
+	for traceID := range traces {
+		if r, ok := s.recordsByTraceID[traceID]; ok {
+			records = append(records, r...)
+		}
+	}
+	return filterNilsAndSort(records)
+}
+
+func filterNilsAndSort(records []*spanRecord) []*spanRecord {
+	filtered := slices.DeleteFunc(records, func(s *spanRecord) bool {
+		// Logs are emitted before the span is closed and sent to the processor.
+		// Skip them in the response.
+		return s == nil || s.Span == nil
+	})
+	slices.SortFunc(filtered, func(a, b *spanRecord) int {
+		return a.Span.StartTime.Compare(b.Span.StartTime)
+	})
+	return filtered
 }
 
 // Export implements sdklog.Exporter.
-func (e *InMemoryLogExporter) Export(ctx context.Context, records []sdklog.Record) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	for _, r := range records {
-		if !r.SpanID().IsValid() {
-			// Drop the logs without spanID - we'll never join them with any span.
+func (s *spanStore) Export(ctx context.Context, logRecords []sdklog.Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, log := range logRecords {
+		if !log.SpanID().IsValid() {
+			// Drop the logs without spanID - we'll never return them to the user.
 			continue
 		}
-		spanID := r.SpanID().String()
-		prev, ok := e.logsBySpanID[spanID]
+		spanID := log.SpanID().String()
+		record, ok := s.recordsBySpanID[spanID]
 		if !ok {
-			prev = nil
+			record = &spanRecord{}
+			s.recordsBySpanID[spanID] = record
 		}
-		e.logsBySpanID[spanID] = append(prev, DebugLog{
-			Body:              telemetry.FromLogValue(r.Body()),
-			ObservedTimestamp: r.ObservedTimestamp().Format(time.RFC3339),
-			TraceID:           r.TraceID().String(),
-			SpanID:            r.SpanID().String(),
-			EventName:         r.EventName(),
+		record.Logs = append(record.Logs, DebugLog{
+			Body:              telemetry.FromLogValue(log.Body()),
+			ObservedTimestamp: log.ObservedTimestamp().Format(time.RFC3339Nano),
+			TraceID:           log.TraceID().String(),
+			SpanID:            log.SpanID().String(),
+			EventName:         log.EventName(),
 		})
 	}
 	return nil
 }
 
-// ForceFlush implements sdklog.Exporter.
-func (e *InMemoryLogExporter) ForceFlush(ctx context.Context) error {
+// ExportSpans implements sdktrace.SpanProcessor.
+func (s *spanStore) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, span := range spans {
+		attrs := convertAttrs(span.Attributes())
+		spanID := span.SpanContext().SpanID().String()
+		record, ok := s.recordsBySpanID[spanID]
+		if !ok {
+			record = &spanRecord{}
+			s.recordsBySpanID[spanID] = record
+		}
+
+		record.Span = &inMemorySpan{
+			Name:         span.Name(),
+			StartTime:    span.StartTime(),
+			EndTime:      span.EndTime(),
+			Context:      span.SpanContext(),
+			ParentSpanID: span.Parent().SpanID(),
+			Attributes:   attrs,
+		}
+
+		s.updateSpanIndexes(record.Span, record)
+	}
 	return nil
 }
 
-// Shutdown implements sdklog.Exporter.
-func (e *InMemoryLogExporter) Shutdown(ctx context.Context) error {
+func (s *spanStore) updateSpanIndexes(span *inMemorySpan, records *spanRecord) {
+	// Update session id -> trace id mapping.
+	sessionIDKey := string(semconv.GenAIConversationIDKey)
+	if sessionID, ok := span.Attributes[sessionIDKey]; ok {
+		traces, ok := s.traceIDsBySessionID[sessionID]
+		if !ok {
+			traces = make(map[string]struct{})
+			s.traceIDsBySessionID[sessionID] = traces
+		}
+		traceID := span.Context.TraceID().String()
+		traces[traceID] = struct{}{}
+	}
+	// Update event id -> span id mapping.
+	if eventID, ok := span.Attributes["gcp.vertex.agent.event_id"]; ok {
+		s.recordsByEventID[eventID] = append(s.recordsByEventID[eventID], records)
+	}
+	// Update trace id -> span id mapping.
+	traceID := span.Context.TraceID().String()
+	s.recordsByTraceID[traceID] = append(s.recordsByTraceID[traceID], records)
+}
+
+// ForceFlush implements sdklog.Exporter and sdktrace.SpanProcessor.
+func (s *spanStore) ForceFlush(ctx context.Context) error {
 	return nil
 }
 
-func (e *InMemoryLogExporter) GetLogsBySpanID(spanID string) []DebugLog {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.logsBySpanID[spanID]
+// Shutdown implements sdklog.Exporter and sdktrace.SpanProcessor.
+func (s *spanStore) Shutdown(ctx context.Context) error {
+	return nil
 }
