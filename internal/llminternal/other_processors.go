@@ -22,11 +22,6 @@ import (
 	"google.golang.org/adk/session"
 )
 
-func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
-	// TODO: implement (adk-python src/google/adk/flows/llm_flows/identity.py)
-	return func(yield func(*session.Event, error) bool) {}
-}
-
 func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_nl_plnning.py)
 	return func(yield func(*session.Event, error) bool) {}
