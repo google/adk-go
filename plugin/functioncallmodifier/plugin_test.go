@@ -342,6 +342,8 @@ type mockAgent struct {
 	inputSchema *genai.Schema
 }
 
+var _ agent.Agent = (*mockAgent)(nil)
+
 func (m *mockAgent) Name() string               { return m.name }
 func (m *mockAgent) Description() string        { return m.description }
 func (m *mockAgent) InputSchema() *genai.Schema { return m.inputSchema }

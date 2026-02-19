@@ -67,6 +67,11 @@ type mcpTool struct {
 	requireConfirmationProvider ConfirmationProvider
 }
 
+var (
+	_ toolinternal.FunctionTool     = (*mcpTool)(nil)
+	_ toolinternal.RequestProcessor = (*mcpTool)(nil)
+)
+
 // Name implements the tool.Tool.
 func (t *mcpTool) Name() string {
 	return t.name
@@ -172,8 +177,3 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 		"output": textResponse.String(),
 	}, nil
 }
-
-var (
-	_ toolinternal.FunctionTool     = (*mcpTool)(nil)
-	_ toolinternal.RequestProcessor = (*mcpTool)(nil)
-)

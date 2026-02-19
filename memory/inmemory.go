@@ -54,6 +54,8 @@ type inMemoryService struct {
 	store map[key]map[sessionID][]value
 }
 
+var _ Service = (*inMemoryService)(nil)
+
 func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Session) error {
 	var values []value
 

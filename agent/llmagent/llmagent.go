@@ -342,6 +342,8 @@ type llmAgent struct {
 	outputSchema *genai.Schema
 }
 
+var _ agentinternal.Agent = (*llmAgent)(nil)
+
 type agentState = agentinternal.State
 
 func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {

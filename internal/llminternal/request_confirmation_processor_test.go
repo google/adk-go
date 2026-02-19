@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -43,6 +44,8 @@ const (
 type mockTool struct {
 	name string
 }
+
+var _ toolinternal.FunctionTool = (*mockTool)(nil)
 
 func (m *mockTool) Name() string        { return m.name }
 func (m *mockTool) Description() string { return "mock tool" }

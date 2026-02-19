@@ -29,6 +29,8 @@ type vertexAiService struct {
 	client *vertexAiClient
 }
 
+var _ session.Service = (*vertexAiService)(nil)
+
 type VertexAIServiceConfig struct {
 	// ProjectID with VertexAI API enabled.
 	ProjectID string

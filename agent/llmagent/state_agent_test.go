@@ -41,6 +41,8 @@ type FakeLLM struct {
 	GenerateContentFunc func(ctx context.Context, req *model.LLMRequest, stream bool) (model.LLMResponse, error)
 }
 
+var _ model.LLM = (*FakeLLM)(nil)
+
 func (f *FakeLLM) Name() string {
 	return "fake-llm"
 }

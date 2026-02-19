@@ -28,16 +28,12 @@ type Loader interface {
 	RootAgent() Agent
 }
 
-// multiLoader should be used when you have multiple agents
-type multiLoader struct {
-	agentMap map[string]Agent
-	root     Agent
-}
-
 // singleLoader should be used when you have only one agent
 type singleLoader struct {
 	root Agent
 }
+
+var _ Loader = (*singleLoader)(nil)
 
 // NewSingleLoader returns a loader with only one agent, which becomes the root agent
 func NewSingleLoader(a Agent) Loader {
@@ -64,6 +60,14 @@ func (s *singleLoader) LoadAgent(name string) (Agent, error) {
 func (s *singleLoader) RootAgent() Agent {
 	return s.root
 }
+
+// multiLoader should be used when you have multiple agents
+type multiLoader struct {
+	agentMap map[string]Agent
+	root     Agent
+}
+
+var _ Loader = (*multiLoader)(nil)
 
 // NewMultiLoader returns a new AgentLoader with the given root Agent and other agents.
 // Returns an error if more than one agent (including root) shares the same name

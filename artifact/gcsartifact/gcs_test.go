@@ -55,6 +55,8 @@ type fakeClient struct {
 	inMemoryBucket gcsBucket
 }
 
+var _ gcsClient = (*fakeClient)(nil)
+
 func newFakeClient() gcsClient {
 	return &fakeClient{
 		inMemoryBucket: &fakeBucket{
@@ -73,6 +75,8 @@ type fakeBucket struct {
 	mu         sync.Mutex
 	objectsMap map[string]*fakeObject
 }
+
+var _ gcsBucket = (*fakeBucket)(nil)
 
 // Object returns a fake object from the in-memory store.
 func (f *fakeBucket) object(name string) gcsObject {
@@ -115,6 +119,8 @@ type fakeObject struct {
 	deleted     bool
 	contentType string
 }
+
+var _ gcsObject = (*fakeObject)(nil)
 
 // NewWriter returns a fake writer that stores data in memory.
 func (f *fakeObject) newWriter(ctx context.Context) gcsWriter {
@@ -160,6 +166,8 @@ type fakeWriter struct {
 	contentType string
 }
 
+var _ gcsWriter = (*fakeWriter)(nil)
+
 func (w *fakeWriter) Write(p []byte) (n int, err error) {
 	return w.buffer.Write(p)
 }
@@ -184,6 +192,8 @@ type fakeObjectIterator struct {
 	index   int
 }
 
+var _ gcsObjectIterator = (*fakeObjectIterator)(nil)
+
 // Next implements the iterator pattern.
 // It returns the next object in the slice or an iterator.Done error.
 func (i *fakeObjectIterator) next() (*storage.ObjectAttrs, error) {
@@ -194,11 +204,3 @@ func (i *fakeObjectIterator) next() (*storage.ObjectAttrs, error) {
 	i.index++
 	return &storage.ObjectAttrs{Name: obj.name, ContentType: obj.contentType}, nil
 }
-
-var (
-	_ gcsClient         = (*fakeClient)(nil)
-	_ gcsBucket         = (*fakeBucket)(nil)
-	_ gcsObject         = (*fakeObject)(nil)
-	_ gcsObjectIterator = (*fakeObjectIterator)(nil)
-	_ gcsWriter         = (*fakeWriter)(nil)
-)

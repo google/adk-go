@@ -25,6 +25,8 @@ type AppsAPIRouter struct {
 	appsController *controllers.AppsAPIController
 }
 
+var _ Router = (*AppsAPIRouter)(nil)
+
 // NewAppsAPIRouter creates a new AppsAPIRouter.
 func NewAppsAPIRouter(controller *controllers.AppsAPIController) *AppsAPIRouter {
 	return &AppsAPIRouter{appsController: controller}

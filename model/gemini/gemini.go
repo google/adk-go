@@ -39,6 +39,8 @@ type geminiModel struct {
 	versionHeaderValue string
 }
 
+var _ model.LLM = (*geminiModel)(nil)
+
 // NewModel returns [model.LLM], backed by the Gemini API.
 //
 // It uses the provided context and configuration to initialize the underlying

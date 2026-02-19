@@ -299,6 +299,8 @@ type FakeLLM struct {
 	callCounter int
 }
 
+var _ model.LLM = (*FakeLLM)(nil)
+
 func (f *FakeLLM) Name() string {
 	return "fake-llm"
 }

@@ -37,6 +37,8 @@ type dummyLLM struct {
 	name string
 }
 
+var _ model.LLM = (*dummyLLM)(nil)
+
 func (d *dummyLLM) Name() string {
 	return d.name
 }
@@ -104,6 +106,8 @@ func newTestAgent(t *testing.T, name, description string, agentType agentinterna
 type mockTool struct {
 	name string
 }
+
+var _ tool.Tool = (*mockTool)(nil)
 
 func (m *mockTool) Name() string { return m.name }
 
