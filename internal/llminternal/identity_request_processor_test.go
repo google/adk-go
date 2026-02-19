@@ -45,7 +45,7 @@ func TestIdentityRequestProcessor(t *testing.T) {
 			},
 			wantContains: []string{
 				"You are an agent.",
-				"Your internal name is test_agent.",
+				"Your internal name is \"test_agent\".",
 			},
 			wantNotContain: []string{
 				"The description about you is",
@@ -62,8 +62,8 @@ func TestIdentityRequestProcessor(t *testing.T) {
 			},
 			wantContains: []string{
 				"You are an agent.",
-				"Your internal name is helper_agent.",
-				"The description about you is A helpful assistant that answers questions.",
+				"Your internal name is \"helper_agent\".",
+				"The description about you is \"A helpful assistant that answers questions\".",
 			},
 		},
 		{
@@ -82,7 +82,7 @@ func TestIdentityRequestProcessor(t *testing.T) {
 			},
 			wantContains: []string{
 				"You are an agent.",
-				"Your internal name is empty_desc_agent.",
+				"Your internal name is \"empty_desc_agent\".",
 			},
 			wantNotContain: []string{
 				"The description about you is",
@@ -98,7 +98,7 @@ func TestIdentityRequestProcessor(t *testing.T) {
 			wantContains: []string{
 				"Be concise.",
 				"You are an agent.",
-				"Your internal name is append_agent.",
+				"Your internal name is \"append_agent\".",
 			},
 		},
 	}

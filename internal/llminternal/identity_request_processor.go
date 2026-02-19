@@ -32,10 +32,9 @@ func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			return // do nothing.
 		}
 
-		agent := ctx.Agent()
-		si := fmt.Sprintf("You are an agent. Your internal name is %s.", agent.Name())
-		if description := agent.Description(); description != "" {
-			si = fmt.Sprintf("%s The description about you is %s.", si, description)
+		si := fmt.Sprintf("You are an agent. Your internal name is %q.", ctx.Agent().Name())
+		if description := ctx.Agent().Description(); description != "" {
+			si += fmt.Sprintf(" The description about you is %q.", description)
 		}
 
 		utils.AppendInstructions(req, si)
