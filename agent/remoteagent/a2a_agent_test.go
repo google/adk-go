@@ -74,7 +74,7 @@ func startA2AServer(agentExecutor a2asrv.AgentExecutor) *testA2AServer {
 func newA2ARemoteAgent(t *testing.T, name string, server *testA2AServer) agent.Agent {
 	t.Helper()
 	card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolJSONRPC, URL: server.URL, Capabilities: a2a.AgentCapabilities{Streaming: true}}
-	agent, err := NewA2A(A2AConfig{Name: name, AgentCard: card})
+	agent, err := NewA2A(A2AConfig{AgentCard: card, Name: name})
 	if err != nil {
 		t.Fatalf("remoteagent.NewA2A() error = %v", err)
 	}
@@ -127,12 +127,16 @@ func toLLMResponses(events []*session.Event) []model.LLMResponse {
 	return result
 }
 
-func newADKEventReplay(t *testing.T, events []*session.Event) a2asrv.AgentExecutor {
+func newADKEventReplay(t *testing.T, name string, events []*session.Event) agent.Agent {
 	t.Helper()
 	agnt, err := agent.New(agent.Config{
+		Name: name,
 		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				for _, ev := range events {
+					ev.InvocationID = ic.InvocationID()
+					ev.Branch = ic.Branch()
+					ev.Author = name
 					if !yield(ev, nil) {
 						return
 					}
@@ -143,11 +147,16 @@ func newADKEventReplay(t *testing.T, events []*session.Event) a2asrv.AgentExecut
 	if err != nil {
 		t.Fatalf("agent.New() error = %v", err)
 	}
+	return agnt
+}
+
+func newADKEventReplayExecutor(t *testing.T, events []*session.Event) a2asrv.AgentExecutor {
+	t.Helper()
 	return adka2a.NewExecutor(adka2a.ExecutorConfig{
 		RunnerConfig: runner.Config{
 			AppName:        "RemoteAgentTest",
 			SessionService: session.InMemoryService(),
-			Agent:          agnt,
+			Agent:          newADKEventReplay(t, "root", events),
 		},
 	})
 }
@@ -208,16 +217,15 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 		{
 			name: "text streaming",
 			remoteEvents: []*session.Event{
-				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello ", genai.RoleModel)}},
-				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("world", genai.RoleModel)}},
+				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello ", genai.RoleModel), Partial: true}},
+				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("world", genai.RoleModel), Partial: true, TurnComplete: true}},
+				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello world", genai.RoleModel)}},
 			},
 			wantResponses: []model.LLMResponse{
 				{Content: genai.NewContentFromText("hello ", genai.RoleModel), Partial: true},
 				{Content: genai.NewContentFromText("world", genai.RoleModel), Partial: true},
-				{
-					Content:      genai.NewContentFromText("hello world", genai.RoleModel),
-					TurnComplete: true,
-				},
+				{Content: genai.NewContentFromText("hello world", genai.RoleModel)},
+				{TurnComplete: true},
 			},
 		},
 		{
@@ -226,10 +234,7 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello world", genai.RoleModel)}},
 			},
 			wantResponses: []model.LLMResponse{
-				{
-					Content:      genai.NewContentFromText("hello world", genai.RoleModel),
-					TurnComplete: false,
-				},
+				{Content: genai.NewContentFromText("hello world", genai.RoleModel), TurnComplete: true},
 			},
 			noStreaming: true,
 		},
@@ -240,8 +245,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromCodeExecutionResult(genai.OutcomeOK, "hello", genai.RoleModel)}},
 			},
 			wantResponses: []model.LLMResponse{
-				{Content: genai.NewContentFromExecutableCode("print('hello')", genai.LanguagePython, genai.RoleModel), Partial: true},
-				{Content: genai.NewContentFromCodeExecutionResult(genai.OutcomeOK, "hello", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromExecutableCode("print('hello')", genai.LanguagePython, genai.RoleModel)},
+				{Content: genai.NewContentFromCodeExecutionResult(genai.OutcomeOK, "hello", genai.RoleModel)},
 				{TurnComplete: true},
 			},
 		},
@@ -252,8 +257,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromFunctionResponse("get_weather", map[string]any{"temo": "1C"}, genai.RoleModel)}},
 			},
 			wantResponses: []model.LLMResponse{
-				{Content: genai.NewContentFromFunctionCall("get_weather", map[string]any{"city": "Warsaw"}, genai.RoleModel), Partial: true},
-				{Content: genai.NewContentFromFunctionResponse("get_weather", map[string]any{"temo": "1C"}, genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromFunctionCall("get_weather", map[string]any{"city": "Warsaw"}, genai.RoleModel)},
+				{Content: genai.NewContentFromFunctionResponse("get_weather", map[string]any{"temo": "1C"}, genai.RoleModel)},
 				{TurnComplete: true},
 			},
 		},
@@ -264,8 +269,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromURI("http://text.com/text.txt", "text", genai.RoleModel)}},
 			},
 			wantResponses: []model.LLMResponse{
-				{Content: genai.NewContentFromBytes([]byte("hello"), "text", genai.RoleModel), Partial: true},
-				{Content: genai.NewContentFromURI("http://text.com/text.txt", "text", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromBytes([]byte("hello"), "text", genai.RoleModel)},
+				{Content: genai.NewContentFromURI("http://text.com/text.txt", "text", genai.RoleModel)},
 				{TurnComplete: true},
 			},
 		},
@@ -278,8 +283,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				},
 			},
 			wantResponses: []model.LLMResponse{
-				{Content: genai.NewContentFromText("stop", genai.RoleModel), Partial: true},
-				{Content: genai.NewContentFromText("stop", genai.RoleModel), TurnComplete: true},
+				{Content: genai.NewContentFromText("stop", genai.RoleModel)},
+				{TurnComplete: true},
 			},
 			wantEscalate: true,
 		},
@@ -292,16 +297,17 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				},
 			},
 			wantResponses: []model.LLMResponse{
-				{Content: genai.NewContentFromText("stop", genai.RoleModel), Partial: true},
-				{Content: genai.NewContentFromText("stop", genai.RoleModel), TurnComplete: true},
+				{Content: genai.NewContentFromText("stop", genai.RoleModel)},
+				{TurnComplete: true},
 			},
 			wantTransfer: "a-2",
 		},
 		{
 			name: "long-running function call",
 			remoteEvents: []*session.Event{
-				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hello!", genai.RoleModel)}},
-				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(" I'll need your approval first:", genai.RoleModel)}},
+				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hello!", genai.RoleModel), Partial: true}},
+				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(" I'll need your approval first:", genai.RoleModel), Partial: true}},
+				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hello! I'll need your approval first:", genai.RoleModel)}},
 				{
 					LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts(
 						[]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "create_ticket", ID: "abc-123"}}}, genai.RoleModel,
@@ -323,16 +329,6 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{Content: genai.NewContentFromText(" I'll need your approval first:", genai.RoleModel), Partial: true},
 				// Aggregated partial responses are emitted before a long-running function call
 				{Content: genai.NewContentFromText("Hello! I'll need your approval first:", genai.RoleModel)},
-				{Content: genai.NewContentFromParts(
-					[]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "create_ticket", ID: "abc-123"}}}, genai.RoleModel,
-				), Partial: true},
-				{Content: genai.NewContentFromParts(
-					[]*genai.Part{{FunctionResponse: &genai.FunctionResponse{
-						Name: "create_ticket", ID: "abc-123", Response: map[string]any{"ticket_id": "123"},
-					}}}, genai.RoleModel,
-				), Partial: true},
-				{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel), Partial: true},
-				// Only partial responses aggregated after the previous flush are included in the terminal event.
 				{Content: genai.NewContentFromText("Waiting for the approval to continue.", genai.RoleModel)},
 				{
 					Content: genai.NewContentFromParts(
@@ -366,12 +362,8 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 					UsageMetadata:     &genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 12, ThoughtsTokenCount: 42},
 					GroundingMetadata: &genai.GroundingMetadata{SourceFlaggingUris: []*genai.GroundingMetadataSourceFlaggingURI{{SourceID: "id1"}}},
 					CustomMetadata:    map[string]any{"nested": map[string]any{"key": "value"}},
-					Partial:           true,
 				},
-				{
-					Content:      genai.NewContentFromText("hello", genai.RoleModel),
-					TurnComplete: true,
-				},
+				{TurnComplete: true},
 			},
 		},
 	}
@@ -382,7 +374,7 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			executor := newADKEventReplay(t, tc.remoteEvents)
+			executor := newADKEventReplayExecutor(t, tc.remoteEvents)
 			remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
 
 			mode := agent.StreamingModeSSE
@@ -399,14 +391,15 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
 			}
 			var lastActions *session.EventActions
-			for _, event := range gotEvents {
+			for i, event := range gotEvents {
 				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("response")]; !ok {
 					if aggregated, _ := event.CustomMetadata[adka2a.ToADKMetaKey("aggregated")].(bool); !aggregated {
 						t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original event or meta[%q] = true", event.CustomMetadata, adka2a.ToADKMetaKey("response"), adka2a.ToADKMetaKey("aggregated"))
 					}
 				}
-				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; !ok {
-					t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original a2a request", event.CustomMetadata, adka2a.ToADKMetaKey("request"))
+				wantRequest := i == len(gotEvents)-1
+				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; ok != wantRequest {
+					t.Fatalf("event.CustomMetadata = %v, want request = %v", event.CustomMetadata, wantRequest)
 				}
 				lastActions = &event.Actions
 			}
@@ -432,7 +425,7 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 		{
 			name:          "empty message",
 			remoteEvents:  []a2a.Event{a2a.NewMessage(a2a.MessageRoleAgent)},
-			wantResponses: []model.LLMResponse{{}},
+			wantResponses: []model.LLMResponse{{TurnComplete: true}},
 		},
 		{
 			name: "message",
@@ -441,6 +434,7 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			},
 			wantResponses: []model.LLMResponse{
 				{
+					TurnComplete: true,
 					Content: &genai.Content{
 						Parts: []*genai.Part{genai.NewPartFromText("hello"), genai.NewPartFromText("world")},
 						Role:  genai.RoleModel,
@@ -453,7 +447,7 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			remoteEvents: []a2a.Event{
 				&a2a.Task{Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}},
 			},
-			wantResponses: []model.LLMResponse{{}},
+			wantResponses: []model.LLMResponse{{TurnComplete: true}},
 		},
 		{
 			name: "task with status message",
@@ -463,7 +457,10 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 					Message: a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "hello"}),
 				}},
 			},
-			wantResponses: []model.LLMResponse{{Content: genai.NewContentFromText("hello", genai.RoleModel)}},
+			wantResponses: []model.LLMResponse{{
+				TurnComplete: true,
+				Content:      genai.NewContentFromText("hello", genai.RoleModel),
+			}},
 		},
 		{
 			name: "task with multipart artifact",
@@ -477,6 +474,7 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			},
 			wantResponses: []model.LLMResponse{
 				{
+					TurnComplete: true,
 					Content: &genai.Content{
 						Parts: []*genai.Part{genai.NewPartFromText("hello"), genai.NewPartFromText("world")},
 						Role:  genai.RoleModel,
@@ -500,7 +498,7 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			},
 			wantResponses: []model.LLMResponse{
 				{Content: genai.NewContentFromText("hello", genai.RoleModel)},
-				{Content: genai.NewContentFromText("world", genai.RoleModel)},
+				{Content: genai.NewContentFromText("world", genai.RoleModel), TurnComplete: true},
 			},
 		},
 		{
@@ -516,6 +514,7 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			},
 			wantResponses: []model.LLMResponse{
 				{
+					TurnComplete: true,
 					Content: &genai.Content{
 						Parts: []*genai.Part{genai.NewPartFromText("hello"), genai.NewPartFromText("world")},
 						Role:  genai.RoleModel,
@@ -565,6 +564,45 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 				{TurnComplete: true},
 			},
 		},
+		{
+			name: "partial and non-partial event aggregation",
+			remoteEvents: []a2a.Event{
+				artifactEvent,
+				&a2a.TaskArtifactUpdateEvent{
+					TaskID:    task.ID,
+					ContextID: task.ContextID,
+					Artifact:  &a2a.Artifact{ID: artifactEvent.Artifact.ID, Parts: a2a.ContentParts{a2a.TextPart{Text: "1"}}},
+					Append:    true,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					TaskID:    task.ID,
+					ContextID: task.ContextID,
+					Artifact:  &a2a.Artifact{ID: artifactEvent.Artifact.ID, Parts: a2a.ContentParts{a2a.TextPart{Text: "2"}}},
+					Append:    true,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					TaskID:    task.ID,
+					ContextID: task.ContextID,
+					Artifact:  &a2a.Artifact{ID: artifactEvent.Artifact.ID, Parts: a2a.ContentParts{a2a.TextPart{Text: "3"}}},
+					Append:    false,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					TaskID:    task.ID,
+					ContextID: task.ContextID,
+					Artifact:  &a2a.Artifact{ID: artifactEvent.Artifact.ID, Parts: a2a.ContentParts{a2a.TextPart{Text: "4"}}},
+					Append:    true,
+				},
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, a2a.TextPart{Text: "5"}),
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: genai.NewContentFromText("1", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromText("2", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromText("3", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromText("4", genai.RoleModel), Partial: true},
+				{Content: genai.NewContentFromText("34", genai.RoleModel)},
+				{Content: genai.NewContentFromText("5", genai.RoleModel), TurnComplete: true},
+			},
+		},
 	}
 
 	ignoreFields := []cmp.Option{
@@ -585,14 +623,16 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			if diff := cmp.Diff(tc.wantResponses, gotResponses, ignoreFields...); diff != "" {
 				t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
 			}
-			for _, event := range gotEvents {
+
+			for i, event := range gotEvents {
 				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("response")]; !ok {
 					if aggregated, _ := event.CustomMetadata[adka2a.ToADKMetaKey("aggregated")].(bool); !aggregated {
 						t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original event or meta[%q] = true", event.CustomMetadata, adka2a.ToADKMetaKey("response"), adka2a.ToADKMetaKey("aggregated"))
 					}
 				}
-				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; !ok {
-					t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original a2a request", event.CustomMetadata, adka2a.ToADKMetaKey("request"))
+				wantOriginalRequest := len(gotEvents)-1 == i
+				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; ok != wantOriginalRequest {
+					t.Fatalf("event.CustomMetadata = %v, want original request = %v", event.CustomMetadata, wantOriginalRequest)
 				}
 			}
 		})
@@ -632,6 +672,7 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 				{
 					Content:        genai.NewContentFromText("foobar", genai.RoleModel),
 					CustomMetadata: map[string]any{"counter": 1},
+					TurnComplete:   true,
 				},
 			},
 		},
@@ -1038,7 +1079,7 @@ func TestRemoteAgent_EmptyResultForEmptySession(t *testing.T) {
 
 func TestRemoteAgent_ResolvesAgentCard(t *testing.T) {
 	remoteEvents := []a2a.Event{a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "Hello!"})}
-	wantResponses := []model.LLMResponse{{Content: genai.NewContentFromText("Hello!", genai.RoleModel)}}
+	wantResponses := []model.LLMResponse{{Content: genai.NewContentFromText("Hello!", genai.RoleModel), TurnComplete: true}}
 
 	executor := newA2AEventReplay(t, remoteEvents)
 	handler := a2asrv.NewHandler(executor)

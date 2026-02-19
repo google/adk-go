@@ -36,6 +36,7 @@ var (
 	metadataGroundingKey       = ToA2AMetaKey("grounding_metadata")
 	metadataUsageKey           = ToA2AMetaKey("usage_metadata")
 	metadataCustomMetaKey      = ToA2AMetaKey("custom_metadata")
+	metadataPartialKey         = ToA2AMetaKey("partial")
 )
 
 // ToA2AMetaKey adds a prefix used to differentiage ADK-related values stored in Metadata an A2A event.

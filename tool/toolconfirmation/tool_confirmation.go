@@ -50,17 +50,17 @@ const FunctionCallName = "adk_request_confirmation"
 type ToolConfirmation struct {
 	// Hint is the message provided to the user to explain why the confirmation
 	// is needed and what action is being confirmed.
-	Hint string
+	Hint string `json:"hint"`
 
 	// Confirmed indicates the user's decision.
 	// true if the user approved the action, false if they denied it.
 	// The state before the user has responded is typically handled outside
 	// this struct (e.g., by the absence of a result or a pending status).
-	Confirmed bool
+	Confirmed bool `json:"confirmed"`
 
 	// Payload contains any additional data or context related to the confirmation request.
 	// The structure of the Payload is application-specific.
-	Payload any
+	Payload any `json:"payload"`
 }
 
 // OriginalCallFrom retrieves the underlying, original function call from a tool confirmation wrapper.

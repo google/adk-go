@@ -146,7 +146,6 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		if ctx.Ended() {
 			return
 		}
-		spans := telemetry.StartTrace(ctx, "call_llm")
 		// Create event to pass to callback state delta
 		stateDelta := make(map[string]any)
 		// Calls the LLM.
@@ -180,7 +179,6 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 
 			// Build the event and yield.
 			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
-			telemetry.TraceLLMCall(spans, ctx, req, modelResponseEvent)
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
@@ -311,7 +309,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 		useStream := runconfig.FromContext(ctx).StreamingMode == runconfig.StreamingModeSSE
 
-		for resp, err := range f.Model.GenerateContent(ctx, req, useStream) {
+		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
 				cbResp, cbErr := f.runOnModelErrorCallbacks(ctx, req, stateDelta, err)
 				if cbErr != nil {
@@ -325,6 +323,9 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 				resp = cbResp
 				err = cbErr
 			}
+			// Function call ID is optional in genai API and some models do not use the field.
+			// Set it in case after model callbacks use it.
+			utils.PopulateClientFunctionCallID(resp.Content)
 			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp, stateDelta, err)
 			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
 			if callbackErr != nil {
@@ -346,6 +347,45 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 
 			if !yield(resp, nil) {
+				return
+			}
+		}
+	}
+}
+
+// generateContent wraps the LLM call with tracing.
+// The generate_contenxt span should cover only calls to LLM. Plugins and callbacks should be outside of this span.
+func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
+			ModelName: m.Name(),
+		})
+		ctx = ctx.WithContext(spanCtx)
+		var lastResponse *model.LLMResponse
+		var lastErr error
+		spanEnded := false
+		endSpanAndTrackResult := func() {
+			if spanEnded {
+				// Return to avoid spamming the logs with "span already ended" errors.
+				return
+			}
+			telemetry.TraceGenerateContentResult(span, telemetry.TraceGenerateContentResultParams{
+				Response: lastResponse,
+				Error:    lastErr,
+			})
+			span.End()
+			spanEnded = true
+		}
+		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
+		defer endSpanAndTrackResult()
+		for resp, err := range m.GenerateContent(ctx, req, useStream) {
+			lastResponse = resp
+			lastErr = err
+			if err != nil || !resp.Partial {
+				// Complete the span immediately to avoid capturing the upstream yield processing time.
+				endSpanAndTrackResult()
+			}
+			if !yield(resp, err) {
 				return
 			}
 		}
@@ -485,72 +525,97 @@ Suggested fixes:
 //
 // TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
-func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation) (*session.Event, error) {
+func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation) (mergedEvent *session.Event, err error) {
 	var fnResponseEvents []*session.Event
-
 	fnCalls := utils.FunctionCalls(resp.Content)
 	toolNames := slices.Collect(maps.Keys(toolsDict))
 	var result map[string]any
+	// Merged span for parallel tool calls - create only if there is more than one tool call.
+	if len(fnCalls) > 1 {
+		mergedCtx, mergedToolCallSpan := telemetry.StartTrace(ctx, "execute_tool (merged)")
+		ctx = ctx.WithContext(mergedCtx)
+		defer func() {
+			telemetry.TraceMergedToolCallsResult(mergedToolCallSpan, mergedEvent, err)
+			mergedToolCallSpan.End()
+		}()
+	}
 	for _, fnCall := range fnCalls {
-		var confirmation *toolconfirmation.ToolConfirmation
-		if toolConfirmations != nil {
-			confirmation = toolConfirmations[fnCall.ID]
-		}
-		toolCtx := toolinternal.NewToolContext(ctx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
-
-		spans := telemetry.StartTrace(ctx, "execute_tool "+fnCall.Name)
-		curTool, found := toolsDict[fnCall.Name]
-		if !found {
-			err := newToolNotFoundError(fnCall.Name, toolNames)
-			result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
-			if err != nil {
-				result = map[string]any{"error": err.Error()}
+		// Wrap function calls in anonymous func to limit the scope of the span.
+		func() {
+			sctx, span := telemetry.StartExecuteToolSpan(ctx, telemetry.StartExecuteToolSpanParams{
+				ToolName: fnCall.Name,
+			})
+			defer span.End()
+			toolCallCtx := ctx.WithContext(sctx)
+			var confirmation *toolconfirmation.ToolConfirmation
+			if toolConfirmations != nil {
+				confirmation = toolConfirmations[fnCall.ID]
 			}
-		} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
-			err := newToolNotFoundError(fnCall.Name, toolNames)
-			result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
-			if err != nil {
-				result = map[string]any{"error": err.Error()}
-			}
-		} else {
-			result = f.callTool(toolCtx, funcTool, fnCall.Args)
-		}
+			toolCtx := toolinternal.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
 
-		// TODO: handle long-running tool.
-		ev := session.NewEvent(ctx.InvocationID())
-		ev.LLMResponse = model.LLMResponse{
-			Content: &genai.Content{
-				Role: "user",
-				Parts: []*genai.Part{
-					{
-						FunctionResponse: &genai.FunctionResponse{
-							ID:       fnCall.ID,
-							Name:     fnCall.Name,
-							Response: result,
+			curTool, found := toolsDict[fnCall.Name]
+			if !found {
+				err := newToolNotFoundError(fnCall.Name, toolNames)
+				result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+				if err != nil {
+					result = map[string]any{"error": err.Error()}
+				}
+			} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
+				err := newToolNotFoundError(fnCall.Name, toolNames)
+				result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+				if err != nil {
+					result = map[string]any{"error": err.Error()}
+				}
+			} else {
+				result = f.callTool(toolCtx, funcTool, fnCall.Args)
+			}
+
+			// TODO: handle long-running tool.
+			ev := session.NewEvent(ctx.InvocationID())
+			ev.LLMResponse = model.LLMResponse{
+				Content: &genai.Content{
+					Role: "user",
+					Parts: []*genai.Part{
+						{
+							FunctionResponse: &genai.FunctionResponse{
+								ID:       fnCall.ID,
+								Name:     fnCall.Name,
+								Response: result,
+							},
 						},
 					},
 				},
-			},
-		}
-		ev.Author = ctx.Agent().Name()
-		ev.Branch = ctx.Branch()
-		ev.Actions = *toolCtx.Actions()
+			}
+			ev.Author = ctx.Agent().Name()
+			ev.Branch = ctx.Branch()
+			ev.Actions = *toolCtx.Actions()
 
-		traceTool := curTool
-		if traceTool == nil {
-			traceTool = &fakeTool{name: fnCall.Name}
-		}
-		telemetry.TraceToolCall(spans, traceTool, fnCall.Args, ev)
+			traceTool := curTool
+			if traceTool == nil {
+				traceTool = &fakeTool{name: fnCall.Name}
+			}
+			var toolErr error
+			resultErr := result["error"]
+			if resultErr != nil {
+				if err, ok := resultErr.(error); ok {
+					toolErr = err
+				} else if errStr, ok := resultErr.(string); ok {
+					toolErr = errors.New(errStr)
+				}
+			}
+			telemetry.TraceToolResult(span, telemetry.TraceToolResultParams{
+				Description:   traceTool.Description(),
+				ResponseEvent: ev,
+				Error:         toolErr,
+			})
 
-		fnResponseEvents = append(fnResponseEvents, ev)
+			fnResponseEvents = append(fnResponseEvents, ev)
+		}()
 	}
-	mergedEvent, err := mergeParallelFunctionResponseEvents(fnResponseEvents)
+	mergedEvent, err = mergeParallelFunctionResponseEvents(fnResponseEvents)
 	if err != nil {
 		return mergedEvent, err
 	}
-	// this is needed for debug traces of parallel calls
-	spans := telemetry.StartTrace(ctx, "execute_tool (merged)")
-	telemetry.TraceMergedToolCalls(spans, mergedEvent)
 	return mergedEvent, nil
 }
 
