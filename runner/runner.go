@@ -257,13 +257,14 @@ func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessio
 	}
 
 	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:                   artifacts,
-		Memory:                      memoryImpl,
-		Session:                     session,
-		Agent:                       agentToRun,
-		RunConfig:                   &cfg,
-		LiveRequestQueue:            liveRequestQueue,
-		LiveSessionResumptionHandle: "", //TODO how we get this from session?
+		Artifacts:        artifacts,
+		Memory:           memoryImpl,
+		Session:          session,
+		Agent:            agentToRun,
+		RunConfig:        &cfg,
+		LiveRequestQueue: liveRequestQueue,
+		//TODO in go we dont have this stored anywhere yet.
+		LiveSessionResumptionHandle: "",
 	})
 	return invCtx
 }
