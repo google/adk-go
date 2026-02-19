@@ -15,6 +15,7 @@
 package controllers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -22,15 +23,17 @@ import (
 
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/server/adkrest/internal/models"
+	"google.golang.org/adk/server/adkrest/validation"
 )
 
 // ArtifactsAPIController is the controller for the Artifacts API.
 type ArtifactsAPIController struct {
-	artifactService artifact.Service
+	artifactService     artifact.Service
+	userAccessValidator validation.UserAccessValidator
 }
 
-func NewArtifactsAPIController(artifactService artifact.Service) *ArtifactsAPIController {
-	return &ArtifactsAPIController{artifactService: artifactService}
+func NewArtifactsAPIController(artifactService artifact.Service, userAccessValidator validation.UserAccessValidator) *ArtifactsAPIController {
+	return &ArtifactsAPIController{artifactService: artifactService, userAccessValidator: userAccessValidator}
 }
 
 // ListArtifactsHandler lists all the artifact filenames within a session.
@@ -43,6 +46,9 @@ func (c *ArtifactsAPIController) ListArtifactsHandler(rw http.ResponseWriter, re
 	}
 	if sessionID.ID == "" {
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
 		return
 	}
 	resp, err := c.artifactService.List(req.Context(), &artifact.ListRequest{
@@ -71,6 +77,9 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 	}
 	if sessionID.ID == "" {
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
 		return
 	}
 	artifactName := vars["artifact_name"]
@@ -114,6 +123,9 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 	}
 	if sessionID.ID == "" {
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
 		return
 	}
 	artifactName := vars["artifact_name"]
@@ -162,6 +174,9 @@ func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, r
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
+	if !c.checkUserAccess(rw, req, sessionID.AppName, sessionID.UserID) {
+		return
+	}
 	artifactName := vars["artifact_name"]
 	if artifactName == "" {
 		http.Error(rw, "artifact_name parameter is required", http.StatusBadRequest)
@@ -178,4 +193,19 @@ func (c *ArtifactsAPIController) DeleteArtifactHandler(rw http.ResponseWriter, r
 		return
 	}
 	EncodeJSONResponse(nil, http.StatusOK, rw)
+}
+
+// checkUserAccess checks if the user has access.
+func (c *ArtifactsAPIController) checkUserAccess(rw http.ResponseWriter, req *http.Request, appName string, userID string) bool {
+	if c.userAccessValidator != nil {
+		if err := c.userAccessValidator.ValidateUserAccess(req, appName, userID); err != nil {
+			if validationErr, ok := err.(validation.ValidationError); ok {
+				http.Error(rw, validationErr.Error(), validationErr.Status())
+				return false
+			}
+			http.Error(rw, fmt.Errorf("user access validation failed: %v", err).Error(), http.StatusForbidden)
+			return false
+		}
+	}
+	return true
 }

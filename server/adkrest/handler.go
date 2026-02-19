@@ -25,11 +25,12 @@ import (
 	"google.golang.org/adk/server/adkrest/controllers"
 	"google.golang.org/adk/server/adkrest/internal/routers"
 	"google.golang.org/adk/server/adkrest/internal/services"
+	"google.golang.org/adk/server/adkrest/validation"
 	"google.golang.org/adk/telemetry"
 )
 
 // NewHandler creates and returns an http.Handler for the ADK REST API.
-func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration) http.Handler {
+func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, userAccessValidator validation.UserAccessValidator) http.Handler {
 	adkExporter := services.NewAPIServerSpanExporter()
 	processor := sdktrace.NewSimpleSpanProcessor(adkExporter)
 	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(processor))
@@ -38,11 +39,11 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration) http.Han
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
 	setupRouter(router,
-		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(config.SessionService)),
-		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(config.SessionService, config.MemoryService, config.AgentLoader, config.ArtifactService, sseWriteTimeout, config.PluginConfig)),
+		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(config.SessionService, userAccessValidator)),
+		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(config.SessionService, config.MemoryService, config.AgentLoader, config.ArtifactService, sseWriteTimeout, config.PluginConfig, userAccessValidator)),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(config.AgentLoader)),
 		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(config.SessionService, config.AgentLoader, adkExporter)),
-		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(config.ArtifactService)),
+		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(config.ArtifactService, userAccessValidator)),
 		&routers.EvalAPIRouter{},
 	)
 	return router
