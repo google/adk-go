@@ -19,10 +19,8 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"log"
-	"time"
-
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"google.golang.org/genai"
@@ -89,13 +87,13 @@ func New(cfg Config) (*Runner, error) {
 	}
 
 	return &Runner{
-		appName:         cfg.AppName,
-		rootAgent:       cfg.Agent,
-		sessionService:  cfg.SessionService,
-		artifactService: cfg.ArtifactService,
-		memoryService:   cfg.MemoryService,
-		parents:         parents,
-		pluginManager:   pluginManager,
+		appName:            cfg.AppName,
+		rootAgent:          cfg.Agent,
+		sessionService:     cfg.SessionService,
+		artifactService:    cfg.ArtifactService,
+		memoryService:      cfg.MemoryService,
+		parents:            parents,
+		pluginManager:      pluginManager,
 		resumabilityConfig: cfg.ResumabilityConfig,
 	}, nil
 }
@@ -111,7 +109,7 @@ type Runner struct {
 	memoryService   memory.Service
 
 	parents            parentmap.Map
-	pluginManager *plugininternal.PluginManager
+	pluginManager      *plugininternal.PluginManager
 	resumabilityConfig *agent.ResumabilityConfig
 }
 
@@ -173,7 +171,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 
 		storedSession := resp.Session
 
-		agentToRun, err := r.findAgentToRun(storedSession)
+		agentToRun, err := r.findAgentToRun(storedSession, nil)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -261,7 +259,7 @@ func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessio
 	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:                   artifacts,
 		Memory:                      memoryImpl,
-		Session:                     sessioninternal.NewMutableSession(r.sessionService, session),
+		Session:                     session,
 		Agent:                       agentToRun,
 		RunConfig:                   &cfg,
 		LiveRequestQueue:            liveRequestQueue,

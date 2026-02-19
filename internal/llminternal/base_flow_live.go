@@ -30,12 +30,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		// We only run them once at start for now.
 		// TODO: Re-evaluate if some processors need to run per-turn or if they make sense in live.
 		// Preprocess before calling the LLM.
-		if err := f.preprocess(ctx, req); err != nil {
-			yield(nil, err)
-			return
-		}
-		if ctx.Ended() {
-			return
+		for _, err := range f.preprocess(ctx, req) {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if ctx.Ended() {
+				return
+			}
 		}
 
 		attempt := 0
