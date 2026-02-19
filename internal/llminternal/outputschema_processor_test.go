@@ -17,6 +17,7 @@ package llminternal
 import (
 	"context"
 	"encoding/json"
+	"iter"
 	"strings"
 	"testing"
 
@@ -58,6 +59,20 @@ func (m *mockLLM) GetGoogleLLMVariant() genai.Backend {
 	}
 	return genai.BackendGeminiAPI
 }
+
+// mockNonGeminiLLM represents a non-Gemini model (e.g., Bedrock/Claude)
+// that doesn't implement the GoogleLLM interface.
+type mockNonGeminiLLM struct {
+	name string
+}
+
+func (m *mockNonGeminiLLM) Name() string { return m.name }
+
+func (m *mockNonGeminiLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return nil
+}
+
+var _ model.LLM = (*mockNonGeminiLLM)(nil)
 
 // mockLLMAgent satisfies both agent.Agent (via embedding) and llminternal.Agent (via internal() implementation)
 type mockLLMAgent struct {
@@ -201,6 +216,50 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 
 		if _, ok := req.Tools["set_model_response"]; ok {
 			t.Error("set_model_response tool should NOT be added when native support is available")
+		}
+	})
+
+	t.Run("InjectsToolForNonGeminiModels", func(t *testing.T) {
+		// Non-Gemini models (like Bedrock/Claude) should use the processor
+		// since they don't support native output schema with tools
+		llm := &mockNonGeminiLLM{name: "claude-3-5-sonnet"}
+
+		baseAgent := utils.Must(agent.New(agent.Config{Name: "ClaudeAgent"}))
+		mockAgent := &mockLLMAgent{
+			Agent: baseAgent,
+			s: &State{
+				Model:        llm,
+				OutputSchema: schema,
+				Tools:        []tool.Tool{&mockTool{name: "other_tool"}},
+			},
+		}
+
+		req := &model.LLMRequest{}
+		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+			Agent: mockAgent,
+		})
+
+		events := outputSchemaRequestProcessor(ctx, req, f)
+		for _, err := range events {
+			t.Fatalf("outputSchemaRequestProcessor() error = %v", err)
+		}
+
+		// Verify set_model_response tool is present for non-Gemini models
+		if _, ok := req.Tools["set_model_response"]; !ok {
+			t.Error("req.Tools['set_model_response'] should be added for non-Gemini models with tools")
+		}
+
+		// Verify instructions
+		instructions := utils.TextParts(req.Config.SystemInstruction)
+		found := false
+		for _, s := range instructions {
+			if strings.Contains(s, "set_model_response") && strings.Contains(s, "required structured format") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Instruction about set_model_response not found for non-Gemini model. Instructions: %v", instructions)
 		}
 	})
 }
