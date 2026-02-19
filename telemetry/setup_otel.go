@@ -93,8 +93,9 @@ func newInternal(cfg *config) (*Providers, error) {
 	// TODO(#479) init meter provider
 
 	return &Providers{
-		TracerProvider: tp,
-		LoggerProvider: lp,
+		TracerProvider:             tp,
+		genAICaptureMessageContent: cfg.genAICaptureMessageContent,
+		LoggerProvider:             lp,
 	}, nil
 }
 
