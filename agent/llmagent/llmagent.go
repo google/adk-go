@@ -77,6 +77,7 @@ func New(cfg Config) (agent.Agent, error) {
 		State: llminternal.State{
 			Model:                    cfg.Model,
 			GenerateContentConfig:    cfg.GenerateContentConfig,
+			LiveConnectConfig:        cfg.LiveConnectConfig,
 			Tools:                    cfg.Tools,
 			Toolsets:                 cfg.Toolsets,
 			DisallowTransferToParent: cfg.DisallowTransferToParent,
@@ -99,6 +100,7 @@ func New(cfg Config) (agent.Agent, error) {
 		SubAgents:            cfg.SubAgents,
 		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		Run:                  a.run,
+		RunLive:              a.runLive,
 		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
 	})
 	if err != nil {
@@ -151,6 +153,11 @@ type Config struct {
 	// For example: use this config to adjust model temperature, configure
 	// safety settings, etc.
 	GenerateContentConfig *genai.GenerateContentConfig
+
+	// LiveConnectConfig configures live connection settings for the agent.
+	//
+	// If this is set, the agent will use live connection to the model.
+	LiveConnectConfig *genai.LiveConnectConfig
 
 	// BeforeModelCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil LLMResponse or error. Then
@@ -371,6 +378,39 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 	return func(yield func(*session.Event, error) bool) {
 		for ev, err := range f.Run(ctx) {
+			a.maybeSaveOutputToState(ev)
+			if !yield(ev, err) {
+				return
+			}
+		}
+	}
+}
+
+func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:        ctx.Artifacts(),
+		Memory:           ctx.Memory(),
+		Session:          ctx.Session(),
+		Branch:           ctx.Branch(),
+		Agent:            a,
+		UserContent:      ctx.UserContent(),
+		RunConfig:        ctx.RunConfig(),
+		LiveRequestQueue: ctx.LiveRequestQueue(),
+	})
+
+	f := &llminternal.Flow{
+		Model:                a.model,
+		AudioCacheManager:    llminternal.NewAudioCacheManager(nil),
+		RequestProcessors:    llminternal.DefaultRequestProcessors,
+		ResponseProcessors:   llminternal.DefaultResponseProcessors,
+		BeforeModelCallbacks: a.beforeModelCallbacks,
+		AfterModelCallbacks:  a.afterModelCallbacks,
+		BeforeToolCallbacks:  a.beforeToolCallbacks,
+		AfterToolCallbacks:   a.afterToolCallbacks,
+	}
+
+	return func(yield func(*session.Event, error) bool) {
+		for ev, err := range f.RunLive(ctx) {
 			a.maybeSaveOutputToState(ev)
 			if !yield(ev, err) {
 				return

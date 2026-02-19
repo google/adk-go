@@ -35,7 +35,15 @@ type InvocationContextParams struct {
 	UserContent   *genai.Content
 	RunConfig     *agent.RunConfig
 	EndInvocation bool
-	InvocationID  string
+
+	LiveRequestQueue *agent.LiveRequestQueue
+
+	TranscriptionCache          []agent.TranscriptionEntry
+	InputRealtimeCache          []agent.RealtimeCacheEntry
+	OutputRealtimeCache         []agent.RealtimeCacheEntry
+	ResumabilityConfig          *agent.ResumabilityConfig
+	LiveSessionResumptionHandle string
+	InvocationID                string
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
@@ -94,6 +102,49 @@ func (c *InvocationContext) Ended() bool {
 	return c.params.EndInvocation
 }
 
+func (c *InvocationContext) LiveRequestQueue() *agent.LiveRequestQueue {
+	return c.params.LiveRequestQueue
+}
+
+func (c *InvocationContext) TranscriptionCache() []agent.TranscriptionEntry {
+	return c.params.TranscriptionCache
+}
+
+func (c *InvocationContext) LiveSessionResumptionHandle() string {
+	return c.params.LiveSessionResumptionHandle
+}
+
+func (c *InvocationContext) InputRealtimeCache() []agent.RealtimeCacheEntry {
+	return c.params.InputRealtimeCache
+}
+
+func (c *InvocationContext) OutputRealtimeCache() []agent.RealtimeCacheEntry {
+	return c.params.OutputRealtimeCache
+}
+
+func (c *InvocationContext) ResumabilityConfig() *agent.ResumabilityConfig {
+	return c.params.ResumabilityConfig
+}
+
+func (c *InvocationContext) AppendInputRealtimeCache(entry agent.RealtimeCacheEntry) {
+	c.params.InputRealtimeCache = append(c.params.InputRealtimeCache, entry)
+}
+
+func (c *InvocationContext) AppendOutputRealtimeCache(entry agent.RealtimeCacheEntry) {
+	c.params.OutputRealtimeCache = append(c.params.OutputRealtimeCache, entry)
+}
+
+func (c *InvocationContext) ClearInputRealtimeCache() {
+	c.params.InputRealtimeCache = nil
+}
+
+func (c *InvocationContext) ClearOutputRealtimeCache() {
+	c.params.OutputRealtimeCache = nil
+}
+
+func (c *InvocationContext) SetLiveSessionResumptionHandle(handle string) {
+	c.params.LiveSessionResumptionHandle = handle
+}
 func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
 	newCtx := *c
 	newCtx.Context = ctx

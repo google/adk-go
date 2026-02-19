@@ -19,9 +19,10 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"log"
+	"strings"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -51,6 +52,8 @@ type Config struct {
 	ArtifactService artifact.Service
 	// optional
 	MemoryService memory.Service
+
+	ResumabilityConfig *agent.ResumabilityConfig
 	// optional
 	PluginConfig PluginConfig
 }
@@ -84,13 +87,14 @@ func New(cfg Config) (*Runner, error) {
 	}
 
 	return &Runner{
-		appName:         cfg.AppName,
-		rootAgent:       cfg.Agent,
-		sessionService:  cfg.SessionService,
-		artifactService: cfg.ArtifactService,
-		memoryService:   cfg.MemoryService,
-		parents:         parents,
-		pluginManager:   pluginManager,
+		appName:            cfg.AppName,
+		rootAgent:          cfg.Agent,
+		sessionService:     cfg.SessionService,
+		artifactService:    cfg.ArtifactService,
+		memoryService:      cfg.MemoryService,
+		parents:            parents,
+		pluginManager:      pluginManager,
+		resumabilityConfig: cfg.ResumabilityConfig,
 	}, nil
 }
 
@@ -104,8 +108,184 @@ type Runner struct {
 	artifactService artifact.Service
 	memoryService   memory.Service
 
-	parents       parentmap.Map
-	pluginManager *plugininternal.PluginManager
+	parents            parentmap.Map
+	pluginManager      *plugininternal.PluginManager
+	resumabilityConfig *agent.ResumabilityConfig
+}
+
+func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if len(cfg.ResponseModalities) == 0 {
+			cfg.ResponseModalities = []genai.Modality{genai.ModalityAudio}
+		}
+
+		if cfg.SpeechConfig == nil {
+			cfg.SpeechConfig = &genai.SpeechConfig{
+				VoiceConfig: &genai.VoiceConfig{
+					PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
+						VoiceName: "Aoede",
+					},
+				},
+			}
+		}
+
+		if strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" {
+			yield(nil, fmt.Errorf("userID and sessionID must be provided."))
+			return
+		}
+
+		if liveRequestQueue == nil {
+			yield(nil, fmt.Errorf("live request queue must be provided"))
+			return
+		}
+
+		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
+			AppName:   r.appName,
+			UserID:    userID,
+			SessionID: sessionID,
+		})
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
+		// For live multi-agents system, we need model's text transcription as
+		// context for the transferred agent.
+		if len(r.rootAgent.SubAgents()) > 0 {
+			found := false
+			for _, modality := range cfg.ResponseModalities {
+				if modality == genai.ModalityAudio {
+					found = true
+					break
+				}
+			}
+			if found {
+				if cfg.InputAudioTranscription == nil {
+					cfg.InputAudioTranscription = &genai.AudioTranscriptionConfig{}
+				}
+				if cfg.OutputAudioTranscription == nil {
+					cfg.OutputAudioTranscription = &genai.AudioTranscriptionConfig{}
+				}
+			}
+		}
+
+		storedSession := resp.Session
+
+		agentToRun, err := r.findAgentToRun(storedSession, nil)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
+		invCtx := r.newInvocationContextForLive(ctx, userID, sessionID, liveRequestQueue, cfg, agentToRun, storedSession)
+
+		for event, err := range agentToRun.RunLive(invCtx) {
+			if err != nil {
+				if !yield(event, err) {
+					return
+				}
+				continue
+			}
+
+			// if r.shouldAppendEvent(event, true) {
+			if err := r.sessionService.AppendEvent(invCtx, storedSession, event); err != nil {
+				yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+				return
+			}
+			// }
+
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessionID string, liveRequestQueue *agent.LiveRequestQueue, cfg agent.RunConfig, agentToRun agent.Agent, session session.Session) agent.InvocationContext {
+	liveConnectConfig := &genai.LiveConnectConfig{
+		ResponseModalities:       cfg.ResponseModalities,
+		SpeechConfig:             cfg.SpeechConfig,
+		InputAudioTranscription:  cfg.InputAudioTranscription,
+		OutputAudioTranscription: cfg.OutputAudioTranscription,
+		RealtimeInputConfig:      cfg.RealtimeInputConfig,
+		ContextWindowCompression: cfg.ContextWindowCompression,
+		Proactivity:              cfg.Proactivity,
+	}
+
+	if cfg.ExplicitVADSignal {
+		liveConnectConfig.ExplicitVADSignal = &cfg.ExplicitVADSignal
+	}
+	if cfg.EnableAffectiveDialog {
+		liveConnectConfig.EnableAffectiveDialog = &cfg.EnableAffectiveDialog
+	}
+
+	if r.resumabilityConfig != nil && r.resumabilityConfig.IsResumable {
+		if cfg.SessionResumption != nil {
+			liveConnectConfig.SessionResumption = cfg.SessionResumption
+		} else {
+			liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{
+				Handle:      fmt.Sprintf("%s_%s", sessionID, userID),
+				Transparent: true,
+			}
+		}
+	}
+
+	ctx = parentmap.ToContext(ctx, r.parents)
+	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
+		StreamingMode:     runconfig.StreamingMode(cfg.StreamingMode),
+		LiveConnectConfig: liveConnectConfig,
+	})
+
+	var artifacts agent.Artifacts
+	if r.artifactService != nil {
+		artifacts = &artifactinternal.Artifacts{
+			Service:   r.artifactService,
+			SessionID: session.ID(),
+			AppName:   session.AppName(),
+			UserID:    session.UserID(),
+		}
+	}
+
+	var memoryImpl agent.Memory = nil
+	if r.memoryService != nil {
+		memoryImpl = &imemory.Memory{
+			Service:   r.memoryService,
+			SessionID: session.ID(),
+			UserID:    session.UserID(),
+			AppName:   session.AppName(),
+		}
+	}
+
+	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:        artifacts,
+		Memory:           memoryImpl,
+		Session:          session,
+		Agent:            agentToRun,
+		RunConfig:        &cfg,
+		LiveRequestQueue: liveRequestQueue,
+		//TODO in go we dont have this stored anywhere yet.
+		LiveSessionResumptionHandle: "",
+	})
+	return invCtx
+}
+
+func (r *Runner) shouldAppendEvent(event *session.Event, isLiveCall bool) bool {
+	if isLiveCall && isLiveModelAudioEventWithInlineData(event) {
+		return false
+	}
+	return !event.Partial
+}
+
+func isLiveModelAudioEventWithInlineData(event *session.Event) bool {
+	if event.Content == nil {
+		return false
+	}
+	for _, part := range event.Content.Parts {
+		if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
+			return true
+		}
+	}
+	return false
 }
 
 // Run runs the agent for the given user input, yielding events from agents.

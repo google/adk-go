@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    command: postgres -c 'max_connections=1000'
+    environment:
+      POSTGRES_DB: adk
+      POSTGRES_USER: adk
+      POSTGRES_PASSWORD: adk
+    ports:
+      - "127.0.0.1:5432:5432"
+    restart: always
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+
+volumes:
+  postgres_data:

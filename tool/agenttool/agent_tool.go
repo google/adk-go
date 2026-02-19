@@ -283,5 +283,26 @@ func (t *agentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) erro
 	} else {
 		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, t.Declaration())
 	}
+
+	// TODO - deduplicate function declarations if multiple agent tools are used.
+	funcTool = nil
+	if req.LiveConnectConfig == nil {
+		req.LiveConnectConfig = &genai.LiveConnectConfig{}
+	}
+
+	for _, t := range req.LiveConnectConfig.Tools {
+		if t != nil && t.FunctionDeclarations != nil {
+			funcTool = t
+			break
+		}
+	}
+
+	if funcTool == nil {
+		req.LiveConnectConfig.Tools = append(req.LiveConnectConfig.Tools, &genai.Tool{
+			FunctionDeclarations: []*genai.FunctionDeclaration{t.Declaration()},
+		})
+	} else {
+		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, t.Declaration())
+	}
 	return nil
 }
