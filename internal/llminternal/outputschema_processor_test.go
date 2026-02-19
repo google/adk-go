@@ -59,16 +59,6 @@ func (m *mockLLM) GetGoogleLLMVariant() genai.Backend {
 	return genai.BackendGeminiAPI
 }
 
-// mockLLMAgent satisfies both agent.Agent (via embedding) and llminternal.Agent (via internal() implementation)
-type mockLLMAgent struct {
-	agent.Agent
-	s *State
-}
-
-func (m *mockLLMAgent) internal() *State {
-	return m.s
-}
-
 func TestOutputSchemaRequestProcessor(t *testing.T) {
 	schema := &genai.Schema{
 		Type: genai.TypeObject,
