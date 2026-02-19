@@ -218,6 +218,11 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("session not found, cannot apply event")
 	}
 
+	// update the in-memory session
+	if err := sess.appendEvent(event); err != nil {
+		return fmt.Errorf("fail to set state on appendEvent: %w", err)
+	}
+
 	eventCopy := &Event{
 		ID:           event.ID,
 		InvocationID: event.InvocationID,
@@ -234,11 +239,6 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		},
 		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
 		LLMResponse:        event.LLMResponse,
-	}
-
-	// update the in-memory session
-	if err := sess.appendEvent(event); err != nil {
-		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
 
 	// update the in-memory session service
