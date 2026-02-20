@@ -26,7 +26,7 @@ import (
 type EmptyArgs struct{}
 
 func exitLoop(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
-	ctx.Actions().Escalate = true
+	ctx.Actions().ExitLoop = true
 	ctx.Actions().SkipSummarization = true
 	return map[string]string{}, nil
 }

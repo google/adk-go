@@ -779,6 +779,9 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.Escalate {
 		base.Escalate = true
 	}
+	if other.ExitLoop {
+		base.ExitLoop = true
+	}
 	if other.StateDelta != nil {
 		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
 	}
