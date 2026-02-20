@@ -21,11 +21,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 type mockFunctionTool struct {
@@ -400,6 +402,49 @@ func TestCallTool(t *testing.T) {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestGenerateRequestConfirmationEvent_SetsEventID(t *testing.T) {
+	agnt, err := agent.New(agent.Config{Name: "testAgent"})
+	if err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: agnt})
+
+	functionCallEvent := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: "my_tool", ID: "fc-1", Args: map[string]any{"k": "v"}}},
+				},
+			},
+		},
+	}
+
+	functionResponseEvent := &session.Event{
+		Actions: session.EventActions{
+			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+				"fc-1": {Hint: "confirm?"},
+			},
+		},
+	}
+
+	event := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if event == nil {
+		t.Fatal("expected non-nil event")
+	}
+	if event.ID == "" {
+		t.Error("expected event ID to be set, got empty string")
+	}
+
+	// Verify uniqueness: calling again should produce a different ID.
+	event2 := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if event2 == nil {
+		t.Fatal("expected non-nil second event")
+	}
+	if event.ID == event2.ID {
+		t.Errorf("expected unique IDs, got same ID %q twice", event.ID)
 	}
 }
 
