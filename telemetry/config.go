@@ -52,6 +52,9 @@ type config struct {
 
 	// tracerProvider overrides the default TracerProvider.
 	tracerProvider *sdktrace.TracerProvider
+
+	// loggerProvider overrides the default LoggerProvider.
+	loggerProvider *sdklog.LoggerProvider
 }
 
 // Option configures adk telemetry.
@@ -125,6 +128,14 @@ func WithLogRecordProcessors(p ...sdklog.Processor) Option {
 func WithTracerProvider(tp *sdktrace.TracerProvider) Option {
 	return optionFunc(func(cfg *config) error {
 		cfg.tracerProvider = tp
+		return nil
+	})
+}
+
+// WithLoggerProvider overrides the default LoggerProvider with preconfigured instance.
+func WithLoggerProvider(lp *sdklog.LoggerProvider) Option {
+	return optionFunc(func(cfg *config) error {
+		cfg.loggerProvider = lp
 		return nil
 	})
 }
