@@ -20,3 +20,25 @@ profile.cov
 # Go workspace file
 go.work
 go.work.sum
+
+# Example binaries and logs
+examples/openai/weather_agent
+examples/openai/*.log
+
+# Temporary shell scripts (not part of the codebase)
+examples/openai/test_llm.sh
+examples/openai/test_agent.sh
+examples/openai/test_weather.sh
+
+# Temporary documentation files (content is in main README.md)
+AGENT_SETUP_CHECKLIST.md
+GOAL_STATUS_REPORT.md
+README_OPENAI.md
+model/openai/VALIDATION.md
+model/openai/TEST_SUMMARY.md
+model/openai/SESSION_USAGE.md
+model/openai/test_results.txt
+
+# Temporary README files (documentation is in main README.md)
+examples/openai/README.md
+model/openai/README.md
