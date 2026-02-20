@@ -75,7 +75,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		mockAgent := &mockLLMAgent{
 			Agent: baseAgent,
 			s: &State{
-				Model:        &mockLLM{name: "gemini-1.5-flash"},
+				Model:        &mockLLM{name: "gemini-2.5-flash"},
 				OutputSchema: schema,
 				Tools:        []tool.Tool{&mockTool{name: "other_tool"}},
 			},
@@ -115,7 +115,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		mockAgent := &mockLLMAgent{
 			Agent: baseAgent,
 			s: &State{
-				Model:        &mockLLM{name: "gemini-1.5-flash"},
+				Model:        &mockLLM{name: "gemini-2.5-flash"},
 				OutputSchema: schema,
 				Tools:        nil, // No tools -> optimization skips processor
 			},
@@ -141,7 +141,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		mockAgent := &mockLLMAgent{
 			Agent: baseAgent,
 			s: &State{
-				Model:        &mockLLM{name: "gemini-1.5-flash"},
+				Model:        &mockLLM{name: "gemini-2.5-flash"},
 				OutputSchema: nil,
 				Tools:        []tool.Tool{&mockTool{name: "other_tool"}},
 			},
@@ -163,9 +163,9 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 	})
 
 	t.Run("NoOpWhenNativeSupportAvailable", func(t *testing.T) {
-		// Native support = Vertex AI + Gemini 2.0+
+		// Native support = Vertex AI + Gemini 2.5+
 		llm := &mockLLM{
-			name:    "gemini-2.0-flash",
+			name:    "gemini-2.5-flash",
 			variant: func() *genai.Backend { x := genai.BackendVertexAI; return &x }(),
 		}
 

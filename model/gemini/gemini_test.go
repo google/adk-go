@@ -43,7 +43,7 @@ func TestModel_Generate(t *testing.T) {
 	}{
 		{
 			name:      "ok",
-			modelName: "gemini-2.0-flash",
+			modelName: "gemini-2.5-flash",
 			req: &model.LLMRequest{
 				Contents: genai.Text("What is the capital of France? One word."),
 				Config: &genai.GenerateContentConfig{
@@ -95,7 +95,7 @@ func TestModel_GenerateStream(t *testing.T) {
 	}{
 		{
 			name:      "ok",
-			modelName: "gemini-2.0-flash",
+			modelName: "gemini-2.5-flash",
 			req: &model.LLMRequest{
 				Contents: genai.Text("What is the capital of France? One word."),
 				Config: &genai.GenerateContentConfig{
@@ -168,7 +168,7 @@ func TestModel_TrackingHeaders(t *testing.T) {
 			APIKey:     apiKey,
 		}
 
-		geminiModel, err := NewModel(t.Context(), "gemini-2.0-flash", cfg)
+		geminiModel, err := NewModel(t.Context(), "gemini-2.5-flash", cfg)
 		if err != nil {
 			t.Fatal(err)
 		}

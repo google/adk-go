@@ -36,7 +36,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
-const modelName = "gemini-2.0-flash"
+const modelName = "gemini-2.5-flash"
 
 //go:generate go test -httprecord=Test
 
