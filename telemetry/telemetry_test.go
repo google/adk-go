@@ -161,62 +161,83 @@ func extractResourceAttributes(res *resource.Resource) (projectID, serviceName, 
 func TestResolveResourceProject(t *testing.T) {
 	testCases := []struct {
 		name        string
-		cfg         *config
+		opts        []Option
 		envVar      string
 		wantProject string
 		wantErr     bool
 	}{
 		{
-			name: "project from config",
-			cfg: &config{
-				oTelToCloud:        true,
-				gcpResourceProject: "config-project",
-				googleCredentials:  &google.Credentials{ProjectID: "cred-project"},
+			name: "project from options",
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGcpResourceProject("option-project"),
+				WithGoogleCredentials(&google.Credentials{ProjectID: "cred-project"}),
 			},
 			envVar:      "env-project",
-			wantProject: "config-project",
+			wantProject: "option-project",
 		},
 		{
 			name: "project from credentials",
-			cfg: &config{
-				oTelToCloud:       true,
-				googleCredentials: &google.Credentials{ProjectID: "cred-project"},
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{ProjectID: "cred-project"}),
 			},
 			envVar:      "env-project",
 			wantProject: "cred-project",
 		},
 		{
 			name: "project from env var",
-			cfg: &config{
-				oTelToCloud: true,
+			opts: []Option{
+				WithOtelToCloud(true),
 			},
 			envVar:      "env-project",
 			wantProject: "env-project",
 		},
 		{
 			name: "no project",
-			cfg: &config{
-				oTelToCloud:       true,
-				googleCredentials: &google.Credentials{},
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{}),
 			},
 			wantErr: true,
 		},
 		{
-			name: "no project and otelToCloud disabled",
-			cfg: &config{
-				oTelToCloud: false,
+			name: "no project no credentials",
+			opts: []Option{
+				WithOtelToCloud(true),
 			},
-			wantProject: "",
+			wantErr: true,
+		},
+		{
+			name: "env var whitespace",
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{}),
+			},
+			envVar:  " ",
+			wantErr: true,
+		},
+		{
+			name: "option project whitespace",
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGcpResourceProject(" "),
+			},
+			wantErr: true,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.envVar != "" {
-				t.Setenv("GOOGLE_CLOUD_PROJECT", tc.envVar)
+			// Always set the environment variable to avoid flakiness from ambient GOOGLE_CLOUD_PROJECT.
+			t.Setenv("GOOGLE_CLOUD_PROJECT", tc.envVar)
+
+			cfg, err := configFromOpts(tc.opts...)
+			if err != nil {
+				t.Fatalf("configFromOpts() unexpected error: %v", err)
 			}
 
-			gotProject, err := resolveGcpResourceProject(tc.cfg)
+			gotProject, err := resolveGcpResourceProject(cfg)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("resolveGcpResourceProject() error = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -234,62 +255,91 @@ func TestResolveResourceProject(t *testing.T) {
 func TestResolveQuotaProject(t *testing.T) {
 	testCases := []struct {
 		name        string
-		cfg         *config
+		opts        []Option
 		envVar      string
 		wantProject string
 		wantErr     bool
 	}{
 		{
-			name: "project from config",
-			cfg: &config{
-				oTelToCloud:       true,
-				gcpQuotaProject:   "config-project",
-				googleCredentials: &google.Credentials{ProjectID: "cred-project"},
+			name: "project from options",
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGcpQuotaProject("option-project"),
+				WithGoogleCredentials(&google.Credentials{ProjectID: "cred-project"}),
 			},
 			envVar:      "env-project",
-			wantProject: "config-project",
+			wantProject: "option-project",
 		},
 		{
 			name: "project from credentials",
-			cfg: &config{
-				oTelToCloud:       true,
-				googleCredentials: &google.Credentials{ProjectID: "cred-project"},
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{ProjectID: "cred-project"}),
 			},
 			envVar:      "env-project",
 			wantProject: "cred-project",
 		},
 		{
 			name: "project from env var",
-			cfg: &config{
-				oTelToCloud: true,
+			opts: []Option{
+				WithOtelToCloud(true),
 			},
 			envVar:      "env-project",
 			wantProject: "env-project",
 		},
 		{
 			name: "no project",
-			cfg: &config{
-				oTelToCloud:       true,
-				googleCredentials: &google.Credentials{},
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{}),
+			},
+			wantErr: true,
+		},
+		{
+			name: "no project no credentials",
+			opts: []Option{
+				WithOtelToCloud(true),
 			},
 			wantErr: true,
 		},
 		{
 			name: "no project and otelToCloud disabled",
-			cfg: &config{
-				oTelToCloud: false,
+			opts: []Option{
+				WithOtelToCloud(false),
+				WithGoogleCredentials(&google.Credentials{}),
 			},
 			wantProject: "",
+		},
+		{
+			name: "env var whitespace",
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{}),
+			},
+			envVar:  " ",
+			wantErr: true,
+		},
+		{
+			name: "option project whitespace",
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGcpQuotaProject(" "),
+			},
+			wantErr: true,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.envVar != "" {
-				t.Setenv("GOOGLE_CLOUD_PROJECT", tc.envVar)
+			// Always set the environment variable to avoid flakiness from ambient GOOGLE_CLOUD_PROJECT.
+			t.Setenv("GOOGLE_CLOUD_PROJECT", tc.envVar)
+
+			cfg, err := configFromOpts(tc.opts...)
+			if err != nil {
+				t.Fatalf("configFromOpts() unexpected error: %v", err)
 			}
 
-			gotProject, err := resolveGcpQuotaProject(tc.cfg)
+			gotProject, err := resolveGcpQuotaProject(cfg)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("resolveGcpQuotaProject() error = %v, wantErr %v", err, tc.wantErr)
 			}

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"go.opentelemetry.io/contrib/detectors/gcp"
 	"go.opentelemetry.io/otel/attribute"
@@ -30,15 +31,11 @@ import (
 )
 
 func configure(ctx context.Context, opts ...Option) (*config, error) {
-	cfg := &config{}
-
-	for _, opt := range opts {
-		if err := opt.apply(cfg); err != nil {
-			return nil, fmt.Errorf("failed to apply option: %w", err)
-		}
+	cfg, err := configFromOpts(opts...)
+	if err != nil {
+		return nil, err
 	}
 
-	var err error
 	if cfg.oTelToCloud {
 		// Load ADC if no credentials are provided in the config.
 		if cfg.googleCredentials == nil {
@@ -70,6 +67,17 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 	}
 	cfg.spanProcessors = append(cfg.spanProcessors, spanProcessors...)
 
+	return cfg, nil
+}
+
+func configFromOpts(opts ...Option) (*config, error) {
+	cfg := &config{}
+
+	for _, opt := range opts {
+		if err := opt.apply(cfg); err != nil {
+			return nil, fmt.Errorf("failed to apply option: %w", err)
+		}
+	}
 	return cfg, nil
 }
 
@@ -107,6 +115,7 @@ func resolveGcpResourceProject(cfg *config) (string, error) {
 }
 
 func resolveProject(configuredProject string, creds *google.Credentials, requireProject bool, projectType string) (string, error) {
+	configuredProject = strings.TrimSpace(configuredProject)
 	if configuredProject != "" {
 		return configuredProject, nil
 	}
@@ -115,8 +124,8 @@ func resolveProject(configuredProject string, creds *google.Credentials, require
 	}
 	// The project was always empty during testing, even though it was set in ADC JSON file.
 	// Using fallback to env variable to resolve the project as a workaround.
-	project, ok := os.LookupEnv("GOOGLE_CLOUD_PROJECT")
-	if !ok && requireProject {
+	project := strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_PROJECT"))
+	if requireProject && project == "" {
 		return "", fmt.Errorf("telemetry.googleapis.com requires setting the %s project. Refer to telemetry.config for the available options to set the %s project", projectType, projectType)
 	}
 	return project, nil
