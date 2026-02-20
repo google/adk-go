@@ -258,9 +258,6 @@ func (f *Flow) receiveFromLiveModel(ctx agent.InvocationContext, conn model.Live
 				if !ok {
 					break
 				}
-
-				log.Info().Interface("resp", resp).Msg("Received response from conn.Receive")
-
 				if resp.LiveSessionResumptionUpdate != nil {
 					log.Info().Str("handle", resp.LiveSessionResumptionUpdate.NewHandle).Msg("Live session resumption update")
 					ctx.SetLiveSessionResumptionHandle(resp.LiveSessionResumptionUpdate.NewHandle)
@@ -271,6 +268,8 @@ func (f *Flow) receiveFromLiveModel(ctx agent.InvocationContext, conn model.Live
 				modelResponseEvent.Author = getAuthorForEvent(resp)
 				modelResponseEvent.OutputTranscription = resp.OutputTranscription
 				modelResponseEvent.InputTranscription = resp.InputTranscription
+
+				log.Info().Interface("resp", resp).Msg("resp from live model before postprocess")
 
 				for ev, err := range f.postprocessLive(ctx, req, resp, modelResponseEvent) {
 					if err != nil {
@@ -295,6 +294,7 @@ func (f *Flow) receiveFromLiveModel(ctx agent.InvocationContext, conn model.Live
 						log.Info().Int("audioblob_length", len(audioBlob.Data)).Msg("Cached audio")
 					}
 
+					log.Info().Interface("ev", ev).Msg("yielding event")
 					if !yield(ev, nil) {
 						return
 					}
@@ -341,6 +341,10 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 			return
 		}
 
+		log.Info().Interface("llmResponse", llmResponse).
+			Interface("llmRequest", llmRequest).
+			Msg("llmResponse after postprocess")
+
 		if llmResponse.Content == nil &&
 			llmResponse.ErrorCode == "" &&
 			!llmResponse.Interrupted &&
@@ -348,6 +352,7 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 			llmResponse.InputTranscription == nil &&
 			llmResponse.OutputTranscription == nil &&
 			llmResponse.UsageMetadata == nil {
+			log.Info().Msg("skipping empty llmResponse")
 			return
 		}
 
@@ -372,15 +377,15 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 			for _, ev := range flushedEvents {
 				yield(ev, nil)
 			}
-			if len(flushedEvents) > 0 {
-				// NOTE below return is O.K. for now, because currently we only flush
-				// events on interrupted or turn_complete. turn_complete is a pure
-				// control event and interrupted is not with content but those content
-				// is ignorable because model is already interrupted. If we have other
-				// case to flush events in the future that are not pure control events,
-				// we should not return here.
-				return
-			}
+			// if len(flushedEvents) > 0 {
+			// 	// NOTE below return is O.K. for now, because currently we only flush
+			// 	// events on interrupted or turn_complete. turn_complete is a pure
+			// 	// control event and interrupted is not with content but those content
+			// 	// is ignorable because model is already interrupted. If we have other
+			// 	// case to flush events in the future that are not pure control events,
+			// 	// we should not return here.
+			// 	return
+			// }
 		}
 
 		// Builds the event.
@@ -422,6 +427,8 @@ func (f *Flow) finalizeLiveModelResponseEvent(ctx agent.InvocationContext, llmRe
 
 	// Populate ev.LongRunningToolIDs
 	// ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)
+
+	
 	return modelResponseEvent
 }
 

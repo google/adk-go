@@ -90,7 +90,6 @@ func (c *liveConnection) receive(ctx context.Context) (<-chan *genai.LiveServerM
 			}
 			select {
 			case out <- msg:
-				log.Info().Interface("msg", msg).Msg("Received the actual message from live api")
 			case <-ctx.Done():
 				return
 			}
@@ -260,12 +259,14 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 
 					}
 					if msg.ServerContent.TurnComplete {
+						log.Info().Msg("Turn complete in gemini_live")
 						if text != "" {
 							if !send(c.buildFullTextResponse(text)) {
 								return
 							}
 							text = ""
 						}
+						log.Info().Interface("msg", msg).Msg("Sending turn complete in gemini_live")
 						if !send(&model.LLMResponse{
 							TurnComplete: true,
 							Interrupted:  msg.ServerContent.Interrupted,
