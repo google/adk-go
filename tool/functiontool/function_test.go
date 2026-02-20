@@ -69,7 +69,7 @@ func createToolContext(t *testing.T) tool.Context {
 	return toolinternal.NewToolContext(invCtx, "", &session.EventActions{}, nil)
 }
 
-//go:generate go test -httprecord=.*
+//go:generate go test -v -httprecord=.*
 
 func TestFunctionTool_Simple(t *testing.T) {
 	ctx := t.Context()

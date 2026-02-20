@@ -51,13 +51,14 @@ func TestModel_Generate(t *testing.T) {
 				},
 			},
 			want: &model.LLMResponse{
-				Content: genai.NewContentFromText("Paris\n", genai.RoleModel),
+				Content: genai.NewContentFromText("Paris", genai.RoleModel),
 				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-					CandidatesTokenCount:    2,
-					CandidatesTokensDetails: []*genai.ModalityTokenCount{{Modality: "TEXT", TokenCount: 2}},
-					PromptTokenCount:        10,
-					PromptTokensDetails:     []*genai.ModalityTokenCount{{Modality: "TEXT", TokenCount: 10}},
-					TotalTokenCount:         12,
+					CandidatesTokenCount:    1,
+					CandidatesTokensDetails: nil,
+					PromptTokenCount:        11,
+					PromptTokensDetails:     []*genai.ModalityTokenCount{{Modality: "TEXT", TokenCount: 11}},
+					ThoughtsTokenCount:      34,
+					TotalTokenCount:         46,
 				},
 				FinishReason: "STOP",
 			},
@@ -102,7 +103,7 @@ func TestModel_GenerateStream(t *testing.T) {
 					Temperature: new(float32),
 				},
 			},
-			want: "Paris\n",
+			want: "Paris",
 		},
 	}
 	for _, tt := range tests {

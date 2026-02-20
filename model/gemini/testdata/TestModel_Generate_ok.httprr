@@ -1,16 +1,17 @@
 httprr trace v1
-361 954
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+361 904
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
 Content-Length: 129
 Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"What is the capital of France? One word."}],"role":"user"}],"generationConfig":{"temperature":0}}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 18 Aug 2025 13:55:14 GMT
+Date: Fri, 20 Feb 2026 12:38:32 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=394
+Server-Timing: gfet4t7; dur=1173
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -24,32 +25,27 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "Paris\n"
+            "text": "Paris"
           }
         ],
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": -0.00055273278849199414
+      "index": 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 10,
-    "candidatesTokenCount": 2,
-    "totalTokenCount": 12,
+    "promptTokenCount": 11,
+    "candidatesTokenCount": 1,
+    "totalTokenCount": 46,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 10
+        "tokenCount": 11
       }
     ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 2
-      }
-    ]
+    "thoughtsTokenCount": 34
   },
-  "modelVersion": "gemini-2.0-flash",
-  "responseId": "wjCjaI3AI7mokdUPn8Gf2Ac"
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "xlWYafXAOKSf1e8PpcODiAg"
 }
