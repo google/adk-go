@@ -66,13 +66,19 @@ func IsGeminiAPIVariant(llm model.LLM) bool {
 	return GetGoogleLLMVariant(llm) == genai.BackendGeminiAPI
 }
 
-// NeedsOutputSchemaProcessor returns true if the Gemini model doesn't support output schema with tools natively and requires a processor to handle it.
-// Only Gemini 2.5 models and lower and only in Gemini API don't support natively, so we enable the processor for them.
+// NeedsOutputSchemaProcessor returns true if the model doesn't support output schema with tools natively and requires a processor to handle it.
+// Non-Gemini models (e.g., Bedrock/Claude) need the processor since they don't support native output schema with tools.
+// For Gemini models, only Gemini 2.5 and lower on Gemini API need the processor.
 func NeedsOutputSchemaProcessor(llm model.LLM) bool {
 	if llm == nil {
 		return false
 	}
-	return IsGeminiModel(llm.Name()) && IsGeminiAPIVariant(llm) && IsGemini25OrLower(llm.Name())
+	// Non-Gemini models need the processor since we can't assume they support native output schema with tools
+	if !IsGeminiModel(llm.Name()) {
+		return true
+	}
+	// Gemini models: only Gemini API (not Vertex AI) with version <= 2.5 need the processor
+	return IsGeminiAPIVariant(llm) && IsGemini25OrLower(llm.Name())
 }
 
 func extractModelName(model string) string {
