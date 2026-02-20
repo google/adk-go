@@ -341,10 +341,6 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 			return
 		}
 
-		log.Info().Interface("llmResponse", llmResponse).
-			Interface("llmRequest", llmRequest).
-			Msg("llmResponse after postprocess")
-
 		if llmResponse.Content == nil &&
 			llmResponse.ErrorCode == "" &&
 			!llmResponse.Interrupted &&
@@ -352,7 +348,6 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 			llmResponse.InputTranscription == nil &&
 			llmResponse.OutputTranscription == nil &&
 			llmResponse.UsageMetadata == nil {
-			log.Info().Msg("skipping empty llmResponse")
 			return
 		}
 
@@ -428,7 +423,6 @@ func (f *Flow) finalizeLiveModelResponseEvent(ctx agent.InvocationContext, llmRe
 	// Populate ev.LongRunningToolIDs
 	// ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)
 
-	
 	return modelResponseEvent
 }
 

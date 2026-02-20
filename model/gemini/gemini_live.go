@@ -123,6 +123,8 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 					return
 				}
 
+				log.Info().Interface("msg", msg).Msg("Received message in gemini_live")
+
 				if msg.UsageMetadata != nil {
 					if !send(&model.LLMResponse{
 						UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
@@ -259,14 +261,12 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 
 					}
 					if msg.ServerContent.TurnComplete {
-						log.Info().Msg("Turn complete in gemini_live")
 						if text != "" {
 							if !send(c.buildFullTextResponse(text)) {
 								return
 							}
 							text = ""
 						}
-						log.Info().Interface("msg", msg).Msg("Sending turn complete in gemini_live")
 						if !send(&model.LLMResponse{
 							TurnComplete: true,
 							Interrupted:  msg.ServerContent.Interrupted,
