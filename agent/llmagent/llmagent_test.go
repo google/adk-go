@@ -696,7 +696,13 @@ func TestInstructionProvider(t *testing.T) {
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
 					Config: &genai.GenerateContentConfig{
-						SystemInstruction: genai.NewContentFromText("instruction custom_value test", genai.RoleUser),
+						SystemInstruction: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("instruction custom_value test"),
+								genai.NewPartFromText(`You are an agent. Your internal name is "test_agent".`),
+							},
+							Role: genai.RoleUser,
+						},
 					},
 				},
 			},
@@ -723,7 +729,13 @@ func TestInstructionProvider(t *testing.T) {
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
 					Config: &genai.GenerateContentConfig{
-						SystemInstruction: genai.NewContentFromText("instruction provider template {var} not evaluated", genai.RoleUser),
+						SystemInstruction: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("instruction provider template {var} not evaluated"),
+								genai.NewPartFromText(`You are an agent. Your internal name is "test_agent".`),
+							},
+							Role: genai.RoleUser,
+						},
 					},
 				},
 			},
@@ -750,7 +762,13 @@ func TestInstructionProvider(t *testing.T) {
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
 					Config: &genai.GenerateContentConfig{
-						SystemInstruction: genai.NewContentFromText("global instruction provider template {var} not evaluated", genai.RoleUser),
+						SystemInstruction: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("global instruction provider template {var} not evaluated"),
+								genai.NewPartFromText(`You are an agent. Your internal name is "test_agent".`),
+							},
+							Role: genai.RoleUser,
+						},
 					},
 				},
 			},
@@ -783,6 +801,7 @@ func TestInstructionProvider(t *testing.T) {
 							Parts: []*genai.Part{
 								genai.NewPartFromText("global instruction provider {var}"),
 								genai.NewPartFromText("instruction provider {var}"),
+								genai.NewPartFromText(`You are an agent. Your internal name is "test_agent".`),
 							},
 							Role: genai.RoleUser,
 						},
