@@ -331,8 +331,16 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
 		event.Actions = *callbackCtx.actions
-		// TODO set context invocation ended
-		// ctx.invocationEnded = true
+		
+// NOTE: Intentionally not calling ctx.EndInvocation() here.
+//
+// Rationale:
+// - After-agent callbacks do not check ctx.Ended(), so ending the invocation here has no effect on the execution flow.
+// - This behavior is consistent with the Python ADK implementation.
+// - The invocation end flag is local to this subagent's context and is not used after this function returns, so setting it could be misleading.
+//
+// TODO: Revisit this decision if the after-callback flow changes in the future.
+
 		return event, nil
 	}
 
@@ -428,10 +436,10 @@ func (c *callbackContextState) All() iter.Seq2[string, any] {
 type invocationContext struct {
 	context.Context
 
-	agent     Agent
-	artifacts Artifacts
-	memory    Memory
-	session   session.Session
+	agent         Agent
+	artifacts     Artifacts
+	memory        Memory
+	session       session.Session
 
 	invocationID  string
 	branch        string
