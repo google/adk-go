@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/genai"
 )
 
 // Session represents a series of interactions between a user and agents.
@@ -127,6 +128,40 @@ func (e *Event) IsFinalResponse() bool {
 	}
 
 	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
+}
+
+func (e *Event) FunctionCalls() []*genai.FunctionCall {
+	content := e.Content
+	if content == nil {
+		content = e.LLMResponse.Content
+	}
+	var funcCalls []*genai.FunctionCall
+	if content == nil {
+		return funcCalls
+	}
+	for _, part := range content.Parts {
+		if part.FunctionCall != nil {
+			funcCalls = append(funcCalls, part.FunctionCall)
+		}
+	}
+	return funcCalls
+}
+
+func (e *Event) FunctionResponses() []*genai.FunctionResponse {
+	content := e.Content
+	if content == nil {
+		content = e.LLMResponse.Content
+	}
+	var funcResponses []*genai.FunctionResponse
+	if content == nil {
+		return funcResponses
+	}
+	for _, part := range content.Parts {
+		if part.FunctionResponse != nil {
+			funcResponses = append(funcResponses, part.FunctionResponse)
+		}
+	}
+	return funcResponses
 }
 
 // NewEvent creates a new event defining now as the timestamp.

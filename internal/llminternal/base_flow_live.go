@@ -8,8 +8,10 @@ import (
 	"github.com/rs/zerolog/log"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/runconfig"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
 
@@ -67,6 +69,17 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				return
 			}
 			defer conn.Close()
+
+			// TODO: this is python implementation and we need to send the history to the model to continue the conversation
+			// if llm_request.contents:
+			//   # Sends the conversation history to the model.
+			//   with tracer.start_as_current_span('send_data'):
+			//     # Combine regular contents with audio/transcription from session
+			//     logger.debug('Sending history to model: %s', llm_request.contents)
+			//       await llm_connection.send_history(llm_request.contents)
+			//       trace_send_data(
+			//           invocation_context, event_id, llm_request.contents
+			//       )
 
 			queue := ctx.LiveRequestQueue()
 			if queue == nil {
@@ -139,86 +152,186 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 							}
 
 						}
+						if liveReq.ToolResponse != nil {
+							if err := conn.Send(liveReq); err != nil {
+								yield(nil, fmt.Errorf("failed to send to live connection: %w", err))
+								return
+							}
+						}
 					case <-ctx.Done():
 						return
 					}
 				}
 			}()
 
-			getAuthorForEvent := func(llmResponse *model.LLMResponse) string {
-				if llmResponse != nil && llmResponse.Content != nil && llmResponse.Content.Role == "user" {
-					return "user"
+			for ev, err := range f.receiveFromLiveModel(ctx, conn, req) {
+				if err != nil {
+					yield(nil, err)
+					return
 				}
-				return ctx.Agent().Name()
+
+				if len(ev.FunctionResponses()) > 0 {
+					toolResponses := &genai.LiveToolResponseInput{
+						FunctionResponses: ev.FunctionResponses(),
+					}
+					if len(toolResponses.FunctionResponses) > 0 {
+						queue.SendToolResponse(toolResponses)
+					}
+				}
+
+				// # We handle agent transfer here in `run_live` rather than
+				// # in `_postprocess_live` to prevent duplication of function
+				// # response processing. If agent transfer were handled in
+				// # `_postprocess_live`, events yielded from child agent's
+				// # `run_live` would bubble up to parent agent's `run_live`,
+				// # causing `event.get_function_responses()` to be true in both
+				// # child and parent, and `send_content()` to be called twice for
+				// # the same function response. By handling agent transfer here,
+				// # we ensure that only child agent processes its own function
+				// # responses after the transfer.
+				// if (
+				//     event.content
+				//     and event.content.parts
+				//     and event.content.parts[0].function_response
+				//     and event.content.parts[0].function_response.name
+				//     == 'transfer_to_agent'
+				// ):
+				//   await asyncio.sleep(DEFAULT_TRANSFER_AGENT_DELAY)
+				//   # cancel the tasks that belongs to the closed connection.
+				//   send_task.cancel()
+				//   logger.debug('Closing live connection')
+				//   await llm_connection.close()
+				//   logger.debug('Live connection closed.')
+				//   # transfer to the sub agent.
+				//   transfer_to_agent = event.actions.transfer_to_agent
+				//   if transfer_to_agent:
+				//     logger.debug('Transferring to agent: %s', transfer_to_agent)
+				//     agent_to_run = self._get_agent_to_run(
+				//         invocation_context, transfer_to_agent
+				//     )
+				//     async with Aclosing(
+				//         agent_to_run.run_live(invocation_context)
+				//     ) as agen:
+				//       async for item in agen:
+				//         yield item
+				// if (
+				//     event.content
+				//     and event.content.parts
+				//     and event.content.parts[0].function_response
+				//     and event.content.parts[0].function_response.name
+				//     == 'task_completed'
+				// ):
+				//   # this is used for sequential agent to signal the end of the agent.
+				//   await asyncio.sleep(DEFAULT_TASK_COMPLETION_DELAY)
+				//   # cancel the tasks that belongs to the closed connection.
+				//   send_task.cancel()
+				//   return
+
+				log.Debug().Interface("ev", ev).Msg("Yielding event")
+				if !yield(ev, nil) {
+					return
+				}
 			}
+		}
+	}
+}
 
-			resps, errs := conn.Receive(ctx)
-			for {
-				select {
-				case resp, ok := <-resps:
-					if !ok {
-						break
-					}
+func (f *Flow) receiveFromLiveModel(ctx agent.InvocationContext, conn model.LiveConnection, req *model.LLMRequest) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		getAuthorForEvent := func(llmResponse *model.LLMResponse) string {
+			if llmResponse != nil && llmResponse.Content != nil && llmResponse.Content.Role == "user" {
+				return "user"
+			}
+			return ctx.Agent().Name()
+		}
 
-					log.Info().Interface("resp", resp).Msg("Received response from conn.Receive")
+		queue := ctx.LiveRequestQueue()
+		if queue == nil {
+			yield(nil, fmt.Errorf("LiveRequestQueue not found in context"))
+			return
+		}
 
-					if resp.LiveSessionResumptionUpdate != nil {
-						log.Info().Str("handle", resp.LiveSessionResumptionUpdate.NewHandle).Msg("Live session resumption update")
-						ctx.SetLiveSessionResumptionHandle(resp.LiveSessionResumptionUpdate.NewHandle)
-					}
+		resps, errs := conn.Receive(ctx)
+		for {
+			select {
+			case resp, ok := <-resps:
+				if !ok {
+					break
+				}
 
-					modelResponseEvent := session.NewEvent(ctx.InvocationID())
-					modelResponseEvent.Content = resp.Content
-					modelResponseEvent.Author = getAuthorForEvent(resp)
-					modelResponseEvent.OutputTranscription = resp.OutputTranscription
-					modelResponseEvent.InputTranscription = resp.InputTranscription
+				log.Info().Interface("resp", resp).Msg("Received response from conn.Receive")
 
-					for ev, err := range f.postprocessLive(ctx, req, resp, modelResponseEvent) {
-						if err != nil {
-							yield(nil, err)
-							return
-						}
+				if resp.LiveSessionResumptionUpdate != nil {
+					log.Info().Str("handle", resp.LiveSessionResumptionUpdate.NewHandle).Msg("Live session resumption update")
+					ctx.SetLiveSessionResumptionHandle(resp.LiveSessionResumptionUpdate.NewHandle)
+				}
 
-						if ctx.RunConfig().SaveLiveBlob &&
-							ev.Content != nil &&
-							ev.Content.Parts != nil &&
-							ev.Content.Parts[0].InlineData != nil &&
-							strings.HasPrefix(ev.Content.Parts[0].InlineData.MIMEType, "audio/") {
+				modelResponseEvent := session.NewEvent(ctx.InvocationID())
+				modelResponseEvent.Content = resp.Content
+				modelResponseEvent.Author = getAuthorForEvent(resp)
+				modelResponseEvent.OutputTranscription = resp.OutputTranscription
+				modelResponseEvent.InputTranscription = resp.InputTranscription
 
-							audioBlob := &genai.Blob{
-								Data:     ev.Content.Parts[0].InlineData.Data,
-								MIMEType: ev.Content.Parts[0].InlineData.MIMEType,
-							}
-
-							if err := f.AudioCacheManager.CacheAudio(ctx, audioBlob, "output"); err != nil {
-								log.Error().Err(err).Msg("Failed to cache audio")
-							}
-							log.Info().Int("audioblob_length", len(audioBlob.Data)).Msg("Cached audio")
-						}
-
-						log.Info().Interface("ev", ev).Msg("Yielding event")
-
-						if !yield(ev, nil) {
-							return
-						}
-
-					}
-				case err, ok := <-errs:
-					if !ok {
-						break
-					}
+				for ev, err := range f.postprocessLive(ctx, req, resp, modelResponseEvent) {
 					if err != nil {
 						yield(nil, err)
 						return
 					}
 
-				case <-ctx.Done():
+					if ctx.RunConfig().SaveLiveBlob &&
+						ev.Content != nil &&
+						ev.Content.Parts != nil &&
+						ev.Content.Parts[0].InlineData != nil &&
+						strings.HasPrefix(ev.Content.Parts[0].InlineData.MIMEType, "audio/") {
+
+						audioBlob := &genai.Blob{
+							Data:     ev.Content.Parts[0].InlineData.Data,
+							MIMEType: ev.Content.Parts[0].InlineData.MIMEType,
+						}
+
+						if err := f.AudioCacheManager.CacheAudio(ctx, audioBlob, "output"); err != nil {
+							log.Error().Err(err).Msg("Failed to cache audio")
+						}
+						log.Info().Int("audioblob_length", len(audioBlob.Data)).Msg("Cached audio")
+					}
+
+					log.Info().Interface("ev", ev).Msg("Yielding event from postprocess live")
+					if !yield(ev, nil) {
+						return
+					}
+				}
+
+				// // TODO: temporarily convert
+				// tools := make(map[string]tool.Tool)
+				// for k, v := range req.Tools {
+				// 	tool, ok := v.(tool.Tool)
+				// 	if !ok {
+				// 		if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
+				// 			return
+				// 		}
+				// 	}
+				// 	tools[k] = tool
+				// }
+				// Trace?
+				// telemetry.TraceLLMCall(callLLMSpan, ctx, req, modelResponseEvent)
+
+				if ctx.Err() != nil {
 					return
 				}
+
+			case err, ok := <-errs:
+				if !ok {
+					break
+				}
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+
+			case <-ctx.Done():
+				return
 			}
-
 		}
-
 	}
 }
 
@@ -249,6 +362,7 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 		if llmResponse.OutputTranscription != nil {
 			modelResponseEvent.OutputTranscription = llmResponse.OutputTranscription
 			modelResponseEvent.Partial = llmResponse.Partial
+			log.Info().Interface("modelResponseEvent", modelResponseEvent).Msg("Yielding modelResponseEvent from outputTranscription postprocess")
 			yield(modelResponseEvent, nil)
 			return
 		}
@@ -257,6 +371,7 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 		if ctx.RunConfig().SaveLiveBlob {
 			flushedEvents := f.handleControlEventFlush(ctx, llmResponse)
 			for _, ev := range flushedEvents {
+				log.Info().Interface("ev", ev).Msg("Yielding event from flush")
 				yield(ev, nil)
 			}
 			if len(flushedEvents) > 0 {
@@ -272,14 +387,43 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 
 		// Builds the event.
 		modelResponseEvent = f.finalizeLiveModelResponseEvent(ctx, llmRequest, llmResponse, modelResponseEvent)
+		log.Info().Interface("modelResponseEvent", modelResponseEvent).Msg("Yielding modelResponseEvent from finalizeLiveModelResponseEvent postprocess")
 		yield(modelResponseEvent, nil)
 
-		// TODO: handle function calls
+		// Resolve tools
+		// TODO: Reuse tool resolution logic or cache it?
+		tools := make(map[string]tool.Tool)
+		for k, v := range llmRequest.Tools {
+			tool, ok := v.(tool.Tool)
+			if !ok {
+				yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k))
+				return
+			}
+			tools[k] = tool
+		}
+		if len(modelResponseEvent.FunctionCalls()) > 0 {
+			log.Debug().Interface("functionCalls", modelResponseEvent.FunctionCalls()).Msg("handling function calls during postprocessing")
+			functionResponseEvent, err := f.handleFunctionCalls(ctx, tools, llmResponse, nil)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if functionResponseEvent != nil {
+				yield(functionResponseEvent, nil)
+			}
+		}
 	}
 }
 
 func (f *Flow) finalizeLiveModelResponseEvent(ctx agent.InvocationContext, llmRequest *model.LLMRequest, llmResponse *model.LLMResponse, modelResponseEvent *session.Event) *session.Event {
-	// TODO: not sure what to modify here
+	utils.PopulateClientFunctionCallID(llmResponse.Content)
+	modelResponseEvent.Author = ctx.Agent().Name()
+	modelResponseEvent.Branch = ctx.Branch()
+	modelResponseEvent.LLMResponse = *llmResponse
+	// ev.Actions.StateDelta = stateDelta
+
+	// Populate ev.LongRunningToolIDs
+	// ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)
 	return modelResponseEvent
 }
 
