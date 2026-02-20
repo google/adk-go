@@ -444,10 +444,16 @@ func (e *inMemoryLogExporter) Export(_ context.Context, records []sdklog.Record)
 func (e *inMemoryLogExporter) Shutdown(context.Context) error   { return nil }
 func (e *inMemoryLogExporter) ForceFlush(context.Context) error { return nil }
 
+type envVars struct {
+	OTEL_EXPORTER_OTLP_ENDPOINT        string
+	OTEL_EXPORTER_OTLP_TRACES_ENDPOINT string
+	OTEL_EXPORTER_OTLP_LOGS_ENDPOINT   string
+}
+
 func TestConfigureExporters(t *testing.T) {
 	testCases := []struct {
 		name    string
-		envVars map[string]string
+		envVars envVars
 		opts    []Option
 		// The client address is nested deep inside the http client of the exporter, which is nested in a processor.
 		// Accessing it via reflection is too brittle. The best thing we can do is a smoke test, which checks the number of created processors.
@@ -456,58 +462,67 @@ func TestConfigureExporters(t *testing.T) {
 	}{
 		{
 			name:               "no processors",
-			envVars:            map[string]string{},
+			envVars:            envVars{},
 			wantSpanProcessors: 0,
 			wantLogProcessors:  0,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_ENDPOINT",
-			envVars: map[string]string{
-				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+			envVars: envVars{
+				OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318",
 			},
 			wantSpanProcessors: 1,
 			wantLogProcessors:  1,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-			envVars: map[string]string{
-				"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://localhost:4318/v1/traces",
+			envVars: envVars{
+				OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://localhost:4318/v1/traces",
 			},
 			wantSpanProcessors: 1,
 			wantLogProcessors:  0,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
-			envVars: map[string]string{
-				"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://localhost:4318/v1/logs",
+			envVars: envVars{
+				OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://localhost:4318/v1/logs",
 			},
 			wantSpanProcessors: 0,
 			wantLogProcessors:  1,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_ENDPOINT and otel_to_cloud",
-			envVars: map[string]string{
-				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+			envVars: envVars{
+				OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318",
 			},
-			opts:               []Option{WithOtelToCloud(true)},
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
+			},
 			wantSpanProcessors: 2,
 			wantLogProcessors:  1,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and otel_to_cloud",
-			envVars: map[string]string{
-				"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://localhost:4318/v1/traces",
+			envVars: envVars{
+				OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://localhost:4318/v1/traces",
 			},
-			opts:               []Option{WithOtelToCloud(true)},
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
+			},
 			wantSpanProcessors: 2,
 			wantLogProcessors:  0,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT and otel_to_cloud",
-			envVars: map[string]string{
-				"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://localhost:4318/v1/logs",
+			envVars: envVars{
+				OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://localhost:4318/v1/logs",
 			},
-			opts:               []Option{WithOtelToCloud(true)},
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
+			},
 			wantSpanProcessors: 1,
 			wantLogProcessors:  1,
 		},
@@ -515,9 +530,9 @@ func TestConfigureExporters(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			for k, v := range tc.envVars {
-				t.Setenv(k, v)
-			}
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", tc.envVars.OTEL_EXPORTER_OTLP_ENDPOINT)
+			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", tc.envVars.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
+			t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", tc.envVars.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT)
 			// Set the quota project needed to configure GCP exporters.
 			t.Setenv("GOOGLE_CLOUD_PROJECT", "test-project")
 			ctx := t.Context()

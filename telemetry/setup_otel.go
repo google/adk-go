@@ -174,10 +174,10 @@ func configureExporters(ctx context.Context, cfg *config) ([]sdktrace.SpanProces
 	var spanProcessors []sdktrace.SpanProcessor
 	var logProcessors []sdklog.Processor
 
-	_, otelEndpointExists := os.LookupEnv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	otelEndpointEnv := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	// Tracing section.
-	_, otelTracesEndpointExists := os.LookupEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-	if otelEndpointExists || otelTracesEndpointExists {
+	otelTracesEndpointEnv := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
+	if otelEndpointEnv != "" || otelTracesEndpointEnv != "" {
 		exporter, err := otlptracehttp.New(ctx)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create OTLP HTTP exporter: %w", err)
@@ -194,8 +194,8 @@ func configureExporters(ctx context.Context, cfg *config) ([]sdktrace.SpanProces
 		spanProcessors = append(spanProcessors, sdktrace.NewBatchSpanProcessor(spanExporter))
 	}
 	// Logs section.
-	_, otelLogsEndpointExists := os.LookupEnv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-	if otelEndpointExists || otelLogsEndpointExists {
+	otelLogsEndpointEnv := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"))
+	if otelEndpointEnv != "" || otelLogsEndpointEnv != "" {
 		exporter, err := otlploghttp.New(ctx)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create OTLP HTTP log exporter: %w", err)
