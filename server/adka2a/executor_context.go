@@ -53,6 +53,8 @@ type executorContext struct {
 	userContent *genai.Content
 }
 
+var _ ExecutorContext = (*executorContext)(nil)
+
 func newExecutorContext(ctx context.Context, meta invocationMeta, plugin *executorPlugin, userContent *genai.Content) ExecutorContext {
 	return &executorContext{
 		Context:     ctx,

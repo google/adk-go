@@ -25,6 +25,8 @@ type DebugAPIRouter struct {
 	runtimeController *controllers.DebugAPIController
 }
 
+var _ Router = (*DebugAPIRouter)(nil)
+
 // NewDebugAPIRouter creates a new DebugAPIRouter.
 func NewDebugAPIRouter(controller *controllers.DebugAPIController) *DebugAPIRouter {
 	return &DebugAPIRouter{runtimeController: controller}

@@ -17,6 +17,7 @@ package geminitool
 import (
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
@@ -27,24 +28,31 @@ import (
 // perform local code execution.
 type GoogleSearch struct{}
 
-// Name implements tool.Tool.
+var (
+	_ tool.Tool                     = (*GoogleSearch)(nil)
+	_ toolinternal.RequestProcessor = (*GoogleSearch)(nil)
+)
+
+// Name implements [tool.Tool].
 func (s GoogleSearch) Name() string {
 	return "google_search"
 }
 
-// Description implements tool.Tool.
+// Description implements [tool.Tool].
 func (s GoogleSearch) Description() string {
 	return "Performs a Google search to retrieve information from the web."
 }
 
 // ProcessRequest adds the GoogleSearch tool to the LLM request.
+//
+// ProcessRequest implements [toolinternal.RequestProcessor].
 func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return setTool(req, &genai.Tool{
 		GoogleSearch: &genai.GoogleSearch{},
 	})
 }
 
-// IsLongRunning implements tool.Tool.
-func (t GoogleSearch) IsLongRunning() bool {
+// IsLongRunning implements [tool.Tool].
+func (s GoogleSearch) IsLongRunning() bool {
 	return false
 }

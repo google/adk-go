@@ -23,6 +23,8 @@ import (
 // EvalAPIRouter defines the routes for the Eval API.
 type EvalAPIRouter struct{}
 
+var _ Router = (*EvalAPIRouter)(nil)
+
 // Routes returns the routes for the Apps API.
 func (r *EvalAPIRouter) Routes() Routes {
 	return Routes{

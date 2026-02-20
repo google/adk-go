@@ -38,6 +38,11 @@ type loadMemoryTool struct {
 	description string
 }
 
+var (
+	_ toolinternal.FunctionTool     = (*loadMemoryTool)(nil)
+	_ toolinternal.RequestProcessor = (*loadMemoryTool)(nil)
+)
+
 // New creates a new loadMemoryTool.
 func New() toolinternal.FunctionTool {
 	return &loadMemoryTool{
