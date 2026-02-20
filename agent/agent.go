@@ -331,8 +331,9 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
 		event.Actions = *callbackCtx.actions
-		// TODO set context invocation ended
 		// ctx.invocationEnded = true
+
+
 		return event, nil
 	}
 
