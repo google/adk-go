@@ -295,7 +295,6 @@ func (f *Flow) receiveFromLiveModel(ctx agent.InvocationContext, conn model.Live
 						log.Info().Int("audioblob_length", len(audioBlob.Data)).Msg("Cached audio")
 					}
 
-					log.Info().Interface("ev", ev).Msg("Yielding event from postprocess live")
 					if !yield(ev, nil) {
 						return
 					}
@@ -371,7 +370,6 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 		if ctx.RunConfig().SaveLiveBlob {
 			flushedEvents := f.handleControlEventFlush(ctx, llmResponse)
 			for _, ev := range flushedEvents {
-				log.Info().Interface("ev", ev).Msg("Yielding event from flush")
 				yield(ev, nil)
 			}
 			if len(flushedEvents) > 0 {
