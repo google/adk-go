@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -111,13 +111,13 @@ func (c *liveConnection) receive(ctx context.Context) (<-chan *genai.LiveServerM
 	return out, errChan
 }
 
-func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServerMessage) <-chan *model.LLMResponse {
+func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServerMessage) (<-chan *model.LLMResponse, <-chan error) {
 	out := make(chan *model.LLMResponse, 100)
-	// errChan := make(chan error, 1)
+	errChan := make(chan error, 1)
 
 	go func() {
 		defer close(out)
-		// defer close(errChan)
+		defer close(errChan)
 
 		send := func(resp *model.LLMResponse) bool {
 			select {
@@ -340,7 +340,7 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 			}
 		}
 	}()
-	return out
+	return out, errChan
 }
 
 func (c *liveConnection) buildFullTextResponse(text string) *model.LLMResponse {
@@ -356,7 +356,7 @@ func (c *liveConnection) buildFullTextResponse(text string) *model.LLMResponse {
 
 func (c *liveConnection) Receive(ctx context.Context) (<-chan *model.LLMResponse, <-chan error) {
 	msgs, errs1 := c.receive(ctx)
-	resps := c.process(ctx, msgs)
+	resps, errs2 := c.process(ctx, msgs)
 
 	errChan := make(chan error, 1)
 	go func() {
@@ -374,11 +374,22 @@ func (c *liveConnection) Receive(ctx context.Context) (<-chan *model.LLMResponse
 				if !ok {
 					errs1 = nil
 				}
+			case err, ok := <-errs2:
+				if ok && err != nil {
+					select {
+					case errChan <- err:
+					case <-ctx.Done():
+					}
+					return
+				}
+				if !ok {
+					errs2 = nil
+				}
 			case <-ctx.Done():
 				return
 			}
 
-			if errs1 == nil {
+			if errs1 == nil && errs2 == nil {
 				return
 			}
 		}

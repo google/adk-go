@@ -26,11 +26,12 @@ The sender goroutine at [base_flow_live.go:104](internal/llminternal/base_flow_l
 
 - **Issue:** The loop indiscriminately attempts to reconnect whenever `receiveFromLiveModel` exits. It does not distinguish between a normal session closure (EOF) and a fatal error that should not be retried (e.g., authentication failure or invalid configuration). This could lead to unnecessary reconnection attempts or masked errors.
 
-### 5. Swallowed Errors in `gemini_live.go` `process` Goroutine
+### 5. Swallowed Errors in `gemini_live.go` `process` Goroutine (FIXED)
 
 In [model/gemini/gemini_live.go:114](model/gemini/gemini_live.go#L114), the `process` function runs in a goroutine to transform `genai.LiveServerMessage` into `model.LLMResponse`.
 
 - **Issue:** While it correctly handles the closing of the input channel, it has no independent error channel. If an error were to occur during the processing/mapping logic (e.g., unexpected message types or internal state inconsistencies), there is no way for this specific goroutine to propagate that error back to the `Receive` caller.
+- **Fix:** Updated `process` to return an error channel and updated `Receive` to merge errors from both the raw receiver and the processor goroutines.
 
 ### 6. Resource Leak on Early Return
 
