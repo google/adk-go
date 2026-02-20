@@ -35,7 +35,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
-//go:generate go test -httprecord=testdata/.*\.httprr
+//go:generate go test -v -httprecord=testdata/.*\.httprr
 
 func TestPluginCallbackIntegration(t *testing.T) {
 	functionTool, err := functiontool.New(functiontool.Config{
@@ -74,7 +74,7 @@ func TestPluginCallbackIntegration(t *testing.T) {
 			name:                     "transfer to agent tool",
 			tools:                    func(a agent.Agent) []tool.Tool { return []tool.Tool{} },
 			wantSkillStateValue:      "add",
-			wantRationaleStateValue:  "The user is asking to add two numbers, and the calculator agent has an add skill.",
+			wantRationaleStateValue:  "The user is asking to add two numbers, and the calculator agent has an add skill to perform this operation.",
 			shouldHaveSkillState:     true,
 			shouldHaveRationaleState: true,
 		},
