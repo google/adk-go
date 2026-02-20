@@ -17,6 +17,7 @@ package llminternal
 import (
 	"fmt"
 	"iter"
+	"strings"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/utils"
@@ -32,10 +33,11 @@ func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			return // do nothing.
 		}
 
-		si := fmt.Sprintf("You are an agent. Your internal name is %q.", ctx.Agent().Name())
+		parts := []string{fmt.Sprintf("You are an agent. Your internal name is %q.", ctx.Agent().Name())}
 		if description := ctx.Agent().Description(); description != "" {
-			si += fmt.Sprintf(" The description about you is %q.", description)
+			parts = append(parts, fmt.Sprintf("The description about you is %q.", description))
 		}
+		si := strings.Join(parts, " ")
 
 		utils.AppendInstructions(req, si)
 	}
