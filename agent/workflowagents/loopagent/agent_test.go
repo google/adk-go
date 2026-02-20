@@ -357,3 +357,7 @@ func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 		}
 	}
 }
+
+func (f *FakeLLM) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
+	return nil, nil
+}

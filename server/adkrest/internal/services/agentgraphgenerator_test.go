@@ -51,6 +51,10 @@ func (d *dummyLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 	}
 }
 
+func (d *dummyLLM) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
+	return nil, nil
+}
+
 // Helper to create a generic agent.Agent
 func newTestAgent(t *testing.T, name, description string, agentType agentinternal.Type, subAgents []agent.Agent, tools []tool.Tool) agent.Agent {
 	var a agent.Agent

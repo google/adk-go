@@ -49,6 +49,10 @@ func (m *mockModelForTest) GenerateContent(ctx context.Context, req *model.LLMRe
 	return func(yield func(*model.LLMResponse, error) bool) {}
 }
 
+func (m *mockModelForTest) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
+	return nil, nil
+}
+
 var (
 	testExporter *tracetest.InMemoryExporter
 	initTracer   sync.Once

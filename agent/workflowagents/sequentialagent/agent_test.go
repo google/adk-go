@@ -312,3 +312,7 @@ func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 		}, nil)
 	}
 }
+
+func (f *FakeLLM) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
+	return nil, fmt.Errorf("not implemented")
+}

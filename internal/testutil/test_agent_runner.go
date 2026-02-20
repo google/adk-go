@@ -205,6 +205,10 @@ func (m *MockModel) Name() string {
 	return "mock"
 }
 
+func (m *MockModel) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
+	return nil, errors.New("not implemented")
+}
+
 var _ model.LLM = (*MockModel)(nil)
 
 // CollectEvents collects all event from the llm response until encountering an error.

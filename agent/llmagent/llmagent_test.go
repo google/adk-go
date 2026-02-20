@@ -698,6 +698,9 @@ func TestInstructionProvider(t *testing.T) {
 					Config: &genai.GenerateContentConfig{
 						SystemInstruction: genai.NewContentFromText("instruction custom_value test", genai.RoleUser),
 					},
+					LiveConnectConfig: &genai.LiveConnectConfig{
+						SystemInstruction: genai.NewContentFromText("instruction custom_value test", genai.RoleUser),
+					},
 				},
 			},
 			wantAgentResponse: []string{
@@ -723,6 +726,9 @@ func TestInstructionProvider(t *testing.T) {
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
 					Config: &genai.GenerateContentConfig{
+						SystemInstruction: genai.NewContentFromText("instruction provider template {var} not evaluated", genai.RoleUser),
+					},
+					LiveConnectConfig: &genai.LiveConnectConfig{
 						SystemInstruction: genai.NewContentFromText("instruction provider template {var} not evaluated", genai.RoleUser),
 					},
 				},
@@ -752,6 +758,9 @@ func TestInstructionProvider(t *testing.T) {
 					Config: &genai.GenerateContentConfig{
 						SystemInstruction: genai.NewContentFromText("global instruction provider template {var} not evaluated", genai.RoleUser),
 					},
+					LiveConnectConfig: &genai.LiveConnectConfig{
+						SystemInstruction: genai.NewContentFromText("global instruction provider template {var} not evaluated", genai.RoleUser),
+					},
 				},
 			},
 			wantAgentResponse: []string{
@@ -779,6 +788,15 @@ func TestInstructionProvider(t *testing.T) {
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
 					Config: &genai.GenerateContentConfig{
+						SystemInstruction: &genai.Content{
+							Parts: []*genai.Part{
+								genai.NewPartFromText("global instruction provider {var}"),
+								genai.NewPartFromText("instruction provider {var}"),
+							},
+							Role: genai.RoleUser,
+						},
+					},
+					LiveConnectConfig: &genai.LiveConnectConfig{
 						SystemInstruction: &genai.Content{
 							Parts: []*genai.Part{
 								genai.NewPartFromText("global instruction provider {var}"),

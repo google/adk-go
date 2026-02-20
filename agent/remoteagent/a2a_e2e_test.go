@@ -745,6 +745,10 @@ func (d *llmStub) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 	return d.generateContent(ctx, req, stream)
 }
 
+func (d *llmStub) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
+	return nil, nil
+}
+
 func newLongRunningTool(t *testing.T) tool.Tool {
 	t.Helper()
 	requestApproval, err := functiontool.New(functiontool.Config{
