@@ -187,12 +187,12 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, liveRequ
 				continue
 			}
 
-			// if r.shouldAppendEvent(event, true) {
-			if err := r.sessionService.AppendEvent(invCtx, storedSession, event); err != nil {
-				yield(nil, fmt.Errorf("failed to add event to session: %w", err))
-				return
+			if r.shouldAppendEvent(event, true) {
+				if err := r.sessionService.AppendEvent(invCtx, storedSession, event); err != nil {
+					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+					return
+				}
 			}
-			// }
 
 			if !yield(event, nil) {
 				return
