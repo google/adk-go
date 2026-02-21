@@ -68,7 +68,6 @@ func (c *liveConnection) Send(req *model.LiveRequest) error {
 				FunctionResponses: functionResponses,
 			})
 		} else {
-			log.Info().Interface("content", req.Content).Msg("Sending content to live connection")
 			turnComplete := true
 			return c.session.SendClientContent(genai.LiveClientContentInput{
 				Turns:        []*genai.Content{req.Content},

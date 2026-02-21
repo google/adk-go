@@ -287,17 +287,11 @@ func (s *Server) websocketHandler() http.HandlerFunc {
 			}
 
 			if messageType == websocket.BinaryMessage {
-				log.Printf("Received binary message: %d bytes", len(p))
 				// Binary data is assumed to be PCM audio from the client
-				err := liveRequestQueue.SendContent(&genai.Content{
-					Role: "user",
-					Parts: []*genai.Part{
-						{
-							InlineData: &genai.Blob{
-								MIMEType: "audio/pcm;rate=16000",
-								Data:     p,
-							},
-						},
+				err := liveRequestQueue.SendRealtimeInput(&genai.LiveRealtimeInput{
+					Audio: &genai.Blob{
+						MIMEType: "audio/pcm;rate=16000",
+						Data:     p,
 					},
 				})
 				if err != nil {
