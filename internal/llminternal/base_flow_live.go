@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,9 +14,11 @@
 package llminternal
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"strings"
+	"sync"
 
 	"github.com/rs/zerolog/log"
 	"google.golang.org/adk/agent"
@@ -27,6 +29,11 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/genai"
 )
+
+type liveResult struct {
+	event *session.Event
+	err   error
+}
 
 // RunLive runs the flow in live mode, connecting to the model and handling live interactions.
 func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -100,148 +107,174 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 				return
 			}
 
-			// Start sender goroutine
+			// Decouple sender/receiver from the yield loop using a channel
+			results := make(chan liveResult, 64)
+			connCtx, cancel := context.WithCancel(ctx)
+			connInvCtx := ctx.WithContext(connCtx)
+			var wg sync.WaitGroup
+
+			wg.Add(2)
+			go f.runSender(connInvCtx, &wg, conn, results)
+			go f.runReceiver(connInvCtx, &wg, conn, req, results)
+
+			// Close the channel when both goroutines are finished
 			go func() {
-				ch := queue.Channel()
-				for {
-					select {
-					case liveReq, ok := <-ch:
-						if !ok {
-							return // Queue closed
-						}
-						if liveReq.Close {
-							conn.Close()
-							return
-						}
+				wg.Wait()
+				close(results)
+			}()
 
-						if liveReq.ActivityStart != nil || liveReq.ActivityEnd != nil {
-							if err := conn.Send(liveReq); err != nil {
-								yield(nil, fmt.Errorf("failed to send to live connection: %w", err))
-								return
-							}
-						} else if liveReq.RealtimeInput != nil && liveReq.RealtimeInput.Audio != nil {
-							err := f.AudioCacheManager.CacheAudio(
-								ctx,
-								liveReq.RealtimeInput.Audio,
-								"input",
-							)
-							if err != nil {
-								yield(nil, fmt.Errorf("failed to cache audio: %w", err))
-								return
-							}
-							if err := conn.Send(liveReq); err != nil {
-								yield(nil, fmt.Errorf("failed to send to live connection: %w", err))
-								return
-							}
+			// Process results from background goroutines safely in this thread
+			shouldReconnect := false
+			for res := range results {
+				if res.err != nil {
+					if !yield(nil, res.err) {
+						cancel()
+						return
+					}
+					shouldReconnect = true
+					break
+				}
+
+				if res.event != nil {
+					// Handle tool response if needed (special logic from previous loop)
+					if len(res.event.FunctionResponses()) > 0 {
+						toolResponses := &genai.LiveToolResponseInput{
+							FunctionResponses: res.event.FunctionResponses(),
 						}
+						queue.SendToolResponse(toolResponses)
+					}
 
-						if liveReq.Content != nil {
-							content := liveReq.Content
-							// Persist user text content to session (similar to non-live mode)
-							// Skip function responses - they are already handled separately
-							isFunctionResponse := false
-							for _, part := range content.Parts {
-								if part.FunctionResponse != nil {
-									isFunctionResponse = true
-									break
-								}
-							}
-							if !isFunctionResponse {
-								if content.Role == "" {
-									content.Role = "user"
-								}
-								userContentEvent := session.NewEvent(ctx.InvocationID())
-								userContentEvent.Content = content
-								userContentEvent.Author = "user"
+					// # We handle agent transfer here in `run_live` rather than
+					// # in `_postprocess_live` to prevent duplication of function
+					// # response processing. If agent transfer were handled in
+					// # `_postprocess_live`, events yielded from child agent's
+					// # `run_live` would bubble up to parent agent's `run_live`,
+					// # causing `event.get_function_responses()` to be true in both
+					// # child and parent, and `send_content()` to be called twice for
+					// # the same function response. By handling agent transfer here,
+					// # we ensure that only child agent processes its own function
+					// # responses after the transfer.
+					// if (
+					//     event.content
+					//     and event.content.parts
+					//     and event.content.parts[0].function_response
+					//     and event.content.parts[0].function_response.name
+					//     == 'transfer_to_agent'
+					// ):
+					//   await asyncio.sleep(DEFAULT_TRANSFER_AGENT_DELAY)
+					//   # cancel the tasks that belongs to the closed connection.
+					//   send_task.cancel()
+					//   logger.debug('Closing live connection')
+					//   await llm_connection.close()
+					//   logger.debug('Live connection closed.')
+					//   # transfer to the sub agent.
+					//   transfer_to_agent = event.actions.transfer_to_agent
+					//   if transfer_to_agent:
+					//     logger.debug('Transferring to agent: %s', transfer_to_agent)
+					//     agent_to_run = self._get_agent_to_run(
+					//         invocation_context, transfer_to_agent
+					//     )
+					//     async with Aclosing(
+					//         agent_to_run.run_live(invocation_context)
+					//     ) as agen:
+					//       async for item in agen:
+					//         yield item
+					// if (
+					//     event.content
+					//     and event.content.parts
+					//     and event.content.parts[0].function_response
+					//     and event.content.parts[0].function_response.name
+					//     == 'task_completed'
+					// ):
+					//   # this is used for sequential agent to signal the end of the agent.
+					//   await asyncio.sleep(DEFAULT_TASK_COMPLETION_DELAY)
+					//   # cancel the tasks that belongs to the closed connection.
+					//   send_task.cancel()
+					//   return
 
-								if !yield(userContentEvent, nil) {
-									return
-								}
-
-								if err := conn.Send(liveReq); err != nil {
-									yield(nil, fmt.Errorf("failed to send to live connection: %w", err))
-									return
-								}
-							}
-
-						}
-						if liveReq.ToolResponse != nil {
-							if err := conn.Send(liveReq); err != nil {
-								yield(nil, fmt.Errorf("failed to send to live connection: %w", err))
-								return
-							}
-						}
-					case <-ctx.Done():
+					if !yield(res.event, nil) {
+						cancel()
 						return
 					}
 				}
-			}()
+			}
 
-			for ev, err := range f.receiveFromLiveModel(ctx, conn, req) {
-				if err != nil {
-					yield(nil, err)
+			cancel()
+			conn.Close()
+
+			if !shouldReconnect || ctx.Err() != nil {
+				return
+			}
+		}
+	}
+}
+
+func (f *Flow) runSender(ctx agent.InvocationContext, wg *sync.WaitGroup, conn model.LiveConnection, results chan<- liveResult) {
+	defer wg.Done()
+	queue := ctx.LiveRequestQueue()
+	ch := queue.Channel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case liveReq, ok := <-ch:
+			if !ok {
+				return
+			}
+			if liveReq.Close {
+				conn.Close()
+				return
+			}
+
+			if liveReq.ActivityStart != nil || liveReq.ActivityEnd != nil {
+				if err := conn.Send(liveReq); err != nil {
+					sendResult(ctx, results, liveResult{err: fmt.Errorf("failed to send to live connection: %w", err)})
 					return
 				}
+			} else if liveReq.RealtimeInput != nil && liveReq.RealtimeInput.Audio != nil {
+				err := f.AudioCacheManager.CacheAudio(ctx, liveReq.RealtimeInput.Audio, "input")
+				if err != nil {
+					sendResult(ctx, results, liveResult{err: fmt.Errorf("failed to cache audio: %w", err)})
+					return
+				}
+				if err := conn.Send(liveReq); err != nil {
+					sendResult(ctx, results, liveResult{err: fmt.Errorf("failed to send to live connection: %w", err)})
+					return
+				}
+			}
 
-				if len(ev.FunctionResponses()) > 0 {
-					toolResponses := &genai.LiveToolResponseInput{
-						FunctionResponses: ev.FunctionResponses(),
-					}
-					if len(toolResponses.FunctionResponses) > 0 {
-						queue.SendToolResponse(toolResponses)
+			if liveReq.Content != nil {
+				content := liveReq.Content
+				// Persist user text content to session (similar to non-live mode)
+				// Skip function responses - they are already handled separately
+				isFunctionResponse := false
+				for _, part := range content.Parts {
+					if part.FunctionResponse != nil {
+						isFunctionResponse = true
+						break
 					}
 				}
+				if !isFunctionResponse {
+					if content.Role == "" {
+						content.Role = "user"
+					}
+					userContentEvent := session.NewEvent(ctx.InvocationID())
+					userContentEvent.Content = content
+					userContentEvent.Author = "user"
 
-				// # We handle agent transfer here in `run_live` rather than
-				// # in `_postprocess_live` to prevent duplication of function
-				// # response processing. If agent transfer were handled in
-				// # `_postprocess_live`, events yielded from child agent's
-				// # `run_live` would bubble up to parent agent's `run_live`,
-				// # causing `event.get_function_responses()` to be true in both
-				// # child and parent, and `send_content()` to be called twice for
-				// # the same function response. By handling agent transfer here,
-				// # we ensure that only child agent processes its own function
-				// # responses after the transfer.
-				// if (
-				//     event.content
-				//     and event.content.parts
-				//     and event.content.parts[0].function_response
-				//     and event.content.parts[0].function_response.name
-				//     == 'transfer_to_agent'
-				// ):
-				//   await asyncio.sleep(DEFAULT_TRANSFER_AGENT_DELAY)
-				//   # cancel the tasks that belongs to the closed connection.
-				//   send_task.cancel()
-				//   logger.debug('Closing live connection')
-				//   await llm_connection.close()
-				//   logger.debug('Live connection closed.')
-				//   # transfer to the sub agent.
-				//   transfer_to_agent = event.actions.transfer_to_agent
-				//   if transfer_to_agent:
-				//     logger.debug('Transferring to agent: %s', transfer_to_agent)
-				//     agent_to_run = self._get_agent_to_run(
-				//         invocation_context, transfer_to_agent
-				//     )
-				//     async with Aclosing(
-				//         agent_to_run.run_live(invocation_context)
-				//     ) as agen:
-				//       async for item in agen:
-				//         yield item
-				// if (
-				//     event.content
-				//     and event.content.parts
-				//     and event.content.parts[0].function_response
-				//     and event.content.parts[0].function_response.name
-				//     == 'task_completed'
-				// ):
-				//   # this is used for sequential agent to signal the end of the agent.
-				//   await asyncio.sleep(DEFAULT_TASK_COMPLETION_DELAY)
-				//   # cancel the tasks that belongs to the closed connection.
-				//   send_task.cancel()
-				//   return
+					sendResult(ctx, results, liveResult{event: userContentEvent})
 
-				log.Debug().Interface("ev", ev).Msg("Yielding event")
-				if !yield(ev, nil) {
+					if err := conn.Send(liveReq); err != nil {
+						sendResult(ctx, results, liveResult{err: fmt.Errorf("failed to send to live connection: %w", err)})
+						return
+					}
+				}
+			}
+
+			if liveReq.ToolResponse != nil {
+				if err := conn.Send(liveReq); err != nil {
+					sendResult(ctx, results, liveResult{err: fmt.Errorf("failed to send to live connection: %w", err)})
 					return
 				}
 			}
@@ -249,101 +282,85 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 	}
 }
 
-func (f *Flow) receiveFromLiveModel(ctx agent.InvocationContext, conn model.LiveConnection, req *model.LLMRequest) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		getAuthorForEvent := func(llmResponse *model.LLMResponse) string {
-			if llmResponse != nil && llmResponse.Content != nil && llmResponse.Content.Role == "user" {
-				return "user"
-			}
-			return ctx.Agent().Name()
+func (f *Flow) runReceiver(ctx agent.InvocationContext, wg *sync.WaitGroup, conn model.LiveConnection, req *model.LLMRequest, results chan<- liveResult) {
+	defer wg.Done()
+
+	getAuthorForEvent := func(llmResponse *model.LLMResponse) string {
+		if llmResponse != nil && llmResponse.Content != nil && llmResponse.Content.Role == "user" {
+			return "user"
 		}
+		return ctx.Agent().Name()
+	}
 
-		queue := ctx.LiveRequestQueue()
-		if queue == nil {
-			yield(nil, fmt.Errorf("LiveRequestQueue not found in context"))
-			return
-		}
-
-		resps, errs := conn.Receive(ctx)
-		for {
-			select {
-			case resp, ok := <-resps:
-				if !ok {
-					break
-				}
-				if resp.LiveSessionResumptionUpdate != nil {
-					log.Info().Str("handle", resp.LiveSessionResumptionUpdate.NewHandle).Msg("Live session resumption update")
-					ctx.SetLiveSessionResumptionHandle(resp.LiveSessionResumptionUpdate.NewHandle)
-				}
-
-				modelResponseEvent := session.NewEvent(ctx.InvocationID())
-				modelResponseEvent.Content = resp.Content
-				modelResponseEvent.Author = getAuthorForEvent(resp)
-				modelResponseEvent.OutputTranscription = resp.OutputTranscription
-				modelResponseEvent.InputTranscription = resp.InputTranscription
-
-				log.Info().Interface("resp", resp).Msg("resp from live model before postprocess")
-
-				for ev, err := range f.postprocessLive(ctx, req, resp, modelResponseEvent) {
-					if err != nil {
-						yield(nil, err)
-						return
-					}
-
-					if ctx.RunConfig().SaveLiveBlob &&
-						ev.Content != nil &&
-						ev.Content.Parts != nil &&
-						ev.Content.Parts[0].InlineData != nil &&
-						strings.HasPrefix(ev.Content.Parts[0].InlineData.MIMEType, "audio/") {
-
-						audioBlob := &genai.Blob{
-							Data:     ev.Content.Parts[0].InlineData.Data,
-							MIMEType: ev.Content.Parts[0].InlineData.MIMEType,
-						}
-
-						if err := f.AudioCacheManager.CacheAudio(ctx, audioBlob, "output"); err != nil {
-							log.Error().Err(err).Msg("Failed to cache audio")
-						}
-						log.Info().Int("audioblob_length", len(audioBlob.Data)).Msg("Cached audio")
-					}
-
-					log.Info().Interface("ev", ev).Msg("yielding event")
-					if !yield(ev, nil) {
-						return
-					}
-				}
-
-				// // TODO: temporarily convert
-				// tools := make(map[string]tool.Tool)
-				// for k, v := range req.Tools {
-				// 	tool, ok := v.(tool.Tool)
-				// 	if !ok {
-				// 		if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
-				// 			return
-				// 		}
-				// 	}
-				// 	tools[k] = tool
-				// }
-				// Trace?
-				// telemetry.TraceLLMCall(callLLMSpan, ctx, req, modelResponseEvent)
-
-				if ctx.Err() != nil {
-					return
-				}
-
-			case err, ok := <-errs:
-				if !ok {
-					break
-				}
-				if err != nil {
-					yield(nil, err)
-					return
-				}
-
-			case <-ctx.Done():
+	resps, errs := conn.Receive(ctx)
+	for {
+		select {
+		case resp, ok := <-resps:
+			if !ok {
 				return
 			}
+			if resp.LiveSessionResumptionUpdate != nil {
+				log.Info().Str("handle", resp.LiveSessionResumptionUpdate.NewHandle).Msg("Live session resumption update")
+				ctx.SetLiveSessionResumptionHandle(resp.LiveSessionResumptionUpdate.NewHandle)
+			}
+
+			modelResponseEvent := session.NewEvent(ctx.InvocationID())
+			modelResponseEvent.Content = resp.Content
+			modelResponseEvent.Author = getAuthorForEvent(resp)
+			modelResponseEvent.OutputTranscription = resp.OutputTranscription
+			modelResponseEvent.InputTranscription = resp.InputTranscription
+
+			log.Info().Interface("resp", resp).Msg("resp from live model before postprocess")
+
+			for ev, err := range f.postprocessLive(ctx, req, resp, modelResponseEvent) {
+				if err != nil {
+					sendResult(ctx, results, liveResult{err: err})
+					return
+				}
+
+				if ctx.RunConfig().SaveLiveBlob &&
+					ev.Content != nil &&
+					ev.Content.Parts != nil &&
+					ev.Content.Parts[0].InlineData != nil &&
+					strings.HasPrefix(ev.Content.Parts[0].InlineData.MIMEType, "audio/") {
+
+					audioBlob := &genai.Blob{
+						Data:     ev.Content.Parts[0].InlineData.Data,
+						MIMEType: ev.Content.Parts[0].InlineData.MIMEType,
+					}
+
+					if err := f.AudioCacheManager.CacheAudio(ctx, audioBlob, "output"); err != nil {
+						log.Error().Err(err).Msg("Failed to cache audio")
+					}
+					log.Info().Int("audioblob_length", len(audioBlob.Data)).Msg("Cached audio")
+				}
+
+				sendResult(ctx, results, liveResult{event: ev})
+			}
+
+			if ctx.Err() != nil {
+				return
+			}
+
+		case err, ok := <-errs:
+			if !ok {
+				return
+			}
+			if err != nil {
+				sendResult(ctx, results, liveResult{err: err})
+				return
+			}
+
+		case <-ctx.Done():
+			return
 		}
+	}
+}
+
+func sendResult(ctx context.Context, results chan<- liveResult, res liveResult) {
+	select {
+	case results <- res:
+	case <-ctx.Done():
 	}
 }
 
