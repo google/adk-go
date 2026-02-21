@@ -400,7 +400,9 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 		if ctx.RunConfig().SaveLiveBlob {
 			flushedEvents := f.handleControlEventFlush(ctx, llmResponse)
 			for _, ev := range flushedEvents {
-				yield(ev, nil)
+				if !yield(ev, nil) {
+					return
+				}
 			}
 			// if len(flushedEvents) > 0 {
 			// 	// NOTE below return is O.K. for now, because currently we only flush
@@ -416,7 +418,9 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 		// Builds the event.
 		modelResponseEvent = f.finalizeLiveModelResponseEvent(ctx, llmRequest, llmResponse, modelResponseEvent)
 		log.Info().Interface("modelResponseEvent", modelResponseEvent).Msg("Yielding modelResponseEvent from finalizeLiveModelResponseEvent postprocess")
-		yield(modelResponseEvent, nil)
+		if !yield(modelResponseEvent, nil) {
+			return
+		}
 
 		// Resolve tools
 		// TODO: Reuse tool resolution logic or cache it?
@@ -437,7 +441,9 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 				return
 			}
 			if functionResponseEvent != nil {
-				yield(functionResponseEvent, nil)
+				if !yield(functionResponseEvent, nil) {
+					return
+				}
 			}
 		}
 	}
