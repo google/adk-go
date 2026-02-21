@@ -17,6 +17,7 @@ const enableProactivityCheckbox = document.getElementById("enableProactivity");
 const enableAffectiveDialogCheckbox = document.getElementById(
   "enableAffectiveDialog",
 );
+const enableLivePlaybackCheckbox = document.getElementById("enableLivePlayback");
 
 // Reconnect WebSocket when RunConfig options change
 function handleRunConfigChange() {
@@ -863,8 +864,20 @@ function connectWebsocket() {
           const mimeType = part.inlineData.mimeType;
           const data = part.inlineData.data;
 
-          if (mimeType && mimeType.startsWith("audio/pcm") && audioPlayerNode) {
-            audioPlayerNode.port.postMessage(base64ToArray(data));
+          if (
+            mimeType &&
+            mimeType.startsWith("audio/pcm") &&
+            enableLivePlaybackCheckbox.checked
+          ) {
+            if (audioPlayerNode) {
+              audioPlayerNode.port.postMessage(base64ToArray(data));
+              console.log("Sent audio chunk to worklet");
+            } else {
+              console.warn("Audio data received but audioPlayerNode not initialized. Live Playback enabled.");
+              // Trigger initialization on incoming data just in case, 
+              // though it might be blocked by browser gesture rules if not already started.
+              ensureAudioOutputStarted();
+            }
           }
         }
 
@@ -978,6 +991,11 @@ function addSubmitHandler() {
 
 // Send a message to the server as JSON
 function sendMessage(message) {
+  // Ensure audio output is started if live playback is enabled
+  if (enableLivePlaybackCheckbox.checked) {
+    ensureAudioOutputStarted();
+  }
+
   if (websocket && websocket.readyState == WebSocket.OPEN) {
     const jsonMessage = JSON.stringify({
       type: "text",
@@ -1215,22 +1233,57 @@ let micStream;
 import { startAudioPlayerWorklet } from "./audio-player.js";
 import { startAudioRecorderWorklet } from "./audio-recorder.js";
 
-// Start audio
-function startAudio() {
-  // Start audio output
-  startAudioPlayerWorklet().then(([node, ctx]) => {
+// Start audio output
+async function ensureAudioOutputStarted() {
+  if (audioPlayerNode) {
+    if (audioPlayerContext && audioPlayerContext.state === "suspended") {
+      await audioPlayerContext.resume();
+    }
+    return;
+  }
+  try {
+    const [node, ctx] = await startAudioPlayerWorklet();
     audioPlayerNode = node;
     audioPlayerContext = ctx;
-  });
-  // Start audio input
-  startAudioRecorderWorklet(audioRecorderHandler).then(
-    ([node, ctx, stream]) => {
-      audioRecorderNode = node;
-      audioRecorderContext = ctx;
-      micStream = stream;
-    },
-  );
+    console.log("Audio player initialized");
+  } catch (err) {
+    console.error("Failed to start audio player:", err);
+  }
 }
+
+// Start audio input
+async function startAudioInput() {
+  if (audioRecorderNode) return;
+  try {
+    const [node, ctx, stream] = await startAudioRecorderWorklet(
+      audioRecorderHandler,
+    );
+    audioRecorderNode = node;
+    audioRecorderContext = ctx;
+    micStream = stream;
+    console.log("Audio recorder initialized");
+  } catch (err) {
+    console.error("Failed to start audio recorder:", err);
+  }
+}
+
+// Start audio
+function startAudio() {
+  ensureAudioOutputStarted();
+  startAudioInput();
+}
+
+// Handle live playback toggle
+enableLivePlaybackCheckbox.addEventListener("change", () => {
+  if (enableLivePlaybackCheckbox.checked) {
+    ensureAudioOutputStarted();
+  } else {
+    // Stop playback immediately if unchecked
+    if (audioPlayerNode) {
+      audioPlayerNode.port.postMessage({ command: "endOfAudio" });
+    }
+  }
+});
 
 // Start the audio only when the user clicked the button
 // (due to the gesture requirement for the Web Audio API)

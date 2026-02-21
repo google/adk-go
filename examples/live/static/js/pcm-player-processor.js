@@ -55,15 +55,18 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
     const framesPerBlock = output[0].length;
     for (let frame = 0; frame < framesPerBlock; frame++) {
 
-      // Write the sample(s) into the output buffer
-      output[0][frame] = this.buffer[this.readIndex]; // left channel
-      if (output.length > 1) {
-        output[1][frame] = this.buffer[this.readIndex]; // right channel
-      }
-
-      // Move the read index forward unless underflowing
-      if (this.readIndex != this.writeIndex) {
+      if (this.readIndex !== this.writeIndex) {
+        const sample = this.buffer[this.readIndex];
+        output[0][frame] = sample;
+        if (output.length > 1) {
+          output[1][frame] = sample;
+        }
         this.readIndex = (this.readIndex + 1) % this.bufferSize;
+      } else {
+        output[0][frame] = 0;
+        if (output.length > 1) {
+          output[1][frame] = 0;
+        }
       }
     }
 
