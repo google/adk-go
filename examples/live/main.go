@@ -225,7 +225,8 @@ func (s *Server) websocketHandler() http.HandlerFunc {
 		}
 		defer conn.Close()
 
-		ctx := context.Background()
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
 
 		// Create session for the user
 		_, err = s.sessionService.Create(ctx, &session.CreateRequest{
@@ -249,6 +250,7 @@ func (s *Server) websocketHandler() http.HandlerFunc {
 
 		// Phase 2 - 4
 		liveRequestQueue := agent.NewLiveRequestQueue(agent.DefaultLiveRequestQueueSize)
+		defer liveRequestQueue.Close()
 
 		// Channel to signal the reading loop to stop
 		done := make(chan struct{})
@@ -338,6 +340,5 @@ func (s *Server) websocketHandler() http.HandlerFunc {
 		}
 
 		log.Printf("Closing queue")
-		liveRequestQueue.Close()
 	}
 }
