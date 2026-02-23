@@ -265,6 +265,7 @@ func (r *Runner) newInvocationContextForLive(ctx context.Context, userID, sessio
 		LiveRequestQueue: liveRequestQueue,
 		//TODO in go we dont have this stored anywhere yet.
 		LiveSessionResumptionHandle: "",
+		ResumabilityConfig:          r.resumabilityConfig,
 	})
 	return invCtx
 }

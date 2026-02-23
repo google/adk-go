@@ -314,9 +314,11 @@ func (f *Flow) runReceiver(ctx agent.InvocationContext, wg *sync.WaitGroup, conn
 	}
 
 	resumable := false
+
 	if cfg := ctx.ResumabilityConfig(); cfg != nil {
 		resumable = cfg.IsResumable
 	}
+	log.Debug().Bool("resumable", resumable).Msg("checking resumability in runReceiver")
 
 	var goAway *genai.LiveServerGoAway
 	var goAwayTimer *time.Timer

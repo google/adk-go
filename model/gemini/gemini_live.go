@@ -17,7 +17,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rs/zerolog/log"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -323,8 +322,7 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 					}
 				}
 
-				if msg.SessionResumptionUpdate != nil {
-					log.Debug().Interface("session_resumption_update", msg.SessionResumptionUpdate).Msg("Received session resumption update")
+				if msg.SessionResumptionUpdate != nil && msg.SessionResumptionUpdate.NewHandle != "" {
 					if !send(&model.LLMResponse{
 						LiveSessionResumptionUpdate: msg.SessionResumptionUpdate,
 					}) {
@@ -333,7 +331,6 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 				}
 
 				if msg.GoAway != nil {
-					log.Debug().Interface("go_away", msg.GoAway).Msg("Received go away")
 					if !send(&model.LLMResponse{
 						LiveGoAway: msg.GoAway,
 					}) {
