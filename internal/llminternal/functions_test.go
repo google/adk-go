@@ -146,6 +146,7 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 				InvocationID: "inv_1",
 				Author:       "agent_1",
 				Branch:       "main",
+				Actions:      session.EventActions{StateDelta: map[string]any{}},
 				LLMResponse: model.LLMResponse{
 					Content: &genai.Content{
 						Role: genai.RoleModel,
@@ -180,6 +181,12 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 			}
 
 			if got != nil {
+				if got.ID == "" {
+					t.Errorf("expected event ID to be set, got empty string")
+				}
+				if got.Timestamp.IsZero() {
+					t.Errorf("expected event Timestamp to be set, got zero value")
+				}
 				for _, s := range got.LongRunningToolIDs {
 					if s == "" {
 						t.Errorf("empty long running tool id")
