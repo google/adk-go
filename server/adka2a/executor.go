@@ -147,7 +147,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 	if err != nil {
 		event := toTaskFailedUpdateEvent(reqCtx, err, invocationMeta.eventMeta)
 		execCtx := newExecutorContext(ctx, invocationMeta, executorPlugin, content)
-		return e.writeFinalTaskStatus(execCtx, queue, event, err)
+		return e.writeFinalTaskStatus(execCtx, queue, nil, event, err)
 	}
 
 	event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateWorking, nil)
@@ -173,7 +173,7 @@ func (e *Executor) process(ctx ExecutorContext, r *runner.Runner, processor *eve
 	for adkEvent, adkErr := range r.Run(ctx, meta.userID, meta.sessionID, ctx.UserContent(), e.config.RunConfig) {
 		if adkErr != nil {
 			event := processor.makeTaskFailedEvent(fmt.Errorf("agent run failed: %w", adkErr), nil)
-			return e.writeFinalTaskStatus(ctx, q, event, adkErr)
+			return e.writeFinalTaskStatus(ctx, q, processor.makeFinalArtifactUpdate(), event, adkErr)
 		}
 
 		a2aEvent, pErr := processor.process(ctx, adkEvent)
@@ -183,7 +183,7 @@ func (e *Executor) process(ctx ExecutorContext, r *runner.Runner, processor *eve
 
 		if pErr != nil {
 			event := processor.makeTaskFailedEvent(fmt.Errorf("processor failed: %w", pErr), adkEvent)
-			return e.writeFinalTaskStatus(ctx, q, event, pErr)
+			return e.writeFinalTaskStatus(ctx, q, processor.makeFinalArtifactUpdate(), event, pErr)
 		}
 
 		if a2aEvent != nil {
@@ -193,20 +193,25 @@ func (e *Executor) process(ctx ExecutorContext, r *runner.Runner, processor *eve
 		}
 	}
 
-	if finalChunk, ok := processor.makeFinalArtifactUpdate(); ok {
-		if err := q.Write(ctx, finalChunk); err != nil {
-			return fmt.Errorf("final artifact update write failed: %w", err)
-		}
-	}
-
 	finalStatus := processor.makeFinalStatusUpdate()
-	return e.writeFinalTaskStatus(ctx, q, finalStatus, nil)
+	return e.writeFinalTaskStatus(ctx, q, processor.makeFinalArtifactUpdate(), finalStatus, nil)
 }
 
-func (e *Executor) writeFinalTaskStatus(ctx ExecutorContext, queue eventqueue.Queue, status *a2a.TaskStatusUpdateEvent, err error) error {
+func (e *Executor) writeFinalTaskStatus(
+	ctx ExecutorContext,
+	queue eventqueue.Queue,
+	partialReset *a2a.TaskArtifactUpdateEvent,
+	status *a2a.TaskStatusUpdateEvent,
+	err error,
+) error {
 	if e.config.AfterExecuteCallback != nil {
 		if err = e.config.AfterExecuteCallback(ctx, status, err); err != nil {
 			return fmt.Errorf("after execute: %w", err)
+		}
+	}
+	if partialReset != nil {
+		if err := queue.Write(ctx, partialReset); err != nil {
+			return fmt.Errorf("partial artifact update write failed: %w", err)
 		}
 	}
 	if err := queue.Write(ctx, status); err != nil {

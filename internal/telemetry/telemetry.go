@@ -12,165 +12,233 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package telemetry implements tracing for ADK.
+// Package telemetry implements telemetry for ADK.
 //
-// WARNING: telemetry provided by ADK (internaltelemetry package) may change (e.g. attributes and their names)
-// because we're in process to standardize and unify tracing across all ADKs.
+// WARNING: telemetry provided by ADK (internal/telemetry package) may change (e.g. attributes and their names)
+// because we're in process to standardize and unify telemetry across all ADKs.
 package telemetry
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/version"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 )
 
-var tracer = otel.GetTracerProvider().Tracer(systemName)
-
 const (
-	systemName           = "gcp.vertex.agent"
-	genAiOperationName   = "gen_ai.operation.name"
-	genAiToolDescription = "gen_ai.tool.description"
-	genAiToolName        = "gen_ai.tool.name"
-	genAiToolCallID      = "gen_ai.tool.call.id"
-	genAiSystemName      = "gen_ai.system"
-
-	genAiRequestModelName = "gen_ai.request.model"
-	genAiRequestTopP      = "gen_ai.request.top_p"
-	genAiRequestMaxTokens = "gen_ai.request.max_tokens"
-
-	genAiResponseFinishReason            = "gen_ai.response.finish_reason"
-	genAiResponsePromptTokenCount        = "gen_ai.response.prompt_token_count"
-	genAiResponseCandidatesTokenCount    = "gen_ai.response.candidates_token_count"
-	genAiResponseCachedContentTokenCount = "gen_ai.response.cached_content_token_count"
-	genAiResponseTotalTokenCount         = "gen_ai.response.total_token_count"
-	genAiConversationID                  = "gen_ai.conversation.id"
-
-	gcpVertexAgentLLMRequestName   = "gcp.vertex.agent.llm_request"
-	gcpVertexAgentToolCallArgsName = "gcp.vertex.agent.tool_call_args"
-	gcpVertexAgentEventID          = "gcp.vertex.agent.event_id"
-	gcpVertexAgentToolResponseName = "gcp.vertex.agent.tool_response"
-	gcpVertexAgentLLMResponseName  = "gcp.vertex.agent.llm_response"
-	gcpVertexAgentInvocationID     = "gcp.vertex.agent.invocation_id"
-	gcpVertexAgentSessionID        = "gcp.vertex.agent.session_id"
+	systemName = "gcp.vertex.agent"
 
 	executeToolName = "execute_tool"
 	mergeToolName   = "(merged tools)"
 )
 
-// StartTrace returns two spans to start emitting events, one from global tracer and second from the local.
-func StartTrace(ctx context.Context, traceName string) (context.Context, trace.Span) {
-	return tracer.Start(ctx, traceName)
+var (
+	gcpVertexAgentToolCallArgsName = attribute.Key("gcp.vertex.agent.tool_call_args")
+	gcpVertexAgentEventID          = attribute.Key("gcp.vertex.agent.event_id")
+	gcpVertexAgentToolResponseName = attribute.Key("gcp.vertex.agent.tool_response")
+)
+
+// tracer is the tracer instance for ADK go.
+var tracer trace.Tracer = otel.GetTracerProvider().Tracer(
+	systemName,
+	trace.WithInstrumentationVersion(version.Version),
+	trace.WithSchemaURL(semconv.SchemaURL),
+)
+
+type agent interface {
+	Name() string
+	Description() string
 }
 
-// TraceMergedToolCalls traces the tool execution events.
-func TraceMergedToolCalls(span trace.Span, fnResponseEvent *session.Event) {
-	attributes := []attribute.KeyValue{
-		attribute.String(genAiOperationName, executeToolName),
-		attribute.String(genAiToolName, mergeToolName),
-		attribute.String(genAiToolDescription, mergeToolName),
-		// Setting empty llm request and response (as UI expect these) while not
-		// applicable for tool_response.
-		attribute.String(gcpVertexAgentLLMRequestName, "{}"),
-		attribute.String(gcpVertexAgentLLMResponseName, "{}"),
-		attribute.String(gcpVertexAgentToolCallArgsName, "N/A"),
-		attribute.String(gcpVertexAgentEventID, fnResponseEvent.ID),
-		attribute.String(gcpVertexAgentToolResponseName, safeSerialize(fnResponseEvent)),
-	}
-	span.SetAttributes(attributes...)
+// StartInvokeAgentSpan starts a new semconv invoke_agent span.
+// It returns a new context with the span and the span itself.
+func StartInvokeAgentSpan(ctx context.Context, agent agent, sessionID string) (context.Context, trace.Span) {
+	agentName := agent.Name()
+	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("invoke_agent %s", agentName), trace.WithAttributes(
+		semconv.GenAIOperationNameInvokeAgent,
+		semconv.GenAIAgentDescription(agent.Description()),
+		semconv.GenAIAgentName(agentName),
+		semconv.GenAIConversationID(sessionID),
+	))
+
+	return spanCtx, span
 }
 
-// TraceToolCall traces the tool execution events.
-func TraceToolCall(span trace.Span, tool tool.Tool, fnArgs map[string]any, fnResponseEvent *session.Event) {
-	if fnResponseEvent == nil {
+type TraceAgentResultParams struct {
+	ResponseEvent *session.Event
+	Error         error
+}
+
+// TraceAgentResult records the result of the agent invocation, including status and error.
+func TraceAgentResult(span trace.Span, params TraceAgentResultParams) {
+	recordErrorAndStatus(span, params.Error)
+}
+
+// StartGenerateContentSpanParams contains parameters for [StartGenerateContentSpan].
+type StartGenerateContentSpanParams struct {
+	// ModelName is the name of the model being used for generation.
+	ModelName string
+}
+
+// StartGenerateContentSpan starts a new semconv generate_content span.
+func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSpanParams) (context.Context, trace.Span) {
+	modelName := params.ModelName
+	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(
+		semconv.GenAIOperationNameGenerateContent,
+		semconv.GenAIRequestModel(modelName),
+	))
+	return spanCtx, span
+}
+
+type TraceGenerateContentResultParams struct {
+	Response *model.LLMResponse
+	Error    error
+}
+
+// TraceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
+func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResultParams) {
+	recordErrorAndStatus(span, params.Error)
+	// TODO(#479): set gcp.vertex.agent.event_id
+	if params.Response == nil {
 		return
 	}
-	attributes := []attribute.KeyValue{
-		attribute.String(genAiOperationName, executeToolName),
-		attribute.String(genAiToolName, tool.Name()),
-		attribute.String(genAiToolDescription, tool.Description()),
-		// TODO: add tool type
+	span.SetAttributes(
+		semconv.GenAIResponseFinishReasons(string(params.Response.FinishReason)),
+	)
+	if params.Response.UsageMetadata != nil {
+		span.SetAttributes(
+			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),
+			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.TotalTokenCount)),
+		)
+	}
+}
 
-		// Setting empty llm request and response (as UI expect these) while not
-		// applicable for tool_response.
-		attribute.String(gcpVertexAgentLLMRequestName, "{}"),
-		attribute.String(gcpVertexAgentLLMResponseName, "{}"),
-		attribute.String(gcpVertexAgentToolCallArgsName, safeSerialize(fnArgs)),
-		attribute.String(gcpVertexAgentEventID, fnResponseEvent.ID),
+// StartExecuteToolSpanParams contains parameters for [StartExecuteToolSpan].
+type StartExecuteToolSpanParams struct {
+	// ToolName is the name of the tool being executed.
+	ToolName string
+	// Args is the arguments of the tool call.
+	Args map[string]any
+}
+
+// StartExecuteToolSpan starts a new semconv execute_tool span.
+func StartExecuteToolSpan(ctx context.Context, params StartExecuteToolSpanParams) (context.Context, trace.Span) {
+	toolName := params.ToolName
+	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("execute_tool %s", toolName), trace.WithAttributes(
+		semconv.GenAIOperationNameExecuteTool,
+		semconv.GenAIToolName(toolName),
+		gcpVertexAgentToolCallArgsName.String(safeSerialize(params.Args))))
+	return spanCtx, span
+}
+
+type TraceToolResultParams struct {
+	// ToolDescription is a brief description of the tool's purpose.
+	Description   string
+	ResponseEvent *session.Event
+	Error         error
+}
+
+// TraceToolResult records the tool execution events.
+func TraceToolResult(span trace.Span, params TraceToolResultParams) {
+	recordErrorAndStatus(span, params.Error)
+
+	attributes := []attribute.KeyValue{
+		semconv.GenAIOperationNameKey.String(executeToolName),
+		semconv.GenAIToolDescriptionKey.String(params.Description),
 	}
 
 	toolCallID := "<not specified>"
 	toolResponse := "<not specified>"
 
-	if fnResponseEvent.LLMResponse.Content != nil {
-		responseParts := fnResponseEvent.LLMResponse.Content.Parts
+	if params.ResponseEvent != nil {
+		attributes = append(attributes, gcpVertexAgentEventID.String(params.ResponseEvent.ID))
+		if params.ResponseEvent.LLMResponse.Content != nil {
+			responseParts := params.ResponseEvent.LLMResponse.Content.Parts
 
-		if len(responseParts) > 0 {
-			functionResponse := responseParts[0].FunctionResponse
-			if functionResponse != nil {
-				if functionResponse.ID != "" {
-					toolCallID = functionResponse.ID
-				}
-				if functionResponse.Response != nil {
-					toolResponse = safeSerialize(functionResponse.Response)
+			if len(responseParts) > 0 {
+				functionResponse := responseParts[0].FunctionResponse
+				if functionResponse != nil {
+					if functionResponse.ID != "" {
+						toolCallID = functionResponse.ID
+					}
+					if functionResponse.Response != nil {
+						toolResponse = safeSerialize(functionResponse.Response)
+					}
 				}
 			}
 		}
 	}
 
-	attributes = append(attributes, attribute.String(genAiToolCallID, toolCallID))
-	attributes = append(attributes, attribute.String(gcpVertexAgentToolResponseName, toolResponse))
+	attributes = append(attributes, semconv.GenAIToolCallIDKey.String(toolCallID))
+	attributes = append(attributes, gcpVertexAgentToolResponseName.String(toolResponse))
 
 	span.SetAttributes(attributes...)
 }
 
-// TraceLLMCall fills the call_llm event details.
-func TraceLLMCall(span trace.Span, agentCtx agent.InvocationContext, llmRequest *model.LLMRequest, event *session.Event) {
-	sessionID := agentCtx.Session().ID()
+func recordErrorAndStatus(span trace.Span, err error) {
+	if err == nil {
+		return
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+}
+
+// WrapYield wraps a yield function to add tracing of values returned by iterators. Read [iter.Seq2] for more information about yield.
+// Limitations:
+// * if yield is called multiple times, then the span will be finalized with the values from the last call.
+//
+// Parameters:
+//
+//	span: The OpenTelemetry span to be managed.
+//	yield: The original yield function `func(T, error) bool`.
+//	finalizeSpan: A function `func(trace.Span, T, error)` called just before the span is ended to record final attributes.
+//
+// Returns:
+//
+//	wrapped: A wrapped yield function with the same signature as the original.
+//	endSpan: A function to be called via `defer` to ensure the span is finalized with capture data and ended.
+func WrapYield[T any](span trace.Span, yield func(T, error) bool, finalizeSpan func(trace.Span, T, error)) (wrapped func(T, error) bool, endSpan func()) {
+	var val T
+	var err error
+	wrapped = func(v T, e error) bool {
+		val = v
+		err = e
+		return yield(v, e)
+	}
+	endSpan = func() {
+		finalizeSpan(span, val, err)
+		span.End()
+	}
+	return wrapped, endSpan
+}
+
+// StartTrace starts a new span with the given name.
+func StartTrace(ctx context.Context, traceName string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, traceName)
+}
+
+// TraceMergedToolCallsResult records the result of the merged tool calls, including status and tool execution events.
+func TraceMergedToolCallsResult(span trace.Span, fnResponseEvent *session.Event, err error) {
+	recordErrorAndStatus(span, err)
 	attributes := []attribute.KeyValue{
-		attribute.String(genAiSystemName, systemName),
-		attribute.String(genAiRequestModelName, llmRequest.Model),
-		attribute.String(gcpVertexAgentInvocationID, event.InvocationID),
-		attribute.String(gcpVertexAgentSessionID, sessionID),
-		attribute.String(genAiConversationID, sessionID),
-		attribute.String(gcpVertexAgentEventID, event.ID),
-		attribute.String(gcpVertexAgentLLMRequestName, safeSerialize(llmRequestToTrace(llmRequest))),
-		attribute.String(gcpVertexAgentLLMResponseName, safeSerialize(event.LLMResponse)),
+		semconv.GenAIOperationNameKey.String(executeToolName),
+		semconv.GenAIToolNameKey.String(mergeToolName),
+		semconv.GenAIToolDescriptionKey.String(mergeToolName),
+		gcpVertexAgentToolCallArgsName.String("N/A"),
+		gcpVertexAgentToolResponseName.String(safeSerialize(fnResponseEvent)),
 	}
-
-	if llmRequest.Config.TopP != nil {
-		attributes = append(attributes, attribute.Float64(genAiRequestTopP, float64(*llmRequest.Config.TopP)))
+	if fnResponseEvent != nil {
+		attributes = append(attributes, gcpVertexAgentEventID.String(fnResponseEvent.ID))
 	}
-
-	if llmRequest.Config.MaxOutputTokens != 0 {
-		attributes = append(attributes, attribute.Int(genAiRequestMaxTokens, int(llmRequest.Config.MaxOutputTokens)))
-	}
-	if event.FinishReason != "" {
-		attributes = append(attributes, attribute.String(genAiResponseFinishReason, string(event.FinishReason)))
-	}
-	if event.UsageMetadata != nil {
-		if event.UsageMetadata.PromptTokenCount > 0 {
-			attributes = append(attributes, attribute.Int(genAiResponsePromptTokenCount, int(event.UsageMetadata.PromptTokenCount)))
-		}
-		if event.UsageMetadata.CandidatesTokenCount > 0 {
-			attributes = append(attributes, attribute.Int(genAiResponseCandidatesTokenCount, int(event.UsageMetadata.CandidatesTokenCount)))
-		}
-		if event.UsageMetadata.CachedContentTokenCount > 0 {
-			attributes = append(attributes, attribute.Int(genAiResponseCachedContentTokenCount, int(event.UsageMetadata.CachedContentTokenCount)))
-		}
-		if event.UsageMetadata.TotalTokenCount > 0 {
-			attributes = append(attributes, attribute.Int(genAiResponseTotalTokenCount, int(event.UsageMetadata.TotalTokenCount)))
-		}
-	}
-
 	span.SetAttributes(attributes...)
 }
 
@@ -180,28 +248,4 @@ func safeSerialize(obj any) string {
 		return "<not serializable>"
 	}
 	return string(dump)
-}
-
-func llmRequestToTrace(llmRequest *model.LLMRequest) map[string]any {
-	result := map[string]any{
-		"config":  llmRequest.Config,
-		"model":   llmRequest.Model,
-		"content": []*genai.Content{},
-	}
-	for _, content := range llmRequest.Contents {
-		parts := []*genai.Part{}
-		// filter out InlineData part
-		for _, part := range content.Parts {
-			if part.InlineData != nil {
-				continue
-			}
-			parts = append(parts, part)
-		}
-		filteredContent := &genai.Content{
-			Role:  content.Role,
-			Parts: parts,
-		}
-		result["content"] = append(result["content"].([]*genai.Content), filteredContent)
-	}
-	return result
 }

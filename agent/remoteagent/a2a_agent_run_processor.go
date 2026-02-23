@@ -43,10 +43,34 @@ func newRunProcessor(config A2AConfig, request *a2a.MessageSendParams) *a2aAgent
 
 // aggregatePartial stores contents of partial events to emit them with the terminal event.
 // It can modify the original event or return a new event to emit before the provided event.
-func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, event *session.Event) *session.Event {
-	// Partial events are not stored in SessionStore, so we need to aggregate contents and emit them with the terminal event.
+func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2aEvent a2a.Event, event *session.Event) *session.Event {
+	// ADK partial events should be aggregated by ADK and emitted as a non-partial artifact update.
+	// That's why we skip them regardless of the actual isPartial value.
+
+	if a2aEvent != nil && adka2a.IsPartialFlagSet(a2aEvent.Meta()) {
+		return nil
+	}
+
+	// RemoteAgent event stream finished, emit any aggregated events data we have
+	if statusUpdate, ok := a2aEvent.(*a2a.TaskStatusUpdateEvent); ok && statusUpdate.Final {
+		return p.buildAggregatedEvent(ctx, event)
+	}
+
+	// RemoteAgent published a snapshot which should have all the data we potentially aggregated.
+	// Reset the aggregation so that it is not published twice.
+	if _, ok := a2aEvent.(*a2a.Task); ok {
+		p.aggregatedText = ""
+		p.aggregatedThoughts = ""
+		return nil
+	}
+
+	if update, ok := a2aEvent.(*a2a.TaskArtifactUpdateEvent); ok && !update.Append {
+		p.aggregatedText = ""
+		p.aggregatedThoughts = ""
+	}
+
+	updatedAggregatedBlock := false
 	if event.Partial {
-		updatedAggregatedBlock := false
 		for _, part := range event.Content.Parts {
 			if part.Text == "" {
 				continue
@@ -58,13 +82,18 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, eve
 			}
 			updatedAggregatedBlock = true
 		}
-		// do not return if event did not contain any text parts
-		// emit the aggregation as a single logical text block
-		if updatedAggregatedBlock {
-			return nil
-		}
 	}
 
+	if updatedAggregatedBlock {
+		return nil
+	}
+
+	// If a non-partial or non-text event is received we might need to publish the data we aggregated
+	// before it so that it appears as a single block of text.
+	return p.buildAggregatedEvent(ctx, event)
+}
+
+func (p *a2aAgentRunProcessor) buildAggregatedEvent(ctx agent.InvocationContext, event *session.Event) *session.Event {
 	parts := []*genai.Part{}
 	if p.aggregatedThoughts != "" {
 		parts = append(parts, &genai.Part{Thought: true, Text: p.aggregatedThoughts})
@@ -77,6 +106,7 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, eve
 	if len(parts) == 0 {
 		return nil
 	}
+
 	content := genai.NewContentFromParts(parts, genai.RoleModel)
 
 	// Use the terminal event to emit aggregated content if it would be empty otherwise.
@@ -87,8 +117,8 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, eve
 
 	aggregatedEvent := adka2a.NewRemoteAgentEvent(ctx)
 	aggregatedEvent.Content = content
+	aggregatedEvent.CustomMetadata = map[string]any{adka2a.ToADKMetaKey("aggregated"): true}
 	p.updateCustomMetadata(aggregatedEvent, nil)
-	aggregatedEvent.CustomMetadata[adka2a.ToADKMetaKey("aggregated")] = true
 	return aggregatedEvent
 }
 
@@ -135,13 +165,21 @@ func (p *a2aAgentRunProcessor) runAfterA2ARequestCallbacks(ctx agent.InvocationC
 }
 
 func (p *a2aAgentRunProcessor) updateCustomMetadata(event *session.Event, response a2a.Event) {
-	if p.request == nil && response == nil {
+	toAdd := map[string]any{}
+	if p.request != nil && event.TurnComplete {
+		// only add request to the final event to avoid massive data duplication during streaming
+		toAdd["request"] = p.request
+	}
+	if response != nil {
+		toAdd["response"] = response
+	}
+	if len(toAdd) == 0 {
 		return
 	}
 	if event.CustomMetadata == nil {
 		event.CustomMetadata = map[string]any{}
 	}
-	for k, v := range map[string]any{"request": p.request, "response": response} {
+	for k, v := range toAdd {
 		if v == nil {
 			continue
 		}

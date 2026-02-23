@@ -128,6 +128,7 @@ func (s *streamingResponseAggregator) createAggregateResponse() *model.LLMRespon
 			ErrorMessage:      s.response.ErrorMessage,
 			UsageMetadata:     s.response.UsageMetadata,
 			GroundingMetadata: s.response.GroundingMetadata,
+			CitationMetadata:  s.response.CitationMetadata,
 			FinishReason:      s.response.FinishReason,
 		}
 		s.clear()

@@ -38,6 +38,11 @@ type eventProcessor struct {
 
 	// responseID is created once the first TaskArtifactUpdateEvent is sent. Used for subsequent artifact updates.
 	responseID a2a.ArtifactID
+	// partialResponseID is created once the first TaskArtifactUpdateEvent created from a partial ADK event is sent.
+	// Partial updates are not saved in the ADK session store. There is no concept of a partial event in A2A so instead
+	// we're updating an "ephemeral" artifact while an agent is running. The artifact gets reset at the end of the
+	// invocation effectively erasing its parts.
+	partialResponseID a2a.ArtifactID
 
 	// failedEvent is used to postpone sending a terminal event until the whole ADK response is saved as an A2A artifact.
 	// Will be sent as the final Task status update if not nil.
@@ -74,7 +79,7 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 	}
 
 	resp := event.LLMResponse
-	if resp.ErrorCode != "" {
+	if resp.ErrorCode != "" || resp.ErrorMessage != "" {
 		// TODO(yarolegovich): consider merging responses if multiple errors can be produced during an invocation
 		if p.failedEvent == nil {
 			// terminal event might add additional keys to its metadata when it's dispatched and these changes should
@@ -84,7 +89,8 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		}
 	}
 
-	if err := p.inputRequiredProcessor.process(event); err != nil {
+	event, err = p.inputRequiredProcessor.process(event)
+	if err != nil {
 		return nil, fmt.Errorf("input required processing failed: %w", err)
 	}
 
@@ -96,31 +102,58 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		return nil, nil
 	}
 
+	var result *a2a.TaskArtifactUpdateEvent
 	if event.Partial {
-		updatePartsMetadata(parts, map[string]any{ToA2AMetaKey("partial"): true})
+		result = newPartialArtifactUpdate(p.reqCtx, p.partialResponseID, parts)
+		p.partialResponseID = result.Artifact.ID
+	} else {
+		result = newArtifactUpdate(p.reqCtx, p.responseID, parts)
+		p.responseID = result.Artifact.ID
 	}
 
-	var result *a2a.TaskArtifactUpdateEvent
-	if p.responseID == "" {
-		result = a2a.NewArtifactEvent(p.reqCtx, parts...)
-		p.responseID = result.Artifact.ID
-	} else {
-		result = a2a.NewArtifactUpdateEvent(p.reqCtx, p.responseID, parts...)
-	}
 	if len(eventMeta) > 0 {
-		result.Metadata = eventMeta
+		maps.Copy(result.Metadata, eventMeta)
 	}
 
 	return result, nil
 }
 
-func (p *eventProcessor) makeFinalArtifactUpdate() (*a2a.TaskArtifactUpdateEvent, bool) {
-	if p.responseID == "" {
-		return nil, false
+func newArtifactUpdate(task a2a.TaskInfoProvider, id a2a.ArtifactID, parts []a2a.Part) *a2a.TaskArtifactUpdateEvent {
+	var result *a2a.TaskArtifactUpdateEvent
+	if id == "" {
+		result = a2a.NewArtifactEvent(task, parts...)
+	} else {
+		result = a2a.NewArtifactUpdateEvent(task, id, parts...)
 	}
-	ev := a2a.NewArtifactUpdateEvent(p.reqCtx, p.responseID)
+	// Explicitely mark and Artifact update as non-partial ADK event so that consumer side
+	// does not run its own aggregation logic.
+	result.Metadata = map[string]any{metadataPartialKey: false}
+	return result
+}
+
+func newPartialArtifactUpdate(task a2a.TaskInfoProvider, artifactID a2a.ArtifactID, parts []a2a.Part) *a2a.TaskArtifactUpdateEvent {
+	ev := newArtifactUpdate(task, artifactID, parts)
+	updatePartsMetadata(parts, map[string]any{metadataPartialKey: true})
+	if ev.Artifact.Metadata == nil {
+		ev.Artifact.Metadata = map[string]any{metadataPartialKey: true}
+	} else {
+		ev.Artifact.Metadata[metadataPartialKey] = true
+	}
+	ev.Metadata[metadataPartialKey] = true
+	ev.Append = false // discard partial events
+	return ev
+}
+
+func (p *eventProcessor) makeFinalArtifactUpdate() *a2a.TaskArtifactUpdateEvent {
+	// We could also send a LastChunk: true event for the main (non-partial) artifact,
+	// but there's currently no special handling for it and not all A2A SDK (eg. Java)
+	// implementations allow empty-part artifact updates.
+	if p.partialResponseID == "" {
+		return nil
+	}
+	ev := newPartialArtifactUpdate(p.reqCtx, p.partialResponseID, []a2a.Part{a2a.DataPart{Data: map[string]any{}}})
 	ev.LastChunk = true
-	return ev, true
+	return ev
 }
 
 func (p *eventProcessor) makeFinalStatusUpdate() *a2a.TaskStatusUpdateEvent {

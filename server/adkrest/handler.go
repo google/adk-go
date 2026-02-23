@@ -18,10 +18,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	"google.golang.org/adk/internal/telemetry"
-	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/server/adkrest/controllers"
 	"google.golang.org/adk/server/adkrest/internal/routers"
 	"google.golang.org/adk/server/adkrest/internal/services"
@@ -34,9 +31,9 @@ func NewHandler(config *Config) (http.Handler, error) {
 		return nil, err
 	}
 
-	adkExporter := services.NewAPIServerSpanExporter()
-	processor := sdktrace.NewSimpleSpanProcessor(adkExporter)
-	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(processor))
+	debugTelemetry := services.NewDebugTelemetry()
+	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(debugTelemetry.SpanProcessor()))
+	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithLogRecordProcessors(debugTelemetry.LogProcessor()))
 
 	router := mux.NewRouter().StrictSlash(true)
 	// TODO: Allow taking a prefix to allow customizing the path
@@ -45,7 +42,7 @@ func NewHandler(config *Config) (http.Handler, error) {
 		routers.NewSessionsAPIRouter(controllers.NewSessionsAPIController(config.SessionService)),
 		routers.NewRuntimeAPIRouter(controllers.NewRuntimeAPIController(config.SessionService, config.MemoryService, config.AgentLoader, config.ArtifactService, config.SSEWriteTimeout, config.PluginConfig)),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(config.AgentLoader)),
-		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(config.SessionService, config.AgentLoader, adkExporter)),
+		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(config.SessionService, config.AgentLoader, debugTelemetry)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(config.ArtifactService)),
 		&routers.EvalAPIRouter{},
 	)

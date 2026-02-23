@@ -37,7 +37,7 @@ func (r *DebugAPIRouter) Routes() Routes {
 			Name:        "GetTraceDict",
 			Methods:     []string{http.MethodGet},
 			Pattern:     "/debug/trace/{event_id}",
-			HandlerFunc: r.runtimeController.TraceDictHandler,
+			HandlerFunc: r.runtimeController.EventSpanHandler,
 		},
 		Route{
 			Name:        "GetEventGraph",
@@ -45,11 +45,12 @@ func (r *DebugAPIRouter) Routes() Routes {
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}/events/{event_id}/graph",
 			HandlerFunc: r.runtimeController.EventGraphHandler,
 		},
+
 		Route{
 			Name:        "GetSessionTrace",
 			Methods:     []string{http.MethodGet},
 			Pattern:     "/debug/trace/session/{session_id}",
-			HandlerFunc: controllers.Unimplemented,
+			HandlerFunc: r.runtimeController.SessionSpansHandler,
 		},
 	}
 }
