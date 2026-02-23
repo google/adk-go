@@ -313,6 +313,19 @@ func (f *Flow) runReceiver(ctx agent.InvocationContext, wg *sync.WaitGroup, conn
 		return ctx.Agent().Name()
 	}
 
+	resumable := false
+	if cfg := ctx.ResumabilityConfig(); cfg != nil {
+		resumable = cfg.IsResumable
+	}
+
+	var goAway *genai.LiveServerGoAway
+	var goAwayTimer *time.Timer
+	defer func() {
+		if goAwayTimer != nil {
+			goAwayTimer.Stop()
+		}
+	}()
+
 	resps, errs := conn.Receive(ctx)
 	for {
 		select {
@@ -331,9 +344,27 @@ func (f *Flow) runReceiver(ctx agent.InvocationContext, wg *sync.WaitGroup, conn
 			}
 
 			if resp.LiveGoAway != nil {
-				log.Info().Interface("go_away", resp.LiveGoAway).Msg("Received GoAway from model. Attempting to reconnect.")
-				sendResult(ctx, results, liveResult{reconnect: true})
-				return
+				if resumable {
+					log.Info().Interface("go_away", resp.LiveGoAway).Msg("Received GoAway from model (Resumable). Setting up deferred reconnect.")
+					goAway = resp.LiveGoAway
+
+					// Reconnect slightly before it expires
+					reconnectDelay := goAway.TimeLeft - 1*time.Second
+					if reconnectDelay < 0 {
+						reconnectDelay = 0
+					}
+
+					if goAwayTimer != nil {
+						goAwayTimer.Stop()
+					}
+					goAwayTimer = time.AfterFunc(reconnectDelay, func() {
+						log.Info().Msg("GoAway timer expired. Triggering reconnect.")
+						sendResult(ctx, results, liveResult{reconnect: true})
+					})
+					continue
+				} else {
+					log.Info().Interface("go_away", resp.LiveGoAway).Msg("Received GoAway from model (Not Resumable). Notifying client.")
+				}
 			}
 
 			modelResponseEvent := session.NewEvent(ctx.InvocationID())
@@ -368,6 +399,15 @@ func (f *Flow) runReceiver(ctx agent.InvocationContext, wg *sync.WaitGroup, conn
 				}
 
 				sendResult(ctx, results, liveResult{event: ev})
+			}
+
+			if resumable && goAway != nil && resp.TurnComplete {
+				log.Info().Msg("Model turn complete after GoAway. Reconnecting now.")
+				if goAwayTimer != nil {
+					goAwayTimer.Stop()
+				}
+				sendResult(ctx, results, liveResult{reconnect: true})
+				return
 			}
 
 			if ctx.Err() != nil {
@@ -411,7 +451,8 @@ func (f *Flow) postprocessLive(ctx agent.InvocationContext, llmRequest *model.LL
 			!llmResponse.TurnComplete &&
 			llmResponse.InputTranscription == nil &&
 			llmResponse.OutputTranscription == nil &&
-			llmResponse.UsageMetadata == nil {
+			llmResponse.UsageMetadata == nil &&
+			llmResponse.LiveGoAway == nil {
 			return
 		}
 
