@@ -23,16 +23,18 @@ import (
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/telemetry"
 )
 
 // Config defines the services and loaders required by the adkrest package.
 type Config struct {
-	SessionService  session.Service
-	ArtifactService artifact.Service
-	AgentLoader     agent.Loader
-	MemoryService   memory.Service
-	SSEWriteTimeout time.Duration
-	PluginConfig    runner.PluginConfig
+	SessionService   session.Service
+	ArtifactService  artifact.Service
+	AgentLoader      agent.Loader
+	MemoryService    memory.Service
+	SSEWriteTimeout  time.Duration
+	PluginConfig     runner.PluginConfig
+	TelemetryOptions []telemetry.Option
 }
 
 // validate validates the config
