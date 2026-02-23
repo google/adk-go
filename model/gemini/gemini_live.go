@@ -135,8 +135,6 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 					return
 				}
 
-				log.Info().Interface("msg", msg).Msg("Received message in gemini_live")
-
 				if msg.UsageMetadata != nil {
 					if !send(&model.LLMResponse{
 						UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
@@ -329,6 +327,15 @@ func (c *liveConnection) process(ctx context.Context, in <-chan *genai.LiveServe
 					log.Debug().Interface("session_resumption_update", msg.SessionResumptionUpdate).Msg("Received session resumption update")
 					if !send(&model.LLMResponse{
 						LiveSessionResumptionUpdate: msg.SessionResumptionUpdate,
+					}) {
+						return
+					}
+				}
+
+				if msg.GoAway != nil {
+					log.Debug().Interface("go_away", msg.GoAway).Msg("Received go away")
+					if !send(&model.LLMResponse{
+						LiveGoAway: msg.GoAway,
 					}) {
 						return
 					}

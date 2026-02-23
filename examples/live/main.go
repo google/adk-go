@@ -163,7 +163,7 @@ func main() {
 		Agent:          a,
 		SessionService: sessionService,
 		ResumabilityConfig: &agent.ResumabilityConfig{
-			IsResumable: false,
+			IsResumable: true,
 		},
 		ArtifactService: artifact.InMemoryService(),
 	})
@@ -246,6 +246,9 @@ func (s *Server) websocketHandler() http.HandlerFunc {
 			OutputAudioTranscription:  &genai.AudioTranscriptionConfig{},
 			SaveLiveBlob:              true,
 			SaveInputBlobsAsArtifacts: true,
+			SessionResumption: &genai.SessionResumptionConfig{
+				Handle: "",
+			},
 		}
 
 		// Phase 2 - 4

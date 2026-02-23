@@ -19,6 +19,7 @@ import (
 	"iter"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"google.golang.org/adk/agent"
@@ -31,8 +32,9 @@ import (
 )
 
 type liveResult struct {
-	event *session.Event
-	err   error
+	event     *session.Event
+	err       error
+	reconnect bool
 }
 
 // RunLive runs the flow in live mode, connecting to the model and handling live interactions.
@@ -42,6 +44,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			yield(nil, fmt.Errorf("agent %q: %w", ctx.Agent().Name(), ErrModelNotConfigured))
 			return
 		}
+
+		defer func() {
+			log.Debug().Msg("RunLive closed")
+		}()
 
 		req := &model.LLMRequest{
 			Model:             f.Model.Name(),
@@ -109,6 +115,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 			// Decouple sender/receiver from the yield loop using a channel
 			results := make(chan liveResult, 64)
+
 			connCtx, cancel := context.WithCancel(ctx)
 			connInvCtx := ctx.WithContext(connCtx)
 			var wg sync.WaitGroup
@@ -131,6 +138,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 						cancel()
 						return
 					}
+					shouldReconnect = true
+					break
+				}
+
+				if res.reconnect {
+					log.Info().Msg("Received reconnection signal from background")
 					shouldReconnect = true
 					break
 				}
@@ -214,6 +227,10 @@ func (f *Flow) runSender(ctx agent.InvocationContext, wg *sync.WaitGroup, conn m
 	queue := ctx.LiveRequestQueue()
 	ch := queue.Channel()
 
+	defer func() {
+		log.Debug().Msg("runSender closed")
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -285,6 +302,10 @@ func (f *Flow) runSender(ctx agent.InvocationContext, wg *sync.WaitGroup, conn m
 func (f *Flow) runReceiver(ctx agent.InvocationContext, wg *sync.WaitGroup, conn model.LiveConnection, req *model.LLMRequest, results chan<- liveResult) {
 	defer wg.Done()
 
+	defer func() {
+		log.Debug().Msg("runReceiver closed")
+	}()
+
 	getAuthorForEvent := func(llmResponse *model.LLMResponse) string {
 		if llmResponse != nil && llmResponse.Content != nil && llmResponse.Content.Role == "user" {
 			return "user"
@@ -295,13 +316,24 @@ func (f *Flow) runReceiver(ctx agent.InvocationContext, wg *sync.WaitGroup, conn
 	resps, errs := conn.Receive(ctx)
 	for {
 		select {
+		case <-time.After(30 * time.Second):
+			log.Debug().Msg("runReceiver dummy timeout. closing")
+			sendResult(ctx, results, liveResult{reconnect: true})
+			return
 		case resp, ok := <-resps:
 			if !ok {
+				log.Debug().Str("func", "runReceiver").Msg("response channel is closed. returning")
 				return
 			}
 			if resp.LiveSessionResumptionUpdate != nil {
 				log.Info().Str("handle", resp.LiveSessionResumptionUpdate.NewHandle).Msg("Live session resumption update")
 				ctx.SetLiveSessionResumptionHandle(resp.LiveSessionResumptionUpdate.NewHandle)
+			}
+
+			if resp.LiveGoAway != nil {
+				log.Info().Interface("go_away", resp.LiveGoAway).Msg("Received GoAway from model. Attempting to reconnect.")
+				sendResult(ctx, results, liveResult{reconnect: true})
+				return
 			}
 
 			modelResponseEvent := session.NewEvent(ctx.InvocationID())
@@ -344,9 +376,11 @@ func (f *Flow) runReceiver(ctx agent.InvocationContext, wg *sync.WaitGroup, conn
 
 		case err, ok := <-errs:
 			if !ok {
+				log.Debug().Str("func", "runReceiver").Msg("error channel is closed. returning")
 				return
 			}
 			if err != nil {
+				log.Debug().Str("func", "runReceiver").Err(err).Msg("error received from live connection")
 				sendResult(ctx, results, liveResult{err: err})
 				return
 			}

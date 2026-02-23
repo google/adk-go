@@ -68,6 +68,7 @@ type LLMResponse struct {
 	LiveSessionResumptionUpdate *genai.LiveServerSessionResumptionUpdate
 	InputTranscription          *genai.Transcription
 	OutputTranscription         *genai.Transcription
+	LiveGoAway                  *genai.LiveServerGoAway
 }
 
 // LiveRequest is the request to be sent to the model in the live stream.

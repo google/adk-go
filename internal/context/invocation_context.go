@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -36,14 +37,11 @@ type InvocationContextParams struct {
 	RunConfig     *agent.RunConfig
 	EndInvocation bool
 
-	LiveRequestQueue *agent.LiveRequestQueue
-
-	TranscriptionCache          []agent.TranscriptionEntry
-	InputRealtimeCache          []agent.RealtimeCacheEntry
-	OutputRealtimeCache         []agent.RealtimeCacheEntry
+	LiveRequestQueue            *agent.LiveRequestQueue
 	ResumabilityConfig          *agent.ResumabilityConfig
 	LiveSessionResumptionHandle string
-	InvocationID                string
+
+	InvocationID string
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
@@ -51,8 +49,12 @@ func NewInvocationContext(ctx context.Context, params InvocationContextParams) a
 		params.InvocationID = "e-" + uuid.NewString()
 	}
 	return &InvocationContext{
-		Context: ctx,
-		params:  params,
+		Context:                     ctx,
+		params:                      params,
+		transcriptionCache:          make([]agent.TranscriptionEntry, 0),
+		inputRealtimeCache:          make([]agent.RealtimeCacheEntry, 0),
+		outputRealtimeCache:         make([]agent.RealtimeCacheEntry, 0),
+		liveSessionResumptionHandle: params.LiveSessionResumptionHandle,
 	}
 }
 
@@ -60,6 +62,11 @@ type InvocationContext struct {
 	context.Context
 
 	params InvocationContextParams
+
+	transcriptionCache          []agent.TranscriptionEntry
+	inputRealtimeCache          []agent.RealtimeCacheEntry
+	outputRealtimeCache         []agent.RealtimeCacheEntry
+	liveSessionResumptionHandle string
 }
 
 func (c *InvocationContext) Artifacts() agent.Artifacts {
@@ -107,19 +114,22 @@ func (c *InvocationContext) LiveRequestQueue() *agent.LiveRequestQueue {
 }
 
 func (c *InvocationContext) TranscriptionCache() []agent.TranscriptionEntry {
-	return c.params.TranscriptionCache
+	return c.transcriptionCache
 }
 
 func (c *InvocationContext) LiveSessionResumptionHandle() string {
-	return c.params.LiveSessionResumptionHandle
+	log.Info().Str("handle", c.liveSessionResumptionHandle).
+		Str("func", "InvocationContext.LiveSessionResumptionHandle").
+		Msg("Getting live session resumption handle")
+	return c.liveSessionResumptionHandle
 }
 
 func (c *InvocationContext) InputRealtimeCache() []agent.RealtimeCacheEntry {
-	return c.params.InputRealtimeCache
+	return c.inputRealtimeCache
 }
 
 func (c *InvocationContext) OutputRealtimeCache() []agent.RealtimeCacheEntry {
-	return c.params.OutputRealtimeCache
+	return c.outputRealtimeCache
 }
 
 func (c *InvocationContext) ResumabilityConfig() *agent.ResumabilityConfig {
@@ -127,23 +137,26 @@ func (c *InvocationContext) ResumabilityConfig() *agent.ResumabilityConfig {
 }
 
 func (c *InvocationContext) AppendInputRealtimeCache(entry agent.RealtimeCacheEntry) {
-	c.params.InputRealtimeCache = append(c.params.InputRealtimeCache, entry)
+	c.inputRealtimeCache = append(c.inputRealtimeCache, entry)
 }
 
 func (c *InvocationContext) AppendOutputRealtimeCache(entry agent.RealtimeCacheEntry) {
-	c.params.OutputRealtimeCache = append(c.params.OutputRealtimeCache, entry)
+	c.outputRealtimeCache = append(c.outputRealtimeCache, entry)
 }
 
 func (c *InvocationContext) ClearInputRealtimeCache() {
-	c.params.InputRealtimeCache = nil
+	c.inputRealtimeCache = nil
 }
 
 func (c *InvocationContext) ClearOutputRealtimeCache() {
-	c.params.OutputRealtimeCache = nil
+	c.outputRealtimeCache = nil
 }
 
 func (c *InvocationContext) SetLiveSessionResumptionHandle(handle string) {
-	c.params.LiveSessionResumptionHandle = handle
+	log.Info().Str("handle", handle).
+		Str("func", "InvocationContext.SetLiveSessionResumptionHandle").
+		Msg("Setting live session resumption handle")
+	c.liveSessionResumptionHandle = handle
 }
 func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
 	newCtx := *c
