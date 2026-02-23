@@ -85,7 +85,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					}
 				}
 				req.LiveConnectConfig.SessionResumption.Handle = ctx.LiveSessionResumptionHandle()
-				req.LiveConnectConfig.SessionResumption.Transparent = true
+				// req.LiveConnectConfig.SessionResumption.Transparent = true
 			}
 
 			// Connect to the model
