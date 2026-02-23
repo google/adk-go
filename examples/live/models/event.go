@@ -47,6 +47,7 @@ type Event struct {
 	Actions             EventActions             `json:"actions"`
 	InputTranscription  *genai.Transcription     `json:"inputTranscription"`
 	OutputTranscription *genai.Transcription     `json:"outputTranscription"`
+	GoAway              *genai.LiveServerGoAway  `json:"goAway"`
 }
 
 // ToSessionEvent maps Event data struct to session.Event
@@ -68,6 +69,7 @@ func ToSessionEvent(event Event) *session.Event {
 			ErrorMessage:        event.ErrorMessage,
 			InputTranscription:  event.InputTranscription,
 			OutputTranscription: event.OutputTranscription,
+			LiveGoAway:          event.GoAway,
 		},
 		Actions: session.EventActions{
 			StateDelta:    event.Actions.StateDelta,
@@ -94,6 +96,7 @@ func FromSessionEvent(event session.Event) Event {
 		ErrorMessage:        event.LLMResponse.ErrorMessage,
 		InputTranscription:  event.LLMResponse.InputTranscription,
 		OutputTranscription: event.LLMResponse.OutputTranscription,
+		GoAway:              event.LLMResponse.LiveGoAway,
 		Actions: EventActions{
 			StateDelta:    event.Actions.StateDelta,
 			ArtifactDelta: event.Actions.ArtifactDelta,
