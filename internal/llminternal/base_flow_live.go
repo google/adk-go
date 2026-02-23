@@ -329,10 +329,6 @@ func (f *Flow) runReceiver(ctx agent.InvocationContext, wg *sync.WaitGroup, conn
 	resps, errs := conn.Receive(ctx)
 	for {
 		select {
-		case <-time.After(30 * time.Second):
-			log.Debug().Msg("runReceiver dummy timeout. closing")
-			sendResult(ctx, results, liveResult{reconnect: true})
-			return
 		case resp, ok := <-resps:
 			if !ok {
 				log.Debug().Str("func", "runReceiver").Msg("response channel is closed. returning")
