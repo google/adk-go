@@ -27,7 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/llminternal"
-	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/internal/schemautil"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
@@ -143,7 +143,11 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 	var content *genai.Content
 	var err error
 	if agentInputSchema != nil {
-		if err = utils.ValidateMapOnSchema(margs, agentInputSchema, true); err != nil {
+		resolved, resolveErr := schemautil.GenaiToResolvedJSONSchema(agentInputSchema)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("failed to resolve input schema for agent %s: %w", t.agent.Name(), resolveErr)
+		}
+		if err = resolved.Validate(margs); err != nil {
 			return nil, fmt.Errorf("argument validation failed for agent %s: %w", t.agent.Name(), err)
 		}
 		jsonData, err := json.Marshal(margs)
@@ -236,10 +240,16 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 			return nil, fmt.Errorf("internal error: failed to convert to llm agent")
 		}
 		if agentOutputSchema := llminternal.Reveal(internalLlmAgent).OutputSchema; agentOutputSchema != nil {
-			// Assuming schemautils.ValidateOutputSchema parses the JSON string outputText
-			// and validates it against the agentOutputSchema, returning a map[string]any.
-			parsedOutput, err := utils.ValidateOutputSchema(outputText, agentOutputSchema)
-			if err != nil {
+			// Parse the JSON output and validate against the schema.
+			var parsedOutput map[string]any
+			if err := json.Unmarshal([]byte(outputText), &parsedOutput); err != nil {
+				return nil, fmt.Errorf("failed to parse output JSON for sub-agent %s: %w", t.agent.Name(), err)
+			}
+			resolved, resolveErr := schemautil.GenaiToResolvedJSONSchema(agentOutputSchema)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("failed to resolve output schema for sub-agent %s: %w", t.agent.Name(), resolveErr)
+			}
+			if err := resolved.Validate(parsedOutput); err != nil {
 				return nil, fmt.Errorf("output validation failed for sub-agent %s: %w", t.agent.Name(), err)
 			}
 			return parsedOutput, nil
