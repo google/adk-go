@@ -24,7 +24,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/httprr"
+	"github.com/sjzsdu/adk-go/internal/httprr"
 )
 
 // NewGeminiTransport returns the genai.ClientConfig configured for record and replay.

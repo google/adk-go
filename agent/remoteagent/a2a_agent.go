@@ -25,10 +25,10 @@ import (
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/server/adka2a"
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/agent"
+	icontext "github.com/sjzsdu/adk-go/internal/context"
+	"github.com/sjzsdu/adk-go/server/adka2a"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 // BeforeA2ARequestCallback is called before sending a request to the remote agent.

@@ -21,17 +21,20 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
 
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/internal/telemetry"
-	"google.golang.org/adk/cmd/launcher/universal"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/cmd/launcher"
+	"github.com/sjzsdu/adk-go/cmd/launcher/internal/telemetry"
+	"github.com/sjzsdu/adk-go/cmd/launcher/universal"
+	"github.com/sjzsdu/adk-go/internal/cli/util"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 // webConfig contains parameters for launching web server
@@ -173,15 +176,39 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 
 	log.Printf("Starting the web server: %+v", w.config)
 	log.Println()
-	webUrl := fmt.Sprintf("http://localhost:%v", fmt.Sprint(w.config.port))
+
+	// Find available port
+	port := w.config.port
+	maxRetries := 100
+	retryCount := 0
+
+	for !isPortAvailable(port) {
+		retryCount++
+		if retryCount > maxRetries {
+			return fmt.Errorf("failed to find available port after %d retries, starting from %d", maxRetries, w.config.port)
+		}
+		log.Printf("Port %d is already in use, trying port %d...", port, port+1)
+		port++
+	}
+
+	// Update config with actual port
+	w.config.port = port
+	webUrl := fmt.Sprintf("http://localhost:%d", port)
 	log.Printf("Web servers starts on %s", webUrl)
 	for _, l := range w.activeSublaunchers {
 		l.UserMessage(webUrl, log.Println)
 	}
 	log.Println()
 
+	// Open browser after server starts successfully
+	go func() {
+		// Give server a moment to start
+		time.Sleep(100 * time.Millisecond)
+		openBrowser(webUrl)
+	}()
+
 	srv := http.Server{
-		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
+		Addr:         fmt.Sprintf(":%d", port),
 		WriteTimeout: w.config.writeTimeout,
 		ReadTimeout:  w.config.readTimeout,
 		IdleTimeout:  w.config.idleTimeout,
@@ -239,6 +266,38 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 		config:       config,
 		flags:        fs,
 		sublaunchers: sublaunchers,
+	}
+}
+
+// isPortAvailable checks if a port is available for binding
+func isPortAvailable(port int) bool {
+	addr := fmt.Sprintf(":%d", port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	listener.Close()
+	return true
+}
+
+// openBrowser opens the specified URL in the default browser of the user
+func openBrowser(url string) {
+	var err error
+
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("xdg-open", url).Start()
+	case "windows":
+		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	case "darwin":
+		err = exec.Command("open", url).Start()
+	default:
+		log.Printf("unsupported platform: %s", runtime.GOOS)
+		return
+	}
+
+	if err != nil {
+		log.Printf("failed to open browser: %v", err)
 	}
 }
 

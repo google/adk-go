@@ -17,10 +17,10 @@ package llminternal
 import (
 	"iter"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/llminternal/googlellm"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/internal/llminternal/googlellm"
+	"github.com/sjzsdu/adk-go/model"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 // The Gemini API (non-Vertex) backend does not support the display_name parameter for file uploads,

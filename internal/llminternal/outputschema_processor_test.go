@@ -23,13 +23,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
+	"github.com/sjzsdu/adk-go/agent"
+	icontext "github.com/sjzsdu/adk-go/internal/context"
+	"github.com/sjzsdu/adk-go/internal/toolinternal"
+	"github.com/sjzsdu/adk-go/internal/utils"
+	"github.com/sjzsdu/adk-go/model"
+	"github.com/sjzsdu/adk-go/session"
+	"github.com/sjzsdu/adk-go/tool"
 )
 
 type mockTool struct {

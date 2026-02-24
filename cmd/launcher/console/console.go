@@ -24,18 +24,20 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/internal/telemetry"
-	"google.golang.org/adk/cmd/launcher/universal"
-	"google.golang.org/adk/internal/cli/util"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/cmd/launcher"
+	"github.com/sjzsdu/adk-go/cmd/launcher/internal/telemetry"
+	"github.com/sjzsdu/adk-go/cmd/launcher/universal"
+	"github.com/sjzsdu/adk-go/internal/cli/util"
+	"github.com/sjzsdu/adk-go/runner"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 // consoleConfig contains command-line params for console launcher
@@ -129,6 +131,71 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 	fmt.Print("\nUser -> ")
 
+	// Check if we have piped input (non-interactive mode)
+	stat, _ := os.Stdin.Stat()
+	isPiped := (stat.Mode() & os.ModeCharDevice) == 0
+
+	if isPiped {
+		// Read all input from pipe
+		reader := bufio.NewReader(os.Stdin)
+		userInput, err := reader.ReadString(0) // Read until EOF
+		if err != nil && err.Error() != "EOF" {
+			log.Fatal(err)
+		}
+
+		// If input is empty (only contains whitespace), return
+		if strings.TrimSpace(userInput) == "" {
+			return nil
+		}
+
+		userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
+
+		streamingMode := l.config.streamingMode
+		if streamingMode == "" {
+			streamingMode = agent.StreamingModeSSE
+		}
+		fmt.Print("Agent -> ")
+		prevText := ""
+		for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
+			StreamingMode: streamingMode,
+		}) {
+			if err != nil {
+				fmt.Printf("\nAGENT_ERROR: %v\n", err)
+			} else {
+				if event.LLMResponse.Content == nil {
+					continue
+				}
+
+				text := ""
+				for _, p := range event.LLMResponse.Content.Parts {
+					text += p.Text
+				}
+
+				if streamingMode != agent.StreamingModeSSE {
+					fmt.Print(text)
+					continue
+				}
+
+				// In SSE mode, always print partial responses and capture them.
+				if !event.IsFinalResponse() {
+					fmt.Print(text)
+					prevText += text
+					continue
+				}
+
+				// Only print final response if it doesn't match previously captured text.
+				if text != prevText {
+					fmt.Print(text)
+				}
+
+				prevText = ""
+			}
+		}
+		fmt.Println() // Add newline at the end
+		return nil
+	}
+
+	// Interactive mode (original behavior)
 	for {
 		select {
 		case <-ctx.Done():
@@ -140,6 +207,55 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 			}
 			log.Fatal(err)
 		case userInput := <-inputChan:
+			// 处理特殊命令
+			trimmedInput := strings.TrimSpace(userInput)
+			switch strings.ToLower(trimmedInput) {
+			case "q", "quit", "exit":
+				fmt.Println("\n正在退出...")
+				return nil
+			case "vim":
+				// 创建临时文件
+				tempFile, err := os.CreateTemp("", "adk-vim-input-")
+				if err != nil {
+					fmt.Printf("创建临时文件失败: %v\n", err)
+					fmt.Print("\nUser -> ")
+					continue
+				}
+				tempFilePath := tempFile.Name()
+				tempFile.Close()
+				defer os.Remove(tempFilePath) // 确保程序结束时删除临时文件
+
+				// 启动vim编辑器
+				fmt.Println("正在启动vim编辑器，请输入您的文本内容...")
+				cmd := exec.Command("vim", tempFilePath)
+				cmd.Stdin = os.Stdin
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				err = cmd.Run()
+				if err != nil {
+					fmt.Printf("vim编辑失败: %v\n", err)
+					fmt.Print("\nUser -> ")
+					continue
+				}
+
+				// 读取vim编辑的内容
+				vimContent, err := os.ReadFile(tempFilePath)
+				if err != nil {
+					fmt.Printf("读取vim编辑内容失败: %v\n", err)
+					fmt.Print("\nUser -> ")
+					continue
+				}
+
+				userInput = string(vimContent)
+				fmt.Println("已成功读取vim编辑的内容")
+			}
+
+			// 如果输入为空（只包含空白字符），则保持用户输入状态
+			if strings.TrimSpace(userInput) == "" {
+				fmt.Print("\nUser -> ")
+				continue
+			}
+
 			userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
 			streamingMode := l.config.streamingMode

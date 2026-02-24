@@ -22,12 +22,12 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/server/adka2a"
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/agent"
+	icontext "github.com/sjzsdu/adk-go/internal/context"
+	"github.com/sjzsdu/adk-go/internal/utils"
+	"github.com/sjzsdu/adk-go/model"
+	"github.com/sjzsdu/adk-go/server/adka2a"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {

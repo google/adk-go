@@ -22,12 +22,12 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/memory"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"github.com/sjzsdu/adk-go/internal/toolinternal"
+	"github.com/sjzsdu/adk-go/internal/toolinternal/toolutils"
+	"github.com/sjzsdu/adk-go/internal/utils"
+	"github.com/sjzsdu/adk-go/memory"
+	"github.com/sjzsdu/adk-go/model"
+	"github.com/sjzsdu/adk-go/tool"
 )
 
 const memoryInstructions = `You have memory. You can use it to answer questions. If any questions need

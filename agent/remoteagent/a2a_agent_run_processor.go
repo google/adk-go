@@ -20,11 +20,11 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/converters"
-	"google.golang.org/adk/server/adka2a"
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/agent"
+	icontext "github.com/sjzsdu/adk-go/internal/context"
+	"github.com/sjzsdu/adk-go/internal/converters"
+	"github.com/sjzsdu/adk-go/server/adka2a"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 type a2aAgentRunProcessor struct {

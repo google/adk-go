@@ -33,12 +33,12 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adka2a"
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/agent"
+	icontext "github.com/sjzsdu/adk-go/internal/context"
+	"github.com/sjzsdu/adk-go/model"
+	"github.com/sjzsdu/adk-go/runner"
+	"github.com/sjzsdu/adk-go/server/adka2a"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 type mockA2AExecutor struct {

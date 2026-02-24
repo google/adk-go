@@ -24,9 +24,9 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/runner"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 // BeforeExecuteCallback is the callback which will be called before an execution is started.

@@ -17,29 +17,28 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 
-	"google.golang.org/genai"
-
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/full"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/geminitool"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/agent/llmagent"
+	"github.com/sjzsdu/adk-go/cmd/launcher"
+	"github.com/sjzsdu/adk-go/cmd/launcher/full"
+	"github.com/sjzsdu/adk-go/tool"
+	"github.com/sjzsdu/adk-go/tool/geminitool"
+	"github.com/sjzsdu/adk-go/util/modelfactory"
 )
 
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
-		APIKey: os.Getenv("GOOGLE_API_KEY"),
-	})
-	if err != nil {
-		log.Fatalf("Failed to create model: %v", err)
-	}
+	// 解析命令行参数，但不传递给launcher的模型相关参数
+	flag.Parse()
+
+	// 从命令行参数创建模型配置
+	modelConfig := modelfactory.NewFromFlags()
+	model := modelfactory.MustCreateModel(ctx, modelConfig)
 
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "weather_time_agent",
@@ -59,7 +58,9 @@ func main() {
 	}
 
 	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+	// 只传递launcher需要的参数，跳过模型相关参数
+	launcherArgs := modelfactory.ExtractLauncherArgs(os.Args[1:])
+	if err = l.Execute(ctx, config, launcherArgs); err != nil {
 		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
 }

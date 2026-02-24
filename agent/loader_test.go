@@ -18,7 +18,7 @@ import (
 	"iter"
 	"testing"
 
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 var _ Agent = (*testAgent)(nil)

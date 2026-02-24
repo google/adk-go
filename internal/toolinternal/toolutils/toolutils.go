@@ -20,7 +20,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/model"
+	"github.com/sjzsdu/adk-go/model"
 )
 
 type Tool interface {

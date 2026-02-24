@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 // TODO localSession is identical to session.session. Move to sessioninternal

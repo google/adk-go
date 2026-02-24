@@ -24,14 +24,14 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/artifact"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/loadartifactstool"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/agent/llmagent"
+	"github.com/sjzsdu/adk-go/artifact"
+	"github.com/sjzsdu/adk-go/model/gemini"
+	"github.com/sjzsdu/adk-go/runner"
+	"github.com/sjzsdu/adk-go/session"
+	"github.com/sjzsdu/adk-go/tool"
+	"github.com/sjzsdu/adk-go/tool/loadartifactstool"
 )
 
 // Note: you need to run the program from the loadartifacts directory

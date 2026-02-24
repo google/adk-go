@@ -17,33 +17,29 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
-	"google.golang.org/genai"
-
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/server/adkrest"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/geminitool"
+	"github.com/sjzsdu/adk-go/agent"
+	"github.com/sjzsdu/adk-go/agent/llmagent"
+	"github.com/sjzsdu/adk-go/cmd/launcher"
+	"github.com/sjzsdu/adk-go/server/adkrest"
+	"github.com/sjzsdu/adk-go/session"
+	"github.com/sjzsdu/adk-go/tool"
+	"github.com/sjzsdu/adk-go/tool/geminitool"
+	"github.com/sjzsdu/adk-go/util/modelfactory"
 )
 
 func main() {
 	ctx := context.Background()
 
-	// Create a Gemini model
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
-		APIKey: os.Getenv("GOOGLE_API_KEY"),
-	})
-	if err != nil {
-		log.Fatalf("Failed to create model: %v", err)
-	}
+	flag.Parse()
+
+	// 从命令行参数创建模型配置
+	modelConfig := modelfactory.NewFromFlags()
+	model := modelfactory.MustCreateModel(ctx, modelConfig)
 
 	// Create an agent
 	a, err := llmagent.New(llmagent.Config{

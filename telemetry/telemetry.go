@@ -19,7 +19,7 @@ import (
 	"context"
 	"errors"
 
-	internal "google.golang.org/adk/internal/telemetry"
+	internal "github.com/sjzsdu/adk-go/internal/telemetry"
 
 	"go.opentelemetry.io/otel"
 	logglobal "go.opentelemetry.io/otel/log/global"
@@ -77,7 +77,7 @@ func (t *Providers) SetGlobalOtelProviders() {
 //
 //		"go.opentelemetry.io/otel/sdk/resource"
 //		semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
-//		"google.golang.org/adk/telemetry"
+//		"github.com/sjzsdu/adk-go/telemetry"
 //	 )
 //
 //	 func main() {

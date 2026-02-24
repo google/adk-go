@@ -22,10 +22,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/toolinternal/toolutils"
-	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
+	"github.com/sjzsdu/adk-go/internal/toolinternal"
+	"github.com/sjzsdu/adk-go/internal/toolinternal/toolutils"
+	"github.com/sjzsdu/adk-go/model"
+	"github.com/sjzsdu/adk-go/tool"
 )
 
 func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) (tool.Tool, error) {

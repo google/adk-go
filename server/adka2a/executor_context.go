@@ -21,7 +21,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/session"
+	"github.com/sjzsdu/adk-go/session"
 )
 
 // ExecutorContext provides read-only information about the context of an A2A agent execution.

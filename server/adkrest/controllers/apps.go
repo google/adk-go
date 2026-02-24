@@ -17,7 +17,7 @@ package controllers
 import (
 	"net/http"
 
-	"google.golang.org/adk/agent"
+	"github.com/sjzsdu/adk-go/agent"
 )
 
 // AppsAPIController is the controller for the Apps API.
