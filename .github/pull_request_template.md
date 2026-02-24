@@ -1,4 +1,4 @@
-**Please ensure you have read the [contribution guide](https://google.github.io/adk-docs/contributing-guide/) before creating a pull request.**
+**Please ensure you have read the [contribution guide](./CONTRIBUTING.md) before creating a pull request.**
 
 ### Link to Issue or Description of Change
 
