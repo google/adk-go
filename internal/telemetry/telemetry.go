@@ -107,17 +107,18 @@ func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSp
 
 type TraceGenerateContentResultParams struct {
 	Response *model.LLMResponse
+	EventID  string
 	Error    error
 }
 
 // TraceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
 func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResultParams) {
 	recordErrorAndStatus(span, params.Error)
-	// TODO(#479): set gcp.vertex.agent.event_id
 	if params.Response == nil {
 		return
 	}
 	span.SetAttributes(
+		gcpVertexAgentEventID.String(params.EventID),
 		semconv.GenAIResponseFinishReasons(string(params.Response.FinishReason)),
 	)
 	if params.Response.UsageMetadata != nil {
