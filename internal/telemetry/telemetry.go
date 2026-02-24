@@ -45,6 +45,7 @@ var (
 	gcpVertexAgentToolCallArgsName = attribute.Key("gcp.vertex.agent.tool_call_args")
 	gcpVertexAgentEventID          = attribute.Key("gcp.vertex.agent.event_id")
 	gcpVertexAgentToolResponseName = attribute.Key("gcp.vertex.agent.tool_response")
+	gcpVertexAgentInvocationID     = attribute.Key("gcp.vertex.agent.invocation_id")
 )
 
 // tracer is the tracer instance for ADK go.
@@ -61,9 +62,10 @@ type agent interface {
 
 // StartInvokeAgentSpan starts a new semconv invoke_agent span.
 // It returns a new context with the span and the span itself.
-func StartInvokeAgentSpan(ctx context.Context, agent agent, sessionID string) (context.Context, trace.Span) {
+func StartInvokeAgentSpan(ctx context.Context, agent agent, sessionID, invocationID string) (context.Context, trace.Span) {
 	agentName := agent.Name()
 	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("invoke_agent %s", agentName), trace.WithAttributes(
+		gcpVertexAgentInvocationID.String(invocationID), // used by adk-web
 		semconv.GenAIOperationNameInvokeAgent,
 		semconv.GenAIAgentDescription(agent.Description()),
 		semconv.GenAIAgentName(agentName),
@@ -87,12 +89,16 @@ func TraceAgentResult(span trace.Span, params TraceAgentResultParams) {
 type StartGenerateContentSpanParams struct {
 	// ModelName is the name of the model being used for generation.
 	ModelName string
+	// InvocationID is the ID of the invocation.
+	InvocationID string
 }
 
 // StartGenerateContentSpan starts a new semconv generate_content span.
 func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSpanParams) (context.Context, trace.Span) {
 	modelName := params.ModelName
 	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(
+		// Used by adk-web, can be removed once it reads the invocation id from invoke_agent span.
+		gcpVertexAgentInvocationID.String(params.InvocationID),
 		semconv.GenAIOperationNameGenerateContent,
 		semconv.GenAIRequestModel(modelName),
 	))
@@ -117,7 +123,7 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 	if params.Response.UsageMetadata != nil {
 		span.SetAttributes(
 			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),
-			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.TotalTokenCount)),
+			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount)),
 		)
 	}
 }

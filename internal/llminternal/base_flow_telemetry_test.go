@@ -71,8 +71,8 @@ func TestGenerateContentTracing(t *testing.T) {
 				// Yield partial response.
 				if !yield(&model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-						PromptTokenCount: 1,
-						TotalTokenCount:  2,
+						PromptTokenCount:     1,
+						CandidatesTokenCount: 2,
 					},
 					Partial: true,
 				}, nil) {
@@ -87,8 +87,8 @@ func TestGenerateContentTracing(t *testing.T) {
 				// Yield final response.
 				if !yield(&model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-						PromptTokenCount: 10,
-						TotalTokenCount:  20,
+						PromptTokenCount:     10,
+						CandidatesTokenCount: 20,
 					},
 					Partial: false,
 				}, nil) {
@@ -103,8 +103,8 @@ func TestGenerateContentTracing(t *testing.T) {
 				// Yield final response - should not panic.
 				if !yield(&model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-						PromptTokenCount: 100,
-						TotalTokenCount:  200,
+						PromptTokenCount:     100,
+						CandidatesTokenCount: 200,
 					},
 					Partial: false,
 				}, nil) {
@@ -147,6 +147,9 @@ func TestGenerateContentTracing(t *testing.T) {
 	if val := attrs[semconv.GenAIUsageOutputTokensKey]; val != "20" {
 		t.Errorf("expected output tokens 20, got %s", val)
 	}
+	if val := attrs["gcp.vertexai.invocation_id"]; val != "" {
+		t.Errorf("expected invocation id, got %s", val)
+	}
 }
 
 func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
@@ -159,8 +162,8 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 				// Yield partial response.
 				if !yield(&model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-						PromptTokenCount: 10,
-						TotalTokenCount:  20,
+						PromptTokenCount:     10,
+						CandidatesTokenCount: 20,
 					},
 					Partial: true,
 				}, nil) {
@@ -215,8 +218,8 @@ func TestGenerateContentTracingError(t *testing.T) {
 				// Yield partial response.
 				if !yield(&model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-						PromptTokenCount: 1,
-						TotalTokenCount:  2,
+						PromptTokenCount:     1,
+						CandidatesTokenCount: 2,
 					},
 					Partial: true,
 				}, nil) {
@@ -305,8 +308,8 @@ func TestLoggingSpanIDPropagation(t *testing.T) {
 			return func(yield func(*model.LLMResponse, error) bool) {
 				yield(&model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-						PromptTokenCount: 1,
-						TotalTokenCount:  2,
+						PromptTokenCount:     1,
+						CandidatesTokenCount: 2,
 					},
 					Content: &genai.Content{
 						Role:  "model",

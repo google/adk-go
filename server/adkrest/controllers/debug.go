@@ -60,12 +60,31 @@ func (c *DebugAPIController) EventSpanHandler(rw http.ResponseWriter, req *http.
 	for _, span := range spans {
 		opName := span.Attributes[key]
 		if slices.Contains(wantedOperations, opName) {
+			response := convertEventSpan(span)
 			// Return the first span that matches the wanted operations - single event should contain only a single generate content or execute tool span.
-			EncodeJSONResponse(span, http.StatusOK, rw)
+			EncodeJSONResponse(response, http.StatusOK, rw)
 			return
 		}
 	}
 	http.Error(rw, fmt.Sprintf("event not found: %s", eventID), http.StatusNotFound)
+}
+
+// ADK web expects different format than in [SessionSpansHandler].
+// The main difference is that span attributes need to be flattened in the response.
+func convertEventSpan(span services.DebugSpan) map[string]any {
+	flattened := map[string]any{
+		"name":           span.Name,
+		"start_time":     span.StartTime,
+		"end_time":       span.EndTime,
+		"trace_id":       span.TraceID,
+		"span_id":        span.SpanID,
+		"parent_span_id": span.ParentSpanID,
+		"logs":           span.Logs,
+	}
+	for k, v := range span.Attributes {
+		flattened[string(k)] = v
+	}
+	return flattened
 }
 
 // SessionSpansHandler returns the debug spans for the session.
@@ -77,16 +96,7 @@ func (c *DebugAPIController) SessionSpansHandler(rw http.ResponseWriter, req *ht
 		return
 	}
 	spans := c.debugTelemetry.GetSpansBySessionID(sessionID)
-	result := SessionTelemetry{
-		SchemaVersion: 2,
-		Spans:         spans,
-	}
-	EncodeJSONResponse(result, http.StatusOK, rw)
-}
-
-type SessionTelemetry struct {
-	SchemaVersion int                  `json:"schema_version"`
-	Spans         []services.DebugSpan `json:"spans"`
+	EncodeJSONResponse(spans, http.StatusOK, rw)
 }
 
 // EventGraphHandler returns the debug information for the session and session events in form of graph.

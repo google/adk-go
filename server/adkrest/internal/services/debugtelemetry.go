@@ -16,6 +16,7 @@ package services
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -24,6 +25,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
+
+	"google.golang.org/adk/internal/telemetry"
 )
 
 // DebugTelemetry stores the in memory spans and logs, grouped by session and event.
@@ -62,9 +65,32 @@ func (d *DebugTelemetry) GetSpansByEventID(eventID string) []DebugSpan {
 // GetSpansBySessionID returns stored session traces.
 func (d *DebugTelemetry) GetSpansBySessionID(sessionID string) []DebugSpan {
 	sessionIDKey := string(semconv.GenAIConversationIDKey)
-	return d.getSpansFilterByAttrs(func(span tracetest.SpanStub, attrs map[string]string) bool {
-		return attrs[sessionIDKey] == sessionID
+	spansByTrace := make(map[string][]tracetest.SpanStub)
+	matchingTraceIDs := make(map[string]struct{})
+
+	// TODO refactor to do more efficient lookup and avoid iterating over all spans.
+	for _, s := range d.spanExporter.GetSpans() {
+		traceID := s.SpanContext.TraceID().String()
+		spansByTrace[traceID] = append(spansByTrace[traceID], s)
+		if attrs := convertAttrs(s.Attributes); attrs[sessionIDKey] == sessionID {
+			matchingTraceIDs[traceID] = struct{}{}
+		}
+	}
+
+	var debugSpans []DebugSpan
+	for traceID := range matchingTraceIDs {
+		for _, s := range spansByTrace[traceID] {
+			attrs := convertAttrs(s.Attributes)
+			debugSpan := convert(s, attrs)
+			debugSpan.Logs = d.logExporter.GetLogsBySpanID(s.SpanContext.SpanID().String())
+			debugSpans = append(debugSpans, debugSpan)
+		}
+	}
+
+	sort.Slice(debugSpans, func(i, j int) bool {
+		return debugSpans[i].StartTime < debugSpans[j].StartTime
 	})
+	return debugSpans
 }
 
 func (d *DebugTelemetry) getSpansFilterByAttrs(filter func(span tracetest.SpanStub, attrs map[string]string) bool) []DebugSpan {
@@ -79,6 +105,9 @@ func (d *DebugTelemetry) getSpansFilterByAttrs(filter func(span tracetest.SpanSt
 			debugSpans = append(debugSpans, debugSpan)
 		}
 	}
+	sort.Slice(debugSpans, func(i, j int) bool {
+		return debugSpans[i].StartTime < debugSpans[j].StartTime
+	})
 	return debugSpans
 }
 
@@ -92,13 +121,11 @@ func convertAttrs(in []attribute.KeyValue) map[string]string {
 
 func convert(span tracetest.SpanStub, attrs map[string]string) DebugSpan {
 	return DebugSpan{
-		Name:      span.Name,
-		StartTime: span.StartTime.Format(time.RFC3339),
-		EndTime:   span.EndTime.Format(time.RFC3339),
-		Context: SpanContext{
-			TraceID: span.SpanContext.TraceID().String(),
-			SpanID:  span.SpanContext.SpanID().String(),
-		},
+		Name:         span.Name,
+		StartTime:    span.StartTime.UnixNano(),
+		EndTime:      span.EndTime.UnixNano(),
+		TraceID:      span.SpanContext.TraceID().String(),
+		SpanID:       span.SpanContext.SpanID().String(),
 		ParentSpanID: span.Parent.SpanID().String(),
 		Attributes:   attrs,
 	}
@@ -112,9 +139,10 @@ type SpanContext struct {
 // Span represents a span in the trace.
 type DebugSpan struct {
 	Name         string            `json:"name"`
-	StartTime    string            `json:"start_time"`
-	EndTime      string            `json:"end_time"`
-	Context      SpanContext       `json:"context"`
+	StartTime    int64             `json:"start_time"`
+	EndTime      int64             `json:"end_time"`
+	SpanID       string            `json:"span_id"`
+	TraceID      string            `json:"trace_id"`
 	ParentSpanID string            `json:"parent_span_id"`
 	Attributes   map[string]string `json:"attributes"`
 	Logs         []DebugLog        `json:"logs"`
@@ -152,7 +180,7 @@ func (e *InMemoryLogExporter) Export(ctx context.Context, records []sdklog.Recor
 			prev = nil
 		}
 		e.logsBySpanID[spanID] = append(prev, DebugLog{
-			Body:              r.Body().String(),
+			Body:              telemetry.FromLogValue(r.Body()),
 			ObservedTimestamp: r.ObservedTimestamp().Format(time.RFC3339),
 			TraceID:           r.TraceID().String(),
 			SpanID:            r.SpanID().String(),

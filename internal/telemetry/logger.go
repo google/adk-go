@@ -17,7 +17,6 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"sync/atomic"
 
@@ -123,7 +122,7 @@ func logUserMessage(ctx context.Context, content *genai.Content, genAISystem *lo
 	record := log.Record{}
 	record.SetEventName("gen_ai.user.message")
 	record.SetBody(log.MapValue(
-		log.KeyValue{Key: "content", Value: mapToLogValue(contentToJSONLikeValue(content))},
+		log.KeyValue{Key: "content", Value: toLogValue(contentToJSONLikeValue(content))},
 	))
 	if genAISystem != nil {
 		record.AddAttributes(*genAISystem)
@@ -165,7 +164,7 @@ func extractSystemMessage(req *model.LLMRequest) log.Value {
 }
 
 func contentToLogValue(c *genai.Content) log.Value {
-	return mapToLogValue(contentToJSONLikeValue(c))
+	return toLogValue(contentToJSONLikeValue(c))
 }
 
 // contentToJSONLikeValue converts a genai.Content to a JSON, which is then converted to a log.Value.
@@ -188,45 +187,4 @@ func contentToJSONLikeValue(c *genai.Content) any {
 		return "<not_serializable>"
 	}
 	return m
-}
-
-// mapToLogValue converts a JSON value to a log.Value.
-// From [encoding/json.Unmarshal] documentation:
-// To unmarshal JSON into an interface value,
-// Unmarshal stores one of these in the interface value:
-//
-//   - bool, for JSON booleans
-//   - float64, for JSON numbers
-//   - string, for JSON strings
-//   - []any, for JSON arrays
-//   - map[string]any, for JSON objects
-//   - nil for JSON null
-func mapToLogValue(v any) log.Value {
-	switch val := v.(type) {
-	case nil:
-		return log.Value{}
-	case string:
-		return log.StringValue(val)
-	case bool:
-		return log.BoolValue(val)
-	case float64:
-		return log.Float64Value(val)
-	case int:
-		return log.IntValue(val)
-	case []any:
-		values := make([]log.Value, 0, len(val))
-		for _, item := range val {
-			values = append(values, mapToLogValue(item))
-		}
-		return log.SliceValue(values...)
-	case map[string]any:
-		kvs := make([]log.KeyValue, 0, len(val))
-		for k, v := range val {
-			kvs = append(kvs, log.KeyValue{Key: k, Value: mapToLogValue(v)})
-		}
-		return log.MapValue(kvs...)
-	default:
-		// Fallback for other types
-		return log.StringValue(fmt.Sprintf("%v", val))
-	}
 }

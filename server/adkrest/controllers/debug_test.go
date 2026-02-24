@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/gorilla/mux"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
@@ -36,32 +38,52 @@ import (
 
 func TestSessionSpansHandler(t *testing.T) {
 	tc := []struct {
-		name          string
-		sessionID     string
-		reqSessionID  string
-		wantStatus    int
-		wantSpanCount int
+		name         string
+		sessionID    string
+		reqSessionID string
+		wantStatus   int
+		wantBody     []map[string]any
 	}{
 		{
-			name:          "spans found for session",
-			sessionID:     "test-session",
-			reqSessionID:  "test-session",
-			wantStatus:    http.StatusOK,
-			wantSpanCount: 1,
+			name:         "spans_found_for_session",
+			sessionID:    "test-session",
+			reqSessionID: "test-session",
+			wantStatus:   http.StatusOK,
+			wantBody: []map[string]any{
+				{
+					"name":           "test-span",
+					"start_time":     "test-time",
+					"end_time":       "test-time",
+					"trace_id":       "test-trace-id",
+					"span_id":        "test-span-id",
+					"parent_span_id": "test-parent-span-id",
+					"attributes": map[string]any{
+						"gcp.vertex.agent.event_id": "test-event",
+						"gen_ai.conversation.id":    "test-session",
+						"gen_ai.operation.name":     "execute_tool",
+					},
+					"logs": []any{
+						map[string]any{
+							"event_name": "test-log-event",
+							"body": map[string]any{
+								"message": "test log message",
+							},
+						},
+					},
+				},
+			},
 		},
 		{
-			name:          "spans not found for session",
-			sessionID:     "test-session",
-			reqSessionID:  "other-session",
-			wantStatus:    http.StatusOK,
-			wantSpanCount: 0,
+			name:         "spans_not_found_for_session",
+			sessionID:    "test-session",
+			reqSessionID: "other-session",
+			wantStatus:   http.StatusOK,
 		},
 		{
-			name:          "empty session id param",
-			sessionID:     "test-session",
-			reqSessionID:  "",
-			wantStatus:    http.StatusBadRequest,
-			wantSpanCount: 0,
+			name:         "empty_session_id_param",
+			sessionID:    "test-session",
+			reqSessionID: "",
+			wantStatus:   http.StatusBadRequest,
 		},
 	}
 
@@ -90,18 +112,14 @@ func TestSessionSpansHandler(t *testing.T) {
 			}
 
 			if tt.wantStatus == http.StatusOK {
-				var result controllers.SessionTelemetry
+				var result []map[string]any
 				err = json.NewDecoder(rr.Body).Decode(&result)
 				if err != nil {
 					t.Fatalf("decode response: %v", err)
 				}
 
-				if result.SchemaVersion != 2 {
-					t.Errorf("got schema_version %d, want 2", result.SchemaVersion)
-				}
-
-				if len(result.Spans) != tt.wantSpanCount {
-					t.Fatalf("got %d spans, want %d", len(result.Spans), tt.wantSpanCount)
+				if diff := cmp.Diff(tt.wantBody, result, ignoreDynamicFields()); diff != "" {
+					t.Errorf("handler returned unexpected body (-want +got):\n%s", diff)
 				}
 			}
 		})
@@ -115,37 +133,66 @@ func TestEventSpanHandler(t *testing.T) {
 		reqEventID string
 		opName     string
 		wantStatus int
+		wantBody   map[string]any
 	}{
 		{
-			name:       "span with generate content operation",
+			name:       "span_with_generate_content_operation",
 			eventID:    "test-event",
 			reqEventID: "test-event",
 			opName:     semconv.GenAIOperationNameGenerateContent.Value.AsString(),
 			wantStatus: http.StatusOK,
+			wantBody: map[string]any{
+				"name":                      "test-span",
+				"gcp.vertex.agent.event_id": "test-event",
+				"gen_ai.conversation.id":    "test-session",
+				"gen_ai.operation.name":     semconv.GenAIOperationNameGenerateContent.Value.AsString(),
+				"logs": []any{
+					map[string]any{
+						"event_name": "test-log-event",
+						"body": map[string]any{
+							"message": "test log message",
+						},
+					},
+				},
+			},
 		},
 		{
-			name:       "span with execute tool operation",
+			name:       "span_with_execute_tool_operation",
 			eventID:    "test-event",
 			reqEventID: "test-event",
 			opName:     semconv.GenAIOperationNameExecuteTool.Value.AsString(),
 			wantStatus: http.StatusOK,
+			wantBody: map[string]any{
+				"name":                      "test-span",
+				"gcp.vertex.agent.event_id": "test-event",
+				"gen_ai.conversation.id":    "test-session",
+				"gen_ai.operation.name":     semconv.GenAIOperationNameExecuteTool.Value.AsString(),
+				"logs": []any{
+					map[string]any{
+						"event_name": "test-log-event",
+						"body": map[string]any{
+							"message": "test log message",
+						},
+					},
+				},
+			},
 		},
 		{
-			name:       "span not found for event id",
+			name:       "span_not_found_for_event_id",
 			eventID:    "test-event",
 			reqEventID: "other-event",
 			opName:     semconv.GenAIOperationNameExecuteTool.Value.AsString(),
 			wantStatus: http.StatusNotFound,
 		},
 		{
-			name:       "span with different operation name",
+			name:       "span_with_different_operation_name",
 			eventID:    "test-event",
 			reqEventID: "test-event",
 			opName:     "other-op",
 			wantStatus: http.StatusNotFound,
 		},
 		{
-			name:       "empty event id param",
+			name:       "empty_event_id_param",
 			eventID:    "test-event",
 			reqEventID: "",
 			opName:     semconv.GenAIOperationNameExecuteTool.Value.AsString(),
@@ -177,30 +224,29 @@ func TestEventSpanHandler(t *testing.T) {
 			}
 
 			if tt.wantStatus == http.StatusOK {
-				var gotSpan services.DebugSpan
-				err = json.NewDecoder(rr.Body).Decode(&gotSpan)
+				var gotBody map[string]any
+				err = json.NewDecoder(rr.Body).Decode(&gotBody)
 				if err != nil {
 					t.Fatalf("decode response: %v", err)
 				}
 
-				if gotSpan.Name != "test-span" {
-					t.Errorf("got span name %q, want %q", gotSpan.Name, "test-span")
-				}
-				if gotSpan.Attributes["gcp.vertex.agent.event_id"] != tt.eventID {
-					t.Errorf("got event_id %q, want %q", gotSpan.Attributes["gcp.vertex.agent.event_id"], tt.eventID)
-				}
-				if len(gotSpan.Logs) != 1 {
-					t.Fatalf("got %d logs, want 1", len(gotSpan.Logs))
-				}
-				if gotSpan.Logs[0].EventName != "test-log-event" {
-					t.Errorf("got log event name %q, want %q", gotSpan.Logs[0].EventName, "test-log-event")
-				}
-				if gotSpan.Logs[0].Body != "test log message" {
-					t.Errorf("got log body %v, want %q", gotSpan.Logs[0].Body, "test log message")
+				if diff := cmp.Diff(tt.wantBody, gotBody, ignoreDynamicFields()); diff != "" {
+					t.Errorf("handler returned unexpected body (-want +got):\n%s", diff)
 				}
 			}
 		})
 	}
+}
+
+func ignoreDynamicFields() cmp.Option {
+	return cmpopts.IgnoreMapEntries(func(k string, v any) bool {
+		switch k {
+		case "end_time", "observed_timestamp", "span_id", "start_time", "trace_id", "parent_span_id":
+			return true
+		default:
+			return false
+		}
+	})
 }
 
 type testTelemetry struct {
@@ -243,7 +289,14 @@ func emitTestSignals(sessionID, eventID, opName string, tp *sdktrace.TracerProvi
 	record.SetTimestamp(time.Now())
 	record.SetObservedTimestamp(time.Now())
 	record.SetEventName("test-log-event")
-	record.SetBody(log.StringValue("test log message"))
+	record.SetBody(
+		log.MapValue(
+			log.KeyValue{
+				Key:   "message",
+				Value: log.StringValue("test log message"),
+			},
+		),
+	)
 	logger.Emit(ctx, record)
 
 	span.End()

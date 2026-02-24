@@ -360,7 +360,8 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
-			ModelName: m.Name(),
+			ModelName:    m.Name(),
+			InvocationID: ctx.InvocationID(),
 		})
 		ctx = ctx.WithContext(spanCtx)
 		backend := googlellm.GetGoogleLLMVariant(m)
@@ -554,6 +555,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		func() {
 			sctx, span := telemetry.StartExecuteToolSpan(ctx, telemetry.StartExecuteToolSpanParams{
 				ToolName: fnCall.Name,
+				Args:     fnCall.Args,
 			})
 			defer span.End()
 			toolCallCtx := ctx.WithContext(sctx)

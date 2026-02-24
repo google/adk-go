@@ -41,41 +41,46 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 
 	tests := []testCase{
 		{
-			name: "nested-span-with-log",
-			testSetup: func(ctx context.Context, tracer trace.Tracer, logger log.Logger) {
-				ctx, span := tracer.Start(ctx, "parent-span", trace.WithAttributes(
+			name: "root span with conversation id",
+			testSetup: func(rootCtx context.Context, tracer trace.Tracer, logger log.Logger) {
+				rootCtx, rootSpan := tracer.Start(rootCtx, "root-span", trace.WithAttributes(
 					attribute.String(string(semconv.GenAIConversationIDKey), "session-1"),
-					attribute.String("gcp.vertex.agent.event_id", "parent-event"),
 				))
-				defer span.End()
+				defer rootSpan.End()
 
-				childSpanCtx, childSpan := tracer.Start(ctx, "child-span", trace.WithAttributes(
-					attribute.String(string(semconv.GenAIConversationIDKey), "session-1"),
-					attribute.String("gcp.vertex.agent.event_id", "child-event"),
-				))
-				r2 := log.Record{}
-				r2.SetBody(log.StringValue("child-log-body"))
-				r2.SetEventName("child-log-event")
-				r2.SetTimestamp(time.Now())
-				logger.Emit(childSpanCtx, r2)
+				childCtx, childSpan := tracer.Start(rootCtx, "child-span")
+				childLog := log.Record{}
+				childLog.SetBody(log.StringValue("child-log-body"))
+				childLog.SetEventName("child-log-event")
+				childLog.SetTimestamp(time.Now())
+				logger.Emit(childCtx, childLog)
 				childSpan.End()
 
-				r1 := log.Record{}
-				r1.SetBody(log.StringValue("parent-log-body"))
-				r1.SetEventName("parent-log-event")
-				r1.SetTimestamp(time.Now())
-
-				logger.Emit(ctx, r1)
+				rootLog := log.Record{}
+				rootLog.SetBody(log.StringValue("root-log-body"))
+				rootLog.SetEventName("root-log-event")
+				rootLog.SetTimestamp(time.Now())
+				logger.Emit(rootCtx, rootLog)
 			},
 			querySessionID: "session-1",
 			wantSessionSpans: []DebugSpan{
 				{
-					Name:         "child-span",
+					Name:         "root-span",
 					ParentSpanID: trace.SpanID{}.String(),
 					Attributes: map[string]string{
 						string(semconv.GenAIConversationIDKey): "session-1",
-						"gcp.vertex.agent.event_id":            "child-event",
 					},
+					Logs: []DebugLog{
+						{
+							Body:      "root-log-body",
+							EventName: "root-log-event",
+						},
+					},
+				},
+				{
+					Name:         "child-span",
+					ParentSpanID: trace.SpanID{}.String(),
+					Attributes:   map[string]string{},
 					Logs: []DebugLog{
 						{
 							Body:      "child-log-body",
@@ -83,30 +88,109 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 						},
 					},
 				},
-				{
-					Name:         "parent-span",
-					ParentSpanID: trace.SpanID{}.String(),
-					Attributes: map[string]string{
-						string(semconv.GenAIConversationIDKey): "session-1",
-						"gcp.vertex.agent.event_id":            "parent-event",
-					},
-					Logs: []DebugLog{
-						{
-							Body:      "parent-log-body",
-							EventName: "parent-log-event",
-						},
-					},
-				},
 			},
 		},
 		{
-			name: "empty-results",
+			name: "child span with conversation id",
+			testSetup: func(rootCtx context.Context, tracer trace.Tracer, logger log.Logger) {
+				var rootSpan trace.Span
+				rootCtx, rootSpan = tracer.Start(rootCtx, "root")
+				childCtx, childSpan := tracer.Start(rootCtx, "child")
+				_, secondChildSpan := tracer.Start(rootCtx, "child-2")
+				_, thirdChildSpan := tracer.Start(childCtx, "grandchild", trace.WithAttributes(
+					semconv.GenAIConversationID("test-session-id"),
+				))
+				thirdChildSpan.End()
+				secondChildSpan.End()
+				childSpan.End()
+				rootSpan.End()
+
+				// Create another trace with a different session ID (should not be returned).
+				_, rootSpan3 := tracer.Start(context.Background(), "root-3", trace.WithAttributes(
+					semconv.GenAIConversationID("test-session-id-1"),
+				))
+				rootSpan3.End()
+			},
+			querySessionID: "test-session-id",
+			wantSessionSpans: []DebugSpan{
+				{Name: "root", Attributes: map[string]string{}},
+				{Name: "child", Attributes: map[string]string{}},
+				{Name: "child-2", Attributes: map[string]string{}},
+				{Name: "grandchild", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "test-session-id"}},
+			},
+		},
+		{
+			name: "multiple traces with same session id",
 			testSetup: func(ctx context.Context, tracer trace.Tracer, logger log.Logger) {
-				_, span := tracer.Start(ctx, "test-span-1", trace.WithAttributes(
+				// Trace 1
+				root1Ctx, root1Span := tracer.Start(ctx, "root-1", trace.WithAttributes(
+					semconv.GenAIConversationID("session-1"),
+				))
+				_, child1 := tracer.Start(root1Ctx, "child-1")
+				child1.End()
+				root1Span.End()
+
+				// Trace 2 (different trace ID, same session ID)
+				// Session ID on child span
+				root2Ctx, root2Span := tracer.Start(ctx, "root-2")
+				_, child2 := tracer.Start(root2Ctx, "child-2", trace.WithAttributes(
+					semconv.GenAIConversationID("session-1"),
+				))
+				child2.End()
+				root2Span.End()
+			},
+			querySessionID: "session-1",
+			wantSessionSpans: []DebugSpan{
+				{Name: "root-1", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
+				{Name: "child-1", Attributes: map[string]string{}},
+				{Name: "root-2", Attributes: map[string]string{}},
+				{Name: "child-2", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
+			},
+		},
+		{
+			name: "trace with spans with mixed session ids session-1",
+			testSetup: func(ctx context.Context, tracer trace.Tracer, logger log.Logger) {
+				rootCtx, rootSpan := tracer.Start(ctx, "mixed-root", trace.WithAttributes(
+					semconv.GenAIConversationID("session-1"),
+				))
+				_, childSpan := tracer.Start(rootCtx, "mixed-child", trace.WithAttributes(
+					semconv.GenAIConversationID("session-2"),
+				))
+				childSpan.End()
+				rootSpan.End()
+			},
+			querySessionID: "session-1",
+			wantSessionSpans: []DebugSpan{
+				{Name: "mixed-root", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
+				{Name: "mixed-child", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-2"}},
+			},
+		},
+		{
+			name: "trace with spans with mixed session ids session-2",
+			testSetup: func(ctx context.Context, tracer trace.Tracer, logger log.Logger) {
+				rootCtx, rootSpan := tracer.Start(ctx, "mixed-root", trace.WithAttributes(
+					semconv.GenAIConversationID("session-1"),
+				))
+				_, childSpan := tracer.Start(rootCtx, "mixed-child", trace.WithAttributes(
+					semconv.GenAIConversationID("session-2"),
+				))
+				childSpan.End()
+				rootSpan.End()
+			},
+			querySessionID: "session-2",
+			wantSessionSpans: []DebugSpan{
+				{Name: "mixed-root", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
+				{Name: "mixed-child", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-2"}},
+			},
+		},
+		{
+			name: "no matching session id",
+			testSetup: func(ctx context.Context, tracer trace.Tracer, logger log.Logger) {
+				_, rootSpan := tracer.Start(ctx, "root-1", trace.WithAttributes(
 					attribute.String(string(semconv.GenAIConversationIDKey), "session-1"),
 					attribute.String("gcp.vertex.agent.event_id", "event-1"),
 				))
-				defer span.End()
+				rootSpan.End()
 			},
 			querySessionID:   "non-existent-session",
 			wantSessionSpans: nil,
@@ -114,12 +198,12 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 		{
 			name: "log without span",
 			testSetup: func(ctx context.Context, tracer trace.Tracer, logger log.Logger) {
-				var rec1 log.Record
-				rec1.SetBody(log.StringValue("test body"))
-				rec1.SetEventName("test_event")
-				rec1.SetTimestamp(time.Now())
+				var logRecord log.Record
+				logRecord.SetBody(log.StringValue("test body"))
+				logRecord.SetEventName("test_event")
+				logRecord.SetTimestamp(time.Now())
 
-				logger.Emit(ctx, rec1)
+				logger.Emit(ctx, logRecord)
 			},
 			querySessionID:   "session-1",
 			wantSessionSpans: nil,
@@ -142,8 +226,9 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 
 			cmpOpts := []cmp.Option{
 				cmpopts.IgnoreUnexported(log.Value{}),
-				cmpopts.IgnoreFields(DebugSpan{}, "StartTime", "EndTime", "Context", "ParentSpanID"),
+				cmpopts.IgnoreFields(DebugSpan{}, "StartTime", "EndTime", "TraceID", "SpanID", "ParentSpanID"),
 				cmpopts.IgnoreFields(DebugLog{}, "ObservedTimestamp", "TraceID", "SpanID"),
+				cmpopts.EquateEmpty(),
 			}
 
 			// Validate session spans
@@ -158,8 +243,6 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 	ctx := context.Background()
 
-	spanName := "test-span-1"
-
 	type testCase struct {
 		name           string
 		testSetup      func(ctx context.Context, tracer trace.Tracer, logger log.Logger)
@@ -169,10 +252,9 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 
 	tests := []testCase{
 		{
-			name: "single-span-and-log",
+			name: "single span and log",
 			testSetup: func(ctx context.Context, tracer trace.Tracer, logger log.Logger) {
-				ctx, span := tracer.Start(ctx, "test-span-1", trace.WithAttributes(
-					attribute.String(string(semconv.GenAIConversationIDKey), "session-1"),
+				ctx, span := tracer.Start(ctx, "root-1", trace.WithAttributes(
 					attribute.String("gcp.vertex.agent.event_id", "event-1"),
 					attribute.String("genai.operation.name", "generate_content"),
 				))
@@ -188,12 +270,11 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 			queryEventID: "event-1",
 			wantEventSpans: []DebugSpan{
 				{
-					Name:         "test-span-1",
+					Name:         "root-1",
 					ParentSpanID: trace.SpanID{}.String(),
 					Attributes: map[string]string{
-						string(semconv.GenAIConversationIDKey): "session-1",
-						"gcp.vertex.agent.event_id":            "event-1",
-						"genai.operation.name":                 "generate_content",
+						"gcp.vertex.agent.event_id": "event-1",
+						"genai.operation.name":      "generate_content",
 					},
 					Logs: []DebugLog{
 						{
@@ -205,14 +286,48 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 			},
 		},
 		{
-			name: "empty-results",
-			testSetup: func(ctx context.Context, tracer trace.Tracer, logger log.Logger) {
-				_, span := tracer.Start(ctx, spanName, trace.WithAttributes(
-					attribute.String(string(semconv.GenAIConversationIDKey), "session-1"),
+			name: "multiple spans",
+			testSetup: func(span1Ctx context.Context, tracer trace.Tracer, logger log.Logger) {
+				span1Ctx, span1 := tracer.Start(span1Ctx, "root-1", trace.WithAttributes(
 					attribute.String("gcp.vertex.agent.event_id", "event-1"),
 					attribute.String("genai.operation.name", "generate_content"),
 				))
-				defer span.End()
+				defer span1.End()
+
+				_, span2 := tracer.Start(span1Ctx, "root-2", trace.WithAttributes(
+					attribute.String("gcp.vertex.agent.event_id", "event-1"),
+					attribute.String("genai.operation.name", "execute_tool"),
+				))
+				defer span2.End()
+			},
+			queryEventID: "event-1",
+			wantEventSpans: []DebugSpan{
+				{
+					Name:         "root-1",
+					ParentSpanID: trace.SpanID{}.String(),
+					Attributes: map[string]string{
+						"gcp.vertex.agent.event_id": "event-1",
+						"genai.operation.name":      "generate_content",
+					},
+				},
+				{
+					Name:         "root-2",
+					ParentSpanID: trace.SpanID{}.String(),
+					Attributes: map[string]string{
+						"gcp.vertex.agent.event_id": "event-1",
+						"genai.operation.name":      "execute_tool",
+					},
+				},
+			},
+		},
+		{
+			name: "no matching span",
+			testSetup: func(ctx context.Context, tracer trace.Tracer, logger log.Logger) {
+				_, span := tracer.Start(ctx, "root-1", trace.WithAttributes(
+					attribute.String("gcp.vertex.agent.event_id", "event-1"),
+					attribute.String("genai.operation.name", "generate_content"),
+				))
+				span.End()
 			},
 			queryEventID:   "non-existent-event",
 			wantEventSpans: nil,
@@ -248,8 +363,9 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 
 			cmpOpts := []cmp.Option{
 				cmpopts.IgnoreUnexported(log.Value{}),
-				cmpopts.IgnoreFields(DebugSpan{}, "StartTime", "EndTime", "Context", "ParentSpanID"),
+				cmpopts.IgnoreFields(DebugSpan{}, "StartTime", "EndTime", "ParentSpanID", "TraceID", "SpanID"),
 				cmpopts.IgnoreFields(DebugLog{}, "ObservedTimestamp", "TraceID", "SpanID"),
+				cmpopts.EquateEmpty(),
 			}
 
 			// Validate event spans

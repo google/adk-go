@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/telemetry"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
 	"google.golang.org/adk/tool/functiontool"
@@ -108,6 +109,9 @@ func main() {
 
 	config := &launcher.Config{
 		AgentLoader: agent.NewSingleLoader(a),
+		TelemetryOptions: []telemetry.Option{
+			telemetry.WithGenAICaptureMessageContent(true),
+		},
 	}
 
 	l := full.NewLauncher()
