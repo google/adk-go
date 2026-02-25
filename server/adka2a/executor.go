@@ -55,6 +55,9 @@ const (
 	// OutputArtifactPerRun produces a single artifact per [runner.Runner.Run].
 	OutputArtifactPerRun OutputMode = "artifact-per-run"
 	// OutputArtifactPerEvent produces an artifact per non-partial [session.Event].
+	// While agent is emitting events an artifact is build incrementally (parts are append to it).
+	// The next partial event replaces accumulated contents and seals the artifact, meaning
+	// the next event from this agent will create a new artifact.
 	OutputArtifactPerEvent OutputMode = "artifact-per-event"
 )
 
