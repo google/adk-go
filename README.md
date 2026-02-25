@@ -45,6 +45,27 @@ To add ADK Go to your project, run:
 go get google.golang.org/adk
 ```
 
+### Anthropic Claude model package
+
+ADK Go now includes an Anthropic provider that implements the same `model.LLM` interface used by Gemini.
+
+```go
+import (
+    "context"
+
+    anthropicapi "github.com/anthropics/anthropic-sdk-go"
+    adkanthropic "google.golang.org/adk/model/anthropic"
+)
+
+func buildModel(ctx context.Context) {
+    _, _ = adkanthropic.NewModel(ctx, anthropicapi.Model("claude-sonnet-4-20250514"), &adkanthropic.Config{
+        APIKey: "${ANTHROPIC_API_KEY}",
+    })
+}
+```
+
+See [`examples/anthropic/main.go`](examples/anthropic/main.go) for a full runnable sample.
+
 ## 📄 License
 
 This project is licensed under the Apache 2.0 License - see the

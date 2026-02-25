@@ -4,6 +4,11 @@ This folder hosts examples to test different features. The examples are usually 
 
 **Note**: This is different from the [google/adk-samples](https://github.com/google/adk-samples) repo, which hosts more complex e2e samples for customers to use or modify directly.
 
+## Model examples
+
+- `quickstart`: basic Gemini-backed agent.
+- `anthropic`: basic Anthropic Claude-backed agent.
+
 
 # Launcher
 In many examples you can see such lines:
