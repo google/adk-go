@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/adk/model"
 	"google.golang.org/genai"
 )
@@ -53,13 +54,13 @@ func TestNewModel_ConfigBehavior(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model, err := NewModel(t.Context(), "claude-sonnet-4-20250514", tt.cfg)
+			model, err := NewModel(t.Context(), anthropic.ModelClaudeSonnet4_6, tt.cfg)
 			if err != nil {
 				t.Fatalf("NewModel() error = %v", err)
 			}
 
-			if model.Name() != "claude-sonnet-4-20250514" {
-				t.Errorf("Name() = %q, want %q", model.Name(), "claude-sonnet-4-20250514")
+			if model.Name() != string(anthropic.ModelClaudeSonnet4_6) {
+				t.Errorf("Name() = %q, want %q", model.Name(), anthropic.ModelClaudeSonnet4_6)
 			}
 
 			am := model.(*anthropicModel)
@@ -90,7 +91,7 @@ func TestNewModel_VertexAI_MissingConfig(t *testing.T) {
 			t.Setenv("GOOGLE_CLOUD_LOCATION", tt.location)
 
 			cfg := &Config{Variant: VariantVertexAI}
-			_, err := NewModel(t.Context(), "claude-sonnet-4-20250514", cfg)
+			_, err := NewModel(t.Context(), anthropic.ModelClaudeSonnet4_6, cfg)
 			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
 				t.Fatalf("NewModel() error = %v, want contains %q", err, tt.wantError)
 			}

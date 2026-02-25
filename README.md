@@ -18,7 +18,7 @@
       <a href="https://google.github.io/adk-docs/">Docs</a> &
       <a href="https://github.com/google/adk-go/tree/main/examples">Samples</a> &
       <a href="https://github.com/google/adk-python">Python ADK</a> &
-      <a href="https://github.com/google/adk-java">Java ADK</a> & 
+      <a href="https://github.com/google/adk-java">Java ADK</a> &
       <a href="https://github.com/google/adk-web">ADK Web</a>.
     </h3>
 </html>
@@ -58,7 +58,7 @@ import (
 )
 
 func buildModel(ctx context.Context) {
-    _, _ = adkanthropic.NewModel(ctx, anthropicapi.Model("claude-sonnet-4-20250514"), &adkanthropic.Config{
+    _, _ = adkanthropic.NewModel(ctx, anthropicapi.Model(anthropic.ModelClaudeSonnet4_6), &adkanthropic.Config{
         APIKey: "${ANTHROPIC_API_KEY}",
     })
 }
