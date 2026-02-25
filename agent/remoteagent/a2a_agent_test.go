@@ -150,17 +150,6 @@ func newADKEventReplay(t *testing.T, name string, events []*session.Event) agent
 	return agnt
 }
 
-func newADKEventReplayExecutor(t *testing.T, events []*session.Event) a2asrv.AgentExecutor {
-	t.Helper()
-	return adka2a.NewExecutor(adka2a.ExecutorConfig{
-		RunnerConfig: runner.Config{
-			AppName:        "RemoteAgentTest",
-			SessionService: session.InMemoryService(),
-			Agent:          newADKEventReplay(t, "root", events),
-		},
-	})
-}
-
 func newA2AEventReplay(t *testing.T, events []a2a.Event) a2asrv.AgentExecutor {
 	return &mockA2AExecutor{
 		executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
@@ -372,44 +361,53 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 		cmpopts.IgnoreFields(model.LLMResponse{}, "CustomMetadata"),
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			executor := newADKEventReplayExecutor(t, tc.remoteEvents)
-			remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
+	for _, outputMode := range []adka2a.OutputMode{adka2a.OutputArtifactPerRun, adka2a.OutputArtifactPerEvent} {
+		for _, tc := range testCases {
+			t.Run(tc.name+" "+string(outputMode), func(t *testing.T) {
+				executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
+					OutputMode: outputMode,
+					RunnerConfig: runner.Config{
+						AppName:        "RemoteAgentTest",
+						SessionService: session.InMemoryService(),
+						Agent:          newADKEventReplay(t, "root", tc.remoteEvents),
+					},
+				})
+				remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
 
-			mode := agent.StreamingModeSSE
-			if tc.noStreaming {
-				mode = agent.StreamingModeNone
-			}
-			ictx := newInvocationContextWithStreamingMode(t, []*session.Event{newUserHello()}, mode)
-			gotEvents, err := runAndCollect(ictx, remoteAgent)
-			if err != nil {
-				t.Fatalf("agent.Run() error = %v", err)
-			}
-			gotResponses := toLLMResponses(gotEvents)
-			if diff := cmp.Diff(tc.wantResponses, gotResponses, ignoreFields...); diff != "" {
-				t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
-			}
-			var lastActions *session.EventActions
-			for i, event := range gotEvents {
-				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("response")]; !ok {
-					if aggregated, _ := event.CustomMetadata[adka2a.ToADKMetaKey("aggregated")].(bool); !aggregated {
-						t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original event or meta[%q] = true", event.CustomMetadata, adka2a.ToADKMetaKey("response"), adka2a.ToADKMetaKey("aggregated"))
+				mode := agent.StreamingModeSSE
+				if tc.noStreaming {
+					mode = agent.StreamingModeNone
+				}
+				ictx := newInvocationContextWithStreamingMode(t, []*session.Event{newUserHello()}, mode)
+				gotEvents, err := runAndCollect(ictx, remoteAgent)
+				if err != nil {
+					t.Fatalf("agent.Run() error = %v", err)
+				}
+				gotResponses := toLLMResponses(gotEvents)
+				if diff := cmp.Diff(tc.wantResponses, gotResponses, ignoreFields...); diff != "" {
+					t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
+				}
+				var lastActions *session.EventActions
+				for i, event := range gotEvents {
+					if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("response")]; !ok {
+						if aggregated, _ := event.CustomMetadata[adka2a.ToADKMetaKey("aggregated")].(bool); !aggregated {
+							t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original event or meta[%q] = true", event.CustomMetadata, adka2a.ToADKMetaKey("response"), adka2a.ToADKMetaKey("aggregated"))
+						}
 					}
+					wantRequest := i == len(gotEvents)-1
+					if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; ok != wantRequest {
+						t.Fatalf("event.CustomMetadata = %v, want request = %v", event.CustomMetadata, wantRequest)
+					}
+					lastActions = &event.Actions
 				}
-				wantRequest := i == len(gotEvents)-1
-				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; ok != wantRequest {
-					t.Fatalf("event.CustomMetadata = %v, want request = %v", event.CustomMetadata, wantRequest)
+				if tc.wantEscalate != lastActions.Escalate {
+					t.Fatalf("lastActions.Escalate = %v, want %v", lastActions.Escalate, tc.wantEscalate)
 				}
-				lastActions = &event.Actions
-			}
-			if tc.wantEscalate != lastActions.Escalate {
-				t.Fatalf("lastActions.Escalate = %v, want %v", lastActions.Escalate, tc.wantEscalate)
-			}
-			if tc.wantTransfer != lastActions.TransferToAgent {
-				t.Fatalf("lastActions.TransferToAgent = %v, want %v", lastActions.TransferToAgent, tc.wantTransfer)
-			}
-		})
+				if tc.wantTransfer != lastActions.TransferToAgent {
+					t.Fatalf("lastActions.TransferToAgent = %v, want %v", lastActions.TransferToAgent, tc.wantTransfer)
+				}
+			})
+		}
 	}
 }
 
@@ -533,10 +531,8 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			wantResponses: []model.LLMResponse{
 				{Content: genai.NewContentFromText("hello", genai.RoleModel), Partial: true},
 				{Content: genai.NewContentFromText("world", genai.RoleModel), Partial: true},
-				{
-					Content:      genai.NewContentFromText("helloworld", genai.RoleModel),
-					TurnComplete: true,
-				},
+				{Content: genai.NewContentFromText("helloworld", genai.RoleModel)},
+				{TurnComplete: true},
 			},
 		},
 		{
@@ -549,7 +545,6 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			wantResponses: []model.LLMResponse{
 				{Content: &genai.Content{Parts: []*genai.Part{{Text: "submitted...\n", Thought: true}}, Role: genai.RoleModel}, Partial: true},
 				{Content: &genai.Content{Parts: []*genai.Part{{Text: "working...\n", Thought: true}}, Role: genai.RoleModel}, Partial: true},
-				{Content: genai.NewContentFromParts([]*genai.Part{{Thought: true, Text: "submitted...\nworking...\n"}}, genai.RoleModel)},
 				{Content: genai.NewContentFromText("completed!", genai.RoleModel), TurnComplete: true},
 			},
 		},
@@ -706,8 +701,11 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 					CustomMetadata: map[string]any{"foo": "bar"},
 				},
 				{
-					TurnComplete:   true,
 					Content:        genai.NewContentFromText("Hello, world!", genai.RoleModel),
+					CustomMetadata: map[string]any{"foo": "bar"},
+				},
+				{
+					TurnComplete:   true,
 					CustomMetadata: map[string]any{"foo": "bar"},
 				},
 			},

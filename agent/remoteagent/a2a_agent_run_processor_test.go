@@ -31,6 +31,21 @@ import (
 )
 
 func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
+	type updateFlags struct {
+		append    bool
+		lastChunk bool
+	}
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	newArtifactUpdate := func(aid a2a.ArtifactID, flags updateFlags, text string) *a2a.TaskArtifactUpdateEvent {
+		return &a2a.TaskArtifactUpdateEvent{
+			TaskID:    task.ID,
+			ContextID: task.ContextID,
+			Artifact:  &a2a.Artifact{ID: aid, Parts: a2a.ContentParts{a2a.TextPart{Text: text}}},
+			LastChunk: flags.lastChunk,
+			Append:    flags.append,
+		}
+	}
+
 	newPartialEvent := func(text string) *session.Event {
 		return &session.Event{LLMResponse: model.LLMResponse{
 			Partial: true,
@@ -44,42 +59,36 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 		}
 		return e
 	}
+	newEvent := func(parts ...*genai.Part) *session.Event {
+		e := &session.Event{LLMResponse: model.LLMResponse{Partial: false}}
+		if len(parts) > 0 {
+			e.Content = genai.NewContentFromParts(parts, genai.RoleModel)
+		}
+		return e
+	}
 	withADKPartial := func(event *a2a.TaskArtifactUpdateEvent, partial bool) *a2a.TaskArtifactUpdateEvent {
 		event.Metadata = map[string]any{adka2a.ToA2AMetaKey("partial"): partial}
 		return event
 	}
 
-	task := &a2a.Task{ID: "t1"}
+	aid1, aid2 := a2a.NewArtifactID(), a2a.NewArtifactID()
 	tests := []struct {
 		name       string
 		events     []a2a.Event
 		wantEvents []*session.Event
 	}{
 		{
-			name: "emit aggregated on final status",
-			events: []a2a.Event{
-				a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{Text: "Hel"}),
-				a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{Text: "lo"}),
-				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
-			},
-			wantEvents: []*session.Event{
-				newPartialEvent("Hel"),
-				newPartialEvent("lo"),
-				newCompletedEvent(genai.NewPartFromText("Hello")),
-			},
-		},
-		{
 			name: "do not aggregate when ADK events",
 			events: []a2a.Event{
-				withADKPartial(a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{Text: "Hel"}), true),
-				withADKPartial(a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{Text: "lo"}), true),
-				withADKPartial(a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{Text: "Hello"}), false),
+				withADKPartial(a2a.NewArtifactUpdateEvent(task, aid1, a2a.TextPart{Text: "Hel"}), true),
+				withADKPartial(a2a.NewArtifactUpdateEvent(task, aid1, a2a.TextPart{Text: "lo"}), true),
+				withADKPartial(a2a.NewArtifactUpdateEvent(task, aid1, a2a.TextPart{Text: "Hello"}), false),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
 			},
 			wantEvents: []*session.Event{
 				newPartialEvent("Hel"),
 				newPartialEvent("lo"),
-				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hello", genai.RoleModel)}},
+				newEvent(genai.NewPartFromText("Hello")),
 				newCompletedEvent(),
 			},
 		},
@@ -109,7 +118,114 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 			wantEvents: []*session.Event{
 				newPartialEvent("foo"),
 				newPartialEvent("bar"),
-				newCompletedEvent(genai.NewPartFromText("bar")),
+				newEvent(genai.NewPartFromText("bar")),
+				newCompletedEvent(),
+			},
+		},
+		{
+			name: "[append=true, lastChunk=false] emit aggregated on final status",
+			events: []a2a.Event{
+				newArtifactUpdate(aid1, updateFlags{append: true}, "Hel"),
+				newArtifactUpdate(aid1, updateFlags{append: true}, "lo"),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newPartialEvent("Hel"),
+				newPartialEvent("lo"),
+				newEvent(genai.NewPartFromText("Hello")),
+				newCompletedEvent(),
+			},
+		},
+		{
+			name: "[append=true, lastChunk=false] emit multiple aggregated on final status",
+			events: []a2a.Event{
+				newArtifactUpdate(aid1, updateFlags{append: true}, "Foo"),
+				newArtifactUpdate(aid2, updateFlags{append: true}, "Bar"),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newPartialEvent("Foo"),
+				newPartialEvent("Bar"),
+				newEvent(genai.NewPartFromText("Foo")),
+				newEvent(genai.NewPartFromText("Bar")),
+				newCompletedEvent(),
+			},
+		},
+		{
+			name: "[append=true, lastChunk=true] results in partial followed by non-partial",
+			events: []a2a.Event{
+				newArtifactUpdate(aid1, updateFlags{append: true}, "Hel"),
+				newArtifactUpdate(aid1, updateFlags{append: true, lastChunk: true}, "lo"),
+				newArtifactUpdate(aid2, updateFlags{append: true}, "bar"),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newPartialEvent("Hel"),
+				newPartialEvent("lo"),
+				newEvent(genai.NewPartFromText("Hello")),
+				newPartialEvent("bar"),
+				newEvent(genai.NewPartFromText("bar")),
+				newCompletedEvent(),
+			},
+		},
+		{
+			name: "[append=false, lastChunk=true] results in non-partial",
+			events: []a2a.Event{
+				newArtifactUpdate(aid1, updateFlags{append: true}, "Hel"),
+				newArtifactUpdate(aid1, updateFlags{append: false, lastChunk: true}, "Hello"),
+				newArtifactUpdate(aid2, updateFlags{append: true}, "bar"),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newPartialEvent("Hel"),
+				newEvent(genai.NewPartFromText("Hello")),
+				newPartialEvent("bar"),
+				newEvent(genai.NewPartFromText("bar")),
+				newCompletedEvent(),
+			},
+		},
+		{
+			name: "[append=false, lastChunk=true] results in non-partial",
+			events: []a2a.Event{
+				newArtifactUpdate(aid1, updateFlags{append: true}, "Hel"),
+				newArtifactUpdate(aid1, updateFlags{append: false, lastChunk: true}, "Hello"),
+				newArtifactUpdate(aid2, updateFlags{append: true}, "bar"),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newPartialEvent("Hel"),
+				newEvent(genai.NewPartFromText("Hello")),
+				newPartialEvent("bar"),
+				newEvent(genai.NewPartFromText("bar")),
+				newCompletedEvent(),
+			},
+		},
+		{
+			name: "[append=false, lastChunk=true] as first event non-partial",
+			events: []a2a.Event{
+				newArtifactUpdate(aid1, updateFlags{append: false, lastChunk: true}, "Hello"),
+				newArtifactUpdate(aid2, updateFlags{append: true}, "bar"),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newEvent(genai.NewPartFromText("Hello")),
+				newPartialEvent("bar"),
+				newEvent(genai.NewPartFromText("bar")),
+				newCompletedEvent(),
+			},
+		},
+		{
+			name: "[append=false, lastChunk=false] resets aggregation",
+			events: []a2a.Event{
+				newArtifactUpdate(aid1, updateFlags{append: true}, "Foo"),
+				newArtifactUpdate(aid1, updateFlags{append: false}, "Bar"),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newPartialEvent("Foo"),
+				newPartialEvent("Bar"),
+				newEvent(genai.NewPartFromText("Bar")),
+				newCompletedEvent(),
 			},
 		},
 		{
@@ -128,10 +244,11 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 					Content: &genai.Content{Parts: []*genai.Part{{Thought: true, Text: "thinking..."}}, Role: genai.RoleModel},
 				}},
 				newPartialEvent("done"),
-				newCompletedEvent(
+				newEvent(
 					&genai.Part{Thought: true, Text: "thinking..."},
 					&genai.Part{Text: "done"},
 				),
+				newCompletedEvent(),
 			},
 		},
 	}
@@ -164,10 +281,11 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 				for _, agg := range p.aggregatePartial(ctx, event, adkEvent) {
 					gotEvents = append(gotEvents, agg)
 				}
-				gotEvents = append(gotEvents, adkEvent)
 			}
-
-			if diff := cmp.Diff(tc.wantEvents, gotEvents, cmp.AllowUnexported(session.Event{}), cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID", "Author", "Branch", "CustomMetadata")); diff != "" {
+			opts := []cmp.Option{
+				cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID", "Author", "Branch", "CustomMetadata", "Actions"),
+			}
+			if diff := cmp.Diff(tc.wantEvents, gotEvents, opts...); diff != "" {
 				t.Errorf("mismatch (-want +got):\n%s", diff)
 			}
 		})
