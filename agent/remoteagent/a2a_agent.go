@@ -192,13 +192,10 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			}
 
 			if event != nil { // an event might be skipped
-				if intermediate := processor.aggregatePartial(ctx, a2aEvent, event); intermediate != nil {
-					if !yield(intermediate, nil) {
+				for _, toEmit := range processor.aggregatePartial(ctx, a2aEvent, event) {
+					if !yield(toEmit, nil) {
 						return false
 					}
-				}
-				if !yield(event, nil) {
-					return false
 				}
 			}
 			return true

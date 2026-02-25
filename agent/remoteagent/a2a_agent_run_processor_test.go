@@ -161,7 +161,7 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 					continue
 				}
 
-				if agg := p.aggregatePartial(ctx, event, adkEvent); agg != nil {
+				for _, agg := range p.aggregatePartial(ctx, event, adkEvent) {
 					gotEvents = append(gotEvents, agg)
 				}
 				gotEvents = append(gotEvents, adkEvent)

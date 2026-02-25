@@ -92,11 +92,11 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 		if partial, ok := v.Metadata[metadataPartialKey].(bool); ok {
 			event.Partial = partial
 		} else {
-			// If an event is not marked as adk_partial we assume that the remoteagent does not have its
-			// own aggregating logic and is using artifact updates to stream respons chunks. It is the responsibility
-			// of ToSessionEvent callers to aggregate those into a single artifact and emit it before final event.
-			// If the final event is a Task the aggregation should be discarded.
-			event.Partial = true
+			// append=false, lastChunk=false: emitted as partial, caller restarts aggregation
+			// append=false, lastChunk=true: emitted as non partial, caller drops aggregation
+			// append=true, lastChunk=false: emitted as partial, caller updates aggregation
+			// append=true, lastChunk=true: emitted as partial, caller updates and emits aggregation as non-partial
+			event.Partial = v.Append || !v.LastChunk
 		}
 		return event, nil
 

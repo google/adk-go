@@ -16,6 +16,7 @@ package remoteagent
 
 import (
 	"fmt"
+	"maps"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/genai"
@@ -27,99 +28,145 @@ import (
 	"google.golang.org/adk/session"
 )
 
+type artifactAggregation struct {
+	aggregatedText     string
+	aggregatedThoughts string
+
+	parts      []*genai.Part
+	citations  *genai.CitationMetadata
+	grounding  *genai.GroundingMetadata
+	customMeta map[string]any
+	usage      *genai.GenerateContentResponseUsageMetadata
+}
+
 type a2aAgentRunProcessor struct {
 	config A2AConfig
 
 	request *a2a.MessageSendParams
 
 	// partial event contents emitted before the terminal event
-	aggregatedText     string
-	aggregatedThoughts string
+	aggregations map[a2a.ArtifactID]*artifactAggregation
 }
 
 func newRunProcessor(config A2AConfig, request *a2a.MessageSendParams) *a2aAgentRunProcessor {
-	return &a2aAgentRunProcessor{config: config, request: request}
+	return &a2aAgentRunProcessor{
+		config:       config,
+		request:      request,
+		aggregations: make(map[a2a.ArtifactID]*artifactAggregation),
+	}
 }
 
 // aggregatePartial stores contents of partial events to emit them with the terminal event.
 // It can modify the original event or return a new event to emit before the provided event.
-func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2aEvent a2a.Event, event *session.Event) *session.Event {
+func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2aEvent a2a.Event, event *session.Event) []*session.Event {
 	// ADK partial events should be aggregated by ADK and emitted as a non-partial artifact update.
 	// That's why we skip them regardless of the actual isPartial value.
-
+	// This is the legacy [adka2a.OutputMode].
 	if a2aEvent != nil && adka2a.IsPartialFlagSet(a2aEvent.Meta()) {
-		return nil
+		return []*session.Event{event}
 	}
 
-	// RemoteAgent event stream finished, emit any aggregated events data we have
+	// RemoteAgent event stream finished, emit any aggregated events data we have before the final event
 	if statusUpdate, ok := a2aEvent.(*a2a.TaskStatusUpdateEvent); ok && statusUpdate.Final {
-		return p.buildAggregatedEvent(ctx, event)
+		var events []*session.Event
+		for _, agg := range p.aggregations {
+			events = append(events, p.buildNonPartialAggregation(ctx, agg))
+		}
+		return append(events, event)
 	}
 
 	// RemoteAgent published a snapshot which should have all the data we potentially aggregated.
 	// Reset the aggregation so that it is not published twice.
 	if _, ok := a2aEvent.(*a2a.Task); ok {
-		p.aggregatedText = ""
-		p.aggregatedThoughts = ""
-		return nil
+		p.aggregations = map[a2a.ArtifactID]*artifactAggregation{}
+		return []*session.Event{event}
 	}
 
-	if update, ok := a2aEvent.(*a2a.TaskArtifactUpdateEvent); ok && !update.Append {
-		p.aggregatedText = ""
-		p.aggregatedThoughts = ""
+	update, ok := a2aEvent.(*a2a.TaskArtifactUpdateEvent)
+	if !ok { // do not aggregate status updates
+		return []*session.Event{event}
 	}
 
-	updatedAggregatedBlock := false
-	if event.Partial {
-		for _, part := range event.Content.Parts {
-			if part.Text == "" {
-				continue
-			}
-			if part.Thought {
-				p.aggregatedThoughts += part.Text
-			} else {
-				p.aggregatedText += part.Text
-			}
-			updatedAggregatedBlock = true
+	if !update.Append { // non-append event resets aggregation
+		delete(p.aggregations, update.Artifact.ID)
+		if update.LastChunk { // non-append event which is the last chunk must already be non-partial
+			event.Partial = false
+			return []*session.Event{event}
 		}
 	}
 
-	if updatedAggregatedBlock {
-		return nil
+	aggregation := p.aggregations[update.Artifact.ID]
+	if aggregation == nil {
+		aggregation = &artifactAggregation{}
+		p.aggregations[update.Artifact.ID] = aggregation
 	}
 
-	// If a non-partial or non-text event is received we might need to publish the data we aggregated
-	// before it so that it appears as a single block of text.
-	return p.buildAggregatedEvent(ctx, event)
+	p.updateAggregation(aggregation, event)
+
+	if !update.LastChunk {
+		return []*session.Event{event}
+	}
+
+	// emit partial last chunk and follow by the non-partial aggregated event
+	delete(p.aggregations, update.Artifact.ID)
+	return []*session.Event{event, p.buildNonPartialAggregation(ctx, aggregation)}
 }
 
-func (p *a2aAgentRunProcessor) buildAggregatedEvent(ctx agent.InvocationContext, event *session.Event) *session.Event {
-	parts := []*genai.Part{}
-	if p.aggregatedThoughts != "" {
-		parts = append(parts, &genai.Part{Thought: true, Text: p.aggregatedThoughts})
-		p.aggregatedThoughts = ""
-	}
-	if p.aggregatedText != "" {
-		parts = append(parts, &genai.Part{Text: p.aggregatedText})
-		p.aggregatedText = ""
-	}
-	if len(parts) == 0 {
-		return nil
-	}
-
-	content := genai.NewContentFromParts(parts, genai.RoleModel)
-
-	// Use the terminal event to emit aggregated content if it would be empty otherwise.
-	if event.Content == nil {
-		event.Content = content
-		return nil
+func (p *a2aAgentRunProcessor) updateAggregation(agg *artifactAggregation, event *session.Event) {
+	for _, part := range event.Content.Parts {
+		if part.Text != "" { // collapse small text-block parts to bigger text blocks
+			if part.Thought {
+				agg.aggregatedThoughts += part.Text
+			} else {
+				agg.aggregatedText += part.Text
+			}
+		} else {
+			agg.promoteTextBlocksToParts()
+			agg.parts = append(agg.parts, part)
+		}
 	}
 
-	aggregatedEvent := adka2a.NewRemoteAgentEvent(ctx)
-	aggregatedEvent.Content = content
-	aggregatedEvent.CustomMetadata = map[string]any{adka2a.ToADKMetaKey("aggregated"): true}
-	p.updateCustomMetadata(aggregatedEvent, nil)
-	return aggregatedEvent
+	if event.CitationMetadata != nil {
+		if agg.citations == nil {
+			agg.citations = &genai.CitationMetadata{}
+		}
+		agg.citations.Citations = append(agg.citations.Citations, event.CitationMetadata.Citations...)
+	}
+	if event.CustomMetadata != nil {
+		if agg.customMeta == nil {
+			agg.customMeta = make(map[string]any)
+		}
+		maps.Copy(agg.customMeta, event.CustomMetadata)
+	}
+	if event.GroundingMetadata != nil {
+		agg.grounding = event.GroundingMetadata
+	}
+	if event.UsageMetadata != nil { // cumulative
+		agg.usage = event.UsageMetadata
+	}
+}
+
+func (p *a2aAgentRunProcessor) buildNonPartialAggregation(ctx agent.InvocationContext, agg *artifactAggregation) *session.Event {
+	agg.promoteTextBlocksToParts()
+	parts := agg.parts
+	result := adka2a.NewRemoteAgentEvent(ctx)
+	result.Content = genai.NewContentFromParts(parts, genai.RoleModel)
+	result.CustomMetadata = agg.customMeta
+	result.GroundingMetadata = agg.grounding
+	result.CitationMetadata = agg.citations
+	result.UsageMetadata = agg.usage
+	return result
+}
+
+func (a *artifactAggregation) promoteTextBlocksToParts() {
+	if a.aggregatedThoughts != "" {
+		a.parts = append(a.parts, &genai.Part{Thought: true, Text: a.aggregatedThoughts})
+		a.aggregatedThoughts = ""
+	}
+	if a.aggregatedText != "" {
+		a.parts = append(a.parts, &genai.Part{Text: a.aggregatedText})
+		a.aggregatedText = ""
+	}
 }
 
 // convertToSessionEvent converts A2A client SendStreamingMessage result to a session event. Returns nil if nothing should be emitted.
