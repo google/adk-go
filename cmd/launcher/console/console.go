@@ -27,7 +27,6 @@ import (
 	"os/signal"
 	"time"
 
-	"golang.org/x/term"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -147,9 +146,9 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 			streamingMode := l.config.streamingMode
 			if streamingMode == "" {
-				// Auto mode: in container/exec environments stdout may not behave like a real TTY.
-				// Prefer non-streaming there to avoid "empty until Enter" rendering/flushing issues.
-				if term.IsTerminal(int(os.Stdout.Fd())) {
+				// Stdlib-only terminal heuristic: stdout is a character device.
+				// Avoids adding golang.org/x/term dependency (golangci-lint failed to load its export data in CI).
+				if fi, err := os.Stdout.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
 					streamingMode = agent.StreamingModeSSE
 				} else {
 					streamingMode = agent.StreamingModeNone
