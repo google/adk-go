@@ -34,6 +34,8 @@ github.com/a2aproject/a2a-go v0.3.3 h1:NqGDw2c8hCSW3/9MakeeRpw5yCZUUmW2Y/yINV15G
 github.com/a2aproject/a2a-go v0.3.3/go.mod h1:8C0O6lsfR7zWFEqVZz/+zWCoxe8gSWpknEpqm/Vgj3E=
 github.com/anthropics/anthropic-sdk-go v1.24.0 h1:SZQ2U4sknjy0t8g275zOhe/113RIo+Uynguf9YNTfGs=
 github.com/anthropics/anthropic-sdk-go v1.24.0/go.mod h1:WTz31rIUHUHqai2UslPpw5CwXrQP3geYBioRV4WOLvE=
+github.com/anthropics/anthropic-sdk-go v1.26.0 h1:oUTzFaUpAevfuELAP1sjL6CQJ9HHAfT7CoSYSac11PY=
+github.com/anthropics/anthropic-sdk-go v1.26.0/go.mod h1:qUKmaW+uuPB64iy1l+4kOSvaLqPXnHTTBKH6RVZ7q5Q=
 github.com/awalterschulze/gographviz v2.0.3+incompatible h1:9sVEXJBJLwGX7EQVhLm2elIKCm7P2YHFC8v6096G09E=
 github.com/awalterschulze/gographviz v2.0.3+incompatible/go.mod h1:GEV5wmg4YquNw7v1kkyoX9etIk8yVmXj+AkDHuuETHs=
 github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=

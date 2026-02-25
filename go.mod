@@ -7,7 +7,7 @@ require (
 	cloud.google.com/go/aiplatform v1.105.0
 	cloud.google.com/go/storage v1.56.1
 	github.com/a2aproject/a2a-go v0.3.3
-	github.com/anthropics/anthropic-sdk-go v1.24.0
+	github.com/anthropics/anthropic-sdk-go v1.26.0
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/glebarez/sqlite v1.8.0
 	github.com/google/go-cmp v0.7.0
