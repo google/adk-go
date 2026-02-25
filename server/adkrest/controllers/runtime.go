@@ -118,11 +118,12 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	}
 
 	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg)
-
+	var invocationID string
 	rw.WriteHeader(http.StatusOK)
 	for event, err := range resp {
 		if err != nil {
 			errorEvent := models.Event{
+				InvocationID: invocationID,
 				ID:           uuid.NewString(),
 				Time:         time.Now().Unix(),
 				Author:       "system",
@@ -136,6 +137,10 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 			}
 
 			continue
+		}
+		// Capture InvocationID from the first successful event
+		if invocationID == "" && event.InvocationID != "" {
+			invocationID = event.InvocationID
 		}
 		err := flashEvent(rc, rw, *event)
 		if err != nil {
