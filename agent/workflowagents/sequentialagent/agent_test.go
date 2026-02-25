@@ -26,6 +26,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/agent/workflowagents/loopagent"
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
@@ -310,5 +311,126 @@ func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 		yield(&model.LLMResponse{
 			Content: genai.NewContentFromText(fmt.Sprintf("hello %v", f.id), genai.RoleModel),
 		}, nil)
+	}
+}
+
+// exitLoopAgent is an agent whose Run yields an event with ExitLoop=true,
+// simulating what happens when the exit_loop tool is called.
+type exitLoopAgent struct {
+	id int
+}
+
+func newExitLoopAgent(t *testing.T, id int) agent.Agent {
+	t.Helper()
+	ea := &exitLoopAgent{id: id}
+	a, err := agent.New(agent.Config{
+		Name: fmt.Sprintf("exit_loop_agent_%v", id),
+		Run:  ea.Run,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func (a *exitLoopAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		yield(&session.Event{
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText(fmt.Sprintf("exiting loop %v", a.id), genai.RoleModel),
+			},
+			Actions: session.EventActions{
+				ExitLoop:          true,
+				SkipSummarization: true,
+			},
+		}, nil)
+	}
+}
+
+func TestSequentialAgentWithNestedLoop(t *testing.T) {
+	tests := []struct {
+		name        string
+		subAgents   []agent.Agent
+		wantAuthors []string
+	}{
+		{
+			name: "exit_loop does not stop sequential pipeline",
+			subAgents: func() []agent.Agent {
+				innerLoop, err := loopagent.New(loopagent.Config{
+					AgentConfig: agent.Config{
+						Name:      "inner_loop",
+						SubAgents: []agent.Agent{newCustomAgent(t, 0), newExitLoopAgent(t, 1)},
+					},
+					MaxIterations: 3,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return []agent.Agent{innerLoop, newCustomAgent(t, 2)}
+			}(),
+			wantAuthors: []string{"custom_agent_0", "exit_loop_agent_1", "custom_agent_2"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+
+			pipeline, err := sequentialagent.New(sequentialagent.Config{
+				AgentConfig: agent.Config{
+					Name:      "pipeline",
+					SubAgents: tt.subAgents,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			sessionService := session.InMemoryService()
+			agentRunner, err := runner.New(runner.Config{
+				AppName:        "test_app",
+				Agent:          pipeline,
+				SessionService: sessionService,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = sessionService.Create(ctx, &session.CreateRequest{
+				AppName:   "test_app",
+				UserID:    "user_id",
+				SessionID: "session_id",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var gotEvents []*session.Event
+			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("got unexpected error: %v", err)
+				}
+				gotEvents = append(gotEvents, event)
+			}
+
+			if len(gotEvents) != len(tt.wantAuthors) {
+				var gotAuthors []string
+				for _, e := range gotEvents {
+					gotAuthors = append(gotAuthors, e.Author)
+				}
+				t.Fatalf("expected %d events %v, got %d events %v", len(tt.wantAuthors), tt.wantAuthors, len(gotEvents), gotAuthors)
+			}
+			for i, want := range tt.wantAuthors {
+				if gotEvents[i].Author != want {
+					t.Errorf("event[%d].Author = %q, want %q", i, gotEvents[i].Author, want)
+				}
+			}
+
+			// Verify the ExitLoop flag was consumed by the loop agent.
+			for i, event := range gotEvents {
+				if event.Actions.ExitLoop {
+					t.Errorf("event[%d] has ExitLoop=true, expected it to be consumed by the loop agent", i)
+				}
+			}
+		})
 	}
 }

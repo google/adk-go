@@ -118,7 +118,7 @@ func TestNewLoopAgent(t *testing.T) {
 			},
 		},
 		{
-			name: "loop with escalate function returns sumarization",
+			name: "loop with exit_loop function returns summarization",
 			args: args{
 				maxIterations: 2,
 				subAgents:     []agent.Agent{newLmmAgentWithFunctionCall(t, 0, false), newCustomAgent(t, 1)},
@@ -135,9 +135,6 @@ func TestNewLoopAgent(t *testing.T) {
 					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromFunctionResponse("exampleFunction", make(map[string]any), genai.RoleUser),
 					},
-					Actions: session.EventActions{
-						Escalate: true,
-					},
 				},
 				{
 					Author: "custom_agent_0",
@@ -153,7 +150,7 @@ func TestNewLoopAgent(t *testing.T) {
 			},
 		},
 		{
-			name: "loop with escalate function returns sumarization",
+			name: "loop with exit_loop function skips summarization",
 			args: args{
 				maxIterations: 2,
 				subAgents:     []agent.Agent{newLmmAgentWithFunctionCall(t, 0, true), newCustomAgent(t, 1)},
@@ -171,7 +168,6 @@ func TestNewLoopAgent(t *testing.T) {
 						Content: genai.NewContentFromFunctionResponse("exampleFunction", make(map[string]any), genai.RoleUser),
 					},
 					Actions: session.EventActions{
-						Escalate:          true,
 						SkipSummarization: true,
 					},
 				},
@@ -287,14 +283,14 @@ func (a *customAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, err
 
 type EmptyArgs struct{}
 
-func exampleFunctionThatEscalates(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
-	ctx.Actions().Escalate = true
+func exampleFunctionThatExitsLoop(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
+	ctx.Actions().ExitLoop = true
 	ctx.Actions().SkipSummarization = false
 	return map[string]string{}, nil
 }
 
-func exampleFunctionThatEscalatesAndSkips(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
-	ctx.Actions().Escalate = true
+func exampleFunctionThatExitsLoopAndSkips(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
+	ctx.Actions().ExitLoop = true
 	ctx.Actions().SkipSummarization = true
 	return map[string]string{}, nil
 }
@@ -302,14 +298,14 @@ func exampleFunctionThatEscalatesAndSkips(ctx tool.Context, myArgs EmptyArgs) (m
 func newLmmAgentWithFunctionCall(t *testing.T, id int, skipSummarization bool) agent.Agent {
 	t.Helper()
 
-	exampleFunction := exampleFunctionThatEscalates
+	exampleFunction := exampleFunctionThatExitsLoop
 	if skipSummarization {
-		exampleFunction = exampleFunctionThatEscalatesAndSkips
+		exampleFunction = exampleFunctionThatExitsLoopAndSkips
 	}
 
-	exampleFunctionThatEscalatesTool, err := functiontool.New(functiontool.Config{
+	exampleFunctionThatExitsLoopTool, err := functiontool.New(functiontool.Config{
 		Name:        "exampleFunction",
-		Description: "Call this function to escalate\n",
+		Description: "Call this function to exit the loop\n",
 	}, exampleFunction)
 	if err != nil {
 		t.Fatalf("error creating exampleFunction tool: %s", err)
@@ -318,7 +314,7 @@ func newLmmAgentWithFunctionCall(t *testing.T, id int, skipSummarization bool) a
 	customAgent, err := llmagent.New(llmagent.Config{
 		Name:  fmt.Sprintf("custom_agent_%v", id),
 		Model: &FakeLLM{id: id, callCounter: 0, skipSummarization: skipSummarization},
-		Tools: []tool.Tool{exampleFunctionThatEscalatesTool},
+		Tools: []tool.Tool{exampleFunctionThatExitsLoopTool},
 	})
 	if err != nil {
 		t.Fatal(err)
