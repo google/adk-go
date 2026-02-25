@@ -48,6 +48,16 @@ type A2APartConverter func(ctx context.Context, a2aEvent a2a.Event, part a2a.Par
 // nil returns are considered intentionally dropped parts.
 type GenAIPartConverter func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (a2a.Part, error)
 
+// OutputMode controls how artifacts are produced.
+type OutputMode string
+
+const (
+	// OutputArtifactPerRun produces a single artifact per [runner.Runner.Run].
+	OutputArtifactPerRun OutputMode = "artifact-per-run"
+	// OutputArtifactPerEvent produces an artifact per non-partial [session.Event].
+	OutputArtifactPerEvent OutputMode = "artifact-per-event"
+)
+
 // ExecutorConfig allows to configure Executor.
 type ExecutorConfig struct {
 	// RunnerConfig is the configuration which will be used for [runner.New] during A2A Execute invocation.
@@ -79,6 +89,10 @@ type ExecutorConfig struct {
 	// Implementations should generally remember to leverage [adka2a.ToA2APart] for default conversions
 	// nil returns are considered intentionally dropped parts.
 	GenAIPartConverter GenAIPartConverter
+
+	// OutputMode controls how artifacts are produced. Can be [OutputArtifactPerRun] or [OutputArtifactPerEvent].
+	// Defaults to [OutputArtifactPerRun].
+	OutputMode OutputMode
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
@@ -156,7 +170,14 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 		return err
 	}
 
-	processor := newEventProcessor(reqCtx, invocationMeta, e.config.GenAIPartConverter)
+	var artifactTransform eventToArtifactTransform
+	if e.config.OutputMode == OutputArtifactPerEvent {
+		artifactTransform = newArtifactMaker(reqCtx)
+	} else {
+		artifactTransform = newLegacyArtifactMaker(reqCtx)
+	}
+
+	processor := newEventProcessor(reqCtx, invocationMeta, e.config.GenAIPartConverter, artifactTransform)
 	executorContext := newExecutorContext(ctx, invocationMeta, executorPlugin, content)
 	return e.process(executorContext, r, processor, queue)
 }

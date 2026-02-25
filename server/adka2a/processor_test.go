@@ -52,7 +52,7 @@ func newNonPartialArtifactUpdateEvent(task *a2a.Task, parts ...a2a.Part) *a2a.Ta
 }
 
 func newDiscardPartialArtifactUpdate(task *a2a.Task) *a2a.TaskArtifactUpdateEvent {
-	ev := newPartialArtifactUpdate(task, "", []a2a.Part{a2a.DataPart{Data: map[string]any{}}})
+	ev := newLegacyPartialArtifactUpdate(task, "", []a2a.Part{a2a.DataPart{Data: map[string]any{}}})
 	ev.LastChunk = true
 	return ev
 }
@@ -358,7 +358,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				)},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				newPartialArtifactUpdate(task, artifactIDPlaceholder, []a2a.Part{
+				newLegacyPartialArtifactUpdate(task, artifactIDPlaceholder, []a2a.Part{
 					a2a.TextPart{Text: "The answer is", Metadata: map[string]any{ToA2AMetaKey("partial"): true}},
 					a2a.DataPart{
 						Data: map[string]any{"code": "get_the_answer()", "language": string(genai.LanguagePython)},
@@ -368,7 +368,7 @@ func TestEventProcessor_Process(t *testing.T) {
 						},
 					},
 				}),
-				newPartialArtifactUpdate(task, artifactIDPlaceholder, []a2a.Part{
+				newLegacyPartialArtifactUpdate(task, artifactIDPlaceholder, []a2a.Part{
 					a2a.DataPart{
 						Data: map[string]any{"outcome": string(genai.OutcomeOK), "output": "42"},
 						Metadata: map[string]any{
@@ -409,7 +409,7 @@ func TestEventProcessor_Process(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
-			processor := newEventProcessor(reqCtx, invocationMeta{}, nil)
+			processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
 
 			var gotEvents []*a2a.TaskArtifactUpdateEvent
 			for _, event := range tc.events {
@@ -457,7 +457,7 @@ func TestEventProcessor_ArtifactUpdates(t *testing.T) {
 	}
 
 	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
-	processor := newEventProcessor(reqCtx, invocationMeta{}, nil)
+	processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
 	got := make([]*a2a.TaskArtifactUpdateEvent, len(events))
 	for i, event := range events {
 		processed, err := processor.process(t.Context(), event)
@@ -500,7 +500,7 @@ func TestEventProcessor_PartialEventsAreDiscardedAsAnArtifact(t *testing.T) {
 	}
 
 	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
-	processor := newEventProcessor(reqCtx, invocationMeta{}, nil)
+	processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
 	got := make([]*a2a.TaskArtifactUpdateEvent, len(events))
 	for i, event := range events {
 		processed, err := processor.process(t.Context(), event)
@@ -559,7 +559,7 @@ func TestEventProcessor_PartialEventsAreDiscardedAsAnArtifact(t *testing.T) {
 
 func makeTerminalEvents(processor *eventProcessor) []a2a.Event {
 	result := make([]a2a.Event, 0, 2)
-	if finalUpdate := processor.makeFinalArtifactUpdate(); finalUpdate != nil {
+	if finalUpdate := processor.eventToArtifact.makeFinalUpdate(); finalUpdate != nil {
 		result = append(result, finalUpdate)
 	}
 	result = append(result, processor.makeFinalStatusUpdate())

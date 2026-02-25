@@ -26,6 +26,11 @@ import (
 	"google.golang.org/adk/session"
 )
 
+type eventToArtifactTransform interface {
+	transform(event *session.Event, parts []a2a.Part, meta map[string]any) (*a2a.TaskArtifactUpdateEvent, error)
+	makeFinalUpdate() *a2a.TaskArtifactUpdateEvent
+}
+
 type eventProcessor struct {
 	reqCtx        *a2asrv.RequestContext
 	meta          invocationMeta
@@ -36,14 +41,6 @@ type eventProcessor struct {
 	// This is done to make sure the caller processes it, since intermediate events without parts might be ignored.
 	terminalActions session.EventActions
 
-	// responseID is created once the first TaskArtifactUpdateEvent is sent. Used for subsequent artifact updates.
-	responseID a2a.ArtifactID
-	// partialResponseID is created once the first TaskArtifactUpdateEvent created from a partial ADK event is sent.
-	// Partial updates are not saved in the ADK session store. There is no concept of a partial event in A2A so instead
-	// we're updating an "ephemeral" artifact while an agent is running. The artifact gets reset at the end of the
-	// invocation effectively erasing its parts.
-	partialResponseID a2a.ArtifactID
-
 	// failedEvent is used to postpone sending a terminal event until the whole ADK response is saved as an A2A artifact.
 	// Will be sent as the final Task status update if not nil.
 	failedEvent *a2a.TaskStatusUpdateEvent
@@ -51,18 +48,23 @@ type eventProcessor struct {
 	// inputRequiredProcessor is used to postpone sending input-required in response to long-running function tool calls.
 	// inputRequiredProcessor.event will be sent as the final Task status update if failedEvent is nil.
 	inputRequiredProcessor *inputRequiredProcessor
+
+	// eventToArtifact is used to convert ADK events to A2A TaskArtifactUpdateEvents.
+	eventToArtifact eventToArtifactTransform
 }
 
 func newEventProcessor(
 	reqCtx *a2asrv.RequestContext,
 	meta invocationMeta,
 	converter GenAIPartConverter,
+	transform eventToArtifactTransform,
 ) *eventProcessor {
 	return &eventProcessor{
 		inputRequiredProcessor: newInputRequiredProcessor(reqCtx),
 		partConverter:          converter,
 		reqCtx:                 reqCtx,
 		meta:                   meta,
+		eventToArtifact:        transform,
 	}
 }
 
@@ -102,58 +104,16 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		return nil, nil
 	}
 
-	var result *a2a.TaskArtifactUpdateEvent
-	if event.Partial {
-		result = newPartialArtifactUpdate(p.reqCtx, p.partialResponseID, parts)
-		p.partialResponseID = result.Artifact.ID
-	} else {
-		result = newArtifactUpdate(p.reqCtx, p.responseID, parts)
-		p.responseID = result.Artifact.ID
-	}
-
-	if len(eventMeta) > 0 {
-		maps.Copy(result.Metadata, eventMeta)
+	result, err := p.eventToArtifact.transform(event, parts, eventMeta)
+	if err != nil {
+		return nil, err
 	}
 
 	return result, nil
 }
 
-func newArtifactUpdate(task a2a.TaskInfoProvider, id a2a.ArtifactID, parts []a2a.Part) *a2a.TaskArtifactUpdateEvent {
-	var result *a2a.TaskArtifactUpdateEvent
-	if id == "" {
-		result = a2a.NewArtifactEvent(task, parts...)
-	} else {
-		result = a2a.NewArtifactUpdateEvent(task, id, parts...)
-	}
-	// Explicitely mark and Artifact update as non-partial ADK event so that consumer side
-	// does not run its own aggregation logic.
-	result.Metadata = map[string]any{metadataPartialKey: false}
-	return result
-}
-
-func newPartialArtifactUpdate(task a2a.TaskInfoProvider, artifactID a2a.ArtifactID, parts []a2a.Part) *a2a.TaskArtifactUpdateEvent {
-	ev := newArtifactUpdate(task, artifactID, parts)
-	updatePartsMetadata(parts, map[string]any{metadataPartialKey: true})
-	if ev.Artifact.Metadata == nil {
-		ev.Artifact.Metadata = map[string]any{metadataPartialKey: true}
-	} else {
-		ev.Artifact.Metadata[metadataPartialKey] = true
-	}
-	ev.Metadata[metadataPartialKey] = true
-	ev.Append = false // discard partial events
-	return ev
-}
-
 func (p *eventProcessor) makeFinalArtifactUpdate() *a2a.TaskArtifactUpdateEvent {
-	// We could also send a LastChunk: true event for the main (non-partial) artifact,
-	// but there's currently no special handling for it and not all A2A SDK (eg. Java)
-	// implementations allow empty-part artifact updates.
-	if p.partialResponseID == "" {
-		return nil
-	}
-	ev := newPartialArtifactUpdate(p.reqCtx, p.partialResponseID, []a2a.Part{a2a.DataPart{Data: map[string]any{}}})
-	ev.LastChunk = true
-	return ev
+	return p.eventToArtifact.makeFinalUpdate()
 }
 
 func (p *eventProcessor) makeFinalStatusUpdate() *a2a.TaskStatusUpdateEvent {
