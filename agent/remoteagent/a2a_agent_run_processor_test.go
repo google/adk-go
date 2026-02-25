@@ -278,9 +278,7 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 					continue
 				}
 
-				for _, agg := range p.aggregatePartial(ctx, event, adkEvent) {
-					gotEvents = append(gotEvents, agg)
-				}
+				gotEvents = append(gotEvents, p.aggregatePartial(ctx, event, adkEvent)...)
 			}
 			opts := []cmp.Option{
 				cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID", "Author", "Branch", "CustomMetadata", "Actions"),
