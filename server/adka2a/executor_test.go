@@ -700,3 +700,240 @@ func TestExecutor_Converters(t *testing.T) {
 		})
 	})
 }
+
+func TestExecutor_OutputArtifactPerEvent(t *testing.T) {
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
+
+	testCases := []struct {
+		name             string
+		events           []*session.Event
+		wantEvents       []a2a.Event
+		wantArtifactMeta []map[string]any
+	}{
+		{
+			name: "single artifact per event chain",
+			events: []*session.Event{
+				{LLMResponse: modelPartialResponseFromParts(genai.NewPartFromText("Hello, ")), Author: "agent"},
+				{LLMResponse: modelPartialResponseFromParts(genai.NewPartFromText("world!")), Author: "agent"},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello, world!")), Author: "agent"},
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Hello, "}}},
+					Append:   false, LastChunk: false,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "world!"}}},
+					Append:   true, LastChunk: false,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Hello, world!"}}},
+					Append:   false, LastChunk: true,
+				},
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
+			},
+		},
+		{
+			name: "multiple authors",
+			events: []*session.Event{
+				{LLMResponse: modelPartialResponseFromParts(genai.NewPartFromText("Agent1: H")), Author: "agent1"},
+				{LLMResponse: modelPartialResponseFromParts(genai.NewPartFromText("Agent2: W")), Author: "agent2"},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Agent1: Hello")), Author: "agent1"},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Agent2: World")), Author: "agent2"},
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Agent1: H"}}},
+					Append:   false, LastChunk: false,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Agent2: W"}}},
+					Append:   false, LastChunk: false,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Agent1: Hello"}}},
+					Append:   false, LastChunk: true,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Agent2: World"}}},
+					Append:   false, LastChunk: true,
+				},
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
+			},
+		},
+		{
+			name: "metadata and thoughts",
+			events: []*session.Event{
+				{
+					LLMResponse:  modelPartialResponseFromParts(&genai.Part{Text: "Thinking...", Thought: true}),
+					Author:       "agent",
+					InvocationID: "inv1",
+				},
+				{
+					LLMResponse:  modelResponseFromParts(genai.NewPartFromText("Done")),
+					Author:       "agent",
+					InvocationID: "inv1",
+				},
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{
+						Parts: a2a.ContentParts{a2a.TextPart{
+							Text:     "Thinking...",
+							Metadata: map[string]any{ToA2AMetaKey("thought"): true},
+						}},
+					},
+					Append: false, LastChunk: false,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{
+						Parts: a2a.ContentParts{a2a.TextPart{Text: "Done"}},
+					},
+					Append: false, LastChunk: true,
+				},
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
+			},
+			wantArtifactMeta: []map[string]any{
+				{ToA2AMetaKey("invocation_id"): "inv1"},
+				{ToA2AMetaKey("invocation_id"): "inv1"},
+			},
+		},
+		{
+			name: "mixed segments",
+			events: []*session.Event{
+				{
+					LLMResponse: modelResponseFromParts(
+						&genai.Part{Text: "Thought part", Thought: true},
+						genai.NewPartFromText("Text part"),
+					),
+					Author: "agent",
+				},
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{
+						Parts: a2a.ContentParts{
+							a2a.TextPart{
+								Text:     "Thought part",
+								Metadata: map[string]any{ToA2AMetaKey("thought"): true},
+							},
+							a2a.TextPart{Text: "Text part"},
+						},
+					},
+					Append: false, LastChunk: true,
+				},
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
+			},
+		},
+		{
+			name: "sequential distinct artifact chains",
+			events: []*session.Event{
+				{LLMResponse: modelPartialResponseFromParts(genai.NewPartFromText("1.a")), Author: "agent"},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("1.final")), Author: "agent"},
+				{LLMResponse: modelPartialResponseFromParts(genai.NewPartFromText("2.a")), Author: "agent"},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("2.final")), Author: "agent"},
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "1.a"}}},
+					Append:   false, LastChunk: false,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "1.final"}}},
+					Append:   false, LastChunk: true,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "2.a"}}},
+					Append:   false, LastChunk: false,
+				},
+				&a2a.TaskArtifactUpdateEvent{
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "2.final"}}},
+					Append:   false, LastChunk: true,
+				},
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent, _ := newEventReplayAgent(tc.events, nil)
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
+				OutputMode:   OutputArtifactPerEvent,
+			})
+
+			queue := &testQueue{Queue: newInMemoryQueue(t)}
+			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+
+			if err := executor.Execute(t.Context(), reqCtx, queue); err != nil {
+				t.Fatalf("executor.Execute() error = %v", err)
+			}
+
+			ignoreOptions := []cmp.Option{
+				cmpopts.IgnoreFields(a2a.Message{}, "ID"),
+				cmpopts.IgnoreFields(a2a.Artifact{}, "ID", "Metadata"), // checked manually
+				cmpopts.IgnoreFields(a2a.TaskStatus{}, "Timestamp"),
+				cmpopts.IgnoreFields(a2a.TaskStatusUpdateEvent{}, "Metadata", "TaskID", "ContextID"),
+				cmpopts.IgnoreFields(a2a.TaskArtifactUpdateEvent{}, "Metadata", "TaskID", "ContextID"),
+			}
+			if len(queue.events) != len(tc.wantEvents) {
+				t.Fatalf("got %d events, want %d", len(queue.events), len(tc.wantEvents))
+			}
+
+			authorToID, lastFinishedID := make(map[string]a2a.ArtifactID), make(map[string]a2a.ArtifactID)
+			artifactCount := 0
+
+			for i := range queue.events {
+				got := queue.events[i]
+				want := tc.wantEvents[i]
+
+				if diff := cmp.Diff(want, got, ignoreOptions...); diff != "" {
+					t.Errorf("event[%d] mismatch (-want +got):\n%s", i, diff)
+				}
+
+				// Metadata check for cases that care about it
+				if ge, ok := got.(*a2a.TaskArtifactUpdateEvent); ok {
+					if artifactCount < len(tc.wantArtifactMeta) {
+						wantMeta := tc.wantArtifactMeta[artifactCount]
+						for k, v := range wantMeta {
+							if gotV := ge.Artifact.Metadata[k]; gotV != v {
+								t.Errorf("event[%d] Metadata[%s] = %v, want %v", i, k, gotV, v)
+							}
+						}
+					}
+					artifactCount++
+				}
+
+				// Custom check for ArtifactID consistency
+				if ge, ok := got.(*a2a.TaskArtifactUpdateEvent); ok {
+					author := tc.events[i-1].Author // i-1 because first event is TaskStatusUpdateEvent
+					if id, ok := authorToID[author]; ok {
+						if ge.Artifact.ID != id {
+							t.Errorf("event[%d] expected ArtifactID %v, got %v", i, id, ge.Artifact.ID)
+						}
+					} else {
+						// New artifact stream started for this author
+						if prevID, ok := lastFinishedID[author]; ok {
+							if ge.Artifact.ID == prevID {
+								t.Errorf("event[%d] expected NEW ArtifactID, but got same as previous chain: %v", i, ge.Artifact.ID)
+							}
+						}
+						authorToID[author] = ge.Artifact.ID
+					}
+					if !tc.events[i-1].Partial {
+						// Stream ended for this author
+						lastFinishedID[author] = ge.Artifact.ID
+						delete(authorToID, author)
+					}
+				}
+			}
+		})
+	}
+}
