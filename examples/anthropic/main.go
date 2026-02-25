@@ -32,7 +32,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	model, err := adkanthropic.NewModel(ctx, anthropicapi.Model("claude-sonnet-4-20250514"), &adkanthropic.Config{
+	model, err := adkanthropic.NewModel(ctx, anthropicapi.ModelClaudeSonnet4_6, &adkanthropic.Config{
 		APIKey: os.Getenv("ANTHROPIC_API_KEY"),
 	})
 	if err != nil {
