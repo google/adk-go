@@ -136,7 +136,7 @@ func TestA2AInputRequired(t *testing.T) {
 
 			// Server
 			inputRequestingAgent := newInputRequestingAgent(t, "agent-b", tc.tool)
-			executor := newAgentExecutor(inputRequestingAgent, nil)
+			executor := newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerRun)
 			server := startA2AServer(executor)
 			defer server.Close()
 
@@ -304,14 +304,14 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 
 			// Server B
 			inputRequestingAgent := newInputRequestingAgent(t, "agent-b", tc.tool)
-			executorB := newAgentExecutor(inputRequestingAgent, nil)
+			executorB := newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerEvent)
 			serverB := startA2AServer(executorB)
 			defer serverB.Close()
 
 			// Server A
 			remoteAgent := newA2ARemoteAgent(t, remoteAgentName, serverB)
 			rootAgent := newRootAgent("root", remoteAgent)
-			executorA := newAgentExecutor(rootAgent, nil)
+			executorA := newAgentExecutor(rootAgent, nil, adka2a.OutputArtifactPerRun)
 			serverA := startA2AServer(executorA)
 			defer serverA.Close()
 
@@ -489,7 +489,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			executor := newAgentExecutor(tc.agentFn(t), nil)
+			executor := newAgentExecutor(tc.agentFn(t), nil, adka2a.OutputArtifactPerRun)
 			server := startA2AServer(executor)
 			defer server.Close()
 
@@ -556,14 +556,14 @@ func TestA2ARemoteAgentStreamingGeminiSuccess(t *testing.T) {
 		Model:       llmModel,
 		Instruction: "You are a helpful assistant.",
 	}))
-	executorB := newAgentExecutor(modelAgent, nil)
+	executorB := newAgentExecutor(modelAgent, nil, adka2a.OutputArtifactPerEvent)
 	serverB := startA2AServer(executorB)
 	defer serverB.Close()
 
 	// Server A with RemoteAgent
 	remoteAgent := newA2ARemoteAgent(t, "remote-agent", serverB)
 	serviceA := session.InMemoryService()
-	executorA := newAgentExecutor(remoteAgent, serviceA)
+	executorA := newAgentExecutor(remoteAgent, serviceA, adka2a.OutputArtifactPerRun)
 	serverA := startA2AServer(executorA)
 	defer serverA.Close()
 
@@ -668,14 +668,14 @@ func TestA2ARemoteAgentStreamingGeminiError(t *testing.T) {
 			},
 		},
 	}))
-	executorB := newAgentExecutor(modelAgent, nil)
+	executorB := newAgentExecutor(modelAgent, nil, adka2a.OutputArtifactPerRun)
 	serverB := startA2AServer(executorB)
 	defer serverB.Close()
 
 	// Server A with RemoteAgent
 	remoteAgent := newA2ARemoteAgent(t, "remote-agent", serverB)
 	serviceA := session.InMemoryService()
-	executorA := newAgentExecutor(remoteAgent, serviceA)
+	executorA := newAgentExecutor(remoteAgent, serviceA, adka2a.OutputArtifactPerRun)
 	serverA := startA2AServer(executorA)
 	defer serverA.Close()
 
@@ -843,11 +843,12 @@ func newRootAgent(name string, subAgent agent.Agent) agent.Agent {
 	}))
 }
 
-func newAgentExecutor(agnt agent.Agent, service session.Service) a2asrv.AgentExecutor {
+func newAgentExecutor(agnt agent.Agent, service session.Service, mode adka2a.OutputMode) a2asrv.AgentExecutor {
 	if service == nil {
 		service = session.InMemoryService()
 	}
 	return adka2a.NewExecutor(adka2a.ExecutorConfig{
+		OutputMode: mode,
 		RunnerConfig: runner.Config{
 			AppName:        agnt.Name(),
 			SessionService: service,
