@@ -33,7 +33,6 @@ import (
 	"google.golang.org/adk/internal/llminternal"
 	imemory "google.golang.org/adk/internal/memory"
 	"google.golang.org/adk/internal/plugininternal"
-	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -164,7 +163,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 			Artifacts:   artifacts,
 			Memory:      memoryImpl,
-			Session:     sessioninternal.NewMutableSession(r.sessionService, storedSession),
+			Session:     storedSession,
 			Agent:       agentToRun,
 			UserContent: msg,
 			RunConfig:   &cfg,

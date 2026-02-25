@@ -81,7 +81,7 @@ Provide your feedback as a concise, bulleted list. Focus on the most important p
 If the code is excellent and requires no changes, simply state: "No major issues found."
 Output *only* the review comments or the "No major issues" statement.`,
 		Description: "Reviews code and provides feedback.",
-		OutputKey:   "review_comments", // Stores output in state["review_comments"]
+		OutputKey:   "temp:review_comments", // Stores output in state["temp:review_comments"]
 	})
 	if err != nil {
 		log.Fatalf("failed to create codeReviewerAgent: %s", err)
@@ -101,7 +101,7 @@ Your goal is to improve the given Python code based on the provided review comme
 '''
 
 **Review Comments:**
-{review_comments}
+{temp:review_comments}
 
 **Task:**
 Carefully apply the suggestions from the review comments to refactor the original code.

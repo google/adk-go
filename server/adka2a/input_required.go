@@ -36,23 +36,28 @@ func newInputRequiredProcessor(reqCtx *a2asrv.RequestContext) *inputRequiredProc
 	return &inputRequiredProcessor{reqCtx: reqCtx}
 }
 
-func (p *inputRequiredProcessor) process(event *session.Event) error {
+// process handles long-running function tool calls by accumulating them for the final task status update.
+// If a part was incorporated into the final task status update the original event is modified to not include it,
+// so that parts are not duplicated in the response.
+func (p *inputRequiredProcessor) process(event *session.Event) (*session.Event, error) {
 	resp := event.LLMResponse
 	if resp.Content == nil {
-		return nil
+		return event, nil
 	}
 
 	var longRunningCallIDs []string
 	var inputRequiredParts []*genai.Part
+	var remainingParts []*genai.Part
 	for _, part := range resp.Content.Parts {
 		callID := ""
 		if part.FunctionCall != nil && slices.Contains(event.LongRunningToolIDs, part.FunctionCall.ID) {
 			callID = part.FunctionCall.ID
 		}
-		if part.FunctionResponse != nil && p.isResponseToLongRunning(part.FunctionResponse.ID) {
+		if p.isLongRunningResponse(event, part) {
 			callID = part.FunctionResponse.ID
 		}
 		if callID == "" {
+			remainingParts = append(remainingParts, part)
 			continue
 		}
 		added := slices.ContainsFunc(p.addedParts, func(p *genai.Part) bool {
@@ -69,28 +74,42 @@ func (p *inputRequiredProcessor) process(event *session.Event) error {
 		longRunningCallIDs = append(longRunningCallIDs, callID)
 	}
 
-	if len(inputRequiredParts) == 0 {
-		return nil
+	if len(inputRequiredParts) > 0 {
+		a2aParts, err := ToA2AParts(inputRequiredParts, longRunningCallIDs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert input required parts to A2A parts: %w", err)
+		}
+
+		if p.event != nil {
+			p.event.Status.Message.Parts = append(p.event.Status.Message.Parts, a2aParts...)
+		} else {
+			msg := a2a.NewMessage(a2a.MessageRoleAgent, a2aParts...)
+			ev := a2a.NewStatusUpdateEvent(p.reqCtx, a2a.TaskStateInputRequired, msg)
+			ev.Final = true
+			p.event = ev
+		}
 	}
 
-	a2aParts, err := ToA2AParts(inputRequiredParts, longRunningCallIDs)
-	if err != nil {
-		return fmt.Errorf("failed to convert input required parts to A2A parts: %w", err)
+	if len(remainingParts) == len(resp.Content.Parts) {
+		return event, nil
 	}
 
-	if p.event != nil {
-		p.event.Status.Message.Parts = append(p.event.Status.Message.Parts, a2aParts...)
-		return nil
-	}
+	modifiedEvent := *event
+	newContent := *resp.Content
+	newContent.Parts = remainingParts
+	modifiedEvent.LLMResponse.Content = &newContent
 
-	msg := a2a.NewMessage(a2a.MessageRoleAgent, a2aParts...)
-	ev := a2a.NewStatusUpdateEvent(p.reqCtx, a2a.TaskStateInputRequired, msg)
-	ev.Final = true
-	p.event = ev
-	return nil
+	return &modifiedEvent, nil
 }
 
-func (p *inputRequiredProcessor) isResponseToLongRunning(id string) bool {
+func (p *inputRequiredProcessor) isLongRunningResponse(event *session.Event, part *genai.Part) bool {
+	if part.FunctionResponse == nil {
+		return false
+	}
+	id := part.FunctionResponse.ID
+	if slices.Contains(event.LongRunningToolIDs, id) {
+		return true
+	}
 	if p.event == nil {
 		return false
 	}
@@ -131,13 +150,29 @@ func handleInputRequired(reqCtx *a2asrv.RequestContext, content *genai.Content) 
 			return p.FunctionResponse != nil && p.FunctionResponse.ID == statusPart.FunctionCall.ID
 		})
 		if !hasMatchingResponse {
-			errPart := a2a.TextPart{Text: fmt.Sprintf("no input provided for function call ID %q", statusPart.FunctionCall.ID)}
-			updatedParts := append(slices.Clone(statusMsg.Parts), errPart)
-			msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, reqCtx.StoredTask, updatedParts...)
+			parts := makeInputMissingErrorMessage(statusMsg.Parts, statusPart.FunctionCall.ID)
+			msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, reqCtx.StoredTask, parts...)
 			event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateInputRequired, msg)
 			event.Final = true
 			return event, nil
 		}
 	}
 	return nil, nil
+}
+
+func makeInputMissingErrorMessage(inputRequiredParts []a2a.Part, callID string) []a2a.Part {
+	errPart := a2a.TextPart{
+		Text:     fmt.Sprintf("no input provided for function call ID %q", callID),
+		Metadata: map[string]any{"validation_error": true},
+	}
+	var preservedParts []a2a.Part
+	for _, p := range inputRequiredParts {
+		if meta := p.Meta(); meta != nil {
+			if v, ok := meta["validation_error"].(bool); ok && v {
+				continue
+			}
+		}
+		preservedParts = append(preservedParts, p)
+	}
+	return append(preservedParts, errPart)
 }

@@ -914,7 +914,16 @@ func Test_inMemoryService_StateManagement(t *testing.T) {
 			Actions:     EventActions{StateDelta: map[string]any{"temp:k1": "v1", "sk": "v2"}},
 			LLMResponse: model.LLMResponse{},
 		}
-		_ = s.AppendEvent(ctx, s1.Session.(*session), event)
+		err := s.AppendEvent(ctx, s1.Session.(*session), event)
+		if err != nil {
+			t.Fatalf("Failed to append event: %v", err)
+		}
+		invocationSession := s1.Session.(*session)
+		wantInvocationState := map[string]any{"sk": "v2", "temp:k1": "v1"}
+		gotInvocationState := maps.Collect(invocationSession.State().All())
+		if diff := cmp.Diff(wantInvocationState, gotInvocationState); diff != "" {
+			t.Errorf("Invocation session state mismatch (-want +got):\n%s", diff)
+		}
 
 		s1_got, _ := s.Get(ctx, &GetRequest{AppName: appName, UserID: "u1", SessionID: "s1"})
 		wantState := map[string]any{"sk": "v2"}

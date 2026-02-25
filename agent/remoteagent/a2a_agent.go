@@ -170,13 +170,13 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return
 		}
 
-		processEvent := func(aEvent a2a.Event, aErr error) bool {
+		processEvent := func(a2aEvent a2a.Event, a2aErr error) bool {
 			var err error
 			var event *session.Event
 			if cfg.Converter != nil {
-				event, err = cfg.Converter(icontext.NewReadonlyContext(ctx), req, aEvent, aErr)
+				event, err = cfg.Converter(icontext.NewReadonlyContext(ctx), req, a2aEvent, a2aErr)
 			} else {
-				event, err = processor.convertToSessionEvent(ctx, aEvent, aErr)
+				event, err = processor.convertToSessionEvent(ctx, a2aEvent, a2aErr)
 			}
 
 			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, event, err); cbResp != nil || cbErr != nil {
@@ -192,7 +192,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			}
 
 			if event != nil { // an event might be skipped
-				if intermediate := processor.aggregatePartial(ctx, event); intermediate != nil {
+				if intermediate := processor.aggregatePartial(ctx, a2aEvent, event); intermediate != nil {
 					if !yield(intermediate, nil) {
 						return false
 					}
@@ -241,9 +241,8 @@ func newMessage(ctx agent.InvocationContext) (*a2a.Message, error) {
 func toErrorEvent(ctx agent.InvocationContext, err error) *session.Event {
 	event := adka2a.NewRemoteAgentEvent(ctx)
 	event.ErrorMessage = err.Error()
-	event.CustomMetadata = map[string]any{
-		adka2a.ToADKMetaKey("error"): err.Error(),
-	}
+	event.CustomMetadata = map[string]any{adka2a.ToADKMetaKey("error"): err.Error()}
+	event.TurnComplete = true
 	return event
 }
 

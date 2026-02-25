@@ -120,6 +120,7 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg)
 	var invocationID string
 	rw.WriteHeader(http.StatusOK)
+
 	for event, err := range resp {
 		if err != nil {
 			errorEvent := models.Event{

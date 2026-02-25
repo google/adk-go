@@ -19,11 +19,13 @@ import (
 	"fmt"
 	"iter"
 
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/artifact"
 	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/internal/plugininternal/plugincontext"
+	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -157,9 +159,17 @@ func (a *agent) SubAgents() []Agent {
 
 func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		spanCtx, span := telemetry.StartInvokeAgentSpan(ctx, a, ctx.Session().ID())
+		yield, endSpan := telemetry.WrapYield(span, yield, func(span trace.Span, event *session.Event, err error) {
+			telemetry.TraceAgentResult(span, telemetry.TraceAgentResultParams{
+				ResponseEvent: event,
+				Error:         err,
+			})
+		})
+		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
 		ctx := &invocationContext{
-			Context:   ctx,
+			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
 			artifacts: ctx.Artifacts(),
 			memory:    ctx.Memory(),

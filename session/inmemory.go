@@ -329,12 +329,12 @@ func (s *session) appendEvent(event *Event) error {
 		return nil
 	}
 
-	processedEvent := trimTempDeltaState(event)
-	if err := updateSessionState(s, processedEvent); err != nil {
+	if err := updateSessionState(s, event); err != nil {
 		return fmt.Errorf("error on appendEvent: %w", err)
 	}
+	processedEvent := trimTempDeltaState(event)
 
-	s.events = append(s.events, event)
+	s.events = append(s.events, processedEvent)
 	s.updatedAt = event.Timestamp
 	return nil
 }
@@ -436,9 +436,6 @@ func updateSessionState(session *session, event *Event) error {
 
 	state := session.State()
 	for key, value := range event.Actions.StateDelta {
-		if strings.HasPrefix(key, KeyPrefixTemp) {
-			continue
-		}
 		err := state.Set(key, value)
 		if err != nil {
 			return fmt.Errorf("error on updateSessionState state: %w", err)
