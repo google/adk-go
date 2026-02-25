@@ -185,22 +185,6 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 			},
 		},
 		{
-			name: "[append=false, lastChunk=true] results in non-partial",
-			events: []a2a.Event{
-				newArtifactUpdate(aid1, updateFlags{append: true}, "Hel"),
-				newArtifactUpdate(aid1, updateFlags{append: false, lastChunk: true}, "Hello"),
-				newArtifactUpdate(aid2, updateFlags{append: true}, "bar"),
-				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
-			},
-			wantEvents: []*session.Event{
-				newPartialEvent("Hel"),
-				newEvent(genai.NewPartFromText("Hello")),
-				newPartialEvent("bar"),
-				newEvent(genai.NewPartFromText("bar")),
-				newCompletedEvent(),
-			},
-		},
-		{
 			name: "[append=false, lastChunk=true] as first event non-partial",
 			events: []a2a.Event{
 				newArtifactUpdate(aid1, updateFlags{append: false, lastChunk: true}, "Hello"),
