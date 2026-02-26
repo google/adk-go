@@ -17,6 +17,7 @@ package llminternal
 import (
 	"encoding/json"
 	"fmt"
+	"iter"
 	"reflect"
 	"slices"
 	"sort"
@@ -32,30 +33,32 @@ import (
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
 // the InvocationContext that includes the previous events.
-func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest) error {
-	// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
-	llmAgent := asLLMAgent(ctx.Agent())
-	if llmAgent == nil {
-		// Do nothing.
-		return nil // In python, no error is yielded.
-	}
-	fn := buildContentsDefault // "" or "default".
-	if llmAgent.internal().IncludeContents == "none" {
-		// Include current turn context only (no conversation history)
-		fn = buildContentsCurrentTurnContextOnly
-	}
-	var events []*session.Event
-	if ctx.Session() != nil {
-		for e := range ctx.Session().Events().All() {
-			events = append(events, e)
+func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
+		llmAgent := asLLMAgent(ctx.Agent())
+		if llmAgent == nil {
+			// Do nothing.
+			return // In python, no error is yielded.
 		}
+		fn := buildContentsDefault // "" or "default".
+		if llmAgent.internal().IncludeContents == "none" {
+			// Include current turn context only (no conversation history)
+			fn = buildContentsCurrentTurnContextOnly
+		}
+		var events []*session.Event
+		if ctx.Session() != nil {
+			for e := range ctx.Session().Events().All() {
+				events = append(events, e)
+			}
+		}
+		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), events)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		req.Contents = append(req.Contents, contents...)
 	}
-	contents, err := fn(ctx.Agent().Name(), ctx.Branch(), events)
-	if err != nil {
-		return err
-	}
-	req.Contents = append(req.Contents, contents...)
-	return nil
 }
 
 // buildContentsDefault returns the contents for the LLM request by applying
@@ -123,7 +126,7 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 }
 
 func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
-	if invocationBranch == "" {
+	if invocationBranch == "" || event.Branch == "" {
 		return true
 	}
 	if event.Branch == invocationBranch {
@@ -147,7 +150,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 	}
 
 	lastEvent := events[len(events)-1]
-	lastResponses := listFunctionResponsesFromEvent(lastEvent)
+	lastResponses := utils.FunctionResponses(lastEvent.Content)
 	// No need to process, since the latest event is not function_response.
 	if len(lastResponses) == 0 {
 		return events, nil
@@ -161,7 +164,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 
 	// Check if its already in the correct position
 	prevEvent := events[len(events)-2]
-	prevCalls := listFunctionCallsFromEvent(prevEvent)
+	prevCalls := utils.FunctionCalls(prevEvent.Content)
 	if len(prevCalls) > 0 {
 		for _, call := range prevCalls {
 			if _, found := responseIDs[call.ID]; found {
@@ -178,7 +181,7 @@ func rearrangeEventsForLatestFunctionResponse(events []*session.Event) ([]*sessi
 SearchLoop: // A label to allow breaking out of the nested loop
 	for idx := len(events) - 2; idx >= 0; idx-- {
 		event := events[idx]
-		calls := listFunctionCallsFromEvent(event)
+		calls := utils.FunctionCalls(event.Content)
 
 		if len(calls) > 0 {
 			for _, call := range calls {
@@ -225,7 +228,7 @@ SearchLoop: // A label to allow breaking out of the nested loop
 	var responseEventsToMerge []*session.Event
 	for i := functionCallEventIdx + 1; i < len(events)-1; i++ {
 		event := events[i]
-		responses := listFunctionResponsesFromEvent(event)
+		responses := utils.FunctionResponses(event.Content)
 		if len(responses) == 0 {
 			continue
 		}
@@ -276,7 +279,7 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 	// Create a map to store the index of the event containing each function response.
 	callIDToResponseEventIndex := make(map[string]int)
 	for i, event := range events {
-		responses := listFunctionResponsesFromEvent(event)
+		responses := utils.FunctionResponses(event.Content)
 
 		if len(responses) > 0 {
 			for _, res := range responses {
@@ -291,11 +294,11 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 	for _, event := range events {
 		// If the event contains responses, skip it. It will be handled
 		// when we process its corresponding call event.
-		if len(listFunctionResponsesFromEvent(event)) > 0 {
+		if len(utils.FunctionResponses(event.Content)) > 0 {
 			continue
 		}
 
-		calls := listFunctionCallsFromEvent(event)
+		calls := utils.FunctionCalls(event.Content)
 		if len(calls) == 0 {
 			// This is a regular event (e.g., user message). Just append it.
 			resultEvents = append(resultEvents, event)
@@ -520,30 +523,6 @@ func isAuthEvent(ev *session.Event) bool {
 		}
 	}
 	return false
-}
-
-func listFunctionCallsFromEvent(e *session.Event) []*genai.FunctionCall {
-	funcCalls := make([]*genai.FunctionCall, 0)
-	if e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
-		for _, part := range e.LLMResponse.Content.Parts {
-			if part.FunctionCall != nil {
-				funcCalls = append(funcCalls, part.FunctionCall)
-			}
-		}
-	}
-	return funcCalls
-}
-
-func listFunctionResponsesFromEvent(e *session.Event) []*genai.FunctionResponse {
-	funcResponses := make([]*genai.FunctionResponse, 0)
-	if e.LLMResponse.Content != nil && e.LLMResponse.Content.Parts != nil {
-		for _, part := range e.LLMResponse.Content.Parts {
-			if part.FunctionResponse != nil {
-				funcResponses = append(funcResponses, part.FunctionResponse)
-			}
-		}
-	}
-	return funcResponses
 }
 
 func cloneEvent(e *session.Event) *session.Event {

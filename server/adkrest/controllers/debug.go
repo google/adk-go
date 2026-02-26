@@ -17,8 +17,10 @@ package controllers
 import (
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/gorilla/mux"
+	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -31,33 +33,70 @@ import (
 type DebugAPIController struct {
 	sessionService session.Service
 	agentloader    agent.Loader
-	spansExporter  *services.APIServerSpanExporter
+	debugTelemetry *services.DebugTelemetry
 }
 
 // NewDebugAPIController creates the controller for the Debug API.
-func NewDebugAPIController(sessionService session.Service, agentLoader agent.Loader, spansExporter *services.APIServerSpanExporter) *DebugAPIController {
+func NewDebugAPIController(sessionService session.Service, agentLoader agent.Loader, spansExporter *services.DebugTelemetry) *DebugAPIController {
 	return &DebugAPIController{
 		sessionService: sessionService,
 		agentloader:    agentLoader,
-		spansExporter:  spansExporter,
+		debugTelemetry: spansExporter,
 	}
 }
 
-// TraceDictHandler returns the debug information for the session in form of dictionary.
-func (c *DebugAPIController) TraceDictHandler(rw http.ResponseWriter, req *http.Request) {
+// EventSpanHandler returns the debug span for the event.
+func (c *DebugAPIController) EventSpanHandler(rw http.ResponseWriter, req *http.Request) {
 	params := mux.Vars(req)
 	eventID := params["event_id"]
 	if eventID == "" {
 		http.Error(rw, "event_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	traceDict := c.spansExporter.GetTraceDict()
-	eventDict, ok := traceDict[eventID]
-	if !ok {
-		http.Error(rw, fmt.Sprintf("event not found: %s", eventID), http.StatusNotFound)
+	spans := c.debugTelemetry.GetSpansByEventID(eventID)
+	key := string(semconv.GenAIOperationNameKey)
+	// Return only generate content and execute tool spans.
+	wantedOperations := []string{"execute_tool", "generate_content"}
+	for _, span := range spans {
+		opName := span.Attributes[key]
+		if slices.Contains(wantedOperations, opName) {
+			response := convertEventSpan(span)
+			// Return the first span that matches the wanted operations - single event should contain only a single generate content or execute tool span.
+			EncodeJSONResponse(response, http.StatusOK, rw)
+			return
+		}
+	}
+	http.Error(rw, fmt.Sprintf("event not found: %s", eventID), http.StatusNotFound)
+}
+
+// ADK web expects different format than in [SessionSpansHandler].
+// The main difference is that span attributes need to be flattened in the response.
+func convertEventSpan(span services.DebugSpan) map[string]any {
+	flattened := map[string]any{
+		"name":           span.Name,
+		"start_time":     span.StartTime,
+		"end_time":       span.EndTime,
+		"trace_id":       span.TraceID,
+		"span_id":        span.SpanID,
+		"parent_span_id": span.ParentSpanID,
+		"logs":           span.Logs,
+	}
+	for k, v := range span.Attributes {
+		flattened[string(k)] = v
+	}
+	return flattened
+}
+
+// SessionSpansHandler returns the debug spans for the session.
+func (c *DebugAPIController) SessionSpansHandler(rw http.ResponseWriter, req *http.Request) {
+	params := mux.Vars(req)
+	sessionID := params["session_id"]
+	if sessionID == "" {
+		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
-	EncodeJSONResponse(eventDict, http.StatusOK, rw)
+	spans := c.debugTelemetry.GetSpansBySessionID(sessionID)
+	EncodeJSONResponse(spans, http.StatusOK, rw)
 }
 
 // EventGraphHandler returns the debug information for the session and session events in form of graph.

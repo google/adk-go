@@ -230,8 +230,13 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 			})
 
 			req := &model.LLMRequest{}
-			if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
-				t.Fatalf("contentsRequestProcessor failed: %v", err)
+			for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if ev != nil {
+					t.Fatal("ContentsRequestProcessor generated an unexpected event")
+				}
+				if err != nil {
+					t.Fatalf("contentRequestProcessor failed: %v", err)
+				}
 			}
 			got := req.Contents
 			if diff := cmp.Diff(tc.want, got); diff != "" {
@@ -335,10 +340,18 @@ func TestContentsRequestProcessor(t *testing.T) {
 						Content: genai.NewContentFromText("In branch 2", "user"),
 					},
 				},
+				{
+					Author: "user",
+					Branch: "",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("empty branch", "user"),
+					},
+				},
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("In branch 1", "user"),
 				genai.NewContentFromText("In branch 1 and task 1", "user"),
+				genai.NewContentFromText("empty branch", "user"),
 			},
 		},
 		{
@@ -383,8 +396,13 @@ func TestContentsRequestProcessor(t *testing.T) {
 			})
 
 			req := &model.LLMRequest{}
-			if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
-				t.Fatalf("contentRequestProcessor failed: %v", err)
+			for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if ev != nil {
+					t.Fatal("ContentsRequestProcessor generated an unexpected event")
+				}
+				if err != nil {
+					t.Fatalf("contentRequestProcessor failed: %v", err)
+				}
 			}
 			got := req.Contents
 			if diff := cmp.Diff(tc.want, got); diff != "" {
@@ -509,8 +527,14 @@ func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 	})
 
 	req := &model.LLMRequest{}
-	if err := llminternal.ContentsRequestProcessor(ctx, req); err != nil {
-		t.Fatalf("contentRequestProcessor failed: %v", err)
+
+	for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if ev != nil {
+			t.Fatal("ContentsRequestProcessor generated an unexpected event")
+		}
+		if err != nil {
+			t.Fatalf("contentRequestProcessor failed: %v", err)
+		}
 	}
 	got := req
 	want := &model.LLMRequest{}
@@ -858,20 +882,23 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			})
 
 			req := &model.LLMRequest{}
-			err := llminternal.ContentsRequestProcessor(ctx, req)
-
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatal("ContentsRequestProcessor succeeded; expected an error")
+			for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if ev != nil {
+					t.Fatal("ContentsRequestProcessor generated an unexpected event")
 				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("Expected error to contain %q, got: %v", tc.wantErr, err)
+				if tc.wantErr != "" {
+					if err == nil {
+						t.Fatal("ContentsRequestProcessor succeeded; expected an error")
+					}
+					if !strings.Contains(err.Error(), tc.wantErr) {
+						t.Errorf("Expected error to contain %q, got: %v", tc.wantErr, err)
+					}
+					return // Test is done
 				}
-				return // Test is done
-			}
 
-			if err != nil {
-				t.Fatalf("ContentsRequestProcessor failed: %v", err)
+				if err != nil {
+					t.Fatalf("ContentsRequestProcessor failed: %v", err)
+				}
 			}
 
 			got := req.Contents

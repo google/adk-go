@@ -23,7 +23,6 @@ import (
 	"google.golang.org/genai"
 
 	imemory "google.golang.org/adk/internal/memory"
-	"google.golang.org/adk/internal/sessioninternal"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -73,7 +72,7 @@ func TestMemory_AddAndSearch(t *testing.T) {
 		}
 	}
 
-	if err := memoryService.AddSession(t.Context(), sessioninternal.NewMutableSession(sessionService, session)); err != nil {
+	if err := memoryService.AddSession(t.Context(), session); err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
 
@@ -196,7 +195,7 @@ func TestMemory_Search_Isolation(t *testing.T) {
 		t.Fatalf("Failed to append event: %v", err)
 	}
 
-	if err := memory1.AddSession(t.Context(), sessioninternal.NewMutableSession(sessionService, storedSession)); err != nil {
+	if err := memory1.AddSession(t.Context(), storedSession); err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
 
@@ -226,7 +225,7 @@ func TestMemory_Search_Isolation(t *testing.T) {
 		t.Fatalf("Failed to append event: %v", err)
 	}
 
-	if err := memory2.AddSession(t.Context(), sessioninternal.NewMutableSession(sessionService, storedSession2)); err != nil {
+	if err := memory2.AddSession(t.Context(), storedSession2); err != nil {
 		t.Fatalf("AddSession failed: %v", err)
 	}
 

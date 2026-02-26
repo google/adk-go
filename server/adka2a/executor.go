@@ -21,6 +21,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -28,18 +29,79 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// ExecutorConfig represents mandatory Executor dependencies.
+// BeforeExecuteCallback is the callback which will be called before an execution is started.
+type BeforeExecuteCallback func(ctx context.Context, reqCtx *a2asrv.RequestContext) (context.Context, error)
+
+// AfterEventCallback is the callback which will be called after an ADK event is converted to an A2A event.
+type AfterEventCallback func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error
+
+// AfterExecuteCallback is the callback which will be called after an execution resolved into a completed or failed task.
+type AfterExecuteCallback func(ctx ExecutorContext, finalEvent *a2a.TaskStatusUpdateEvent, err error) error
+
+// A2APartConverter is a custom converter for converting A2A parts to GenAI parts.
+// Implementations should generally remember to leverage adka2a.ToGenAiPart for default conversions
+// nil returns are considered intentionally dropped parts.
+type A2APartConverter func(ctx context.Context, a2aEvent a2a.Event, part a2a.Part) (*genai.Part, error)
+
+// GenAIPartConverter is a custom converter for converting GenAI parts to A2A parts.
+// Implementations should generally remember to leverage adka2a.ToA2APart for default conversions
+// nil returns are considered intentionally dropped parts.
+type GenAIPartConverter func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (a2a.Part, error)
+
+// OutputMode controls how artifacts are produced.
+type OutputMode string
+
+const (
+	// OutputArtifactPerRun produces a single artifact per [runner.Runner.Run].
+	OutputArtifactPerRun OutputMode = "artifact-per-run"
+	// OutputArtifactPerEvent produces an artifact per non-partial [session.Event].
+	// While agent is emitting events an artifact is build incrementally (parts are append to it).
+	// The next partial event replaces accumulated contents and seals the artifact, meaning
+	// the next event from this agent will create a new artifact.
+	OutputArtifactPerEvent OutputMode = "artifact-per-event"
+)
+
+// ExecutorConfig allows to configure Executor.
 type ExecutorConfig struct {
 	// RunnerConfig is the configuration which will be used for [runner.New] during A2A Execute invocation.
 	RunnerConfig runner.Config
+
 	// RunConfig is the configuration which will be passed to [runner.Runner.Run] during A2A Execute invocation.
 	RunConfig agent.RunConfig
+
+	// BeforeExecuteCallback is the callback which will be called before an execution is started.
+	// It can be used to instrument a context or prevent the execution by returning an error.
+	BeforeExecuteCallback BeforeExecuteCallback
+
+	// AfterEventCallback is the callback which will be called after an ADK event is successfully converted to an A2A event.
+	// This gives an opportunity to enrich the event with additional metadata or abort the execution by returning an error.
+	// The callback is not invoked for errors originating from ADK or event processing. Such errors are converted to
+	// TaskStatusUpdateEvent-s with TaskStateFailed state. If needed these can be intercepted using AfterExecuteCallback.
+	AfterEventCallback AfterEventCallback
+
+	// AfterExecuteCallback is the callback which will be called after an execution resolved into a completed or failed task.
+	// This gives an opportunity to enrich the event with additional metadata or log it.
+	AfterExecuteCallback AfterExecuteCallback
+
+	// A2APartConverter is a custom converter for converting A2A parts to GenAI parts.
+	// Implementations should generally remember to leverage [adka2a.ToGenAiPart] for default conversions
+	// nil returns are considered intentionally dropped parts.
+	A2APartConverter A2APartConverter
+
+	// GenAIPartConverter is a custom converter for converting GenAI parts to A2A parts.
+	// Implementations should generally remember to leverage [adka2a.ToA2APart] for default conversions
+	// nil returns are considered intentionally dropped parts.
+	GenAIPartConverter GenAIPartConverter
+
+	// OutputMode controls how artifacts are produced. Can be [OutputArtifactPerRun] or [OutputArtifactPerEvent].
+	// Defaults to [OutputArtifactPerRun].
+	OutputMode OutputMode
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
 
-// Executor invokes an ADK agent and translates [session.Event]s to [a2a.Event]s according to the following rules:
-//   - If the input doesn't reference any a2a.Task, produce a TaskStatusUpdateEvent with TaskStateSubmitted.
+// Executor invokes an ADK agent and translates [session.Event]-s to [a2a.Event]-s according to the following rules:
+//   - If the input doesn't reference any a2a.Task, produce a Task with TaskStateSubmitted state.
 //   - Right before runner.Runner invocation, produce TaskStatusUpdateEvent with TaskStateWorking.
 //   - For every session.Event produce a TaskArtifactUpdateEvent{Append=true} with transformed parts.
 //   - After the last session.Event is processed produce an empty TaskArtifactUpdateEvent{Append=true} with LastChunk=true,
@@ -61,30 +123,48 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 	if msg == nil {
 		return fmt.Errorf("message not provided")
 	}
-	content, err := toGenAIContent(msg)
+	content, err := toGenAIContent(ctx, msg, e.config.A2APartConverter)
 	if err != nil {
 		return fmt.Errorf("a2a message conversion failed: %w", err)
 	}
-	r, err := runner.New(e.config.RunnerConfig)
+
+	runnerCfg, executorPlugin, err := withExecutorPlugin(e.config.RunnerConfig)
+	if err != nil {
+		return fmt.Errorf("failed to install a2a-executor plugin: %w", err)
+	}
+
+	r, err := runner.New(runnerCfg)
 	if err != nil {
 		return fmt.Errorf("failed to create a runner: %w", err)
 	}
+	if e.config.BeforeExecuteCallback != nil {
+		ctx, err = e.config.BeforeExecuteCallback(ctx, reqCtx)
+		if err != nil {
+			return fmt.Errorf("before execute: %w", err)
+		}
+	}
+
+	if event, err := handleInputRequired(reqCtx, content); event != nil || err != nil {
+		if err != nil {
+			return err
+		}
+		return queue.Write(ctx, event)
+	}
 
 	if reqCtx.StoredTask == nil {
-		event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateSubmitted, nil)
+		event := a2a.NewSubmittedTask(reqCtx, msg)
 		if err := queue.Write(ctx, event); err != nil {
-			return fmt.Errorf("failed to setup a task: %w", err)
+			return fmt.Errorf("failed to submit a task: %w", err)
 		}
 	}
 
 	invocationMeta := toInvocationMeta(ctx, e.config, reqCtx)
 
-	if err := e.prepareSession(ctx, invocationMeta); err != nil {
+	err = e.prepareSession(ctx, invocationMeta)
+	if err != nil {
 		event := toTaskFailedUpdateEvent(reqCtx, err, invocationMeta.eventMeta)
-		if err := queue.Write(ctx, event); err != nil {
-			return err
-		}
-		return nil
+		execCtx := newExecutorContext(ctx, invocationMeta, executorPlugin, content)
+		return e.writeFinalTaskStatus(execCtx, queue, nil, event, err)
 	}
 
 	event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateWorking, nil)
@@ -93,68 +173,86 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 		return err
 	}
 
-	processor := newEventProcessor(reqCtx, invocationMeta)
-	if err := e.process(ctx, r, processor, content, queue); err != nil {
-		return err
+	var artifactTransform eventToArtifactTransform
+	if e.config.OutputMode == OutputArtifactPerEvent {
+		artifactTransform = newArtifactMaker(reqCtx)
+	} else {
+		artifactTransform = newLegacyArtifactMaker(reqCtx)
 	}
 
-	return nil
+	processor := newEventProcessor(reqCtx, invocationMeta, e.config.GenAIPartConverter, artifactTransform)
+	executorContext := newExecutorContext(ctx, invocationMeta, executorPlugin, content)
+	return e.process(executorContext, r, processor, queue)
 }
 
 func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
 	event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil)
-	if err := queue.Write(ctx, event); err != nil {
-		return err
-	}
-	return nil
+	event.Final = true
+	return queue.Write(ctx, event)
 }
 
 // Processing failures should be delivered as Task failed events. An error is returned from this method if an event write fails.
-func (e *Executor) process(ctx context.Context, r *runner.Runner, processor *eventProcessor, content *genai.Content, q eventqueue.Queue) error {
+func (e *Executor) process(ctx ExecutorContext, r *runner.Runner, processor *eventProcessor, q eventqueue.Queue) error {
 	meta := processor.meta
-	for event, err := range r.Run(ctx, meta.userID, meta.sessionID, content, e.config.RunConfig) {
-		if err != nil {
-			event := processor.makeTaskFailedEvent(fmt.Errorf("agent run failed: %w", err), nil)
-			if eventSendErr := q.Write(ctx, event); eventSendErr != nil {
-				return fmt.Errorf("error event write failed: %w, %w", err, eventSendErr)
-			}
-			return nil
+	for adkEvent, adkErr := range r.Run(ctx, meta.userID, meta.sessionID, ctx.UserContent(), e.config.RunConfig) {
+		if adkErr != nil {
+			event := processor.makeTaskFailedEvent(fmt.Errorf("agent run failed: %w", adkErr), nil)
+			return e.writeFinalTaskStatus(ctx, q, processor.makeFinalArtifactUpdate(), event, adkErr)
 		}
 
-		a2aEvent, err := processor.process(ctx, event)
-		if err != nil {
-			event := processor.makeTaskFailedEvent(fmt.Errorf("processor failed: %w", err), event)
-			if eventSendErr := q.Write(ctx, event); eventSendErr != nil {
-				return fmt.Errorf("processor error event write failed: %w, %w", err, eventSendErr)
-			}
-			return nil
+		a2aEvent, pErr := processor.process(ctx, adkEvent)
+		if pErr == nil && a2aEvent != nil && e.config.AfterEventCallback != nil {
+			pErr = e.config.AfterEventCallback(ctx, adkEvent, a2aEvent)
+		}
+
+		if pErr != nil {
+			event := processor.makeTaskFailedEvent(fmt.Errorf("processor failed: %w", pErr), adkEvent)
+			return e.writeFinalTaskStatus(ctx, q, processor.makeFinalArtifactUpdate(), event, pErr)
 		}
 
 		if a2aEvent != nil {
 			if err := q.Write(ctx, a2aEvent); err != nil {
-				return fmt.Errorf("send event failed: %w", err)
+				return fmt.Errorf("event write failed: %w", err)
 			}
 		}
 	}
 
-	for _, ev := range processor.makeTerminalEvents() {
-		if err := q.Write(ctx, ev); err != nil {
-			return fmt.Errorf("terminal event send failed: %w", err)
+	finalStatus := processor.makeFinalStatusUpdate()
+	return e.writeFinalTaskStatus(ctx, q, processor.makeFinalArtifactUpdate(), finalStatus, nil)
+}
+
+func (e *Executor) writeFinalTaskStatus(
+	ctx ExecutorContext,
+	queue eventqueue.Queue,
+	partialReset *a2a.TaskArtifactUpdateEvent,
+	status *a2a.TaskStatusUpdateEvent,
+	err error,
+) error {
+	if e.config.AfterExecuteCallback != nil {
+		if err = e.config.AfterExecuteCallback(ctx, status, err); err != nil {
+			return fmt.Errorf("after execute: %w", err)
 		}
 	}
-
+	if partialReset != nil {
+		if err := queue.Write(ctx, partialReset); err != nil {
+			return fmt.Errorf("partial artifact update write failed: %w", err)
+		}
+	}
+	if err := queue.Write(ctx, status); err != nil {
+		return fmt.Errorf("%q state update event write failed: %w", status.Status.State, err)
+	}
 	return nil
 }
 
 func (e *Executor) prepareSession(ctx context.Context, meta invocationMeta) error {
 	service := e.config.RunnerConfig.SessionService
 
-	resp, err := service.Get(ctx, &session.GetRequest{
+	_, err := service.Get(ctx, &session.GetRequest{
 		AppName:   e.config.RunnerConfig.AppName,
 		UserID:    meta.userID,
 		SessionID: meta.sessionID,
 	})
-	if err == nil && resp != nil {
+	if err == nil {
 		return nil
 	}
 

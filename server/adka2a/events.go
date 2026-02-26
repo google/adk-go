@@ -16,20 +16,13 @@ package adka2a
 
 import (
 	"fmt"
+	"maps"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
-)
-
-var (
-	customMetaTaskIDKey    = ToADKMetaKey("task_id")
-	customMetaContextIDKey = ToADKMetaKey("context_id")
-
-	metadataEscalateKey        = ToA2AMetaKey("escalate")
-	metadataTransferToAgentKey = ToA2AMetaKey("transfer_to_agent")
 )
 
 // NewRemoteAgentEvent create a new Event authored by the agent running in the provided invocation context.
@@ -50,6 +43,10 @@ func EventToMessage(event *session.Event) (*a2a.Message, error) {
 	if err != nil {
 		return nil, fmt.Errorf("part conversion failed: %w", err)
 	}
+	eventMeta, err := toEventMeta(invocationMeta{}, event)
+	if err != nil {
+		return nil, fmt.Errorf("event metadata conversion failed: %w", err)
+	}
 
 	var role a2a.MessageRole
 	if event.Author == "user" {
@@ -60,6 +57,7 @@ func EventToMessage(event *session.Event) (*a2a.Message, error) {
 
 	msg := a2a.NewMessage(role, parts...)
 	msg.Metadata = setActionsMeta(msg.Metadata, event.Actions)
+	maps.Copy(msg.Metadata, eventMeta)
 	return msg, nil
 }
 
@@ -76,13 +74,30 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 		if len(v.Artifact.Parts) == 0 {
 			return nil, nil
 		}
+		if IsPartial(v.Metadata) && v.LastChunk {
+			// Partial ADK artifact reset
+			return nil, nil
+		}
 		event, err := artifactToEvent(ctx, v.Artifact)
 		if err != nil {
 			return nil, fmt.Errorf("artifact update event conversion failed: %w", err)
 		}
+		if len(event.Content.Parts) == 0 {
+			return nil, nil
+		}
 		event.LongRunningToolIDs = getLongRunningToolIDs(v.Artifact.Parts, event.Content.Parts)
-		event.CustomMetadata = ToCustomMetadata(v.TaskID, v.ContextID)
-		event.Partial = true
+		if err := processA2AMeta(v, event); err != nil {
+			return nil, fmt.Errorf("metadata processing failed: %w", err)
+		}
+		if partial, ok := v.Metadata[metadataPartialKey].(bool); ok {
+			event.Partial = partial
+		} else {
+			// append=false, lastChunk=false: emitted as partial, caller restarts aggregation
+			// append=false, lastChunk=true: emitted as non partial, caller drops aggregation
+			// append=true, lastChunk=false: emitted as partial, caller updates aggregation
+			// append=true, lastChunk=true: emitted as partial, caller updates and emits aggregation as non-partial
+			event.Partial = v.Append || !v.LastChunk
+		}
 		return event, nil
 
 	case *a2a.TaskStatusUpdateEvent:
@@ -93,12 +108,15 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 			return nil, nil
 		}
 		event, err := messageToEvent(ctx, v.Status.Message)
-		event.CustomMetadata = ToCustomMetadata(v.TaskID, v.ContextID)
+		event.TurnComplete = false
 		if err != nil {
 			return nil, fmt.Errorf("custom metadata conversion failed: %w", err)
 		}
 		if len(event.Content.Parts) == 0 {
 			return nil, nil
+		}
+		if err := processA2AMeta(v, event); err != nil {
+			return nil, fmt.Errorf("metadata processing failed: %w", err)
 		}
 		for _, part := range event.Content.Parts {
 			part.Thought = true
@@ -111,17 +129,19 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 	}
 }
 
-// ToADKMetaKey adds a prefix used to differentiage A2A-related values stored in custom metadata of an ADK session event.
-func ToADKMetaKey(key string) string {
-	return "a2a:" + key
-}
-
 // ToCustomMetadata creates a session event custom metadata with A2A task and context IDs in it.
 func ToCustomMetadata(taskID a2a.TaskID, ctxID string) map[string]any {
-	return map[string]any{
-		customMetaTaskIDKey:    string(taskID),
-		customMetaContextIDKey: ctxID,
+	if taskID == "" && ctxID == "" {
+		return nil
 	}
+	result := make(map[string]any)
+	if taskID != "" {
+		result[customMetaTaskIDKey] = string(taskID)
+	}
+	if ctxID != "" {
+		result[customMetaContextIDKey] = ctxID
+	}
+	return result
 }
 
 // GetA2ATaskInfo returns A2A task and context IDs if they are present in session event custom metadata.
@@ -157,10 +177,10 @@ func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message) (*session.Eve
 	if len(parts) > 0 {
 		event.Content = genai.NewContentFromParts(parts, toGenAIRole(msg.Role))
 	}
-	if msg.TaskID != "" || msg.ContextID != "" {
-		event.CustomMetadata = ToCustomMetadata(msg.TaskID, msg.ContextID)
+	if err := processA2AMeta(msg, event); err != nil {
+		return nil, fmt.Errorf("metadata processing failed: %w", err)
 	}
-	event.Actions = toEventActions(msg)
+	event.TurnComplete = true
 	return event, nil
 }
 
@@ -197,6 +217,8 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 		longRunningToolIDs = append(longRunningToolIDs, lrtIDs...)
 	}
 
+	event := NewRemoteAgentEvent(ctx)
+
 	if task.Status.Message != nil {
 		msgParts, err := ToGenAIParts(task.Status.Message.Parts)
 		if err != nil {
@@ -204,22 +226,28 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task) (*session.Event, e
 		}
 		lrtIDs := getLongRunningToolIDs(task.Status.Message.Parts, msgParts)
 
-		parts = append(parts, msgParts...)
+		if task.Status.State == a2a.TaskStateFailed && len(msgParts) == 1 && msgParts[0].Text != "" {
+			event.ErrorMessage = msgParts[0].Text
+		} else {
+			parts = append(parts, msgParts...)
+		}
 		longRunningToolIDs = append(longRunningToolIDs, lrtIDs...)
 	}
 
-	event := NewRemoteAgentEvent(ctx)
+	isTerminal := task.Status.State.Terminal() || task.Status.State == a2a.TaskStateInputRequired
+	if len(parts) == 0 && !isTerminal {
+		return nil, nil
+	}
 	if len(parts) > 0 {
 		event.Content = genai.NewContentFromParts(parts, genai.RoleModel)
 	}
-	event.CustomMetadata = ToCustomMetadata(task.ID, task.ContextID)
 	if task.Status.State == a2a.TaskStateInputRequired {
 		event.LongRunningToolIDs = longRunningToolIDs
 	}
-	if !task.Status.State.Terminal() && task.Status.State != a2a.TaskStateInputRequired {
-		event.Partial = true
+	if err := processA2AMeta(task, event); err != nil {
+		return nil, fmt.Errorf("metadata processing failed: %w", err)
 	}
-	event.Actions = toEventActions(task)
+	event.TurnComplete = isTerminal
 	return event, nil
 }
 
@@ -227,6 +255,8 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 	if update == nil {
 		return nil, nil
 	}
+
+	event := NewRemoteAgentEvent(ctx)
 
 	var parts []*genai.Part
 	if update.Status.Message != nil {
@@ -236,12 +266,17 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 		}
 		parts = localParts
 	}
-	event := NewRemoteAgentEvent(ctx)
-	if len(parts) > 0 {
+	if update.Status.State == a2a.TaskStateFailed && len(parts) == 1 && parts[0].Text != "" {
+		event.ErrorMessage = parts[0].Text
+	} else if len(parts) > 0 {
 		event.Content = genai.NewContentFromParts(parts, genai.RoleModel)
 	}
-	event.CustomMetadata = ToCustomMetadata(update.TaskID, update.ContextID)
-	event.Actions = toEventActions(update)
+	if err := processA2AMeta(update, event); err != nil {
+		return nil, fmt.Errorf("metadata processing failed: %w", err)
+	}
+	if update.Status.Message != nil {
+		event.LongRunningToolIDs = getLongRunningToolIDs(update.Status.Message.Parts, parts)
+	}
 	event.TurnComplete = true
 	return event, nil
 }
@@ -273,8 +308,10 @@ func toGenAIRole(role a2a.MessageRole) genai.Role {
 	}
 }
 
-func toEventActions(event a2a.Event) session.EventActions {
-	meta := event.Meta()
+func toEventActions(meta map[string]any) session.EventActions {
+	if meta == nil {
+		return session.EventActions{}
+	}
 	var result session.EventActions
 	result.Escalate, _ = meta[metadataEscalateKey].(bool)
 	result.TransferToAgent, _ = meta[metadataTransferToAgentKey].(string)

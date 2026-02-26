@@ -28,7 +28,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
@@ -141,6 +140,7 @@ func TestModelCallbacks(t *testing.T) {
 		llmResponses         []*genai.Content
 		beforeModelCallbacks []llmagent.BeforeModelCallback
 		afterModelCallbacks  []llmagent.AfterModelCallback
+		onModelErrorCallback []llmagent.OnModelErrorCallback
 		wantTexts            []string
 		wantErr              error
 	}{
@@ -272,16 +272,154 @@ func TestModelCallbacks(t *testing.T) {
 			},
 			wantErr: http.ErrNoCookie,
 		},
+		{
+			name: "on model error callback is not called",
+			onModelErrorCallback: []llmagent.OnModelErrorCallback{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
+						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
+					}, fmt.Errorf("on_model_error_callback: %w", http.ErrNoCookie)
+				},
+			},
+			llmResponses: []*genai.Content{
+				genai.NewContentFromText("hello from model", genai.RoleModel),
+			},
+			wantTexts: []string{
+				"hello from model",
+			},
+		},
+		{
+			name: "on model error callback changes message",
+			onModelErrorCallback: []llmagent.OnModelErrorCallback{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
+						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
+					}, nil
+				},
+			},
+			llmResponses: []*genai.Content{},
+			wantTexts: []string{
+				"hello from on_model_error_callback",
+			},
+		},
+		{
+			name: "on model error callback changes err",
+			onModelErrorCallback: []llmagent.OnModelErrorCallback{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
+						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
+					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrNoCookie)
+				},
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
+						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
+					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrHijacked)
+				},
+			},
+			llmResponses: []*genai.Content{},
+			wantErr:      http.ErrNoCookie,
+		},
+		{
+			name: "on model error callback returns both new LLMResponse and error",
+			onModelErrorCallback: []llmagent.OnModelErrorCallback{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
+						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
+					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrNoCookie)
+				},
+			},
+			llmResponses: []*genai.Content{},
+			wantErr:      http.ErrNoCookie,
+		},
+		{
+			name: "on model error callback does not process before model callback error",
+			beforeModelCallbacks: []llmagent.BeforeModelCallback{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
+				},
+			},
+			onModelErrorCallback: []llmagent.OnModelErrorCallback{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
+						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
+					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrHijacked)
+				},
+			},
+			llmResponses: []*genai.Content{
+				genai.NewContentFromText("hello from model", genai.RoleModel),
+			},
+			wantErr: http.ErrNoCookie,
+		},
+		{
+			name: "on model error callback does not process before model callback message",
+			beforeModelCallbacks: []llmagent.BeforeModelCallback{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
+						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
+					}, nil
+				},
+			},
+			onModelErrorCallback: []llmagent.OnModelErrorCallback{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
+						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
+					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrHijacked)
+				},
+			},
+			llmResponses: []*genai.Content{
+				genai.NewContentFromText("hello from model", genai.RoleModel),
+			},
+			wantTexts: []string{
+				"hello from before_model_callback",
+			},
+		},
+		{
+			name: "after error callback process on model error callback message",
+			onModelErrorCallback: []llmagent.OnModelErrorCallback{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
+						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
+					}, nil
+				},
+			},
+			afterModelCallbacks: []llmagent.AfterModelCallback{
+				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{
+						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
+					}, nil
+				},
+			},
+			llmResponses: []*genai.Content{},
+			wantTexts: []string{
+				"hello from after_model_callback",
+			},
+		},
+		{
+			name: "after error callback does not process on model error callback error",
+			onModelErrorCallback: []llmagent.OnModelErrorCallback{
+				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+					return nil, fmt.Errorf("error from on_model_error_callback: %w", http.ErrNoCookie)
+				},
+			},
+			afterModelCallbacks: []llmagent.AfterModelCallback{
+				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrHijacked)
+				},
+			},
+			llmResponses: []*genai.Content{},
+			wantErr:      http.ErrNoCookie,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			testLLM := &testutil.MockModel{
 				Responses: tc.llmResponses,
 			}
 			a, err := llmagent.New(llmagent.Config{
-				Name:                 "hello_world_agent",
-				Model:                testLLM,
-				BeforeModelCallbacks: tc.beforeModelCallbacks,
-				AfterModelCallbacks:  tc.afterModelCallbacks,
+				Name:                  "hello_world_agent",
+				Model:                 testLLM,
+				BeforeModelCallbacks:  tc.beforeModelCallbacks,
+				AfterModelCallbacks:   tc.afterModelCallbacks,
+				OnModelErrorCallbacks: tc.onModelErrorCallback,
 			})
 			if err != nil {
 				t.Fatalf("failed to create llm agent: %v", err)
@@ -553,6 +691,7 @@ func TestInstructionProvider(t *testing.T) {
 			},
 			wantLLMRequests: []*model.LLMRequest{
 				{
+					Model: "mock",
 					Contents: []*genai.Content{
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
@@ -579,6 +718,7 @@ func TestInstructionProvider(t *testing.T) {
 			},
 			wantLLMRequests: []*model.LLMRequest{
 				{
+					Model: "mock",
 					Contents: []*genai.Content{
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
@@ -605,6 +745,7 @@ func TestInstructionProvider(t *testing.T) {
 			},
 			wantLLMRequests: []*model.LLMRequest{
 				{
+					Model: "mock",
 					Contents: []*genai.Content{
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
@@ -633,6 +774,7 @@ func TestInstructionProvider(t *testing.T) {
 			},
 			wantLLMRequests: []*model.LLMRequest{
 				{
+					Model: "mock",
 					Contents: []*genai.Content{
 						genai.NewContentFromText("user input", genai.RoleUser),
 					},
@@ -933,33 +1075,19 @@ func TestAgentTransfer(t *testing.T) {
 }
 
 func newGeminiModel(t *testing.T, modelName string, transport http.RoundTripper) model.LLM {
-	apiKey := "fakeKey"
+	cfg := &genai.ClientConfig{
+		HTTPClient: &http.Client{Transport: transport},
+		APIKey:     "fakeKey",
+	}
 	if transport == nil { // use httprr
 		trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
-		recording := false
-		transport, recording = newGeminiTestClientConfig(t, trace)
-		if recording { // if we are recording httprr trace, don't use the fakeKey.
-			apiKey = ""
-		}
+		cfg = testutil.NewGeminiTestClientConfig(t, trace)
 	}
-	model, err := gemini.NewModel(t.Context(), modelName, &genai.ClientConfig{
-		HTTPClient: &http.Client{Transport: transport},
-		APIKey:     apiKey,
-	})
+	model, err := gemini.NewModel(t.Context(), modelName, cfg)
 	if err != nil {
 		t.Fatalf("failed to create model: %v", err)
 	}
 	return model
-}
-
-func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, bool) {
-	t.Helper()
-	rr, err := testutil.NewGeminiTransport(rrfile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	recording, _ := httprr.Recording(rrfile)
-	return rr, recording
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)

@@ -31,8 +31,28 @@ func modelResponseFromParts(parts ...*genai.Part) model.LLMResponse {
 	return model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: parts}}
 }
 
-func newArtifactLastChunkEvent(task *a2a.Task) *a2a.TaskArtifactUpdateEvent {
-	ev := a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID())
+func modelPartialResponseFromParts(parts ...*genai.Part) model.LLMResponse {
+	resp := modelResponseFromParts(parts...)
+	resp.Partial = true
+	return resp
+}
+
+func newNonPartialArtifactEvent(task *a2a.Task, parts ...a2a.Part) *a2a.TaskArtifactUpdateEvent {
+	ev := a2a.NewArtifactEvent(task, parts...)
+	// It is important for events to be explicitely marked as ADK partial or non-partial.
+	// This signals to consumers that the remote agent is running its own aggregation logic.
+	ev.Metadata = map[string]any{metadataPartialKey: false}
+	return ev
+}
+
+func newNonPartialArtifactUpdateEvent(task *a2a.Task, parts ...a2a.Part) *a2a.TaskArtifactUpdateEvent {
+	ev := newNonPartialArtifactEvent(task, parts...)
+	ev.Append = true
+	return ev
+}
+
+func newDiscardPartialArtifactUpdate(task *a2a.Task) *a2a.TaskArtifactUpdateEvent {
+	ev := newLegacyPartialArtifactUpdate(task, "", []a2a.Part{a2a.DataPart{Data: map[string]any{}}})
 	ev.LastChunk = true
 	return ev
 }
@@ -75,41 +95,29 @@ func TestEventProcessor_Process(t *testing.T) {
 				LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"), genai.NewPartFromText(", world!")),
 			}},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}, a2a.TextPart{Text: ", world!"}),
+				newNonPartialArtifactEvent(task, a2a.TextPart{Text: "Hello"}, a2a.TextPart{Text: ", world!"}),
 			},
-			terminal: []a2a.Event{
-				newArtifactLastChunkEvent(task),
-				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
-			},
+			terminal: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil)},
 		},
 		{
 			name: "multiple artifact updates",
 			events: []*session.Event{
-				{
-					LLMResponse: modelResponseFromParts(genai.NewPartFromExecutableCode("get_the_answer()", genai.LanguagePython)),
-				},
-				{
-					LLMResponse: modelResponseFromParts(genai.NewPartFromCodeExecutionResult(genai.OutcomeOK, "42")),
-				},
-				{
-					LLMResponse: modelResponseFromParts(genai.NewPartFromText("The answer is 42")),
-				},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromExecutableCode("get_the_answer()", genai.LanguagePython))},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromCodeExecutionResult(genai.OutcomeOK, "42"))},
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("The answer is 42"))},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				a2a.NewArtifactEvent(task, a2a.DataPart{
+				newNonPartialArtifactEvent(task, a2a.DataPart{
 					Data:     map[string]any{"code": "get_the_answer()", "language": string(genai.LanguagePython)},
 					Metadata: map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeCodeExecutableCode},
 				}),
-				a2a.NewArtifactUpdateEvent(task, artifactIDPlaceholder, a2a.DataPart{
+				newNonPartialArtifactUpdateEvent(task, a2a.DataPart{
 					Data:     map[string]any{"outcome": string(genai.OutcomeOK), "output": "42"},
 					Metadata: map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeCodeExecResult},
 				}),
-				a2a.NewArtifactUpdateEvent(task, artifactIDPlaceholder, a2a.TextPart{Text: "The answer is 42"}),
+				newNonPartialArtifactUpdateEvent(task, a2a.TextPart{Text: "The answer is 42"}),
 			},
-			terminal: []a2a.Event{
-				newArtifactLastChunkEvent(task),
-				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
-			},
+			terminal: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil)},
 		},
 		{
 			name: "failed without artifacts",
@@ -144,11 +152,10 @@ func TestEventProcessor_Process(t *testing.T) {
 				{LLMResponse: model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "The answer is"}),
-				a2a.NewArtifactUpdateEvent(task, artifactIDPlaceholder, a2a.TextPart{Text: "42"}),
+				newNonPartialArtifactEvent(task, a2a.TextPart{Text: "The answer is"}),
+				newNonPartialArtifactUpdateEvent(task, a2a.TextPart{Text: "42"}),
 			},
 			terminal: []a2a.Event{
-				newArtifactLastChunkEvent(task),
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
 					map[string]any{ToA2AMetaKey("error_code"): "1"},
@@ -163,11 +170,10 @@ func TestEventProcessor_Process(t *testing.T) {
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("42"))},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "The answer is"}),
-				a2a.NewArtifactUpdateEvent(task, artifactIDPlaceholder, a2a.TextPart{Text: "42"}),
+				newNonPartialArtifactEvent(task, a2a.TextPart{Text: "The answer is"}),
+				newNonPartialArtifactUpdateEvent(task, a2a.TextPart{Text: "42"}),
 			},
 			terminal: []a2a.Event{
-				newArtifactLastChunkEvent(task),
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
 					map[string]any{ToA2AMetaKey("error_code"): "1"},
@@ -180,7 +186,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromFunctionCall("get_weather", map[string]any{"city": "Warsaw"}))},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				a2a.NewArtifactEvent(task, a2a.DataPart{
+				newNonPartialArtifactEvent(task, a2a.DataPart{
 					Data: map[string]any{"name": "get_weather", "args": map[string]any{"city": "Warsaw"}},
 					Metadata: map[string]any{
 						a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
@@ -189,7 +195,6 @@ func TestEventProcessor_Process(t *testing.T) {
 				}),
 			},
 			terminal: []a2a.Event{
-				newArtifactLastChunkEvent(task),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
 			},
 		},
@@ -203,18 +208,20 @@ func TestEventProcessor_Process(t *testing.T) {
 					}),
 				},
 			},
-			processed: []*a2a.TaskArtifactUpdateEvent{
-				a2a.NewArtifactEvent(task, a2a.DataPart{
-					Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
-					Metadata: map[string]any{
-						a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
-						a2aDataPartMetaLongRunningKey: true,
+			processed: nil,
+			terminal: []a2a.Event{
+				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
+					Role: a2a.MessageRoleAgent,
+					Parts: []a2a.Part{
+						a2a.DataPart{
+							Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
+							Metadata: map[string]any{
+								a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
+								a2aDataPartMetaLongRunningKey: true,
+							},
+						},
 					},
 				}),
-			},
-			terminal: []a2a.Event{
-				newArtifactLastChunkEvent(task),
-				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, nil),
 			},
 		},
 		{
@@ -231,18 +238,60 @@ func TestEventProcessor_Process(t *testing.T) {
 				},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				a2a.NewArtifactEvent(task, a2a.DataPart{
-					Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
-					Metadata: map[string]any{
-						a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
-						a2aDataPartMetaLongRunningKey: true,
+				newNonPartialArtifactEvent(task, a2a.TextPart{Text: "This will take a while"}),
+			},
+
+			terminal: []a2a.Event{
+				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
+					Role: a2a.MessageRoleAgent,
+					Parts: []a2a.Part{
+						a2a.DataPart{
+							Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
+							Metadata: map[string]any{
+								a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
+								a2aDataPartMetaLongRunningKey: true,
+							},
+						},
 					},
 				}),
-				a2a.NewArtifactUpdateEvent(task, artifactIDPlaceholder, a2a.TextPart{Text: "This will take a while"}),
 			},
+		},
+		{
+			name: "long running tool response without ID",
+			events: []*session.Event{
+				{
+					LongRunningToolIDs: []string{"get_weather"},
+					LLMResponse: modelResponseFromParts(&genai.Part{
+						FunctionCall: &genai.FunctionCall{ID: "get_weather", Name: "weather", Args: map[string]any{"city": "Warsaw"}},
+					}),
+				},
+				{
+					// No LongRunningToolIDs here
+					LLMResponse: modelResponseFromParts(&genai.Part{
+						FunctionResponse: &genai.FunctionResponse{ID: "get_weather", Name: "weather", Response: map[string]any{"status": "pending"}},
+					}),
+				},
+			},
+			processed: nil,
 			terminal: []a2a.Event{
-				newArtifactLastChunkEvent(task),
-				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, nil),
+				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
+					Role: a2a.MessageRoleAgent,
+					Parts: []a2a.Part{
+						a2a.DataPart{
+							Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
+							Metadata: map[string]any{
+								a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
+								a2aDataPartMetaLongRunningKey: true,
+							},
+						},
+						a2a.DataPart{
+							Data: map[string]any{"id": "get_weather", "name": "weather", "response": map[string]any{"status": "pending"}},
+							Metadata: map[string]any{
+								a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionResponse,
+							},
+						},
+					},
+				}),
 			},
 		},
 		{
@@ -286,15 +335,69 @@ func TestEventProcessor_Process(t *testing.T) {
 				{LLMResponse: model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "The answer is"}),
+				newNonPartialArtifactEvent(task, a2a.TextPart{Text: "The answer is"}),
 			},
 			terminal: []a2a.Event{
-				newArtifactLastChunkEvent(task),
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
 					map[string]any{ToA2AMetaKey("error_code"): "1", metadataEscalateKey: true, metadataTransferToAgentKey: "a-2"},
 				),
 			},
+		},
+		{
+			name: "partial events parts marked",
+			events: []*session.Event{
+				{
+					LLMResponse: modelPartialResponseFromParts(
+						genai.NewPartFromText("The answer is"),
+						genai.NewPartFromExecutableCode("get_the_answer()", genai.LanguagePython)),
+				},
+				{LLMResponse: modelPartialResponseFromParts(
+					genai.NewPartFromCodeExecutionResult(genai.OutcomeOK, "42"),
+					genai.NewPartFromText("42"),
+				)},
+			},
+			processed: []*a2a.TaskArtifactUpdateEvent{
+				newLegacyPartialArtifactUpdate(task, artifactIDPlaceholder, []a2a.Part{
+					a2a.TextPart{Text: "The answer is", Metadata: map[string]any{ToA2AMetaKey("partial"): true}},
+					a2a.DataPart{
+						Data: map[string]any{"code": "get_the_answer()", "language": string(genai.LanguagePython)},
+						Metadata: map[string]any{
+							a2aDataPartMetaTypeKey:  a2aDataPartTypeCodeExecutableCode,
+							ToA2AMetaKey("partial"): true,
+						},
+					},
+				}),
+				newLegacyPartialArtifactUpdate(task, artifactIDPlaceholder, []a2a.Part{
+					a2a.DataPart{
+						Data: map[string]any{"outcome": string(genai.OutcomeOK), "output": "42"},
+						Metadata: map[string]any{
+							a2aDataPartMetaTypeKey:  a2aDataPartTypeCodeExecResult,
+							ToA2AMetaKey("partial"): true,
+						},
+					},
+					a2a.TextPart{Text: "42", Metadata: map[string]any{ToA2AMetaKey("partial"): true}},
+				}),
+			},
+			terminal: []a2a.Event{
+				newDiscardPartialArtifactUpdate(task),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
+			},
+		},
+		{
+			name: "metadata merging",
+			events: []*session.Event{{
+				InvocationID: "test-invocation-id",
+				LLMResponse:  modelResponseFromParts(genai.NewPartFromText("Hello")),
+			}},
+			processed: []*a2a.TaskArtifactUpdateEvent{
+				func() *a2a.TaskArtifactUpdateEvent {
+					ev := newNonPartialArtifactEvent(task, a2a.TextPart{Text: "Hello"})
+					ev.Metadata[ToA2AMetaKey("invocation_id")] = "test-invocation-id"
+					return ev
+				}(),
+			},
+			terminal: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil)},
 		},
 	}
 
@@ -306,7 +409,7 @@ func TestEventProcessor_Process(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
-			processor := newEventProcessor(reqCtx, invocationMeta{})
+			processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
 
 			var gotEvents []*a2a.TaskArtifactUpdateEvent
 			for _, event := range tc.events {
@@ -323,7 +426,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				t.Fatalf("processor.process() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotEvents, tc.events, diff)
 			}
 
-			gotTerminal := processor.makeTerminalEvents()
+			gotTerminal := makeTerminalEvents(processor)
 			if diff := cmp.Diff(tc.terminal, gotTerminal, ignoreFields...); diff != "" {
 				t.Fatalf("processor.makeTerminalEvents() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotTerminal, tc.terminal, diff)
 			}
@@ -333,6 +436,7 @@ func TestEventProcessor_Process(t *testing.T) {
 
 func TestEventProcessor_ArtifactUpdates(t *testing.T) {
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+
 	events := []*session.Event{
 		{
 			LLMResponse: modelResponseFromParts(genai.NewPartFromExecutableCode("find_cat()", genai.LanguagePython)),
@@ -353,16 +457,14 @@ func TestEventProcessor_ArtifactUpdates(t *testing.T) {
 	}
 
 	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
-	processor := newEventProcessor(reqCtx, invocationMeta{})
+	processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
 	got := make([]*a2a.TaskArtifactUpdateEvent, len(events))
 	for i, event := range events {
 		processed, err := processor.process(t.Context(), event)
 		if err != nil {
 			t.Fatalf("processor.process() error for %d-th = %v, want nil", i, err)
 		}
-		if processed != nil {
-			got[i] = processed
-		}
+		got[i] = processed
 	}
 
 	if len(events) != len(got) {
@@ -382,12 +484,84 @@ func TestEventProcessor_ArtifactUpdates(t *testing.T) {
 		}
 	}
 
-	terminal := processor.makeTerminalEvents()
+	terminal := makeTerminalEvents(processor)
+	if len(terminal) != 1 {
+		t.Fatalf("processor.makeTerminalEvents() = %v, want [finalStatusUpdate]", terminal)
+	}
+}
+
+func TestEventProcessor_PartialEventsAreDiscardedAsAnArtifact(t *testing.T) {
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+
+	events := []*session.Event{
+		{LLMResponse: modelPartialResponseFromParts(genai.NewPartFromText("Hello, "))},
+		{LLMResponse: modelPartialResponseFromParts(genai.NewPartFromText("world!"))},
+		{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello, world!"))},
+	}
+
+	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
+	processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
+	got := make([]*a2a.TaskArtifactUpdateEvent, len(events))
+	for i, event := range events {
+		processed, err := processor.process(t.Context(), event)
+		if err != nil {
+			t.Fatalf("processor.process() error for %d-th = %v, want nil", i, err)
+		}
+		got[i] = processed
+	}
+
+	if len(events) != len(got) {
+		t.Fatalf("processor.process() returned %d events, want %d\nevents = %v", len(got), len(events), got)
+	}
+
+	lastI := len(events) - 1
+	if got[0].Append || got[0].LastChunk {
+		t.Fatalf("processor.process()[0] = %+v, want {Append=false, LastChunk=false}", got[0])
+	}
+	if got[lastI].Append || got[lastI].LastChunk {
+		t.Fatalf("processor.process()[lastI] = %+v, want {Append=false, LastChunk=false}", got[lastI])
+	}
+
+	if got[0].Artifact.ID != got[1].Artifact.ID {
+		t.Fatal("processor.process() partial events applied to different artifact")
+	}
+	if got[0].Artifact.ID == got[lastI].Artifact.ID {
+		t.Fatal("processor.process() final event applied to partial artifact")
+	}
+
+	for i, event := range got {
+		if event.LastChunk {
+			t.Fatalf("processor.process()[%d] = %+v, want LastChunk=false", i, event)
+		}
+	}
+
+	terminal := makeTerminalEvents(processor)
 	finalUpdate, ok := terminal[0].(*a2a.TaskArtifactUpdateEvent)
 	if len(terminal) != 2 || !ok {
 		t.Fatalf("processor.makeTerminalEvents() = %v, want [finalArtifactChunk, finalStatusUpdate]", terminal)
 	}
-	if !(finalUpdate.Append && finalUpdate.LastChunk) {
-		t.Fatalf("finalArtifactUpdate = %+v, want {Append=true, LastChunk=true}", finalUpdate)
+	wantEvent := &a2a.TaskArtifactUpdateEvent{
+		TaskID:    task.ID,
+		ContextID: task.ContextID,
+		Artifact: &a2a.Artifact{
+			ID:       got[0].Artifact.ID,
+			Parts:    a2a.ContentParts{a2a.DataPart{Data: map[string]any{}, Metadata: map[string]any{metadataPartialKey: true}}},
+			Metadata: map[string]any{metadataPartialKey: true},
+		},
+		Metadata:  map[string]any{metadataPartialKey: true},
+		Append:    false,
+		LastChunk: true,
 	}
+	if diff := cmp.Diff(wantEvent, finalUpdate); diff != "" {
+		t.Fatalf("makeTerminalEvents() wrong result (+got,-want) diff = %s", diff)
+	}
+}
+
+func makeTerminalEvents(processor *eventProcessor) []a2a.Event {
+	result := make([]a2a.Event, 0, 2)
+	if finalUpdate := processor.eventToArtifact.makeFinalUpdate(); finalUpdate != nil {
+		result = append(result, finalUpdate)
+	}
+	result = append(result, processor.makeFinalStatusUpdate())
+	return result
 }

@@ -58,8 +58,13 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			Agent: curAgent,
 		})
 
-		if err := llminternal.AgentTransferRequestProcessor(ctx, req); err != nil {
-			t.Fatalf("AgentTransferRequestProcessor() = %v, want success", err)
+		for ev, err := range llminternal.AgentTransferRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			if ev != nil {
+				t.Fatal("AgentTransferRequestProcessor generated an unexpected event")
+			}
+			if err != nil {
+				t.Fatalf("AgentTransferRequestProcessor failed: %v", err)
+			}
 		}
 
 		// We don't expect transfer. Check AgentTransferRequestProcessor was no-op.
@@ -408,9 +413,12 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 
 func TestAgentTransfer_ProcessRequest(t *testing.T) {
 	// First Tool
+	type Input struct {
+		x int
+	}
 	var req model.LLMRequest
-	handler := func(ctx tool.Context, x int) (int, error) {
-		return x, nil
+	handler := func(ctx tool.Context, input Input) (int, error) {
+		return input.x, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{
 		Name:        "identity",
@@ -445,7 +453,7 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		curTool := &llminternal.TransferToAgentTool{}
 
 		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-		ctx := toolinternal.NewToolContext(invCtx, "", &session.EventActions{})
+		ctx := toolinternal.NewToolContext(invCtx, "", &session.EventActions{}, nil)
 
 		wantAgentName := "TestAgent"
 		args := map[string]any{"agent_name": wantAgentName}
@@ -471,7 +479,7 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				curTool := &llminternal.TransferToAgentTool{}
-				ctx := toolinternal.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil)
+				ctx := toolinternal.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil, nil)
 				if got, err := curTool.Run(ctx, tc.args); err == nil {
 					t.Fatalf("Run(%v) = (%v, %v), want error", tc.args, got, err)
 				}

@@ -19,9 +19,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adkrest/internal/models"
 	"google.golang.org/adk/session"
@@ -29,14 +31,17 @@ import (
 
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
+	sseTimeout      time.Duration
 	sessionService  session.Service
+	memoryService   memory.Service
 	artifactService artifact.Service
 	agentLoader     agent.Loader
+	pluginConfig    runner.PluginConfig
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
-func NewRuntimeAPIController(sessionService session.Service, agentLoader agent.Loader, artifactService artifact.Service) *RuntimeAPIController {
-	return &RuntimeAPIController{sessionService: sessionService, agentLoader: agentLoader, artifactService: artifactService}
+func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig) *RuntimeAPIController {
+	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig}
 }
 
 // RunAgent executes a non-streaming agent run for a given session and message.
@@ -74,7 +79,7 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 	var events []*session.Event
 	for event, err := range resp {
 		if err != nil {
-			return nil, newStatusError(fmt.Errorf("run agent: %w", err), http.StatusInternalServerError)
+			return nil, newStatusError(fmt.Errorf("failed to run agent: %w", err), http.StatusInternalServerError)
 		}
 		events = append(events, event)
 	}
@@ -83,14 +88,17 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 
 // RunSSEHandler executes an agent run and streams the resulting events using Server-Sent Events (SSE).
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) error {
-	flusher, ok := rw.(http.Flusher)
-	if !ok {
-		return newStatusError(fmt.Errorf("streaming not supported"), http.StatusInternalServerError)
-	}
-
 	rw.Header().Set("Content-Type", "text/event-stream")
 	rw.Header().Set("Cache-Control", "no-cache")
 	rw.Header().Set("Connection", "keep-alive")
+
+	// set custom deadlines for this request - it overrides server-wide timeouts
+	rc := http.NewResponseController(rw)
+	deadline := time.Now().Add(c.sseTimeout)
+	err := rc.SetWriteDeadline(deadline)
+	if err != nil {
+		return newStatusError(fmt.Errorf("failed to set write deadline: %w", err), http.StatusInternalServerError)
+	}
 
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
@@ -109,17 +117,20 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg)
 
-	rw.WriteHeader(http.StatusOK)
 	for event, err := range resp {
 		if err != nil {
 			_, err := fmt.Fprintf(rw, "Error while running agent: %v\n", err)
 			if err != nil {
-				return newStatusError(fmt.Errorf("write response: %w", err), http.StatusInternalServerError)
+				return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
 			}
-			flusher.Flush()
+			err = rc.Flush()
+			if err != nil {
+				return newStatusError(fmt.Errorf("failed to flush: %w", err), http.StatusInternalServerError)
+			}
+
 			continue
 		}
-		err := flashEvent(flusher, rw, *event)
+		err := flashEvent(rc, rw, *event)
 		if err != nil {
 			return err
 		}
@@ -127,20 +138,23 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	return nil
 }
 
-func flashEvent(flusher http.Flusher, rw http.ResponseWriter, event session.Event) error {
+func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, event session.Event) error {
 	_, err := fmt.Fprintf(rw, "data: ")
 	if err != nil {
-		return newStatusError(fmt.Errorf("write response: %w", err), http.StatusInternalServerError)
+		return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
 	}
 	err = json.NewEncoder(rw).Encode(models.FromSessionEvent(event))
 	if err != nil {
-		return newStatusError(fmt.Errorf("encode response: %w", err), http.StatusInternalServerError)
+		return newStatusError(fmt.Errorf("failed to encode response: %w", err), http.StatusInternalServerError)
 	}
 	_, err = fmt.Fprintf(rw, "\n")
 	if err != nil {
-		return newStatusError(fmt.Errorf("write response: %w", err), http.StatusInternalServerError)
+		return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
 	}
-	flusher.Flush()
+	err = rc.Flush()
+	if err != nil {
+		return newStatusError(fmt.Errorf("failed to flush: %w", err), http.StatusInternalServerError)
+	}
 	return nil
 }
 
@@ -151,7 +165,7 @@ func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appNam
 		SessionID: sessionID,
 	})
 	if err != nil {
-		return newStatusError(fmt.Errorf("get session: %w", err), http.StatusNotFound)
+		return newStatusError(fmt.Errorf("failed to get session: %w", err), http.StatusNotFound)
 	}
 	return nil
 }
@@ -159,18 +173,20 @@ func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appNam
 func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Runner, *agent.RunConfig, error) {
 	curAgent, err := c.agentLoader.LoadAgent(req.AppName)
 	if err != nil {
-		return nil, nil, newStatusError(fmt.Errorf("load agent: %w", err), http.StatusInternalServerError)
+		return nil, nil, newStatusError(fmt.Errorf("failed to load agent: %w", err), http.StatusInternalServerError)
 	}
 
 	r, err := runner.New(runner.Config{
 		AppName:         req.AppName,
 		Agent:           curAgent,
 		SessionService:  c.sessionService,
+		MemoryService:   c.memoryService,
 		ArtifactService: c.artifactService,
+		PluginConfig:    c.pluginConfig,
 	},
 	)
 	if err != nil {
-		return nil, nil, newStatusError(fmt.Errorf("create runner: %w", err), http.StatusInternalServerError)
+		return nil, nil, newStatusError(fmt.Errorf("failed to create runner: %w", err), http.StatusInternalServerError)
 	}
 
 	streamingMode := agent.StreamingModeNone
@@ -190,7 +206,7 @@ func decodeRequestBody(req *http.Request) (decodedReq models.RunAgentRequest, er
 	d := json.NewDecoder(req.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(&runAgentRequest); err != nil {
-		return runAgentRequest, newStatusError(fmt.Errorf("decode request: %w", err), http.StatusBadRequest)
+		return runAgentRequest, newStatusError(fmt.Errorf("failed to decode request: %w", err), http.StatusBadRequest)
 	}
 	return runAgentRequest, nil
 }

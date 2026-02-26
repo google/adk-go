@@ -611,9 +611,6 @@ func TestToolCallbacksAgent(t *testing.T) {
 			eventStream := r.Run(ctx, "test_user", sessionID, userContent, agent.RunConfig{})
 
 			toolResults := collectToolResults(t, eventStream)
-			if err != nil {
-				t.Fatalf("Agent run failed: %v", err)
-			}
 
 			if len(toolResults) == 0 {
 				t.Fatalf("Expected tool results, got none")

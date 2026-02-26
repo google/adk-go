@@ -34,3 +34,20 @@ func ToMapStructure(data any) (map[string]any, error) {
 	}
 	return result, nil
 }
+
+// FromMapStructure converts map[string]any to the type parameter T.
+// We can't use mapstructure library in a way compatible with ADK-python, because genai type fields
+// don't have proper field tags.
+// TODO(yarolegovich): field annotation PR for genai types.
+func FromMapStructure[T any](data map[string]any) (*T, error) {
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var zero T
+	if err := json.Unmarshal(bytes, &zero); err != nil {
+		return nil, err
+	}
+	return &zero, nil
+}

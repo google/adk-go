@@ -328,22 +328,29 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 		return nil
 	}
 
-	// Trim temp state before persisting
-	event = trimTempDeltaState(event)
+	// Truncate timestamp to microsecond precision to match database precision and prevent rounding errors.
+	event.Timestamp = event.Timestamp.Truncate(time.Microsecond)
 
 	sess, ok := curSession.(*localSession)
 	if !ok {
 		return fmt.Errorf("unexpected session type %T", sess)
 	}
+	// append it to session
+	if err := sess.appendEvent(event); err != nil {
+		return err
+	}
 
+	// Trim temp state before persisting
+	event = trimTempDeltaState(event)
 	// applyChanges and persist them
 	err := s.applyEvent(ctx, sess, event)
 	if err != nil {
 		return err
 	}
 
-	// append it to session
-	return sess.appendEvent(event)
+	// update local session last update time
+	sess.updatedAt = event.Timestamp
+	return nil
 }
 
 // applyEvent fetches the session, validates it, applies state changes from an
@@ -363,9 +370,9 @@ func (s *databaseService) applyEvent(ctx context.Context, session *localSession,
 		}
 
 		// Ensure the session object is not stale.
-		// We use UnixNano() for microsecond-level precision, matching the Python code.
-		storageUpdateTime := storageSess.UpdateTime.UnixNano()
-		sessionUpdateTime := session.updatedAt.UnixNano()
+		// We use UnixMicro() for microsecond-level precision, matching the Python code.
+		storageUpdateTime := storageSess.UpdateTime.UnixMicro()
+		sessionUpdateTime := session.updatedAt.UnixMicro()
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
