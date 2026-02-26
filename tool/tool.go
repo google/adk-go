@@ -1,4 +1,4 @@
-// Copyright 2026 Google LLC
+// Copyright 2025 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -159,6 +159,7 @@ func (f *filteredToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 	return filtered, nil
 }
 
+// EXPERIMENTAL: ConfirmationProvider is experimental and not currently in scope for the v1.0 API.
 // ConfirmationProvider defines a function that dynamically determines whether
 // a specific tool execution requires user confirmation.
 //
@@ -167,6 +168,7 @@ func (f *filteredToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 // approval before proceeding with the execution.
 type ConfirmationProvider func(toolName string, toolInput any) bool
 
+// EXPERIMENTAL: WithConfirmation is experimental and not currently in scope for the v1.0 API.
 // WithConfirmation wraps a toolset to inject confirmation logic in each tool.
 // Only tools within the provided Toolset that implement the `runnableTool` interface
 // (i.e., provide a FunctionDeclaration and a Run method) will be wrapped with
@@ -197,7 +199,7 @@ func (c *confirmationToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 	for _, t := range tools {
 		if _, ok := t.(runnableTool); ok {
 			wrappedTools = append(wrappedTools, &confirmationTool{
-				Tool:                t,
+				runnableTool:        t.(runnableTool),
 				requireConfirmation: c.requireConfirmation,
 				provider:            c.requireConfirmationProvider,
 			})
@@ -213,7 +215,7 @@ func (c *confirmationToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 // confirmationTool is a wrapper around a tool that adds confirmation logic.
 // It implements tool.Tool and adk/internal/toolinternal.FunctionTool and adk/internal/toolinternal.RequestProcessor.
 type confirmationTool struct {
-	Tool
+	runnableTool
 	requireConfirmation bool
 	provider            ConfirmationProvider
 }
@@ -225,7 +227,7 @@ type runnableTool interface {
 }
 
 func (t *confirmationTool) Declaration() *genai.FunctionDeclaration {
-	return t.Tool.(runnableTool).Declaration()
+	return t.runnableTool.Declaration()
 }
 
 func (t *confirmationTool) ProcessRequest(ctx Context, req *model.LLMRequest) error {
@@ -233,12 +235,12 @@ func (t *confirmationTool) ProcessRequest(ctx Context, req *model.LLMRequest) er
 }
 
 func (t *confirmationTool) Run(ctx Context, args any) (map[string]any, error) {
-	ft := t.Tool.(runnableTool)
+	ft := t.runnableTool
 
 	// Check for Human-in-the-Loop confirmation.
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
-			return nil, fmt.Errorf("tool %q call is rejected", t.Tool.Name())
+			return nil, fmt.Errorf("tool %q call is rejected", t.runnableTool.Name())
 		}
 	} else {
 		requireConfirmation := t.requireConfirmation
