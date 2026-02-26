@@ -15,6 +15,7 @@
 package toolinternal
 
 import (
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/agent"
@@ -88,4 +89,58 @@ func TestRequestConfirmation_AutoGeneratesIDWhenEmpty(t *testing.T) {
 			t.Error("expected Confirmed to be false")
 		}
 	}
+}
+
+func TestInternalArtifacts_NilArtifactsService(t *testing.T) {
+	// Create a tool context with nil artifacts service
+	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{
+		Artifacts: nil, // Explicitly set to nil to simulate misconfiguration
+	})
+	toolCtx := NewToolContext(inv, "fn1", &session.EventActions{}, nil)
+
+	artifacts := toolCtx.Artifacts()
+
+	t.Run("List returns error for nil service", func(t *testing.T) {
+		_, err := artifacts.List(t.Context())
+		if err == nil {
+			t.Fatal("expected error when calling List on nil artifacts service, got nil")
+		}
+		expectedMsg := "artifact service is not configured"
+		if !strings.Contains(err.Error(), expectedMsg) {
+			t.Errorf("expected error message to contain %q, got %q", expectedMsg, err.Error())
+		}
+	})
+
+	t.Run("Load returns error for nil service", func(t *testing.T) {
+		_, err := artifacts.Load(t.Context(), "test.txt")
+		if err == nil {
+			t.Fatal("expected error when calling Load on nil artifacts service, got nil")
+		}
+		expectedMsg := "artifact service is not configured"
+		if !strings.Contains(err.Error(), expectedMsg) {
+			t.Errorf("expected error message to contain %q, got %q", expectedMsg, err.Error())
+		}
+	})
+
+	t.Run("LoadVersion returns error for nil service", func(t *testing.T) {
+		_, err := artifacts.LoadVersion(t.Context(), "test.txt", 1)
+		if err == nil {
+			t.Fatal("expected error when calling LoadVersion on nil artifacts service, got nil")
+		}
+		expectedMsg := "artifact service is not configured"
+		if !strings.Contains(err.Error(), expectedMsg) {
+			t.Errorf("expected error message to contain %q, got %q", expectedMsg, err.Error())
+		}
+	})
+
+	t.Run("Save returns error for nil service", func(t *testing.T) {
+		_, err := artifacts.Save(t.Context(), "test.txt", nil)
+		if err == nil {
+			t.Fatal("expected error when calling Save on nil artifacts service, got nil")
+		}
+		expectedMsg := "artifact service is not configured"
+		if !strings.Contains(err.Error(), expectedMsg) {
+			t.Errorf("expected error message to contain %q, got %q", expectedMsg, err.Error())
+		}
+	})
 }
