@@ -15,7 +15,6 @@
 package openai
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -29,16 +28,9 @@ import (
 )
 
 // convertToOpenAIMessages converts genai.Content to OpenAI message format.
-// This function manages conversation history by:
-// 1. Retrieving existing history for the session
-// 2. Converting new genai.Content messages to OpenAI format
-// 3. Appending them to history
-// 4. Returning the complete message list for the API call
-func (m *openaiModel) convertToOpenAIMessages(ctx context.Context, req *model.LLMRequest) ([]OpenAIMessage, error) {
-	// Extract session ID from context with logging
-	sessionID := extractSessionIDWithLogging(ctx, m.logger)
-
-	// Initialize result slice
+// The function is stateless — the ADK framework passes full conversation history
+// in req.Contents on every call.
+func (m *openaiModel) convertToOpenAIMessages(req *model.LLMRequest) ([]OpenAIMessage, error) {
 	var allMessages []OpenAIMessage
 
 	// Add SystemInstruction if present (must be first message with role "system")
@@ -57,11 +49,9 @@ func (m *openaiModel) convertToOpenAIMessages(ctx context.Context, req *model.LL
 	// JSON Mode Safety: OpenAI requires "JSON" keyword in prompt when using json_object mode
 	jsonModeEnabled := req.Config != nil && req.Config.ResponseMIMEType == "application/json"
 	if jsonModeEnabled {
-		// Check if "JSON" keyword exists in system instruction
 		hasJSONKeyword := strings.Contains(strings.ToUpper(systemText), "JSON")
 
 		if !hasJSONKeyword {
-			// Add JSON instruction to system prompt
 			jsonInstruction := "You must respond with valid JSON."
 			if systemText != "" {
 				systemText = systemText + "\n\n" + jsonInstruction
@@ -83,31 +73,15 @@ func (m *openaiModel) convertToOpenAIMessages(ctx context.Context, req *model.LL
 		})
 	}
 
-	// Get existing history
-	history := m.getConversationHistory(sessionID)
-	if history == nil {
-		history = make([]*OpenAIMessage, 0)
-	}
-
-	// Convert new contents
-	newMessages := make([]*OpenAIMessage, 0, len(req.Contents))
+	// Convert contents from the request
 	for _, content := range req.Contents {
 		msgs, err := m.convertContent(content)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert content: %w", err)
 		}
-		newMessages = append(newMessages, msgs...)
-	}
-
-	// Add new messages to history
-	m.addToHistory(sessionID, newMessages...)
-
-	// Combine: System + History + New messages
-	for _, msg := range history {
-		allMessages = append(allMessages, *msg)
-	}
-	for _, msg := range newMessages {
-		allMessages = append(allMessages, *msg)
+		for _, msg := range msgs {
+			allMessages = append(allMessages, *msg)
+		}
 	}
 
 	return allMessages, nil

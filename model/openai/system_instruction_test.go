@@ -15,7 +15,6 @@
 package openai
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -35,8 +34,6 @@ func TestSystemInstruction(t *testing.T) {
 	}
 
 	om := m.(*openaiModel)
-	ctx := context.Background()
-
 	tests := []struct {
 		name              string
 		systemInstruction *genai.Content
@@ -82,7 +79,7 @@ func TestSystemInstruction(t *testing.T) {
 				},
 			}
 
-			msgs, err := om.convertToOpenAIMessages(ctx, req)
+			msgs, err := om.convertToOpenAIMessages(req)
 			if err != nil {
 				t.Fatalf("convertToOpenAIMessages() error = %v", err)
 			}
@@ -123,8 +120,6 @@ func TestJSONModeSafety(t *testing.T) {
 	}
 
 	om := m.(*openaiModel)
-	ctx := context.Background()
-
 	tests := []struct {
 		name              string
 		systemInstruction *genai.Content
@@ -180,7 +175,7 @@ func TestJSONModeSafety(t *testing.T) {
 				},
 			}
 
-			msgs, err := om.convertToOpenAIMessages(ctx, req)
+			msgs, err := om.convertToOpenAIMessages(req)
 			if err != nil {
 				t.Fatalf("convertToOpenAIMessages() error = %v", err)
 			}
@@ -215,7 +210,6 @@ func TestSystemInstructionOrder(t *testing.T) {
 	}
 
 	om := m.(*openaiModel)
-	ctx := context.Background()
 
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
@@ -231,7 +225,7 @@ func TestSystemInstructionOrder(t *testing.T) {
 		},
 	}
 
-	msgs, err := om.convertToOpenAIMessages(ctx, req)
+	msgs, err := om.convertToOpenAIMessages(req)
 	if err != nil {
 		t.Fatalf("convertToOpenAIMessages() error = %v", err)
 	}

@@ -42,7 +42,7 @@ type StreamChunk struct {
 func (m *openaiModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		// Convert genai.Content to OpenAI messages
-		messages, err := m.convertToOpenAIMessages(ctx, req)
+		messages, err := m.convertToOpenAIMessages(req)
 		if err != nil {
 			yield(nil, fmt.Errorf("failed to convert messages: %w", err))
 			return
@@ -55,77 +55,10 @@ func (m *openaiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 		}
 
 		// Build OpenAI request
-		chatReq := ChatCompletionRequest{
-			Model:    m.name,
-			Messages: messages,
-			Stream:   true,
-		}
+		chatReq := m.buildChatRequest(messages, true, req)
 
-		// Add configuration from req.Config
-		if req.Config != nil {
-			if req.Config.Temperature != nil {
-				chatReq.Temperature = req.Config.Temperature
-			}
-			if req.Config.TopP != nil {
-				chatReq.TopP = req.Config.TopP
-			}
-			if req.Config.MaxOutputTokens > 0 {
-				tokens := req.Config.MaxOutputTokens
-				chatReq.MaxTokens = &tokens
-			}
-			if len(req.Config.StopSequences) > 0 {
-				chatReq.Stop = req.Config.StopSequences
-			}
-			if req.Config.PresencePenalty != nil {
-				chatReq.PresencePenalty = req.Config.PresencePenalty
-			}
-			if req.Config.FrequencyPenalty != nil {
-				chatReq.FrequencyPenalty = req.Config.FrequencyPenalty
-			}
-			if req.Config.Seed != nil {
-				chatReq.Seed = req.Config.Seed
-			}
-			if req.Config.CandidateCount > 0 {
-				chatReq.N = req.Config.CandidateCount
-			}
-			// Logprobs support (streaming also supports logprobs)
-			if req.Config.ResponseLogprobs {
-				chatReq.Logprobs = true
-				if req.Config.Logprobs != nil {
-					chatReq.TopLogprobs = req.Config.Logprobs
-				}
-			}
-			// Map ResponseMIMEType to OpenAI response_format
-			if req.Config.ResponseMIMEType != "" {
-				if req.Config.ResponseMIMEType == "application/json" {
-					chatReq.ResponseFormat = &ResponseFormat{Type: "json_object"}
-				}
-			}
-			// ResponseSchema for structured outputs
-			if req.Config.ResponseSchema != nil {
-				schema := convertGenaiSchemaToMap(req.Config.ResponseSchema)
-				chatReq.ResponseFormat = &ResponseFormat{
-					Type: "json_schema",
-					JSONSchema: &JSONSchemaRef{
-						Name:   "response_schema",
-						Schema: schema,
-						Strict: true,
-					},
-				}
-			}
-		}
-
-		// Add tools if present
-		if len(req.Tools) > 0 {
-			chatReq.Tools = m.convertTools(req.Tools)
-			chatReq.ToolChoice = "auto"
-		}
-
-		// Extract session ID for history saving
-		sessionID := extractSessionIDWithLogging(ctx, m.logger)
-
-		// Make streaming API call with history callback
-		if err := m.streamRequest(ctx, chatReq, sessionID, yield); err != nil {
+		// Make streaming API call
+		if err := m.streamRequest(ctx, chatReq, yield); err != nil {
 			yield(nil, err)
 			return
 		}
@@ -133,14 +66,10 @@ func (m *openaiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 }
 
 // streamRequest makes a streaming HTTP request and processes SSE events.
-func (m *openaiModel) streamRequest(ctx context.Context, req ChatCompletionRequest, sessionID string, yield func(*model.LLMResponse, error) bool) error {
-	buf := m.jsonPool.Get().(*bytes.Buffer)
-	defer func() {
-		buf.Reset()
-		m.jsonPool.Put(buf)
-	}()
+func (m *openaiModel) streamRequest(ctx context.Context, req ChatCompletionRequest, yield func(*model.LLMResponse, error) bool) error {
+	var buf bytes.Buffer
 
-	if err := json.NewEncoder(buf).Encode(req); err != nil {
+	if err := json.NewEncoder(&buf).Encode(req); err != nil {
 		return fmt.Errorf("failed to encode request: %w", err)
 	}
 
@@ -167,13 +96,11 @@ func (m *openaiModel) streamRequest(ctx context.Context, req ChatCompletionReque
 		return fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
-	// Process SSE stream with history saving callback
-	return m.processSSEStream(resp.Body, sessionID, yield)
+	return m.processSSEStream(resp.Body, yield)
 }
 
 // processSSEStream reads and processes Server-Sent Events.
-// sessionID is used to save the final response to conversation history.
-func (m *openaiModel) processSSEStream(reader io.Reader, sessionID string, yield func(*model.LLMResponse, error) bool) error {
+func (m *openaiModel) processSSEStream(reader io.Reader, yield func(*model.LLMResponse, error) bool) error {
 	scanner := bufio.NewScanner(reader)
 
 	// Aggregator for combining streaming chunks
@@ -181,23 +108,6 @@ func (m *openaiModel) processSSEStream(reader io.Reader, sessionID string, yield
 	var aggregatedToolCalls []ToolCall
 	var lastChunk *StreamChunk
 	var finalSent bool // Track if we've already sent the final response
-
-	// Helper to save response to history
-	saveToHistory := func(text string, toolCalls []ToolCall) {
-		if sessionID == "" {
-			return
-		}
-		responseMsg := &OpenAIMessage{
-			Role: "assistant",
-		}
-		if text != "" {
-			responseMsg.Content = text
-		}
-		if len(toolCalls) > 0 {
-			responseMsg.ToolCalls = toolCalls
-		}
-		m.addToHistory(sessionID, responseMsg)
-	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -214,9 +124,6 @@ func (m *openaiModel) processSSEStream(reader io.Reader, sessionID string, yield
 		if data == "[DONE]" {
 			// Only send final response if we haven't already sent it via FinishReason
 			if !finalSent && (aggregatedText.Len() > 0 || len(aggregatedToolCalls) > 0) {
-				// Save to history before yielding
-				saveToHistory(aggregatedText.String(), aggregatedToolCalls)
-
 				finalResp := m.createFinalResponse(aggregatedText.String(), aggregatedToolCalls)
 				if !yield(finalResp, nil) {
 					return nil
@@ -274,9 +181,6 @@ func (m *openaiModel) processSSEStream(reader io.Reader, sessionID string, yield
 
 		// Check for finish
 		if choice.FinishReason != "" && choice.FinishReason != "null" {
-			// Save to history before yielding final response
-			saveToHistory(aggregatedText.String(), aggregatedToolCalls)
-
 			// Send final response
 			finalResp := m.createFinalResponse(aggregatedText.String(), aggregatedToolCalls)
 			finalResp.TurnComplete = true

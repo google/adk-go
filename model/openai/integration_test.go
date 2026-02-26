@@ -126,7 +126,7 @@ func TestIntegrationSimpleToolCall(t *testing.T) {
 	}
 
 	// Convert to OpenAI format with tools
-	messages, err := om.convertToOpenAIMessages(ctx, req)
+	messages, err := om.convertToOpenAIMessages(req)
 	if err != nil {
 		t.Fatalf("Failed to convert messages: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestIntegrationToolCallChain(t *testing.T) {
 		},
 	}
 
-	messages, err := om.convertToOpenAIMessages(ctx, req)
+	messages, err := om.convertToOpenAIMessages(req)
 	if err != nil {
 		t.Fatalf("Failed to convert messages: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestIntegrationToolError(t *testing.T) {
 		},
 	}
 
-	messages, err := om.convertToOpenAIMessages(ctx, req)
+	messages, err := om.convertToOpenAIMessages(req)
 	if err != nil {
 		t.Fatalf("Failed to convert messages: %v", err)
 	}

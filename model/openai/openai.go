@@ -24,27 +24,12 @@
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	defer model.(*openaiModel).Close() // Important: prevents goroutine leak
 //
-// # Session Management
+// # Stateless Design
 //
-// The adapter maintains conversation history per session. To enable multi-turn
-// conversations, you must pass a session ID in the context:
-//
-//	ctx := openai.WithSessionID(context.Background(), "user-123")
-//	model.GenerateContent(ctx, req, false)
-//
-// Without a session ID, each request starts a new conversation and history is lost.
-// If no session ID is provided, a UUID is auto-generated (with a warning logged).
-//
-// # Resource Cleanup
-//
-// The model starts a background goroutine for session cleanup. Call Close() when
-// the model is no longer needed to prevent goroutine leaks:
-//
-//	if closer, ok := model.(interface{ Close() error }); ok {
-//	    defer closer.Close()
-//	}
+// The adapter is stateless — it does not maintain conversation history internally.
+// The ADK framework passes full conversation history in req.Contents on every
+// GenerateContent() call (built by ContentsRequestProcessor from session events).
 //
 // # Compatibility Notes
 //
@@ -64,17 +49,14 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"google.golang.org/adk/model"
 )
 
 const (
-	defaultMaxHistoryLength = 50
-	defaultSessionTTL       = 1 * time.Hour
-	defaultMaxRetries       = 3
-	defaultTimeout          = 120 * time.Second
+	defaultMaxRetries = 3
+	defaultTimeout    = 120 * time.Second
 )
 
 // OpenAIMessage represents a message in OpenAI chat format.
@@ -331,12 +313,6 @@ func validateMessageSequence(messages []OpenAIMessage) error {
 	return nil
 }
 
-// conversationState holds the history for a session.
-type conversationState struct {
-	history    []*OpenAIMessage
-	lastAccess time.Time
-}
-
 // Config holds configuration for the OpenAI adapter.
 type Config struct {
 	// BaseURL is the API endpoint (e.g., "https://api.openai.com/v1" or "http://localhost:1234/v1")
@@ -345,10 +321,6 @@ type Config struct {
 	APIKey string
 	// HTTPClient for making requests (optional, will use default if nil)
 	HTTPClient *http.Client
-	// MaxHistoryLength is the maximum number of messages to keep in history
-	MaxHistoryLength int
-	// SessionTTL is how long to keep session history before cleanup
-	SessionTTL time.Duration
 	// MaxRetries for failed requests
 	MaxRetries int
 	// Timeout for HTTP requests
@@ -360,27 +332,14 @@ type Config struct {
 }
 
 type openaiModel struct {
-	name             string
-	baseURL          string
-	apiKey           string
-	httpClient       *http.Client
-	maxHistoryLength int
-	sessionTTL       time.Duration
-	maxRetries       int
-	timeout          time.Duration
-	logger           *log.Logger
-	debugLogging     bool
-
-	// Conversation state management
-	conversations map[string]*conversationState
-	mu            sync.RWMutex
-
-	// JSON pool for performance
-	jsonPool sync.Pool
-
-	// Cleanup goroutine control
-	stopCleanup chan struct{}
-	cleanupDone chan struct{}
+	name         string
+	baseURL      string
+	apiKey       string
+	httpClient   *http.Client
+	maxRetries   int
+	timeout      time.Duration
+	logger       *log.Logger
+	debugLogging bool
 }
 
 // NewModel creates a new OpenAI-compatible model adapter.
@@ -393,17 +352,6 @@ func NewModel(modelName string, cfg *Config) (model.LLM, error) {
 	}
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("BaseURL must be specified")
-	}
-
-	// Set defaults
-	maxHistoryLength := cfg.MaxHistoryLength
-	if maxHistoryLength == 0 {
-		maxHistoryLength = defaultMaxHistoryLength
-	}
-
-	sessionTTL := cfg.SessionTTL
-	if sessionTTL == 0 {
-		sessionTTL = defaultSessionTTL
 	}
 
 	maxRetries := cfg.MaxRetries
@@ -424,28 +372,15 @@ func NewModel(modelName string, cfg *Config) (model.LLM, error) {
 	}
 
 	m := &openaiModel{
-		name:             modelName,
-		baseURL:          strings.TrimSuffix(cfg.BaseURL, "/"),
-		apiKey:           cfg.APIKey,
-		httpClient:       httpClient,
-		maxHistoryLength: maxHistoryLength,
-		sessionTTL:       sessionTTL,
-		maxRetries:       maxRetries,
-		timeout:          timeout,
-		logger:           cfg.Logger,
-		debugLogging:     cfg.DebugLogging,
-		conversations:    make(map[string]*conversationState),
-		jsonPool: sync.Pool{
-			New: func() interface{} {
-				return new(bytes.Buffer)
-			},
-		},
-		stopCleanup: make(chan struct{}),
-		cleanupDone: make(chan struct{}),
+		name:         modelName,
+		baseURL:      strings.TrimSuffix(cfg.BaseURL, "/"),
+		apiKey:       cfg.APIKey,
+		httpClient:   httpClient,
+		maxRetries:   maxRetries,
+		timeout:      timeout,
+		logger:       cfg.Logger,
+		debugLogging: cfg.DebugLogging,
 	}
-
-	// Start cleanup goroutine for expired sessions
-	go m.cleanupExpiredSessions()
 
 	return m, nil
 }
@@ -466,128 +401,15 @@ func (m *openaiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	}
 }
 
-// cleanupExpiredSessions removes old conversation states periodically.
-// This goroutine runs until Close() is called.
-func (m *openaiModel) cleanupExpiredSessions() {
-	defer close(m.cleanupDone)
-
-	ticker := time.NewTicker(m.sessionTTL / 2)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-m.stopCleanup:
-			return
-		case <-ticker.C:
-			m.mu.Lock()
-			now := time.Now()
-			for sessionID, state := range m.conversations {
-				if now.Sub(state.lastAccess) > m.sessionTTL {
-					delete(m.conversations, sessionID)
-				}
-			}
-			m.mu.Unlock()
-		}
-	}
-}
-
-// Close stops the background cleanup goroutine and releases resources.
-// This should be called when the model is no longer needed to prevent goroutine leaks.
+// Close is a no-op retained for backward compatibility.
 func (m *openaiModel) Close() error {
-	close(m.stopCleanup)
-	<-m.cleanupDone // Wait for cleanup goroutine to finish
 	return nil
-}
-
-// getConversationHistory retrieves the conversation history for a session.
-// Returns nil if no history exists or if the session has expired.
-func (m *openaiModel) getConversationHistory(sessionID string) []*OpenAIMessage {
-	if sessionID == "" {
-		return nil
-	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	state, exists := m.conversations[sessionID]
-	if !exists {
-		return nil
-	}
-
-	// Check TTL
-	if time.Since(state.lastAccess) > m.sessionTTL {
-		return nil
-	}
-
-	// Return a copy to prevent concurrent modification
-	history := make([]*OpenAIMessage, len(state.history))
-	copy(history, state.history)
-
-	return history
-}
-
-// addToHistory adds messages to the conversation history for a session.
-// Validates each message before adding. If validation fails, logs error and skips the message.
-func (m *openaiModel) addToHistory(sessionID string, msgs ...*OpenAIMessage) {
-	if sessionID == "" {
-		return
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	state, exists := m.conversations[sessionID]
-	if !exists {
-		state = &conversationState{
-			history: make([]*OpenAIMessage, 0, m.maxHistoryLength),
-		}
-		m.conversations[sessionID] = state
-	}
-
-	// Validate and add messages
-	for _, msg := range msgs {
-		if err := validateMessage(msg); err != nil {
-			// Log validation error if logger is available
-			if m.logger != nil {
-				m.logger.Printf("WARNING: Invalid message skipped: %v", err)
-			}
-			// Skip invalid message
-			continue
-		}
-		state.history = append(state.history, msg)
-	}
-
-	state.lastAccess = time.Now()
-
-	// Trim if exceeds max length (keep system message if present)
-	if len(state.history) > m.maxHistoryLength {
-		systemMsg := []*OpenAIMessage{}
-		if len(state.history) > 0 && state.history[0].Role == "system" {
-			systemMsg = append(systemMsg, state.history[0])
-		}
-
-		// Keep the most recent messages
-		startIdx := len(state.history) - m.maxHistoryLength + len(systemMsg)
-		state.history = append(systemMsg, state.history[startIdx:]...)
-	}
-}
-
-// clearHistory removes all conversation history for a session.
-func (m *openaiModel) clearHistory(sessionID string) {
-	if sessionID == "" {
-		return
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	delete(m.conversations, sessionID)
 }
 
 // generate calls the model synchronously.
 func (m *openaiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	// Convert genai.Content to OpenAI messages
-	messages, err := m.convertToOpenAIMessages(ctx, req)
+	messages, err := m.convertToOpenAIMessages(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert messages: %w", err)
 	}
@@ -598,13 +420,47 @@ func (m *openaiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 	}
 
 	// Build OpenAI request
+	chatReq := m.buildChatRequest(messages, false, req)
+
+	// Make API call
+	respData, err := m.makeRequest(ctx, chatReq)
+	if err != nil {
+		return nil, err
+	}
+
+	var chatResp ChatCompletionResponse
+	if err := json.Unmarshal(respData, &chatResp); err != nil {
+		return nil, &OpenAIError{
+			Type:    ErrorTypeInvalidJSON,
+			Message: fmt.Sprintf("failed to parse response: %v", err),
+			Details: truncateString(string(respData), 200),
+		}
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return nil, &OpenAIError{
+			Type:    ErrorTypeUnknown,
+			Message: "no choices in response",
+			Details: chatResp,
+		}
+	}
+
+	// Get the response message and logprobs
+	choice := &chatResp.Choices[0]
+	responseMsg := &choice.Message
+
+	// Convert back to genai format (including logprobs if present)
+	return m.convertToLLMResponse(responseMsg, &chatResp.Usage, choice.Logprobs)
+}
+
+// buildChatRequest constructs a ChatCompletionRequest from messages and LLMRequest config.
+func (m *openaiModel) buildChatRequest(messages []OpenAIMessage, stream bool, req *model.LLMRequest) ChatCompletionRequest {
 	chatReq := ChatCompletionRequest{
 		Model:    m.name,
 		Messages: messages,
-		Stream:   false,
+		Stream:   stream,
 	}
 
-	// Add configuration from req.Config
 	if req.Config != nil {
 		if req.Config.Temperature != nil {
 			chatReq.Temperature = req.Config.Temperature
@@ -643,7 +499,6 @@ func (m *openaiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 			if req.Config.ResponseMIMEType == "application/json" {
 				chatReq.ResponseFormat = &ResponseFormat{Type: "json_object"}
 			}
-			// "text/plain" maps to default (no response_format)
 		}
 		// ResponseSchema for structured outputs
 		if req.Config.ResponseSchema != nil {
@@ -665,53 +520,14 @@ func (m *openaiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 		chatReq.ToolChoice = "auto"
 	}
 
-	// Make API call
-	respData, err := m.makeRequest(ctx, chatReq)
-	if err != nil {
-		return nil, err
-	}
-
-	var chatResp ChatCompletionResponse
-	if err := json.Unmarshal(respData, &chatResp); err != nil {
-		return nil, &OpenAIError{
-			Type:    ErrorTypeInvalidJSON,
-			Message: fmt.Sprintf("failed to parse response: %v", err),
-			Details: truncateString(string(respData), 200),
-		}
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return nil, &OpenAIError{
-			Type:    ErrorTypeUnknown,
-			Message: "no choices in response",
-			Details: chatResp,
-		}
-	}
-
-	// Get the response message and logprobs
-	choice := &chatResp.Choices[0]
-	responseMsg := &choice.Message
-
-	// Add response to history (even if no tools were used)
-	sessionID := extractSessionIDWithLogging(ctx, m.logger)
-	if sessionID != "" {
-		m.addToHistory(sessionID, responseMsg)
-	}
-
-	// Convert back to genai format (including logprobs if present)
-	return m.convertToLLMResponse(responseMsg, &chatResp.Usage, choice.Logprobs)
+	return chatReq
 }
-
 
 // makeRequest makes an HTTP request to the OpenAI API.
 func (m *openaiModel) makeRequest(ctx context.Context, req ChatCompletionRequest) ([]byte, error) {
-	buf := m.jsonPool.Get().(*bytes.Buffer)
-	defer func() {
-		buf.Reset()
-		m.jsonPool.Put(buf)
-	}()
+	var buf bytes.Buffer
 
-	if err := json.NewEncoder(buf).Encode(req); err != nil {
+	if err := json.NewEncoder(&buf).Encode(req); err != nil {
 		return nil, fmt.Errorf("failed to encode request: %w", err)
 	}
 

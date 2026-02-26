@@ -74,58 +74,6 @@ func TestNewModel(t *testing.T) {
 	}
 }
 
-func TestConversationHistoryManagement(t *testing.T) {
-	cfg := &Config{
-		BaseURL:          "http://localhost:1234/v1",
-		MaxHistoryLength: 5,
-		SessionTTL:       1 * time.Second,
-	}
-
-	m, err := NewModel("test-model", cfg)
-	if err != nil {
-		t.Fatalf("Failed to create model: %v", err)
-	}
-
-	om := m.(*openaiModel)
-
-	// Test adding to history
-	sessionID := "test-session"
-	msg1 := &OpenAIMessage{Role: "user", Content: "Hello"}
-	msg2 := &OpenAIMessage{Role: "assistant", Content: "Hi there"}
-
-	om.addToHistory(sessionID, msg1, msg2)
-
-	history := om.getConversationHistory(sessionID)
-	if len(history) != 2 {
-		t.Errorf("Expected 2 messages in history, got %d", len(history))
-	}
-
-	// Test max history length
-	for i := 0; i < 10; i++ {
-		om.addToHistory(sessionID, &OpenAIMessage{Role: "user", Content: "test"})
-	}
-
-	history = om.getConversationHistory(sessionID)
-	if len(history) > cfg.MaxHistoryLength {
-		t.Errorf("History length %d exceeds max %d", len(history), cfg.MaxHistoryLength)
-	}
-
-	// Test TTL expiration
-	time.Sleep(2 * time.Second)
-	history = om.getConversationHistory(sessionID)
-	if history != nil {
-		t.Error("Expected history to be nil after TTL expiration")
-	}
-
-	// Test clear history
-	om.addToHistory(sessionID, msg1)
-	om.clearHistory(sessionID)
-	history = om.getConversationHistory(sessionID)
-	if history != nil {
-		t.Error("Expected history to be nil after clearing")
-	}
-}
-
 func TestGenerateContent(t *testing.T) {
 	// Create mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -393,5 +341,105 @@ func TestConvertContent(t *testing.T) {
 				t.Errorf("convertContent() returned %d messages, want %d", len(msgs), tt.wantMsgs)
 			}
 		})
+	}
+}
+
+func TestBuildChatRequest(t *testing.T) {
+	cfg := &Config{
+		BaseURL: "http://localhost:1234/v1",
+	}
+
+	m, err := NewModel("test-model", cfg)
+	if err != nil {
+		t.Fatalf("Failed to create model: %v", err)
+	}
+
+	om := m.(*openaiModel)
+
+	temp := float32(0.7)
+	topP := float32(0.9)
+	presP := float32(0.1)
+	freqP := float32(0.2)
+	seed := int32(42)
+	logprobs := int32(5)
+
+	req := &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{
+			Temperature:      &temp,
+			TopP:             &topP,
+			MaxOutputTokens:  1024,
+			StopSequences:    []string{"STOP"},
+			PresencePenalty:  &presP,
+			FrequencyPenalty: &freqP,
+			Seed:             &seed,
+			CandidateCount:   2,
+			ResponseLogprobs: true,
+			Logprobs:         &logprobs,
+		},
+		Tools: map[string]any{
+			"my_tool": map[string]any{
+				"description": "A test tool",
+			},
+		},
+	}
+
+	messages := []OpenAIMessage{{Role: "user", Content: "hello"}}
+
+	chatReq := om.buildChatRequest(messages, false, req)
+
+	if chatReq.Model != "test-model" {
+		t.Errorf("Expected model 'test-model', got %q", chatReq.Model)
+	}
+	if chatReq.Stream {
+		t.Error("Expected stream=false")
+	}
+	if *chatReq.Temperature != 0.7 {
+		t.Errorf("Expected temperature 0.7, got %v", *chatReq.Temperature)
+	}
+	if *chatReq.TopP != 0.9 {
+		t.Errorf("Expected topP 0.9, got %v", *chatReq.TopP)
+	}
+	if *chatReq.MaxTokens != 1024 {
+		t.Errorf("Expected maxTokens 1024, got %v", *chatReq.MaxTokens)
+	}
+	if len(chatReq.Stop) != 1 || chatReq.Stop[0] != "STOP" {
+		t.Errorf("Expected stop=['STOP'], got %v", chatReq.Stop)
+	}
+	if *chatReq.PresencePenalty != 0.1 {
+		t.Errorf("Expected presencePenalty 0.1, got %v", *chatReq.PresencePenalty)
+	}
+	if *chatReq.FrequencyPenalty != 0.2 {
+		t.Errorf("Expected frequencyPenalty 0.2, got %v", *chatReq.FrequencyPenalty)
+	}
+	if *chatReq.Seed != 42 {
+		t.Errorf("Expected seed 42, got %v", *chatReq.Seed)
+	}
+	if chatReq.N != 2 {
+		t.Errorf("Expected N=2, got %d", chatReq.N)
+	}
+	if !chatReq.Logprobs {
+		t.Error("Expected logprobs=true")
+	}
+	if *chatReq.TopLogprobs != 5 {
+		t.Errorf("Expected topLogprobs=5, got %v", *chatReq.TopLogprobs)
+	}
+	if len(chatReq.Tools) != 1 {
+		t.Errorf("Expected 1 tool, got %d", len(chatReq.Tools))
+	}
+	if chatReq.ToolChoice != "auto" {
+		t.Errorf("Expected toolChoice='auto', got %v", chatReq.ToolChoice)
+	}
+
+	// Test stream=true
+	chatReqStream := om.buildChatRequest(messages, true, req)
+	if !chatReqStream.Stream {
+		t.Error("Expected stream=true for streaming request")
+	}
+
+	// Test nil config
+	reqNoConfig := &model.LLMRequest{Config: nil}
+	chatReqNoConfig := om.buildChatRequest(messages, false, reqNoConfig)
+	if chatReqNoConfig.Temperature != nil {
+		t.Error("Expected nil temperature with nil config")
 	}
 }
