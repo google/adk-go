@@ -146,6 +146,9 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 				InvocationID: "inv_1",
 				Author:       "agent_1",
 				Branch:       "main",
+				Actions: session.EventActions{
+					StateDelta: map[string]any{},
+				},
 				LLMResponse: model.LLMResponse{
 					Content: &genai.Content{
 						Role: genai.RoleModel,
@@ -187,5 +190,64 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestGenerateRequestConfirmationEventHasID verifies that the event returned
+// by generateRequestConfirmationEvent always has a non-empty ID.
+//
+// In Python ADK, every Event gets a UUID via model_post_init:
+//
+//	def model_post_init(self, __context):
+//	    if not self.id:
+//	        self.id = Event.new_id()   # str(uuid.uuid4())
+//
+// In Go ADK, events must be created with session.NewEvent() to get an ID.
+// A raw &session.Event{} literal leaves ID as "" which breaks features
+// that rely on event IDs (e.g. time-travel restart_from_event_id).
+func TestGenerateRequestConfirmationEventHasID(t *testing.T) {
+	confirmingFunctionCall := &genai.FunctionCall{
+		ID:   "call_1",
+		Name: "test_tool",
+		Args: map[string]any{"arg": "val"},
+	}
+
+	ctx := &mockInvocationContext{
+		invocationID: "inv_1",
+		agentName:    "agent_1",
+		branch:       "main",
+	}
+
+	functionCallEvent := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{FunctionCall: confirmingFunctionCall},
+				},
+			},
+		},
+	}
+
+	functionResponseEvent := &session.Event{
+		Actions: session.EventActions{
+			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+				"call_1": {
+					Hint: "Are you sure?",
+				},
+			},
+		},
+	}
+
+	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if got == nil {
+		t.Fatal("expected non-nil event")
+	}
+
+	if got.ID == "" {
+		t.Error("event ID is empty; events must have a UUID for time-travel and session lookup")
+	}
+
+	if got.InvocationID != "inv_1" {
+		t.Errorf("expected InvocationID=\"inv_1\", got %q", got.InvocationID)
 	}
 }
