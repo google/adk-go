@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/llminternal/googlellm"
+	"google.golang.org/adk/internal/schemautil"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -134,7 +135,11 @@ func (t *setModelResponseTool) Run(ctx tool.Context, args any) (map[string]any, 
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type for set_model_response: %T", args)
 	}
-	if err := utils.ValidateMapOnSchema(m, t.schema, false); err != nil {
+	resolved, err := schemautil.GenaiToResolvedJSONSchema(t.schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve output schema: %w", err)
+	}
+	if err := resolved.Validate(m); err != nil {
 		return nil, fmt.Errorf("invalid output schema: %w", err)
 	}
 	return m, nil
