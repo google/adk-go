@@ -15,6 +15,8 @@
 package googlellm
 
 import (
+	"context"
+	"iter"
 	"testing"
 
 	"google.golang.org/genai"
@@ -68,28 +70,33 @@ func TestIsGeminiModel(t *testing.T) {
 
 func TestNeedsOutputSchemaProcessor(t *testing.T) {
 	testCases := []struct {
-		name    string
-		model   string
-		variant genai.Backend
-		want    bool
+		name string
+		llm  model.LLM
+		want bool
 	}{
-		{"Gemini2.0_Vertex", "gemini-2.0-flash", genai.BackendVertexAI, false},
-		{"Gemini2.0_GeminiAPI", "gemini-2.0-flash", genai.BackendGeminiAPI, true},
-		{"NonGemini_Vertex", "not-a-gemini", genai.BackendVertexAI, false},
-		{"Gemini3.0_GeminiAPI", "gemini-3.0", genai.BackendGeminiAPI, false},
-		{"Gemini3.0_Vertex", "gemini-3.0", genai.BackendVertexAI, false},
-		{"CustomGemini2", "gemini-2.0-hack", genai.BackendUnspecified, false},
-		{"CustomGemini3", "gemini-3.0-hack", genai.BackendUnspecified, false},
+		// Gemini models on Vertex AI have native support
+		{"Gemini2.0_Vertex", &mockGoogleLLM{nameVal: "gemini-2.0-flash", variant: genai.BackendVertexAI}, false},
+		{"Gemini3.0_Vertex", &mockGoogleLLM{nameVal: "gemini-3.0", variant: genai.BackendVertexAI}, false},
+		// Gemini <= 2.5 on Gemini API need the processor
+		{"Gemini2.0_GeminiAPI", &mockGoogleLLM{nameVal: "gemini-2.0-flash", variant: genai.BackendGeminiAPI}, true},
+		// Gemini >= 3.0 on Gemini API have native support
+		{"Gemini3.0_GeminiAPI", &mockGoogleLLM{nameVal: "gemini-3.0", variant: genai.BackendGeminiAPI}, false},
+		// Unspecified backend defaults to no processor (conservative)
+		{"CustomGemini2", &mockGoogleLLM{nameVal: "gemini-2.0-hack", variant: genai.BackendUnspecified}, false},
+		{"CustomGemini3", &mockGoogleLLM{nameVal: "gemini-3.0-hack", variant: genai.BackendUnspecified}, false},
+		// Non-Gemini models (Bedrock/Claude/GPT) always need the processor
+		{"Claude_Sonnet", &simpleLLM{name: "claude-3-5-sonnet"}, true},
+		{"Claude_Opus", &simpleLLM{name: "anthropic.claude-v2"}, true},
+		{"Bedrock_Claude", &simpleLLM{name: "bedrock/anthropic.claude-3-sonnet"}, true},
+		{"GPT4", &simpleLLM{name: "gpt-4"}, true},
+		{"CustomModel", &simpleLLM{name: "my-custom-model"}, true},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := NeedsOutputSchemaProcessor(&mockGoogleLLM{
-				variant: tc.variant,
-				nameVal: tc.model,
-			})
+			got := NeedsOutputSchemaProcessor(tc.llm)
 			if got != tc.want {
-				t.Errorf("NeedsOutputSchemaProcessor(%q) = %v, want %v", tc.model, got, tc.want)
+				t.Errorf("NeedsOutputSchemaProcessor(%q) = %v, want %v", tc.llm.Name(), got, tc.want)
 			}
 		})
 	}
@@ -110,3 +117,19 @@ func (m *mockGoogleLLM) Name() string {
 }
 
 var _ GoogleLLM = (*mockGoogleLLM)(nil)
+
+// simpleLLM is a minimal LLM mock for non-Google LLMs (e.g., Bedrock, OpenAI)
+// that don't implement the GoogleLLM interface.
+type simpleLLM struct {
+	name string
+}
+
+func (m *simpleLLM) Name() string {
+	return m.name
+}
+
+func (m *simpleLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return nil
+}
+
+var _ model.LLM = (*simpleLLM)(nil)
