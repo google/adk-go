@@ -30,12 +30,17 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+const artifactServiceNotConfiguredMsg = "artifact service is not configured: please configure ArtifactService in the runner"
+
 type internalArtifacts struct {
 	agent.Artifacts
 	eventActions *session.EventActions
 }
 
 func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
+	if ia.Artifacts == nil {
+		return nil, fmt.Errorf(artifactServiceNotConfiguredMsg)
+	}
 	resp, err := ia.Artifacts.Save(ctx, name, data)
 	if err != nil {
 		return resp, err
@@ -48,6 +53,27 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 		ia.eventActions.ArtifactDelta[name] = resp.Version
 	}
 	return resp, nil
+}
+
+func (ia *internalArtifacts) List(ctx context.Context) (*artifact.ListResponse, error) {
+	if ia.Artifacts == nil {
+		return nil, fmt.Errorf(artifactServiceNotConfiguredMsg)
+	}
+	return ia.Artifacts.List(ctx)
+}
+
+func (ia *internalArtifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {
+	if ia.Artifacts == nil {
+		return nil, fmt.Errorf(artifactServiceNotConfiguredMsg)
+	}
+	return ia.Artifacts.Load(ctx, name)
+}
+
+func (ia *internalArtifacts) LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error) {
+	if ia.Artifacts == nil {
+		return nil, fmt.Errorf(artifactServiceNotConfiguredMsg)
+	}
+	return ia.Artifacts.LoadVersion(ctx, name, version)
 }
 
 func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) tool.Context {
