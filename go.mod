@@ -7,6 +7,7 @@ require (
 	cloud.google.com/go/aiplatform v1.105.0
 	cloud.google.com/go/storage v1.56.1
 	github.com/a2aproject/a2a-go v0.3.3
+	github.com/anthropics/anthropic-sdk-go v1.26.0
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/glebarez/sqlite v1.8.0
 	github.com/google/go-cmp v0.7.0
@@ -33,6 +34,13 @@ require (
 	gorm.io/gorm v1.31.0
 	rsc.io/omap v1.2.0
 	rsc.io/ordered v1.1.1
+)
+
+require (
+	github.com/tidwall/gjson v1.18.0 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/pretty v1.2.1 // indirect
+	github.com/tidwall/sjson v1.2.5 // indirect
 )
 
 require (
