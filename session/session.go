@@ -122,7 +122,7 @@ type Event struct {
 // Note: when multiple agents participate in one invocation, there could be
 // multiple events with IsFinalResponse() as True, for each participating agent.
 func (e *Event) IsFinalResponse() bool {
-	if (e.Actions.SkipSummarization) || len(e.LongRunningToolIDs) > 0 {
+	if e.Actions.ExitLoop || e.Actions.SkipSummarization || len(e.LongRunningToolIDs) > 0 {
 		return true
 	}
 
@@ -150,8 +150,12 @@ type EventActions struct {
 
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation
 
-	// If true, it won't call model to summarize function response.
-	// Only valid for function response event.
+	// ExitLoop signals the agent to stop its event loop after processing this event.
+	// Use this when a tool needs to halt the agent's execution, such as when
+	// requiring user confirmation or when the tool's result is the final output.
+	ExitLoop bool
+
+	// Deprecated: Use ExitLoop instead. SkipSummarization is kept for backward compatibility.
 	SkipSummarization bool
 	// If set, the event transfers to the specified agent.
 	TransferToAgent string

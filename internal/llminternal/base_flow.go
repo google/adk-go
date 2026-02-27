@@ -792,6 +792,9 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if base == nil {
 		return other
 	}
+	if other.ExitLoop {
+		base.ExitLoop = true
+	}
 	if other.SkipSummarization {
 		base.SkipSummarization = true
 	}

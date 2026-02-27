@@ -87,6 +87,11 @@ type Context interface {
 	//   - error: If there was a failure in initiating the confirmation process itself (e.g., invalid
 	//     arguments, issue with the event system). The request to ask the user has not been sent.
 	RequestConfirmation(hint string, payload any) error
+
+	// ExitLoop signals the agent to stop its event loop after processing this tool's response.
+	// Call this when the tool's result should be the final output, or when the agent should
+	// halt execution (e.g., waiting for user input, confirmation, or external action).
+	ExitLoop()
 }
 
 // Toolset is an interface for a collection of tools. It allows grouping

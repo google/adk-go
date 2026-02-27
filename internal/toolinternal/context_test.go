@@ -34,7 +34,7 @@ func TestToolContext(t *testing.T) {
 	}
 }
 
-func TestRequestConfirmation_SetsSkipSummarization(t *testing.T) {
+func TestRequestConfirmation_SetsExitLoop(t *testing.T) {
 	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
 	actions := &session.EventActions{}
 	toolCtx := NewToolContext(inv, "fn1", actions, nil)
@@ -44,8 +44,8 @@ func TestRequestConfirmation_SetsSkipSummarization(t *testing.T) {
 		t.Fatalf("RequestConfirmation returned unexpected error: %v", err)
 	}
 
-	if !actions.SkipSummarization {
-		t.Error("RequestConfirmation did not set SkipSummarization to true")
+	if !actions.ExitLoop {
+		t.Error("RequestConfirmation did not set ExitLoop to true")
 	}
 
 	if actions.RequestedToolConfirmations == nil {
@@ -74,8 +74,8 @@ func TestRequestConfirmation_AutoGeneratesIDWhenEmpty(t *testing.T) {
 		t.Fatalf("RequestConfirmation returned unexpected error: %v", err)
 	}
 
-	if !actions.SkipSummarization {
-		t.Error("SkipSummarization should be set even with auto-generated function call ID")
+	if !actions.ExitLoop {
+		t.Error("ExitLoop should be set even with auto-generated function call ID")
 	}
 	if len(actions.RequestedToolConfirmations) != 1 {
 		t.Fatalf("expected 1 confirmation entry, got %d", len(actions.RequestedToolConfirmations))
@@ -87,5 +87,25 @@ func TestRequestConfirmation_AutoGeneratesIDWhenEmpty(t *testing.T) {
 		if tc.Confirmed {
 			t.Error("expected Confirmed to be false")
 		}
+	}
+}
+
+func TestExitLoop(t *testing.T) {
+	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
+	actions := &session.EventActions{}
+	toolCtx := NewToolContext(inv, "fn1", actions, nil)
+
+	if actions.ExitLoop {
+		t.Error("ExitLoop should be false initially")
+	}
+
+	toolCtx.ExitLoop()
+
+	if !actions.ExitLoop {
+		t.Error("ExitLoop should be true after calling ExitLoop()")
+	}
+	// SkipSummarization should also be set for backward compatibility
+	if !actions.SkipSummarization {
+		t.Error("SkipSummarization should be true for backward compatibility")
 	}
 }
