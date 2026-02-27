@@ -15,14 +15,22 @@
 package tool_test
 
 import (
+	"context"
+	"strings"
 	"testing"
 
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal"
+	"google.golang.org/adk/memory"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/adk/tool/loadartifactstool"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 func TestTypes(t *testing.T) {
@@ -99,6 +107,172 @@ func TestTypes(t *testing.T) {
 				default:
 					t.Fatalf("Unknown expected type: %s", s)
 				}
+			}
+		})
+	}
+}
+
+type testContext struct {
+	context.Context
+	toolConfirmationResult    *toolconfirmation.ToolConfirmation
+	requestConfirmationCalled bool
+	eventActions              *session.EventActions
+}
+
+func (c *testContext) ToolConfirmation() *toolconfirmation.ToolConfirmation {
+	return c.toolConfirmationResult
+}
+
+func (c *testContext) RequestConfirmation(string, any) error {
+	c.requestConfirmationCalled = true
+	return nil
+}
+
+func (c *testContext) Actions() *session.EventActions {
+	if c.eventActions == nil {
+		c.eventActions = &session.EventActions{}
+	}
+	return c.eventActions
+}
+func (c *testContext) FunctionCallID() string { return "test-function-call-id" }
+func (c *testContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
+	return nil, nil
+}
+func (c *testContext) AgentName() string                    { return "test-agent" }
+func (c *testContext) ReadonlyState() session.ReadonlyState { return nil }
+func (c *testContext) State() session.State                 { return nil }
+func (c *testContext) Artifacts() agent.Artifacts           { return nil }
+func (c *testContext) InvocationID() string                 { return "test-invocation-id" }
+func (c *testContext) UserContent() *genai.Content          { return nil }
+func (c *testContext) AppName() string                      { return "test-app" }
+func (c *testContext) Branch() string                       { return "test-branch" }
+func (c *testContext) SessionID() string                    { return "test-session-id" }
+func (c *testContext) UserID() string                       { return "test-user-id" }
+
+type testToolset struct {
+	tools []tool.Tool
+}
+
+func (tts *testToolset) Name() string { return "testToolset" }
+func (tts *testToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
+	return tts.tools, nil
+}
+
+func TestWithConfirmation(t *testing.T) {
+	toolRan := false
+	noOpTool, err := functiontool.New(functiontool.Config{Name: "noOpTool"}, func(ctx tool.Context, input struct{}) (struct{}, error) {
+		toolRan = true
+		return struct{}{}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() failed: %v", err)
+	}
+	ts := &testToolset{tools: []tool.Tool{noOpTool}}
+
+	tests := []struct {
+		name                      string
+		requireConfirmation       bool
+		provider                  tool.ConfirmationProvider
+		toolConfirmation          *toolconfirmation.ToolConfirmation
+		wantConfirmationRequested bool
+		wantSkipSummarization     bool
+		wantErr                   bool
+		wantErrMsg                string
+		wantToolRan               bool
+	}{
+		{
+			name:                      "confirmation required, no confirmation in context",
+			requireConfirmation:       true,
+			wantConfirmationRequested: true,
+			wantSkipSummarization:     true,
+			wantErr:                   true,
+			wantErrMsg:                "requires confirmation",
+			wantToolRan:               false,
+		},
+		{
+			name:                "confirmation required, confirmed in context",
+			requireConfirmation: true,
+			toolConfirmation:    &toolconfirmation.ToolConfirmation{Confirmed: true},
+			wantToolRan:         true,
+		},
+		{
+			name:                "confirmation required, rejected in context",
+			requireConfirmation: true,
+			toolConfirmation:    &toolconfirmation.ToolConfirmation{Confirmed: false},
+			wantErr:             true,
+			wantErrMsg:          "call is rejected",
+			wantToolRan:         false,
+		},
+		{
+			name:                      "confirmation not required",
+			requireConfirmation:       false,
+			wantConfirmationRequested: false,
+			wantToolRan:               true,
+		},
+		{
+			name: "confirmation provider requires confirmation",
+			provider: func(toolName string, toolInput any) bool {
+				return true
+			},
+			wantConfirmationRequested: true,
+			wantSkipSummarization:     true,
+			wantErr:                   true,
+			wantErrMsg:                "requires confirmation",
+			wantToolRan:               false,
+		},
+		{
+			name: "confirmation provider does not require confirmation",
+			provider: func(toolName string, toolInput any) bool {
+				return false
+			},
+			wantConfirmationRequested: false,
+			wantToolRan:               true,
+		},
+		{
+			name:                "requireConfirmation=true but provider returns false",
+			requireConfirmation: true,
+			provider: func(toolName string, toolInput any) bool {
+				return false
+			},
+			wantConfirmationRequested: false,
+			wantToolRan:               true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			toolRan = false
+			ctx := &testContext{Context: context.Background(), toolConfirmationResult: tt.toolConfirmation}
+
+			cts := tool.WithConfirmation(ts, tt.requireConfirmation, tt.provider)
+			tools, err := cts.Tools(nil)
+			if err != nil {
+				t.Fatalf("cts.Tools() failed: %v", err)
+			}
+			if len(tools) != 1 {
+				t.Fatalf("cts.Tools() returned %d tools, want 1", len(tools))
+			}
+			confirmedTool, ok := tools[0].(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatalf("tools[0] is not a FunctionTool")
+			}
+
+			_, err = confirmedTool.Run(ctx, map[string]any{})
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Run() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil && tt.wantErrMsg != "" && !strings.Contains(err.Error(), tt.wantErrMsg) {
+				t.Errorf("Run() error msg = %q, want it to contain %q", err.Error(), tt.wantErrMsg)
+			}
+
+			if ctx.Actions().SkipSummarization != tt.wantSkipSummarization {
+				t.Errorf("Run() skipSummarization = %v, want %v", ctx.Actions().SkipSummarization, tt.wantSkipSummarization)
+			}
+			if ctx.requestConfirmationCalled != tt.wantConfirmationRequested {
+				t.Errorf("Run() requestConfirmationCalled = %v, want %v", ctx.requestConfirmationCalled, tt.wantConfirmationRequested)
+			}
+			if toolRan != tt.wantToolRan {
+				t.Errorf("toolRan = %v, want %v", toolRan, tt.wantToolRan)
 			}
 		})
 	}
