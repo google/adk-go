@@ -57,7 +57,7 @@ func NewLauncher() launcher.SubLauncher {
 	config := &consoleConfig{}
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
-	fs.StringVar(&config.streamingModeString, "streaming_mode", string(agent.StreamingModeSSE),
+	fs.StringVar(&config.streamingModeString, "streaming_mode", "",
 		fmt.Sprintf("defines streaming mode (%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE))
 	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 2*time.Second, "Console shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
 	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
@@ -126,6 +126,8 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 			inputChan <- userInput
 		}
 	}()
+	// Print an initial newline to work around PTY/exec buffering issues in some environments.
+	fmt.Println()
 
 	fmt.Print("\nUser -> ")
 
@@ -144,7 +146,13 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 			streamingMode := l.config.streamingMode
 			if streamingMode == "" {
-				streamingMode = agent.StreamingModeSSE
+				// Stdlib-only terminal heuristic: stdout is a character device.
+				// Avoids adding golang.org/x/term dependency (golangci-lint failed to load its export data in CI).
+				if fi, err := os.Stdout.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
+					streamingMode = agent.StreamingModeSSE
+				} else {
+					streamingMode = agent.StreamingModeNone
+				}
 			}
 			fmt.Print("\nAgent -> ")
 			prevText := ""
@@ -195,7 +203,8 @@ func (l *consoleLauncher) Parse(args []string) ([]string, error) {
 	if err != nil || !l.flags.Parsed() {
 		return nil, fmt.Errorf("failed to parse flags: %v", err)
 	}
-	if l.config.streamingModeString != string(agent.StreamingModeNone) &&
+	if l.config.streamingModeString != "" &&
+		l.config.streamingModeString != string(agent.StreamingModeNone) &&
 		l.config.streamingModeString != string(agent.StreamingModeSSE) {
 		return nil, fmt.Errorf("invalid streaming_mode: %v. Should be (%s|%s)", l.config.streamingModeString,
 			agent.StreamingModeNone, agent.StreamingModeSSE)
