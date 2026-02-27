@@ -1,0 +1,622 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package openai
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+
+	"google.golang.org/adk/model"
+	"google.golang.org/genai"
+)
+
+// convertToOpenAIMessages converts genai.Content to OpenAI message format.
+// The function is stateless — the ADK framework passes full conversation history
+// in req.Contents on every call.
+func (m *openaiModel) convertToOpenAIMessages(req *model.LLMRequest) ([]OpenAIMessage, error) {
+	var allMessages []OpenAIMessage
+
+	// Add SystemInstruction if present (must be first message with role "system")
+	var systemText string
+	if req.Config != nil && req.Config.SystemInstruction != nil {
+		for _, part := range req.Config.SystemInstruction.Parts {
+			if part.Text != "" {
+				if systemText != "" {
+					systemText += "\n"
+				}
+				systemText += part.Text
+			}
+		}
+	}
+
+	// JSON Mode Safety: OpenAI requires "JSON" keyword in prompt when using json_object mode
+	jsonModeEnabled := req.Config != nil && req.Config.ResponseMIMEType == "application/json"
+	if jsonModeEnabled {
+		hasJSONKeyword := strings.Contains(strings.ToUpper(systemText), "JSON")
+
+		if !hasJSONKeyword {
+			jsonInstruction := "You must respond with valid JSON."
+			if systemText != "" {
+				systemText = systemText + "\n\n" + jsonInstruction
+			} else {
+				systemText = jsonInstruction
+			}
+
+			if m.logger != nil {
+				m.logger.Printf("INFO: JSON mode enabled - added JSON instruction to system prompt")
+			}
+		}
+	}
+
+	// Add system message if we have any system text
+	if systemText != "" {
+		allMessages = append(allMessages, OpenAIMessage{
+			Role:    "system",
+			Content: systemText,
+		})
+	}
+
+	// Convert contents from the request
+	for _, content := range req.Contents {
+		msgs, err := m.convertContent(content)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert content: %w", err)
+		}
+		for _, msg := range msgs {
+			allMessages = append(allMessages, *msg)
+		}
+	}
+
+	return allMessages, nil
+}
+
+// convertContent converts a single genai.Content to one or more OpenAI messages.
+func (m *openaiModel) convertContent(content *genai.Content) ([]*OpenAIMessage, error) {
+	if content == nil {
+		return nil, nil
+	}
+
+	// Determine role
+	role := content.Role
+	if role == "" {
+		role = "user"
+	}
+	if role == "model" {
+		role = "assistant"
+	}
+
+	messages := make([]*OpenAIMessage, 0)
+
+	// Handle different part types
+	var contentParts []any // Use interface slice for multimodal content (text + images)
+	var toolCalls []ToolCall
+	var functionResponses []*OpenAIMessage
+
+	for _, part := range content.Parts {
+		switch {
+		case part.Text != "":
+			// Add as text content part
+			contentParts = append(contentParts, ContentPartText{
+				Type: "text",
+				Text: part.Text,
+			})
+
+		case part.FunctionCall != nil:
+			// Convert function call to tool call
+			argsJSON, err := json.Marshal(part.FunctionCall.Args)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal function args: %w", err)
+			}
+
+			// Sanitize arguments
+			sanitized, err := sanitizeJSONArgs(string(argsJSON))
+			if err != nil {
+				// Log error but continue with safe fallback
+				sanitized = "{}"
+				if m.logger != nil {
+					m.logger.Printf("WARNING: Invalid function args sanitized to {}: %v", err)
+				}
+			}
+
+			// Use ID from FunctionCall - MUST be present for OpenAI API
+			toolCallID := part.FunctionCall.ID
+			if toolCallID == "" {
+				// CRITICAL: OpenAI API requires tool_call_id to match exactly
+				// If we generate a fake ID, the response will be rejected with 400 error
+				if m.logger != nil {
+					m.logger.Printf("WARNING: FunctionCall missing ID for '%s' - generating fallback ID. This may cause API errors!", part.FunctionCall.Name)
+				}
+				toolCallID = generateToolCallID(part.FunctionCall.Name)
+			}
+
+			toolCalls = append(toolCalls, ToolCall{
+				ID:   toolCallID,
+				Type: "function",
+				Function: FunctionCall{
+					Name:      part.FunctionCall.Name,
+					Arguments: sanitized,
+				},
+			})
+
+		case part.FunctionResponse != nil:
+			// Convert function response to tool message
+			responseJSON, err := json.Marshal(part.FunctionResponse.Response)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal function response: %w", err)
+			}
+
+			// Use ID from FunctionResponse - MUST match the original tool_call_id
+			toolCallID := part.FunctionResponse.ID
+			if toolCallID == "" {
+				// CRITICAL: This is a serious problem!
+				// OpenAI will reject the response with 400 if tool_call_id doesn't match
+				return nil, fmt.Errorf("FunctionResponse for '%s' missing required ID field - cannot match with tool call", part.FunctionResponse.Name)
+			}
+
+			functionResponses = append(functionResponses, &OpenAIMessage{
+				Role:       "tool",
+				Content:    string(responseJSON),
+				ToolCallID: toolCallID,
+			})
+
+		case part.ExecutableCode != nil:
+			// Represent executable code as text
+			codeText := fmt.Sprintf("```%s\n%s\n```", part.ExecutableCode.Language, part.ExecutableCode.Code)
+			contentParts = append(contentParts, ContentPartText{
+				Type: "text",
+				Text: codeText,
+			})
+
+		case part.CodeExecutionResult != nil:
+			// Represent code execution result as text
+			resultText := fmt.Sprintf("Execution result (%s): %s", part.CodeExecutionResult.Outcome, part.CodeExecutionResult.Output)
+			contentParts = append(contentParts, ContentPartText{
+				Type: "text",
+				Text: resultText,
+			})
+
+		case part.InlineData != nil:
+			// OpenAI supports vision for images via multimodal content
+			if part.InlineData.MIMEType != "" && len(part.InlineData.Data) > 0 {
+				// Encode image as base64 data URL
+				imageURL := fmt.Sprintf("data:%s;base64,%s",
+					part.InlineData.MIMEType,
+					base64.StdEncoding.EncodeToString(part.InlineData.Data))
+
+				// Add as image content part (NOT as text!)
+				contentParts = append(contentParts, ContentPartImage{
+					Type: "image_url",
+					ImageURL: struct {
+						URL string `json:"url"`
+					}{URL: imageURL},
+				})
+			}
+
+		case part.FileData != nil:
+			// File URIs (e.g., gs://, https://, file://)
+			if part.FileData.FileURI != "" {
+				// For HTTP(S) image URLs, add as image content part
+				// For other URIs, add as text
+				if strings.HasPrefix(part.FileData.FileURI, "http://") ||
+					strings.HasPrefix(part.FileData.FileURI, "https://") {
+					contentParts = append(contentParts, ContentPartImage{
+						Type: "image_url",
+						ImageURL: struct {
+							URL string `json:"url"`
+						}{URL: part.FileData.FileURI},
+					})
+				} else {
+					contentParts = append(contentParts, ContentPartText{
+						Type: "text",
+						Text: part.FileData.FileURI,
+					})
+				}
+			}
+		}
+	}
+
+	// Create message(s) based on what we found
+	if len(toolCalls) > 0 {
+		// Assistant message with tool calls
+		msg := &OpenAIMessage{
+			Role:      "assistant",
+			ToolCalls: toolCalls,
+		}
+		if len(contentParts) > 0 {
+			// Use array format for multimodal or single text part
+			msg.Content = convertContentToMessage(contentParts)
+		}
+		messages = append(messages, msg)
+	} else if len(contentParts) > 0 {
+		// Regular message (text or multimodal)
+		messages = append(messages, &OpenAIMessage{
+			Role:    role,
+			Content: convertContentToMessage(contentParts),
+		})
+	}
+
+	// Add function response messages
+	messages = append(messages, functionResponses...)
+
+	return messages, nil
+}
+
+// convertToLLMResponse converts an OpenAI message back to genai format.
+func (m *openaiModel) convertToLLMResponse(msg *OpenAIMessage, usage *Usage, logprobs *ChoiceLogprobs) (*model.LLMResponse, error) {
+	parts := make([]*genai.Part, 0)
+
+	// Handle text content
+	if msg.Content != nil {
+		if text, ok := msg.Content.(string); ok && text != "" {
+			parts = append(parts, genai.NewPartFromText(text))
+		}
+	}
+
+	// Handle tool calls (function calls in genai format)
+	for _, toolCall := range msg.ToolCalls {
+		if toolCall.Type == "function" {
+			// Handle empty arguments (some models send "" or "{}")
+			argsStr := toolCall.Function.Arguments
+			if argsStr == "" {
+				argsStr = "{}" // Default to empty object
+			}
+
+			var args map[string]any
+			if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal tool call args: %w", err)
+			}
+
+			// Create FunctionCall part with ID preserved
+			part := genai.NewPartFromFunctionCall(toolCall.Function.Name, args)
+			if part.FunctionCall != nil {
+				part.FunctionCall.ID = toolCall.ID
+			}
+			parts = append(parts, part)
+		}
+	}
+
+	content := &genai.Content{
+		Role:  "model",
+		Parts: parts,
+	}
+
+	response := &model.LLMResponse{
+		Content:      content,
+		TurnComplete: true,
+	}
+
+	// Add usage metadata if available
+	if usage != nil {
+		response.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     int32(usage.PromptTokens),
+			CandidatesTokenCount: int32(usage.CompletionTokens),
+			TotalTokenCount:      int32(usage.TotalTokens),
+		}
+	}
+
+	// Add logprobs if available
+	if logprobs != nil && len(logprobs.Content) > 0 {
+		response.LogprobsResult = convertLogprobs(logprobs)
+		// Calculate average logprobs
+		var sum float64
+		for _, lp := range logprobs.Content {
+			sum += lp.Logprob
+		}
+		response.AvgLogprobs = sum / float64(len(logprobs.Content))
+	}
+
+	return response, nil
+}
+
+// convertLogprobs converts OpenAI logprobs to genai format.
+func convertLogprobs(logprobs *ChoiceLogprobs) *genai.LogprobsResult {
+	if logprobs == nil || len(logprobs.Content) == 0 {
+		return nil
+	}
+
+	result := &genai.LogprobsResult{
+		ChosenCandidates: make([]*genai.LogprobsResultCandidate, len(logprobs.Content)),
+		TopCandidates:    make([]*genai.LogprobsResultTopCandidates, len(logprobs.Content)),
+	}
+
+	for i, lp := range logprobs.Content {
+		// Chosen candidate
+		result.ChosenCandidates[i] = &genai.LogprobsResultCandidate{
+			Token:          lp.Token,
+			LogProbability: float32(lp.Logprob),
+		}
+
+		// Top candidates
+		if len(lp.TopLogprobs) > 0 {
+			topCandidates := make([]*genai.LogprobsResultCandidate, len(lp.TopLogprobs))
+			for j, top := range lp.TopLogprobs {
+				topCandidates[j] = &genai.LogprobsResultCandidate{
+					Token:          top.Token,
+					LogProbability: float32(top.Logprob),
+				}
+			}
+			result.TopCandidates[i] = &genai.LogprobsResultTopCandidates{
+				Candidates: topCandidates,
+			}
+		}
+	}
+
+	return result
+}
+
+// convertTools converts ADK tools to OpenAI tool format.
+// Tools are sorted by name for deterministic order (important for testing and reproducibility).
+// Supports multiple tool formats:
+// 1. ADK tools with Declaration() method (returns *genai.FunctionDeclaration)
+// 2. Tools with Name()/Description() interface
+// 3. Legacy map[string]any format
+func (m *openaiModel) convertTools(adkTools map[string]any) []Tool {
+	// Debug logging
+	if m.debugLogging && m.logger != nil {
+		m.logger.Printf("[convertTools] Input: %d tools", len(adkTools))
+		for name, def := range adkTools {
+			m.logger.Printf("[convertTools] Tool '%s': type=%T", name, def)
+		}
+	}
+
+	// Extract and sort tool names for deterministic order
+	names := make([]string, 0, len(adkTools))
+	for name := range adkTools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	tools := make([]Tool, 0, len(adkTools))
+
+	for _, name := range names {
+		toolDef := adkTools[name]
+
+		// Initialize tool with basic info
+		tool := Tool{
+			Type: "function",
+			Function: Function{
+				Name: name,
+			},
+		}
+
+		// Method 1: Check if tool has Declaration() method (ADK standard tools)
+		if declarer, ok := toolDef.(interface {
+			Declaration() *genai.FunctionDeclaration
+		}); ok {
+			decl := declarer.Declaration()
+			if decl != nil {
+				tool.Function.Name = decl.Name
+				tool.Function.Description = decl.Description
+
+				// Extract parameters from JSON schema
+				if decl.ParametersJsonSchema != nil {
+					if params, ok := decl.ParametersJsonSchema.(map[string]any); ok {
+						tool.Function.Parameters = params
+					} else {
+						// Try to convert to map via JSON
+						tool.Function.Parameters = convertSchemaToMap(decl.ParametersJsonSchema)
+					}
+				} else if decl.Parameters != nil {
+					// Fallback to genai.Schema if ParametersJsonSchema is not set
+					tool.Function.Parameters = convertGenaiSchemaToMap(decl.Parameters)
+				}
+
+				if m.debugLogging && m.logger != nil {
+					m.logger.Printf("[convertTools] Tool '%s' from Declaration(): desc=%q, params=%+v",
+						name, tool.Function.Description, tool.Function.Parameters)
+				}
+			}
+		} else if describer, ok := toolDef.(interface {
+			Name() string
+			Description() string
+		}); ok {
+			// Method 2: Check if tool has Name() and Description() methods
+			tool.Function.Name = describer.Name()
+			tool.Function.Description = describer.Description()
+
+			if m.debugLogging && m.logger != nil {
+				m.logger.Printf("[convertTools] Tool '%s' from Name()/Description(): desc=%q",
+					name, tool.Function.Description)
+			}
+		} else if toolMap, ok := toolDef.(map[string]any); ok {
+			// Method 3: Legacy map format
+			if desc, ok := toolMap["description"].(string); ok {
+				tool.Function.Description = desc
+			}
+			if params, ok := toolMap["parameters"].(map[string]any); ok {
+				tool.Function.Parameters = params
+			} else if params, ok := toolMap["input_schema"].(map[string]any); ok {
+				tool.Function.Parameters = params
+			}
+
+			if m.debugLogging && m.logger != nil {
+				m.logger.Printf("[convertTools] Tool '%s' from map: desc=%q, params=%+v",
+					name, tool.Function.Description, tool.Function.Parameters)
+			}
+		} else {
+			// Unknown format - use name only
+			if m.debugLogging && m.logger != nil {
+				m.logger.Printf("[convertTools] WARNING: Tool '%s' has unknown type=%T, using name only", name, toolDef)
+			}
+		}
+
+		tools = append(tools, tool)
+	}
+
+	// Debug: log final tools
+	if m.debugLogging && m.logger != nil {
+		m.logger.Printf("[convertTools] Output: %d tools converted", len(tools))
+		for _, t := range tools {
+			m.logger.Printf("[convertTools] Final tool: name=%s, desc=%q, hasParams=%v",
+				t.Function.Name, t.Function.Description, t.Function.Parameters != nil)
+		}
+	}
+
+	return tools
+}
+
+// convertSchemaToMap converts any schema type to map[string]any via JSON marshaling
+func convertSchemaToMap(schema any) map[string]any {
+	if schema == nil {
+		return nil
+	}
+	// If it's already a map, return it
+	if m, ok := schema.(map[string]any); ok {
+		return m
+	}
+	// Try JSON encoding/decoding as fallback
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return nil
+	}
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil
+	}
+	return result
+}
+
+// Helper functions
+// Note: Session ID extraction moved to session.go
+
+func generateToolCallID(functionName string) string {
+	// Generate a unique ID to avoid collisions if the same function is called multiple times.
+	// Using crypto/rand ensures uniqueness even for parallel calls.
+	randomBytes := make([]byte, 4)
+	// crypto/rand is safe for concurrent use - ignore error as it's extremely rare
+	rand.Read(randomBytes)
+	return fmt.Sprintf("call_%s_%s", functionName, hex.EncodeToString(randomBytes))
+}
+
+// convertContentToMessage converts content parts to the appropriate format.
+// Returns string if single text part (optimization), array otherwise (multimodal).
+func convertContentToMessage(parts []any) interface{} {
+	if len(parts) == 0 {
+		return ""
+	}
+
+	// Optimization: if only one text part, return as string
+	if len(parts) == 1 {
+		if textPart, ok := parts[0].(ContentPartText); ok {
+			return textPart.Text
+		}
+	}
+
+	// Otherwise return array for multimodal content
+	return parts
+}
+
+// convertGenaiSchemaToMap converts a genai.Schema to a map for JSON Schema.
+func convertGenaiSchemaToMap(schema *genai.Schema) map[string]any {
+	if schema == nil {
+		return nil
+	}
+
+	result := make(map[string]any)
+
+	// Type mapping
+	if schema.Type != "" {
+		result["type"] = strings.ToLower(string(schema.Type))
+	}
+
+	if schema.Format != "" {
+		result["format"] = schema.Format
+	}
+
+	if schema.Description != "" {
+		result["description"] = schema.Description
+	}
+
+	if schema.Title != "" {
+		result["title"] = schema.Title
+	}
+
+	// Enum values
+	if len(schema.Enum) > 0 {
+		result["enum"] = schema.Enum
+	}
+
+	// Array items
+	if schema.Items != nil {
+		result["items"] = convertGenaiSchemaToMap(schema.Items)
+	}
+
+	// Object properties
+	if len(schema.Properties) > 0 {
+		props := make(map[string]any)
+		for name, propSchema := range schema.Properties {
+			props[name] = convertGenaiSchemaToMap(propSchema)
+		}
+		result["properties"] = props
+	}
+
+	// Required fields
+	if len(schema.Required) > 0 {
+		result["required"] = schema.Required
+	}
+
+	// Nullable
+	if schema.Nullable != nil && *schema.Nullable {
+		// JSON Schema uses array type for nullable: ["string", "null"]
+		if t, ok := result["type"].(string); ok {
+			result["type"] = []string{t, "null"}
+		}
+	}
+
+	// Min/Max for numbers
+	if schema.Minimum != nil {
+		result["minimum"] = *schema.Minimum
+	}
+	if schema.Maximum != nil {
+		result["maximum"] = *schema.Maximum
+	}
+
+	// Min/Max for arrays
+	if schema.MinItems != nil {
+		result["minItems"] = *schema.MinItems
+	}
+	if schema.MaxItems != nil {
+		result["maxItems"] = *schema.MaxItems
+	}
+
+	// Min/Max for strings
+	if schema.MinLength != nil {
+		result["minLength"] = *schema.MinLength
+	}
+	if schema.MaxLength != nil {
+		result["maxLength"] = *schema.MaxLength
+	}
+
+	// Pattern for strings
+	if schema.Pattern != "" {
+		result["pattern"] = schema.Pattern
+	}
+
+	// AnyOf
+	if len(schema.AnyOf) > 0 {
+		anyOf := make([]map[string]any, len(schema.AnyOf))
+		for i, s := range schema.AnyOf {
+			anyOf[i] = convertGenaiSchemaToMap(s)
+		}
+		result["anyOf"] = anyOf
+	}
+
+	return result
+}
