@@ -46,6 +46,8 @@ type a2aAgentRunProcessor struct {
 
 	// partial event contents emitted before the terminal event
 	aggregations map[a2a.ArtifactID]*artifactAggregation
+	// used to emit aggregations in the order of last update
+	aggregationOrder []a2a.ArtifactID
 }
 
 func newRunProcessor(config A2AConfig, request *a2a.MessageSendParams) *a2aAgentRunProcessor {
@@ -69,8 +71,10 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2a
 	// RemoteAgent event stream finished, emit any aggregated events data we have before the final event
 	if statusUpdate, ok := a2aEvent.(*a2a.TaskStatusUpdateEvent); ok && statusUpdate.Final {
 		var events []*session.Event
-		for _, agg := range p.aggregations {
-			events = append(events, p.buildNonPartialAggregation(ctx, agg))
+		for _, aid := range p.aggregationOrder {
+			if agg, ok := p.aggregations[aid]; ok {
+				events = append(events, p.buildNonPartialAggregation(ctx, agg))
+			}
 		}
 		return append(events, event)
 	}
@@ -79,6 +83,7 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2a
 	// Reset the aggregation so that it is not published twice.
 	if _, ok := a2aEvent.(*a2a.Task); ok {
 		p.aggregations = map[a2a.ArtifactID]*artifactAggregation{}
+		p.aggregationOrder = nil
 		return []*session.Event{event}
 	}
 
@@ -88,7 +93,7 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2a
 	}
 
 	if !update.Append { // non-append event resets aggregation
-		delete(p.aggregations, update.Artifact.ID)
+		p.removeAggregation(update.Artifact.ID)
 		if update.LastChunk { // non-append event which is the last chunk must already be non-partial
 			event.Partial = false
 			return []*session.Event{event}
@@ -100,6 +105,7 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2a
 		aggregation = &artifactAggregation{}
 		p.aggregations[update.Artifact.ID] = aggregation
 	}
+	p.updateOrder(update.Artifact.ID)
 
 	p.updateAggregation(aggregation, event)
 
@@ -108,8 +114,28 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2a
 	}
 
 	// emit partial last chunk and follow by the non-partial aggregated event
-	delete(p.aggregations, update.Artifact.ID)
+	p.removeAggregation(update.Artifact.ID)
 	return []*session.Event{event, p.buildNonPartialAggregation(ctx, aggregation)}
+}
+
+func (p *a2aAgentRunProcessor) removeAggregation(aid a2a.ArtifactID) {
+	delete(p.aggregations, aid)
+	for i, id := range p.aggregationOrder {
+		if id == aid {
+			p.aggregationOrder = append(p.aggregationOrder[:i], p.aggregationOrder[i+1:]...)
+			break
+		}
+	}
+}
+
+func (p *a2aAgentRunProcessor) updateOrder(aid a2a.ArtifactID) {
+	for i, id := range p.aggregationOrder {
+		if id == aid {
+			p.aggregationOrder = append(p.aggregationOrder[:i], p.aggregationOrder[i+1:]...)
+			break
+		}
+	}
+	p.aggregationOrder = append(p.aggregationOrder, aid)
 }
 
 func (p *a2aAgentRunProcessor) updateAggregation(agg *artifactAggregation, event *session.Event) {

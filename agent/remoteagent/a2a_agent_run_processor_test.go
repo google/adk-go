@@ -152,6 +152,23 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 			},
 		},
 		{
+			name: "last updated aggregation is emitted last",
+			events: []a2a.Event{
+				newArtifactUpdate(aid1, updateFlags{append: true}, "Foo"),
+				newArtifactUpdate(aid2, updateFlags{append: true}, "Bar"),
+				newArtifactUpdate(aid1, updateFlags{append: true}, "Baz"),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newPartialEvent("Foo"),
+				newPartialEvent("Bar"),
+				newPartialEvent("Baz"),
+				newEvent(genai.NewPartFromText("Bar")),
+				newEvent(genai.NewPartFromText("FooBaz")),
+				newCompletedEvent(),
+			},
+		},
+		{
 			name: "[append=true, lastChunk=true] results in partial followed by non-partial",
 			events: []a2a.Event{
 				newArtifactUpdate(aid1, updateFlags{append: true}, "Hel"),
