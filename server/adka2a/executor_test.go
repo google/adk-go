@@ -55,6 +55,8 @@ type testSessionService struct {
 	createErr bool
 }
 
+var _ session.Service = (*testSessionService)(nil)
+
 func (s *testSessionService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
 	if s.createErr {
 		return nil, fmt.Errorf("session creation failed")

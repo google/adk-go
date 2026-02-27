@@ -528,11 +528,11 @@ type fakeTool struct {
 	name string
 }
 
+var _ tool.Tool = (*fakeTool)(nil)
+
 func (f *fakeTool) Name() string      { return f.name }
 func (*fakeTool) Description() string { return "Tool not found" }
 func (*fakeTool) IsLongRunning() bool { return false }
-
-var _ tool.Tool = (*fakeTool)(nil)
 
 // newToolNotFoundError creates an error matching the specific Python format
 func newToolNotFoundError(toolName string, availableTools []string) error {

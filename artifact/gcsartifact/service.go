@@ -39,12 +39,14 @@ import (
 	"google.golang.org/adk/artifact"
 )
 
-// gcsService is a google cloud storage implementation of the Service.
+// gcsService is a google cloud storage implementation of the [artifact.Service].
 type gcsService struct {
 	bucketName    string
 	storageClient gcsClient
 	bucket        gcsBucket
 }
+
+var _ artifact.Service = (*gcsService)(nil)
 
 // NewService creates a Google Cloud Storage service for the specified bucket.
 func NewService(ctx context.Context, bucketName string, opts ...option.ClientOption) (artifact.Service, error) {

@@ -25,6 +25,8 @@ type RuntimeAPIRouter struct {
 	runtimeController *controllers.RuntimeAPIController
 }
 
+var _ Router = (*RuntimeAPIRouter)(nil)
+
 // NewRuntimeAPIRouter creates a new RuntimeAPIRouter.
 func NewRuntimeAPIRouter(controller *controllers.RuntimeAPIController) *RuntimeAPIRouter {
 	return &RuntimeAPIRouter{runtimeController: controller}

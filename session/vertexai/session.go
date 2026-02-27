@@ -38,6 +38,8 @@ type localSession struct {
 	updatedAt time.Time
 }
 
+var _ session.Session = (*localSession)(nil)
+
 func (s *localSession) ID() string {
 	return s.sessionID
 }
@@ -86,6 +88,11 @@ func (s *localSession) appendEvent(event *session.Event) error {
 }
 
 type events []*session.Event
+
+var (
+	_ session.Events = (*events)(nil)
+	_ session.State  = (*state)(nil)
+)
 
 func (e events) All() iter.Seq[*session.Event] {
 	return func(yield func(*session.Event) bool) {
@@ -183,9 +190,3 @@ func updateSessionState(sess *localSession, event *session.Event) error {
 
 	return nil
 }
-
-var (
-	_ session.Session = (*localSession)(nil)
-	_ session.Events  = (*events)(nil)
-	_ session.State   = (*state)(nil)
-)

@@ -59,6 +59,8 @@ type gcsClientWrapper struct {
 	client *storage.Client
 }
 
+var _ gcsClient = (*gcsClientWrapper)(nil)
+
 // Bucket returns a gcsBucketWrapper that satisfies the gcsBucket interface.
 func (w *gcsClientWrapper) bucket(name string) gcsBucket {
 	return &gcsBucketWrapper{
@@ -70,6 +72,8 @@ func (w *gcsClientWrapper) bucket(name string) gcsBucket {
 type gcsBucketWrapper struct {
 	bucket *storage.BucketHandle
 }
+
+var _ gcsBucket = (*gcsBucketWrapper)(nil)
 
 // Object returns a gcsObjectWrapper that satisfies the gcsObject interface.
 func (w *gcsBucketWrapper) object(name string) gcsObject {
@@ -91,6 +95,8 @@ func (w *gcsBucketWrapper) objects(ctx context.Context, q *storage.Query) gcsObj
 type gcsObjectWrapper struct {
 	object *storage.ObjectHandle
 }
+
+var _ gcsObject = (*gcsObjectWrapper)(nil)
 
 // NewWriter implements the gcsObject interface for gcsObjectWrapper.
 func (w *gcsObjectWrapper) newWriter(ctx context.Context) gcsWriter {
@@ -117,6 +123,8 @@ type gcsObjectIteratorWrapper struct {
 	iter *storage.ObjectIterator
 }
 
+var _ gcsObjectIterator = (*gcsObjectIteratorWrapper)(nil)
+
 func (w *gcsObjectIteratorWrapper) next() (*storage.ObjectAttrs, error) {
 	return w.iter.Next()
 }
@@ -125,6 +133,8 @@ func (w *gcsObjectIteratorWrapper) next() (*storage.ObjectAttrs, error) {
 type gcsWriterWrapper struct {
 	w *storage.Writer
 }
+
+var _ gcsWriter = (*gcsWriterWrapper)(nil)
 
 func (g *gcsWriterWrapper) Write(p []byte) (n int, err error) {
 	return g.w.Write(p)
@@ -137,11 +147,3 @@ func (g *gcsWriterWrapper) Close() error {
 func (g *gcsWriterWrapper) SetContentType(cType string) {
 	g.w.ContentType = cType
 }
-
-var (
-	_ gcsClient         = (*gcsClientWrapper)(nil)
-	_ gcsBucket         = (*gcsBucketWrapper)(nil)
-	_ gcsObject         = (*gcsObjectWrapper)(nil)
-	_ gcsObjectIterator = (*gcsObjectIteratorWrapper)(nil)
-	_ gcsWriter         = (*gcsWriterWrapper)(nil)
-)

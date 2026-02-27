@@ -25,6 +25,8 @@ type ArtifactsAPIRouter struct {
 	artifactsController *controllers.ArtifactsAPIController
 }
 
+var _ Router = (*ArtifactsAPIRouter)(nil)
+
 // NewArtifactsAPIRouter creates a new ArtifactsAPIRouter.
 func NewArtifactsAPIRouter(controller *controllers.ArtifactsAPIController) *ArtifactsAPIRouter {
 	return &ArtifactsAPIRouter{artifactsController: controller}

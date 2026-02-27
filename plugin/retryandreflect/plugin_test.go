@@ -26,6 +26,8 @@ type mockTool struct {
 	name string
 }
 
+var _ tool.Tool = (*mockTool)(nil)
+
 func (m *mockTool) Name() string        { return m.name }
 func (m *mockTool) Description() string { return "" }
 func (m *mockTool) IsLongRunning() bool { return false }

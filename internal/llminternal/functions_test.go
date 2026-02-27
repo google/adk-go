@@ -32,6 +32,8 @@ type mockAgent struct {
 	name string
 }
 
+var _ agent.Agent = (*mockAgent)(nil)
+
 func (m *mockAgent) Name() string {
 	return m.name
 }

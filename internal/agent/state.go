@@ -14,7 +14,7 @@
 
 package agent
 
-// holds Agent internal state
+// Agent holds agent internal state.
 type Agent interface {
 	internal() *State
 }
@@ -23,6 +23,12 @@ type State struct {
 	AgentType Type
 	Config    any
 }
+
+var _ Agent = (*State)(nil)
+
+func (s *State) internal() *State { return s }
+
+func Reveal(a Agent) *State { return a.internal() }
 
 type Type string
 
@@ -33,7 +39,3 @@ const (
 	TypeParallelAgent   Type = "ParallelAgent"
 	TypeCustomAgent     Type = "CustomAgent"
 )
-
-func (s *State) internal() *State { return s }
-
-func Reveal(a Agent) *State { return a.internal() }

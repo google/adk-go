@@ -180,6 +180,8 @@ type testSession struct {
 	events                     []*session.Event
 }
 
+var _ session.Session = (*testSession)(nil)
+
 func (s *testSession) ID() string {
 	return s.sessionID
 }

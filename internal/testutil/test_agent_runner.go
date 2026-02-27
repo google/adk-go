@@ -147,6 +147,8 @@ type MockModel struct {
 	StreamResponsesCount int
 }
 
+var _ model.LLM = (*MockModel)(nil)
+
 var errNoModelData = errors.New("no data")
 
 func (m *MockModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
@@ -159,7 +161,7 @@ func (m *MockModel) GenerateContent(ctx context.Context, req *model.LLMRequest, 
 	}
 }
 
-// GenerateContent implements llm.Model.
+// Generate implements [model.LLM].
 func (m *MockModel) Generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	m.Requests = append(m.Requests, req)
 	if len(m.Responses) == 0 {
@@ -204,8 +206,6 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) i
 func (m *MockModel) Name() string {
 	return "mock"
 }
-
-var _ model.LLM = (*MockModel)(nil)
 
 // CollectEvents collects all event from the llm response until encountering an error.
 // It returns all collected events and the last error.

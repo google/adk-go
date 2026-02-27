@@ -737,6 +737,8 @@ type llmStub struct {
 	generateContent func(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error]
 }
 
+var _ model.LLM = (*llmStub)(nil)
+
 func (d *llmStub) Name() string {
 	return d.name
 }

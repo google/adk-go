@@ -97,22 +97,28 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 
 type TransferToAgentTool struct{}
 
-// Description implements tool.Tool.
+var (
+	_ toolinternal.FunctionTool     = (*TransferToAgentTool)(nil)
+	_ toolinternal.RequestProcessor = (*TransferToAgentTool)(nil)
+)
+
+// Description implements [toolinternal.FunctionTool].
 func (t *TransferToAgentTool) Description() string {
 	return `Transfer the question to another agent.
 This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
 }
 
-// Name implements tool.Tool.
+// Name implements [toolinternal.FunctionTool].
 func (t *TransferToAgentTool) Name() string {
 	return "transfer_to_agent"
 }
 
-// IsLongRunning implements tool.Tool.
+// IsLongRunning implements [toolinternal.FunctionTool].
 func (t *TransferToAgentTool) IsLongRunning() bool {
 	return false
 }
 
+// Declaration implements [toolinternal.FunctionTool].
 func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:        t.Name(),
@@ -130,12 +136,12 @@ func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
 	}
 }
 
-// ProcessRequest implements types.Tool.
+// ProcessRequest implements [toolinternal.RequestProcessor].
 func (t *TransferToAgentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return appendTools(req, t)
 }
 
-// Run implements types.Tool.
+// Run implements [toolinternal.FunctionTool].
 func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	if args == nil {
 		return nil, fmt.Errorf("missing argument")
@@ -151,8 +157,6 @@ func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (map[string]any, e
 	ctx.Actions().TransferToAgent = agent
 	return map[string]any{}, nil
 }
-
-var _ tool.Tool = (*TransferToAgentTool)(nil)
 
 func transferTargets(agent, parent agent.Agent) []agent.Agent {
 	targets := slices.Clone(agent.SubAgents())

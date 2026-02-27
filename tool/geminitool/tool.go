@@ -34,6 +34,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
@@ -51,6 +52,11 @@ type geminiTool struct {
 	name  string
 	value *genai.Tool
 }
+
+var (
+	_ tool.Tool                     = (*geminiTool)(nil)
+	_ toolinternal.RequestProcessor = (*geminiTool)(nil)
+)
 
 // ProcessRequest adds the Gemini tool to the LLM request.
 func (t *geminiTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
