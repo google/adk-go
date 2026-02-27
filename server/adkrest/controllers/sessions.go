@@ -18,7 +18,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/server/adkrest/internal/models"
@@ -161,4 +163,68 @@ func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req 
 		sessions = append(sessions, respSession)
 	}
 	EncodeJSONResponse(sessions, http.StatusOK, rw)
+}
+
+// UpdateSessionHandler handles updating a session's state, specifically it performs a PATCH.
+// It creates and appends an event containing the state delta, ensuring all state changes
+// are recorded in the session's event history.
+func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req *http.Request) {
+	params := mux.Vars(req)
+	sessionID, err := models.SessionIDFromHTTPParameters(params)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if sessionID.ID == "" {
+		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	patchRequest := models.PatchSessionStateDeltaRequest{}
+	if err := json.NewDecoder(req.Body).Decode(&patchRequest); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Normalize directives to nil values for the service layer
+	normalizedDelta, err := models.NormalizeStateDelta(patchRequest.StateDelta)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Fetch the current session
+	getResp, err := c.service.Get(req.Context(), &session.GetRequest{
+		AppName:   sessionID.AppName,
+		UserID:    sessionID.UserID,
+		SessionID: sessionID.ID,
+	})
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	stateUpdateEvent := &session.Event{
+		ID:           uuid.NewString(),
+		InvocationID: "p-" + uuid.NewString(),
+		Author:       "user",
+		Timestamp:    time.Now(),
+		Actions: session.EventActions{
+			StateDelta: normalizedDelta,
+		},
+	}
+
+	// Append the event to the session, which applies the state delta through the event path
+	if err := c.service.AppendEvent(req.Context(), getResp.Session, stateUpdateEvent); err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return the updated session
+	respSession, err := models.FromSession(getResp.Session)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	EncodeJSONResponse(respSession, http.StatusOK, rw)
 }

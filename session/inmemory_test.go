@@ -946,6 +946,189 @@ func Test_inMemoryService_StateManagement(t *testing.T) {
 	})
 }
 
+func Test_inMemoryService_StateDeletionSemantics(t *testing.T) {
+	ctx := t.Context()
+	appName := "deletion_test_app"
+
+	t.Run("app_state_delete_via_event", func(t *testing.T) {
+		s := emptyService(t)
+		// Create session with initial app state
+		s1, _ := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1", State: map[string]any{"app:k1": "v1", "app:k2": "v2"}})
+
+		// Delete app:k1 via event with nil value
+		s1.Session.(*session).updatedAt = time.Now()
+		_ = s.AppendEvent(ctx, s1.Session.(*session), &Event{
+			ID:          "event1",
+			Actions:     EventActions{StateDelta: map[string]any{"app:k1": nil}},
+			LLMResponse: model.LLMResponse{},
+		})
+
+		// Create new session for same app to verify app state
+		s2, err := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u2", SessionID: "s2"})
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		// app:k1 should be deleted, app:k2 should remain
+		gotState := maps.Collect(s2.Session.State().All())
+		if _, exists := gotState["app:k1"]; exists {
+			t.Errorf("app:k1 should have been deleted but still exists")
+		}
+		if gotState["app:k2"] != "v2" {
+			t.Errorf("app:k2 should be 'v2', got %v", gotState["app:k2"])
+		}
+	})
+
+	t.Run("user_state_delete_via_event", func(t *testing.T) {
+		s := emptyService(t)
+		// Create session with initial user state
+		s1, _ := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1", State: map[string]any{"user:k1": "v1", "user:k2": "v2"}})
+
+		// Delete user:k1 via event with nil value
+		s1.Session.(*session).updatedAt = time.Now()
+		_ = s.AppendEvent(ctx, s1.Session.(*session), &Event{
+			ID:          "event1",
+			Actions:     EventActions{StateDelta: map[string]any{"user:k1": nil}},
+			LLMResponse: model.LLMResponse{},
+		})
+
+		// Create new session for same user to verify user state
+		s1b, err := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1b"})
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		// user:k1 should be deleted, user:k2 should remain
+		gotState := maps.Collect(s1b.Session.State().All())
+		if _, exists := gotState["user:k1"]; exists {
+			t.Errorf("user:k1 should have been deleted but still exists")
+		}
+		if gotState["user:k2"] != "v2" {
+			t.Errorf("user:k2 should be 'v2', got %v", gotState["user:k2"])
+		}
+
+		// Verify different user is not affected
+		s2, _ := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u2", SessionID: "s2"})
+		s2State := maps.Collect(s2.Session.State().All())
+		if len(s2State) != 0 {
+			t.Errorf("User 2 should have empty state, but got: %v", s2State)
+		}
+	})
+
+	t.Run("session_state_delete_via_event", func(t *testing.T) {
+		s := emptyService(t)
+		// Create session with initial session state
+		s1, _ := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1", State: map[string]any{"sk1": "v1", "sk2": "v2"}})
+
+		// Delete sk1 via event with nil value
+		s1.Session.(*session).updatedAt = time.Now()
+		_ = s.AppendEvent(ctx, s1.Session.(*session), &Event{
+			ID:          "event1",
+			Actions:     EventActions{StateDelta: map[string]any{"sk1": nil}},
+			LLMResponse: model.LLMResponse{},
+		})
+
+		// Fetch session to verify state
+		s1Got, err := s.Get(ctx, &GetRequest{AppName: appName, UserID: "u1", SessionID: "s1"})
+		if err != nil {
+			t.Fatalf("Failed to get session: %v", err)
+		}
+
+		// sk1 should be deleted, sk2 should remain
+		gotState := maps.Collect(s1Got.Session.State().All())
+		if _, exists := gotState["sk1"]; exists {
+			t.Errorf("sk1 should have been deleted but still exists")
+		}
+		if gotState["sk2"] != "v2" {
+			t.Errorf("sk2 should be 'v2', got %v", gotState["sk2"])
+		}
+	})
+
+	t.Run("app_state_add_overwrite_delete_sequence", func(t *testing.T) {
+		s := emptyService(t)
+		// Create session with initial app state
+		s1, _ := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1", State: map[string]any{"app:k1": "initial"}})
+
+		// Overwrite app:k1 via event
+		s1.Session.(*session).updatedAt = time.Now()
+		_ = s.AppendEvent(ctx, s1.Session.(*session), &Event{
+			ID:          "event1",
+			Actions:     EventActions{StateDelta: map[string]any{"app:k1": "overwritten", "app:k2": "added"}},
+			LLMResponse: model.LLMResponse{},
+		})
+
+		// Verify overwrite and add worked
+		s2, _ := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u2", SessionID: "s2"})
+		state1 := maps.Collect(s2.Session.State().All())
+		if state1["app:k1"] != "overwritten" {
+			t.Errorf("app:k1 should be 'overwritten', got %v", state1["app:k1"])
+		}
+		if state1["app:k2"] != "added" {
+			t.Errorf("app:k2 should be 'added', got %v", state1["app:k2"])
+		}
+
+		// Delete app:k1 via event
+		s1.Session.(*session).updatedAt = time.Now()
+		_ = s.AppendEvent(ctx, s1.Session.(*session), &Event{
+			ID:          "event2",
+			Actions:     EventActions{StateDelta: map[string]any{"app:k1": nil}},
+			LLMResponse: model.LLMResponse{},
+		})
+
+		// Verify deletion
+		s3, _ := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u3", SessionID: "s3"})
+		state2 := maps.Collect(s3.Session.State().All())
+		if _, exists := state2["app:k1"]; exists {
+			t.Errorf("app:k1 should have been deleted but still exists")
+		}
+		if state2["app:k2"] != "added" {
+			t.Errorf("app:k2 should still be 'added', got %v", state2["app:k2"])
+		}
+	})
+
+	t.Run("user_state_add_overwrite_delete_sequence", func(t *testing.T) {
+		s := emptyService(t)
+		// Create session with initial user state
+		s1, _ := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1", State: map[string]any{"user:k1": "initial"}})
+
+		// Overwrite user:k1 via event
+		s1.Session.(*session).updatedAt = time.Now()
+		_ = s.AppendEvent(ctx, s1.Session.(*session), &Event{
+			ID:          "event1",
+			Actions:     EventActions{StateDelta: map[string]any{"user:k1": "overwritten", "user:k2": "added"}},
+			LLMResponse: model.LLMResponse{},
+		})
+
+		// Verify overwrite and add worked (new session for same user)
+		s1b, _ := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1b"})
+		state1 := maps.Collect(s1b.Session.State().All())
+		if state1["user:k1"] != "overwritten" {
+			t.Errorf("user:k1 should be 'overwritten', got %v", state1["user:k1"])
+		}
+		if state1["user:k2"] != "added" {
+			t.Errorf("user:k2 should be 'added', got %v", state1["user:k2"])
+		}
+
+		// Delete user:k1 via event
+		s1.Session.(*session).updatedAt = time.Now()
+		_ = s.AppendEvent(ctx, s1.Session.(*session), &Event{
+			ID:          "event2",
+			Actions:     EventActions{StateDelta: map[string]any{"user:k1": nil}},
+			LLMResponse: model.LLMResponse{},
+		})
+
+		// Verify deletion (new session for same user)
+		s1c, _ := s.Create(ctx, &CreateRequest{AppName: appName, UserID: "u1", SessionID: "s1c"})
+		state2 := maps.Collect(s1c.Session.State().All())
+		if _, exists := state2["user:k1"]; exists {
+			t.Errorf("user:k1 should have been deleted but still exists")
+		}
+		if state2["user:k2"] != "added" {
+			t.Errorf("user:k2 should still be 'added', got %v", state2["user:k2"])
+		}
+	})
+}
+
 func serviceDbWithData(t *testing.T) Service {
 	t.Helper()
 

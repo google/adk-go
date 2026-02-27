@@ -181,6 +181,20 @@ func (s *FakeSessionService) AppendEvent(ctx context.Context, curSession session
 	}
 	testSession.SessionEvents = append(testSession.SessionEvents, event)
 	testSession.UpdatedAt = event.Timestamp
+
+	if event.Actions.StateDelta != nil {
+		if testSession.SessionState == nil {
+			testSession.SessionState = make(TestState)
+		}
+		for k, v := range event.Actions.StateDelta {
+			if v == nil {
+				delete(testSession.SessionState, k)
+			} else {
+				testSession.SessionState[k] = v
+			}
+		}
+	}
+
 	s.Sessions[testSession.Id] = *testSession
 	return nil
 }

@@ -230,7 +230,13 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
 		s.updateAppState(appDelta, curSession.AppName())
 		s.updateUserState(userDelta, curSession.AppName(), curSession.UserID())
-		maps.Copy(stored_session.state, sessionDelta)
+		for key, value := range sessionDelta {
+			if value == nil {
+				delete(stored_session.state, key)
+			} else {
+				stored_session.state[key] = value
+			}
+		}
 	}
 	return nil
 }
@@ -241,7 +247,13 @@ func (s *inMemoryService) updateAppState(appDelta stateMap, appName string) stat
 		innerMap = make(stateMap)
 		s.appState[appName] = innerMap
 	}
-	maps.Copy(innerMap, appDelta)
+	for key, value := range appDelta {
+		if value == nil {
+			delete(innerMap, key)
+		} else {
+			innerMap[key] = value
+		}
+	}
 	return innerMap
 }
 
@@ -256,7 +268,13 @@ func (s *inMemoryService) updateUserState(userDelta stateMap, appName, userID st
 		innerMap = make(stateMap)
 		innerUsersMap[userID] = innerMap
 	}
-	maps.Copy(innerMap, userDelta)
+	for key, value := range userDelta {
+		if value == nil {
+			delete(innerMap, key)
+		} else {
+			innerMap[key] = value
+		}
+	}
 	return innerMap
 }
 

@@ -436,6 +436,174 @@ func TestListSessions(t *testing.T) {
 	}
 }
 
+func TestUpdateSession(t *testing.T) {
+	id := fakes.SessionKey{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: "testSession",
+	}
+
+	tc := []struct {
+		name            string
+		storedSessions  map[fakes.SessionKey]fakes.TestSession
+		sessionID       fakes.SessionKey
+		patchBody       string
+		wantState       map[string]any
+		wantEventCount  int
+		wantStatus      int
+		wantErrContains string
+	}{
+		{
+			name: "patch adds new key and appends event",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {
+					Id:            id,
+					SessionState:  fakes.TestState{"existing": "value"},
+					SessionEvents: fakes.TestEvents{},
+					UpdatedAt:     time.Now(),
+				},
+			},
+			sessionID:      id,
+			patchBody:      `{"stateDelta": {"newKey": "newValue"}}`,
+			wantState:      map[string]any{"existing": "value", "newKey": "newValue"},
+			wantEventCount: 1,
+			wantStatus:     http.StatusOK,
+		},
+		{
+			name: "patch overwrites existing key",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {
+					Id:            id,
+					SessionState:  fakes.TestState{"key": "oldValue"},
+					SessionEvents: fakes.TestEvents{},
+					UpdatedAt:     time.Now(),
+				},
+			},
+			sessionID:      id,
+			patchBody:      `{"stateDelta": {"key": "newValue"}}`,
+			wantState:      map[string]any{"key": "newValue"},
+			wantEventCount: 1,
+			wantStatus:     http.StatusOK,
+		},
+		{
+			name: "patch deletes key with delete directive",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {
+					Id:            id,
+					SessionState:  fakes.TestState{"toDelete": "value", "toKeep": "value"},
+					SessionEvents: fakes.TestEvents{},
+					UpdatedAt:     time.Now(),
+				},
+			},
+			sessionID:      id,
+			patchBody:      `{"stateDelta": {"toDelete": {"$adk_state_update": "delete"}}}`,
+			wantState:      map[string]any{"toKeep": "value"},
+			wantEventCount: 1,
+			wantStatus:     http.StatusOK,
+		},
+		{
+			name: "patch on session with existing events adds one more",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {
+					Id:           id,
+					SessionState: fakes.TestState{"key": "value"},
+					SessionEvents: fakes.TestEvents{
+						{InvocationID: "existing-event"},
+					},
+					UpdatedAt: time.Now(),
+				},
+			},
+			sessionID:      id,
+			patchBody:      `{"stateDelta": {"newKey": "newValue"}}`,
+			wantState:      map[string]any{"key": "value", "newKey": "newValue"},
+			wantEventCount: 2,
+			wantStatus:     http.StatusOK,
+		},
+		{
+			name:            "patch on non-existent session returns error",
+			storedSessions:  map[fakes.SessionKey]fakes.TestSession{},
+			sessionID:       id,
+			patchBody:       `{"stateDelta": {"key": "value"}}`,
+			wantStatus:      http.StatusInternalServerError,
+			wantErrContains: "not found",
+		},
+		{
+			name: "patch with missing session_id returns error",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{
+				id: {
+					Id:            id,
+					SessionState:  fakes.TestState{},
+					SessionEvents: fakes.TestEvents{},
+					UpdatedAt:     time.Now(),
+				},
+			},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			patchBody:       `{"stateDelta": {"key": "value"}}`,
+			wantStatus:      http.StatusBadRequest,
+			wantErrContains: "session_id parameter is required",
+		},
+	}
+
+	for _, tt := range tc {
+		t.Run(tt.name, func(t *testing.T) {
+			sessionService := fakes.FakeSessionService{Sessions: tt.storedSessions}
+			apiController := controllers.NewSessionsAPIController(&sessionService)
+			req, err := http.NewRequest(http.MethodPatch, "/apps/testApp/users/testUser/sessions/testSession", strings.NewReader(tt.patchBody))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
+			rr := httptest.NewRecorder()
+
+			apiController.UpdateSessionHandler(rr, req)
+
+			if status := rr.Code; status != tt.wantStatus {
+				t.Fatalf("handler returned wrong status code: got %v want %v, body: %s", status, tt.wantStatus, rr.Body.String())
+			}
+
+			if tt.wantErrContains != "" {
+				if !strings.Contains(rr.Body.String(), tt.wantErrContains) {
+					t.Errorf("expected error containing %q, got %q", tt.wantErrContains, rr.Body.String())
+				}
+				return
+			}
+
+			// Decode response
+			var got models.Session
+			if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+
+			// Verify state
+			if diff := cmp.Diff(tt.wantState, got.State); diff != "" {
+				t.Errorf("UpdateSession() state mismatch (-want +got):\n%s", diff)
+			}
+
+			// Verify event count
+			if len(got.Events) != tt.wantEventCount {
+				t.Errorf("UpdateSession() event count = %d, want %d", len(got.Events), tt.wantEventCount)
+			}
+
+			// Verify the new event has correct properties (if events were added)
+			if tt.wantEventCount > 0 && len(got.Events) > 0 {
+				lastEvent := got.Events[len(got.Events)-1]
+				// Verify invocation ID starts with "p-" (matching Python behavior)
+				if !strings.HasPrefix(lastEvent.InvocationID, "p-") {
+					t.Errorf("UpdateSession() event invocation_id should start with 'p-', got %q", lastEvent.InvocationID)
+				}
+				// Verify author is "user" (matching Python behavior)
+				if lastEvent.Author != "user" {
+					t.Errorf("UpdateSession() event author should be 'user', got %q", lastEvent.Author)
+				}
+			}
+		})
+	}
+}
+
 func sessionVars(sessionID fakes.SessionKey) map[string]string {
 	return map[string]string{
 		"app_name":   sessionID.AppName,
