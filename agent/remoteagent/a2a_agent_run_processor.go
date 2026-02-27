@@ -17,6 +17,7 @@ package remoteagent
 import (
 	"fmt"
 	"maps"
+	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/genai"
@@ -123,12 +124,9 @@ func (p *a2aAgentRunProcessor) removeAggregation(aid a2a.ArtifactID) {
 }
 
 func (p *a2aAgentRunProcessor) removeFromOrder(aid a2a.ArtifactID) {
-	for i, id := range p.aggregationOrder {
-		if id == aid {
-			p.aggregationOrder = append(p.aggregationOrder[:i], p.aggregationOrder[i+1:]...)
-			return
-		}
-	}
+	p.aggregationOrder = slices.DeleteFunc(p.aggregationOrder, func(id a2a.ArtifactID) bool {
+		return id == aid
+	})
 }
 
 func (p *a2aAgentRunProcessor) updateAggregation(aid a2a.ArtifactID, agg *artifactAggregation, event *session.Event) {
