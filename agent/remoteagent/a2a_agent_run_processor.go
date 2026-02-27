@@ -105,9 +105,8 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2a
 		aggregation = &artifactAggregation{}
 		p.aggregations[update.Artifact.ID] = aggregation
 	}
-	p.updateOrder(update.Artifact.ID)
 
-	p.updateAggregation(aggregation, event)
+	p.updateAggregation(update.Artifact.ID, aggregation, event)
 
 	if !update.LastChunk {
 		return []*session.Event{event}
@@ -120,25 +119,19 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2a
 
 func (p *a2aAgentRunProcessor) removeAggregation(aid a2a.ArtifactID) {
 	delete(p.aggregations, aid)
+	p.removeFromOrder(aid)
+}
+
+func (p *a2aAgentRunProcessor) removeFromOrder(aid a2a.ArtifactID) {
 	for i, id := range p.aggregationOrder {
 		if id == aid {
 			p.aggregationOrder = append(p.aggregationOrder[:i], p.aggregationOrder[i+1:]...)
-			break
+			return
 		}
 	}
 }
 
-func (p *a2aAgentRunProcessor) updateOrder(aid a2a.ArtifactID) {
-	for i, id := range p.aggregationOrder {
-		if id == aid {
-			p.aggregationOrder = append(p.aggregationOrder[:i], p.aggregationOrder[i+1:]...)
-			break
-		}
-	}
-	p.aggregationOrder = append(p.aggregationOrder, aid)
-}
-
-func (p *a2aAgentRunProcessor) updateAggregation(agg *artifactAggregation, event *session.Event) {
+func (p *a2aAgentRunProcessor) updateAggregation(aid a2a.ArtifactID, agg *artifactAggregation, event *session.Event) {
 	for _, part := range event.Content.Parts {
 		if part.Text != "" { // collapse small text-block parts to bigger text blocks
 			if part.Thought {
@@ -170,6 +163,9 @@ func (p *a2aAgentRunProcessor) updateAggregation(agg *artifactAggregation, event
 	if event.UsageMetadata != nil { // cumulative
 		agg.usage = event.UsageMetadata
 	}
+
+	p.removeFromOrder(aid)
+	p.aggregationOrder = append(p.aggregationOrder, aid)
 }
 
 func (p *a2aAgentRunProcessor) buildNonPartialAggregation(ctx agent.InvocationContext, agg *artifactAggregation) *session.Event {
