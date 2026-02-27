@@ -59,16 +59,6 @@ func (m *mockLLM) GetGoogleLLMVariant() genai.Backend {
 	return genai.BackendGeminiAPI
 }
 
-// mockLLMAgent satisfies both agent.Agent (via embedding) and llminternal.Agent (via internal() implementation)
-type mockLLMAgent struct {
-	agent.Agent
-	s *State
-}
-
-func (m *mockLLMAgent) internal() *State {
-	return m.s
-}
-
 func TestOutputSchemaRequestProcessor(t *testing.T) {
 	schema := &genai.Schema{
 		Type: genai.TypeObject,
@@ -85,7 +75,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		mockAgent := &mockLLMAgent{
 			Agent: baseAgent,
 			s: &State{
-				Model:        &mockLLM{name: "gemini-1.5-flash"},
+				Model:        &mockLLM{name: "gemini-2.5-flash"},
 				OutputSchema: schema,
 				Tools:        []tool.Tool{&mockTool{name: "other_tool"}},
 			},
@@ -125,7 +115,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		mockAgent := &mockLLMAgent{
 			Agent: baseAgent,
 			s: &State{
-				Model:        &mockLLM{name: "gemini-1.5-flash"},
+				Model:        &mockLLM{name: "gemini-2.5-flash"},
 				OutputSchema: schema,
 				Tools:        nil, // No tools -> optimization skips processor
 			},
@@ -151,7 +141,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		mockAgent := &mockLLMAgent{
 			Agent: baseAgent,
 			s: &State{
-				Model:        &mockLLM{name: "gemini-1.5-flash"},
+				Model:        &mockLLM{name: "gemini-2.5-flash"},
 				OutputSchema: nil,
 				Tools:        []tool.Tool{&mockTool{name: "other_tool"}},
 			},
@@ -173,9 +163,9 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 	})
 
 	t.Run("NoOpWhenNativeSupportAvailable", func(t *testing.T) {
-		// Native support = Vertex AI + Gemini 2.0+
+		// Native support = Vertex AI + Gemini 2.5+
 		llm := &mockLLM{
-			name:    "gemini-2.0-flash",
+			name:    "gemini-2.5-flash",
 			variant: func() *genai.Backend { x := genai.BackendVertexAI; return &x }(),
 		}
 

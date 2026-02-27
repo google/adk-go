@@ -1,18 +1,19 @@
 httprr trace v1
-439 1799
+507 1897
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 193
+Content-Length: 261
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Tell me about the current weather"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a helpful assistant."}],"role":"user"}}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Tell me about the current weather"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a helpful assistant."},{"text":"You are an agent. Your internal name is \"model-agent\"."}],"role":"user"}}HTTP/2.0 200 OK
 Connection: close
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Disposition: attachment
 Content-Type: text/event-stream
-Date: Mon, 09 Feb 2026 10:12:06 GMT
+Date: Fri, 20 Feb 2026 12:34:18 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=4090
+Server-Timing: gfet4t7; dur=1227
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -20,9 +21,9 @@ X-Content-Type-Options: nosniff
 X-Frame-Options: SAMEORIGIN
 X-Xss-Protection: 0
 
-data: {"candidates": [{"content": {"parts": [{"text": "I'd love to tell you about"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 14,"candidatesTokenCount": 8,"totalTokenCount": 779,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 14}],"thoughtsTokenCount": 757},"modelVersion": "gemini-2.5-flash","responseId": "8rKJabi_HrDq7M8PvtSS6QE"}
+data: {"candidates": [{"content": {"parts": [{"text": "I'm sorry, but I cannot tell you about the current weather. As an AI, I don't have access"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 28,"candidatesTokenCount": 25,"totalTokenCount": 92,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 28}],"thoughtsTokenCount": 39},"modelVersion": "gemini-2.5-flash","responseId": "yFSYaYHNPJPH1e8P6vyhqQY"}
 
-data: {"candidates": [{"content": {"parts": [{"text": " the current weather!\n\nHowever, as an AI, I don't know your specific location or have access to real-time data from where you are.\n\n**To give you an accurate update, please tell me:**\n\n*   **Your"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 14,"candidatesTokenCount": 58,"totalTokenCount": 829,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 14}],"thoughtsTokenCount": 757},"modelVersion": "gemini-2.5-flash","responseId": "8rKJabi_HrDq7M8PvtSS6QE"}
+data: {"candidates": [{"content": {"parts": [{"text": " to real-time information or your current location.\n\nTo get the current weather, you can:\n*   **Check a weather app** on your phone (e.g., Apple Weather, Google Weather, AccuWeather, The Weather Channel"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 28,"candidatesTokenCount": 75,"totalTokenCount": 142,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 28}],"thoughtsTokenCount": 39},"modelVersion": "gemini-2.5-flash","responseId": "yFSYaYHNPJPH1e8P6vyhqQY"}
 
-data: {"candidates": [{"content": {"parts": [{"text": " city and state/country**\n*   **(Or a zip/postal code)**\n\nOnce I have that, I can look up the current temperature, conditions, and even a short forecast for you!"}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 14,"candidatesTokenCount": 99,"totalTokenCount": 870,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 14}],"thoughtsTokenCount": 757},"modelVersion": "gemini-2.5-flash","responseId": "8rKJabi_HrDq7M8PvtSS6QE"}
+data: {"candidates": [{"content": {"parts": [{"text": ")\n*   **Use a search engine** like Google or Bing and type \"weather near me\" or \"weather in [your city]\"\n*   **Look out your window!**"}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 28,"candidatesTokenCount": 114,"totalTokenCount": 181,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 28}],"thoughtsTokenCount": 39},"modelVersion": "gemini-2.5-flash","responseId": "yFSYaYHNPJPH1e8P6vyhqQY"}
 

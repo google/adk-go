@@ -1,16 +1,17 @@
 httprr trace v1
-989 1704
+1109 1743
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 757
+Content-Length: 877
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. calculator agent\n Skills: add, subtract, multiply, divide","name":"calculator","parameters":{"properties":{"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"request":{"type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools."},{"text":"You are an agent. Your internal name is \"transfer_agent\". The description about you is \"transfer agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. calculator agent\n Skills: add, subtract, multiply, divide","name":"calculator","parameters":{"properties":{"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"request":{"type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Thu, 05 Feb 2026 13:47:59 GMT
+Date: Fri, 20 Feb 2026 12:51:28 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=895
+Server-Timing: gfet4t7; dur=1829
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -27,12 +28,12 @@ X-Xss-Protection: 0
             "functionCall": {
               "name": "calculator",
               "args": {
-                "request": "2+2",
                 "skill_id": "add",
-                "rationale": "The user is asking to add two numbers, and the calculator tool with the add skill can perform this operation."
+                "rationale": "The user is asking to add two numbers, and the calculator tool with the add skill can perform this operation.",
+                "request": "2 + 2"
               }
             },
-            "thoughtSignature": "CtECAb4+9vvPBKTo7gXMQg5en/JH6fJLjWHx6/D5sd96TOEWqP8RiCvGGwRasFqOmGm0xTWSAqI+tx9aGMxMuuP4rZ+O430zG99M81TbPjvF1xsPafDSo5hLPXSOjs6OldjyC248Qweta/NxEJHcRWbTxX/RxGgCS8l2kC8qejYJ3vBarKXm7RCh1kk1E01gkQ/I66ClY5eWam3Vzv5AhFB4gbMtw1hPvVtEOuIu2WTpjvTXRKwAADn8kLoYWtTpfwnRpoaAzd7moM098MDVjtiWQ8hOuJXP9/Ryc9Lj3RLPYvLUkLkEpm91l+88Mi8OhNwyTESgOpEYJcFqO4YVD62jImlEguO59Zq1EzquGc9gxbIAohw573pRQbRy/XH/eCozLPh3f2riFtLgB4I3KX79TtVdRAgzxePexxasx/xtbhQLnYlHts8EwZufw2juZFDuOw=="
+            "thoughtSignature": "CsICAb4+9vt9/1L8xVx5XEypruXBMQq91+7+GBLGcwKMWCtvAu6hM5Z4i5GvJBwtX8ySyc8rIlvB7DSOcyC213aJPiftSL+a7uzcah7u3rVFo61dVDHlP0bWTFhfSytHbavUt6H3ojfXxgriMXWbXIpIKaBq15kYAwzTk9sIjg2uPjeHB256gAZnibTqt9ltEWG7r4Un0mBfspbsQaHAb1wt+uIoqrWYU+v9ogI+UKSgPYy2oZs6Li07t3E2KpFOY2gGEkmMVvmgTGwwQ2+KwK9XgKfNYbj+twqTH6a4YfCHjRpdpERYy67axHodRX+IXiPhPGurknNz9O2vULnU2DnIv1LCR7v6HcbF46Mra6JVYJTCNJz2Z44QMBxlBZY4vbV+1jTAhx3lY9rONTtyxdUMt8n8b2d0f69sW6xTGRG6GI8fkA=="
           }
         ],
         "role": "model"
@@ -43,34 +44,35 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 141,
-    "candidatesTokenCount": 48,
-    "totalTokenCount": 267,
+    "promptTokenCount": 164,
+    "candidatesTokenCount": 49,
+    "totalTokenCount": 285,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 141
+        "tokenCount": 164
       }
     ],
-    "thoughtsTokenCount": 78
+    "thoughtsTokenCount": 72
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "jp-Eaf3SOdnknsEPlcuTkQ0"
+  "responseId": "z1iYaZPaArLZ2roPsKvdOQ"
 }
-435 708
+598 785
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 189
+Content-Length: 352
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"2+2"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator agent. You can calculate numbers."}],"role":"user"}}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"2 + 2"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator agent. You can calculate numbers."},{"text":"You are an agent. Your internal name is \"calculator\". The description about you is \"calculator agent\\n Skills: add, subtract, multiply, divide\"."}],"role":"user"}}HTTP/2.0 200 OK
 Connection: close
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Disposition: attachment
 Content-Type: text/event-stream
-Date: Thu, 05 Feb 2026 13:47:59 GMT
+Date: Fri, 20 Feb 2026 12:51:30 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=419
+Server-Timing: gfet4t7; dur=1182
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -78,20 +80,21 @@ X-Content-Type-Options: nosniff
 X-Frame-Options: SAMEORIGIN
 X-Xss-Protection: 0
 
-data: {"candidates": [{"content": {"parts": [{"text": "4"}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 16,"candidatesTokenCount": 1,"totalTokenCount": 50,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 16}],"thoughtsTokenCount": 33},"modelVersion": "gemini-2.5-flash","responseId": "j5-EaaO7De-qkdUP7KSl8A4"}
+data: {"candidates": [{"content": {"parts": [{"text": "calculator.add(2, 2)"}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 49,"candidatesTokenCount": 9,"totalTokenCount": 99,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 49}],"thoughtsTokenCount": 41},"modelVersion": "gemini-2.5-flash","responseId": "0FiYabrDO5H-2roP9_2W2Q0"}
 
-1654 832
+1775 1352
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1421
+Content-Length: 1542
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"2+2"},"name":"calculator"},"thoughtSignature":"CtECAb4+9vvPBKTo7gXMQg5en/JH6fJLjWHx6/D5sd96TOEWqP8RiCvGGwRasFqOmGm0xTWSAqI+tx9aGMxMuuP4rZ+O430zG99M81TbPjvF1xsPafDSo5hLPXSOjs6OldjyC248Qweta/NxEJHcRWbTxX/RxGgCS8l2kC8qejYJ3vBarKXm7RCh1kk1E01gkQ/I66ClY5eWam3Vzv5AhFB4gbMtw1hPvVtEOuIu2WTpjvTXRKwAADn8kLoYWtTpfwnRpoaAzd7moM098MDVjtiWQ8hOuJXP9/Ryc9Lj3RLPYvLUkLkEpm91l+88Mi8OhNwyTESgOpEYJcFqO4YVD62jImlEguO59Zq1EzquGc9gxbIAohw573pRQbRy/XH/eCozLPh3f2riFtLgB4I3KX79TtVdRAgzxePexxasx/xtbhQLnYlHts8EwZufw2juZFDuOw=="}],"role":"model"},{"parts":[{"functionResponse":{"name":"calculator","response":{"result":"4"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. calculator agent\n Skills: add, subtract, multiply, divide","name":"calculator","parameters":{"properties":{"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"request":{"type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"2 + 2"},"name":"calculator"},"thoughtSignature":"CsICAb4+9vt9/1L8xVx5XEypruXBMQq91+7+GBLGcwKMWCtvAu6hM5Z4i5GvJBwtX8ySyc8rIlvB7DSOcyC213aJPiftSL+a7uzcah7u3rVFo61dVDHlP0bWTFhfSytHbavUt6H3ojfXxgriMXWbXIpIKaBq15kYAwzTk9sIjg2uPjeHB256gAZnibTqt9ltEWG7r4Un0mBfspbsQaHAb1wt+uIoqrWYU+v9ogI+UKSgPYy2oZs6Li07t3E2KpFOY2gGEkmMVvmgTGwwQ2+KwK9XgKfNYbj+twqTH6a4YfCHjRpdpERYy67axHodRX+IXiPhPGurknNz9O2vULnU2DnIv1LCR7v6HcbF46Mra6JVYJTCNJz2Z44QMBxlBZY4vbV+1jTAhx3lY9rONTtyxdUMt8n8b2d0f69sW6xTGRG6GI8fkA=="}],"role":"model"},{"parts":[{"functionResponse":{"name":"calculator","response":{"result":"calculator.add(2, 2)"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools."},{"text":"You are an agent. Your internal name is \"transfer_agent\". The description about you is \"transfer agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. calculator agent\n Skills: add, subtract, multiply, divide","name":"calculator","parameters":{"properties":{"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"request":{"type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Thu, 05 Feb 2026 13:48:00 GMT
+Date: Fri, 20 Feb 2026 12:51:31 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=579
+Server-Timing: gfet4t7; dur=1582
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -105,7 +108,8 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "The answer is 4.\n"
+            "text": "2 + 2 = 4.",
+            "thoughtSignature": "CqsCAb4+9vvS8nnHtdgLkkrI6NN79dQZn96idZjhvpGjIaj5VVNNNyphjhLpRYg2jMEDMmpAJSjfviZhXvsXhCj6IRCkFAp8yQQrzo5roVOoNzhXQa9uly0aKjcQ29R+iAhElRo61oZILmplH4Ugx67nYTu3YjwykEOsZglEgBxfM0gH+HlETbJCzzLlVHaAWm1ONFhtRDNVNLCH/TWygDb41kpdODOhC2sBDVQwvMCdi44GV71zU6Q8N5S2S62d51tFBw04DzuZ3O04dsgiHtwBh/rePO4Mxjw6L006nh+kPaoUxMf8MqE5un0WSUZJTcYEyw1RpJK7Prfm0DJXZvw3ldUjlpnHB9wQXEa9m+c8FLjqwKWI1isqT5oMEjfWqwZsgW00+Be4qe8H+VI="
           }
         ],
         "role": "model"
@@ -115,16 +119,17 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 169,
-    "candidatesTokenCount": 6,
-    "totalTokenCount": 175,
+    "promptTokenCount": 201,
+    "candidatesTokenCount": 8,
+    "totalTokenCount": 280,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 169
+        "tokenCount": 201
       }
-    ]
+    ],
+    "thoughtsTokenCount": 71
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "j5-EaeimO-D6nsEP4_2KkAw"
+  "responseId": "0liYafLTC-ad0-kPrfidgAs"
 }

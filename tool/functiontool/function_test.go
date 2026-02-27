@@ -69,12 +69,12 @@ func createToolContext(t *testing.T) tool.Context {
 	return toolinternal.NewToolContext(invCtx, "", &session.EventActions{}, nil)
 }
 
-//go:generate go test -httprecord=.*
+//go:generate go test -v -httprecord=.*
 
 func TestFunctionTool_Simple(t *testing.T) {
 	ctx := t.Context()
 	// TODO: this model creation code was copied from model/genai_test.go. Refactor so both tests can share.
-	modelName := "gemini-2.0-flash"
+	modelName := "gemini-2.5-flash"
 	replayTrace := filepath.Join("testdata", t.Name()+".httprr")
 	cfg := testutil.NewGeminiTestClientConfig(t, replayTrace)
 	m, err := gemini.NewModel(ctx, modelName, cfg)

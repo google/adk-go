@@ -1,16 +1,17 @@
 httprr trace v1
-925 1436
+1098 1442
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 693
+Content-Length: 866
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"what is the weather in Lisbon?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"what is the weather in Lisbon?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."},{"text":"You are an agent. Your internal name is \"weather_time_agent\". The description about you is \"Agent to answer questions about the time and weather in a city.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 30 Jan 2026 13:14:24 GMT
+Date: Fri, 20 Feb 2026 12:56:31 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=609
+Server-Timing: gfet4t7; dur=1081
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -30,7 +31,7 @@ X-Xss-Protection: 0
                 "city": "Lisbon"
               }
             },
-            "thoughtSignature": "Co0CAXLI2nwNpz14KARCRwxrprYL438vUGi5noXwpsoyKBwKy/QBGPGeX3Ffxz3mfz2pRr9kal9zazfOLM/KKmBmtMCZe9DzT3MQogWEaqBh/Dqk13mCgGzkYyYyRxuByCgHGDDrVhdncGIZnXvPPdw6kj5QluQckzbQ9bs4Zg8sZ48FBJLSGr4Mv+0orpRz9au9lFMHP2jWqnxBdtPxn0dFrBUeEYN6nrqjCIGHyF218d2byOHj0iKPe0HvudqFjsKNPpxQFFWOkVSfeexXUZBqzDsfa9nr4Ld66j9IEYVYU+Hs9NrQ3Xxg1bq+ssaOY6L5X8Ni+Ek59PmWcXMCsm6NqZmEq5xoLrkE+zeSQvc="
+            "thoughtSignature": "CuUBAb4+9vsSF8z3gvcvCDqtz2L3wNY4x3Fqt8WN/4ijA7TQjkg0cuvMtEoj1Tu96RlRt/mjM8Bh8gRlkshp1Z4n31DFC12TUi4zS8AwpIcAKmGqdzM5aXMZnXwGdEZiCbpvC9kHWfHADIAHUJqvWbEMvuxXSatlriLUezT/zoB2/VEp6YtLrMYD/9J/xeIebfUtit+pj/y+F1SAI/OnqCkXnc7yASvmqvacvk+HF4c+xz/nvdwV3tkiQa6s8hRv8zVkWiSlWCbEjHlBHQnWVHNCXm0dtyTxyeGzzyFbWOJ1PXmz62MAog=="
           }
         ],
         "role": "model"
@@ -41,32 +42,33 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 113,
+    "promptTokenCount": 148,
     "candidatesTokenCount": 16,
-    "totalTokenCount": 189,
+    "totalTokenCount": 212,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 113
+        "tokenCount": 148
       }
     ],
-    "thoughtsTokenCount": 60
+    "thoughtsTokenCount": 48
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "sK58aYXUK4TVvdIPu-2TsAw"
+  "responseId": "_lmYad3zHcGu2roPisf1iAs"
 }
-1547 842
+1668 899
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1314
+Content-Length: 1435
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"what is the weather in Lisbon?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Lisbon"},"name":"get_weather"},"thoughtSignature":"Co0CAXLI2nwNpz14KARCRwxrprYL438vUGi5noXwpsoyKBwKy/QBGPGeX3Ffxz3mfz2pRr9kal9zazfOLM/KKmBmtMCZe9DzT3MQogWEaqBh/Dqk13mCgGzkYyYyRxuByCgHGDDrVhdncGIZnXvPPdw6kj5QluQckzbQ9bs4Zg8sZ48FBJLSGr4Mv+0orpRz9au9lFMHP2jWqnxBdtPxn0dFrBUeEYN6nrqjCIGHyF218d2byOHj0iKPe0HvudqFjsKNPpxQFFWOkVSfeexXUZBqzDsfa9nr4Ld66j9IEYVYU+Hs9NrQ3Xxg1bq+ssaOY6L5X8Ni+Ek59PmWcXMCsm6NqZmEq5xoLrkE+zeSQvc="}],"role":"model"},{"parts":[{"functionResponse":{"name":"get_weather","response":{"output":{"weather_summary":"Today in \"Lisbon\" is sunny"}}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"what is the weather in Lisbon?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Lisbon"},"name":"get_weather"},"thoughtSignature":"CuUBAb4+9vsSF8z3gvcvCDqtz2L3wNY4x3Fqt8WN/4ijA7TQjkg0cuvMtEoj1Tu96RlRt/mjM8Bh8gRlkshp1Z4n31DFC12TUi4zS8AwpIcAKmGqdzM5aXMZnXwGdEZiCbpvC9kHWfHADIAHUJqvWbEMvuxXSatlriLUezT/zoB2/VEp6YtLrMYD/9J/xeIebfUtit+pj/y+F1SAI/OnqCkXnc7yASvmqvacvk+HF4c+xz/nvdwV3tkiQa6s8hRv8zVkWiSlWCbEjHlBHQnWVHNCXm0dtyTxyeGzzyFbWOJ1PXmz62MAog=="}],"role":"model"},{"parts":[{"functionResponse":{"name":"get_weather","response":{"output":{"weather_summary":"Today in \"Lisbon\" is sunny"}}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."},{"text":"You are an agent. Your internal name is \"weather_time_agent\". The description about you is \"Agent to answer questions about the time and weather in a city.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 30 Jan 2026 13:14:25 GMT
+Date: Fri, 20 Feb 2026 12:56:32 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=305
+Server-Timing: gfet4t7; dur=801
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -90,16 +92,16 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 157,
+    "promptTokenCount": 192,
     "candidatesTokenCount": 8,
-    "totalTokenCount": 165,
+    "totalTokenCount": 200,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 157
+        "tokenCount": 192
       }
     ]
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "sa58aZCEAaCX28oP-Y2Q-AE"
+  "responseId": "_1mYaZP8JsDh2roP3ISwuAo"
 }
