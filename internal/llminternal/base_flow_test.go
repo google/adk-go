@@ -508,6 +508,78 @@ func TestMergeEventActions(t *testing.T) {
 			},
 		},
 		{
+			name: "base has artifact delta, other has nil",
+			base: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": 1, "file2": 2},
+			},
+			other: &session.EventActions{
+				ArtifactDelta: nil,
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": 1, "file2": 2},
+			},
+		},
+		{
+			name: "base has nil artifact delta, other has values",
+			base: &session.EventActions{
+				ArtifactDelta: nil,
+			},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": 1, "file2": 2},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": 1, "file2": 2},
+			},
+		},
+		{
+			name: "artifact delta merged with non-overlapping keys",
+			base: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": 1, "file2": 2},
+			},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file3": 3, "file4": 4},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": 1, "file2": 2, "file3": 3, "file4": 4},
+			},
+		},
+		{
+			name: "artifact delta merged with overlapping keys",
+			base: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": 1, "file2": 100},
+			},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": 10, "file2": 10},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": 10, "file2": 100},
+			},
+		},
+		{
+			name: "artifact deltas merged with partially overlapping keys",
+			base: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": 1, "file2": 100},
+			},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file2": 2, "file3": 3},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": 1, "file2": 100, "file3": 3},
+			},
+		},
+		{
+			name: "artifact deltas merged with negative version preserved",
+			base: &session.EventActions{
+				ArtifactDelta: nil,
+			},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": -1},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file1": -1},
+			},
+		},
+		{
 			name: "skip summarization merging - any true wins",
 			base: &session.EventActions{
 				SkipSummarization: false,
@@ -547,18 +619,21 @@ func TestMergeEventActions(t *testing.T) {
 			name: "all fields merged correctly",
 			base: &session.EventActions{
 				StateDelta:        map[string]any{"key1": "value1"},
+				ArtifactDelta:     map[string]int64{"file1": 1},
 				SkipSummarization: false,
 				TransferToAgent:   "agent1",
 				Escalate:          false,
 			},
 			other: &session.EventActions{
 				StateDelta:        map[string]any{"key2": "value2"},
+				ArtifactDelta:     map[string]int64{"file2": 2},
 				SkipSummarization: true,
 				TransferToAgent:   "agent2",
 				Escalate:          true,
 			},
 			want: &session.EventActions{
 				StateDelta:        map[string]any{"key1": "value1", "key2": "value2"},
+				ArtifactDelta:     map[string]int64{"file1": 1, "file2": 2},
 				SkipSummarization: true,
 				TransferToAgent:   "agent2",
 				Escalate:          true,
