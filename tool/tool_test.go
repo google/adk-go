@@ -17,6 +17,7 @@ package tool_test
 import (
 	"testing"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
@@ -102,4 +103,26 @@ func TestTypes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFilterToolset_Close(t *testing.T) {
+	mock := &mockToolset{}
+	ts := tool.FilterToolset(mock, func(ctx agent.ReadonlyContext, _ tool.Tool) bool { return true })
+	if err := ts.Close(); err != nil {
+		t.Errorf("Close() error = %v", err)
+	}
+	if !mock.closeCalled {
+		t.Error("Close() was not called on underlying toolset")
+	}
+}
+
+type mockToolset struct {
+	closeCalled bool
+}
+
+func (m *mockToolset) Name() string                                         { return "mock" }
+func (m *mockToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) { return nil, nil }
+func (m *mockToolset) Close() error {
+	m.closeCalled = true
+	return nil
 }

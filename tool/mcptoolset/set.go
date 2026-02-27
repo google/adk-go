@@ -40,7 +40,7 @@ import (
 //		Model:       model,
 //		Description: "...",
 //		Instruction: "...",
-//		Toolsets: []tool.Set{
+//		Toolsets: []tool.Toolset{
 //			mcptoolset.New(mcptoolset.Config{
 //				Transport: &mcp.CommandTransport{Command: exec.Command("myserver")}
 //			}),
@@ -128,6 +128,13 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	return adkTools, nil
 }
 
+// Close closes the underlying MCP client.
+func (s *set) Close() error {
+	if c, ok := s.mcpClient.(interface{ Close() error }); ok {
+		return c.Close()
+	}
+	return nil
+}
 // ConfirmationProvider defines a function that dynamically determines whether
 // a specific tool execution requires user confirmation.
 //
