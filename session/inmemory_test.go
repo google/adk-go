@@ -1058,3 +1058,39 @@ func Test_inMemoryService_CreateConcurrentAccess(t *testing.T) {
 		t.Errorf("expected %d 'already exists' errors, but got %d", expectedErrors, errorCount.Load())
 	}
 }
+
+func TestInMemorySession_AppendEvent_Deadlock(t *testing.T) {
+	ctx := t.Context()
+	service := InMemoryService()
+
+	// Create a session
+	createReq := &CreateRequest{
+		AppName: "testapp",
+		UserID:  "testuser",
+	}
+	createResp, err := service.Create(ctx, createReq)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+	sess := createResp.Session
+
+	// Event with StateDelta to trigger updateSessionState
+	event := &Event{
+		ID:        "event1",
+		Timestamp: time.Now(),
+		Actions: EventActions{
+			StateDelta: map[string]any{
+				"test_key": "test_value",
+			},
+		},
+	}
+
+	// This call should hang if the deadlock is present
+	err = service.AppendEvent(ctx, sess, event)
+	if err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	// If it doesn't hang, the test passes (meaning no deadlock)
+	t.Log("AppendEvent did not deadlock")
+}

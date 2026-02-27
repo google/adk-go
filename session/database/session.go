@@ -126,18 +126,17 @@ func (s *state) Get(key string) (any, error) {
 }
 
 func (s *state) All() iter.Seq2[string, any] {
-	return func(yield func(key string, val any) bool) {
-		s.mu.RLock()
+	s.mu.RLock()
+	// Create a copy of the state to iterate over it without holding the lock.
+	stateCopy := maps.Clone(s.state)
+	s.mu.RUnlock()
 
-		for k, v := range s.state {
-			s.mu.RUnlock()
+	return func(yield func(key string, val any) bool) {
+		for k, v := range stateCopy {
 			if !yield(k, v) {
 				return
 			}
-			s.mu.RLock()
 		}
-
-		s.mu.RUnlock()
 	}
 }
 

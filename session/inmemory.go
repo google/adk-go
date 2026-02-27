@@ -223,8 +223,26 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
 
+	eventCopy := &Event{
+		ID:           event.ID,
+		InvocationID: event.InvocationID,
+		Timestamp:    event.Timestamp,
+		Author:       event.Author,
+		Branch:       event.Branch,
+		Actions: EventActions{
+			StateDelta:                 maps.Clone(event.Actions.StateDelta),
+			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
+			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
+			TransferToAgent:            event.Actions.TransferToAgent,
+			Escalate:                   event.Actions.Escalate,
+			SkipSummarization:          event.Actions.SkipSummarization,
+		},
+		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
+		LLMResponse:        event.LLMResponse,
+	}
+
 	// update the in-memory session service
-	stored_session.events = append(stored_session.events, event)
+	stored_session.events = append(stored_session.events, eventCopy)
 	stored_session.updatedAt = event.Timestamp
 	if len(event.Actions.StateDelta) > 0 {
 		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
@@ -314,6 +332,8 @@ func (s *session) State() State {
 }
 
 func (s *session) Events() Events {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return events(s.events)
 }
 
@@ -328,6 +348,9 @@ func (s *session) appendEvent(event *Event) error {
 	if event.Partial {
 		return nil
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if err := updateSessionState(s, event); err != nil {
 		return fmt.Errorf("error on appendEvent: %w", err)
@@ -380,18 +403,17 @@ func (s *state) Get(key string) (any, error) {
 }
 
 func (s *state) All() iter.Seq2[string, any] {
-	return func(yield func(key string, val any) bool) {
-		s.mu.RLock()
+	s.mu.RLock()
+	// Create a copy of the state to iterate over it without holding the lock.
+	stateCopy := maps.Clone(s.state)
+	s.mu.RUnlock()
 
-		for k, v := range s.state {
-			s.mu.RUnlock()
+	return func(yield func(key string, val any) bool) {
+		for k, v := range stateCopy {
 			if !yield(k, v) {
 				return
 			}
-			s.mu.RLock()
 		}
-
-		s.mu.RUnlock()
 	}
 }
 
@@ -434,13 +456,7 @@ func updateSessionState(session *session, event *Event) error {
 		session.state = make(map[string]any)
 	}
 
-	state := session.State()
-	for key, value := range event.Actions.StateDelta {
-		err := state.Set(key, value)
-		if err != nil {
-			return fmt.Errorf("error on updateSessionState state: %w", err)
-		}
-	}
+	maps.Copy(session.state, event.Actions.StateDelta)
 	return nil
 }
 
