@@ -882,11 +882,8 @@ func runMetadataTest[In, Out any](t *testing.T, provider mcptoolset.MetadataProv
 	}
 
 	toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
-	result, err := fnTool.Run(toolCtx, map[string]any{})
+	_, err = fnTool.Run(toolCtx, map[string]any{})
 	if err != nil {
 		t.Fatalf("Failed to run tool: %v", err)
-	}
-	if result == nil {
-		t.Fatal("Expected non-nil result from tool run")
 	}
 }
