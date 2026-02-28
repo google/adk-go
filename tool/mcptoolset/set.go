@@ -62,6 +62,7 @@ func New(cfg Config) (tool.Toolset, error) {
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
+		metadataProvider:            cfg.MetadataProvider,
 	}, nil
 }
 
@@ -103,6 +104,7 @@ type set struct {
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider ConfirmationProvider
+	metadataProvider            MetadataProvider
 }
 
 func (*set) Name() string {
@@ -126,7 +128,7 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
-		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
+		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider, s.metadataProvider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}
