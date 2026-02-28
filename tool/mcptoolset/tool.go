@@ -17,6 +17,7 @@ package mcptoolset
 import (
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -93,7 +94,13 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 	return t.funcDeclaration
 }
 
-func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (t *mcpTool) Run(ctx tool.Context, args any) (result map[string]any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in tool %q: %v\nstack: %s", t.Name(), r, debug.Stack())
+		}
+	}()
+
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
 			return nil, fmt.Errorf("error tool %q call is rejected", t.Name())
