@@ -17,6 +17,7 @@ package mcptoolset
 import (
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -28,7 +29,7 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider, metadataProvider MetadataProvider) (tool.Tool, error) {
 	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
@@ -39,6 +40,7 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 		mcpClient:                   client,
 		requireConfirmation:         requireConfirmation,
 		requireConfirmationProvider: requireConfirmationProvider,
+		metadataProvider:            metadataProvider,
 	}
 
 	// Since t.InputSchema and t.OutputSchema are pointers (*jsonschema.Schema) and the destination ResponseJsonSchema
@@ -65,6 +67,8 @@ type mcpTool struct {
 	requireConfirmation bool
 
 	requireConfirmationProvider ConfirmationProvider
+
+	metadataProvider MetadataProvider
 }
 
 // Name implements the tool.Tool.
@@ -90,7 +94,13 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 	return t.funcDeclaration
 }
 
-func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (t *mcpTool) Run(ctx tool.Context, args any) (result map[string]any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in tool %q: %v\nstack: %s", t.Name(), r, debug.Stack())
+		}
+	}()
+
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
 			return nil, fmt.Errorf("error tool %q call is rejected", t.Name())
@@ -115,12 +125,16 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 			return nil, fmt.Errorf("error tool %q requires confirmation, please approve or reject", t.Name())
 		}
 	}
-
-	// TODO: add auth
-	res, err := t.mcpClient.CallTool(ctx, &mcp.CallToolParams{
+	params := &mcp.CallToolParams{
 		Name:      t.name,
 		Arguments: args,
-	})
+	}
+
+	if t.metadataProvider != nil {
+		params.Meta = t.metadataProvider(ctx)
+	}
+	// TODO: add auth
+	res, err := t.mcpClient.CallTool(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call MCP tool %q with err: %w", t.name, err)
 	}
