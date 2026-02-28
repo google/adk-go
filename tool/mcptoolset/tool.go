@@ -124,9 +124,7 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	}
 
 	if t.metadataProvider != nil {
-		if meta := t.metadataProvider(ctx); meta != nil {
-			params.Meta = meta
-		}
+		params.Meta = t.metadataProvider(ctx)
 	}
 	// TODO: add auth
 	res, err := t.mcpClient.CallTool(ctx, params)

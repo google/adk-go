@@ -824,17 +824,19 @@ func TestMetadataProvider(t *testing.T) {
 }
 
 func TestMetadataProviderNil(t *testing.T) {
+	var receivedMeta map[string]any
 	var toolCalled bool
 	echoToolFunc := func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, struct{ Message string }, error) {
 		toolCalled = true
-		if req.Params.Meta != nil {
-			t.Errorf("Expected nil metadata, got %v", req.Params.Meta)
-		}
+		receivedMeta = req.Params.Meta
 		return nil, struct{ Message string }{Message: "ok"}, nil
 	}
 	_ = runMetadataTest(t, nil, echoToolFunc)
 	if !toolCalled {
 		t.Fatal("Tool was not called")
+	}
+	if receivedMeta != nil {
+		t.Errorf("Expected nil metadata, got %v", receivedMeta)
 	}
 }
 
