@@ -791,77 +791,62 @@ func TestNewToolSet_RequireConfirmationProvider_Validation(t *testing.T) {
 	}
 }
 
-func TestMetadataProvider(t *testing.T) {
-	var receivedMeta map[string]any
-	var toolCalled bool
-	echoToolFunc := func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, struct{ Message string }, error) {
-		toolCalled = true
-		receivedMeta = req.Params.Meta
-		return nil, struct{ Message string }{Message: "ok"}, nil
-	}
-
+func TestMetadata(t *testing.T) {
 	testMetadata := map[string]any{
 		"request_id":  "test-123",
 		"user_id":     "user-456",
 		"nested_data": map[string]any{"key": "value"},
 	}
-	metadataProvider := func(ctx tool.Context) map[string]any {
-		return testMetadata
+
+	testCases := []struct {
+		name         string
+		provider     mcptoolset.MetadataProvider
+		wantMetadata map[string]any
+	}{
+		{
+			name: "provider returns metadata",
+			provider: func(ctx tool.Context) map[string]any {
+				return testMetadata
+			},
+			wantMetadata: testMetadata,
+		},
+		{
+			name:         "provider is nil",
+			provider:     nil,
+			wantMetadata: nil,
+		},
+		{
+			name: "provider returns nil",
+			provider: func(ctx tool.Context) map[string]any {
+				return nil
+			},
+			wantMetadata: nil,
+		},
 	}
 
-	result := runMetadataTest(t, metadataProvider, echoToolFunc)
-	if result == nil {
-		t.Fatal("Expected non-nil result")
-	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var receivedMeta map[string]any
+			var toolCalled bool
+			echoToolFunc := func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, struct{ Message string }, error) {
+				toolCalled = true
+				receivedMeta = req.Params.Meta
+				return nil, struct{ Message string }{Message: "ok"}, nil
+			}
 
-	if !toolCalled {
-		t.Fatal("Tool was not called")
-	}
+			result := runMetadataTest(t, tc.provider, echoToolFunc)
+			if result == nil {
+				t.Fatal("Expected non-nil result")
+			}
 
-	if diff := cmp.Diff(testMetadata, receivedMeta); diff != "" {
-		t.Errorf("metadata mismatch (-want +got):\n%s", diff)
-	}
-}
+			if !toolCalled {
+				t.Fatal("Tool was not called")
+			}
 
-func TestMetadataProviderNil(t *testing.T) {
-	var receivedMeta map[string]any
-	var toolCalled bool
-	echoToolFunc := func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, struct{ Message string }, error) {
-		toolCalled = true
-		receivedMeta = req.Params.Meta
-		return nil, struct{ Message string }{Message: "ok"}, nil
-	}
-	_ = runMetadataTest(t, nil, echoToolFunc)
-	if !toolCalled {
-		t.Fatal("Tool was not called")
-	}
-	if receivedMeta != nil {
-		t.Errorf("Expected nil metadata, got %v", receivedMeta)
-	}
-}
-
-func TestMetadataProviderReturnsNil(t *testing.T) {
-	var receivedMeta map[string]any
-	var toolCalled bool
-
-	echoToolFunc := func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, struct{ Message string }, error) {
-		toolCalled = true
-		receivedMeta = req.Params.Meta
-		return nil, struct{ Message string }{Message: "ok"}, nil
-	}
-
-	metadataProvider := func(ctx tool.Context) map[string]any {
-		return nil
-	}
-
-	_ = runMetadataTest(t, metadataProvider, echoToolFunc)
-
-	if !toolCalled {
-		t.Fatal("Tool was not called")
-	}
-
-	if receivedMeta != nil {
-		t.Errorf("Expected nil metadata when provider returns nil, got %v", receivedMeta)
+			if diff := cmp.Diff(tc.wantMetadata, receivedMeta); diff != "" {
+				t.Errorf("metadata mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
