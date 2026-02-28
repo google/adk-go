@@ -10,12 +10,12 @@ require (
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/glebarez/sqlite v1.8.0
 	github.com/google/go-cmp v0.7.0
-	github.com/google/jsonschema-go v0.3.0
+	github.com/google/jsonschema-go v0.4.2
 	github.com/google/safehtml v0.1.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
 	github.com/mitchellh/mapstructure v1.5.0
-	github.com/modelcontextprotocol/go-sdk v0.7.0
+	github.com/modelcontextprotocol/go-sdk v1.3.1
 	github.com/spf13/cobra v1.8.1
 	go.opentelemetry.io/contrib/detectors/gcp v1.40.0
 	go.opentelemetry.io/otel v1.40.0
@@ -33,6 +33,11 @@ require (
 	gorm.io/gorm v1.31.0
 	rsc.io/omap v1.2.0
 	rsc.io/ordered v1.1.1
+)
+
+require (
+	github.com/segmentio/asm v1.1.3 // indirect
+	github.com/segmentio/encoding v0.5.3 // indirect
 )
 
 require (
