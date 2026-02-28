@@ -791,7 +791,7 @@ func TestNewToolSet_RequireConfirmationProvider_Validation(t *testing.T) {
 	}
 }
 
-func TestMetadata(t *testing.T) {
+func TestMetadataProvider(t *testing.T) {
 	testMetadata := map[string]any{
 		"request_id":  "test-123",
 		"user_id":     "user-456",
@@ -834,11 +834,7 @@ func TestMetadata(t *testing.T) {
 				return nil, struct{ Message string }{Message: "ok"}, nil
 			}
 
-			result := runMetadataTest(t, tc.provider, echoToolFunc)
-			if result == nil {
-				t.Fatal("Expected non-nil result")
-			}
-
+			runMetadataTest(t, tc.provider, echoToolFunc)
 			if !toolCalled {
 				t.Fatal("Tool was not called")
 			}
@@ -850,7 +846,7 @@ func TestMetadata(t *testing.T) {
 	}
 }
 
-func runMetadataTest[In, Out any](t *testing.T, provider mcptoolset.MetadataProvider, toolFunc mcp.ToolHandlerFor[In, Out]) map[string]any {
+func runMetadataTest[In, Out any](t *testing.T, provider mcptoolset.MetadataProvider, toolFunc mcp.ToolHandlerFor[In, Out]) {
 	t.Helper()
 
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
@@ -890,5 +886,7 @@ func runMetadataTest[In, Out any](t *testing.T, provider mcptoolset.MetadataProv
 	if err != nil {
 		t.Fatalf("Failed to run tool: %v", err)
 	}
-	return result
+	if result == nil {
+		t.Fatal("Expected non-nil result from tool run")
+	}
 }
