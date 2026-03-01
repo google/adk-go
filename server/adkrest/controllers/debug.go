@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 
@@ -104,6 +105,7 @@ func (c *DebugAPIController) EventGraphHandler(rw http.ResponseWriter, req *http
 	vars := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(vars)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting session ID", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -113,6 +115,7 @@ func (c *DebugAPIController) EventGraphHandler(rw http.ResponseWriter, req *http
 		SessionID: sessionID.ID,
 	})
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting session", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -157,11 +160,13 @@ func (c *DebugAPIController) EventGraphHandler(rw http.ResponseWriter, req *http
 
 	agent, err := c.agentloader.LoadAgent(sessionID.AppName)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while loading agent", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	graph, err := services.GetAgentGraph(req.Context(), agent, highlightedPairs)
 	if err != nil {
+		slog.ErrorContext(req.Context(), "Error while getting agent graph", slog.Any("err", err))
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
