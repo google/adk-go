@@ -133,59 +133,80 @@ func TestModel_GenerateStream(t *testing.T) {
 }
 
 func TestModel_TrackingHeaders(t *testing.T) {
-	t.Run("verifies_headers_are_set", func(t *testing.T) {
-		httpRecordFilename := filepath.Join("testdata", strings.ReplaceAll(t.Name(), "/", "_")+".httprr")
-
-		baseTransport, err := testutil.NewGeminiTransport(httpRecordFilename)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		headersChecked := false
-		interceptor := &headerInterceptor{
-			base: baseTransport,
-			check: func(req *http.Request) {
-				headersChecked = true
-				// Verify that standard tracking headers are present.
-				// The exact expected values for these may need adjustment based on
-				// the specific implementation of the tracking logic.
-				if ua := req.Header.Get("User-Agent"); !strings.Contains(ua, "google-adk/") || !strings.Contains(ua, "gl-go/") {
-					t.Errorf("User-Agent header should contain both 'google-adk/' and 'gl-go/', but got: %q", ua)
-				}
-				if xgac := req.Header.Get("x-goog-api-client"); !strings.Contains(xgac, "google-adk/") || !strings.Contains(xgac, "gl-go/") {
-					t.Errorf("x-goog-api-client header should contain both 'google-adk/' and 'gl-go/', but got: %q", xgac)
-				}
-			},
-		}
-
-		apiKey := ""
-		if recording, _ := httprr.Recording(httpRecordFilename); !recording {
-			apiKey = "fakekey"
-		}
-
-		cfg := &genai.ClientConfig{
-			HTTPClient: &http.Client{Transport: interceptor},
-			APIKey:     apiKey,
-		}
-
-		geminiModel, err := NewModel(t.Context(), "gemini-2.0-flash", cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		// Trigger a request to fire the interceptor.
-		// We don't strictly care about the success of the call, only that it was attempted with headers.
-		req := &model.LLMRequest{Contents: genai.Text("ping")}
-		for _, err := range geminiModel.GenerateContent(t.Context(), req, false) {
-			if err != nil {
-				t.Logf("GenerateContent finished with error (expected if no recording exists): %v", err)
+	tests := []struct {
+		name      string
+		useVertex bool
+	}{
+		{"vertex_enabled", true},
+		{"vertex_disabled", false},
+	}
+	for _, tt := range tests {
+		t.Run("verifies_headers_are_set_"+tt.name, func(t *testing.T) {
+			if tt.useVertex {
+				t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+			} else {
+				t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
 			}
-		}
 
-		if !headersChecked {
-			t.Error("HTTP request was not intercepted; headers not verified")
-		}
-	})
+			httpRecordFilename := filepath.Join("testdata", strings.ReplaceAll(t.Name(), "/", "_")+".httprr")
+
+			baseTransport, err := testutil.NewGeminiTransport(httpRecordFilename)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			headersChecked := false
+			interceptor := &headerInterceptor{
+				base: baseTransport,
+				check: func(req *http.Request) {
+					headersChecked = true
+					// Verify that standard tracking headers are present.
+					// The exact expected values for these may need adjustment based on
+					// the specific implementation of the tracking logic.
+					if len(req.Header.Values("User-Agent")) != 1 {
+						t.Errorf("User-Agent header should have exactly one value, but got %v", req.Header.Values("User-Agent"))
+					}
+					if len(req.Header.Values("x-goog-api-client")) != 1 {
+						t.Errorf("x-goog-api-client header should have exactly one value, but got %v", req.Header.Values("x-goog-api-client"))
+					}
+					if ua := req.Header.Get("User-Agent"); !strings.Contains(ua, "google-adk/") || !strings.Contains(ua, "gl-go/") {
+						t.Errorf("User-Agent header should contain both 'google-adk/' and 'gl-go/', but got: %q", ua)
+					}
+					if xgac := req.Header.Get("x-goog-api-client"); !strings.Contains(xgac, "google-adk/") || !strings.Contains(xgac, "gl-go/") {
+						t.Errorf("x-goog-api-client header should contain both 'google-adk/' and 'gl-go/', but got: %q", xgac)
+					}
+				},
+			}
+
+			apiKey := ""
+			if recording, _ := httprr.Recording(httpRecordFilename); !recording {
+				apiKey = "fakekey"
+			}
+
+			cfg := &genai.ClientConfig{
+				HTTPClient: &http.Client{Transport: interceptor},
+				APIKey:     apiKey,
+			}
+
+			geminiModel, err := NewModel(t.Context(), "gemini-2.0-flash", cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Trigger a request to fire the interceptor.
+			// We don't strictly care about the success of the call, only that it was attempted with headers.
+			req := &model.LLMRequest{Contents: genai.Text("ping")}
+			for _, err := range geminiModel.GenerateContent(t.Context(), req, false) {
+				if err != nil {
+					t.Logf("GenerateContent finished with error (expected if no recording exists): %v", err)
+				}
+			}
+
+			if !headersChecked {
+				t.Error("HTTP request was not intercepted; headers not verified")
+			}
+		})
+	}
 }
 
 // TextResponse holds the concatenated text from a response stream,

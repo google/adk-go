@@ -52,6 +52,12 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 		return nil, err
 	}
 
+	if client.ClientConfig().HTTPClient != nil {
+		client.ClientConfig().HTTPClient.Transport = &mergeHeadersInterceptor{
+			base: client.ClientConfig().HTTPClient.Transport,
+		}
+	}
+
 	// Create header value once, when the model is created
 	headerValue := fmt.Sprintf("google-adk/%s gl-go/%s", version.Version,
 		strings.TrimPrefix(runtime.Version(), "go"))
@@ -141,6 +147,56 @@ func (m *geminiModel) maybeAppendUserContent(req *model.LLMRequest) {
 	if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != "user" {
 		req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
 	}
+}
+
+// mergeHeadersInterceptor is a http.RoundTripper that merges headers from the request
+// with the model's headers before delegating to the base transport.
+type mergeHeadersInterceptor struct {
+	base http.RoundTripper
+}
+
+func (h *mergeHeadersInterceptor) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Process x-goog-api-client
+	if values := req.Header.Values("x-goog-api-client"); len(values) > 0 {
+		req.Header.Set("x-goog-api-client", h.buildDedupeHeader(values))
+	}
+
+	// Process user-agent
+	if values := req.Header.Values("user-agent"); len(values) > 0 {
+		req.Header.Set("user-agent", h.buildDedupeHeader(values))
+	}
+
+	if h.base == nil {
+		return http.DefaultTransport.RoundTrip(req)
+	}
+	return h.base.RoundTrip(req)
+}
+
+// buildDedupeHeader merges slices and removes duplicates with zero extra slice allocations
+func (h *mergeHeadersInterceptor) buildDedupeHeader(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	if len(values) == 1 && !strings.Contains(values[0], " ") {
+		return values[0]
+	}
+
+	var sb strings.Builder
+	// 4 is the number of header values expected: 2 from adk and 2 from genai
+	seen := make(map[string]struct{}, 4)
+
+	for _, val := range values {
+		for p := range strings.FieldsSeq(val) {
+			if _, exists := seen[p]; !exists {
+				if sb.Len() > 0 {
+					sb.WriteByte(' ')
+				}
+				sb.WriteString(p)
+				seen[p] = struct{}{}
+			}
+		}
+	}
+	return sb.String()
 }
 
 func (m *geminiModel) GetGoogleLLMVariant() genai.Backend {
