@@ -98,6 +98,10 @@ type Toolset interface {
 	// ReadonlyContext can be used to dynamically determine which tools
 	// to return based on the current invocation state.
 	Tools(ctx agent.ReadonlyContext) ([]Tool, error)
+
+	// Close performs cleanup and releases resources held by the toolset.
+	// It should be called when the toolset is no longer needed.
+	Close() error
 }
 
 // Predicate is a function which decides whether a tool should be exposed to LLM.
@@ -152,4 +156,8 @@ func (f *filteredToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 		}
 	}
 	return filtered, nil
+}
+
+func (f *filteredToolset) Close() error {
+	return f.toolset.Close()
 }
