@@ -59,6 +59,7 @@ func TestModel_Generate(t *testing.T) {
 					PromptTokensDetails:     []*genai.ModalityTokenCount{{Modality: "TEXT", TokenCount: 10}},
 					TotalTokenCount:         12,
 				},
+				ModelVersion: "gemini-2.0-flash",
 				FinishReason: "STOP",
 			},
 		},
