@@ -159,21 +159,23 @@ func (f *filteredToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 	return filtered, nil
 }
 
-// EXPERIMENTAL: ConfirmationProvider is experimental and not currently in scope for the v1.0 API.
 // ConfirmationProvider defines a function that dynamically determines whether
 // a specific tool execution requires user confirmation.
 //
 // It accepts the tool name and the input parameters as arguments.
 // Returning true signals that the system must wait for Human-in-the-Loop (HITL)
 // approval before proceeding with the execution.
+//
+// EXPERIMENTAL: ConfirmationProvider is experimental and not currently in scope for the v1.0 API.
 type ConfirmationProvider func(toolName string, toolInput any) bool
 
-// EXPERIMENTAL: WithConfirmation is experimental and not currently in scope for the v1.0 API.
 // WithConfirmation wraps a toolset to inject confirmation logic in each tool.
 // Only tools within the provided Toolset that implement the `runnableTool` interface
 // (i.e., provide a FunctionDeclaration and a Run method) will be wrapped with
 // confirmation logic. Other tools will be included in the returned Toolset without
 // modification.
+//
+// EXPERIMENTAL: WithConfirmation is experimental and not currently in scope for the v1.0 API.
 func WithConfirmation(ts Toolset, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) Toolset {
 	return &confirmationToolset{
 		toolset:                     ts,
