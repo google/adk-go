@@ -188,19 +188,9 @@ func (s *gcsService) Load(ctx context.Context, req *artifact.LoadRequest) (_ *ar
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	version := req.Version
-
-	if version == 0 {
-		response, err := s.versions(ctx, &artifact.VersionsRequest{
-			AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID, FileName: req.FileName,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to list artifact versions: %w", err)
-		}
-		if len(response.Versions) == 0 {
-			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
-		}
-		version = slices.Max(response.Versions)
+	version, err := s.resolveVersion(ctx, appName, userID, sessionID, fileName, req.Version)
+	if err != nil {
+		return nil, err
 	}
 
 	blobName := buildBlobName(appName, userID, sessionID, fileName, version)
@@ -351,6 +341,23 @@ func (s *gcsService) Versions(ctx context.Context, req *artifact.VersionsRequest
 	return response, nil
 }
 
+// resolveVersion returns the provided version if non-zero, otherwise finds the latest version.
+func (s *gcsService) resolveVersion(ctx context.Context, appName, userID, sessionID, fileName string, version int64) (int64, error) {
+	if version == 0 {
+		response, err := s.versions(ctx, &artifact.VersionsRequest{
+			AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
+		})
+		if err != nil {
+			return 0, fmt.Errorf("failed to list artifact versions: %w", err)
+		}
+		if len(response.Versions) == 0 {
+			return 0, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
+		}
+		version = slices.Max(response.Versions)
+	}
+	return version, nil
+}
+
 // GetArtifactVersion implements [artifact.Service] and returns the metadata for a specific version.
 func (s *gcsService) GetArtifactVersion(ctx context.Context, req *artifact.GetArtifactVersionRequest) (*artifact.GetArtifactVersionResponse, error) {
 	err := req.Validate()
@@ -358,19 +365,9 @@ func (s *gcsService) GetArtifactVersion(ctx context.Context, req *artifact.GetAr
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	version := req.Version
-
-	if version == 0 {
-		response, err := s.versions(ctx, &artifact.VersionsRequest{
-			AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID, FileName: req.FileName,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to list artifact versions: %w", err)
-		}
-		if len(response.Versions) == 0 {
-			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
-		}
-		version = slices.Max(response.Versions)
+	version, err := s.resolveVersion(ctx, appName, userID, sessionID, fileName, req.Version)
+	if err != nil {
+		return nil, err
 	}
 
 	blobName := buildBlobName(appName, userID, sessionID, fileName, version)
