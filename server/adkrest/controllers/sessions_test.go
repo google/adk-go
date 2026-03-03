@@ -191,7 +191,6 @@ func TestCreateSession(t *testing.T) {
 				Events: []models.Event{
 					{
 						ID:     "eventID",
-						Time:   time.Now().Add(5 * time.Minute).Unix(),
 						Author: "testUser",
 					},
 				},
@@ -208,7 +207,6 @@ func TestCreateSession(t *testing.T) {
 					{
 						ID:     "eventID",
 						Author: "testUser",
-						Time:   time.Now().Add(5 * time.Minute).Unix(),
 					},
 				},
 			},
