@@ -34,23 +34,23 @@ type EventActions struct {
 
 // Event represents a single event in a session.
 type Event struct {
-	ID                 string                   `json:"id"`
-	InvocationID       string                   `json:"invocationId"`
-	Branch             string                   `json:"branch,omitempty"`
-	Author             string                   `json:"author"`
-	Partial            bool                     `json:"partial,omitempty"`
-	LongRunningToolIDs []string                 `json:"longRunningToolIds,omitempty"`
-	Content            *genai.Content           `json:"content"`
-	GroundingMetadata  *genai.GroundingMetadata `json:"groundingMetadata"`
+	ID                 string                                      `json:"id"`
+	InvocationID       string                                      `json:"invocationId"`
+	Branch             string                                      `json:"branch,omitempty"`
+	Author             string                                      `json:"author"`
+	Partial            bool                                        `json:"partial,omitempty"`
+	LongRunningToolIDs []string                                    `json:"longRunningToolIds,omitempty"`
+	Content            *genai.Content                              `json:"content"`
+	GroundingMetadata  *genai.GroundingMetadata                    `json:"groundingMetadata"`
 	UsageMetadata      *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata"`
-	TurnComplete       bool                     `json:"turnComplete,omitempty"`
-	Interrupted        bool                     `json:"interrupted,omitempty"`
-	ErrorCode          string                   `json:"errorCode,omitempty"`
-	ErrorMessage       string                   `json:"errorMessage,omitempty"`
-	AvgLogprobs        float64                  `json:"avgLogprobs,omitempty"`
-	FinishReason       genai.FinishReason       `json:"finishReason,omitempty"`
-	ModelVersion       string                   `json:"modelVersion,omitempty"`
-	Actions            EventActions             `json:"actions"`
+	TurnComplete       bool                                        `json:"turnComplete,omitempty"`
+	Interrupted        bool                                        `json:"interrupted,omitempty"`
+	ErrorCode          string                                      `json:"errorCode,omitempty"`
+	ErrorMessage       string                                      `json:"errorMessage,omitempty"`
+	AvgLogprobs        float64                                     `json:"avgLogprobs,omitempty"`
+	FinishReason       genai.FinishReason                          `json:"finishReason,omitempty"`
+	ModelVersion       string                                      `json:"modelVersion,omitempty"`
+	Actions            EventActions                                `json:"actions"`
 }
 
 // ToSessionEvent maps Event data struct to session.Event
