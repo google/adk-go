@@ -103,7 +103,7 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 		gemini2 := strings.Contains(model, "gemini-2")
 		previousRole := ""
 		for _, content := range example.Output {
-			role := modelPrefix
+			var role string
 			if content.Role == "model" {
 				role = modelPrefix
 			} else {
