@@ -1,17 +1,16 @@
 httprr trace v1
-994 1148
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent HTTP/1.1
+1135 1429
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 758
+Content-Length: 903
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Search for AI news"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Use the search tool to find information, then provide a brief response."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Search for information on the web","name":"search_tool_agent1","parametersJsonSchema":{"additionalProperties":false,"properties":{"Query":{"type":"string"}},"required":["Query"],"type":"object"},"responseJsonSchema":{"type":"string"}},{"description":"Analyze data and return insights","name":"analyze_tool_agent1","parametersJsonSchema":{"additionalProperties":false,"properties":{"Data":{"type":"string"}},"required":["Data"],"type":"object"},"responseJsonSchema":{"type":"string"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+{"contents":[{"parts":[{"text":"Search for AI news"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Use the search tool to find information, then provide a brief response."},{"text":"You are an agent. Your internal name is \"agent1\". The description about you is \"Test agent agent1 that searches for information\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Search for information on the web","name":"search_tool_agent1","parametersJsonSchema":{"additionalProperties":false,"properties":{"Query":{"type":"string"}},"required":["Query"],"type":"object"},"responseJsonSchema":{"type":"string"}},{"description":"Analyze data and return insights","name":"analyze_tool_agent1","parametersJsonSchema":{"additionalProperties":false,"properties":{"Data":{"type":"string"}},"required":["Data"],"type":"object"},"responseJsonSchema":{"type":"string"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 12 Jan 2026 03:32:51 GMT
+Date: Wed, 04 Mar 2026 11:51:06 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=661
+Server-Timing: gfet4t7; dur=884
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -30,48 +29,44 @@ X-Xss-Protection: 0
               "args": {
                 "Query": "AI news"
               }
-            }
+            },
+            "thoughtSignature": "CoECAb4+9vuHdfI5BAMEVIE00jjQTuOU+5hC1jgwG4IhouqhXMYDs1dnsPyuX41u+nbeFhsXNKQj9yEwn0eCCX/2CDp9OrhfUks0+881KwnlQ8nspbVdQnPygcP6t7IPtPMMGnu4n+s0dcdNunuUXZzPft/r8rNM9885EpTSmTfTNkuqi25GRxeDwOCN9S8POgk0/gHCLAsRPhT14smgar11D9URb3npFge+nPHdGZ2xQ9cZc4FzsBRBlGkvJ7zgR17noBbU/w0pvNDP9iKuy1GYjrPvGsMogA23o+Z6DzV9PNhTlhdEA1/DiMNFJHuw/z0nDbBfZO1WwiwdDEbaq3SGOPE="
           }
         ],
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": -1.7506775394495991e-05
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 41,
-    "candidatesTokenCount": 9,
-    "totalTokenCount": 50,
+    "promptTokenCount": 129,
+    "candidatesTokenCount": 19,
+    "totalTokenCount": 201,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 41
+        "tokenCount": 129
       }
     ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 9
-      }
-    ]
+    "thoughtsTokenCount": 53
   },
-  "modelVersion": "gemini-2.0-flash-exp",
-  "responseId": "Ymtkad2GMvz_2roPv6WLmQs"
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "qRyoaciyDNOHkdUPjKDfoQQ"
 }
-1237 1033
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent HTTP/1.1
+1748 844
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1000
+Content-Length: 1515
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Search for AI news"}],"role":"user"},{"parts":[{"functionCall":{"args":{"Query":"AI news"},"name":"search_tool_agent1"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"search_tool_agent1","response":{"result":"search result for 'AI news' from agent1"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Use the search tool to find information, then provide a brief response."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Search for information on the web","name":"search_tool_agent1","parametersJsonSchema":{"additionalProperties":false,"properties":{"Query":{"type":"string"}},"required":["Query"],"type":"object"},"responseJsonSchema":{"type":"string"}},{"description":"Analyze data and return insights","name":"analyze_tool_agent1","parametersJsonSchema":{"additionalProperties":false,"properties":{"Data":{"type":"string"}},"required":["Data"],"type":"object"},"responseJsonSchema":{"type":"string"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+{"contents":[{"parts":[{"text":"Search for AI news"}],"role":"user"},{"parts":[{"functionCall":{"args":{"Query":"AI news"},"name":"search_tool_agent1"},"thoughtSignature":"CoECAb4+9vuHdfI5BAMEVIE00jjQTuOU+5hC1jgwG4IhouqhXMYDs1dnsPyuX41u+nbeFhsXNKQj9yEwn0eCCX/2CDp9OrhfUks0+881KwnlQ8nspbVdQnPygcP6t7IPtPMMGnu4n+s0dcdNunuUXZzPft/r8rNM9885EpTSmTfTNkuqi25GRxeDwOCN9S8POgk0/gHCLAsRPhT14smgar11D9URb3npFge+nPHdGZ2xQ9cZc4FzsBRBlGkvJ7zgR17noBbU/w0pvNDP9iKuy1GYjrPvGsMogA23o+Z6DzV9PNhTlhdEA1/DiMNFJHuw/z0nDbBfZO1WwiwdDEbaq3SGOPE="}],"role":"model"},{"parts":[{"functionResponse":{"name":"search_tool_agent1","response":{"result":"search result for 'AI news' from agent1"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Use the search tool to find information, then provide a brief response."},{"text":"You are an agent. Your internal name is \"agent1\". The description about you is \"Test agent agent1 that searches for information\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Search for information on the web","name":"search_tool_agent1","parametersJsonSchema":{"additionalProperties":false,"properties":{"Query":{"type":"string"}},"required":["Query"],"type":"object"},"responseJsonSchema":{"type":"string"}},{"description":"Analyze data and return insights","name":"analyze_tool_agent1","parametersJsonSchema":{"additionalProperties":false,"properties":{"Data":{"type":"string"}},"required":["Data"],"type":"object"},"responseJsonSchema":{"type":"string"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Mon, 12 Jan 2026 03:32:52 GMT
+Date: Wed, 04 Mar 2026 11:51:07 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=656
+Server-Timing: gfet4t7; dur=1437
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -85,32 +80,26 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "I have searched for AI news."
+            "text": "I found the latest AI news.\n"
           }
         ],
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": -0.03738286665507725
+      "index": 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 67,
+    "promptTokenCount": 175,
     "candidatesTokenCount": 7,
-    "totalTokenCount": 74,
+    "totalTokenCount": 182,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 67
-      }
-    ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 7
+        "tokenCount": 175
       }
     ]
   },
-  "modelVersion": "gemini-2.0-flash-exp",
-  "responseId": "Y2tkaaH-NJKd0-kP9puPwAc"
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "qhyoafTJBP3OnsEP9ZDSkQ0"
 }

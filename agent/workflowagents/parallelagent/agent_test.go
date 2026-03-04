@@ -43,7 +43,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
-const modelName = "gemini-2.0-flash-exp"
+const modelName = "gemini-2.5-flash"
 
 func TestNewParallelAgent(t *testing.T) {
 	tests := []struct {
