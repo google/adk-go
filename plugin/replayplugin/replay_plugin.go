@@ -69,7 +69,6 @@ func MustNew() *plugin.Plugin {
 
 type replayPlugin struct {
 	mu               sync.Mutex // Mutex to protect the map
-	name             string
 	invocationStates map[string]*invocationReplayState
 }
 
@@ -126,7 +125,10 @@ func (p *replayPlugin) beforeTool(ctx tool.Context, t tool.Tool, args map[string
 	if !strings.HasSuffix(typeName, "agentTool") {
 		// TODO: support replay requests and responses from AgentTool.
 		if ft, ok := t.(toolinternal.FunctionTool); ok {
-			ft.Run(ctx, args)
+			_, err := ft.Run(ctx, args)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
