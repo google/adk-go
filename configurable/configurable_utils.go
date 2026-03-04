@@ -109,7 +109,10 @@ func init() {
 		if ss, ok := a["skip_summarization"].(bool); ok {
 			skipSummarization = ss
 		}
-		parentPath := ctx.Value(parentPathKey).(string)
+		parentPath, ok := ctx.Value(parentPathKey).(string)
+		if !ok {
+			return nil, fmt.Errorf("parentPath not found in context")
+		}
 		if configPath, ok := a["config_path"].(string); ok {
 			ag, err := ResolveAgentReference(ctx, parentPath, configPath)
 			if err != nil {

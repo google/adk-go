@@ -35,7 +35,11 @@ func beforeAgentCallback2(ctx agent.CallbackContext) (*genai.Content, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = ctx.State().Set("before_agent_callback_state_key", val.(string)+"+value2")
+	s, ok := val.(string)
+	if !ok {
+		return nil, fmt.Errorf("state value for 'before_agent_callback_state_key' is not a string, but %T", val)
+	}
+	err = ctx.State().Set("before_agent_callback_state_key", s+"+value2")
 	return nil, err
 }
 
@@ -45,10 +49,10 @@ func shortcutAgentExecution(ctx agent.CallbackContext) (*genai.Content, error) {
 		if !errors.Is(err, session.ErrStateKeyNotExist) {
 			return nil, err
 		}
-		err = ctx.State().Set("conversation_limit_reached", "True")
+		err = ctx.State().Set("conversation_limit_reached", true)
 		return nil, err
 	}
-	if val.(string) == "True" {
+	if limitReached, ok := val.(bool); ok && limitReached {
 		return &genai.Content{
 			Parts: []*genai.Part{
 				{Text: "Sorry, you have reached the limit of the conversation."},
@@ -69,7 +73,11 @@ func afterAgentCallback2(ctx agent.CallbackContext) (*genai.Content, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = ctx.State().Set("after_agent_callback_state_key", val.(string)+"+value2")
+	s, ok := val.(string)
+	if !ok {
+		return nil, fmt.Errorf("state value for 'after_agent_callback_state_key' is not a string, but %T", val)
+	}
+	err = ctx.State().Set("after_agent_callback_state_key", s+"+value2")
 	return nil, err
 }
 

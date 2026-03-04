@@ -30,13 +30,10 @@ type ValidateEmailArgs struct {
 	Email string `json:"email"`
 }
 
+var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+
 func validateEmail(ctx tool.Context, args ValidateEmailArgs) (bool, error) {
-	emailRegex := `^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`
-	b, err := regexp.MatchString(emailRegex, args.Email)
-	if err != nil {
-		return false, err
-	}
-	return b, nil
+	return emailRegex.MatchString(args.Email), nil
 }
 
 func getUserID(ctx tool.Context, args ValidateEmailArgs) (int, error) {

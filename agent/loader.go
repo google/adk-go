@@ -142,8 +142,8 @@ func (m *multiAgentMapLoader) LoadAgent(name string) (Agent, error) {
 
 // multiAgentMapLoader implements LoadAgent.
 func (m *multiAgentMapLoader) RootAgent() Agent {
-	for _, a := range m.agentMap {
-		return a
+	if len(m.agentsNames) == 0 {
+		return nil
 	}
-	return nil
+	return m.agentMap[m.agentsNames[0]]
 }
