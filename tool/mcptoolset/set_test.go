@@ -123,6 +123,7 @@ func TestMCPToolSet(t *testing.T) {
 					},
 					Role: genai.RoleModel,
 				},
+				ModelVersion: "gemini-2.5-flash",
 			},
 		},
 		{
@@ -154,6 +155,7 @@ func TestMCPToolSet(t *testing.T) {
 					},
 					Role: genai.RoleModel,
 				},
+				ModelVersion: "gemini-2.5-flash",
 			},
 		},
 	}
