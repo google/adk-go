@@ -19,6 +19,7 @@ import (
 	"iter"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -142,11 +143,7 @@ func TestModel_TrackingHeaders(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run("verifies_headers_are_set_"+tt.name, func(t *testing.T) {
-			if tt.useVertex {
-				t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
-			} else {
-				t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
-			}
+			t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", strconv.FormatBool(tt.useVertex))
 
 			httpRecordFilename := filepath.Join("testdata", strings.ReplaceAll(t.Name(), "/", "_")+".httprr")
 
@@ -206,6 +203,27 @@ func TestModel_TrackingHeaders(t *testing.T) {
 				t.Error("HTTP request was not intercepted; headers not verified")
 			}
 		})
+	}
+}
+
+// TestModel_NoSideEffects verifies that NewModel does not modify the passed http.Client.
+func TestModel_NoSideEffects(t *testing.T) {
+	// Create a custom transport to identify the client
+	originalTransport := &http.Transport{}
+	httpClient := &http.Client{
+		Transport: originalTransport,
+	}
+	cfg := &genai.ClientConfig{
+		HTTPClient: httpClient,
+		APIKey:     "fake-api-key",
+	}
+
+	// We expect NewModel to fail because of the fake API key (or network),
+	// but we only care about the side effects on httpClient.
+	_, _ = NewModel(t.Context(), "gemini-2.0-flash", cfg)
+
+	if httpClient.Transport != originalTransport {
+		t.Errorf("NewModel modified the passed http.Client.Transport; got %v, want %v", httpClient.Transport, originalTransport)
 	}
 }
 

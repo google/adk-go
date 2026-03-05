@@ -47,6 +47,17 @@ type geminiModel struct {
 //
 // An error is returned if the [genai.Client] fails to initialize.
 func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (model.LLM, error) {
+	// Create a copy of the config to avoid mutating the caller's config
+	// or the underlying http.Client.
+	if cfg != nil {
+		cfgCopy := *cfg
+		if cfg.HTTPClient != nil {
+			clientCopy := *cfg.HTTPClient
+			cfgCopy.HTTPClient = &clientCopy
+		}
+		cfg = &cfgCopy
+	}
+
 	client, err := genai.NewClient(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -156,47 +167,16 @@ type mergeHeadersInterceptor struct {
 }
 
 func (h *mergeHeadersInterceptor) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Process x-goog-api-client
-	if values := req.Header.Values("x-goog-api-client"); len(values) > 0 {
-		req.Header.Set("x-goog-api-client", h.buildDedupeHeader(values))
-	}
-
-	// Process user-agent
-	if values := req.Header.Values("user-agent"); len(values) > 0 {
-		req.Header.Set("user-agent", h.buildDedupeHeader(values))
+	for _, headerName := range []string{"x-goog-api-client", "user-agent"} {
+		if values := req.Header.Values(headerName); len(values) > 0 {
+			req.Header.Set(headerName, strings.Join(values, " "))
+		}
 	}
 
 	if h.base == nil {
 		return http.DefaultTransport.RoundTrip(req)
 	}
 	return h.base.RoundTrip(req)
-}
-
-// buildDedupeHeader merges slices and removes duplicates with zero extra slice allocations
-func (h *mergeHeadersInterceptor) buildDedupeHeader(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	if len(values) == 1 && !strings.Contains(values[0], " ") {
-		return values[0]
-	}
-
-	var sb strings.Builder
-	// 4 is the number of header values expected: 2 from adk and 2 from genai
-	seen := make(map[string]struct{}, 4)
-
-	for _, val := range values {
-		for p := range strings.FieldsSeq(val) {
-			if _, exists := seen[p]; !exists {
-				if sb.Len() > 0 {
-					sb.WriteByte(' ')
-				}
-				sb.WriteString(p)
-				seen[p] = struct{}{}
-			}
-		}
-	}
-	return sb.String()
 }
 
 func (m *geminiModel) GetGoogleLLMVariant() genai.Backend {
