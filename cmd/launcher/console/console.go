@@ -131,6 +131,18 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 	fmt.Print("\nUser -> ")
 
+	// Resolve "auto" streaming mode once per session (stdout TTY-ness doesn't change).
+	defaultStreamingMode := l.config.streamingMode
+	if defaultStreamingMode == "" {
+		// Stdlib-only terminal heuristic: stdout is a character device.
+		// Avoids adding golang.org/x/term dependency (golangci-lint failed to load its export data in CI).
+		if fi, err := os.Stdout.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
+			defaultStreamingMode = agent.StreamingModeSSE
+		} else {
+			defaultStreamingMode = agent.StreamingModeNone
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -142,18 +154,13 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 			}
 			log.Fatal(err)
 		case userInput := <-inputChan:
-			userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 
+			userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
 			streamingMode := l.config.streamingMode
 			if streamingMode == "" {
-				// Stdlib-only terminal heuristic: stdout is a character device.
-				// Avoids adding golang.org/x/term dependency (golangci-lint failed to load its export data in CI).
-				if fi, err := os.Stdout.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
-					streamingMode = agent.StreamingModeSSE
-				} else {
-					streamingMode = agent.StreamingModeNone
-				}
+				streamingMode = defaultStreamingMode
 			}
+
 			fmt.Print("\nAgent -> ")
 			prevText := ""
 			for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
