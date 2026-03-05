@@ -37,7 +37,7 @@ import (
 func TestReplayPlugin(t *testing.T) {
 	// Setup per test
 	setup := func(t *testing.T) (*plugin.Plugin, *MockSession, *MockState) {
-		plugin := replayplugin.MustNew()
+		plugin := replayplugin.MustNew("/")
 		sessionState := make(map[string]any)
 		mockState := &MockState{data: sessionState}
 		mockSession := &MockSession{state: mockState}
@@ -465,3 +465,83 @@ func (m *MockTool) Name() string                                        { return
 func (m *MockTool) Description() string                                 { return "mock tool" }
 func (m *MockTool) IsLongRunning() bool                                 { return false }
 func (m *MockTool) Run(ctx any, args map[string]any, toolCtx any) error { return nil }
+
+func TestReplayPlugin_PathValidation(t *testing.T) {
+	// Create a temporary directory structure for testing path validation
+	tempDir := t.TempDir()
+	safeDir := filepath.Join(tempDir, "safe")
+	if err := os.Mkdir(safeDir, 0755); err != nil {
+		t.Fatalf("failed to create safe dir: %v", err)
+	}
+
+	// Create a safe recordings file
+	createRecordingsFile(t, safeDir, "recordings: []")
+
+	// Initialize plugin with restricted base directory
+	plugin := replayplugin.MustNew(safeDir)
+	sessionState := make(map[string]any)
+	mockState := &MockState{data: sessionState}
+	mockSession := &MockSession{state: mockState}
+	invContext := &MockInvocationContext{
+		session:      mockSession,
+		invocationID: "test-invocation",
+	}
+
+	tests := []struct {
+		name        string
+		dir         string
+		expectError bool
+	}{
+		{
+			name:        "ValidPath_InsideBaseDir",
+			dir:         safeDir,
+			expectError: false,
+		},
+		{
+			name:        "InvalidPath_ParentTraversal",
+			dir:         filepath.Join(safeDir, ".."),
+			expectError: true,
+		},
+		{
+			name:        "InvalidPath_OutsideBaseDir",
+			dir:         tempDir, // tempDir is parent of safeDir, so it's outside
+			expectError: true,
+		},
+		{
+			name:        "InvalidPath_AbsoluteOutside",
+			dir:         "/etc", // outside
+			expectError: true,
+		},
+		{
+			name:        "InvalidPath_RelativeTraversal",
+			dir:         "../", // Relative path traversing up
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set the config
+			err := mockSession.State().Set("_adk_replay_config", map[string]any{
+				"dir":                tt.dir,
+				"user_message_index": 0,
+			})
+			if err != nil {
+				t.Fatalf("unexpected error setting config: %v", err)
+			}
+
+			// Run BeforeRunCallback
+			_, err = plugin.BeforeRunCallback()(invContext)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error for dir %q, got nil", tt.dir)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error for dir %q: %v", tt.dir, err)
+				}
+			}
+		})
+	}
+}

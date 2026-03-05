@@ -23,10 +23,10 @@ import (
 // LLMRecording represents a paired LLM request and response.
 type LLMRecording struct {
 	// Required. The LLM request.
-	LlmRequest *llmRequestRecording `yaml:"llm_request,omitempty"`
+	LLMRequest *llmRequestRecording `yaml:"llm_request,omitempty"`
 
 	// Required. The LLM response.
-	LlmResponse *llmResponseRecording `yaml:"llm_response,omitempty"`
+	LLMResponse *llmResponseRecording `yaml:"llm_response,omitempty"`
 }
 
 type llmRequestRecording struct {

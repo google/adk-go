@@ -45,9 +45,10 @@ import (
 // - Tool calls with arguments and results
 // - Events and final responses
 // - Errors during model and tool execution
-func New() (*plugin.Plugin, error) {
+func New(allowedBaseDir string) (*plugin.Plugin, error) {
 	p := &replayPlugin{
 		invocationStates: make(map[string]*invocationReplayState),
+		allowedBaseDir:   allowedBaseDir,
 	}
 	return plugin.New(plugin.Config{
 		Name:                "replay_plugin",
@@ -59,8 +60,8 @@ func New() (*plugin.Plugin, error) {
 }
 
 // MustNew is like New but panics if there is an error.
-func MustNew() *plugin.Plugin {
-	p, err := New()
+func MustNew(allowedBaseDir string) *plugin.Plugin {
+	p, err := New(allowedBaseDir)
 	if err != nil {
 		panic(err)
 	}
@@ -70,17 +71,23 @@ func MustNew() *plugin.Plugin {
 type replayPlugin struct {
 	mu               sync.Mutex // Mutex to protect the map
 	invocationStates map[string]*invocationReplayState
+	allowedBaseDir   string
 }
 
 func (p *replayPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, error) {
 	if ctx.Session() == nil {
 		return nil, nil
 	}
-	if !p.isReplayModeOn(ctx.Session().State()) {
+
+	on, err := p.isReplayModeOn(ctx.Session().State())
+	if err != nil {
+		return nil, err
+	}
+	if !on {
 		return nil, nil
 	}
 
-	_, err := p.loadInvocationState(ctx)
+	_, err = p.loadInvocationState(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +95,11 @@ func (p *replayPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, e
 }
 
 func (p *replayPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
-	if !p.isReplayModeOn(ctx.State()) {
+	on, err := p.isReplayModeOn(ctx.State())
+	if err != nil {
+		return nil, err
+	}
+	if !on {
 		return nil, nil
 	}
 
@@ -103,11 +114,15 @@ func (p *replayPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequ
 		return nil, err
 	}
 
-	return recording.LlmResponse.ToLLMResponse(), nil
+	return recording.LLMResponse.ToLLMResponse(), nil
 }
 
 func (p *replayPlugin) beforeTool(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-	if !p.isReplayModeOn(ctx.State()) {
+	on, err := p.isReplayModeOn(ctx.State())
+	if err != nil {
+		return nil, err
+	}
+	if !on {
 		return nil, nil
 	}
 
@@ -140,42 +155,61 @@ func (p *replayPlugin) afterRun(ctx agent.InvocationContext) {
 		return
 	}
 	sessionState := ctx.Session().State()
-	if !p.isReplayModeOn(sessionState) {
+	on, err := p.isReplayModeOn(sessionState)
+	if err != nil || !on {
 		return
 	}
+	p.mu.Lock()
 	delete(p.invocationStates, ctx.InvocationID())
+	p.mu.Unlock()
 }
 
-func (p *replayPlugin) isReplayModeOn(sessionState session.State) bool {
+func (p *replayPlugin) isReplayModeOn(sessionState session.State) (bool, error) {
 	if sessionState == nil {
-		return false
+		return false, nil
 	}
 	configVal, err := sessionState.Get("_adk_replay_config")
 	// If the key doesn't exist or there's an error, we treat it as disabled.
 	if err != nil {
-		return false
+		return false, nil
 	}
 
 	config, ok := configVal.(map[string]any)
 	if !ok {
-		return false
+		return false, nil
 	}
 
 	caseDirVal, ok := config["dir"]
 	if !ok {
-		return false
+		return false, nil
 	}
 	caseDir, ok := caseDirVal.(string)
 	if !ok || caseDir == "" {
-		return false
+		return false, nil
+	}
+
+	basePath, err := filepath.Abs(p.allowedBaseDir)
+	if err != nil {
+		return false, fmt.Errorf("invalid path format: %v", err)
+	}
+	requestedAbsPath, err := filepath.Abs(caseDir)
+	if err != nil {
+		return false, fmt.Errorf("invalid path format: %v", err)
+	}
+	rel, err := filepath.Rel(basePath, requestedAbsPath)
+	if err != nil {
+		return false, fmt.Errorf("invalid path format: %v", err)
+	}
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return false, fmt.Errorf("replay config error: 'dir' is not within the allowed base directory")
 	}
 
 	msgIndexVal, ok := config["user_message_index"]
 	if !ok || msgIndexVal == nil {
-		return false
+		return false, nil
 	}
 
-	return true
+	return true, nil
 }
 
 func (p *replayPlugin) getInvocationState(ctx agent.CallbackContext) (*invocationReplayState, error) {
@@ -209,6 +243,22 @@ func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invoca
 		return nil, fmt.Errorf("replay config error: 'dir' parameter is missing or empty")
 	}
 
+	basePath, err := filepath.Abs(p.allowedBaseDir)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path format: %v", err)
+	}
+	requestedAbsPath, err := filepath.Abs(caseDir)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path format: %v", err)
+	}
+	rel, err := filepath.Rel(basePath, requestedAbsPath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path format: %v", err)
+	}
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return nil, fmt.Errorf("replay config error: 'dir' is not within the allowed base directory")
+	}
+
 	// Safely extract 'user_message_index'
 	// Note: JSON/YAML unmarshaling into 'any' often results in float64,
 	// so we check for both int and float64 to be robust.
@@ -223,7 +273,7 @@ func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invoca
 	}
 
 	// 3. Load Recordings File
-	recordingsPath := filepath.Join(caseDir, "generated-recordings.yaml")
+	recordingsPath := filepath.Join(requestedAbsPath, "generated-recordings.yaml")
 
 	// Check if file exists
 	if _, err := os.Stat(recordingsPath); os.IsNotExist(err) {
@@ -320,7 +370,7 @@ func (p *replayPlugin) verifyAndGetNextLLMRecordingForAgent(state *invocationRep
 	}
 
 	// Strict verification of LLM request
-	err = verifyLLMRequestMatch(expectedRecording.LLMRecording.LlmRequest.ToLLMRequest(), llmRequest, agentName, currentAgentIndex)
+	err = verifyLLMRequestMatch(expectedRecording.LLMRecording.LLMRequest.ToLLMRequest(), llmRequest, agentName, currentAgentIndex)
 	if err != nil {
 		return nil, err
 	}
