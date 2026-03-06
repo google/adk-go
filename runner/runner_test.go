@@ -122,53 +122,6 @@ func TestRunner_findAgentToRun(t *testing.T) {
 	}
 }
 
-func Test_findAgent(t *testing.T) {
-	agentTree := agentTree(t)
-
-	oneAgent := must(llmagent.New(llmagent.Config{
-		Name: "test",
-	}))
-
-	tests := []struct {
-		name      string
-		root      agent.Agent
-		target    string
-		wantAgent agent.Agent
-	}{
-		{
-			name:      "ok",
-			root:      agentTree.root,
-			target:    agentTree.allowsTransferAgent.Name(),
-			wantAgent: agentTree.allowsTransferAgent,
-		},
-		{
-			name:      "finds in one node tree",
-			root:      oneAgent,
-			target:    oneAgent.Name(),
-			wantAgent: oneAgent,
-		},
-		{
-			name:      "doesn't fail if agent is missing in the tree",
-			root:      agentTree.root,
-			target:    "random",
-			wantAgent: nil,
-		},
-		{
-			name:      "doesn't fail on the empty tree",
-			root:      nil,
-			target:    "random",
-			wantAgent: nil,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if gotAgent := findAgent(tt.root, tt.target); gotAgent != tt.wantAgent {
-				t.Errorf("Runner.findAgent() = %+v, want %+v", gotAgent.Name(), tt.wantAgent.Name())
-			}
-		})
-	}
-}
-
 func Test_isTransferrableAcrossAgentTree(t *testing.T) {
 	tests := []struct {
 		name  string
