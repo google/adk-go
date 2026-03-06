@@ -1,12 +1,12 @@
 httprr trace v1
-537 8297
+656 8297
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 291
+Content-Length: 410
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"What is the sum of the first 50 prime numbers?"}],"role":"user"}],"generationConfig":{"thinkingConfig":{"includeThoughts":true}},"systemInstruction":{"parts":[{"text":"Think deep. Always double check the answer before making the conclusion."}],"role":"user"}}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"What is the sum of the first 50 prime numbers?"}],"role":"user"}],"generationConfig":{"thinkingConfig":{"includeThoughts":true}},"systemInstruction":{"parts":[{"text":"Think deep. Always double check the answer before making the conclusion."},{"text":"You are an agent. Your internal name is \"calculator\". The description about you is \"calculating agent\"."}],"role":"user"}}HTTP/2.0 200 OK
 Connection: close
 Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Disposition: attachment

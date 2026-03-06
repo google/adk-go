@@ -1,12 +1,12 @@
 httprr trace v1
-822 1070
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+931 1070
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 590
+Content-Length: 699
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:27 GMT
 Server: scaffolding on HTTPServer2
@@ -58,14 +58,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-2.0-flash",
   "responseId": "hvX4aJWrKevWxN8Pqd_FgAI"
 }
-1003 950
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+1112 950
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 771
+Content-Length: 880
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"7"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"7"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:28 GMT
 Server: scaffolding on HTTPServer2
@@ -112,14 +112,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-2.0-flash",
   "responseId": "h_X4aPHaIqfKvdIP1b-IyQY"
 }
-822 1070
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+931 1070
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 590
+Content-Length: 699
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:28 GMT
 Server: scaffolding on HTTPServer2
@@ -171,14 +171,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-2.0-flash",
   "responseId": "iPX4aNzMFdTivdIPgMv46AU"
 }
-1003 949
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+1112 949
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 771
+Content-Length: 880
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"3"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"3"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:29 GMT
 Server: scaffolding on HTTPServer2
@@ -225,14 +225,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-2.0-flash",
   "responseId": "ifX4aM0FjZnE3w_Sk775AQ"
 }
-822 1069
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+931 1069
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 590
+Content-Length: 699
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:30 GMT
 Server: scaffolding on HTTPServer2
@@ -284,14 +284,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-2.0-flash",
   "responseId": "ifX4aJmHH4XmxN8PycikeA"
 }
-1003 951
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+1112 951
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 771
+Content-Length: 880
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"7"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"7"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:31 GMT
 Server: scaffolding on HTTPServer2
@@ -338,14 +338,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-2.0-flash",
   "responseId": "ivX4aLqwCLjUvdIPn6eOuQU"
 }
-822 1069
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+931 1069
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 590
+Content-Length: 699
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:32 GMT
 Server: scaffolding on HTTPServer2
@@ -397,14 +397,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-2.0-flash",
   "responseId": "i_X4aI2PENuFxN8PqvuKqAM"
 }
-1003 949
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+1112 949
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 771
+Content-Length: 880
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"3"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"3"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:33 GMT
 Server: scaffolding on HTTPServer2
@@ -451,14 +451,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-2.0-flash",
   "responseId": "jPX4aPqzJorLvdIP_rWq0Ak"
 }
-822 1068
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+931 1068
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 590
+Content-Length: 699
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:34 GMT
 Server: scaffolding on HTTPServer2
@@ -510,14 +510,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-2.0-flash",
   "responseId": "jfX4aLe4C_rDvdIP5oLnMQ"
 }
-1003 950
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+1112 950
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 771
+Content-Length: 880
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"7"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":"7"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:35 GMT
 Server: scaffolding on HTTPServer2
@@ -564,14 +564,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-2.0-flash",
   "responseId": "jvX4aJr5E8ajvdIPlIuO4AE"
 }
-822 1069
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+931 1069
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 590
+Content-Length: 699
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:37 GMT
 Server: scaffolding on HTTPServer2
@@ -623,14 +623,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-2.0-flash",
   "responseId": "j_X4aNHBA5Dzxs0P0ZOM8QY"
 }
-1001 949
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+1110 949
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 769
+Content-Length: 878
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":1}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Generate random number with 5 as a seed."}],"role":"user"},{"parts":[{"functionCall":{"args":{"seed":5},"name":"rand_number"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"rand_number","response":{"number":1}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"},{"text":"You are an agent. Your internal name is \"agent\". The description about you is \"random agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns random number","name":"rand_number","parametersJsonSchema":{"additionalProperties":false,"properties":{"seed":{"type":"integer"}},"required":["seed"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"number":{"type":"integer"}},"required":["number"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 22 Oct 2025 15:17:37 GMT
 Server: scaffolding on HTTPServer2
