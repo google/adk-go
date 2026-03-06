@@ -334,6 +334,11 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 			// Function call ID is optional in genai API and some models do not use the field.
 			// Set it in case after model callbacks use it.
+			// Guard against nil LLMResponse to prevent nil pointer dereference
+			// when the model returns no response (e.g. empty stream).
+			if resp.LLMResponse == nil {
+				continue
+			}
 			utils.PopulateClientFunctionCallID(resp.Content)
 
 			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp.LLMResponse, stateDelta, err)
@@ -410,6 +415,9 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 			// Complete the span immediately to avoid capturing the upstream yield processing time.
 			if err != nil {
 				endSpanAndTrackResult()
+			} else if resp == nil {
+				// Skip nil responses to prevent nil pointer dereference.
+				continue
 			} else if !resp.Partial {
 				// Log only final responses.
 				telemetry.LogResponse(ctx, resp, backend)
