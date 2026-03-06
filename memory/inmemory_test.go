@@ -135,6 +135,84 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			},
 			wantResp: &memory.SearchResponse{},
 		},
+		{
+			name: "words with punctuation",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess1", []*session.Event{
+					{
+						Author:    "user1",
+						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("That was great!", genai.RoleUser)},
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+				}),
+			},
+			req: &memory.SearchRequest{
+				AppName: "app1",
+				UserID:  "user1",
+				Query:   "great",
+			},
+			wantResp: &memory.SearchResponse{
+				Memories: []memory.Entry{
+					{
+						Content:   genai.NewContentFromText("That was great!", genai.RoleUser),
+						Author:    "user1",
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+				},
+			},
+		},
+		{
+			name: "multi-line text with tabs and newlines",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess1", []*session.Event{
+					{
+						Author:    "user1",
+						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("first line\n\tsecond line\tthird", genai.RoleUser)},
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+				}),
+			},
+			req: &memory.SearchRequest{
+				AppName: "app1",
+				UserID:  "user1",
+				Query:   "second",
+			},
+			wantResp: &memory.SearchResponse{
+				Memories: []memory.Entry{
+					{
+						Content:   genai.NewContentFromText("first line\n\tsecond line\tthird", genai.RoleUser),
+						Author:    "user1",
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+				},
+			},
+		},
+		{
+			name: "comma-separated values",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess1", []*session.Event{
+					{
+						Author:    "user1",
+						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("apple, banana, cherry", genai.RoleUser)},
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+				}),
+			},
+			req: &memory.SearchRequest{
+				AppName: "app1",
+				UserID:  "user1",
+				Query:   "banana",
+			},
+			wantResp: &memory.SearchResponse{
+				Memories: []memory.Entry{
+					{
+						Content:   genai.NewContentFromText("apple, banana, cherry", genai.RoleUser),
+						Author:    "user1",
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+					},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
