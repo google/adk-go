@@ -47,9 +47,26 @@ type geminiModel struct {
 //
 // An error is returned if the [genai.Client] fails to initialize.
 func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (model.LLM, error) {
+	// Create a copy of the config to avoid mutating the caller's config
+	// or the underlying http.Client.
+	if cfg != nil {
+		cfgCopy := *cfg
+		if cfg.HTTPClient != nil {
+			clientCopy := *cfg.HTTPClient
+			cfgCopy.HTTPClient = &clientCopy
+		}
+		cfg = &cfgCopy
+	}
+
 	client, err := genai.NewClient(ctx, cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	if client.ClientConfig().HTTPClient != nil {
+		client.ClientConfig().HTTPClient.Transport = &mergeHeadersInterceptor{
+			base: client.ClientConfig().HTTPClient.Transport,
+		}
 	}
 
 	// Create header value once, when the model is created
@@ -151,6 +168,25 @@ func (m *geminiModel) maybeAppendUserContent(req *model.LLMRequest) {
 	if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != "user" {
 		req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
 	}
+}
+
+// mergeHeadersInterceptor is a http.RoundTripper that merges headers from the request
+// with the model's headers before delegating to the base transport.
+type mergeHeadersInterceptor struct {
+	base http.RoundTripper
+}
+
+func (h *mergeHeadersInterceptor) RoundTrip(req *http.Request) (*http.Response, error) {
+	for _, headerName := range []string{"x-goog-api-client", "user-agent"} {
+		if values := req.Header.Values(headerName); len(values) > 0 {
+			req.Header.Set(headerName, strings.Join(values, " "))
+		}
+	}
+
+	if h.base == nil {
+		return http.DefaultTransport.RoundTrip(req)
+	}
+	return h.base.RoundTrip(req)
 }
 
 func (m *geminiModel) GetGoogleLLMVariant() genai.Backend {
