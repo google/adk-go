@@ -501,24 +501,8 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 }
 
 func stringify(v any) string {
-	b, _ := json.Marshal(v)
-    s := string(b)
-
-    // Add the space after colons: {"a":"b"} -> {"a": "b"}
-    s = strings.ReplaceAll(s, "\":", "\": ")
-
-    // Add the space after commas: {"a": "b","c": "d"} -> {"a": "b", "c": "d"}
-    s = strings.ReplaceAll(s, ",", ", ")
-
-    // Swap double quotes for single quotes
-    s = strings.ReplaceAll(s, "\"", "'")
-
-    // Handle the Python-isms for conformance with Python code.
-    s = strings.ReplaceAll(s, "null", "None")
-    s = strings.ReplaceAll(s, "true", "True")
-    s = strings.ReplaceAll(s, "false", "False")
-
-    return s
+	s, _ := json.Marshal(v)
+	return string(s)
 }
 
 // requestEUCFunctionCallName is a special function to handle credential
