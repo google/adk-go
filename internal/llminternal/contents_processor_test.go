@@ -156,14 +156,14 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 				{
 					Parts: []*genai.Part{
 						{Text: "For context:"},
-						{Text: "[anotherAgent] called tool `func1` with parameters: None"},
+						{Text: "[anotherAgent] called tool `func1` with parameters: null"},
 					},
 					Role: "user",
 				},
 				{
 					Parts: []*genai.Part{
 						{Text: "For context:"},
-						{Text: "[anotherAgent] `func1` tool returned result: None"},
+						{Text: "[anotherAgent] `func1` tool returned result: null"},
 					},
 					Role: "user",
 				},
