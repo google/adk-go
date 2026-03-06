@@ -225,7 +225,7 @@ func TestToMissingRemoteSessionParts(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ictx := newTestInvocationContext(t, remoteName, tc.events...)
-			gotParts, gotContextID := toMissingRemoteSessionParts(ictx, ictx.Session().Events())
+			gotParts, gotContextID := toMissingRemoteSessionParts(ictx, ictx.Session().Events(), A2AConfig{})
 			if tc.wantContextID != gotContextID {
 				t.Errorf("toMissingRemoteSessionParts() contextID = %s, want %s", gotContextID, tc.wantContextID)
 			}

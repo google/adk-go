@@ -1168,3 +1168,41 @@ func TestRemoteAgent_ErrorEventOnServerError(t *testing.T) {
 		t.Fatal("event.ErrorMessage empty, want non-empty")
 	}
 }
+
+func TestRemoteAgent_CustomConverters(t *testing.T) {
+	originalA2APart := a2a.TextPart{Text: "hello"}
+	customA2APart := a2a.TextPart{Text: "modified"}
+	mockGenAIPartConverter := func(ctx context.Context, event *session.Event, part *genai.Part) (a2a.Part, error) {
+		return customA2APart, nil
+	}
+
+	tests := []struct {
+		name string
+		cfg  A2AConfig
+		want a2a.Part
+	}{
+		{
+			name: "custom converter",
+			cfg:  A2AConfig{GenAIPartConverter: mockGenAIPartConverter},
+			want: customA2APart,
+		},
+		{
+			name: "default converter",
+			want: originalA2APart,
+		},
+	}
+	for _, tc := range tests {
+		events := []*session.Event{newUserHello()}
+		ictx := newTestInvocationContext(t, "a2a agent", events...)
+		msg, err := newMessage(ictx, tc.cfg)
+		if err != nil {
+			t.Fatalf("newMessage() error = %v", err)
+		}
+		if len(msg.Parts) != 1 {
+			t.Fatalf("len(msg.Parts) = %d, want 1", len(msg.Parts))
+		}
+		if textPart, ok := msg.Parts[0].(a2a.TextPart); !ok || textPart.Text != tc.want.(a2a.TextPart).Text {
+			t.Fatalf("msg.Parts[0] = %+v, want %+v", msg.Parts[0], tc.want)
+		}
+	}
+}

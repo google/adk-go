@@ -15,6 +15,7 @@
 package adka2a
 
 import (
+	"context"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -427,6 +428,58 @@ func TestToSessionEvent(t *testing.T) {
 			},
 		},
 		{
+			name: "task with multiple artifacts and mixed long-running tools",
+			input: &a2a.Task{
+				ID:        taskID,
+				ContextID: contextID,
+				Artifacts: []*a2a.Artifact{
+					{
+						ID: "artifact-1",
+						Parts: []a2a.Part{
+							a2a.TextPart{Text: "Checking weather..."},
+							a2a.DataPart{
+								Data: map[string]any{"id": "tool_1", "name": "GetWeather", "args": map[string]any{"city": "London"}},
+								Metadata: map[string]any{
+									a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
+									a2aDataPartMetaLongRunningKey: true,
+								},
+							},
+						},
+					},
+					{
+						ID: "artifact-2",
+						Parts: []a2a.Part{
+							a2a.DataPart{
+								Data: map[string]any{"id": "tool_2", "name": "GetNews", "args": map[string]any{"topic": "tech"}},
+								Metadata: map[string]any{
+									a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
+									a2aDataPartMetaLongRunningKey: true,
+								},
+							},
+						},
+					},
+				},
+				Status: a2a.TaskStatus{State: a2a.TaskStateInputRequired},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: genai.NewContentFromParts([]*genai.Part{
+						{Text: "Checking weather..."},
+						{FunctionCall: &genai.FunctionCall{ID: "tool_1", Name: "GetWeather", Args: map[string]any{"city": "London"}}},
+						{FunctionCall: &genai.FunctionCall{ID: "tool_2", Name: "GetNews", Args: map[string]any{"topic": "tech"}}},
+					}, genai.RoleModel),
+					CustomMetadata: map[string]any{
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
+					},
+					TurnComplete: true,
+				},
+				LongRunningToolIDs: []string{"tool_1", "tool_2"},
+				Author:             agentName,
+				Branch:             branch,
+			},
+		},
+		{
 			name: "task with single-part text status",
 			input: &a2a.Task{
 				ID:        taskID,
@@ -458,6 +511,181 @@ func TestToSessionEvent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Branch: branch, Agent: a2aAgent})
 			got, err := ToSessionEvent(ictx, tc.input)
+			if err != nil {
+				t.Errorf("ToSessionEvent() error = %v, want nil", err)
+			}
+			if diff := cmp.Diff(tc.want, got, ignoreFields...); diff != "" {
+				t.Errorf("ToSessionEvent() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", got, tc.want, diff)
+			}
+		})
+	}
+}
+
+func TestToSessionEventWithParts(t *testing.T) {
+	t.Parallel()
+	taskID, contextID, branch, agentName := a2a.NewTaskID(), a2a.NewContextID(), "main", "a2a agent"
+	a2aAgent, err := agent.New(agent.Config{Name: agentName})
+	if err != nil {
+		t.Fatalf("failed to create an agent: %v", err)
+	}
+
+	customGenAITextPart := &genai.Part{Text: "modified text part"}
+	customGenAIDataPart := &genai.Part{Text: "modified data part"}
+	customGenAIFilePart := &genai.Part{FileData: &genai.FileData{FileURI: "http://example.com/modified"}}
+
+	converter := func(ctx context.Context, event a2a.Event, part a2a.Part) (*genai.Part, error) {
+		switch p := part.(type) {
+		case a2a.TextPart:
+			return customGenAITextPart, nil
+		case a2a.FilePart:
+			return customGenAIFilePart, nil
+		case a2a.DataPart:
+			if p.Metadata[a2aDataPartMetaTypeKey] == a2aDataPartTypeFunctionCall {
+				return &genai.Part{
+					FunctionCall: &genai.FunctionCall{
+						ID:   p.Data["id"].(string),
+						Args: p.Data["args"].(map[string]any),
+						Name: p.Data["name"].(string),
+					},
+				}, nil
+			}
+			return customGenAIDataPart, nil
+		}
+		return nil, nil
+	}
+	testCases := []struct {
+		name  string
+		input a2a.Event
+		want  *session.Event
+	}{
+		{
+			name: "message parts",
+			input: &a2a.Message{
+				Parts: []a2a.Part{a2a.TextPart{Text: "foo"}},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content:      genai.NewContentFromParts([]*genai.Part{customGenAITextPart}, genai.RoleModel),
+					TurnComplete: true,
+				},
+				Author: agentName,
+				Branch: branch,
+			},
+		},
+		{
+			name: "task artifact parts",
+			input: &a2a.Task{
+				ID:        taskID,
+				ContextID: contextID,
+				Artifacts: []*a2a.Artifact{
+					{
+						ID:    "artifact-id",
+						Parts: []a2a.Part{a2a.DataPart{Data: map[string]any{"foo": "bar"}}},
+					},
+				},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: genai.NewContentFromParts([]*genai.Part{customGenAIDataPart}, genai.RoleModel),
+					CustomMetadata: map[string]any{
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
+					},
+				},
+				Author: agentName,
+				Branch: branch,
+			},
+		},
+		{
+			name: "TaskArtifactApdateEvent with artifact part",
+			input: &a2a.TaskArtifactUpdateEvent{
+				Artifact: &a2a.Artifact{
+					Parts: []a2a.Part{a2a.FilePart{File: &a2a.FileURI{URI: "http://example.com/file"}}},
+				},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: genai.NewContentFromParts([]*genai.Part{customGenAIFilePart}, genai.RoleModel),
+					Partial: true,
+				},
+				Author: agentName,
+				Branch: branch,
+			},
+		},
+		{
+			name: "TaskStatusUpdateEvent with status message parts",
+			input: &a2a.TaskStatusUpdateEvent{
+				TaskID:    taskID,
+				ContextID: contextID,
+				Final:     true,
+				Status: a2a.TaskStatus{
+					State:   a2a.TaskStateCompleted,
+					Message: &a2a.Message{Parts: []a2a.Part{a2a.TextPart{Text: "completed"}}},
+				},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: genai.NewContentFromParts([]*genai.Part{customGenAITextPart}, genai.RoleModel),
+					CustomMetadata: map[string]any{
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
+					},
+					TurnComplete: true,
+				},
+				Author: agentName,
+				Branch: branch,
+			},
+		},
+		{
+			name: "long running task",
+			input: &a2a.Task{
+				ID:        taskID,
+				ContextID: contextID,
+				Artifacts: []*a2a.Artifact{
+					{
+						ID: a2a.NewArtifactID(),
+						Parts: []a2a.Part{
+							a2a.DataPart{
+								Data:     map[string]any{"id": "get_weather", "args": map[string]any{"city": "Warsaw"}, "name": "GetWeather"},
+								Metadata: map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionCall, a2aDataPartMetaLongRunningKey: true},
+							},
+						},
+					},
+				},
+				Status: a2a.TaskStatus{State: a2a.TaskStateInputRequired},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: genai.NewContentFromParts([]*genai.Part{
+						{FunctionCall: &genai.FunctionCall{
+							ID:   "get_weather",
+							Args: map[string]any{"city": "Warsaw"},
+							Name: "GetWeather",
+						}},
+					}, genai.RoleModel),
+					CustomMetadata: map[string]any{
+						customMetaTaskIDKey:    string(taskID),
+						customMetaContextIDKey: contextID,
+					},
+					TurnComplete: true,
+				},
+				Author:             agentName,
+				Branch:             branch,
+				LongRunningToolIDs: []string{"get_weather"},
+			},
+		},
+	}
+
+	ignoreFields := []cmp.Option{
+		cmpopts.IgnoreFields(session.Event{}, "ID"),
+		cmpopts.IgnoreFields(session.Event{}, "Timestamp"),
+		cmpopts.IgnoreFields(session.Event{}, "InvocationID"),
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Branch: branch, Agent: a2aAgent})
+			got, err := ToSessionEventWithParts(ictx, tc.input, converter)
 			if err != nil {
 				t.Errorf("ToSessionEvent() error = %v, want nil", err)
 			}
