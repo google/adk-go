@@ -59,7 +59,7 @@ func weatherFunc(ctx context.Context, req *mcp.CallToolRequest, input Input) (*m
 
 const modelName = "gemini-2.5-flash"
 
-//go:generate go test -httprecord=.*
+//go:generate go test -v -httprecord=.*
 
 func TestMCPToolSet(t *testing.T) {
 	const (
@@ -123,6 +123,7 @@ func TestMCPToolSet(t *testing.T) {
 					},
 					Role: genai.RoleModel,
 				},
+				ModelVersion: "gemini-2.5-flash",
 			},
 		},
 		{
@@ -154,6 +155,7 @@ func TestMCPToolSet(t *testing.T) {
 					},
 					Role: genai.RoleModel,
 				},
+				ModelVersion: "gemini-2.5-flash",
 			},
 		},
 	}
@@ -478,7 +480,7 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 				genai.NewContentFromFunctionResponse(toolName, map[string]any{
 					"error": errors.New("error tool \"get_weather\" call is rejected"),
 				}, "user"),
-				genai.NewContentFromText("I am sorry, I cannot get the weather in Lisbon.", "model"),
+				genai.NewContentFromText("I am sorry, I cannot provide the weather in Lisbon.", "model"),
 			},
 		},
 		{
@@ -508,7 +510,7 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 				genai.NewContentFromFunctionResponse(toolName, map[string]any{
 					"output": map[string]any{"weather_summary": string(`Today in "Lisbon" is sunny`)},
 				}, "user"),
-				genai.NewContentFromText(`Today in "Lisbon" is sunny`, "model"),
+				genai.NewContentFromText(`Today in "Lisbon" is sunny.`, "model"),
 			},
 		},
 		{
@@ -608,7 +610,7 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 				genai.NewContentFromFunctionResponse(toolName, map[string]any{
 					"error": errors.New("error tool \"get_weather\" call is rejected"),
 				}, "user"),
-				genai.NewContentFromText("I am sorry, I cannot get the weather in Lisbon for you. The tool is not working at the moment.", "model"),
+				genai.NewContentFromText("I'm sorry, I cannot get the weather information in Lisbon.", "model"),
 			},
 		},
 	}

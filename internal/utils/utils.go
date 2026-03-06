@@ -131,6 +131,7 @@ func Must[T agent.Agent](a T, err error) T {
 	return a
 }
 
+// AppendInstructions appends instructions to the [genai.GenerateContentConfig.SystemInstruction] system instruction.
 func AppendInstructions(r *model.LLMRequest, instructions ...string) {
 	if len(instructions) == 0 {
 		return
