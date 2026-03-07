@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/memory"
@@ -116,19 +118,30 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	}
 
 	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg)
+	var invocationID string
+	rw.WriteHeader(http.StatusOK)
 
 	for event, err := range resp {
 		if err != nil {
-			_, err := fmt.Fprintf(rw, "Error while running agent: %v\n", err)
-			if err != nil {
-				return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
+			errorEvent := models.Event{
+				InvocationID: invocationID,
+				ID:           uuid.NewString(),
+				Time:         time.Now().Unix(),
+				Author:       "system",
+				ErrorCode:    "EXECUTION_ERROR",
+				ErrorMessage: err.Error(),
 			}
-			err = rc.Flush()
-			if err != nil {
-				return newStatusError(fmt.Errorf("failed to flush: %w", err), http.StatusInternalServerError)
+
+			errFlash := flashModelEvent(rc, rw, &errorEvent)
+			if errFlash != nil {
+				return errFlash
 			}
 
 			continue
+		}
+		// Capture InvocationID from the first successful event
+		if invocationID == "" && event.InvocationID != "" {
+			invocationID = event.InvocationID
 		}
 		err := flashEvent(rc, rw, *event)
 		if err != nil {
@@ -139,18 +152,26 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 }
 
 func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, event session.Event) error {
+	wireEvent := models.FromSessionEvent(event)
+	return flashModelEvent(rc, rw, &wireEvent)
+}
+
+func flashModelEvent(rc *http.ResponseController, rw http.ResponseWriter, event *models.Event) error {
 	_, err := fmt.Fprintf(rw, "data: ")
 	if err != nil {
 		return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
 	}
-	err = json.NewEncoder(rw).Encode(models.FromSessionEvent(event))
+
+	err = json.NewEncoder(rw).Encode(event)
 	if err != nil {
 		return newStatusError(fmt.Errorf("failed to encode response: %w", err), http.StatusInternalServerError)
 	}
+
 	_, err = fmt.Fprintf(rw, "\n")
 	if err != nil {
 		return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
 	}
+
 	err = rc.Flush()
 	if err != nil {
 		return newStatusError(fmt.Errorf("failed to flush: %w", err), http.StatusInternalServerError)
