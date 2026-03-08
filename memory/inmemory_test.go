@@ -144,9 +144,9 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess1", []*session.Event{
 					{
-						Author:    "user1",
+						Author:      "user1",
 						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("That was great!", genai.RoleUser)},
-						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+						Timestamp:   must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
 					},
 				}),
 			},
@@ -170,9 +170,9 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess1", []*session.Event{
 					{
-						Author:    "user1",
+						Author:      "user1",
 						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("first line\n\tsecond line\tthird", genai.RoleUser)},
-						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+						Timestamp:   must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
 					},
 				}),
 			},
@@ -196,9 +196,9 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess1", []*session.Event{
 					{
-						Author:    "user1",
+						Author:      "user1",
 						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("apple, banana, cherry", genai.RoleUser)},
-						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+						Timestamp:   must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
 					},
 				}),
 			},
