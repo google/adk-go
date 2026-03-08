@@ -1,0 +1,48 @@
+name: ADK Stale Issue Auditor (Go)
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # This runs at 6:00 AM UTC (10 PM PST)
+    - cron: '0 6 * * *'
+
+jobs:
+  audit-stale-issues:
+    if: github.repository == 'google/adk-go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.24' # Use a stable Go version
+
+      - name: Initialize and Sync Dependencies
+        working-directory: contributing/samples/stale-bot-agent
+        run: |
+          # Initialize module only if go.mod is missing or invalid
+          if [ ! -f go.mod ] || ! grep -q "module" go.mod; then
+            go mod init stale-bot-agent
+          fi
+          go mod tidy
+
+      - name: Run Stale Auditor Agent
+        working-directory: contributing/samples/stale-bot-agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: adk-go
+          CONCURRENCY_LIMIT: 3
+          GEMINI_MODEL: gemini-2.5-flash
+        run: |
+          go run .

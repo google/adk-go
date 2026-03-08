@@ -222,7 +222,11 @@ func TestTelemetryCustomLoggerProvider(t *testing.T) {
 	}
 }
 
-func extractResourceAttributes(res *resource.Resource) (projectID, serviceName, serviceVersion string) {
+func extractResourceAttributes(res *resource.Resource) (string, string, string) {
+	var projectID string
+	var serviceName string
+	var serviceVersion string
+
 	for _, attr := range res.Attributes() {
 		switch attr.Key {
 		case "gcp.project_id":
@@ -233,7 +237,8 @@ func extractResourceAttributes(res *resource.Resource) (projectID, serviceName, 
 			serviceVersion = attr.Value.AsString()
 		}
 	}
-	return
+
+	return projectID, serviceName, serviceVersion
 }
 
 func TestResolveResourceProject(t *testing.T) {
