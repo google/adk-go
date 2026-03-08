@@ -157,7 +157,7 @@ func checkMapsIntersect(m1, m2 map[string]struct{}) bool {
 func extractWords(text string) map[string]struct{} {
 	res := make(map[string]struct{})
 
-	for _, s := range strings.Fields(text) {
+	for s := range strings.FieldsSeq(text) {
 		s = strings.TrimFunc(s, func(r rune) bool {
 			return !unicode.IsLetter(r) && !unicode.IsNumber(r)
 		})
