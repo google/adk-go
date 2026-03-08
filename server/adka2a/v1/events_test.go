@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package adka2a
+package v1
 
 import (
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
@@ -45,7 +45,7 @@ func TestToSessionEvent(t *testing.T) {
 		{
 			name: "message",
 			input: &a2a.Message{
-				Parts:     []a2a.Part{a2a.TextPart{Text: "foo"}},
+				Parts:     a2a.ContentParts{a2a.NewTextPart("foo")},
 				TaskID:    taskID,
 				ContextID: contextID,
 				Metadata: map[string]any{
@@ -76,7 +76,7 @@ func TestToSessionEvent(t *testing.T) {
 		{
 			name: "nil values",
 			input: &a2a.Message{
-				Parts:     []a2a.Part{a2a.TextPart{Text: "foo"}},
+				Parts:     a2a.ContentParts{a2a.NewTextPart("foo")},
 				TaskID:    taskID,
 				ContextID: contextID,
 				Metadata: map[string]any{
@@ -100,6 +100,7 @@ func TestToSessionEvent(t *testing.T) {
 			input: &a2a.Message{
 				TaskID:    taskID,
 				ContextID: contextID,
+				Parts:     a2a.ContentParts{},
 			},
 			want: &session.Event{
 				LLMResponse: model.LLMResponse{
@@ -121,19 +122,20 @@ func TestToSessionEvent(t *testing.T) {
 				Artifacts: []*a2a.Artifact{
 					{ // long running key is ignored for non-input-required states
 						ID: a2a.NewArtifactID(),
-						Parts: []a2a.Part{
-							a2a.DataPart{
-								Data:     map[string]any{"id": "get_weather", "args": map[string]any{"city": "Warsaw"}, "name": "GetWeather"},
-								Metadata: map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionCall, a2aDataPartMetaLongRunningKey: true},
-							},
+						Parts: a2a.ContentParts{
+							func() *a2a.Part {
+								p := a2a.NewDataPart(map[string]any{"id": "get_weather", "args": map[string]any{"city": "Warsaw"}, "name": "GetWeather"})
+								p.Metadata = map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionCall, a2aDataPartMetaLongRunningKey: true}
+								return p
+							}(),
 						},
 					},
-					{ID: a2a.NewArtifactID(), Parts: a2a.ContentParts{a2a.TextPart{Text: "foo"}}},
-					{ID: a2a.NewArtifactID(), Parts: a2a.ContentParts{a2a.TextPart{Text: "bar"}}},
+					{ID: a2a.NewArtifactID(), Parts: a2a.ContentParts{a2a.NewTextPart("foo")}},
+					{ID: a2a.NewArtifactID(), Parts: a2a.ContentParts{a2a.NewTextPart("bar")}},
 				},
 				Status: a2a.TaskStatus{
 					State:   a2a.TaskStateCompleted,
-					Message: a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "done"}),
+					Message: a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("done")),
 				},
 				Metadata: map[string]any{
 					metadataGroundingKey:  map[string]any{"sourceFlaggingUris": []any{map[string]any{"sourceId": "id1"}}},
@@ -206,11 +208,12 @@ func TestToSessionEvent(t *testing.T) {
 				Artifacts: []*a2a.Artifact{
 					{
 						ID: a2a.NewArtifactID(),
-						Parts: []a2a.Part{
-							a2a.DataPart{
-								Data:     map[string]any{"id": "get_weather", "args": map[string]any{"city": "Warsaw"}, "name": "GetWeather"},
-								Metadata: map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionCall, a2aDataPartMetaLongRunningKey: true},
-							},
+						Parts: a2a.ContentParts{
+							func() *a2a.Part {
+								p := a2a.NewDataPart(map[string]any{"id": "get_weather", "args": map[string]any{"city": "Warsaw"}, "name": "GetWeather"})
+								p.Metadata = map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionCall, a2aDataPartMetaLongRunningKey: true}
+								return p
+							}(),
 						},
 					},
 				},
@@ -246,7 +249,7 @@ func TestToSessionEvent(t *testing.T) {
 				TaskID:    taskID,
 				ContextID: contextID,
 				Artifact: &a2a.Artifact{
-					ID: a2a.NewArtifactID(), Parts: a2a.ContentParts{a2a.TextPart{Text: "foo"}, a2a.TextPart{Text: "bar"}},
+					ID: a2a.NewArtifactID(), Parts: a2a.ContentParts{a2a.NewTextPart("foo"), a2a.NewTextPart("bar")},
 				},
 				Metadata: map[string]any{
 					metadataGroundingKey:  map[string]any{"sourceFlaggingUris": []any{map[string]any{"sourceId": "id1"}}},
@@ -280,7 +283,7 @@ func TestToSessionEvent(t *testing.T) {
 				ContextID: contextID,
 				Artifact: &a2a.Artifact{
 					ID:    a2a.NewArtifactID(),
-					Parts: []a2a.Part{},
+					Parts: a2a.ContentParts{},
 				},
 			},
 			want: nil,
@@ -292,11 +295,12 @@ func TestToSessionEvent(t *testing.T) {
 				ContextID: contextID,
 				Artifact: &a2a.Artifact{
 					ID: a2a.NewArtifactID(),
-					Parts: []a2a.Part{
-						a2a.DataPart{
-							Data:     map[string]any{"id": "get_weather", "args": map[string]any{"city": "Warsaw"}, "name": "GetWeather"},
-							Metadata: map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionCall, a2aDataPartMetaLongRunningKey: true},
-						},
+					Parts: a2a.ContentParts{
+						func() *a2a.Part {
+							p := a2a.NewDataPart(map[string]any{"id": "get_weather", "args": map[string]any{"city": "Warsaw"}, "name": "GetWeather"})
+							p.Metadata = map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionCall, a2aDataPartMetaLongRunningKey: true}
+							return p
+						}(),
 					},
 				},
 			},
@@ -327,10 +331,10 @@ func TestToSessionEvent(t *testing.T) {
 			input: &a2a.TaskStatusUpdateEvent{
 				TaskID:    taskID,
 				ContextID: contextID,
-				Final:     true,
 				Status: a2a.TaskStatus{
+					State: a2a.TaskStateCompleted,
 					Message: &a2a.Message{
-						Parts: []a2a.Part{a2a.TextPart{Text: "foo"}},
+						Parts: a2a.ContentParts{a2a.NewTextPart("foo")},
 					},
 				},
 				Metadata: map[string]any{
@@ -359,7 +363,7 @@ func TestToSessionEvent(t *testing.T) {
 		},
 		{
 			name:  "final task status update without message",
-			input: &a2a.TaskStatusUpdateEvent{TaskID: taskID, ContextID: contextID, Final: true},
+			input: &a2a.TaskStatusUpdateEvent{TaskID: taskID, ContextID: contextID, Status: a2a.TaskStatus{State: a2a.TaskStateCompleted}},
 			want: &session.Event{
 				LLMResponse: model.LLMResponse{
 					CustomMetadata: map[string]any{
@@ -378,9 +382,9 @@ func TestToSessionEvent(t *testing.T) {
 				TaskID:    taskID,
 				ContextID: contextID,
 				Status: a2a.TaskStatus{
-					State: a2a.TaskStateCompleted,
+					State: a2a.TaskStateWorking,
 					Message: &a2a.Message{
-						Parts: []a2a.Part{a2a.TextPart{Text: "foo"}},
+						Parts: a2a.ContentParts{a2a.NewTextPart("foo")},
 					},
 				},
 			},
@@ -407,10 +411,9 @@ func TestToSessionEvent(t *testing.T) {
 			input: &a2a.TaskStatusUpdateEvent{
 				TaskID:    taskID,
 				ContextID: contextID,
-				Final:     true,
 				Status: a2a.TaskStatus{
 					State:   a2a.TaskStateFailed,
-					Message: &a2a.Message{Parts: []a2a.Part{a2a.TextPart{Text: "failed with an error"}}},
+					Message: &a2a.Message{Parts: a2a.ContentParts{a2a.NewTextPart("failed with an error")}},
 				},
 			},
 			want: &session.Event{
@@ -433,7 +436,7 @@ func TestToSessionEvent(t *testing.T) {
 				ContextID: contextID,
 				Status: a2a.TaskStatus{
 					State:   a2a.TaskStateFailed,
-					Message: &a2a.Message{Parts: []a2a.Part{a2a.TextPart{Text: "failed with an error"}}},
+					Message: &a2a.Message{Parts: a2a.ContentParts{a2a.NewTextPart("failed with an error")}},
 				},
 			},
 			want: &session.Event{

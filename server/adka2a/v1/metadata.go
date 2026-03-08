@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package adka2a
+package v1
 
 import (
 	"context"
 	"maps"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
 	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/session"
@@ -53,17 +53,17 @@ type invocationMeta struct {
 	userID    string
 	sessionID string
 	agentName string
-	reqCtx    *a2asrv.RequestContext
+	reqCtx    *a2asrv.ExecutorContext
 	eventMeta map[string]any
 }
 
-func toInvocationMeta(ctx context.Context, config ExecutorConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
+func toInvocationMeta(ctx context.Context, config ExecutorConfig, reqCtx *a2asrv.ExecutorContext) invocationMeta {
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 
 	// a2a sdk attaches authn info to the call context, use it when provided
 	if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
-		if callCtx.User != nil && callCtx.User.Name() != "" {
-			userID = callCtx.User.Name()
+		if callCtx.User != nil && callCtx.User.Name != "" {
+			userID = callCtx.User.Name
 		}
 	}
 

@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go v0.123.0
 	cloud.google.com/go/aiplatform v1.105.0
 	cloud.google.com/go/storage v1.56.1
-	github.com/a2aproject/a2a-go v0.3.3
+	github.com/a2aproject/a2a-go v0.3.7
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/glebarez/sqlite v1.8.0
 	github.com/google/go-cmp v0.7.0
@@ -33,6 +33,11 @@ require (
 	gorm.io/gorm v1.31.0
 	rsc.io/omap v1.2.0
 	rsc.io/ordered v1.1.1
+)
+
+require (
+	github.com/a2aproject/a2a-go/v2 v2.0.0-20260308140223-02ab3e4d6c6b
+	golang.org/x/mod v0.33.0 // indirect
 )
 
 require (

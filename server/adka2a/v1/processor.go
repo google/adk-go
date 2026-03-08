@@ -12,27 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package adka2a
+package v1
 
 import (
 	"context"
 	"fmt"
 	"maps"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
 
 type eventToArtifactTransform interface {
-	transform(event *session.Event, parts []a2a.Part, meta map[string]any) (*a2a.TaskArtifactUpdateEvent, error)
+	transform(event *session.Event, parts []*a2a.Part, meta map[string]any) (*a2a.TaskArtifactUpdateEvent, error)
 	makeFinalUpdate() *a2a.TaskArtifactUpdateEvent
 }
 
 type eventProcessor struct {
-	reqCtx        *a2asrv.RequestContext
+	reqCtx        *a2asrv.ExecutorContext
 	meta          invocationMeta
 	partConverter GenAIPartConverter
 
@@ -54,7 +54,7 @@ type eventProcessor struct {
 }
 
 func newEventProcessor(
-	reqCtx *a2asrv.RequestContext,
+	reqCtx *a2asrv.ExecutorContext,
 	meta invocationMeta,
 	converter GenAIPartConverter,
 	transform eventToArtifactTransform,
@@ -125,7 +125,6 @@ func (p *eventProcessor) makeFinalStatusUpdate() *a2a.TaskStatusUpdateEvent {
 	}
 
 	ev := a2a.NewStatusUpdateEvent(p.reqCtx, a2a.TaskStateCompleted, nil)
-	ev.Final = true
 	// we're modifying base processor metadata which might have been sent with one of the previous events.
 	// this update shouldn't be reflected in the sent events' metadata.
 	baseMetaCopy := maps.Clone(p.meta.eventMeta)
@@ -152,7 +151,7 @@ func (p *eventProcessor) updateTerminalActions(event *session.Event) {
 	}
 }
 
-func (p *eventProcessor) convertParts(ctx context.Context, event *session.Event) ([]a2a.Part, error) {
+func (p *eventProcessor) convertParts(ctx context.Context, event *session.Event) ([]*a2a.Part, error) {
 	if event.Content == nil || len(event.Content.Parts) == 0 {
 		return nil, nil
 	}
@@ -160,7 +159,7 @@ func (p *eventProcessor) convertParts(ctx context.Context, event *session.Event)
 	if p.partConverter == nil {
 		return ToA2AParts(parts, event.LongRunningToolIDs)
 	}
-	converted := make([]a2a.Part, 0, len(parts))
+	converted := make([]*a2a.Part, 0, len(parts))
 	for _, part := range parts {
 		cp, err := p.partConverter(ctx, event, part)
 		if err != nil {
@@ -175,10 +174,9 @@ func (p *eventProcessor) convertParts(ctx context.Context, event *session.Event)
 }
 
 func toTaskFailedUpdateEvent(task a2a.TaskInfoProvider, cause error, meta map[string]any) *a2a.TaskStatusUpdateEvent {
-	msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.TextPart{Text: cause.Error()})
+	msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.NewTextPart(cause.Error()))
 	ev := a2a.NewStatusUpdateEvent(task, a2a.TaskStateFailed, msg)
 	ev.Metadata = meta
-	ev.Final = true
 	return ev
 }
 

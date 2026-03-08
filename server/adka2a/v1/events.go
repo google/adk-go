@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package adka2a
+package v1
 
 import (
 	"fmt"
 	"maps"
 
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -101,17 +101,20 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 		return event, nil
 
 	case *a2a.TaskStatusUpdateEvent:
-		if v.Final {
+		if v.Status.State.Terminal() {
 			return finalTaskStatusUpdateToEvent(ctx, v)
 		}
 		if v.Status.Message == nil {
 			return nil, nil
 		}
 		event, err := messageToEvent(ctx, v.Status.Message)
-		event.TurnComplete = false
 		if err != nil {
 			return nil, fmt.Errorf("custom metadata conversion failed: %w", err)
 		}
+		if event == nil {
+			return nil, nil
+		}
+		event.TurnComplete = false
 		if len(event.Content.Parts) == 0 {
 			return nil, nil
 		}
@@ -168,9 +171,15 @@ func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message) (*session.Eve
 		return nil, nil
 	}
 
-	parts, err := ToGenAIParts(msg.Parts)
-	if err != nil {
-		return nil, err
+	var parts []*genai.Part
+	for _, part := range msg.Parts {
+		genaiPart, err := ToGenAIPart(part)
+		if err != nil {
+			return nil, err
+		}
+		if genaiPart != nil {
+			parts = append(parts, genaiPart)
+		}
 	}
 
 	event := NewRemoteAgentEvent(ctx)
@@ -281,14 +290,13 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 	return event, nil
 }
 
-func getLongRunningToolIDs(parts []a2a.Part, converted []*genai.Part) []string {
+func getLongRunningToolIDs(parts []*a2a.Part, converted []*genai.Part) []string {
 	var ids []string
 	for i, part := range parts {
-		dp, ok := part.(a2a.DataPart)
-		if !ok {
+		if part.Data() == nil {
 			continue
 		}
-		if longRunning, ok := dp.Metadata[a2aDataPartMetaLongRunningKey].(bool); ok && longRunning {
+		if longRunning, ok := part.Meta()[a2aDataPartMetaLongRunningKey].(bool); ok && longRunning {
 			fnCall := converted[i]
 			if fnCall.FunctionCall == nil {
 				// TODO(yarolegovich): log a warning

@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,5 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package adka2a allows to expose ADK agents via A2A.
-package adka2a
+package v1
+
+import "github.com/a2aproject/a2a-go/v2/a2a"
+
+// WithoutPartialArtifacts returns a slice of artifacts without partial artifacts.
+// Partial artifacts are usually discarded (contain no parts) after agent invocation is finished.
+func WithoutPartialArtifacts(artifacts []*a2a.Artifact) []*a2a.Artifact {
+	var result []*a2a.Artifact
+	for _, artifact := range artifacts {
+		if IsPartial(artifact.Metadata) {
+			continue
+		}
+		result = append(result, artifact)
+	}
+	return result
+}
