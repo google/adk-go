@@ -1,0 +1,1562 @@
+{
+    "contents": [
+        {
+            "parts": [
+                {
+                    "text": "select server date using googlesql from project kdroste-x88z16\n"
+                }
+            ],
+            "role": "user"
+        }
+    ],
+    "generationConfig": {},
+    "systemInstruction": {
+        "parts": [
+            {
+                "text": "You are a helpful assistant that helps users with various tasks."
+            }
+        ],
+        "role": "user"
+    },
+    "tools": [
+        {
+            "functionDeclarations": [
+                {
+                    "description": "Get metadata information about a BigQuery table",
+                    "name": "get_table_info",
+                    "parametersJsonSchema": {
+                        "description": "Request for a table.",
+                        "properties": {
+                            "datasetId": {
+                                "description": "Required. Dataset ID of the table request.",
+                                "type": "string"
+                            },
+                            "projectId": {
+                                "description": "Required. Project ID of the table request.",
+                                "type": "string"
+                            },
+                            "tableId": {
+                                "description": "Required. Table ID of the table request.",
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "projectId",
+                            "datasetId",
+                            "tableId"
+                        ],
+                        "type": "object"
+                    },
+                    "responseJsonSchema": {
+                        "$defs": {
+                            "AggregationThresholdPolicy": {
+                                "description": "Represents privacy policy associated with \"aggregation threshold\" method.",
+                                "properties": {
+                                    "privacyUnitColumns": {
+                                        "description": "Optional. The privacy unit column(s) associated with this policy. For now, only one column per data source object (table, view) is allowed as a privacy unit column. Representing as a repeated field in metadata for extensibility to multiple columns in future. Duplicates and Repeated struct fields are not allowed. For nested fields, use dot notation (\"outer.inner\")",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "threshold": {
+                                        "description": "Optional. The threshold for the \"aggregation threshold\" policy.",
+                                        "format": "int64",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "AvroOptions": {
+                                "description": "Options for external data sources.",
+                                "properties": {
+                                    "useAvroLogicalTypes": {
+                                        "description": "Optional. If sourceFormat is set to \"AVRO\", indicates whether to interpret logical types as the corresponding BigQuery data type (for example, TIMESTAMP), instead of using the raw type (for example, INTEGER).",
+                                        "type": "boolean"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "BigLakeConfiguration": {
+                                "description": "Configuration for BigQuery tables for Apache Iceberg (formerly BigLake managed tables.)",
+                                "properties": {
+                                    "connectionId": {
+                                        "description": "Optional. The connection specifying the credentials to be used to read and write to external storage, such as Cloud Storage. The connection_id can have the form `{project}.{location}.{connection_id}` or `projects/{project}/locations/{location}/connections/{connection_id}\".",
+                                        "type": "string"
+                                    },
+                                    "fileFormat": {
+                                        "description": "Optional. The file format the table data is stored in.",
+                                        "enum": [
+                                            "FILE_FORMAT_UNSPECIFIED",
+                                            "PARQUET"
+                                        ],
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "Default Value.",
+                                            "Apache Parquet format."
+                                        ]
+                                    },
+                                    "storageUri": {
+                                        "description": "Optional. The fully qualified location prefix of the external folder where table data is stored. The '*' wildcard character is not allowed. The URI should be in the format `gs://bucket/path_to_table/`",
+                                        "type": "string"
+                                    },
+                                    "tableFormat": {
+                                        "description": "Optional. The table format the metadata only snapshots are stored in.",
+                                        "enum": [
+                                            "TABLE_FORMAT_UNSPECIFIED",
+                                            "ICEBERG"
+                                        ],
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "Default Value.",
+                                            "Apache Iceberg format."
+                                        ]
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "BigtableColumn": {
+                                "description": "Information related to a Bigtable column.",
+                                "properties": {
+                                    "encoding": {
+                                        "description": "Optional. The encoding of the values when the type is not STRING. Acceptable encoding values are: TEXT - indicates values are alphanumeric text strings. BINARY - indicates values are encoded using HBase Bytes.toBytes family of functions. PROTO_BINARY - indicates values are encoded using serialized proto messages. This can only be used in combination with JSON type. 'encoding' can also be set at the column family level. However, the setting at this level takes precedence if 'encoding' is set at both levels.",
+                                        "type": "string"
+                                    },
+                                    "fieldName": {
+                                        "description": "Optional. If the qualifier is not a valid BigQuery field identifier i.e. does not match a-zA-Z*, a valid identifier must be provided as the column field name and is used as field name in queries.",
+                                        "type": "string"
+                                    },
+                                    "onlyReadLatest": {
+                                        "description": "Optional. If this is set, only the latest version of value in this column are exposed. 'onlyReadLatest' can also be set at the column family level. However, the setting at this level takes precedence if 'onlyReadLatest' is set at both levels.",
+                                        "type": "boolean"
+                                    },
+                                    "protoConfig": {
+                                        "$ref": "#/$defs/BigtableProtoConfig",
+                                        "description": "Optional. Protobuf-specific configurations, only takes effect when the encoding is PROTO_BINARY."
+                                    },
+                                    "qualifierEncoded": {
+                                        "description": "[Required] Qualifier of the column. Columns in the parent column family that has this exact qualifier are exposed as `.` field. If the qualifier is valid UTF-8 string, it can be specified in the qualifier_string field. Otherwise, a base-64 encoded value must be set to qualifier_encoded. The column field name is the same as the column qualifier. However, if the qualifier is not a valid BigQuery field identifier i.e. does not match a-zA-Z*, a valid identifier must be provided as field_name.",
+                                        "format": "byte",
+                                        "type": "string"
+                                    },
+                                    "qualifierString": {
+                                        "description": "Qualifier string.",
+                                        "type": "string"
+                                    },
+                                    "type": {
+                                        "description": "Optional. The type to convert the value in cells of this column. The values are expected to be encoded using HBase Bytes.toBytes function when using the BINARY encoding value. Following BigQuery types are allowed (case-sensitive): * BYTES * STRING * INTEGER * FLOAT * BOOLEAN * JSON Default type is BYTES. 'type' can also be set at the column family level. However, the setting at this level takes precedence if 'type' is set at both levels.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "BigtableColumnFamily": {
+                                "description": "Information related to a Bigtable column family.",
+                                "properties": {
+                                    "columns": {
+                                        "description": "Optional. Lists of columns that should be exposed as individual fields as opposed to a list of (column name, value) pairs. All columns whose qualifier matches a qualifier in this list can be accessed as `.`. Other columns can be accessed as a list through the `.Column` field.",
+                                        "items": {
+                                            "$ref": "#/$defs/BigtableColumn"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "encoding": {
+                                        "description": "Optional. The encoding of the values when the type is not STRING. Acceptable encoding values are: TEXT - indicates values are alphanumeric text strings. BINARY - indicates values are encoded using HBase Bytes.toBytes family of functions. PROTO_BINARY - indicates values are encoded using serialized proto messages. This can only be used in combination with JSON type. This can be overridden for a specific column by listing that column in 'columns' and specifying an encoding for it.",
+                                        "type": "string"
+                                    },
+                                    "familyId": {
+                                        "description": "Identifier of the column family.",
+                                        "type": "string"
+                                    },
+                                    "onlyReadLatest": {
+                                        "description": "Optional. If this is set only the latest version of value are exposed for all columns in this column family. This can be overridden for a specific column by listing that column in 'columns' and specifying a different setting for that column.",
+                                        "type": "boolean"
+                                    },
+                                    "protoConfig": {
+                                        "$ref": "#/$defs/BigtableProtoConfig",
+                                        "description": "Optional. Protobuf-specific configurations, only takes effect when the encoding is PROTO_BINARY."
+                                    },
+                                    "type": {
+                                        "description": "Optional. The type to convert the value in cells of this column family. The values are expected to be encoded using HBase Bytes.toBytes function when using the BINARY encoding value. Following BigQuery types are allowed (case-sensitive): * BYTES * STRING * INTEGER * FLOAT * BOOLEAN * JSON Default type is BYTES. This can be overridden for a specific column by listing that column in 'columns' and specifying a type for it.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "BigtableOptions": {
+                                "description": "Options specific to Google Cloud Bigtable data sources.",
+                                "properties": {
+                                    "columnFamilies": {
+                                        "description": "Optional. List of column families to expose in the table schema along with their types. This list restricts the column families that can be referenced in queries and specifies their value types. You can use this list to do type conversions - see the 'type' field for more details. If you leave this list empty, all column families are present in the table schema and their values are read as BYTES. During a query only the column families referenced in that query are read from Bigtable.",
+                                        "items": {
+                                            "$ref": "#/$defs/BigtableColumnFamily"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "ignoreUnspecifiedColumnFamilies": {
+                                        "description": "Optional. If field is true, then the column families that are not specified in columnFamilies list are not exposed in the table schema. Otherwise, they are read with BYTES type values. The default value is false.",
+                                        "type": "boolean"
+                                    },
+                                    "outputColumnFamiliesAsJson": {
+                                        "description": "Optional. If field is true, then each column family will be read as a single JSON column. Otherwise they are read as a repeated cell structure containing timestamp/value tuples. The default value is false.",
+                                        "type": "boolean"
+                                    },
+                                    "readRowkeyAsString": {
+                                        "description": "Optional. If field is true, then the rowkey column families will be read and converted to string. Otherwise they are read with BYTES type values and users need to manually cast them with CAST if necessary. The default value is false.",
+                                        "type": "boolean"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "BigtableProtoConfig": {
+                                "description": "Information related to a Bigtable protobuf column.",
+                                "properties": {
+                                    "protoMessageName": {
+                                        "description": "Optional. The fully qualified proto message name of the protobuf. In the format of \"foo.bar.Message\".",
+                                        "type": "string"
+                                    },
+                                    "schemaBundleId": {
+                                        "description": "Optional. The ID of the Bigtable SchemaBundle resource associated with this protobuf. The ID should be referred to within the parent table, e.g., `foo` rather than `projects/{project}/instances/{instance}/tables/{table}/schemaBundles/foo`. See [more details on Bigtable SchemaBundles](https://docs.cloud.google.com/bigtable/docs/create-manage-protobuf-schemas).",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "CloneDefinition": {
+                                "description": "Information about base table and clone time of a table clone.",
+                                "properties": {
+                                    "baseTableReference": {
+                                        "$ref": "#/$defs/TableReference",
+                                        "description": "Required. Reference describing the ID of the table that was cloned."
+                                    },
+                                    "cloneTime": {
+                                        "description": "Required. The time at which the base table was cloned. This value is reported in the JSON response using RFC3339 format.",
+                                        "format": "date-time",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "Clustering": {
+                                "description": "Configures table clustering.",
+                                "properties": {
+                                    "fields": {
+                                        "description": "One or more fields on which data should be clustered. Only top-level, non-repeated, simple-type fields are supported. The ordering of the clustering fields should be prioritized from most to least important for filtering purposes. For additional information, see [Introduction to clustered tables](https://cloud.google.com/bigquery/docs/clustered-tables#limitations).",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "type": "array"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "ColumnReference": {
+                                "description": "The pair of the foreign key column and primary key column.",
+                                "properties": {
+                                    "referencedColumn": {
+                                        "description": "Required. The column in the primary key that are referenced by the referencing_column.",
+                                        "type": "string"
+                                    },
+                                    "referencingColumn": {
+                                        "description": "Required. The column that composes the foreign key.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "CsvOptions": {
+                                "description": "Information related to a CSV data source.",
+                                "properties": {
+                                    "allowJaggedRows": {
+                                        "description": "Optional. Indicates if BigQuery should accept rows that are missing trailing optional columns. If true, BigQuery treats missing trailing columns as null values. If false, records with missing trailing columns are treated as bad records, and if there are too many bad records, an invalid error is returned in the job result. The default value is false.",
+                                        "type": "boolean"
+                                    },
+                                    "allowQuotedNewlines": {
+                                        "description": "Optional. Indicates if BigQuery should allow quoted data sections that contain newline characters in a CSV file. The default value is false.",
+                                        "type": "boolean"
+                                    },
+                                    "encoding": {
+                                        "description": "Optional. The character encoding of the data. The supported values are UTF-8, ISO-8859-1, UTF-16BE, UTF-16LE, UTF-32BE, and UTF-32LE. The default value is UTF-8. BigQuery decodes the data after the raw, binary data has been split using the values of the quote and fieldDelimiter properties.",
+                                        "type": "string"
+                                    },
+                                    "fieldDelimiter": {
+                                        "description": "Optional. The separator character for fields in a CSV file. The separator is interpreted as a single byte. For files encoded in ISO-8859-1, any single character can be used as a separator. For files encoded in UTF-8, characters represented in decimal range 1-127 (U+0001-U+007F) can be used without any modification. UTF-8 characters encoded with multiple bytes (i.e. U+0080 and above) will have only the first byte used for separating fields. The remaining bytes will be treated as a part of the field. BigQuery also supports the escape sequence \"\\t\" (U+0009) to specify a tab separator. The default value is comma (\",\", U+002C).",
+                                        "type": "string"
+                                    },
+                                    "nullMarker": {
+                                        "description": "Optional. Specifies a string that represents a null value in a CSV file. For example, if you specify \"\\N\", BigQuery interprets \"\\N\" as a null value when querying a CSV file. The default value is the empty string. If you set this property to a custom value, BigQuery throws an error if an empty string is present for all data types except for STRING and BYTE. For STRING and BYTE columns, BigQuery interprets the empty string as an empty value.",
+                                        "type": "string"
+                                    },
+                                    "nullMarkers": {
+                                        "description": "Optional. A list of strings represented as SQL NULL value in a CSV file. null_marker and null_markers can't be set at the same time. If null_marker is set, null_markers has to be not set. If null_markers is set, null_marker has to be not set. If both null_marker and null_markers are set at the same time, a user error would be thrown. Any strings listed in null_markers, including empty string would be interpreted as SQL NULL. This applies to all column types.",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "preserveAsciiControlCharacters": {
+                                        "description": "Optional. Indicates if the embedded ASCII control characters (the first 32 characters in the ASCII-table, from '\\x00' to '\\x1F') are preserved.",
+                                        "type": "boolean"
+                                    },
+                                    "quote": {
+                                        "default": "\"",
+                                        "description": "Optional. The value that is used to quote data sections in a CSV file. BigQuery converts the string to ISO-8859-1 encoding, and then uses the first byte of the encoded string to split the data in its raw, binary state. The default value is a double-quote (\"). If your data does not contain quoted sections, set the property value to an empty string. If your data contains quoted newline characters, you must also set the allowQuotedNewlines property to true. To include the specific quote character within a quoted value, precede it with an additional matching quote character. For example, if you want to escape the default character ' \" ', use ' \"\" '.",
+                                        "pattern": ".?",
+                                        "type": "string"
+                                    },
+                                    "skipLeadingRows": {
+                                        "description": "Optional. The number of rows at the top of a CSV file that BigQuery will skip when reading the data. The default value is 0. This property is useful if you have header rows in the file that should be skipped. When autodetect is on, the behavior is the following: * skipLeadingRows unspecified - Autodetect tries to detect headers in the first row. If they are not detected, the row is read as data. Otherwise data is read starting from the second row. * skipLeadingRows is 0 - Instructs autodetect that there are no headers and data should be read starting from the first row. * skipLeadingRows = N \u003e 0 - Autodetect skips N-1 rows and tries to detect headers in row N. If headers are not detected, row N is just skipped. Otherwise row N is used to extract column names for the detected schema.",
+                                        "format": "int64",
+                                        "type": "string"
+                                    },
+                                    "sourceColumnMatch": {
+                                        "description": "Optional. Controls the strategy used to match loaded columns to the schema. If not set, a sensible default is chosen based on how the schema is provided. If autodetect is used, then columns are matched by name. Otherwise, columns are matched by position. This is done to keep the behavior backward-compatible. Acceptable values are: POSITION - matches by position. This assumes that the columns are ordered the same way as the schema. NAME - matches by name. This reads the header row as column names and reorders columns to match the field names in the schema.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "DataPolicyOption": {
+                                "description": "Data policy option. For more information, see [Mask data by applying data policies to a column](https://cloud.google.com/bigquery/docs/column-data-masking#data-policies-on-column/).",
+                                "properties": {
+                                    "name": {
+                                        "description": "Data policy resource name in the form of projects/project_id/locations/location_id/dataPolicies/data_policy_id.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "DifferentialPrivacyPolicy": {
+                                "description": "Represents privacy policy associated with \"differential privacy\" method.",
+                                "properties": {
+                                    "deltaBudget": {
+                                        "description": "Optional. The total delta budget for all queries against the privacy-protected view. Each subscriber query against this view charges the amount of delta that is pre-defined by the contributor through the privacy policy delta_per_query field. If there is sufficient budget, then the subscriber query attempts to complete. It might still fail due to other reasons, in which case the charge is refunded. If there is insufficient budget the query is rejected. There might be multiple charge attempts if a single query references multiple views. In this case there must be sufficient budget for all charges or the query is rejected and charges are refunded in best effort. The budget does not have a refresh policy and can only be updated via ALTER VIEW or circumvented by creating a new view that can be queried with a fresh budget.",
+                                        "format": "double",
+                                        "type": "number"
+                                    },
+                                    "deltaBudgetRemaining": {
+                                        "description": "Output only. The delta budget remaining. If budget is exhausted, no more queries are allowed. Note that the budget for queries that are in progress is deducted before the query executes. If the query fails or is cancelled then the budget is refunded. In this case the amount of budget remaining can increase.",
+                                        "format": "double",
+                                        "readOnly": true,
+                                        "type": "number"
+                                    },
+                                    "deltaPerQuery": {
+                                        "description": "Optional. The delta value that is used per query. Delta represents the probability that any row will fail to be epsilon differentially private. Indicates the risk associated with exposing aggregate rows in the result of a query.",
+                                        "format": "double",
+                                        "type": "number"
+                                    },
+                                    "epsilonBudget": {
+                                        "description": "Optional. The total epsilon budget for all queries against the privacy-protected view. Each subscriber query against this view charges the amount of epsilon they request in their query. If there is sufficient budget, then the subscriber query attempts to complete. It might still fail due to other reasons, in which case the charge is refunded. If there is insufficient budget the query is rejected. There might be multiple charge attempts if a single query references multiple views. In this case there must be sufficient budget for all charges or the query is rejected and charges are refunded in best effort. The budget does not have a refresh policy and can only be updated via ALTER VIEW or circumvented by creating a new view that can be queried with a fresh budget.",
+                                        "format": "double",
+                                        "type": "number"
+                                    },
+                                    "epsilonBudgetRemaining": {
+                                        "description": "Output only. The epsilon budget remaining. If budget is exhausted, no more queries are allowed. Note that the budget for queries that are in progress is deducted before the query executes. If the query fails or is cancelled then the budget is refunded. In this case the amount of budget remaining can increase.",
+                                        "format": "double",
+                                        "readOnly": true,
+                                        "type": "number"
+                                    },
+                                    "maxEpsilonPerQuery": {
+                                        "description": "Optional. The maximum epsilon value that a query can consume. If the subscriber specifies epsilon as a parameter in a SELECT query, it must be less than or equal to this value. The epsilon parameter controls the amount of noise that is added to the groups — a higher epsilon means less noise.",
+                                        "format": "double",
+                                        "type": "number"
+                                    },
+                                    "maxGroupsContributed": {
+                                        "description": "Optional. The maximum groups contributed value that is used per query. Represents the maximum number of groups to which each protected entity can contribute. Changing this value does not improve or worsen privacy. The best value for accuracy and utility depends on the query and data.",
+                                        "format": "int64",
+                                        "type": "string"
+                                    },
+                                    "privacyUnitColumn": {
+                                        "description": "Optional. The privacy unit column associated with this policy. Differential privacy policies can only have one privacy unit column per data source object (table, view).",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "EncryptionConfiguration": {
+                                "description": "Configuration for Cloud KMS encryption settings.",
+                                "properties": {
+                                    "kmsKeyName": {
+                                        "description": "Optional. Describes the Cloud KMS encryption key that will be used to protect destination BigQuery table. The BigQuery Service Account associated with your project requires access to this encryption key.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "ErrorProto": {
+                                "description": "Error details.",
+                                "properties": {
+                                    "debugInfo": {
+                                        "description": "Debugging information. This property is internal to Google and should not be used.",
+                                        "type": "string"
+                                    },
+                                    "location": {
+                                        "description": "Specifies where the error occurred, if present.",
+                                        "type": "string"
+                                    },
+                                    "message": {
+                                        "description": "A human-readable description of the error.",
+                                        "type": "string"
+                                    },
+                                    "reason": {
+                                        "description": "A short error code that summarizes the error.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "ExternalCatalogTableOptions": {
+                                "description": "Metadata about open source compatible table. The fields contained in these options correspond to Hive metastore's table-level properties.",
+                                "properties": {
+                                    "connectionId": {
+                                        "description": "Optional. A connection ID that specifies the credentials to be used to read external storage, such as Azure Blob, Cloud Storage, or Amazon S3. This connection is needed to read the open source table from BigQuery. The connection_id format must be either `..` or `projects//locations//connections/`.",
+                                        "type": "string"
+                                    },
+                                    "parameters": {
+                                        "additionalProperties": {
+                                            "type": "string"
+                                        },
+                                        "description": "Optional. A map of the key-value pairs defining the parameters and properties of the open source table. Corresponds with Hive metastore table parameters. Maximum size of 4MiB.",
+                                        "type": "object"
+                                    },
+                                    "storageDescriptor": {
+                                        "$ref": "#/$defs/StorageDescriptor",
+                                        "description": "Optional. A storage descriptor containing information about the physical storage of this table."
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "ExternalDataConfiguration": {
+                                "properties": {
+                                    "autodetect": {
+                                        "description": "Try to detect schema and format options automatically. Any option specified explicitly will be honored.",
+                                        "type": "boolean"
+                                    },
+                                    "avroOptions": {
+                                        "$ref": "#/$defs/AvroOptions",
+                                        "description": "Optional. Additional properties to set if sourceFormat is set to AVRO."
+                                    },
+                                    "bigtableOptions": {
+                                        "$ref": "#/$defs/BigtableOptions",
+                                        "description": "Optional. Additional options if sourceFormat is set to BIGTABLE."
+                                    },
+                                    "compression": {
+                                        "description": "Optional. The compression type of the data source. Possible values include GZIP and NONE. The default value is NONE. This setting is ignored for Google Cloud Bigtable, Google Cloud Datastore backups, Avro, ORC and Parquet formats. An empty string is an invalid value.",
+                                        "type": "string"
+                                    },
+                                    "connectionId": {
+                                        "description": "Optional. The connection specifying the credentials to be used to read external storage, such as Azure Blob, Cloud Storage, or S3. The connection_id can have the form `{project_id}.{location_id};{connection_id}` or `projects/{project_id}/locations/{location_id}/connections/{connection_id}`.",
+                                        "type": "string"
+                                    },
+                                    "csvOptions": {
+                                        "$ref": "#/$defs/CsvOptions",
+                                        "description": "Optional. Additional properties to set if sourceFormat is set to CSV."
+                                    },
+                                    "dateFormat": {
+                                        "description": "Optional. Format used to parse DATE values. Supports C-style and SQL-style values.",
+                                        "type": "string"
+                                    },
+                                    "datetimeFormat": {
+                                        "description": "Optional. Format used to parse DATETIME values. Supports C-style and SQL-style values.",
+                                        "type": "string"
+                                    },
+                                    "decimalTargetTypes": {
+                                        "description": "Defines the list of possible SQL data types to which the source decimal values are converted. This list and the precision and the scale parameters of the decimal field determine the target type. In the order of NUMERIC, BIGNUMERIC, and STRING, a type is picked if it is in the specified list and if it supports the precision and the scale. STRING supports all precision and scale values. If none of the listed types supports the precision and the scale, the type supporting the widest range in the specified list is picked, and if a value exceeds the supported range when reading the data, an error will be thrown. Example: Suppose the value of this field is [\"NUMERIC\", \"BIGNUMERIC\"]. If (precision,scale) is: * (38,9) -\u003e NUMERIC; * (39,9) -\u003e BIGNUMERIC (NUMERIC cannot hold 30 integer digits); * (38,10) -\u003e BIGNUMERIC (NUMERIC cannot hold 10 fractional digits); * (76,38) -\u003e BIGNUMERIC; * (77,38) -\u003e BIGNUMERIC (error if value exceeds supported range). This field cannot contain duplicate types. The order of the types in this field is ignored. For example, [\"BIGNUMERIC\", \"NUMERIC\"] is the same as [\"NUMERIC\", \"BIGNUMERIC\"] and NUMERIC always takes precedence over BIGNUMERIC. Defaults to [\"NUMERIC\", \"STRING\"] for ORC and [\"NUMERIC\"] for the other file formats.",
+                                        "items": {
+                                            "enum": [
+                                                "DECIMAL_TARGET_TYPE_UNSPECIFIED",
+                                                "NUMERIC",
+                                                "BIGNUMERIC",
+                                                "STRING"
+                                            ],
+                                            "type": "string",
+                                            "x-google-enum-descriptions": [
+                                                "Invalid type.",
+                                                "Decimal values could be converted to NUMERIC type.",
+                                                "Decimal values could be converted to BIGNUMERIC type.",
+                                                "Decimal values could be converted to STRING type."
+                                            ]
+                                        },
+                                        "type": "array"
+                                    },
+                                    "fileSetSpecType": {
+                                        "description": "Optional. Specifies how source URIs are interpreted for constructing the file set to load. By default source URIs are expanded against the underlying storage. Other options include specifying manifest files. Only applicable to object storage systems.",
+                                        "enum": [
+                                            "FILE_SET_SPEC_TYPE_FILE_SYSTEM_MATCH",
+                                            "FILE_SET_SPEC_TYPE_NEW_LINE_DELIMITED_MANIFEST"
+                                        ],
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "This option expands source URIs by listing files from the object store. It is the default behavior if FileSetSpecType is not set.",
+                                            "This option indicates that the provided URIs are newline-delimited manifest files, with one URI per line. Wildcard URIs are not supported."
+                                        ]
+                                    },
+                                    "googleSheetsOptions": {
+                                        "$ref": "#/$defs/GoogleSheetsOptions",
+                                        "description": "Optional. Additional options if sourceFormat is set to GOOGLE_SHEETS."
+                                    },
+                                    "hivePartitioningOptions": {
+                                        "$ref": "#/$defs/HivePartitioningOptions",
+                                        "description": "Optional. When set, configures hive partitioning support. Not all storage formats support hive partitioning -- requesting hive partitioning on an unsupported format will lead to an error, as will providing an invalid specification."
+                                    },
+                                    "ignoreUnknownValues": {
+                                        "description": "Optional. Indicates if BigQuery should allow extra values that are not represented in the table schema. If true, the extra values are ignored. If false, records with extra columns are treated as bad records, and if there are too many bad records, an invalid error is returned in the job result. The default value is false. The sourceFormat property determines what BigQuery treats as an extra value: CSV: Trailing columns JSON: Named values that don't match any column names Google Cloud Bigtable: This setting is ignored. Google Cloud Datastore backups: This setting is ignored. Avro: This setting is ignored. ORC: This setting is ignored. Parquet: This setting is ignored.",
+                                        "type": "boolean"
+                                    },
+                                    "jsonExtension": {
+                                        "description": "Optional. Load option to be used together with source_format newline-delimited JSON to indicate that a variant of JSON is being loaded. To load newline-delimited GeoJSON, specify GEOJSON (and source_format must be set to NEWLINE_DELIMITED_JSON).",
+                                        "enum": [
+                                            "JSON_EXTENSION_UNSPECIFIED",
+                                            "GEOJSON"
+                                        ],
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "The default if provided value is not one included in the enum, or the value is not specified. The source format is parsed without any modification.",
+                                            "Use GeoJSON variant of JSON. See https://tools.ietf.org/html/rfc7946."
+                                        ]
+                                    },
+                                    "jsonOptions": {
+                                        "$ref": "#/$defs/JsonOptions",
+                                        "description": "Optional. Additional properties to set if sourceFormat is set to JSON."
+                                    },
+                                    "maxBadRecords": {
+                                        "description": "Optional. The maximum number of bad records that BigQuery can ignore when reading data. If the number of bad records exceeds this value, an invalid error is returned in the job result. The default value is 0, which requires that all records are valid. This setting is ignored for Google Cloud Bigtable, Google Cloud Datastore backups, Avro, ORC and Parquet formats.",
+                                        "format": "int32",
+                                        "type": "integer"
+                                    },
+                                    "metadataCacheMode": {
+                                        "description": "Optional. Metadata Cache Mode for the table. Set this to enable caching of metadata from external data source.",
+                                        "enum": [
+                                            "METADATA_CACHE_MODE_UNSPECIFIED",
+                                            "AUTOMATIC",
+                                            "MANUAL"
+                                        ],
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "Unspecified metadata cache mode.",
+                                            "Set this mode to trigger automatic background refresh of metadata cache from the external source. Queries will use the latest available cache version within the table's maxStaleness interval.",
+                                            "Set this mode to enable triggering manual refresh of the metadata cache from external source. Queries will use the latest manually triggered cache version within the table's maxStaleness interval."
+                                        ]
+                                    },
+                                    "objectMetadata": {
+                                        "description": "Optional. ObjectMetadata is used to create Object Tables. Object Tables contain a listing of objects (with their metadata) found at the source_uris. If ObjectMetadata is set, source_format should be omitted. Currently SIMPLE is the only supported Object Metadata type.",
+                                        "enum": [
+                                            "OBJECT_METADATA_UNSPECIFIED",
+                                            "DIRECTORY",
+                                            "SIMPLE"
+                                        ],
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "Unspecified by default.",
+                                            "A synonym for `SIMPLE`.",
+                                            "Directory listing of objects."
+                                        ]
+                                    },
+                                    "parquetOptions": {
+                                        "$ref": "#/$defs/ParquetOptions",
+                                        "description": "Optional. Additional properties to set if sourceFormat is set to PARQUET."
+                                    },
+                                    "referenceFileSchemaUri": {
+                                        "description": "Optional. When creating an external table, the user can provide a reference file with the table schema. This is enabled for the following formats: AVRO, PARQUET, ORC.",
+                                        "type": "string"
+                                    },
+                                    "schema": {
+                                        "$ref": "#/$defs/TableSchema",
+                                        "description": "Optional. The schema for the data. Schema is required for CSV and JSON formats if autodetect is not on. Schema is disallowed for Google Cloud Bigtable, Cloud Datastore backups, Avro, ORC and Parquet formats."
+                                    },
+                                    "sourceFormat": {
+                                        "description": "[Required] The data format. For CSV files, specify \"CSV\". For Google sheets, specify \"GOOGLE_SHEETS\". For newline-delimited JSON, specify \"NEWLINE_DELIMITED_JSON\". For Avro files, specify \"AVRO\". For Google Cloud Datastore backups, specify \"DATASTORE_BACKUP\". For Apache Iceberg tables, specify \"ICEBERG\". For ORC files, specify \"ORC\". For Parquet files, specify \"PARQUET\". [Beta] For Google Cloud Bigtable, specify \"BIGTABLE\".",
+                                        "type": "string"
+                                    },
+                                    "sourceUris": {
+                                        "description": "[Required] The fully-qualified URIs that point to your data in Google Cloud. For Google Cloud Storage URIs: Each URI can contain one '*' wildcard character and it must come after the 'bucket' name. Size limits related to load jobs apply to external data sources. For Google Cloud Bigtable URIs: Exactly one URI can be specified and it has be a fully specified and valid HTTPS URL for a Google Cloud Bigtable table. For Google Cloud Datastore backups, exactly one URI can be specified. Also, the '*' wildcard character is not allowed.",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "timeFormat": {
+                                        "description": "Optional. Format used to parse TIME values. Supports C-style and SQL-style values.",
+                                        "type": "string"
+                                    },
+                                    "timeZone": {
+                                        "description": "Optional. Time zone used when parsing timestamp values that do not have specific time zone information (e.g. 2024-04-20 12:34:56). The expected format is a IANA timezone string (e.g. America/Los_Angeles).",
+                                        "type": "string"
+                                    },
+                                    "timestampFormat": {
+                                        "description": "Optional. Format used to parse TIMESTAMP values. Supports C-style and SQL-style values.",
+                                        "type": "string"
+                                    },
+                                    "timestampTargetPrecision": {
+                                        "description": "Precisions (maximum number of total digits in base 10) for seconds of TIMESTAMP types that are allowed to the destination table for autodetection mode. Available for the formats: CSV. For the CSV Format, Possible values include: Not Specified, [], or [6]: timestamp(6) for all auto detected TIMESTAMP columns [6, 12]: timestamp(6) for all auto detected TIMESTAMP columns that have less than 6 digits of subseconds. timestamp(12) for all auto detected TIMESTAMP columns that have more than 6 digits of subseconds. [12]: timestamp(12) for all auto detected TIMESTAMP columns. The order of the elements in this array is ignored. Inputs that have higher precision than the highest target precision in this array will be truncated.",
+                                        "items": {
+                                            "format": "int32",
+                                            "type": "integer"
+                                        },
+                                        "type": "array"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "FieldElementType": {
+                                "description": "Represents the type of a field element.",
+                                "properties": {
+                                    "type": {
+                                        "description": "Required. The type of a field element. For more information, see TableFieldSchema.type.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "ForeignKey": {
+                                "description": "Represents a foreign key constraint on a table's columns.",
+                                "properties": {
+                                    "columnReferences": {
+                                        "description": "Required. The columns that compose the foreign key.",
+                                        "items": {
+                                            "$ref": "#/$defs/ColumnReference"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "name": {
+                                        "description": "Optional. Set only if the foreign key constraint is named.",
+                                        "type": "string"
+                                    },
+                                    "referencedTable": {
+                                        "$ref": "#/$defs/TableReference",
+                                        "description": "Required. The table that holds the primary key and is referenced by this foreign key."
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "ForeignTypeInfo": {
+                                "description": "Metadata about the foreign data type definition such as the system in which the type is defined.",
+                                "properties": {
+                                    "typeSystem": {
+                                        "description": "Required. Specifies the system which defines the foreign data type.",
+                                        "enum": [
+                                            "TYPE_SYSTEM_UNSPECIFIED",
+                                            "HIVE"
+                                        ],
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "TypeSystem not specified.",
+                                            "Represents Hive data types."
+                                        ]
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "ForeignViewDefinition": {
+                                "description": "A view can be represented in multiple ways. Each representation has its own dialect. This message stores the metadata required for these representations.",
+                                "properties": {
+                                    "dialect": {
+                                        "description": "Optional. Represents the dialect of the query.",
+                                        "type": "string"
+                                    },
+                                    "query": {
+                                        "description": "Required. The query that defines the view.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "GoogleSheetsOptions": {
+                                "description": "Options specific to Google Sheets data sources.",
+                                "properties": {
+                                    "range": {
+                                        "description": "Optional. Range of a sheet to query from. Only used when non-empty. Typical format: sheet_name!top_left_cell_id:bottom_right_cell_id For example: sheet1!A1:B20",
+                                        "type": "string"
+                                    },
+                                    "skipLeadingRows": {
+                                        "description": "Optional. The number of rows at the top of a sheet that BigQuery will skip when reading the data. The default value is 0. This property is useful if you have header rows that should be skipped. When autodetect is on, the behavior is the following: * skipLeadingRows unspecified - Autodetect tries to detect headers in the first row. If they are not detected, the row is read as data. Otherwise data is read starting from the second row. * skipLeadingRows is 0 - Instructs autodetect that there are no headers and data should be read starting from the first row. * skipLeadingRows = N \u003e 0 - Autodetect skips N-1 rows and tries to detect headers in row N. If headers are not detected, row N is just skipped. Otherwise row N is used to extract column names for the detected schema.",
+                                        "format": "int64",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "HivePartitioningOptions": {
+                                "description": "Options for configuring hive partitioning detect.",
+                                "properties": {
+                                    "fields": {
+                                        "description": "Output only. For permanent external tables, this field is populated with the hive partition keys in the order they were inferred. The types of the partition keys can be deduced by checking the table schema (which will include the partition keys). Not every API will populate this field in the output. For example, Tables.Get will populate it, but Tables.List will not contain this field.",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "readOnly": true,
+                                        "type": "array"
+                                    },
+                                    "mode": {
+                                        "description": "Optional. When set, what mode of hive partitioning to use when reading data. The following modes are supported: * AUTO: automatically infer partition key name(s) and type(s). * STRINGS: automatically infer partition key name(s). All types are strings. * CUSTOM: partition key schema is encoded in the source URI prefix. Not all storage formats support hive partitioning. Requesting hive partitioning on an unsupported format will lead to an error. Currently supported formats are: JSON, CSV, ORC, Avro and Parquet.",
+                                        "type": "string"
+                                    },
+                                    "requirePartitionFilter": {
+                                        "default": "false",
+                                        "description": "Optional. If set to true, queries over this table require a partition filter that can be used for partition elimination to be specified. Note that this field should only be true when creating a permanent external table or querying a temporary external table. Hive-partitioned loads with require_partition_filter explicitly set to true will fail.",
+                                        "type": "boolean"
+                                    },
+                                    "sourceUriPrefix": {
+                                        "description": "Optional. When hive partition detection is requested, a common prefix for all source uris must be required. The prefix must end immediately before the partition key encoding begins. For example, consider files following this data layout: gs://bucket/path_to_table/dt=2019-06-01/country=USA/id=7/file.avro gs://bucket/path_to_table/dt=2019-05-31/country=CA/id=3/file.avro When hive partitioning is requested with either AUTO or STRINGS detection, the common prefix can be either of gs://bucket/path_to_table or gs://bucket/path_to_table/. CUSTOM detection requires encoding the partitioning schema immediately after the common prefix. For CUSTOM, any of * gs://bucket/path_to_table/{dt:DATE}/{country:STRING}/{id:INTEGER} * gs://bucket/path_to_table/{dt:STRING}/{country:STRING}/{id:INTEGER} * gs://bucket/path_to_table/{dt:DATE}/{country:STRING}/{id:STRING} would all be valid source URI prefixes.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "JoinRestrictionPolicy": {
+                                "description": "Represents privacy policy associated with \"join restrictions\". Join restriction gives data providers the ability to enforce joins on the 'join_allowed_columns' when data is queried from a privacy protected view.",
+                                "properties": {
+                                    "joinAllowedColumns": {
+                                        "description": "Optional. The only columns that joins are allowed on. This field is must be specified for join_conditions JOIN_ANY and JOIN_ALL and it cannot be set for JOIN_BLOCKED.",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "joinCondition": {
+                                        "description": "Optional. Specifies if a join is required or not on queries for the view. Default is JOIN_CONDITION_UNSPECIFIED.",
+                                        "enum": [
+                                            "JOIN_CONDITION_UNSPECIFIED",
+                                            "JOIN_ANY",
+                                            "JOIN_ALL",
+                                            "JOIN_NOT_REQUIRED",
+                                            "JOIN_BLOCKED"
+                                        ],
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "A join is neither required nor restricted on any column. Default value.",
+                                            "A join is required on at least one of the specified columns.",
+                                            "A join is required on all specified columns.",
+                                            "A join is not required, but if present it is only permitted on 'join_allowed_columns'",
+                                            "Joins are blocked for all queries."
+                                        ]
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "JsonOptions": {
+                                "description": "Json Options for load and make external tables.",
+                                "properties": {
+                                    "encoding": {
+                                        "description": "Optional. The character encoding of the data. The supported values are UTF-8, UTF-16BE, UTF-16LE, UTF-32BE, and UTF-32LE. The default value is UTF-8.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "MaterializedViewDefinition": {
+                                "description": "Definition and configuration of a materialized view.",
+                                "properties": {
+                                    "allowNonIncrementalDefinition": {
+                                        "description": "Optional. This option declares the intention to construct a materialized view that isn't refreshed incrementally. Non-incremental materialized views support an expanded range of SQL queries. The `allow_non_incremental_definition` option can't be changed after the materialized view is created.",
+                                        "type": "boolean"
+                                    },
+                                    "enableRefresh": {
+                                        "description": "Optional. Enable automatic refresh of the materialized view when the base table is updated. The default value is \"true\".",
+                                        "type": "boolean"
+                                    },
+                                    "lastRefreshTime": {
+                                        "description": "Output only. The time when this materialized view was last refreshed, in milliseconds since the epoch.",
+                                        "format": "int64",
+                                        "readOnly": true,
+                                        "type": "string"
+                                    },
+                                    "query": {
+                                        "description": "Required. A query whose results are persisted.",
+                                        "type": "string"
+                                    },
+                                    "refreshIntervalMs": {
+                                        "description": "Optional. The maximum frequency at which this materialized view will be refreshed. The default value is \"1800000\" (30 minutes).",
+                                        "format": "uint64",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "MaterializedViewStatus": {
+                                "description": "Status of a materialized view. The last refresh timestamp status is omitted here, but is present in the MaterializedViewDefinition message.",
+                                "properties": {
+                                    "lastRefreshStatus": {
+                                        "$ref": "#/$defs/ErrorProto",
+                                        "description": "Output only. Error result of the last automatic refresh. If present, indicates that the last automatic refresh was unsuccessful.",
+                                        "readOnly": true
+                                    },
+                                    "refreshWatermark": {
+                                        "description": "Output only. Refresh watermark of materialized view. The base tables' data were collected into the materialized view cache until this time.",
+                                        "format": "date-time",
+                                        "readOnly": true,
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "ParquetOptions": {
+                                "description": "Parquet Options for load and make external tables.",
+                                "properties": {
+                                    "enableListInference": {
+                                        "description": "Optional. Indicates whether to use schema inference specifically for Parquet LIST logical type.",
+                                        "type": "boolean"
+                                    },
+                                    "enumAsString": {
+                                        "description": "Optional. Indicates whether to infer Parquet ENUM logical type as STRING instead of BYTES by default.",
+                                        "type": "boolean"
+                                    },
+                                    "mapTargetType": {
+                                        "description": "Optional. Indicates how to represent a Parquet map if present.",
+                                        "enum": [
+                                            "MAP_TARGET_TYPE_UNSPECIFIED",
+                                            "ARRAY_OF_STRUCT"
+                                        ],
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "In this mode, the map will have the following schema: struct map_field_name { repeated struct key_value { key value } }.",
+                                            "In this mode, the map will have the following schema: repeated struct map_field_name { key value }."
+                                        ]
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "PartitionedColumn": {
+                                "description": "The partitioning column information.",
+                                "properties": {
+                                    "field": {
+                                        "description": "Required. The name of the partition column.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "PartitioningDefinition": {
+                                "description": "The partitioning information, which includes managed table, external table and metastore partitioned table partition information.",
+                                "properties": {
+                                    "partitionedColumn": {
+                                        "description": "Optional. Details about each partitioning column. This field is output only for all partitioning types other than metastore partitioned tables. BigQuery native tables only support 1 partitioning column. Other table types may support 0, 1 or more partitioning columns. For metastore partitioned tables, the order must match the definition order in the Hive Metastore, where it must match the physical layout of the table. For example, CREATE TABLE a_table(id BIGINT, name STRING) PARTITIONED BY (city STRING, state STRING). In this case the values must be ['city', 'state'] in that order.",
+                                        "items": {
+                                            "$ref": "#/$defs/PartitionedColumn"
+                                        },
+                                        "type": "array"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "PolicyTagList": {
+                                "properties": {
+                                    "names": {
+                                        "description": "A list of policy tag resource names. For example, \"projects/1/locations/eu/taxonomies/2/policyTags/3\". At most 1 policy tag is currently allowed.",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "type": "array"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "PrimaryKey": {
+                                "description": "Represents the primary key constraint on a table's columns.",
+                                "properties": {
+                                    "columns": {
+                                        "description": "Required. The columns that are composed of the primary key constraint.",
+                                        "items": {
+                                            "type": "string"
+                                        },
+                                        "type": "array"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "PrivacyPolicy": {
+                                "description": "Represents privacy policy that contains the privacy requirements specified by the data owner. Currently, this is only supported on views.",
+                                "properties": {
+                                    "aggregationThresholdPolicy": {
+                                        "$ref": "#/$defs/AggregationThresholdPolicy",
+                                        "description": "Optional. Policy used for aggregation thresholds."
+                                    },
+                                    "differentialPrivacyPolicy": {
+                                        "$ref": "#/$defs/DifferentialPrivacyPolicy",
+                                        "description": "Optional. Policy used for differential privacy."
+                                    },
+                                    "joinRestrictionPolicy": {
+                                        "$ref": "#/$defs/JoinRestrictionPolicy",
+                                        "description": "Optional. Join restriction policy is outside of the one of policies, since this policy can be set along with other policies. This policy gives data providers the ability to enforce joins on the 'join_allowed_columns' when data is queried from a privacy protected view."
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "Range": {
+                                "description": "Defines the ranges for range partitioning.",
+                                "properties": {
+                                    "end": {
+                                        "description": "Required. The end of range partitioning, exclusive. This field is an INT64 value represented as a string.",
+                                        "type": "string"
+                                    },
+                                    "interval": {
+                                        "description": "Required. The width of each interval. This field is an INT64 value represented as a string.",
+                                        "type": "string"
+                                    },
+                                    "start": {
+                                        "description": "Required. The start of range partitioning, inclusive. This field is an INT64 value represented as a string.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "RangePartitioning": {
+                                "properties": {
+                                    "field": {
+                                        "description": "Required. The name of the column to partition the table on. It must be a top-level, INT64 column whose mode is NULLABLE or REQUIRED.",
+                                        "type": "string"
+                                    },
+                                    "range": {
+                                        "$ref": "#/$defs/Range",
+                                        "description": "Defines the ranges for range partitioning."
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "RestrictionConfig": {
+                                "properties": {
+                                    "type": {
+                                        "description": "Output only. Specifies the type of dataset/table restriction.",
+                                        "enum": [
+                                            "RESTRICTION_TYPE_UNSPECIFIED",
+                                            "RESTRICTED_DATA_EGRESS"
+                                        ],
+                                        "readOnly": true,
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "Should never be used.",
+                                            "Restrict data egress. See [Data egress](https://cloud.google.com/bigquery/docs/analytics-hub-introduction#data_egress) for more details."
+                                        ]
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "SerDeInfo": {
+                                "description": "Serializer and deserializer information.",
+                                "properties": {
+                                    "name": {
+                                        "description": "Optional. Name of the SerDe. The maximum length is 256 characters.",
+                                        "type": "string"
+                                    },
+                                    "parameters": {
+                                        "additionalProperties": {
+                                            "type": "string"
+                                        },
+                                        "description": "Optional. Key-value pairs that define the initialization parameters for the serialization library. Maximum size 10 Kib.",
+                                        "type": "object"
+                                    },
+                                    "serializationLibrary": {
+                                        "description": "Required. Specifies a fully-qualified class name of the serialization library that is responsible for the translation of data between table representation and the underlying low-level input and output format structures. The maximum length is 256 characters.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "SnapshotDefinition": {
+                                "description": "Information about base table and snapshot time of the snapshot.",
+                                "properties": {
+                                    "baseTableReference": {
+                                        "$ref": "#/$defs/TableReference",
+                                        "description": "Required. Reference describing the ID of the table that was snapshot."
+                                    },
+                                    "snapshotTime": {
+                                        "description": "Required. The time at which the base table was snapshot. This value is reported in the JSON response using RFC3339 format.",
+                                        "format": "date-time",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "StorageDescriptor": {
+                                "description": "Contains information about how a table's data is stored and accessed by open source query engines.",
+                                "properties": {
+                                    "inputFormat": {
+                                        "description": "Optional. Specifies the fully qualified class name of the InputFormat (e.g. \"org.apache.hadoop.hive.ql.io.orc.OrcInputFormat\"). The maximum length is 128 characters.",
+                                        "type": "string"
+                                    },
+                                    "locationUri": {
+                                        "description": "Optional. The physical location of the table (e.g. `gs://spark-dataproc-data/pangea-data/case_sensitive/` or `gs://spark-dataproc-data/pangea-data/*`). The maximum length is 2056 bytes.",
+                                        "type": "string"
+                                    },
+                                    "outputFormat": {
+                                        "description": "Optional. Specifies the fully qualified class name of the OutputFormat (e.g. \"org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat\"). The maximum length is 128 characters.",
+                                        "type": "string"
+                                    },
+                                    "serdeInfo": {
+                                        "$ref": "#/$defs/SerDeInfo",
+                                        "description": "Optional. Serializer and deserializer information."
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "Streamingbuffer": {
+                                "properties": {
+                                    "estimatedBytes": {
+                                        "description": "Output only. A lower-bound estimate of the number of bytes currently in the streaming buffer.",
+                                        "format": "uint64",
+                                        "readOnly": true,
+                                        "type": "string"
+                                    },
+                                    "estimatedRows": {
+                                        "description": "Output only. A lower-bound estimate of the number of rows currently in the streaming buffer.",
+                                        "format": "uint64",
+                                        "readOnly": true,
+                                        "type": "string"
+                                    },
+                                    "oldestEntryTime": {
+                                        "description": "Output only. Contains the timestamp of the oldest entry in the streaming buffer, in milliseconds since the epoch, if the streaming buffer is available.",
+                                        "format": "uint64",
+                                        "readOnly": true,
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "TableConstraints": {
+                                "description": "The TableConstraints defines the primary key and foreign key.",
+                                "properties": {
+                                    "foreignKeys": {
+                                        "description": "Optional. Present only if the table has a foreign key. The foreign key is not enforced.",
+                                        "items": {
+                                            "$ref": "#/$defs/ForeignKey"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "primaryKey": {
+                                        "$ref": "#/$defs/PrimaryKey",
+                                        "description": "Optional. Represents a primary key constraint on a table's columns. Present only if the table has a primary key. The primary key is not enforced."
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "TableFieldSchema": {
+                                "description": "A field in TableSchema",
+                                "properties": {
+                                    "collation": {
+                                        "description": "Optional. Field collation can be set only when the type of field is STRING. The following values are supported: * 'und:ci': undetermined locale, case insensitive. * '': empty string. Default to case-sensitive behavior.",
+                                        "type": "string"
+                                    },
+                                    "dataPolicies": {
+                                        "description": "Optional. Data policies attached to this field, used for field-level access control.",
+                                        "items": {
+                                            "$ref": "#/$defs/DataPolicyOption"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "defaultValueExpression": {
+                                        "description": "Optional. A SQL expression to specify the [default value] (https://cloud.google.com/bigquery/docs/default-values) for this field.",
+                                        "type": "string"
+                                    },
+                                    "description": {
+                                        "description": "Optional. The field description. The maximum length is 1,024 characters.",
+                                        "type": "string"
+                                    },
+                                    "fields": {
+                                        "description": "Optional. Describes the nested schema fields if the type property is set to RECORD.",
+                                        "items": {
+                                            "$ref": "#/$defs/TableFieldSchema"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "foreignTypeDefinition": {
+                                        "description": "Optional. Definition of the foreign data type. Only valid for top-level schema fields (not nested fields). If the type is FOREIGN, this field is required.",
+                                        "type": "string"
+                                    },
+                                    "maxLength": {
+                                        "description": "Optional. Maximum length of values of this field for STRINGS or BYTES. If max_length is not specified, no maximum length constraint is imposed on this field. If type = \"STRING\", then max_length represents the maximum UTF-8 length of strings in this field. If type = \"BYTES\", then max_length represents the maximum number of bytes in this field. It is invalid to set this field if type ≠ \"STRING\" and ≠ \"BYTES\".",
+                                        "format": "int64",
+                                        "type": "string"
+                                    },
+                                    "mode": {
+                                        "description": "Optional. The field mode. Possible values include NULLABLE, REQUIRED and REPEATED. The default value is NULLABLE.",
+                                        "type": "string"
+                                    },
+                                    "name": {
+                                        "description": "Required. The field name. The name must contain only letters (a-z, A-Z), numbers (0-9), or underscores (_), and must start with a letter or underscore. The maximum length is 300 characters.",
+                                        "type": "string"
+                                    },
+                                    "policyTags": {
+                                        "$ref": "#/$defs/PolicyTagList",
+                                        "description": "Optional. The policy tags attached to this field, used for field-level access control. If not set, defaults to empty policy_tags."
+                                    },
+                                    "precision": {
+                                        "description": "Optional. Precision (maximum number of total digits in base 10) and scale (maximum number of digits in the fractional part in base 10) constraints for values of this field for NUMERIC or BIGNUMERIC. It is invalid to set precision or scale if type ≠ \"NUMERIC\" and ≠ \"BIGNUMERIC\". If precision and scale are not specified, no value range constraint is imposed on this field insofar as values are permitted by the type. Values of this NUMERIC or BIGNUMERIC field must be in this range when: * Precision (P) and scale (S) are specified: [-10P-S + 10-S, 10P-S - 10-S] * Precision (P) is specified but not scale (and thus scale is interpreted to be equal to zero): [-10P + 1, 10P - 1]. Acceptable values for precision and scale if both are specified: * If type = \"NUMERIC\": 1 ≤ precision - scale ≤ 29 and 0 ≤ scale ≤ 9. * If type = \"BIGNUMERIC\": 1 ≤ precision - scale ≤ 38 and 0 ≤ scale ≤ 38. Acceptable values for precision if only precision is specified but not scale (and thus scale is interpreted to be equal to zero): * If type = \"NUMERIC\": 1 ≤ precision ≤ 29. * If type = \"BIGNUMERIC\": 1 ≤ precision ≤ 38. If scale is specified but not precision, then it is invalid.",
+                                        "format": "int64",
+                                        "type": "string"
+                                    },
+                                    "rangeElementType": {
+                                        "$ref": "#/$defs/FieldElementType",
+                                        "description": "Optional. The subtype of the RANGE, if the type of this field is RANGE. If the type is RANGE, this field is required. Values for the field element type can be the following: * DATE * DATETIME * TIMESTAMP"
+                                    },
+                                    "roundingMode": {
+                                        "description": "Optional. Specifies the rounding mode to be used when storing values of NUMERIC and BIGNUMERIC type.",
+                                        "enum": [
+                                            "ROUNDING_MODE_UNSPECIFIED",
+                                            "ROUND_HALF_AWAY_FROM_ZERO",
+                                            "ROUND_HALF_EVEN"
+                                        ],
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "Unspecified will default to using ROUND_HALF_AWAY_FROM_ZERO.",
+                                            "ROUND_HALF_AWAY_FROM_ZERO rounds half values away from zero when applying precision and scale upon writing of NUMERIC and BIGNUMERIC values. For Scale: 0 1.1, 1.2, 1.3, 1.4 =\u003e 1 1.5, 1.6, 1.7, 1.8, 1.9 =\u003e 2",
+                                            "ROUND_HALF_EVEN rounds half values to the nearest even value when applying precision and scale upon writing of NUMERIC and BIGNUMERIC values. For Scale: 0 1.1, 1.2, 1.3, 1.4 =\u003e 1 1.5 =\u003e 2 1.6, 1.7, 1.8, 1.9 =\u003e 2 2.5 =\u003e 2"
+                                        ]
+                                    },
+                                    "scale": {
+                                        "description": "Optional. See documentation for precision.",
+                                        "format": "int64",
+                                        "type": "string"
+                                    },
+                                    "timestampPrecision": {
+                                        "default": "6",
+                                        "description": "Optional. Precision (maximum number of total digits in base 10) for seconds of TIMESTAMP type. Possible values include: * 6 (Default, for TIMESTAMP type with microsecond precision) * 12 (For TIMESTAMP type with picosecond precision)",
+                                        "format": "int64",
+                                        "type": "string"
+                                    },
+                                    "type": {
+                                        "description": "Required. The field data type. Possible values include: * STRING * BYTES * INTEGER (or INT64) * FLOAT (or FLOAT64) * BOOLEAN (or BOOL) * TIMESTAMP * DATE * TIME * DATETIME * GEOGRAPHY * NUMERIC * BIGNUMERIC * JSON * RECORD (or STRUCT) * RANGE Use of RECORD/STRUCT indicates that the field contains a nested schema.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "TableReference": {
+                                "properties": {
+                                    "datasetId": {
+                                        "description": "Required. The ID of the dataset containing this table.",
+                                        "type": "string"
+                                    },
+                                    "projectId": {
+                                        "description": "Required. The ID of the project containing this table.",
+                                        "type": "string"
+                                    },
+                                    "tableId": {
+                                        "description": "Required. The ID of the table. The ID can contain Unicode characters in category L (letter), M (mark), N (number), Pc (connector, including underscore), Pd (dash), and Zs (space). For more information, see [General Category](https://wikipedia.org/wiki/Unicode_character_property#General_Category). The maximum length is 1,024 characters. Certain operations allow suffixing of the table ID with a partition decorator, such as `sample_table$20190123`.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "TableReplicationInfo": {
+                                "description": "Replication info of a table created using `AS REPLICA` DDL like: `CREATE MATERIALIZED VIEW mv1 AS REPLICA OF src_mv`",
+                                "properties": {
+                                    "replicatedSourceLastRefreshTime": {
+                                        "description": "Optional. Output only. If source is a materialized view, this field signifies the last refresh time of the source.",
+                                        "format": "int64",
+                                        "readOnly": true,
+                                        "type": "string"
+                                    },
+                                    "replicationError": {
+                                        "$ref": "#/$defs/ErrorProto",
+                                        "description": "Optional. Output only. Replication error that will permanently stopped table replication.",
+                                        "readOnly": true
+                                    },
+                                    "replicationIntervalMs": {
+                                        "description": "Optional. Specifies the interval at which the source table is polled for updates. It's Optional. If not specified, default replication interval would be applied.",
+                                        "format": "int64",
+                                        "type": "string"
+                                    },
+                                    "replicationStatus": {
+                                        "description": "Optional. Output only. Replication status of configured replication.",
+                                        "enum": [
+                                            "REPLICATION_STATUS_UNSPECIFIED",
+                                            "ACTIVE",
+                                            "SOURCE_DELETED",
+                                            "PERMISSION_DENIED",
+                                            "UNSUPPORTED_CONFIGURATION"
+                                        ],
+                                        "readOnly": true,
+                                        "type": "string",
+                                        "x-google-enum-descriptions": [
+                                            "Default value.",
+                                            "Replication is Active with no errors.",
+                                            "Source object is deleted.",
+                                            "Source revoked replication permissions.",
+                                            "Source configuration doesn’t allow replication."
+                                        ]
+                                    },
+                                    "sourceTable": {
+                                        "$ref": "#/$defs/TableReference",
+                                        "description": "Required. Source table reference that is replicated."
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "TableSchema": {
+                                "description": "Schema of a table",
+                                "properties": {
+                                    "fields": {
+                                        "description": "Describes the fields in a table.",
+                                        "items": {
+                                            "$ref": "#/$defs/TableFieldSchema"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "foreignTypeInfo": {
+                                        "$ref": "#/$defs/ForeignTypeInfo",
+                                        "description": "Optional. Specifies metadata of the foreign data type definition in field schema (TableFieldSchema.foreign_type_definition)."
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "TimePartitioning": {
+                                "properties": {
+                                    "expirationMs": {
+                                        "description": "Optional. Number of milliseconds for which to keep the storage for a partition. A wrapper is used here because 0 is an invalid value.",
+                                        "format": "int64",
+                                        "type": "string"
+                                    },
+                                    "field": {
+                                        "description": "Optional. If not set, the table is partitioned by pseudo column '_PARTITIONTIME'; if set, the table is partitioned by this field. The field must be a top-level TIMESTAMP or DATE field. Its mode must be NULLABLE or REQUIRED. A wrapper is used here because an empty string is an invalid value.",
+                                        "type": "string"
+                                    },
+                                    "requirePartitionFilter": {
+                                        "default": "false",
+                                        "deprecated": true,
+                                        "description": "If set to true, queries over this table require a partition filter that can be used for partition elimination to be specified. This field is deprecated; please set the field with the same name on the table itself instead. This field needs a wrapper because we want to output the default value, false, if the user explicitly set it.",
+                                        "type": "boolean"
+                                    },
+                                    "type": {
+                                        "description": "Required. The supported types are DAY, HOUR, MONTH, and YEAR, which will generate one partition per day, hour, month, and year, respectively.",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "UserDefinedFunctionResource": {
+                                "description": " This is used for defining User Defined Function (UDF) resources only when using legacy SQL. Users of GoogleSQL should leverage either DDL (e.g. CREATE [TEMPORARY] FUNCTION ... ) or the Routines API to define UDF resources. For additional information on migrating, see: https://cloud.google.com/bigquery/docs/reference/standard-sql/migrating-from-legacy-sql#differences_in_user-defined_javascript_functions",
+                                "properties": {
+                                    "inlineCode": {
+                                        "description": "[Pick one] An inline resource that contains code for a user-defined function (UDF). Providing a inline code resource is equivalent to providing a URI for a file containing the same code.",
+                                        "type": "string"
+                                    },
+                                    "resourceUri": {
+                                        "description": "[Pick one] A code resource to load from a Google Cloud Storage URI (gs://bucket/path).",
+                                        "type": "string"
+                                    }
+                                },
+                                "type": "object"
+                            },
+                            "ViewDefinition": {
+                                "description": "Describes the definition of a logical view.",
+                                "properties": {
+                                    "foreignDefinitions": {
+                                        "description": "Optional. Foreign view representations.",
+                                        "items": {
+                                            "$ref": "#/$defs/ForeignViewDefinition"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "privacyPolicy": {
+                                        "$ref": "#/$defs/PrivacyPolicy",
+                                        "description": "Optional. Specifies the privacy policy for the view."
+                                    },
+                                    "query": {
+                                        "description": "Required. A query that BigQuery executes when the view is referenced.",
+                                        "type": "string"
+                                    },
+                                    "useExplicitColumnNames": {
+                                        "description": "True if the column names are explicitly specified. For example by using the 'CREATE VIEW v(c1, c2) AS ...' syntax. Can only be set for GoogleSQL views.",
+                                        "type": "boolean"
+                                    },
+                                    "useLegacySql": {
+                                        "description": "Specifies whether to use BigQuery's legacy SQL for this view. The default value is true. If set to false, the view will use BigQuery's GoogleSQL: https://cloud.google.com/bigquery/sql-reference/ Queries and views that reference this view must use the same flag value. A wrapper is used here because the default value is True.",
+                                        "type": "boolean"
+                                    },
+                                    "userDefinedFunctionResources": {
+                                        "description": "Describes user-defined function resources used in the query.",
+                                        "items": {
+                                            "$ref": "#/$defs/UserDefinedFunctionResource"
+                                        },
+                                        "type": "array"
+                                    }
+                                },
+                                "type": "object"
+                            }
+                        },
+                        "properties": {
+                            "biglakeConfiguration": {
+                                "$ref": "#/$defs/BigLakeConfiguration",
+                                "description": "Optional. Specifies the configuration of a BigQuery table for Apache Iceberg."
+                            },
+                            "cloneDefinition": {
+                                "$ref": "#/$defs/CloneDefinition",
+                                "description": "Output only. Contains information about the clone. This value is set via the clone operation.",
+                                "readOnly": true
+                            },
+                            "clustering": {
+                                "$ref": "#/$defs/Clustering",
+                                "description": "Clustering specification for the table. Must be specified with time-based partitioning, data in the table will be first partitioned and subsequently clustered."
+                            },
+                            "creationTime": {
+                                "description": "Output only. The time when this table was created, in milliseconds since the epoch.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "defaultCollation": {
+                                "description": "Optional. Defines the default collation specification of new STRING fields in the table. During table creation or update, if a STRING field is added to this table without explicit collation specified, then the table inherits the table default collation. A change to this field affects only fields added afterwards, and does not alter the existing fields. The following values are supported: * 'und:ci': undetermined locale, case insensitive. * '': empty string. Default to case-sensitive behavior.",
+                                "type": "string"
+                            },
+                            "defaultRoundingMode": {
+                                "description": "Optional. Defines the default rounding mode specification of new decimal fields (NUMERIC OR BIGNUMERIC) in the table. During table creation or update, if a decimal field is added to this table without an explicit rounding mode specified, then the field inherits the table default rounding mode. Changing this field doesn't affect existing fields.",
+                                "enum": [
+                                    "ROUNDING_MODE_UNSPECIFIED",
+                                    "ROUND_HALF_AWAY_FROM_ZERO",
+                                    "ROUND_HALF_EVEN"
+                                ],
+                                "type": "string",
+                                "x-google-enum-descriptions": [
+                                    "Unspecified will default to using ROUND_HALF_AWAY_FROM_ZERO.",
+                                    "ROUND_HALF_AWAY_FROM_ZERO rounds half values away from zero when applying precision and scale upon writing of NUMERIC and BIGNUMERIC values. For Scale: 0 1.1, 1.2, 1.3, 1.4 =\u003e 1 1.5, 1.6, 1.7, 1.8, 1.9 =\u003e 2",
+                                    "ROUND_HALF_EVEN rounds half values to the nearest even value when applying precision and scale upon writing of NUMERIC and BIGNUMERIC values. For Scale: 0 1.1, 1.2, 1.3, 1.4 =\u003e 1 1.5 =\u003e 2 1.6, 1.7, 1.8, 1.9 =\u003e 2 2.5 =\u003e 2"
+                                ]
+                            },
+                            "description": {
+                                "description": "Optional. A user-friendly description of this table.",
+                                "type": "string"
+                            },
+                            "encryptionConfiguration": {
+                                "$ref": "#/$defs/EncryptionConfiguration",
+                                "description": "Custom encryption configuration (e.g., Cloud KMS keys)."
+                            },
+                            "etag": {
+                                "description": "Output only. A hash of this resource.",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "expirationTime": {
+                                "description": "Optional. The time when this table expires, in milliseconds since the epoch. If not present, the table will persist indefinitely. Expired tables will be deleted and their storage reclaimed. The defaultTableExpirationMs property of the encapsulating dataset can be used to set a default expirationTime on newly created tables.",
+                                "format": "int64",
+                                "type": "string"
+                            },
+                            "externalCatalogTableOptions": {
+                                "$ref": "#/$defs/ExternalCatalogTableOptions",
+                                "description": "Optional. Options defining open source compatible table."
+                            },
+                            "externalDataConfiguration": {
+                                "$ref": "#/$defs/ExternalDataConfiguration",
+                                "description": "Optional. Describes the data format, location, and other properties of a table stored outside of BigQuery. By defining these properties, the data source can then be queried as if it were a standard BigQuery table."
+                            },
+                            "friendlyName": {
+                                "description": "Optional. A descriptive name for this table.",
+                                "type": "string"
+                            },
+                            "id": {
+                                "description": "Output only. An opaque ID uniquely identifying the table.",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "kind": {
+                                "default": "bigquery#table",
+                                "description": "The type of resource ID.",
+                                "type": "string"
+                            },
+                            "labels": {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "description": "The labels associated with this table. You can use these to organize and group your tables. Label keys and values can be no longer than 63 characters, can only contain lowercase letters, numeric characters, underscores and dashes. International characters are allowed. Label values are optional. Label keys must start with a letter and each label in the list must have a different key.",
+                                "type": "object"
+                            },
+                            "lastModifiedTime": {
+                                "description": "Output only. The time when this table was last modified, in milliseconds since the epoch.",
+                                "format": "uint64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "location": {
+                                "description": "Output only. The geographic location where the table resides. This value is inherited from the dataset.",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "managedTableType": {
+                                "description": "Optional. If set, overrides the default managed table type configured in the dataset.",
+                                "enum": [
+                                    "MANAGED_TABLE_TYPE_UNSPECIFIED",
+                                    "NATIVE",
+                                    "BIGLAKE"
+                                ],
+                                "type": "string",
+                                "x-google-enum-descriptions": [
+                                    "No managed table type specified.",
+                                    "The managed table is a native BigQuery table.",
+                                    "The managed table is a BigLake table for Apache Iceberg in BigQuery."
+                                ]
+                            },
+                            "materializedView": {
+                                "$ref": "#/$defs/MaterializedViewDefinition",
+                                "description": "Optional. The materialized view definition."
+                            },
+                            "materializedViewStatus": {
+                                "$ref": "#/$defs/MaterializedViewStatus",
+                                "description": "Output only. The materialized view status.",
+                                "readOnly": true
+                            },
+                            "maxStaleness": {
+                                "description": "Optional. The maximum staleness of data that could be returned when the table (or stale MV) is queried. Staleness encoded as a string encoding of sql IntervalValue type.",
+                                "type": "string"
+                            },
+                            "numActiveLogicalBytes": {
+                                "description": "Output only. Number of logical bytes that are less than 90 days old.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numActivePhysicalBytes": {
+                                "description": "Output only. Number of physical bytes less than 90 days old. This data is not kept in real time, and might be delayed by a few seconds to a few minutes.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numBytes": {
+                                "description": "Output only. The size of this table in logical bytes, excluding any data in the streaming buffer.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numCurrentPhysicalBytes": {
+                                "description": "Output only. Number of physical bytes used by current live data storage. This data is not kept in real time, and might be delayed by a few seconds to a few minutes.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numLongTermBytes": {
+                                "description": "Output only. The number of logical bytes in the table that are considered \"long-term storage\".",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numLongTermLogicalBytes": {
+                                "description": "Output only. Number of logical bytes that are more than 90 days old.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numLongTermPhysicalBytes": {
+                                "description": "Output only. Number of physical bytes more than 90 days old. This data is not kept in real time, and might be delayed by a few seconds to a few minutes.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numPartitions": {
+                                "description": "Output only. The number of partitions present in the table or materialized view. This data is not kept in real time, and might be delayed by a few seconds to a few minutes.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numPhysicalBytes": {
+                                "description": "Output only. The physical size of this table in bytes. This includes storage used for time travel.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numRows": {
+                                "description": "Output only. The number of rows of data in this table, excluding any data in the streaming buffer.",
+                                "format": "uint64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numTimeTravelPhysicalBytes": {
+                                "description": "Output only. Number of physical bytes used by time travel storage (deleted or changed data). This data is not kept in real time, and might be delayed by a few seconds to a few minutes.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numTotalLogicalBytes": {
+                                "description": "Output only. Total number of logical bytes in the table or materialized view.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "numTotalPhysicalBytes": {
+                                "description": "Output only. The physical size of this table in bytes. This also includes storage used for time travel. This data is not kept in real time, and might be delayed by a few seconds to a few minutes.",
+                                "format": "int64",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "partitionDefinition": {
+                                "$ref": "#/$defs/PartitioningDefinition",
+                                "description": "Optional. The partition information for all table formats, including managed partitioned tables, hive partitioned tables, iceberg partitioned, and metastore partitioned tables. This field is only populated for metastore partitioned tables. For other table formats, this is an output only field."
+                            },
+                            "rangePartitioning": {
+                                "$ref": "#/$defs/RangePartitioning",
+                                "description": "If specified, configures range partitioning for this table."
+                            },
+                            "replicas": {
+                                "description": "Optional. Output only. Table references of all replicas currently active on the table.",
+                                "items": {
+                                    "$ref": "#/$defs/TableReference"
+                                },
+                                "readOnly": true,
+                                "type": "array"
+                            },
+                            "requirePartitionFilter": {
+                                "default": "false",
+                                "description": "Optional. If set to true, queries over this table require a partition filter that can be used for partition elimination to be specified.",
+                                "type": "boolean"
+                            },
+                            "resourceTags": {
+                                "additionalProperties": {
+                                    "type": "string"
+                                },
+                                "description": "Optional. The [tags](https://cloud.google.com/bigquery/docs/tags) attached to this table. Tag keys are globally unique. Tag key is expected to be in the namespaced format, for example \"123456789012/environment\" where 123456789012 is the ID of the parent organization or project resource for this tag key. Tag value is expected to be the short name, for example \"Production\". See [Tag definitions](https://cloud.google.com/iam/docs/tags-access-control#definitions) for more details.",
+                                "type": "object"
+                            },
+                            "restrictions": {
+                                "$ref": "#/$defs/RestrictionConfig",
+                                "description": "Optional. Output only. Restriction config for table. If set, restrict certain accesses on the table based on the config. See [Data egress](https://cloud.google.com/bigquery/docs/analytics-hub-introduction#data_egress) for more details.",
+                                "readOnly": true
+                            },
+                            "schema": {
+                                "$ref": "#/$defs/TableSchema",
+                                "description": "Optional. Describes the schema of this table."
+                            },
+                            "selfLink": {
+                                "description": "Output only. A URL that can be used to access this resource again.",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "snapshotDefinition": {
+                                "$ref": "#/$defs/SnapshotDefinition",
+                                "description": "Output only. Contains information about the snapshot. This value is set via snapshot creation.",
+                                "readOnly": true
+                            },
+                            "streamingBuffer": {
+                                "$ref": "#/$defs/Streamingbuffer",
+                                "description": "Output only. Contains information regarding this table's streaming buffer, if one is present. This field will be absent if the table is not being streamed to or if there is no data in the streaming buffer.",
+                                "readOnly": true
+                            },
+                            "tableConstraints": {
+                                "$ref": "#/$defs/TableConstraints",
+                                "description": "Optional. Tables Primary Key and Foreign Key information"
+                            },
+                            "tableReference": {
+                                "$ref": "#/$defs/TableReference",
+                                "description": "Required. Reference describing the ID of this table."
+                            },
+                            "tableReplicationInfo": {
+                                "$ref": "#/$defs/TableReplicationInfo",
+                                "description": "Optional. Table replication info for table created `AS REPLICA` DDL like: `CREATE MATERIALIZED VIEW mv1 AS REPLICA OF src_mv`"
+                            },
+                            "timePartitioning": {
+                                "$ref": "#/$defs/TimePartitioning",
+                                "description": "If specified, configures time-based partitioning for this table."
+                            },
+                            "type": {
+                                "description": "Output only. Describes the table type. The following values are supported: * `TABLE`: A normal BigQuery table. * `VIEW`: A virtual table defined by a SQL query. * `EXTERNAL`: A table that references data stored in an external storage system, such as Google Cloud Storage. * `MATERIALIZED_VIEW`: A precomputed view defined by a SQL query. * `SNAPSHOT`: An immutable BigQuery table that preserves the contents of a base table at a particular time. See additional information on [table snapshots](https://cloud.google.com/bigquery/docs/table-snapshots-intro). The default value is `TABLE`.",
+                                "readOnly": true,
+                                "type": "string"
+                            },
+                            "view": {
+                                "$ref": "#/$defs/ViewDefinition",
+                                "description": "Optional. The view definition."
+                            }
+                        },
+                        "type": "object"
+                    }
+                }
+            ]
+        }
+    ]
+}

@@ -77,7 +77,11 @@ func main() {
 	defer stop()
 
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
-		APIKey: apiKey,
+		Project:  "kdroste-x88z16", //os.Getenv("GOOGLE_CLOUD_PROJECT"),
+		Location: "us-central1",    //os.Getenv("GOOGLE_CLOUD_LOCATION"),
+		Backend:  genai.BackendVertexAI,
+
+		// APIKey: apiKey,
 	})
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
