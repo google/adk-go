@@ -19,6 +19,7 @@ package adka2a
 
 import (
 	"context"
+	"maps"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
@@ -188,6 +189,7 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 	if err != nil {
 		return err
 	}
+
 	for event, err := range e.impl.Execute(ctx, execCtx) {
 		if err != nil {
 			return err
@@ -261,6 +263,7 @@ func toRequestContext(ctx *v2asrv.ExecutorContext) *a2asrv.RequestContext {
 	for _, t := range ctx.RelatedTasks {
 		relatedTasks = append(relatedTasks, a2av0.FromV1Task(t))
 	}
+
 	return &a2asrv.RequestContext{
 		ContextID:    ctx.ContextID,
 		Message:      a2av0.FromV1Message(ctx.Message),
@@ -276,9 +279,7 @@ func toExecutorContext(ctx context.Context, reqCtx *a2asrv.RequestContext) (*v2a
 	reqMeta := make(map[string][]string)
 	if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
 		user = &v2asrv.User{Name: callCtx.User.Name(), Authenticated: callCtx.User.Authenticated()}
-		for k, v := range callCtx.RequestMeta().List() {
-			reqMeta[k] = v
-		}
+		maps.Insert(reqMeta, callCtx.RequestMeta().List())
 	}
 
 	storedTask, err := a2av0.ToV1Task(reqCtx.StoredTask)
