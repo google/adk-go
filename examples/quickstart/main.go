@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 
@@ -31,7 +32,12 @@ import (
 	"google.golang.org/adk/tool/geminitool"
 )
 
+var (
+	adkFlags = full.DefineFlags()
+)
+
 func main() {
+	flag.Parse()
 	ctx := context.Background()
 
 	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
@@ -58,8 +64,7 @@ func main() {
 		AgentLoader: agent.NewSingleLoader(a),
 	}
 
-	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err := full.Run(ctx, adkFlags, config); err != nil {
+		log.Fatalf("Run failed: %v", err)
 	}
 }

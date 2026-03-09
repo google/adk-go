@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 
@@ -35,7 +36,12 @@ const (
 	modelName = "gemini-2.5-flash"
 )
 
+var (
+	adkFlags = full.DefineFlags()
+)
+
 func main() {
+	flag.Parse()
 	ctx := context.Background()
 
 	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
@@ -69,10 +75,8 @@ func main() {
 		AgentLoader:    agent.NewSingleLoader(rootAgent),
 	}
 
-	l := full.NewLauncher()
-	err = l.Execute(ctx, config, os.Args[1:])
-	if err != nil {
-		log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err := full.Run(ctx, adkFlags, config); err != nil {
+		log.Fatalf("Run failed: %v", err)
 	}
 }
 

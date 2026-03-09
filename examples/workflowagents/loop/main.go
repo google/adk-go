@@ -17,9 +17,9 @@ package main
 
 import (
 	"context"
+	"flag"
 	"iter"
 	"log"
-	"os"
 
 	"google.golang.org/genai"
 
@@ -29,6 +29,10 @@ import (
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+)
+
+var (
+	adkFlags = full.DefineFlags()
 )
 
 func CustomAgentRun(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -48,6 +52,7 @@ func CustomAgentRun(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 }
 
 func main() {
+	flag.Parse()
 	ctx := context.Background()
 
 	customAgent, err := agent.New(agent.Config{
@@ -75,8 +80,7 @@ func main() {
 		AgentLoader: agent.NewSingleLoader(loopAgent),
 	}
 
-	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err := full.Run(ctx, adkFlags, config); err != nil {
+		log.Fatalf("Run failed: %v", err)
 	}
 }
