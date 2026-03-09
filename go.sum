@@ -36,6 +36,8 @@ github.com/a2aproject/a2a-go/v2 v2.0.0-20260308140223-02ab3e4d6c6b h1:VGB/Y61+n+
 github.com/a2aproject/a2a-go/v2 v2.0.0-20260308140223-02ab3e4d6c6b/go.mod h1:zxrqbi85M0ufPMqgYIn91upId0vYRZAbqt+6o6UWIV8=
 github.com/a2aproject/a2a-go/v2 v2.0.0-20260308152056-1f6c51b62c26 h1:oqiUb89YJrpHwjukSY7WofpJCWvcX7ZGZI6ZXsvRNJU=
 github.com/a2aproject/a2a-go/v2 v2.0.0-20260308152056-1f6c51b62c26/go.mod h1:zxrqbi85M0ufPMqgYIn91upId0vYRZAbqt+6o6UWIV8=
+github.com/a2aproject/a2a-go/v2 v2.0.0-20260309103159-97bf2ed0abf6 h1:lj9emFQ6kOcrred2BKF/hBXg5JB5NV8vurIyScbPvSs=
+github.com/a2aproject/a2a-go/v2 v2.0.0-20260309103159-97bf2ed0abf6/go.mod h1:zxrqbi85M0ufPMqgYIn91upId0vYRZAbqt+6o6UWIV8=
 github.com/awalterschulze/gographviz v2.0.3+incompatible h1:9sVEXJBJLwGX7EQVhLm2elIKCm7P2YHFC8v6096G09E=
 github.com/awalterschulze/gographviz v2.0.3+incompatible/go.mod h1:GEV5wmg4YquNw7v1kkyoX9etIk8yVmXj+AkDHuuETHs=
 github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=

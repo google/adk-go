@@ -18,11 +18,11 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/server/adka2a"
+	"google.golang.org/adk/server/adka2a/v1"
 	"google.golang.org/adk/session"
 )
 
@@ -89,7 +89,7 @@ func getFunctionResponseCallID(event *session.Event) (string, bool) {
 // Parts from all events we processed are returned as a single list.
 // The returned contextID might be an empty string. This means the current remote agent invocation is not associates with
 // any of the previous one. In this case a new contextID will be generated on the remote server.
-func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Events) ([]a2a.Part, string) {
+func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Events) ([]*a2a.Part, string) {
 	partCount, contextID := 0, ""
 	// only events after this index are not in the remote session
 	lastRemoteResponseIndex := -1
@@ -105,7 +105,7 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 		}
 	}
 
-	result := make([]a2a.Part, 0, partCount)
+	result := make([]*a2a.Part, 0, partCount)
 	for i := lastRemoteResponseIndex + 1; i < events.Len(); i++ {
 		event := events.At(i)
 		if event.Author != "user" && event.Author != ctx.Agent().Name() {
