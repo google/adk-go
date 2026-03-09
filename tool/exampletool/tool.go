@@ -1,4 +1,4 @@
-// Copyright 2026 Google LLC
+// Copyright 2025 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package exampletool provides a tool that allows an agent to add (few-shot) examples to the LLM request.
+// Package exampletool provides a tool that allows an agent to exit a loop.
 package exampletool
 
 import (
@@ -57,11 +57,13 @@ func (s exampleTool) Description() string {
 // ProcessRequest adds the exampleTool examples to the LLM request.
 func (s exampleTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	parts := ctx.UserContent().Parts
+	fmt.Println("I am gere")
 	if len(parts) == 0 || parts[0].Text == "" {
 		return nil
 	}
 
 	instruction := buildExamplesSystemInstruction(s.examples, req.Model)
+	fmt.Println("instruction", instruction)
 	utils.AppendInstructions(req, instruction)
 	return nil
 }
@@ -95,7 +97,8 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 		if example.Input != nil && len(example.Input.Parts) > 0 {
 			for _, part := range example.Input.Parts {
 				if part.Text != "" {
-					sb.WriteString(part.Text)
+					safeText := strings.ReplaceAll(part.Text, "End few-shot", "[PROTECTED]")
+					sb.WriteString(safeText)
 					sb.WriteString("\n")
 				}
 			}
@@ -103,7 +106,7 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 		gemini2 := strings.Contains(model, "gemini-2")
 		previousRole := ""
 		for _, content := range example.Output {
-			var role string
+			role := modelPrefix
 			if content.Role == "model" {
 				role = modelPrefix
 			} else {
@@ -135,7 +138,9 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 					}
 					fmt.Fprintf(&sb, "%s%v%s", prefix, part.FunctionResponse, functionResponseSuffix)
 				} else if part.Text != "" {
-					sb.WriteString(part.Text)
+					// SANITIZATION: Again, protect the boundary tags
+					safeText := strings.ReplaceAll(part.Text, "End few-shot", "[PROTECTED]")
+					sb.WriteString(safeText)
 					sb.WriteString("\n")
 				}
 			}
