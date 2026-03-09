@@ -15,11 +15,13 @@
 package controllers
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/session"
 )
 
 func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
@@ -75,4 +77,111 @@ func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
 			}
 		})
 	}
+}
+
+// recordingSessionService wraps a session.Service and records each AppendEvent call.
+type recordingSessionService struct {
+	session.Service
+	appendEventCalls []*session.Event
+}
+
+func (r *recordingSessionService) AppendEvent(ctx context.Context, s session.Session, ev *session.Event) error {
+	r.appendEventCalls = append(r.appendEventCalls, ev)
+	return r.Service.AppendEvent(ctx, s, ev)
+}
+
+func TestRuntimeAPIController_applyStateDeltaIfPresent(t *testing.T) {
+	ctx := context.Background()
+	base := session.InMemoryService()
+	rec := &recordingSessionService{Service: base}
+
+	createResp, err := base.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "sess",
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	ssn := createResp.Session
+
+	c := NewRuntimeAPIController(rec, nil, nil, nil, 10*time.Second, runner.PluginConfig{})
+
+	t.Run("nil stateDelta does not call AppendEvent", func(t *testing.T) {
+		rec.appendEventCalls = nil
+		if err := c.applyStateDeltaIfPresent(ctx, ssn, nil); err != nil {
+			t.Errorf("applyStateDeltaIfPresent(nil): %v", err)
+		}
+		if n := len(rec.appendEventCalls); n != 0 {
+			t.Errorf("AppendEvent called %d times, want 0", n)
+		}
+		// Validate from session perspective: no new events.
+		getResp, err := rec.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "sess"})
+		if err != nil {
+			t.Fatalf("Get session: %v", err)
+		}
+		if n := getResp.Session.Events().Len(); n != 0 {
+			t.Errorf("session Events().Len() = %d, want 0 after nil stateDelta", n)
+		}
+	})
+
+	t.Run("empty stateDelta does not call AppendEvent", func(t *testing.T) {
+		rec.appendEventCalls = nil
+		empty := map[string]any{}
+		if err := c.applyStateDeltaIfPresent(ctx, ssn, &empty); err != nil {
+			t.Errorf("applyStateDeltaIfPresent(empty): %v", err)
+		}
+		if n := len(rec.appendEventCalls); n != 0 {
+			t.Errorf("AppendEvent called %d times, want 0", n)
+		}
+		// Validate from session perspective: no new events.
+		getResp, err := rec.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "sess"})
+		if err != nil {
+			t.Fatalf("Get session: %v", err)
+		}
+		if n := getResp.Session.Events().Len(); n != 0 {
+			t.Errorf("session Events().Len() = %d, want 0 after empty stateDelta", n)
+		}
+	})
+
+	t.Run("non-empty stateDelta appends event with Author system and shallow-copied delta", func(t *testing.T) {
+		rec.appendEventCalls = nil
+		delta := map[string]any{"user:key": "value", "user:other": 42}
+		if err := c.applyStateDeltaIfPresent(ctx, ssn, &delta); err != nil {
+			t.Errorf("applyStateDeltaIfPresent: %v", err)
+		}
+		if n := len(rec.appendEventCalls); n != 1 {
+			t.Fatalf("AppendEvent called %d times, want 1", n)
+		}
+		ev := rec.appendEventCalls[0]
+		if ev.Author != "system" {
+			t.Errorf("event.Author = %q, want %q", ev.Author, "system")
+		}
+		if ev.Actions.StateDelta == nil {
+			t.Fatal("event.Actions.StateDelta is nil")
+		}
+		if got := ev.Actions.StateDelta["user:key"]; got != "value" {
+			t.Errorf("StateDelta[user:key] = %v, want value", got)
+		}
+		if got := ev.Actions.StateDelta["user:other"]; got != 42 {
+			t.Errorf("StateDelta[user:other] = %v, want 42", got)
+		}
+		// Shallow copy: mutating the request map after the call must not change the stored event.
+		delta["user:key"] = "mutated"
+		if got := ev.Actions.StateDelta["user:key"]; got != "value" {
+			t.Errorf("after mutating request map, StateDelta[user:key] = %v, want value (stored event must be a copy)", got)
+		}
+		// Validate from session perspective: state was merged.
+		getResp, err := rec.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "sess"})
+		if err != nil {
+			t.Fatalf("Get session: %v", err)
+		}
+		state := getResp.Session.State()
+		if got, err := state.Get("user:key"); err != nil || got != "value" {
+			t.Errorf("session state user:key = %v, err = %v; want value", got, err)
+		}
+		if got, err := state.Get("user:other"); err != nil || got != 42 {
+			t.Errorf("session state user:other = %v, err = %v; want 42", got, err)
+		}
+	})
 }
