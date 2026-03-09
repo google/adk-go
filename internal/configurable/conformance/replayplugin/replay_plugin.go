@@ -129,7 +129,7 @@ func (p *replayPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequ
 		return nil, err
 	}
 
-	return recording.LLMResponse.ToLLMResponse(), nil
+	return recording.LLMResponse, nil
 }
 
 // beforeTool intercepts tool calls, verifies them against the recording, and returns the recorded response.
@@ -307,9 +307,17 @@ func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invoca
 	}
 
 	// Parse YAML
-	var recordings recording.Recordings
-	if err := yaml.Unmarshal(data, &recordings); err != nil {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("failed to parse recordings from %s: %w", recordingsPath, err)
+	}
+
+	removeUnderscores(&root)
+	fixTypeMismatches(&root)
+
+	var recordings recording.Recordings
+	if err := root.Decode(&recordings); err != nil {
+		return nil, fmt.Errorf("failed to decode recordings: %w", err)
 	}
 
 	// Add index to each recording, based on user message index. Used for parallel execution sync.
@@ -393,7 +401,7 @@ func (p *replayPlugin) verifyAndGetNextLLMRecordingForAgent(state *invocationRep
 	}
 
 	// Strict verification of LLM request
-	err = verifyLLMRequestMatch(expectedRecording.LLMRecording.LLMRequest.ToLLMRequest(), llmRequest, agentName, currentAgentIndex)
+	err = verifyLLMRequestMatch(expectedRecording.LLMRecording.LLMRequest, llmRequest, agentName, currentAgentIndex)
 	if err != nil {
 		return nil, err
 	}
@@ -496,7 +504,7 @@ func (p *replayPlugin) verifyAndGetNextToolRecordingForAgent(state *invocationRe
 	}
 
 	// Strict verification of tool call
-	err = verifyToolCallMatch(expectedRecording.ToolRecording.ToolCall.ToGenAI(), t.Name(), args, agentName, currentAgentIndex)
+	err = verifyToolCallMatch(expectedRecording.ToolRecording.ToolCall, t.Name(), args, agentName, currentAgentIndex)
 	if err != nil {
 		return nil, err
 	}
