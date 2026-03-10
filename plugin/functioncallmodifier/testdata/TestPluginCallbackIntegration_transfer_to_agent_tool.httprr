@@ -1,5 +1,5 @@
 httprr trace v1
-1788 1869
+1788 1892
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
@@ -7,11 +7,10 @@ Content-Length: 1555
 Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools."},{"text":"You are an agent. Your internal name is \"transfer_agent\". The description about you is \"transfer agent\"."},{"text":"You have a list of other agents to transfer to:\n\nAgent name: calculator\nAgent description: calculator agent\n Skills: add, subtract, multiply, divide\n\nIf you are the best to answer the question according to your description, you\ncan answer it.\nIf another agent is better for answering the question according to its\ndescription, call 'transfer_to_agent' function to transfer the\nquestion to that agent. When transfering, do not generate any text other than\nthe function call.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","type":"string"},"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["agent_name"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 20 Feb 2026 12:51:33 GMT
+Date: Fri, 06 Mar 2026 11:26:44 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1488
+Server-Timing: gfet4t7; dur=1248
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -28,12 +27,12 @@ X-Xss-Protection: 0
             "functionCall": {
               "name": "transfer_to_agent",
               "args": {
-                "skill_id": "add",
+                "rationale": "The user is asking to add two numbers, and the calculator agent has skills for mathematical operations.",
                 "agent_name": "calculator",
-                "rationale": "The user is asking to add two numbers, and the calculator agent has an add skill to perform this operation."
+                "skill_id": "add"
               }
             },
-            "thoughtSignature": "CpcDAb4+9vvUbRRMF8bpdeOnQohIbjk0+cRhgwLusB1j/2UsBQT6EQo9xk3c80EUKw3NF6pYPtdQR7bwrAaqJ2eOV3AG6wCkRQIpSR2cQkod/oydmM/+SR2v+p0ESj2DZ3B3Y30H1yRoArelXtoeqQTijrvdzxc/HEWjWp8pUHseuChvbXj5rDC334yLXUtWP3e0nUd/N+F5X02n6OTDiwNSEkNoLR5jMvWkZPOUmZSoCNKl7lx2LRcEGyXn1uyyDMXPZsw0xdB4trnbSe1Z1leCE2PcwM+lmdwRVKOfNG4dqnGu31oS1LLScMG4/RYxlRir1NyoxonSpwTHI1TKYDSJvwX8zfCaBI6RXH46gCfSHjJkSsCvEdAnHp1sEEaJEstJ6XDHBDy0831cbYM8EJIsM2JSmgtmxFcNZlskkVXiQg8g+hta/Kkpv04dWPC8Na8QMtWNbJv9HxjgaxqV6M87nuqNuqbvZ2OZaqqyRZ7d5FLxGxNcaXhR686NFDHwW6jo1tOWhim8vWYsOCiel57lMis/1/UAUyo="
+            "thoughtSignature": "CtcDAb4+9vt0uaFTWHD8NANvxJaiZ1FCbl90j+0ZqYmZ2okyKoCefSU5KeBP+6pe4D+j6QYdFeECTFm2dXYlLTqWI+tJUaBHV+IcN0kmtM8pSJxCBkZSsD+hKQafy4YtFZxx2dz6MI7/25/SWpUi6akfqjFk00KAxkCv+uANGwOl5yvGDSf/pfSc4xwvppc/rRO5+ntv/Qo+bHTpG206bXJex7Ls2U9PoOzsU2W3UUcnz19EfuGodPi5kSXaLl2II4OdlcM/UikDIDg/bHJwdaD/RO800JPm0DqE31AxOWZzlYPLPYOAgsEi/KOUZtCz3pdbCH6YiJN+h0rUyp0MX2CdgIUGhjZS7Gs4h7sx7MIAppcIfMAFsvEy1cdFs/VZMkGzzMfrEkyuGAQmEDV0NNLH0tenVjOjaEhxLvEzJpRv25GG25+riPpnjvXY1lq6ww0g7x++MQvKmScNE86D3Jb603QPdXHf4tSnCjDXpQ3d92jM6llsKgc9XWYnBNSVL/hZl2aqG0E+dyQwE6Hn6N+uzxxIdbBixF5KZT6ZhpoyNBhzM8pK4fTbRRdpksa+4Ll5UKPJEUnikarHB6rYvu3v8+9td3FkmqNdfDiKHOmU0l26luXSR1ut"
           }
         ],
         "role": "model"
@@ -45,32 +44,31 @@ X-Xss-Protection: 0
   ],
   "usageMetadata": {
     "promptTokenCount": 307,
-    "candidatesTokenCount": 51,
-    "totalTokenCount": 442,
+    "candidatesTokenCount": 48,
+    "totalTokenCount": 446,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
         "tokenCount": 307
       }
     ],
-    "thoughtsTokenCount": 84
+    "thoughtsTokenCount": 91
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "01iYaZfoL77A0-kP3Pyv2Q0"
+  "responseId": "87mqaZfHGviskdUPz9TVuQs"
 }
-2285 1415
+2281 2187
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 2052
+Content-Length: 2048
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[transfer_agent] called tool \"transfer_to_agent\" with parameters: {\"agent_name\":\"calculator\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[transfer_agent] \"transfer_to_agent\" tool returned result: {}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator agent. You can calculate numbers."},{"text":"You are an agent. Your internal name is \"calculator\". The description about you is \"calculator agent\\n Skills: add, subtract, multiply, divide\"."},{"text":"You have a list of other agents to transfer to:\n\nAgent name: transfer_agent\nAgent description: transfer agent\n\nIf you are the best to answer the question according to your description, you\ncan answer it.\nIf another agent is better for answering the question according to its\ndescription, call 'transfer_to_agent' function to transfer the\nquestion to that agent. When transfering, do not generate any text other than\nthe function call.\n\nYour parent agent is transfer_agent. If neither the other agents nor\nyou are best for answering the question according to the descriptions, transfer\nto your parent agent. If you don't have parent agent, try answer by yourself.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","type":"string"},"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["agent_name"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[transfer_agent] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"calculator\"}"}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[transfer_agent] `transfer_to_agent` tool returned result: {}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a calculator agent. You can calculate numbers."},{"text":"You are an agent. Your internal name is \"calculator\". The description about you is \"calculator agent\\n Skills: add, subtract, multiply, divide\"."},{"text":"You have a list of other agents to transfer to:\n\nAgent name: transfer_agent\nAgent description: transfer agent\n\nIf you are the best to answer the question according to your description, you\ncan answer it.\nIf another agent is better for answering the question according to its\ndescription, call 'transfer_to_agent' function to transfer the\nquestion to that agent. When transfering, do not generate any text other than\nthe function call.\n\nYour parent agent is transfer_agent. If neither the other agents nor\nyou are best for answering the question according to the descriptions, transfer\nto your parent agent. If you don't have parent agent, try answer by yourself.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"This tool can now optionally accept skill_id and rationale parameters to guide skill-based orchestration. Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","type":"string"},"rationale":{"description":"The reasoning behind selecting this agent and skill.","type":"STRING"},"skill_id":{"description":"The specific skill to be utilized by the agent.","type":"STRING"}},"required":["agent_name"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 20 Feb 2026 12:51:34 GMT
+Date: Fri, 06 Mar 2026 11:26:46 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1174
+Server-Timing: gfet4t7; dur=1724
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -85,7 +83,7 @@ X-Xss-Protection: 0
         "parts": [
           {
             "text": "2 + 2 = 4",
-            "thoughtSignature": "CtsCAb4+9vvcjc239ncEbGfSBdZtUQD1CxjY79vrkchgBCKQRBiyWybbFGM9vzbKbItRQemDPnQ0RxD5lUL9sqLVvdMsJ4QMgXqsvoPtiB4D5MhoFJQAjrI4f7R5nhavOFTK+5GSCjSkAtAVdDqWKICKPIVL0otQ0P2XaV1BtLGuNjtPI64rn7iPM7Jow0FBAvrqSUkDHSM6qTc8AKbAymB2+4lBg8Xs1jdcP5VvOV89P+qdViho8W2KNMn9zoO5MH19onY4Ca8VE3rBZGIHhbdohgQybLhE2Ek3f3DW7kYwl1jkYjxwzk0HXocJcw8cuzy9oBYDNfB8r0DQ8qsuGyZ66VLtXiYuozegqGEbTICOTrN3Ud8yDofTeIyRnWZR4wTjwlZ91WCaiXmhgD0OmQ0MocK06orOnthr8rTNXXmg+/C847xRxy/9lJFrGzelkPgI2Fls1amYfDxABMk="
+            "thoughtSignature": "CsgHAb4+9vv/ezZy9BlvnLmEZ4H83H7Dqg/hiGbvjs3or2u7ynp0Qr0TOBU7M+8h9kjDgOd1Lrkl6rR7w+6sNxRNvGYCuaFSdjyuYcLqv64E0sBOP55TqKPXPmbF5Rb8WW35e7FSuC+13nNEHsZ77d1NSXZz7NUC8fZ+Uz3Xx0b2nMzzd4PNPNjF+TBciaspc/9ccyCpjQ5mCpTXwTDndW8CgSYqSe1Zmvoe7ddBZMM4iMikuXd5HYkGUjYdj5aVHWzyc+QUf49kGxBJwYAdQ5JQBnTtgE0U3TJbkZYVZuWqis8cn20XbKOMxYKSdzHXM5f86jq1PBqdPRyNlAZWXl6ygf6JeJMHO7CPLm4kqlZeZPpR+uNslT6wXyWJfzRuxWks6M7nb6OENwwAF+yojKgMdkBs9m4Z4VVpphiSPa/jD21ZUe6V9S4iECufE52X05JSx6MHB063zNB9TBdUze/m62ZfzS3+IfWqX4xBTlt1dSM71rGOJgR1lBqVoeNMho80eER7WScvyYbqoXb1jijSH+mUlvi3/vmvaxzKPmb+jJ5Xf+/AGI/UJUMDoD/C7nWmCdgGeJE4hazGRhfCr9nATBvXBhqmMkr69zeuEmxQXGCuhLC8XYe1j7EiFbPkQe0dp592YoBpyKTgU3ihnGXc57Gw4ye2J2FNs58/7s4hT4MwLidodeKnmBAAI8ukQzzrGuzXTR22gZ5wKH4w29dXHEd81Wixj2HB/S5ojb5UN/MjanDHrRPJs5ABKyAaqMA0PBcXH4TZmsfVfOdYL/xuH+PktX6xC4uGjn8GCDPtC6ms3O9wN5ZVGUBKXhNlTdlxEQKHjHzYUA/Sb7jSg4ODluz+I7ytQFSfj5WybUAKxTA7k1I5+Tf89n254gv926b/dngLQkt0FSIUmsUDXeN+xL6ZVcIuFU7HwAv/MlxXa0ldIPM1s0pvyvSMzMysO1UpNb/GxnOHcpS8j4IRfg/UXpLKprzIka3oCbtc7FhZIuSK9hwxmVWSZcWnat1arPNUXQuerk4mxpohHf5J0LNU+vmRG5Q4gQ+U3sEhgAvfshAQoPaSsWOKkNqBCTfGNaGskzaEl6q6HZBSrjHvpZpooCpk/t5knTk1SBeMI09T0BzuH6GaWATGkpJD8c58eWcvEupcRrcIeHuntYHsf3Xp69Fuw6MtjtslJ9q2OdzcBzZ+E3Kr8LN1jzyVFxG1jw5vi9dwGzpbxzkatl0+EH47e6XecfAynkVdtYr8W3onRO2IKjUzUwFvCET/Gvwwnd0F0w0tXACfbLQ="
           }
         ],
         "role": "model"
@@ -97,15 +95,15 @@ X-Xss-Protection: 0
   "usageMetadata": {
     "promptTokenCount": 401,
     "candidatesTokenCount": 7,
-    "totalTokenCount": 479,
+    "totalTokenCount": 626,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
         "tokenCount": 401
       }
     ],
-    "thoughtsTokenCount": 71
+    "thoughtsTokenCount": 218
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "1ViYadLQEpDo2roP-vaZ2Ao"
+  "responseId": "9LmqafHGKdf87M8PycnQ-Ak"
 }

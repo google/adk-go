@@ -80,15 +80,13 @@ func init() {
 		panic(err)
 	}
 	err = RegisterToolFactory("url_context", func(_ context.Context, _ map[string]any) (tool.Tool, error) {
-		// TODO: return geminitool.New("url_context", "url context", &genai.Tool{URLContext: &genai.URLContext{}}), nil
-		return geminitool.New("url_context", &genai.Tool{URLContext: &genai.URLContext{}}), nil
+		return geminitool.New("url_context", "url context", &genai.Tool{URLContext: &genai.URLContext{}}), nil
 	})
 	if err != nil {
 		panic(err)
 	}
 	err = RegisterToolFactory("google_maps_grounding", func(_ context.Context, _ map[string]any) (tool.Tool, error) {
-		// TODO: return geminitool.New("google_maps_grounding", "google maps grounding", &genai.Tool{GoogleMaps: &genai.GoogleMaps{}}), nil
-		return geminitool.New("google_maps_grounding", &genai.Tool{GoogleMaps: &genai.GoogleMaps{}}), nil
+		return geminitool.New("google_maps_grounding", "google maps grounding", &genai.Tool{GoogleMaps: &genai.GoogleMaps{}}), nil
 	})
 	if err != nil {
 		panic(err)

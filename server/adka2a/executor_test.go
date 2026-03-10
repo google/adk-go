@@ -690,10 +690,8 @@ func TestExecutor_Converters(t *testing.T) {
 
 			for _, e := range queue.events {
 				if ae, ok := e.(*a2a.TaskArtifactUpdateEvent); ok {
-					for _, p := range ae.Artifact.Parts {
-						if tp, ok := p.(a2a.TextPart); ok && tp.Text == "world" {
-							t.Errorf("found 'world' but expected it to be filtered")
-						}
+					if len(ae.Artifact.Parts) != 0 {
+						t.Errorf("found %d parts but expected 0", len(ae.Artifact.Parts))
 					}
 				}
 			}

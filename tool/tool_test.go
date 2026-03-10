@@ -62,7 +62,7 @@ func TestTypes(t *testing.T) {
 		},
 		{
 			name:          "geminitool",
-			constructor:   func() (tool.Tool, error) { return geminitool.New("", nil), nil },
+			constructor:   func() (tool.Tool, error) { return geminitool.New("", "", nil), nil },
 			expectedTypes: []string{requestProc},
 		},
 		{
