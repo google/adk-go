@@ -19,6 +19,7 @@ package tool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"google.golang.org/genai"
@@ -30,6 +31,9 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool/toolconfirmation"
 )
+
+// ErrConfirmationRequired indicates that the tool requires confirmation.
+var ErrConfirmationRequired = errors.New("requires confirmation, please approve or reject")
 
 // Tool defines the interface for a callable tool.
 type Tool interface {
@@ -258,7 +262,7 @@ func (t *confirmationTool) Run(ctx Context, args any) (map[string]any, error) {
 				return nil, err
 			}
 			ctx.Actions().SkipSummarization = true
-			return nil, fmt.Errorf("tool %q requires confirmation, please approve or reject", t.Name())
+			return nil, fmt.Errorf("error tool %q %w", t.Name(), ErrConfirmationRequired)
 		}
 	}
 
