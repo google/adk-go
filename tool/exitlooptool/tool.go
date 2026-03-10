@@ -35,7 +35,7 @@ func exitLoop(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
 func New() (tool.Tool, error) {
 	exitLoopTool, err := functiontool.New(functiontool.Config{
 		Name:        "exit_loop",
-		Description: "Exits the loop.\nCall this function only when you are instructed to do so.\n",
+		Description: "Exits the loop.\n\n  Call this function only when you are instructed to do so.\n  ",
 	}, exitLoop)
 	if err != nil {
 		return nil, fmt.Errorf("error creating exit loop tool: %w", err)

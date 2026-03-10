@@ -1,0 +1,42 @@
+httprr trace v1
+312 1269
+POST https://aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-2.0-flash:generateContent HTTP/1.1
+Host: aiplatform.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 78
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"ping"}],"role":"user"}],"generationConfig":{}}HTTP/2.0 401 Unauthorized
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 02 Mar 2026 09:40:38 GMT
+Server: scaffolding on HTTPServer2
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+Www-Authenticate: Bearer realm="https://accounts.google.com/"
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "error": {
+    "code": 401,
+    "message": "API keys are not supported by this API. Expected OAuth2 access token or other authentication credentials that assert a principal. See https://cloud.google.com/docs/authentication",
+    "status": "UNAUTHENTICATED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.DebugInfo",
+        "detail": "Request is missing required authentication credential. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project."
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "CREDENTIALS_MISSING",
+        "domain": "googleapis.com",
+        "metadata": {
+          "method": "google.cloud.aiplatform.v1beta1.PredictionService.GenerateContent",
+          "service": "aiplatform.googleapis.com"
+        }
+      }
+    ]
+  }
+}

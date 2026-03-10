@@ -46,16 +46,16 @@ func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.
 }
 
 func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
-	return newCallbackContext(ctx, make(map[string]any))
+	return newCallbackContext(ctx, make(map[string]any), make(map[string]int64))
 }
 
-func NewCallbackContextWithDelta(ctx agent.InvocationContext, stateDelta map[string]any) agent.CallbackContext {
-	return newCallbackContext(ctx, stateDelta)
+func NewCallbackContextWithDelta(ctx agent.InvocationContext, stateDelta map[string]any, artifactDelta map[string]int64) agent.CallbackContext {
+	return newCallbackContext(ctx, stateDelta, artifactDelta)
 }
 
-func newCallbackContext(ctx agent.InvocationContext, stateDelta map[string]any) *callbackContext {
+func newCallbackContext(ctx agent.InvocationContext, stateDelta map[string]any, artifactDelta map[string]int64) *callbackContext {
 	rCtx := NewReadonlyContext(ctx)
-	eventActions := &session.EventActions{StateDelta: stateDelta}
+	eventActions := &session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta}
 	return &callbackContext{
 		ReadonlyContext: rCtx,
 		invocationCtx:   ctx,

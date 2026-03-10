@@ -1,6 +1,6 @@
 httprr trace v1
-800 1141
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+800 1845
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
 Content-Length: 568
@@ -9,9 +9,9 @@ Content-Type: application/json
 {"contents":[{"parts":[{"text":"Report the current weather of the capital city of U.K."}],"role":"user"}],"generationConfig":{},"tools":[{"functionDeclarations":[{"description":"Retrieves the current weather report for a specified city.","name":"get_weather_report","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"report":{"type":"string"},"status":{"type":"string"}},"required":["report","status"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 05 Sep 2025 15:40:35 GMT
+Date: Fri, 20 Feb 2026 12:55:06 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=606
+Server-Timing: gfet4t7; dur=1723
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -30,37 +30,34 @@ X-Xss-Protection: 0
               "args": {
                 "city": "London"
               }
-            }
+            },
+            "thoughtSignature": "CpAEAb4+9vsutluzr9rWOQfH9dS0XV653cFDpSb/TRzRVzLknyGU1eF725i0tt9tq4t6LkEatm9ZtMbBhY0pm/IAYSwCmqDf5AnI2wsTqpgpFXuU/3EEFWGp+4wWaBqcjEZeRmPW7I4lNZEQ9Y80p8/7OIeJ7FVr14WQnqmb8wJK8H8WPo2idly7T9+J5Ybqh+fdJDAm4iIFSPvhGYnkUjmYyVzzNFLTTMgEVY+PuFQvAog1xvl/+YWl89bwJbYbaP637rbraYQSiEDhlJ/+Ki0uKyOeKt56PaIA+89bDteD1D4AK9exmtW7wjg06lPkw3g5dT5JtIl+lstayFemzZxTd3+0rW2F0FGDH4vQ1Fe6M/qNAUpdtU9rM9VR//ROw1dLT8yVDHQVKF6eDLKJBzPTmS6yYpUUurV8Vjz7wf8OY1UsNxRCeKTYUJKq9mEGkvUoOxqT+WA5EWtUiVvGv6dVVU2xtxs43p/paEMx2vWK8jAG3ol8Z++4eml7QmAFvSkv5S/kD/RWali/Spu+UfZsMJLUP/0sQP8JCxzmjBuD4GUG1v0yiXNb5I2bVOp0NOOcpNd2Y1TMfAdf7o3HjNdn1GyVffiWJ7xdct0gE0Y7XtWwU9vsevdvlsvTTshG9zOW6R9uvp51Q24HeRhrrTq/bQCO7wjC3PkUtXQNKM+OYsWjOSMjfKH3S9Ddhb9Cdppz"
           }
         ],
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": -0.0025846857045378003
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 29,
-    "candidatesTokenCount": 7,
-    "totalTokenCount": 36,
+    "promptTokenCount": 113,
+    "candidatesTokenCount": 17,
+    "totalTokenCount": 265,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 29
+        "tokenCount": 113
       }
     ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 7
-      }
-    ]
+    "thoughtsTokenCount": 135
   },
-  "modelVersion": "gemini-2.0-flash",
-  "responseId": "cwS7aOClBfqY1MkPqtmw0QI"
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "qFmYaY79GbLZ2roPsKvdOQ"
 }
-778 1140
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+778 1708
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
 Content-Length: 546
@@ -69,9 +66,9 @@ Content-Type: application/json
 {"contents":[{"parts":[{"text":"How is the weather of Paris now?"}],"role":"user"}],"generationConfig":{},"tools":[{"functionDeclarations":[{"description":"Retrieves the current weather report for a specified city.","name":"get_weather_report","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"report":{"type":"string"},"status":{"type":"string"}},"required":["report","status"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 05 Sep 2025 15:40:36 GMT
+Date: Fri, 20 Feb 2026 12:55:07 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=559
+Server-Timing: gfet4t7; dur=1339
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -90,37 +87,34 @@ X-Xss-Protection: 0
               "args": {
                 "city": "Paris"
               }
-            }
+            },
+            "thoughtSignature": "CqoDAb4+9vuYMHffdQJYJ6ErebPblkYklb38rf+UMkmKXgFs3mcKDEdvtupR5PEFt5aUhNftTB0sDsBCLCNPB+V+bReLxEuCk7wEUbya/mosSi9cj92Ql1Lpg2PNYDqyElSg/YYGa0SX7b+y4IF6s/H/PhNxS2Z7CfS/iaaau9MJkRcMH+RQeMdu+GGRJ9hT9wgPMUMuJlMPYNL7vVrW8RzCdoHUb73QxHk/NnxpbScpRg7Bi7blNPjOXh07xHzJvcUWfIRXWVvGNdUSHbQGzhGtZYBcWXWIm6HnkHlgpdyi13rDBrd36j5TIcrNe7zKC3I/uuTF0y8M0TwC6API4sTYJThXKqBXNeHra20W6gi2lzyW8fAtA9353e97hdtPJheV9X97zF3BsWKpj8uSKmc8o8EzXfu/TiJWIhw5yJBwpfv6FDscBn16CbeO8q0lPdSf+aQ2DBo9908PUHDCEheuRFClL6KyKmp53O43fyfWKotgqB0CD2t65zkdxWtiL8p9R1mmjNAGMNdtVxm89RvOrNU00QD8rdhRL2FeYFiHFVb2svTAdleNI+Ko"
           }
         ],
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": 3.2837269827723503e-06
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 24,
-    "candidatesTokenCount": 7,
-    "totalTokenCount": 31,
+    "promptTokenCount": 108,
+    "candidatesTokenCount": 17,
+    "totalTokenCount": 218,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 24
+        "tokenCount": 108
       }
     ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 7
-      }
-    ]
+    "thoughtsTokenCount": 93
   },
-  "modelVersion": "gemini-2.0-flash",
-  "responseId": "cwS7aPn6Jpak1MkP6NnioQI"
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "qlmYaZ3RDoa20-kPlJHKuQo"
 }
-791 1143
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+791 1587
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
 Content-Length: 559
@@ -129,9 +123,9 @@ Content-Type: application/json
 {"contents":[{"parts":[{"text":"Tell me about the current weather in New York"}],"role":"user"}],"generationConfig":{},"tools":[{"functionDeclarations":[{"description":"Retrieves the current weather report for a specified city.","name":"get_weather_report","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"report":{"type":"string"},"status":{"type":"string"}},"required":["report","status"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 05 Sep 2025 15:40:36 GMT
+Date: Fri, 20 Feb 2026 12:55:08 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=598
+Server-Timing: gfet4t7; dur=1413
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -150,32 +144,29 @@ X-Xss-Protection: 0
               "args": {
                 "city": "New York"
               }
-            }
+            },
+            "thoughtSignature": "CswCAb4+9vuQNOI+nK2hM31s/rM7fYTq5LKORz+pMG1NjQDg0FamFaOnnLxXjT/Ut0fA/JjHyaBHd6xKy+swUeH6YZ7Ez0timODCf2vUHV/5jCEEtkAsbKFVfrtO1Jw43dmOgy+nJ1DnDVzWfPe4Wy7HYfyDCXqIjrtbWTo5yG6nmT15xx0YChT0SpForS5liyLbjMbIVP1WhVknZLoRBeQoXWBFeb8Trb6vYi5TYLU5G4rzWKn2Ogu0GDcg62000nWPC8Ifk6A8fjqbCjr49esecCny+gkfET1bagIQG21kpoQijUM869r0rx5BDokkXeXfYfG+dMpAmO2YnyW2s7ldzF6bppzg+Ka7hGhdfL+7xJ24y4JrKwnCmnDnq+SUjPUiG8/toObyN0l+VVpHRK7R1H81ZXox69ifcn3YEDo5Zzp7+JfsjX+8MsJBktk="
           }
         ],
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": 1.9547005649656057e-06
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 25,
-    "candidatesTokenCount": 8,
-    "totalTokenCount": 33,
+    "promptTokenCount": 109,
+    "candidatesTokenCount": 18,
+    "totalTokenCount": 202,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 25
+        "tokenCount": 109
       }
     ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 8
-      }
-    ]
+    "thoughtsTokenCount": 75
   },
-  "modelVersion": "gemini-2.0-flash",
-  "responseId": "dAS7aNavC9Kd1MkPoYKfyAk"
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "q1mYadDQI96M2roPsP3UyAs"
 }

@@ -1,16 +1,17 @@
 httprr trace v1
-925 1471
+1098 1498
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 693
+Content-Length: 866
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"what is the weather in Lisbon?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"what is the weather in Lisbon?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."},{"text":"You are an agent. Your internal name is \"weather_time_agent\". The description about you is \"Agent to answer questions about the time and weather in a city.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 30 Jan 2026 13:14:20 GMT
+Date: Fri, 20 Feb 2026 12:56:22 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=669
+Server-Timing: gfet4t7; dur=1146
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -30,7 +31,7 @@ X-Xss-Protection: 0
                 "city": "Lisbon"
               }
             },
-            "thoughtSignature": "CqkCAXLI2nzzErpTSSdR9YByf9QfeQSqeMiwJPi6PvUgjum9hK2EugFQmpc6HP57AE+AGKAk6r9V2BJynJb7ilwUmgzOpiQTyQvxZjzco31w4tDsyC/yIW2O6O80ZVsdQv7feeQFlZW/EhlrbpuiORiGhj28JXm2IZILOE9Zhcqv+OSHS9EUi2Quz4RKHIffCmDcVYvDu9w3EsOf3ANjyfIYTOEFd/3aLRcHzcv9xzI/BfBdmM6aZ23USv8XRGLbjFeohJv6C1a/Z1HQPLVxKyhlOnJDuIJSWq9Cl0uPJ2/h4OrMhswXHr/x1mTtGQ9RGaVyd7mQH2Q3K1Y8EeZKYsQVY+qoC2+loA1tmu+30ViJofP2EgeYVOjcIRhdZngo8NTtFWfGLr9x4pTZ"
+            "thoughtSignature": "Co8CAb4+9vtJ3FPgMAJsra+D8rPYE5ivdOIrJkniBj6zKugMhAG7GJandOqSmtgh0NcWS2jOGENxuafNWlcIVGr4RbbCvWf3hiUsKZyWK7HijgqMmMgEWKaxBBtvkITyxhnaKF9e5Leee/RJLhK9VQg3xrvq4/LE/QAYxy38gP6AORtPQFyFMXSaxqX4rStFiInjT4eAI5KopWm45MDeYrlFAfbgMaONjkHjpULKVMzHy3wnP/EqPZiEoWlpolXm/G+7U9nBdGS+Vt3wJgnNFDpMHvpKOhuCR+9dM6D9ZH5I/x6+0jz43bx3WkxJuvQVUDfxUypwJt6R786C0oGgXUqY/Q/ai0TprSB0ik+4KnkQwQ=="
           }
         ],
         "role": "model"
@@ -41,32 +42,33 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 113,
+    "promptTokenCount": 148,
     "candidatesTokenCount": 16,
-    "totalTokenCount": 195,
+    "totalTokenCount": 226,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 113
+        "tokenCount": 148
       }
     ],
-    "thoughtsTokenCount": 66
+    "thoughtsTokenCount": 62
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "rK58aYpMvNjE3w_TgvCIBQ"
+  "responseId": "9FmYaZfhPKqk2roPnJLziAI"
 }
-1577 1379
+1718 1310
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1344
+Content-Length: 1485
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"what is the weather in Lisbon?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Lisbon"},"name":"get_weather"},"thoughtSignature":"CqkCAXLI2nzzErpTSSdR9YByf9QfeQSqeMiwJPi6PvUgjum9hK2EugFQmpc6HP57AE+AGKAk6r9V2BJynJb7ilwUmgzOpiQTyQvxZjzco31w4tDsyC/yIW2O6O80ZVsdQv7feeQFlZW/EhlrbpuiORiGhj28JXm2IZILOE9Zhcqv+OSHS9EUi2Quz4RKHIffCmDcVYvDu9w3EsOf3ANjyfIYTOEFd/3aLRcHzcv9xzI/BfBdmM6aZ23USv8XRGLbjFeohJv6C1a/Z1HQPLVxKyhlOnJDuIJSWq9Cl0uPJ2/h4OrMhswXHr/x1mTtGQ9RGaVyd7mQH2Q3K1Y8EeZKYsQVY+qoC2+loA1tmu+30ViJofP2EgeYVOjcIRhdZngo8NTtFWfGLr9x4pTZ"}],"role":"model"},{"parts":[{"functionResponse":{"name":"get_weather","response":{"error":"error tool \"get_weather\" call is rejected"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"what is the weather in Lisbon?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Lisbon"},"name":"get_weather"},"thoughtSignature":"Co8CAb4+9vtJ3FPgMAJsra+D8rPYE5ivdOIrJkniBj6zKugMhAG7GJandOqSmtgh0NcWS2jOGENxuafNWlcIVGr4RbbCvWf3hiUsKZyWK7HijgqMmMgEWKaxBBtvkITyxhnaKF9e5Leee/RJLhK9VQg3xrvq4/LE/QAYxy38gP6AORtPQFyFMXSaxqX4rStFiInjT4eAI5KopWm45MDeYrlFAfbgMaONjkHjpULKVMzHy3wnP/EqPZiEoWlpolXm/G+7U9nBdGS+Vt3wJgnNFDpMHvpKOhuCR+9dM6D9ZH5I/x6+0jz43bx3WkxJuvQVUDfxUypwJt6R786C0oGgXUqY/Q/ai0TprSB0ik+4KnkQwQ=="}],"role":"model"},{"parts":[{"functionResponse":{"name":"get_weather","response":{"error":"error tool \"get_weather\" call is rejected"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."},{"text":"You are an agent. Your internal name is \"weather_time_agent\". The description about you is \"Agent to answer questions about the time and weather in a city.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 30 Jan 2026 13:14:20 GMT
+Date: Fri, 20 Feb 2026 12:56:23 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=763
+Server-Timing: gfet4t7; dur=1309
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -80,8 +82,8 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "I am sorry, I cannot get the weather in Lisbon.",
-            "thoughtSignature": "Cs8CAXLI2nwTanQJI+Xgadyz0eVvNPp7VArACzb8//1hTw2T9TNrBB9I0UKq1yfcIXHlIPlUZnWu383h3TIFyDITyvnwBy3N63Ri3D4pfOb4KX5XQgWtLK5kxss14nRJNvpdo5QnHq3hZCm7RAuxnh+zBtzW4/t7tTpjCfPh8AQnonIqjn5ElWbav64cq6tjzeX78v/HH8cK79/YVdtM3MZ0slH4uO2cLl1I3VqEblr1qDoGGEM/L8PqqI3+JSGh6wmaDQSIyJyf+fm4+u6zcjaBN+2AkrdG1B1aS4JA3nofwdylv2RmGfDYDCW77g+75IwgZtCGaL5dNuZRuS4zqs3leT3cjOqAF5A3htZHzDrRrgIYn/UqFy/7baY47+At3D0KeMHpNNx0deHMm5VqN75u0e9KlZdwoAo1LBl3lb1Jm3wvj0zchMJhoCP0aCkrmC0="
+            "text": "I am sorry, I cannot provide the weather in Lisbon.",
+            "thoughtSignature": "CusBAb4+9vux+QLTdFecW3PR+vJ/72ko8TN6G7+tyPM4e6rII4dGIRDLEld7KqpfpVd8LAfUp5wvG4SMsfz9ISlIk+Gf9WyLuqaq1mRJf9Vt2jrKJ4dNcX06sAsm8lyqPcVnSlw2naGyCGxFsurda7zg1pPpNU/x9YrYUY7oxVyoTzbCZnd6BOSZYx/utZi97dNPTmqcgW6pON3WI+yt8+U73XaWOEVbSqHQIjPDQu088fShWg53yMf9pwLPGy04YErMs3A8bpJdhDXdC/xItIMBH5DHXEcr7luqNjUqJMcEjCwY6LveWeu+XI62HQ=="
           }
         ],
         "role": "model"
@@ -91,17 +93,17 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 153,
+    "promptTokenCount": 188,
     "candidatesTokenCount": 12,
-    "totalTokenCount": 234,
+    "totalTokenCount": 241,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 153
+        "tokenCount": 188
       }
     ],
-    "thoughtsTokenCount": 69
+    "thoughtsTokenCount": 41
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "rK58afuwL-TZvdIPzdOtWA"
+  "responseId": "9lmYacCPD96M2roPsP3UyAs"
 }
