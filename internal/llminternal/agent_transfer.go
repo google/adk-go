@@ -272,17 +272,17 @@ func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agen
 
 	var buf bytes.Buffer
 	if err := transferToAgentPromptTmpl.Execute(&buf, struct {
-		AgentName       string
-		Parent          agent.Agent
-		Targets         []agent.Agent
-		ToolName        string
-		FormattedTargets  string
+		AgentName        string
+		Parent           agent.Agent
+		Targets          []agent.Agent
+		ToolName         string
+		FormattedTargets string
 	}{
-		AgentName:       curAgent.Name(),
-		Parent:          parent,
-		Targets:         targets,
-		ToolName:        transferTool.Name(),
-		FormattedTargets:  formatTargets(targets),
+		AgentName:        curAgent.Name(),
+		Parent:           parent,
+		Targets:          targets,
+		ToolName:         transferTool.Name(),
+		FormattedTargets: formatTargets(targets),
 	}); err != nil {
 		return "", err
 	}
@@ -317,11 +317,11 @@ If you are the best to answer the question according to your description,
 you can answer it.
 
 If another agent is better for answering the question according to its
-description, call `+"`"+`{{.ToolName}}`+"`"+` function to transfer the question to that
+description, call ` + "`" + `{{.ToolName}}` + "`" + ` function to transfer the question to that
 agent. When transferring, do not generate any text other than the function
 call.
 
-**NOTE**: the only available agents for `+"`"+`{{.ToolName}}`+"`"+` function are
+**NOTE**: the only available agents for ` + "`" + `{{.ToolName}}` + "`" + ` function are
 {{.FormattedTargets}}.
 {{if .Parent}}
 If neither you nor the other agents are best for the question, transfer to your parent agent {{.Parent.Name}}.
