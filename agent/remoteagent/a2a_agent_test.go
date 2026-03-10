@@ -1237,7 +1237,7 @@ func TestRemoteAgent_DoSVulnerability(t *testing.T) {
 
 	for _, p := range parts {
 		if p == nil {
-			t.Fatalf("Found a nil part! This is the DoS vulnerability.")
+			t.Fatalf("got nil part, want it filtered out.")
 		}
 
 		if tp, ok := p.(a2a.TextPart); ok && tp.Text != "KEEP" {
