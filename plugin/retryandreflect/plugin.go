@@ -145,7 +145,7 @@ func (r *retryAndReflect) onToolError(ctx tool.Context, tool tool.Tool, args map
 
 func (r *retryAndReflect) handleToolError(ctx tool.Context, failedTool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 	// skip if the error is tool.ErrConfirmationRequired.
-	if errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmatonRejected) {
+	if errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmationRejected) {
 		return nil, nil
 	}
 

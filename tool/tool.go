@@ -35,8 +35,8 @@ import (
 // ErrConfirmationRequired indicates that the tool requires confirmation.
 var ErrConfirmationRequired = errors.New("requires confirmation, please approve or reject")
 
-// ErrConfirmatonRejected indicated that the tool call confirmaton rejected.
-var ErrConfirmatonRejected = errors.New("call is rejected")
+// ErrConfirmationRejected indicated that the tool call confirmaton rejected.
+var ErrConfirmationRejected = errors.New("call is rejected")
 
 // Tool defines the interface for a callable tool.
 type Tool interface {
@@ -249,7 +249,7 @@ func (t *confirmationTool) Run(ctx Context, args any) (map[string]any, error) {
 	// Check for Human-in-the-Loop confirmation.
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
-			return nil, fmt.Errorf("error tool %q %w", t.runnableTool.Name(), ErrConfirmatonRejected)
+			return nil, fmt.Errorf("error tool %q %w", t.runnableTool.Name(), ErrConfirmationRejected)
 		}
 	} else {
 		requireConfirmation := t.requireConfirmation

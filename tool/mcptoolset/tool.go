@@ -93,7 +93,7 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
-			return nil, fmt.Errorf("error tool %q %w", t.Name(), tool.ErrConfirmatonRejected)
+			return nil, fmt.Errorf("error tool %q %w", t.Name(), tool.ErrConfirmationRejected)
 		}
 	} else {
 		requireConfirmation := t.requireConfirmation

@@ -200,7 +200,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
-			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmatonRejected)
+			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected)
 		}
 	} else {
 		requireConfirmation := f.requireConfirmation
