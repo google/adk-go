@@ -193,6 +193,9 @@ func (r *retryAndReflect) resetFailuresForTool(ctx tool.Context, toolName string
 	defer r.mu.Unlock()
 	if scope, ok := r.scopedFailureCounters[scopeKey]; ok {
 		delete(scope, toolName)
+		if len(scope) == 0 {
+			delete(r.scopedFailureCounters, scopeKey)
+		}
 	}
 }
 

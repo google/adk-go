@@ -35,7 +35,7 @@ import (
 // ErrConfirmationRequired indicates that the tool requires confirmation.
 var ErrConfirmationRequired = errors.New("requires confirmation, please approve or reject")
 
-// ErrConfirmationRejected indicated that the tool call confirmaton rejected.
+// ErrConfirmationRejected indicated that the tool call confirmation rejected.
 var ErrConfirmationRejected = errors.New("call is rejected")
 
 // Tool defines the interface for a callable tool.
