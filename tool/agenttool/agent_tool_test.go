@@ -272,7 +272,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 	agent := createAgentWithModel(t, nil, nil, testLLM)
 	toolCtx := createToolContext(t, agent)
 
-	// Test with skipSummarization = true
+	// Test with skipSummarization = true (sets ExitLoop)
 	agentToolSkip := agenttool.New(agent, &agenttool.Config{SkipSummarization: true})
 	actions := toolCtx.Actions()
 	toolImpl, ok := agentToolSkip.(toolinternal.FunctionTool)
@@ -283,8 +283,8 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() with skipSummarization=true failed unexpectedly: %v", err)
 	}
-	if !actions.SkipSummarization {
-		t.Errorf("SkipSummarization flag not set when AgentTool was created with skipSummarization=true")
+	if !actions.ExitLoop {
+		t.Errorf("ExitLoop flag not set when AgentTool was created with skipSummarization=true")
 	}
 
 	// Test with skipSummarization = false
@@ -293,7 +293,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 	if !ok {
 		t.Fatal("agentToolNoSkip does not implement FunctionTool")
 	}
-	actions.SkipSummarization = false // Reset
+	actions.ExitLoop = false // Reset
 	// Reset mock for the second call
 	testLLM.Responses = []*genai.Content{
 		genai.NewContentFromText("test response", genai.RoleModel),
@@ -303,8 +303,8 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() with skipSummarization=false failed unexpectedly: %v", err)
 	}
-	if actions.SkipSummarization {
-		t.Errorf("SkipSummarization flag was set when AgentTool was created with skipSummarization=false")
+	if actions.ExitLoop {
+		t.Errorf("ExitLoop flag was set when AgentTool was created with skipSummarization=false")
 	}
 }
 

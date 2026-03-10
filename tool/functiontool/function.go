@@ -218,7 +218,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 			if err != nil {
 				return nil, err
 			}
-			ctx.Actions().SkipSummarization = true
+			// RequestConfirmation calls ExitLoop() internally
 			return nil, fmt.Errorf("error tool %q requires confirmation, please approve or reject", f.Name())
 		}
 	}

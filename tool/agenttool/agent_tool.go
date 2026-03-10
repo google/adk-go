@@ -125,9 +125,7 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 	}
 
 	if t.skipSummarization {
-		if actions := toolCtx.Actions(); actions != nil {
-			actions.SkipSummarization = true
-		}
+		toolCtx.ExitLoop()
 	}
 
 	var agentInputSchema *genai.Schema
