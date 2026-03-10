@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"slices"
+	"strings"
 
 	"github.com/google/safehtml/template"
 	"google.golang.org/genai"
@@ -100,7 +101,18 @@ type TransferToAgentTool struct{}
 // Description implements tool.Tool.
 func (t *TransferToAgentTool) Description() string {
 	return `Transfer the question to another agent.
-This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
+
+  This tool hands off control to another agent when it's more suitable to
+  answer the user's question according to the agent's description.
+
+  Note:
+    For most use cases, you should use TransferToAgentTool instead of this
+    function directly. TransferToAgentTool provides additional enum constraints
+    that prevent LLMs from hallucinating invalid agent names.
+
+  Args:
+    agent_name: the agent name to transfer to.
+  `
 }
 
 // Name implements tool.Tool.
@@ -260,38 +272,57 @@ func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agen
 
 	var buf bytes.Buffer
 	if err := transferToAgentPromptTmpl.Execute(&buf, struct {
-		AgentName string
-		Parent    agent.Agent
-		Targets   []agent.Agent
-		ToolName  string
+		AgentName       string
+		Parent          agent.Agent
+		Targets         []agent.Agent
+		ToolName        string
+		FormattedTargets  string
 	}{
-		AgentName: curAgent.Name(),
-		Parent:    parent,
-		Targets:   targets,
-		ToolName:  transferTool.Name(),
+		AgentName:       curAgent.Name(),
+		Parent:          parent,
+		Targets:         targets,
+		ToolName:        transferTool.Name(),
+		FormattedTargets:  formatTargets(targets),
 	}); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
 }
 
+func formatTargets(targets []agent.Agent) string {
+	availableAgentNames := make([]string, len(targets))
+	for i, t := range targets {
+		availableAgentNames[i] = t.Name()
+	}
+	slices.Sort(availableAgentNames)
+	formattedAgentNames := make([]string, len(availableAgentNames))
+	for i, name := range availableAgentNames {
+		formattedAgentNames[i] = fmt.Sprintf("`%s`", name)
+	}
+	return strings.Join(formattedAgentNames, ", ")
+}
+
 // Prompt source:
 //  flows/llm_flows/agent_transfer.py _build_target_agents_instructions.
 
-const agentTransferInstructionTemplate = `You have a list of other agents to transfer to:
+const agentTransferInstructionTemplate = `
+You have a list of other agents to transfer to:
+
 {{range .Targets}}
 Agent name: {{.Name}}
 Agent description: {{.Description}}
+
 {{end}}
-If you are the best to answer the question according to your description, you
-can answer it.
+If you are the best to answer the question according to your description,
+you can answer it.
+
 If another agent is better for answering the question according to its
-description, call '{{.ToolName}}' function to transfer the
-question to that agent. When transfering, do not generate any text other than
-the function call.
+description, call `+"`"+`{{.ToolName}}`+"`"+` function to transfer the question to that
+agent. When transferring, do not generate any text other than the function
+call.
+
+**NOTE**: the only available agents for `+"`"+`{{.ToolName}}`+"`"+` function are
+{{.FormattedTargets}}.
 {{if .Parent}}
-Your parent agent is {{.Parent.Name}}. If neither the other agents nor
-you are best for answering the question according to the descriptions, transfer
-to your parent agent. If you don't have parent agent, try answer by yourself.
-{{end}}
-`
+If neither you nor the other agents are best for the question, transfer to your parent agent {{.Parent.Name}}.
+{{end}}`

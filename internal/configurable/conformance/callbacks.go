@@ -27,6 +27,7 @@ import (
 
 func beforeAgentCallback1(ctx agent.CallbackContext) (*genai.Content, error) {
 	err := ctx.State().Set("before_agent_callback_state_key", "value1")
+	fmt.Printf("Before agent callback 1: %v\n", err)
 	return nil, err
 }
 
@@ -49,10 +50,10 @@ func shortcutAgentExecution(ctx agent.CallbackContext) (*genai.Content, error) {
 		if !errors.Is(err, session.ErrStateKeyNotExist) {
 			return nil, err
 		}
-		err = ctx.State().Set("conversation_limit_reached", true)
+		err = ctx.State().Set("conversation_limit_reached", "True")
 		return nil, err
 	}
-	if limitReached, ok := val.(bool); ok && limitReached {
+	if limitReached, ok := val.(string); ok && limitReached == "True" {
 		return &genai.Content{
 			Parts: []*genai.Part{
 				{Text: "Sorry, you have reached the limit of the conversation."},
