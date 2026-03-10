@@ -1206,3 +1206,42 @@ func TestRemoteAgent_CustomConverters(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteAgent_DoSVulnerability(t *testing.T) {
+	event := &session.Event{
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			{Text: "KEEP"},
+			{Text: "DROP"},
+		}, genai.RoleModel)},
+	}
+
+	cfg := A2AConfig{
+		GenAIPartConverter: func(ctx context.Context, event *session.Event, p *genai.Part) (a2a.Part, error) {
+			if p.Text == "DROP" {
+				return nil, nil
+			}
+			return a2a.TextPart{Text: p.Text}, nil
+		},
+	}
+
+	ictx := newTestInvocationContext(t, "test-agent", newUserHello())
+
+	parts, err := convertParts(ictx, cfg, event)
+	if err != nil {
+		t.Fatalf("convertParts() error = %v", err)
+	}
+
+	if len(parts) != 1 {
+		t.Errorf("Expected 1 part after filtering, got %d", len(parts))
+	}
+
+	for _, p := range parts {
+		if p == nil {
+			t.Fatalf("Found a nil part! This is the DoS vulnerability.")
+		}
+
+		if tp, ok := p.(a2a.TextPart); ok && tp.Text != "KEEP" {
+			t.Errorf("got %s, want 'KEEP'", tp.Text)
+		}
+	}
+}

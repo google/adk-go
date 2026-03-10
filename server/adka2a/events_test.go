@@ -695,3 +695,86 @@ func TestToSessionEventWithParts(t *testing.T) {
 		})
 	}
 }
+
+func TestToSessionEvent_DoSVulnerability(t *testing.T) {
+	taskID, contextID, branch, agentName := a2a.NewTaskID(), a2a.NewContextID(), "main", "a2a agent"
+	a2aAgent, err := agent.New(agent.Config{Name: agentName})
+	if err != nil {
+		t.Fatalf("failed to create an agent: %v", err)
+	}
+
+	keepPart := a2a.TextPart{Text: "KEEP"}
+	dropPart := a2a.TextPart{Text: "DROP"}
+
+	filterConverter := func(ctx context.Context, ev a2a.Event, p a2a.Part) (*genai.Part, error) {
+		if tp, ok := p.(a2a.TextPart); ok && tp.Text == "DROP" {
+			return nil, nil
+		}
+		return ToGenAIPart(p)
+	}
+
+	testCases := []struct {
+		name  string
+		input a2a.Event
+	}{
+		{
+			name: "task event",
+			input: &a2a.Task{
+				ID:        taskID,
+				ContextID: contextID,
+				Artifacts: []*a2a.Artifact{{Parts: []a2a.Part{keepPart, dropPart}}},
+				Status: a2a.TaskStatus{
+					State:   a2a.TaskStateCompleted,
+					Message: &a2a.Message{Parts: []a2a.Part{keepPart, dropPart}},
+				},
+			},
+		},
+		{
+			name: "message event",
+			input: &a2a.Message{
+				Parts: []a2a.Part{keepPart, dropPart},
+			},
+		},
+		{
+			name: "artifact update event",
+			input: &a2a.TaskArtifactUpdateEvent{
+				Artifact: &a2a.Artifact{Parts: []a2a.Part{keepPart, dropPart}},
+			},
+		},
+		{
+			name: "status update event",
+			input: &a2a.TaskStatusUpdateEvent{
+				TaskID:    taskID,
+				ContextID: contextID,
+				Final:     true,
+				Status: a2a.TaskStatus{
+					Message: &a2a.Message{Parts: []a2a.Part{keepPart, dropPart}},
+				},
+			},
+		},
+	}
+
+	ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Branch: branch, Agent: a2aAgent})
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ToSessionEventWithParts(ictx, tc.input, filterConverter)
+			if err != nil {
+				t.Fatalf("ToSessionEventWithParts() error = %v", err)
+			}
+			if got == nil {
+				t.Fatal("got event is nil, expected valid event with filtered parts")
+			}
+
+			parts := got.LLMResponse.Content.Parts
+			for _, p := range parts {
+				if p == nil {
+					t.Fatalf("Found a nil part! This is the DoS vulnerability.")
+				}
+				if p.Text != "KEEP" {
+					t.Errorf("got %s, want 'KEEP'", p.Text)
+				}
+			}
+		})
+	}
+}
