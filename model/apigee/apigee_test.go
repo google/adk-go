@@ -185,7 +185,7 @@ func TestParseModelName(t *testing.T) {
 				t.Setenv(googleGenaiUseVertexAIEnvVar, tc.vertexEnv)
 			} else {
 				if err := os.Unsetenv(googleGenaiUseVertexAIEnvVar); err != nil {
-					t.Errorf("failed to unset GOOGLE_CLOUD_PROJECT: %v", err)
+					t.Errorf("failed to unset %s: %v", googleGenaiUseVertexAIEnvVar, err)
 				}
 			}
 			got, err := parseModelName(tc.modelName)
@@ -216,7 +216,9 @@ func TestNewModelWithCustomHeaders(t *testing.T) {
 func TestNewModelWithoutProxyURL(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
-	os.Unsetenv(apigeeProxyURLEnvVar)
+	if err := os.Unsetenv(apigeeProxyURLEnvVar); err != nil {
+		t.Errorf("failed to unset %s: %v", apigeeProxyURLEnvVar, err)
+	}
 	_, err := NewModel(ctx, "apigee/gemini-1.5-flash")
 	if err == nil {
 		t.Errorf("NewModel() did not return an error when proxy URL is not set")
@@ -233,8 +235,12 @@ func TestNewModelVertexMissingProjectOrLocation(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
 	t.Setenv(googleGenaiUseVertexAIEnvVar, "true")
-	os.Unsetenv(projectEnvVar)
-	os.Unsetenv(locationEnvVar)
+	if err := os.Unsetenv(projectEnvVar); err != nil {
+		t.Errorf("failed to unset %s: %v", projectEnvVar, err)
+	}
+	if err := os.Unsetenv(locationEnvVar); err != nil {
+		t.Errorf("failed to unset %s: %v", locationEnvVar, err)
+	}
 	_, err := NewModel(ctx, "apigee/gemini-1.5-flash", WithProxyURL(proxyURL))
 	if err == nil || !strings.Contains(err.Error(), projectEnvVar) {
 		t.Errorf("NewModel() with vertex enabled but no project env var should fail")
