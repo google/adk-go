@@ -61,7 +61,7 @@ func newEventFromParts(author string, parts ...*genai.Part) *session.Event {
 	if author == "user" {
 		role = genai.RoleUser
 	}
-	event := &session.Event{Author: author}
+	event := &session.Event{Author: author, Actions: session.EventActions{StateDelta: map[string]any{}, ArtifactDelta: map[string]int64{}}}
 	if len(parts) > 0 {
 		event.Content = genai.NewContentFromParts(parts, role)
 	}
@@ -304,7 +304,6 @@ func TestPresentAsUserMessage(t *testing.T) {
 		cmpopts.IgnoreFields(session.Event{}, "ID"),
 		cmpopts.IgnoreFields(session.Event{}, "InvocationID"),
 		cmpopts.IgnoreFields(session.Event{}, "Timestamp"),
-		cmpopts.IgnoreFields(session.EventActions{}, "StateDelta"),
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

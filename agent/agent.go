@@ -233,7 +233,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
 	}
 
 	if pluginManager != nil {
@@ -295,7 +295,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
 	}
 
 	if pluginManager != nil {
