@@ -580,15 +580,15 @@ func TestMergeEventActions(t *testing.T) {
 	}
 }
 
-// partialOnlyModel is a mock LLM that always returns partial responses in streaming mode.
+// mockStreamingLLM is a mock LLM that returns a canned sequence of responses.
 // This simulates the scenario where the model's last streaming chunk has Partial=true,
 // for example when reaching a max token limit.
-type partialOnlyModel struct {
+type mockStreamingLLM struct {
 	responses []*model.LLMResponse
 }
 
-func (m *partialOnlyModel) Name() string { return "partial-mock" }
-func (m *partialOnlyModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *mockStreamingLLM) Name() string { return "mock-llm" }
+func (m *mockStreamingLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		for _, r := range m.responses {
 			if !yield(r, nil) {
@@ -663,7 +663,7 @@ func TestFlowRunPartialLastEvent(t *testing.T) {
 			})
 
 			f := &Flow{
-				Model:             &partialOnlyModel{responses: tc.responses},
+				Model:             &mockStreamingLLM{responses: tc.responses},
 				RequestProcessors: nil, // no preprocessors needed
 			}
 
