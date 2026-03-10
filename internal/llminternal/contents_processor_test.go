@@ -156,14 +156,14 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 				{
 					Parts: []*genai.Part{
 						{Text: "For context:"},
-						{Text: `[anotherAgent] called tool "func1" with parameters: null`},
+						{Text: "[anotherAgent] called tool `func1` with parameters: null"},
 					},
 					Role: "user",
 				},
 				{
 					Parts: []*genai.Part{
 						{Text: "For context:"},
-						{Text: `[anotherAgent] "func1" tool returned result: null`},
+						{Text: "[anotherAgent] `func1` tool returned result: null"},
 					},
 					Role: "user",
 				},
@@ -468,7 +468,7 @@ func TestConvertForeignEvent(t *testing.T) {
 						Role: "user",
 						Parts: []*genai.Part{
 							{Text: "For context:"},
-							{Text: `[foreign] called tool "test" with parameters: {"a":"b"}`},
+							{Text: "[foreign] called tool `test` with parameters: {\"a\":\"b\"}"},
 						},
 					},
 				},
@@ -498,7 +498,7 @@ func TestConvertForeignEvent(t *testing.T) {
 						Role: "user",
 						Parts: []*genai.Part{
 							{Text: "For context:"},
-							{Text: `[foreign] "test" tool returned result: {"c":"d"}`},
+							{Text: "[foreign] `test` tool returned result: {\"c\":\"d\"}"},
 						},
 					},
 				},
