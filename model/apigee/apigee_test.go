@@ -62,8 +62,12 @@ func TestNewModelWithValidModelStrings(t *testing.T) {
 				t.Setenv("GOOGLE_CLOUD_PROJECT", "test-project")
 				t.Setenv("GOOGLE_CLOUD_LOCATION", "test-location")
 			} else {
-				os.Unsetenv("GOOGLE_CLOUD_PROJECT")
-				os.Unsetenv("GOOGLE_CLOUD_LOCATION")
+				if err := os.Unsetenv("GOOGLE_CLOUD_PROJECT"); err != nil {
+					t.Errorf("failed to unset GOOGLE_CLOUD_PROJECT: %v", err)
+				}
+				if err := os.Unsetenv("GOOGLE_CLOUD_LOCATION"); err != nil {
+					t.Errorf("failed to unset GOOGLE_CLOUD_LOCATION: %v", err)
+				}
 			}
 			client := newTestClient(func(req *http.Request) (*http.Response, error) {
 				// Check if the request URL is what we expect
@@ -180,7 +184,9 @@ func TestParseModelName(t *testing.T) {
 			if tc.vertexEnv != "" {
 				t.Setenv(googleGenaiUseVertexAIEnvVar, tc.vertexEnv)
 			} else {
-				os.Unsetenv(googleGenaiUseVertexAIEnvVar)
+				if err := os.Unsetenv(googleGenaiUseVertexAIEnvVar); err != nil {
+					t.Errorf("failed to unset GOOGLE_CLOUD_PROJECT: %v", err)
+				}
 			}
 			got, err := parseModelName(tc.modelName)
 			if (err != nil) != tc.wantErr {
