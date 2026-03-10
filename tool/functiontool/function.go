@@ -81,7 +81,7 @@ func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.T
 
 	var zeroArgs TArgs
 	argsType := reflect.TypeOf(zeroArgs)
-	for argsType != nil && argsType.Kind() == reflect.Ptr {
+	for argsType != nil && argsType.Kind() == reflect.Pointer {
 		argsType = argsType.Elem()
 	}
 	if argsType == nil || (argsType.Kind() != reflect.Struct && argsType.Kind() != reflect.Map) {
