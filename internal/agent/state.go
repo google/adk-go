@@ -32,6 +32,7 @@ const (
 	TypeSequentialAgent Type = "SequentialAgent"
 	TypeParallelAgent   Type = "ParallelAgent"
 	TypeCustomAgent     Type = "CustomAgent"
+	TypeRemoteAgent     Type = "RemoteAgent"
 )
 
 func (s *State) internal() *State { return s }
