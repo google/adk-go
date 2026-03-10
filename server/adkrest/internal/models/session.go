@@ -23,6 +23,16 @@ import (
 	"google.golang.org/adk/session"
 )
 
+// State delta directive constants
+const (
+	// stateUpdateKey is the special key used in state delta directives
+	// to indicate a patch operation (e.g., delete).
+	stateUpdateKey = "$adk_state_update"
+
+	// stateUpdateDelete is the directive value indicating a key should be deleted.
+	stateUpdateDelete = "delete"
+)
+
 // Session represents an agent's session.
 type Session struct {
 	ID        string         `json:"id"`
@@ -36,6 +46,10 @@ type Session struct {
 type CreateSessionRequest struct {
 	State  map[string]any `json:"state"`
 	Events []Event        `json:"events"`
+}
+
+type PatchSessionStateDeltaRequest struct {
+	StateDelta map[string]any `json:"stateDelta"`
 }
 
 type SessionID struct {
@@ -104,4 +118,54 @@ func (s Session) Validate() error {
 		return fmt.Errorf("events is nil")
 	}
 	return nil
+}
+
+// NormalizeStateDelta processes state delta directives and converts them
+// into a normalized representation suitable for the service layer.
+// Delete directives ({"$adk_state_update": "delete"}) are converted to nil values.
+// Returns a new map with normalized values.
+func NormalizeStateDelta(stateDelta map[string]any) (map[string]any, error) {
+	normalized := make(map[string]any, len(stateDelta))
+	for key, value := range stateDelta {
+		// Check if value is a directive (map with special key)
+		directive, isDirective := value.(map[string]any)
+		if isDirective {
+			// Check if this map contains a state update directive
+			updateValue, hasDirective := directive[stateUpdateKey]
+			if hasDirective {
+				normalizedValue, err := processDirective(key, updateValue)
+				if err != nil {
+					return nil, err
+				}
+				normalized[key] = normalizedValue
+				continue
+			}
+			// else: it's a normal map value, fall through and set it as-is
+		}
+
+		// Normal value (including normal maps): keep it directly.
+		normalized[key] = value
+	}
+
+	return normalized, nil
+}
+
+// processDirective handles a state update directive and returns the normalized value.
+func processDirective(key string, updateValue any) (any, error) {
+	updateStr, ok := updateValue.(string)
+	if !ok {
+		return nil, fmt.Errorf(
+			"invalid directive value type for key %q: expected string, got %T",
+			key,
+			updateValue,
+		)
+	}
+
+	switch updateStr {
+	case stateUpdateDelete:
+		// Delete directive: return nil to indicate deletion
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unknown state update directive %q for key %q", updateStr, key)
+	}
 }
