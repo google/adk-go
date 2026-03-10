@@ -39,6 +39,8 @@ type inMemoryService struct {
 	artifacts omap.Map[string, *genai.Part]
 }
 
+var _ Service = (*inMemoryService)(nil)
+
 // InMemoryService returns a new in-memory artifact service.
 func InMemoryService() Service {
 	return &inMemoryService{}
@@ -284,5 +286,3 @@ func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*
 	}
 	return &VersionsResponse{Versions: versions}, nil
 }
-
-var _ Service = (*inMemoryService)(nil)

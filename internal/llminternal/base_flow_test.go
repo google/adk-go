@@ -33,6 +33,11 @@ type mockFunctionTool struct {
 	runFunc func(tool.Context, map[string]any) (map[string]any, error)
 }
 
+var (
+	_ toolinternal.FunctionTool     = (*mockFunctionTool)(nil)
+	_ toolinternal.RequestProcessor = (*mockFunctionTool)(nil)
+)
+
 func (m *mockFunctionTool) Name() string {
 	return m.name
 }

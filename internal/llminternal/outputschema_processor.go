@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/llminternal/googlellm"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -104,23 +105,29 @@ func needOutputSchemaProcessor(state *State) bool {
 	return hasTools && googlellm.NeedsOutputSchemaProcessor(state.Model)
 }
 
-// setModelResponseTool implements tool.Tool and toolinternal.FunctionTool.
+// setModelResponseTool implements [tool.Tool] and [toolinternal.FunctionTool].
 type setModelResponseTool struct {
 	schema *genai.Schema
 }
 
+var _ toolinternal.FunctionTool = (*setModelResponseTool)(nil)
+
+// Name implements [toolinternal.FunctionTool].
 func (t *setModelResponseTool) Name() string {
 	return "set_model_response"
 }
 
+// Description implements [toolinternal.FunctionTool].
 func (t *setModelResponseTool) Description() string {
 	return "Set your final response using the required output schema. Use this tool to provide your final structured answer instead of outputting text directly."
 }
 
+// IsLongRunning implements [toolinternal.FunctionTool].
 func (t *setModelResponseTool) IsLongRunning() bool {
 	return false
 }
 
+// Declaration implements [toolinternal.FunctionTool].
 func (t *setModelResponseTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{
 		Name:                 t.Name(),
@@ -129,6 +136,7 @@ func (t *setModelResponseTool) Declaration() *genai.FunctionDeclaration {
 	}
 }
 
+// Run implements [toolinternal.FunctionTool].
 func (t *setModelResponseTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {

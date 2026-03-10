@@ -54,6 +54,8 @@ type InvocationContext struct {
 	params InvocationContextParams
 }
 
+var _ agent.InvocationContext = (*InvocationContext)(nil)
+
 func (c *InvocationContext) Artifacts() agent.Artifacts {
 	return c.params.Artifacts
 }
@@ -99,5 +101,3 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 	newCtx.Context = ctx
 	return &newCtx
 }
-
-var _ agent.InvocationContext = (*InvocationContext)(nil)

@@ -22,10 +22,12 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-// holds LLMAgent internal state
+// Agent holds LLMAgent internal state.
 type Agent interface {
 	internal() *State
 }
+
+type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
 
 type State struct {
 	Model model.LLM
@@ -51,7 +53,7 @@ type State struct {
 	OutputKey string
 }
 
-type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
+var _ Agent = (*State)(nil)
 
 func (s *State) internal() *State { return s }
 

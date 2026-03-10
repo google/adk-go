@@ -101,6 +101,8 @@ type mockGoogleLLM struct {
 	nameVal string
 }
 
+var _ GoogleLLM = (*mockGoogleLLM)(nil)
+
 func (m *mockGoogleLLM) GetGoogleLLMVariant() genai.Backend {
 	return m.variant
 }
@@ -108,5 +110,3 @@ func (m *mockGoogleLLM) GetGoogleLLMVariant() genai.Backend {
 func (m *mockGoogleLLM) Name() string {
 	return m.nameVal
 }
-
-var _ GoogleLLM = (*mockGoogleLLM)(nil)

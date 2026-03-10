@@ -21,11 +21,11 @@ import (
 	"google.golang.org/adk/session"
 )
 
-var _ Agent = (*testAgent)(nil)
-
 type testAgent struct {
 	name string
 }
+
+var _ Agent = (*testAgent)(nil)
 
 func (a *testAgent) Name() string {
 	return a.name

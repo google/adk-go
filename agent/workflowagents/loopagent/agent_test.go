@@ -353,6 +353,8 @@ type FakeLLM struct {
 	skipSummarization bool
 }
 
+var _ model.LLM = (*FakeLLM)(nil)
+
 func (f *FakeLLM) Name() string {
 	return "fake-llm"
 }

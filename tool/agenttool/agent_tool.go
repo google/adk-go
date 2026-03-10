@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
@@ -41,6 +42,11 @@ type agentTool struct {
 	agent             agent.Agent
 	skipSummarization bool
 }
+
+var (
+	_ toolinternal.FunctionTool     = (*agentTool)(nil)
+	_ toolinternal.RequestProcessor = (*agentTool)(nil)
+)
 
 // Config holds the configuration for an agent tool.
 type Config struct {
@@ -64,17 +70,17 @@ func New(agent agent.Agent, cfg *Config) tool.Tool {
 	}
 }
 
-// Name implements tool.Tool.
+// Name implements [toolinternal.FunctionTool].
 func (t *agentTool) Name() string {
 	return t.agent.Name()
 }
 
-// Description implements tool.Tool.
+// Description implements [toolinternal.FunctionTool].
 func (t *agentTool) Description() string {
 	return t.agent.Description()
 }
 
-// IsLongRunning implements tool.Tool.
+// IsLongRunning implements [toolinternal.FunctionTool].
 func (t *agentTool) IsLongRunning() bool {
 	return false
 }
@@ -83,6 +89,8 @@ func (t *agentTool) IsLongRunning() bool {
 // It generates a function declaration based on the agent's input schema.
 // If the agent does not have an input schema, a default schema with a
 // "request" string parameter is used.
+//
+// Declaration implements [toolinternal.FunctionTool].
 func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 	decl := &genai.FunctionDeclaration{
 		Name:        t.Name(),
@@ -118,6 +126,8 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 // Run executes the wrapped agent with the provided arguments.
 // It creates a new session for the sub-agent, runs the agent, and returns
 // the final result.
+//
+// Run implements [toolinternal.FunctionTool].
 func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
@@ -251,6 +261,8 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 }
 
 // ProcessRequest adds the agent tool's function declaration to the LLM request.
+//
+// ProcessRequest implements [toolinternal.RequestProcessor].
 func (t *agentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }

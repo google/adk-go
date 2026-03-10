@@ -73,6 +73,8 @@ type TestSession struct {
 	UpdatedAt     time.Time
 }
 
+var _ session.Session = (*TestSession)(nil)
+
 func (s TestSession) ID() string {
 	return s.Id.SessionID
 }
@@ -100,6 +102,8 @@ func (s TestSession) LastUpdateTime() time.Time {
 type FakeSessionService struct {
 	Sessions map[SessionKey]TestSession
 }
+
+var _ session.Service = (*FakeSessionService)(nil)
 
 type SessionKey struct {
 	AppName   string
@@ -184,5 +188,3 @@ func (s *FakeSessionService) AppendEvent(ctx context.Context, curSession session
 	s.Sessions[testSession.Id] = *testSession
 	return nil
 }
-
-var _ session.Service = (*FakeSessionService)(nil)

@@ -24,6 +24,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/model"
@@ -134,6 +135,11 @@ type functionTool[TArgs, TResults any] struct {
 
 	requireConfirmationProvider func(TArgs) bool
 }
+
+var (
+	_ toolinternal.FunctionTool     = (*functionTool[any, any])(nil)
+	_ toolinternal.RequestProcessor = (*functionTool[any, any])(nil)
+)
 
 // Description implements tool.Tool.
 func (f *functionTool[TArgs, TResults]) Description() string {

@@ -284,4 +284,6 @@ type mockSession struct {
 	sessionID string
 }
 
+var _ session.Session = (*mockSession)(nil)
+
 func (m *mockSession) ID() string { return m.sessionID }

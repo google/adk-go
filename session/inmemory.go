@@ -34,7 +34,7 @@ import (
 
 type stateMap map[string]any
 
-// inMemoryService is an in-memory implementation of sessionService.Service.
+// inMemoryService is an in-memory implementation of [Service].
 // Thread-safe.
 type inMemoryService struct {
 	mu        sync.RWMutex
@@ -42,6 +42,8 @@ type inMemoryService struct {
 	userState map[string]map[string]stateMap
 	appState  map[string]stateMap
 }
+
+var _ Service = (*inMemoryService)(nil)
 
 func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
 	if req.AppName == "" || req.UserID == "" {
@@ -312,6 +314,8 @@ type session struct {
 	updatedAt time.Time
 }
 
+var _ Session = (*session)(nil)
+
 func (s *session) ID() string {
 	return s.id.sessionID
 }
@@ -470,5 +474,3 @@ func copySessionWithoutStateAndEvents(sess *session) *session {
 		updatedAt: sess.updatedAt,
 	}
 }
-
-var _ Service = (*inMemoryService)(nil)

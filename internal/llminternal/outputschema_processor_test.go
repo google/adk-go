@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -35,6 +36,8 @@ import (
 type mockTool struct {
 	name string
 }
+
+var _ toolinternal.FunctionTool = (*mockTool)(nil)
 
 func (m *mockTool) Name() string        { return m.name }
 func (m *mockTool) Description() string { return "mock tool" }
@@ -49,6 +52,8 @@ type mockLLM struct {
 	name    string
 	variant *genai.Backend
 }
+
+var _ googlellm.GoogleLLM = (*mockLLM)(nil)
 
 func (m *mockLLM) Name() string { return m.name }
 

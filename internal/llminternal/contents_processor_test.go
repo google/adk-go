@@ -37,6 +37,8 @@ type testModel struct {
 	model.LLM
 }
 
+var _ model.LLM = (*testModel)(nil)
+
 // Test behavior around Agent's IncludeContents.
 func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	const agentName = "testAgent"
@@ -931,6 +933,11 @@ type fakeSession struct {
 	events []*session.Event
 }
 
+var (
+	_ session.Session = (*fakeSession)(nil)
+	_ session.Events  = (*fakeSession)(nil)
+)
+
 func (s *fakeSession) State() session.State {
 	return nil
 }
@@ -966,8 +973,3 @@ func (s *fakeSession) Len() int {
 func (s *fakeSession) At(i int) *session.Event {
 	return s.events[i]
 }
-
-var (
-	_ session.Session = (*fakeSession)(nil)
-	_ session.Events  = (*fakeSession)(nil)
-)
