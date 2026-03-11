@@ -1,17 +1,16 @@
 httprr trace v1
-807 1204
+799 1427
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 575
+Content-Length: 567
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools."},{"text":"You are an agent. Your internal name is \"transfer_agent\". The description about you is \"transfer agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"name":"other_tool","parametersJsonSchema":{"additionalProperties":false,"properties":{"Num":{"type":"integer"}},"required":["Num"],"type":"object"},"responseJsonSchema":{"type":"string"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+{"contents":[{"parts":[{"text":"Can you add 2 and 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a transfer agent. You can transfer to other agents using your tools.\n\nYou are an agent. Your internal name is \"transfer_agent\". The description about you is \"transfer agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"name":"other_tool","parametersJsonSchema":{"additionalProperties":false,"properties":{"Num":{"type":"integer"}},"required":["Num"],"type":"object"},"responseJsonSchema":{"type":"string"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 20 Feb 2026 12:51:26 GMT
+Date: Tue, 10 Mar 2026 14:09:48 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=979
+Server-Timing: gfet4t7; dur=783
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -26,7 +25,7 @@ X-Xss-Protection: 0
         "parts": [
           {
             "text": "2 + 2 = 4",
-            "thoughtSignature": "CsABAb4+9vsHtz4/zYGRDzidP5GJdcesiSPqwWjPC0rDQ7VZg69k6UmQv3JJ5Mld2R1gO04+zJ8vChL05E5gDzDvvG8EB+uMmvKRkDZv150TFvSb9PY0/Q3KWzTqWv2Z/1LDEHrlYT10X/DBkBXTBupUPj7TgmNcbRoXVhA6AeryvqDIjN0YjSVBpBXA388SCHQ40cpY4oze0i0CE5dNADkH7O5e3Vw8UYkK05Tvic6SpST+snU4xmLb3Q27+atX8HSV"
+            "thoughtSignature": "CpADAb4+9vt+i6+qQR9zvUte0JZ0M5mqvUhdXgi2bUStUEEqH545LXdrNyIc9r2VrrE8QCS9rO3AOH4uoa60V3gxcATTMry6j/rHwuza2udWz9q65/YEJljJ4hbz9Uri399vsCHsJnz+81Cb9BJB9Stt9q0R6Yo6jDFV+oNfmw7UZej+SocDq6YvltlrwzboLYN5FYhWhoPnY0GobaNLfu8sgOKSyDqh0D0K5W5RV9ByiZUd2tlJv03Hy9H+XSEXS5r1WyX6xh5jhioTp16+ORB2okWACdzxysRrP+sxGEtBeeF2LXRhVwOCmHp8XIxlN/I/qnj0at8XjoVeEeLqqr+z7QBcT0lu68k7pVh11n7CkFmlhgyeXD/33PSO8JIlLWRejywf0NpyUafI4ftLX57xkfaDxAaBK+wy1UiR1tek8Ab9rRIPPqKOqi1iyQUn/0n8jTNOoxoIgpqE42ZxyKPUN0M1fRntnfHgWxhUTqRNBGU7oYemx9MRsmWob14FE9vt1YKUZhqzUSU8htO6Oq3cqw=="
           }
         ],
         "role": "model"
@@ -36,17 +35,17 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 82,
+    "promptTokenCount": 83,
     "candidatesTokenCount": 7,
-    "totalTokenCount": 125,
+    "totalTokenCount": 166,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 82
+        "tokenCount": 83
       }
     ],
-    "thoughtsTokenCount": 36
+    "thoughtsTokenCount": 76
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "zViYadvqOd6M2roPsP3UyAs"
+  "responseId": "KyawacSTEqvzkdUPlY6CsAU"
 }

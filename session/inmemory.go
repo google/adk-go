@@ -207,7 +207,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	sess, ok := curSession.(*session)
 	if !ok {
-		return fmt.Errorf("unexpected session type %T", sess)
+		return fmt.Errorf("unexpected session type %T for session ID %s", curSession, curSession.ID())
 	}
 
 	s.mu.Lock()
