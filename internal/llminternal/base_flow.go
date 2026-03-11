@@ -203,7 +203,11 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				continue
 			}
 
-			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
+			toolConfirmationEvent, err := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
 			if toolConfirmationEvent != nil {
 				if !yield(toolConfirmationEvent, nil) {
 					return
