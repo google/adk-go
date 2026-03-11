@@ -181,7 +181,7 @@ func resolveProxyURL(proxyURL string) string {
 	return os.Getenv(apigeeProxyURLEnvVar)
 }
 
-func generateHTTPOptions(proxyURL string, apiVersion string, customHeaders http.Header) *genai.HTTPOptions {
+func generateHTTPOptions(proxyURL, apiVersion string, customHeaders http.Header) *genai.HTTPOptions {
 	httpOptions := &genai.HTTPOptions{
 		BaseURL: proxyURL,
 	}
