@@ -60,6 +60,19 @@ type PluginConfig struct {
 	CloseTimeout time.Duration
 }
 
+type RunOption func(*runOptions)
+
+type runOptions struct {
+	stateDelta map[string]any
+}
+
+// WithStateDelta sets a state delta for the run invocation.
+func WithStateDelta(delta map[string]any) RunOption {
+	return func(o *runOptions) {
+		o.stateDelta = delta
+	}
+}
+
 // New creates a new [Runner].
 func New(cfg Config) (*Runner, error) {
 	if cfg.Agent == nil {
@@ -111,11 +124,16 @@ type Runner struct {
 // Run runs the agent for the given user input, yielding events from agents.
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
 	return func(yield func(*session.Event, error) bool) {
+		options := runOptions{}
+		for _, opt := range opts {
+			opt(&options)
+		}
+
 		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
 			AppName:   r.appName,
 			UserID:    userID,
@@ -168,7 +186,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			UserContent: msg,
 			RunConfig:   &cfg,
 		})
-		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager)
+		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -232,7 +250,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	}
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager) (agent.InvocationContext, error) {
+func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.InvocationContext, error) {
 	if msg == nil {
 		return ctx, nil
 	}
@@ -278,6 +296,9 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 	event.Author = "user"
 	event.LLMResponse = model.LLMResponse{
 		Content: msg,
+	}
+	if stateDelta != nil {
+		event.Actions.StateDelta = stateDelta
 	}
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {

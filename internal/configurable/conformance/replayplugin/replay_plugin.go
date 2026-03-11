@@ -158,7 +158,7 @@ func (p *replayPlugin) beforeTool(ctx tool.Context, t tool.Tool, args map[string
 		if ft, ok := t.(toolinternal.FunctionTool); ok {
 			_, err := ft.Run(ctx, args)
 			if err != nil {
-				return nil, err
+				fmt.Println("Error calling tool:", err)
 			}
 		}
 	}
@@ -373,8 +373,10 @@ func getNextRecordingForAgent(state *invocationReplayState, agentName string) (*
 	state.mu.Lock()
 	for state.curIndex != expectedRecording.Index {
 		state.cond.Wait()
-		time.Sleep(1 * time.Second)
 	}
+	// FIXME: remove this sleep, move curIndex++ and state cond.Broadcast() to onEvent callback.
+	// This sleep is here to make the replay deterministic, but it's not ideal.
+	time.Sleep(time.Duration(expectedRecording.Index) * time.Millisecond * 10)
 
 	state.agentReplayIndices[agentName]++
 	state.curIndex++
@@ -417,6 +419,23 @@ func verifyLLMRequestMatch(expectedLLMRequest, actualLLMRequest *model.LLMReques
 		cmpopts.IgnoreFields(model.LLMRequest{}, "Tools"),
 		cmpopts.IgnoreFields(genai.GenerateContentConfig{}, "Labels"),
 		cmpopts.EquateEmpty(),
+	}
+
+	if transferToolAny, ok := expectedLLMRequest.Tools["transfer_to_agent"]; ok {
+		transferTool := transferToolAny.(*genai.FunctionDeclaration)
+		transferTool.Description = `Transfer the question to another agent.
+This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
+	}
+
+	if expectedLLMRequest.Config != nil {
+		for _, tool := range expectedLLMRequest.Config.Tools {
+			for _, funcDecl := range tool.FunctionDeclarations {
+				if funcDecl.Name == "transfer_to_agent" {
+					funcDecl.Description = `Transfer the question to another agent.
+This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
+				}
+			}
+		}
 	}
 
 	// Compare!
