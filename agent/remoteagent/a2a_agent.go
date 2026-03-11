@@ -15,8 +15,11 @@
 package remoteagent
 
 import (
+	"context"
 	"fmt"
 	"iter"
+	"log"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
@@ -45,6 +48,9 @@ type A2AEventConverter func(ctx agent.ReadonlyContext, req *a2a.MessageSendParam
 //
 // If it returns non-nil result or error, it gets emitted instead of the original result.
 type AfterA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.MessageSendParams, resp *session.Event, err error) (*session.Event, error)
+
+// A2ARemoteTaskCleanupCallback is called if Run context was canceled before a terminal event was received from the remote A2A server.
+type A2ARemoteTaskCleanupCallback func(ctx context.Context, client *a2aclient.Client, taskID a2a.TaskID)
 
 // A2AConfig is used to describe and configure a remote agent.
 type A2AConfig struct {
@@ -105,6 +111,11 @@ type A2AConfig struct {
 	ClientFactory *a2aclient.Factory
 	// MessageSendConfig is attached to a2a.MessageSendParams sent on every agent invocation.
 	MessageSendConfig *a2a.MessageSendConfig
+
+	// RemoteTaskCleanupCallback is called if Run context was canceled before a terminal event was received from the remote A2A server.
+	// If no callback is provided the default behavior is to make a cancel RPC request with 5 second timeout.
+	// The context passed to this callback is the original context with Err() still set.
+	RemoteTaskCleanupCallback A2ARemoteTaskCleanupCallback
 }
 
 // NewA2A creates a remote A2A agent. A2A (Agent-To-Agent) protocol is used for communication with an
@@ -188,7 +199,14 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return
 		}
 
+		var lastEvent a2a.Event
+		defer func() {
+			cleanupRemoteTaskOnContextCancelation(ctx, cfg, client, lastEvent)
+		}()
+
 		processEvent := func(a2aEvent a2a.Event, a2aErr error) bool {
+			lastEvent = a2aEvent
+
 			var err error
 			var event *session.Event
 			if cfg.Converter != nil {
@@ -230,6 +248,38 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 				return
 			}
 		}
+	}
+}
+
+func cleanupRemoteTaskOnContextCancelation(ctx context.Context, cfg A2AConfig, client *a2aclient.Client, lastEvent a2a.Event) {
+	if lastEvent == nil || ctx.Err() == nil {
+		return
+	}
+
+	taskID := lastEvent.TaskInfo().TaskID
+	if taskID == "" {
+		return
+	}
+	if _, ok := lastEvent.(*a2a.Message); ok {
+		return
+	}
+	if tu, ok := lastEvent.(*a2a.TaskStatusUpdateEvent); ok && tu.Status.State.Terminal() {
+		return
+	}
+	if t, ok := lastEvent.(*a2a.Task); ok && t.Status.State.Terminal() {
+		return
+	}
+
+	if cfg.RemoteTaskCleanupCallback != nil {
+		cfg.RemoteTaskCleanupCallback(ctx, client, taskID)
+		return
+	}
+
+	cancelCtx, cancelTimeout := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancelTimeout()
+	_, err := client.CancelTask(cancelCtx, &a2a.TaskIDParams{ID: taskID})
+	if err != nil {
+		log.Printf("failed to cancel task %s: %v", taskID, err)
 	}
 }
 
@@ -284,6 +334,7 @@ func convertParts(ctx agent.InvocationContext, cfg A2AConfig, event *session.Eve
 }
 
 func destroy(client *a2aclient.Client) {
-	// TODO(yarolegovich): log ignored error
-	_ = client.Destroy()
+	if err := client.Destroy(); err != nil {
+		log.Printf("failed to destroy client: %v", err)
+	}
 }
