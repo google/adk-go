@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"path/filepath"
@@ -36,7 +37,12 @@ import (
 	"google.golang.org/adk/tool/loadartifactstool"
 )
 
+var (
+	adkFlags = full.DefineFlags()
+)
+
 func main() {
+	flag.Parse()
 	ctx := context.Background()
 
 	model, err := gemini.NewModel(ctx, "gemini-2.0-flash-001", nil)
@@ -84,9 +90,8 @@ func main() {
 		AgentLoader:     agent.NewSingleLoader(a),
 	}
 
-	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err := full.Run(ctx, adkFlags, config); err != nil {
+		log.Fatalf("Run failed: %v", err)
 	}
 }
 

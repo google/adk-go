@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 
@@ -34,6 +35,10 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
+)
+
+var (
+	adkFlags = full.DefineFlags()
 )
 
 func saveReportfunc(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
@@ -63,6 +68,7 @@ func (a *AuthInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContex
 }
 
 func main() {
+	flag.Parse()
 	ctx := context.Background()
 	apiKey := os.Getenv("GOOGLE_API_KEY")
 
@@ -109,8 +115,7 @@ func main() {
 		},
 	}
 
-	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err := full.Run(ctx, adkFlags, config); err != nil {
+		log.Fatalf("Run failed: %v", err)
 	}
 }

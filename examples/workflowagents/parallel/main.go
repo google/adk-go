@@ -17,11 +17,11 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"iter"
 	"log"
 	rand "math/rand/v2"
-	"os"
 	"time"
 
 	"google.golang.org/genai"
@@ -34,7 +34,12 @@ import (
 	"google.golang.org/adk/session"
 )
 
+var (
+	adkFlags = full.DefineFlags()
+)
+
 func main() {
+	flag.Parse()
 	ctx := context.Background()
 
 	subAgent1, err := agent.New(agent.Config{
@@ -70,9 +75,8 @@ func main() {
 		AgentLoader: agent.NewSingleLoader(parallelAgent),
 	}
 
-	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err := full.Run(ctx, adkFlags, config); err != nil {
+		log.Fatalf("Run failed: %v", err)
 	}
 }
 

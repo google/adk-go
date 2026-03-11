@@ -16,8 +16,6 @@
 package launcher
 
 import (
-	"context"
-
 	"github.com/a2aproject/a2a-go/a2asrv"
 
 	"google.golang.org/adk/agent"
@@ -27,32 +25,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/telemetry"
 )
-
-// Launcher is the main interface for running an ADK application.
-// It is responsible for parsing command-line arguments and executing the
-// corresponding logic.
-type Launcher interface {
-	// Execute parses command-line arguments and runs the launcher.
-	Execute(ctx context.Context, config *Config, args []string) error
-	// CommandLineSyntax returns a string describing the command-line flags and arguments.
-	CommandLineSyntax() string
-}
-
-// SubLauncher is an interface for launchers that can be composed within a parent
-// launcher, like the universal launcher. Each SubLauncher corresponds to a
-// specific mode of operation (e.g., 'console' or 'web').
-type SubLauncher interface {
-	// Keyword returns the command-line keyword that activates this sub-launcher.
-	Keyword() string
-	// Parse parses the arguments for the sub-launcher. It should return any unparsed arguments.
-	Parse(args []string) ([]string, error)
-	// CommandLineSyntax returns a string describing the command-line flags and arguments for the sub-launcher.
-	CommandLineSyntax() string
-	// SimpleDescription provides a brief, one-line description of the sub-launcher's function.
-	SimpleDescription() string
-	// Run executes the sub-launcher's main logic.
-	Run(ctx context.Context, config *Config) error
-}
 
 // Config contains parameters for web & console execution: sessions, artifacts, agents etc
 type Config struct {

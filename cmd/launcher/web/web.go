@@ -22,171 +22,123 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/internal/telemetry"
-	"google.golang.org/adk/cmd/launcher/universal"
-	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/session"
 )
 
-// webConfig contains parameters for launching web server
-type webConfig struct {
-	port            int
-	writeTimeout    time.Duration
-	readTimeout     time.Duration
-	idleTimeout     time.Duration
-	shutdownTimeout time.Duration
-	otelToCloud     bool
+// Config contains parameters for launching web server
+type Config struct {
+	Port            int
+	WriteTimeout    time.Duration
+	ReadTimeout     time.Duration
+	IdleTimeout     time.Duration
+	ShutdownTimeout time.Duration
+	OTelToCloud     bool
+
+	EnableA2A   bool
+	EnableAPI   bool
+	EnableWebUI bool
+
+	A2A   A2AConfig
+	API   APIConfig
+	WebUI WebUIConfig
 }
 
-// webLauncher can launch web server
-type webLauncher struct {
-	flags        *flag.FlagSet
-	config       *webConfig
-	sublaunchers []Sublauncher
-	// maps keyword to sublauncher for the keywords parsed from command line
-	activeSublaunchers map[string]Sublauncher
+func DefineFlags(cfg *Config) {
+	DefineA2AFlags(&cfg.A2A)
+	DefineAPIFlags(&cfg.API)
+	DefineWebUIFlags(&cfg.WebUI)
+
+	flag.BoolVar(&cfg.EnableA2A, "adk_weba2a_enable", true, "Enable the ADK A2A server")
+	flag.BoolVar(&cfg.EnableAPI, "adk_webapi_enable", true, "Enable the ADK REST API server")
+	flag.BoolVar(&cfg.EnableWebUI, "adk_webui_enable", true, "Enable the ADK development web UI.  Not for production use")
+
+	flag.IntVar(&cfg.Port, "adk_web_port", 8080, "Localhost port for the server")
+	flag.DurationVar(&cfg.WriteTimeout, "adk_web_write_timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
+	flag.DurationVar(&cfg.ReadTimeout, "adk_web_read_timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
+	flag.DurationVar(&cfg.IdleTimeout, "adk_web_idle_timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
+	flag.DurationVar(&cfg.ShutdownTimeout, "adk_web_shutdown_timeout", 15*time.Second, "Server shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
+	flag.BoolVar(&cfg.OTelToCloud, "adk_web_otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 }
 
-// Execute implements launcher.Launcher.
-func (w *webLauncher) Execute(ctx context.Context, config *launcher.Config, args []string) error {
-	remainingArgs, err := w.Parse(args)
-	if err != nil {
-		return fmt.Errorf("cannot parse args: %w", err)
-	}
-	// do not accept additional arguments
-	err = universal.ErrorOnUnparsedArgs(remainingArgs)
-	if err != nil {
-		return fmt.Errorf("cannot parse all the arguments: %w", err)
-	}
-	return w.Run(ctx, config)
+// Launcher can launch web server
+type Launcher struct {
+	config *Config
+
+	apiSubLauncher   *APISubLauncher
+	a2aSubLauncher   *A2ASubLauncher
+	webUISubLauncher *WebUISubLauncher
 }
 
-// Sublauncher defines an interface for extending the WebLauncher.
-// Each sublauncher can add its own routes, wrap existing handlers, and parse its own command-line flags.
-type Sublauncher interface {
-	// Keyword is used to request usage of the Sublauncher from command-line
-	Keyword() string
-	// Parse after parsing command line args returns the remaining un-parsed arguments or error
-	Parse(args []string) ([]string, error)
-	// CommandLineSyntax returns a formatted string explaining command line syntax to end user
-	CommandLineSyntax() string
-	// SimpleDescription returns a short explanatory text displayed to end user
-	SimpleDescription() string
-
-	// SetupSubrouters adds sublauncher-specific routes to the router.
-	SetupSubrouters(router *mux.Router, config *launcher.Config) error
-	// UserMessage is a hook for sublaunchers to print a message to the user when the web server starts.
-	UserMessage(webURL string, printer func(v ...any))
-}
-
-// CommandLineSyntax implements launcher.Launcher.
-func (w *webLauncher) CommandLineSyntax() string {
-	var b strings.Builder
-	fmt.Fprint(&b, util.FormatFlagUsage(w.flags))
-	fmt.Fprintf(&b, "  You may specify sublaunchers:\n")
-	for _, l := range w.sublaunchers {
-		fmt.Fprintf(&b, "    * %s - %s\n", l.Keyword(), l.SimpleDescription())
-	}
-	fmt.Fprintf(&b, "  Sublaunchers syntax:\n")
-	for _, l := range w.sublaunchers {
-		fmt.Fprintf(&b, "    %s\n  %s\n", l.Keyword(), l.CommandLineSyntax())
-	}
-	return b.String()
-}
-
-// Keyword implements launcher.SubLauncher.
-func (w *webLauncher) Keyword() string {
-	return "web"
-}
-
-// Parse implements launcher.SubLauncher. It parses the web launcher's flags
-// and then iterates through the remaining arguments to find and parse arguments
-// for any specified sublaunchers. It returns any arguments that are not processed.
-func (w *webLauncher) Parse(args []string) ([]string, error) {
-	keyToSublauncher := make(map[string]Sublauncher)
-	for _, l := range w.sublaunchers {
-		if _, ok := keyToSublauncher[l.Keyword()]; ok {
-			return nil, fmt.Errorf("cannot create universal launcher. Keywords for sublaunchers should be unique and they are not: '%s'", l.Keyword())
-		}
-		keyToSublauncher[l.Keyword()] = l
+// NewLauncher creates a new web launcher.
+func NewLauncher(cfg *Config) *Launcher {
+	l := &Launcher{
+		config: cfg,
 	}
 
-	err := w.flags.Parse(args)
-	if err != nil || !w.flags.Parsed() {
-		return nil, fmt.Errorf("failed to parse web flags: %v", err)
+	if cfg.EnableAPI {
+		l.apiSubLauncher = NewAPISubLauncher(&cfg.API)
+	}
+	if cfg.EnableA2A {
+		l.a2aSubLauncher = NewA2ASubLauncher(&cfg.A2A)
+	}
+	if cfg.EnableWebUI {
+		l.webUISubLauncher = NewWebUISubLauncher(&cfg.WebUI)
 	}
 
-	restArgs := w.flags.Args()
-	w.activeSublaunchers = make(map[string]Sublauncher)
-
-	for len(restArgs) > 0 {
-		keyword := restArgs[0]
-		if _, ok := w.activeSublaunchers[keyword]; ok {
-			// already processed
-			return restArgs, fmt.Errorf("the keyword %q is specified and processed more than once, which is not allowed", keyword)
-		}
-
-		if sublauncher, ok := keyToSublauncher[keyword]; ok {
-			// skip the keyword and move on
-			restArgs, err = sublauncher.Parse(restArgs[1:])
-			if err != nil {
-				return nil, fmt.Errorf("the %q launcher cannot parse arguments: %v", keyword, err)
-			}
-			w.activeSublaunchers[keyword] = sublauncher
-		} else {
-			// not known keyword, let it be processed elsewhere
-			break
-		}
-	}
-	return restArgs, nil
+	return l
 }
 
 // Run implements launcher.SubLauncher.
-func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
+func (w *Launcher) Run(ctx context.Context, config *launcher.Config) error {
 	if config.SessionService == nil {
 		config.SessionService = session.InMemoryService()
 	}
 
 	router := BuildBaseRouter()
 
-	// check if there are any active sublaunchers
-	if len(w.activeSublaunchers) == 0 {
-		availableSublaunchers := make([]string, len(w.sublaunchers))
-		for i, l := range w.sublaunchers {
-			availableSublaunchers[i] = l.Keyword()
+	if w.config.EnableAPI {
+		if err := w.apiSubLauncher.SetupSubrouters(router, config); err != nil {
+			return fmt.Errorf("while setting up API subrouter: %w", err)
 		}
-		return fmt.Errorf("no active sublaunchers found - please specify them in the command line. Possible values: %v", availableSublaunchers)
 	}
-
-	// Setup subrouters
-	for _, l := range w.sublaunchers {
-		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
-			if err := l.SetupSubrouters(router, config); err != nil {
-				return fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
-			}
+	if w.config.EnableA2A {
+		if err := w.a2aSubLauncher.SetupSubrouters(router, config); err != nil {
+			return fmt.Errorf("while setting up A2A subrouter: %w", err)
+		}
+	}
+	if w.config.EnableWebUI {
+		if err := w.webUISubLauncher.SetupSubrouters(router, config); err != nil {
+			return fmt.Errorf("while setting up WebUI subrouter: %w", err)
 		}
 	}
 
 	log.Printf("Starting the web server: %+v", w.config)
 	log.Println()
-	webUrl := fmt.Sprintf("http://localhost:%v", fmt.Sprint(w.config.port))
-	log.Printf("Web servers starts on %s", webUrl)
-	for _, l := range w.activeSublaunchers {
-		l.UserMessage(webUrl, log.Println)
+	webURL := fmt.Sprintf("http://localhost:%v", fmt.Sprint(w.config.Port))
+	log.Printf("Web servers starts on %s", webURL)
+	if w.config.EnableAPI {
+		log.Printf("       api:  you can access API using %s%s", webURL, w.config.API.PathPrefix)
+		log.Printf("       api:      for instance: %s%s/list-apps", webURL, w.config.API.PathPrefix)
+	}
+	if w.config.EnableA2A {
+		log.Printf("       a2a:  you can access A2A using jsonrpc protocol: %s", webURL)
+	}
+	if w.config.EnableWebUI {
+		log.Printf("       webui:  you can access API using %s%s", webURL, WebUIPathPrefix)
 	}
 	log.Println()
 
 	srv := http.Server{
-		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
-		WriteTimeout: w.config.writeTimeout,
-		ReadTimeout:  w.config.readTimeout,
-		IdleTimeout:  w.config.idleTimeout,
+		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.Port)),
+		WriteTimeout: w.config.WriteTimeout,
+		ReadTimeout:  w.config.ReadTimeout,
+		IdleTimeout:  w.config.IdleTimeout,
 		Handler:      router,
 	}
 
@@ -198,7 +150,7 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 		close(errChan)
 	}()
 
-	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.otelToCloud)
+	telemetryService, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, w.config.OTelToCloud)
 	if err != nil {
 		return fmt.Errorf("telemetry initialization failed: %v", err)
 	}
@@ -206,7 +158,7 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	select {
 	case <-ctx.Done():
 		log.Println("Shutting down the web server...")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), w.config.shutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), w.config.ShutdownTimeout)
 		defer cancel()
 		serverErr := srv.Shutdown(shutdownCtx)
 		telemetryErr := telemetryService.Shutdown(shutdownCtx)
@@ -216,31 +168,6 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 			return nil
 		}
 		return fmt.Errorf("server failed: %v", err)
-	}
-}
-
-// SimpleDescription implements launcher.SubLauncher.
-func (w *webLauncher) SimpleDescription() string {
-	return "starts web server with additional sub-servers specified by sublaunchers"
-}
-
-// NewLauncher creates a new WebLauncher. It should be extended by providing
-// one or more Sublaunchers that add the actual content and functionality.
-func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
-	config := &webConfig{}
-
-	fs := flag.NewFlagSet("web", flag.ContinueOnError)
-	fs.IntVar(&config.port, "port", 8080, "Localhost port for the server")
-	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
-	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
-	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
-	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 15*time.Second, "Server shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
-	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
-
-	return &webLauncher{
-		config:       config,
-		flags:        fs,
-		sublaunchers: sublaunchers,
 	}
 }
 

@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -34,6 +35,10 @@ import (
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptoolset"
+)
+
+var (
+	adkFlags = full.DefineFlags()
 )
 
 // This example demonstrates 2 ways to use MCP tools with ADK:
@@ -86,6 +91,8 @@ func githubMCPTransport(ctx context.Context) mcp.Transport {
 }
 
 func main() {
+	flag.Parse()
+
 	// Create context that cancels on interrupt signal (Ctrl+C)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -128,8 +135,7 @@ func main() {
 	config := &launcher.Config{
 		AgentLoader: agent.NewSingleLoader(a),
 	}
-	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err := full.Run(ctx, adkFlags, config); err != nil {
+		log.Fatalf("Run failed: %v", err)
 	}
 }

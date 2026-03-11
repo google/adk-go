@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"net"
 	"net/http"
@@ -38,6 +39,10 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
+)
+
+var (
+	adkFlags = full.DefineFlags()
 )
 
 // newWeatherAgent creates a simple LLM-agent as in the quickstart example.
@@ -108,6 +113,7 @@ func startWeatherAgentServer() string {
 }
 
 func main() {
+	flag.Parse()
 	ctx := context.Background()
 
 	a2aServerAddress := startWeatherAgentServer()
@@ -124,8 +130,7 @@ func main() {
 		AgentLoader: agent.NewSingleLoader(remoteAgent),
 	}
 
-	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err := full.Run(ctx, adkFlags, config); err != nil {
+		log.Fatalf("Run failed: %v", err)
 	}
 }
