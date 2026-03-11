@@ -158,9 +158,15 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 								FunctionCall: &genai.FunctionCall{
 									Name: toolconfirmation.FunctionCallName,
 									Args: map[string]any{
-										"originalFunctionCall": confirmingFunctionCall,
-										"toolConfirmation": toolconfirmation.ToolConfirmation{
-											Hint: "Are you sure?",
+										"originalFunctionCall": map[string]any{
+											"id":   "call_1",
+											"name": "test_tool",
+											"args": map[string]any{"arg": "val"},
+										},
+										"toolConfirmation": map[string]any{
+											"hint":      "Are you sure?",
+											"confirmed": false,
+											"payload":   nil,
 										},
 									},
 								},
@@ -174,7 +180,10 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := generateRequestConfirmationEvent(tt.invocationContext, tt.functionCallEvent, tt.functionResponseEvent)
+			got, err := generateRequestConfirmationEvent(tt.invocationContext, tt.functionCallEvent, tt.functionResponseEvent)
+			if err != nil {
+				t.Fatalf("generateRequestConfirmationEvent() returned unexpected error: %v", err)
+			}
 
 			if diff := cmp.Diff(tt.wantEvent, got,
 				cmpopts.IgnoreFields(session.Event{}, "Timestamp", "LongRunningToolIDs", "ID"),
@@ -239,7 +248,10 @@ func TestGenerateRequestConfirmationEventHasID(t *testing.T) {
 		},
 	}
 
-	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	got, err := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if err != nil {
+		t.Fatalf("generateRequestConfirmationEvent() returned unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil event")
 	}

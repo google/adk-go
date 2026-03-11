@@ -15,9 +15,12 @@
 package llminternal
 
 import (
+	"fmt"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -33,12 +36,12 @@ func generateRequestConfirmationEvent(
 	invocationContext agent.InvocationContext,
 	functionCallEvent *session.Event,
 	functionResponseEvent *session.Event,
-) *session.Event {
+) (*session.Event, error) {
 	if functionResponseEvent == nil || len(functionResponseEvent.Actions.RequestedToolConfirmations) == 0 {
-		return nil
+		return nil, nil
 	}
 	if functionCallEvent == nil || functionCallEvent.Content == nil {
-		return nil
+		return nil, nil
 	}
 
 	parts := []*genai.Part{}
@@ -55,9 +58,17 @@ func generateRequestConfirmationEvent(
 		}
 
 		// Prepare arguments for the adk_request_confirmation call
+		originalCallMap, err := converters.ToMapStructure(originalFunctionCall)
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize original function call: %w", err)
+		}
+		confirmationMap, err := converters.ToMapStructure(confirmation)
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize tool confirmation: %w", err)
+		}
 		args := map[string]any{
-			"originalFunctionCall": originalFunctionCall,
-			"toolConfirmation":     confirmation,
+			"originalFunctionCall": originalCallMap,
+			"toolConfirmation":     confirmationMap,
 		}
 
 		requestConfirmationFC := &genai.FunctionCall{
@@ -73,7 +84,7 @@ func generateRequestConfirmationEvent(
 	}
 
 	if len(parts) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	ev := session.NewEvent(invocationContext.InvocationID())
@@ -86,5 +97,5 @@ func generateRequestConfirmationEvent(
 		},
 	}
 	ev.LongRunningToolIDs = longRunningToolIDs
-	return ev
+	return ev, nil
 }
