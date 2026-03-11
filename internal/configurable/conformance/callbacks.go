@@ -27,7 +27,6 @@ import (
 
 func beforeAgentCallback1(ctx agent.CallbackContext) (*genai.Content, error) {
 	err := ctx.State().Set("before_agent_callback_state_key", "value1")
-	fmt.Printf("Before agent callback 1: %v\n", err)
 	return nil, err
 }
 
