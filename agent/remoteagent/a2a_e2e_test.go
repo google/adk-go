@@ -26,7 +26,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -1118,49 +1117,6 @@ func newGeminiModel(t *testing.T, modelName string) model.LLM {
 		t.Fatalf("failed to create model: %v", err)
 	}
 	return model
-}
-
-type storedTask struct {
-	task    *a2a.Task
-	version a2a.TaskVersion
-}
-
-type taskStore struct {
-	mu    sync.Mutex
-	tasks map[string]*storedTask
-}
-
-var _ a2asrv.TaskStore = (*taskStore)(nil)
-
-func (s *taskStore) Get(ctx context.Context, tid a2a.TaskID) (*a2a.Task, a2a.TaskVersion, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	stored, ok := s.tasks[string(tid)]
-	if !ok {
-		return nil, a2a.TaskVersionMissing, a2a.ErrTaskNotFound
-	}
-	return stored.task, stored.version, nil
-}
-
-func (s *taskStore) Save(ctx context.Context, task *a2a.Task, event a2a.Event, prev *a2a.Task, prevVersion a2a.TaskVersion) (a2a.TaskVersion, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	stored, ok := s.tasks[string(task.ID)]
-	if ok && prevVersion != a2a.TaskVersionMissing && stored.version != prevVersion {
-		return a2a.TaskVersionMissing, a2a.ErrConcurrentTaskModification
-	}
-	version := prevVersion
-	if version == a2a.TaskVersionMissing {
-		version = 1
-	} else {
-		version = prevVersion + 1
-	}
-	s.tasks[string(task.ID)] = &storedTask{task: task, version: version}
-	return version, nil
-}
-
-func (*taskStore) List(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
-	return nil, fmt.Errorf("not implemented")
 }
 
 func TestA2AMultiHopInputRequiredCancellation(t *testing.T) {

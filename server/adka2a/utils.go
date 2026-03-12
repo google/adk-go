@@ -44,15 +44,8 @@ func findRemoteSubagents(root agent.Agent) []remoteAgent {
 			return
 		}
 		config := iagent.Reveal(ia).Config
-		var remoteState *iremoteagent.RemoteAgentState
-		if s, ok := config.(iremoteagent.RemoteAgentState); ok {
-			remoteState = &s
-		} else if s, ok := config.(*iremoteagent.RemoteAgentState); ok {
-			remoteState = s
-		}
-
-		if remoteState != nil && remoteState.A2A != nil {
-			result = append(result, remoteAgent{agent: agent, config: remoteState.A2A})
+		if state, ok := config.(iremoteagent.RemoteAgentState); ok && state.A2A != nil {
+			result = append(result, remoteAgent{agent: agent, config: state.A2A})
 			return
 		}
 		for _, sa := range agent.SubAgents() {

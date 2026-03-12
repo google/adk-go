@@ -244,9 +244,6 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 					if !yield(toEmit, nil) {
 						return false
 					}
-					if toEmit.TurnComplete {
-						return false
-					}
 				}
 			}
 			return true
