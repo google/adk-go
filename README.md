@@ -29,6 +29,101 @@ This Go version of ADK is ideal for developers building cloud-native agent appli
 
 ---
 
+## 🆕 OpenAI Adapter for Local LLMs
+
+**This fork adds OpenAI-compatible adapter support**, enabling you to run ADK agents on:
+- 🖥️ **Local LLMs** (LM Studio, Ollama)
+- ☁️ **OpenAI API** (GPT-4, GPT-3.5-turbo)
+- 🔧 **Any OpenAI-compatible endpoint**
+
+### ✨ Features
+- ✅ **Multi-turn tool calling** - Full conversation flow with tool execution
+- ✅ **Streaming responses** - Server-Sent Events (SSE) for real-time output
+- ✅ **Session management** - Automatic conversation history with TTL
+- ✅ **Error handling** - Exponential backoff, rate limiting, retry logic
+- ✅ **Comprehensive testing** - 146 tests, 74.8% coverage
+
+### 🚀 Quick Start
+
+**1. Start vLLM with Docker** (recommended — supports MTP speculative decoding)
+```bash
+docker compose up -d
+# First run downloads ~3GB model; subsequent starts use cached weights.
+# Wait for health check: curl http://localhost:8000/health
+```
+
+**2. Run Example**
+```bash
+cd examples/openai
+go build -o weather_agent main.go
+./weather_agent console
+```
+
+**3. Try it**
+```
+> What's the weather in London?
+Agent: The weather in London is sunny with a temperature of 22°C...
+```
+
+<details>
+<summary>Alternative: LM Studio / Ollama</summary>
+
+```bash
+# LM Studio (port 1234):
+export OPENAI_BASE_URL=http://localhost:1234/v1
+
+# Ollama (port 11434):
+export OPENAI_BASE_URL=http://localhost:11434/v1
+```
+</details>
+
+### 📦 Usage
+
+```go
+import "google.golang.org/adk/model/openai"
+
+// Create OpenAI model adapter
+model, err := openai.NewModel("Qwen/Qwen3.5-4B", &openai.Config{
+    BaseURL: "http://localhost:8000/v1",
+})
+if err != nil {
+    // Handle error
+}
+
+// Create agent with tools
+agent, err := llmagent.New(llmagent.Config{
+    Name:  "my_assistant",
+    Model: model,
+    Tools: []tool.Tool{/* your tools */},
+})
+if err != nil {
+    // Handle error
+}
+```
+
+### 🏗️ Architecture
+
+```
+model/openai/
+├── openai.go          # Main adapter implementation
+├── streaming.go       # SSE streaming support
+├── converters.go      # ADK ↔ OpenAI format conversion
+├── tool_executor.go   # Tool execution engine
+├── session.go         # Session management
+└── error_handling.go  # Retry & error logic
+```
+
+### 🤖 Supported Models
+
+| Model | Provider | Tool Calling | Status | Notes |
+|-------|----------|--------------|--------|-------|
+| Qwen3.5 (4B, 8B) | Alibaba | ✅ Full | ✅ Recommended | MTP speculative decoding via vLLM |
+| Gemma 3 (12B, 4B) | Google | ✅ Full | ✅ Works | |
+| GPT-4 | OpenAI | ✅ Full | ✅ Works | |
+| Mistral 7B | Mistral | ⚠️ Limited | ✅ Works | |
+
+---
+
 ## ✨ Key Features
 
 *   **Idiomatic Go:** Designed to feel natural and leverage the power of Go.
