@@ -41,9 +41,9 @@ type artifactAggregation struct {
 }
 
 type a2aAgentRunProcessor struct {
-	config A2AConfig
-
-	request *a2a.MessageSendParams
+	config        A2AConfig
+	partConverter adka2a.A2APartConverter
+	request       *a2a.MessageSendParams
 
 	// partial event contents emitted before the terminal event
 	aggregations map[a2a.ArtifactID]*artifactAggregation
@@ -53,9 +53,10 @@ type a2aAgentRunProcessor struct {
 
 func newRunProcessor(config A2AConfig, request *a2a.MessageSendParams) *a2aAgentRunProcessor {
 	return &a2aAgentRunProcessor{
-		config:       config,
-		request:      request,
-		aggregations: make(map[a2a.ArtifactID]*artifactAggregation),
+		config:        config,
+		request:       request,
+		partConverter: config.A2APartConverter,
+		aggregations:  make(map[a2a.ArtifactID]*artifactAggregation),
 	}
 }
 
@@ -130,16 +131,18 @@ func (p *a2aAgentRunProcessor) removeFromOrder(aid a2a.ArtifactID) {
 }
 
 func (p *a2aAgentRunProcessor) updateAggregation(aid a2a.ArtifactID, agg *artifactAggregation, event *session.Event) {
-	for _, part := range event.Content.Parts {
-		if part.Text != "" { // collapse small text-block parts to bigger text blocks
-			if part.Thought {
-				agg.aggregatedThoughts += part.Text
+	if event.Content != nil {
+		for _, part := range event.Content.Parts {
+			if part.Text != "" { // collapse small text-block parts to bigger text blocks
+				if part.Thought {
+					agg.aggregatedThoughts += part.Text
+				} else {
+					agg.aggregatedText += part.Text
+				}
 			} else {
-				agg.aggregatedText += part.Text
+				agg.promoteTextBlocksToParts()
+				agg.parts = append(agg.parts, part)
 			}
-		} else {
-			agg.promoteTextBlocksToParts()
-			agg.parts = append(agg.parts, part)
 		}
 	}
 
@@ -197,7 +200,7 @@ func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext
 		return event, nil
 	}
 
-	event, err := adka2a.ToSessionEvent(ctx, a2aEvent)
+	event, err := adka2a.ToSessionEventWithParts(ctx, a2aEvent, p.partConverter)
 	if err != nil {
 		event := toErrorEvent(ctx, fmt.Errorf("failed to convert a2aEvent: %w", err))
 		p.updateCustomMetadata(event, nil)

@@ -14,7 +14,13 @@
 
 package adka2a
 
-import "github.com/a2aproject/a2a-go/a2a"
+import (
+	"github.com/a2aproject/a2a-go/a2a"
+
+	"google.golang.org/adk/agent"
+	iagent "google.golang.org/adk/internal/agent"
+	iremoteagent "google.golang.org/adk/internal/agent/remoteagent"
+)
 
 // WithoutPartialArtifacts returns a slice of artifacts without partial artifacts.
 // Partial artifacts are usually discarded (contain no parts) after agent invocation is finished.
@@ -27,4 +33,30 @@ func WithoutPartialArtifacts(artifacts []*a2a.Artifact) []*a2a.Artifact {
 		result = append(result, artifact)
 	}
 	return result
+}
+
+func findRemoteSubagents(root agent.Agent) []remoteAgent {
+	var result []remoteAgent
+	var collect func(agent.Agent)
+	collect = func(agent agent.Agent) {
+		ia, ok := agent.(iagent.Agent)
+		if !ok {
+			return
+		}
+		config := iagent.Reveal(ia).Config
+		if state, ok := config.(iremoteagent.RemoteAgentState); ok && state.A2A != nil {
+			result = append(result, remoteAgent{agent: agent, config: state.A2A})
+			return
+		}
+		for _, sa := range agent.SubAgents() {
+			collect(sa)
+		}
+	}
+	collect(root)
+	return result
+}
+
+type remoteAgent struct {
+	agent  agent.Agent
+	config *iremoteagent.A2AServerConfig
 }

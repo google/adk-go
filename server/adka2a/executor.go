@@ -16,15 +16,20 @@ package adka2a
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/log"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	iremoteagent "google.golang.org/adk/internal/agent/remoteagent"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 )
@@ -47,6 +52,9 @@ type A2APartConverter func(ctx context.Context, a2aEvent a2a.Event, part a2a.Par
 // Implementations should generally remember to leverage adka2a.ToA2APart for default conversions
 // nil returns are considered intentionally dropped parts.
 type GenAIPartConverter func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (a2a.Part, error)
+
+// A2AExecutionCleanupCallback is a callback which will be called after an execution or cancellatio has completed or failed.
+type A2AExecutionCleanupCallback func(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error)
 
 // OutputMode controls how artifacts are produced.
 type OutputMode string
@@ -96,6 +104,10 @@ type ExecutorConfig struct {
 	// OutputMode controls how artifacts are produced. Can be [OutputArtifactPerRun] or [OutputArtifactPerEvent].
 	// Defaults to [OutputArtifactPerRun].
 	OutputMode OutputMode
+
+	// A2AExecutionCleanupCallback is a callback which will be called after an execution or cancellation has completed or failed.
+	// If not provided, the default behavior is to log the failure cause, if any.
+	A2AExecutionCleanupCallback A2AExecutionCleanupCallback
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
@@ -186,9 +198,83 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 }
 
 func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+	if reqCtx.StoredTask.Status.State == a2a.TaskStateInputRequired {
+		if err := e.cancelChildInputRequiredTasks(ctx, reqCtx, reqCtx.StoredTask.Status); err != nil {
+			log.Warn(ctx, "failed to cancel subagent tasks waiting for input", "cause", err)
+		}
+	}
+
 	event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil)
 	event.Final = true
 	return queue.Write(ctx, event)
+}
+
+func (e *Executor) Cleanup(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error) {
+	if e.config.A2AExecutionCleanupCallback != nil {
+		e.config.A2AExecutionCleanupCallback(ctx, reqCtx, result, cause)
+	} else if cause != nil {
+		if reqCtx.Message != nil {
+			log.Warn(ctx, "execution failed", "error", cause)
+		} else {
+			log.Warn(ctx, "cancellation failed", "error", cause)
+		}
+	}
+}
+
+func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2asrv.RequestContext, status a2a.TaskStatus) error {
+	remoteSubagents := findRemoteSubagents(e.config.RunnerConfig.Agent)
+	if len(remoteSubagents) == 0 {
+		return nil
+	}
+
+	meta := toInvocationMeta(ctx, e.config, reqCtx)
+	getSessionResponse, err := e.config.RunnerConfig.SessionService.Get(ctx, &session.GetRequest{
+		AppName:   e.config.RunnerConfig.AppName,
+		UserID:    meta.userID,
+		SessionID: meta.sessionID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get a session: %w", err)
+	}
+
+	tasksToCancel, err := getSubagentTasksToCancel(ctx, status, getSessionResponse.Session)
+	if err != nil {
+		return fmt.Errorf("subtask search failed: %w", err)
+	}
+	if len(tasksToCancel) == 0 {
+		return nil
+	}
+
+	var failures []error
+	clientCache := map[string]*a2aclient.Client{}
+	for _, task := range tasksToCancel { // TODO(yarolegovich): run in parallel (how to limit?)
+		remoteSubagentIdx := slices.IndexFunc(remoteSubagents, func(a remoteAgent) bool { return a.agent.Name() == task.agentName })
+		if remoteSubagentIdx < 0 {
+			continue
+		}
+		remoteSubagent := remoteSubagents[remoteSubagentIdx]
+		client, ok := clientCache[task.agentName]
+		if !ok {
+			_, newClient, err := iremoteagent.CreateA2AClient(ctx, remoteSubagent.config)
+			if err != nil {
+				failures = append(failures, fmt.Errorf("failed to create A2A client: %w", err))
+				continue
+			}
+			clientCache[task.agentName] = newClient
+			client = newClient
+		}
+		_, err = client.CancelTask(ctx, &a2a.TaskIDParams{ID: task.taskID})
+		if err != nil {
+			failures = append(failures, fmt.Errorf("failed to cancel task: %w", err))
+			continue
+		}
+	}
+	for _, client := range clientCache {
+		if err := client.Destroy(); err != nil {
+			failures = append(failures, fmt.Errorf("client destroy failed: %w", err))
+		}
+	}
+	return errors.Join(failures...)
 }
 
 // Processing failures should be delivered as Task failed events. An error is returned from this method if an event write fails.
@@ -265,5 +351,6 @@ func (e *Executor) prepareSession(ctx context.Context, meta invocationMeta) erro
 	if err != nil {
 		return fmt.Errorf("failed to create a session: %w", err)
 	}
+
 	return nil
 }
