@@ -150,7 +150,7 @@ func TestMCPToolSet(t *testing.T) {
 				Content: &genai.Content{
 					Parts: []*genai.Part{
 						{
-							Text: `Today in "london" is sunny`,
+							Text: `The weather in London is sunny.`,
 						},
 					},
 					Role: genai.RoleModel,
@@ -162,7 +162,7 @@ func TestMCPToolSet(t *testing.T) {
 
 	if diff := cmp.Diff(wantEvents, gotEvents,
 		cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID"),
-		cmpopts.IgnoreFields(session.EventActions{}, "StateDelta"),
+		cmpopts.IgnoreFields(session.EventActions{}, "StateDelta", "ArtifactDelta"),
 		cmpopts.IgnoreFields(model.LLMResponse{}, "UsageMetadata", "AvgLogprobs", "FinishReason"),
 		cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
 		cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID"),
@@ -480,7 +480,7 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 				genai.NewContentFromFunctionResponse(toolName, map[string]any{
 					"error": errors.New("error tool \"get_weather\" call is rejected"),
 				}, "user"),
-				genai.NewContentFromText("I am sorry, I cannot provide the weather in Lisbon.", "model"),
+				genai.NewContentFromText("I am sorry, I cannot get the weather in Lisbon.", "model"),
 			},
 		},
 		{
@@ -510,7 +510,7 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 				genai.NewContentFromFunctionResponse(toolName, map[string]any{
 					"output": map[string]any{"weather_summary": string(`Today in "Lisbon" is sunny`)},
 				}, "user"),
-				genai.NewContentFromText(`Today in "Lisbon" is sunny.`, "model"),
+				genai.NewContentFromText(`Today in "Lisbon" is sunny`, "model"),
 			},
 		},
 		{
@@ -610,7 +610,7 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 				genai.NewContentFromFunctionResponse(toolName, map[string]any{
 					"error": errors.New("error tool \"get_weather\" call is rejected"),
 				}, "user"),
-				genai.NewContentFromText("I'm sorry, I cannot get the weather information in Lisbon.", "model"),
+				genai.NewContentFromText("I am sorry, I cannot get the weather in Lisbon.", "model"),
 			},
 		},
 	}

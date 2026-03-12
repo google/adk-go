@@ -1063,12 +1063,14 @@ func TestRemoteAgent_EmptyResultForEmptySession(t *testing.T) {
 	}
 
 	wantEvents := []*session.Event{
-		{InvocationID: ictx.InvocationID(), Author: agentName, Branch: ictx.Branch()},
+		{
+			InvocationID: ictx.InvocationID(), Author: agentName, Branch: ictx.Branch(),
+			Actions: session.EventActions{StateDelta: map[string]any{}, ArtifactDelta: map[string]int64{}},
+		},
 	}
 	ignoreFields := []cmp.Option{
 		cmpopts.IgnoreFields(session.Event{}, "ID"),
 		cmpopts.IgnoreFields(session.Event{}, "Timestamp"),
-		cmpopts.IgnoreFields(session.EventActions{}, "StateDelta"),
 	}
 	if diff := cmp.Diff(wantEvents, gotEvents, ignoreFields...); diff != "" {
 		t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotEvents, wantEvents, diff)
@@ -1166,5 +1168,82 @@ func TestRemoteAgent_ErrorEventOnServerError(t *testing.T) {
 	}
 	if gotEvents[0].ErrorMessage == "" {
 		t.Fatal("event.ErrorMessage empty, want non-empty")
+	}
+}
+
+func TestRemoteAgent_CustomConverters(t *testing.T) {
+	originalA2APart := a2a.TextPart{Text: "hello"}
+	customA2APart := a2a.TextPart{Text: "modified"}
+	mockGenAIPartConverter := func(ctx context.Context, event *session.Event, part *genai.Part) (a2a.Part, error) {
+		return customA2APart, nil
+	}
+
+	tests := []struct {
+		name string
+		cfg  A2AConfig
+		want a2a.Part
+	}{
+		{
+			name: "custom converter",
+			cfg:  A2AConfig{GenAIPartConverter: mockGenAIPartConverter},
+			want: customA2APart,
+		},
+		{
+			name: "default converter",
+			want: originalA2APart,
+		},
+	}
+	for _, tc := range tests {
+		events := []*session.Event{newUserHello()}
+		ictx := newTestInvocationContext(t, "a2a agent", events...)
+		msg, err := newMessage(ictx, tc.cfg)
+		if err != nil {
+			t.Fatalf("newMessage() error = %v", err)
+		}
+		if len(msg.Parts) != 1 {
+			t.Fatalf("len(msg.Parts) = %d, want 1", len(msg.Parts))
+		}
+		if textPart, ok := msg.Parts[0].(a2a.TextPart); !ok || textPart.Text != tc.want.(a2a.TextPart).Text {
+			t.Fatalf("msg.Parts[0] = %+v, want %+v", msg.Parts[0], tc.want)
+		}
+	}
+}
+
+func TestRemoteAgent_DoSVulnerability(t *testing.T) {
+	event := &session.Event{
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			{Text: "KEEP"},
+			{Text: "DROP"},
+		}, genai.RoleModel)},
+	}
+
+	cfg := A2AConfig{
+		GenAIPartConverter: func(ctx context.Context, event *session.Event, p *genai.Part) (a2a.Part, error) {
+			if p.Text == "DROP" {
+				return nil, nil
+			}
+			return a2a.TextPart{Text: p.Text}, nil
+		},
+	}
+
+	ictx := newTestInvocationContext(t, "test-agent", newUserHello())
+
+	parts, err := convertParts(ictx, cfg, event)
+	if err != nil {
+		t.Fatalf("convertParts() error = %v", err)
+	}
+
+	if len(parts) != 1 {
+		t.Errorf("Expected 1 part after filtering, got %d", len(parts))
+	}
+
+	for _, p := range parts {
+		if p == nil {
+			t.Fatalf("got nil part, want it filtered out.")
+		}
+
+		if tp, ok := p.(a2a.TextPart); ok && tp.Text != "KEEP" {
+			t.Errorf("got %s, want 'KEEP'", tp.Text)
+		}
 	}
 }

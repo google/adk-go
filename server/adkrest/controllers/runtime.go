@@ -115,7 +115,11 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		return err
 	}
 
-	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg)
+	opts := []runner.RunOption{}
+	if runAgentRequest.StateDelta != nil {
+		opts = append(opts, runner.WithStateDelta(*runAgentRequest.StateDelta))
+	}
+	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg, opts...)
 
 	for event, err := range resp {
 		if err != nil {

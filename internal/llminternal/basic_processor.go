@@ -61,12 +61,12 @@ func clone[M any](src M) M {
 	val := reflect.ValueOf(src)
 
 	// Handle nil pointers
-	if val.Kind() == reflect.Ptr && val.IsNil() {
+	if val.Kind() == reflect.Pointer && val.IsNil() {
 		var zero M
 		return zero
 	}
 
-	srcIsPointer := val.Kind() == reflect.Ptr
+	srcIsPointer := val.Kind() == reflect.Pointer
 
 	// Dereference pointer to get the underlying value
 	if srcIsPointer {
@@ -124,7 +124,7 @@ func deepCopy(src, dst reflect.Value) {
 			deepCopy(src.MapIndex(key), valCopy)
 			dst.SetMapIndex(keyCopy, valCopy)
 		}
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if src.IsNil() {
 			return
 		}
