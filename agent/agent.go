@@ -45,6 +45,8 @@ type Agent interface {
 	Description() string
 	Run(InvocationContext) iter.Seq2[*session.Event, error]
 	SubAgents() []Agent
+	FindAgent(name string) Agent
+	FindSubAgent(name string) Agent
 
 	internal() *agent
 }
@@ -214,6 +216,22 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 
 func (a *agent) internal() *agent {
 	return a
+}
+
+func (a *agent) FindAgent(name string) Agent {
+	if a.Name() == name {
+		return a
+	}
+	return a.FindSubAgent(name)
+}
+
+func (a *agent) FindSubAgent(name string) Agent {
+	for _, subAgent := range a.SubAgents() {
+		if result := subAgent.FindAgent(name); result != nil {
+			return result
+		}
+	}
+	return nil
 }
 
 func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
