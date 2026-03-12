@@ -1162,3 +1162,57 @@ func (s *taskStore) Save(ctx context.Context, task *a2a.Task, event a2a.Event, p
 func (*taskStore) List(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
 	return nil, fmt.Errorf("not implemented")
 }
+
+func TestA2AMultiHopInputRequiredCancellation(t *testing.T) {
+	remoteAgentName := "remote-agent-B"
+	remoteTaskIDChan := make(chan a2a.TaskID, 1)
+	serverB := startA2AServer(&mockA2AExecutor{
+		executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+			remoteTaskIDChan <- reqCtx.TaskID
+			ev := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateInputRequired, a2a.NewMessage(a2a.MessageRoleAgent, a2a.DataPart{
+				Data:     map[string]any{"id": "call-1", "name": "foo"},
+				Metadata: map[string]any{"adk_is_long_running": true, "adk_type": "function_call"},
+			}))
+			ev.Final = true
+			return queue.Write(ctx, ev)
+		},
+		cancelFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+			ev := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil)
+			ev.Final = true
+			return queue.Write(ctx, ev)
+		},
+	})
+	defer serverB.Close()
+
+	// Server A
+	remoteAgent := newA2ARemoteAgent(t, remoteAgentName, serverB)
+	rootAgent := newRootAgent("root", remoteAgent)
+	executorA := newAgentExecutor(rootAgent, nil, adka2a.OutputArtifactPerRun)
+	serverA := startA2AServer(executorA)
+	defer serverA.Close()
+
+	// Send message
+	clientA := newA2AClient(t, serverA)
+	msg1 := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "Hello"})
+	task1 := mustSendMessage(t, clientA, msg1)
+	if task1.Status.State != a2a.TaskStateInputRequired {
+		t.Fatalf("task1.Status.State = %q, want %q", task1.Status.State, a2a.TaskStateInputRequired)
+	}
+
+	// Cancel the task on Server A
+	_, err := clientA.CancelTask(t.Context(), &a2a.TaskIDParams{ID: task1.ID})
+	if err != nil {
+		t.Fatalf("client.CancelTask() error = %v", err)
+	}
+
+	// Verify that Server B's task was cancelled
+	remoteTaskID := <-remoteTaskIDChan
+	clientB := newA2AClient(t, serverB)
+	remoteTask, err := clientB.GetTask(t.Context(), &a2a.TaskQueryParams{ID: remoteTaskID})
+	if err != nil {
+		t.Fatalf("client.CancelTask() error = %v", err)
+	}
+	if remoteTask.Status.State != a2a.TaskStateCanceled {
+		t.Fatalf("remoteTask.Status.State = %q, want %q", remoteTask.Status.State, a2a.TaskStateCanceled)
+	}
+}
