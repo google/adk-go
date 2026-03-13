@@ -66,7 +66,7 @@ func TestPluginCallbackIntegration(t *testing.T) {
 				return []tool.Tool{agentToolDefault}
 			},
 			wantSkillStateValue:      "add",
-			wantRationaleStateValue:  "The user is asking to add two numbers, and the calculator tool with the add skill can perform this operation.",
+			wantRationaleStateValue:  "The user wants to add two numbers, and the calculator tool has an 'add' skill that can perform this operation. Providing the request as '2+2' and explicitly setting the skill_id to 'add' should allow the calculator to correctly perform the addition.",
 			shouldHaveSkillState:     true,
 			shouldHaveRationaleState: true,
 		},
@@ -74,7 +74,7 @@ func TestPluginCallbackIntegration(t *testing.T) {
 			name:                     "transfer to agent tool",
 			tools:                    func(a agent.Agent) []tool.Tool { return []tool.Tool{} },
 			wantSkillStateValue:      "add",
-			wantRationaleStateValue:  "The user is asking to add two numbers, and the calculator agent has skills for mathematical operations.",
+			wantRationaleStateValue:  "The user is asking to add two numbers, and the calculator agent has an add skill.",
 			shouldHaveSkillState:     true,
 			shouldHaveRationaleState: true,
 		},

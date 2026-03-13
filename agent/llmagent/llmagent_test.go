@@ -442,8 +442,6 @@ func TestModelCallbacks(t *testing.T) {
 }
 
 func TestToolCallback(t *testing.T) {
-	model := newGeminiModel(t, modelName, nil)
-
 	type Args struct {
 		Seed int `json:"seed"`
 	}
@@ -460,11 +458,12 @@ func TestToolCallback(t *testing.T) {
 	}, handler)
 
 	t.Run("before_callback_response_used", func(t *testing.T) {
+		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
 			Name:                     "agent",
 			Description:              "random agent",
 			Model:                    model,
-			Instruction:              "output ONLY the result computed by the provided function",
+			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
 			DisallowTransferToParent: true,
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
@@ -494,11 +493,12 @@ func TestToolCallback(t *testing.T) {
 	})
 
 	t.Run("extra_before_callback_skipped", func(t *testing.T) {
+		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
 			Name:                     "agent",
 			Description:              "random agent",
 			Model:                    model,
-			Instruction:              "output ONLY the result computed by the provided function",
+			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
 			DisallowTransferToParent: true,
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
@@ -529,11 +529,12 @@ func TestToolCallback(t *testing.T) {
 	})
 
 	t.Run("after_callback_response_used", func(t *testing.T) {
+		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
 			Name:                     "agent",
 			Description:              "random agent",
 			Model:                    model,
-			Instruction:              "output ONLY the result computed by the provided function",
+			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
 			DisallowTransferToParent: true,
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
@@ -563,11 +564,12 @@ func TestToolCallback(t *testing.T) {
 	})
 
 	t.Run("extra_after_callback_skipped", func(t *testing.T) {
+		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
 			Name:                     "agent",
 			Description:              "random agent",
 			Model:                    model,
-			Instruction:              "output ONLY the result computed by the provided function",
+			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
 			DisallowTransferToParent: true,
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
@@ -598,11 +600,12 @@ func TestToolCallback(t *testing.T) {
 	})
 
 	t.Run("after_callback_returned_when_used_with_before_callback", func(t *testing.T) {
+		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
 			Name:                     "agent",
 			Description:              "random agent",
 			Model:                    model,
-			Instruction:              "output ONLY the result computed by the provided function",
+			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
 			DisallowTransferToParent: true,
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
@@ -634,11 +637,12 @@ func TestToolCallback(t *testing.T) {
 	})
 
 	t.Run("both_callbacks_return_nil_actual_tool_is_executed", func(t *testing.T) {
+		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
 			Name:                     "agent",
 			Description:              "random agent",
 			Model:                    model,
-			Instruction:              "output ONLY the result computed by the provided function",
+			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
 			DisallowTransferToParent: true,
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
@@ -698,8 +702,7 @@ func TestInstructionProvider(t *testing.T) {
 					Config: &genai.GenerateContentConfig{
 						SystemInstruction: &genai.Content{
 							Parts: []*genai.Part{
-								genai.NewPartFromText("instruction custom_value test"),
-								genai.NewPartFromText(`You are an agent. Your internal name is "test_agent".`),
+								genai.NewPartFromText("instruction custom_value test\n\nYou are an agent. Your internal name is \"test_agent\"."),
 							},
 							Role: genai.RoleUser,
 						},
@@ -731,8 +734,7 @@ func TestInstructionProvider(t *testing.T) {
 					Config: &genai.GenerateContentConfig{
 						SystemInstruction: &genai.Content{
 							Parts: []*genai.Part{
-								genai.NewPartFromText("instruction provider template {var} not evaluated"),
-								genai.NewPartFromText(`You are an agent. Your internal name is "test_agent".`),
+								genai.NewPartFromText("instruction provider template {var} not evaluated\n\nYou are an agent. Your internal name is \"test_agent\"."),
 							},
 							Role: genai.RoleUser,
 						},
@@ -764,8 +766,7 @@ func TestInstructionProvider(t *testing.T) {
 					Config: &genai.GenerateContentConfig{
 						SystemInstruction: &genai.Content{
 							Parts: []*genai.Part{
-								genai.NewPartFromText("global instruction provider template {var} not evaluated"),
-								genai.NewPartFromText(`You are an agent. Your internal name is "test_agent".`),
+								genai.NewPartFromText("global instruction provider template {var} not evaluated\n\nYou are an agent. Your internal name is \"test_agent\"."),
 							},
 							Role: genai.RoleUser,
 						},
@@ -799,9 +800,7 @@ func TestInstructionProvider(t *testing.T) {
 					Config: &genai.GenerateContentConfig{
 						SystemInstruction: &genai.Content{
 							Parts: []*genai.Part{
-								genai.NewPartFromText("global instruction provider {var}"),
-								genai.NewPartFromText("instruction provider {var}"),
-								genai.NewPartFromText(`You are an agent. Your internal name is "test_agent".`),
+								genai.NewPartFromText("global instruction provider {var}\n\ninstruction provider {var}\n\nYou are an agent. Your internal name is \"test_agent\"."),
 							},
 							Role: genai.RoleUser,
 						},
@@ -873,7 +872,7 @@ func TestFunctionTool(t *testing.T) {
 		Name:        "agent",
 		Description: "math agent",
 		Model:       model,
-		Instruction: "output ONLY the result computed by the provided function",
+		Instruction: "IMPORTANT: output ONLY the result computed by the provided function, if the result of 10 + 32 is 42 print only 42",
 		// TODO(hakim): set to false when autoflow is implemented.
 		DisallowTransferToParent: true,
 		DisallowTransferToPeers:  true,

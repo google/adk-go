@@ -200,7 +200,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
-			return nil, fmt.Errorf("error tool %q call is rejected", f.Name())
+			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected)
 		}
 	} else {
 		requireConfirmation := f.requireConfirmation
@@ -219,7 +219,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result 
 				return nil, err
 			}
 			ctx.Actions().SkipSummarization = true
-			return nil, fmt.Errorf("error tool %q requires confirmation, please approve or reject", f.Name())
+			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired)
 		}
 	}
 
