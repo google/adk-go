@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -46,6 +47,12 @@ var (
 	gcpVertexAgentEventID          = attribute.Key("gcp.vertex.agent.event_id")
 	gcpVertexAgentToolResponseName = attribute.Key("gcp.vertex.agent.tool_response")
 	gcpVertexAgentInvocationID     = attribute.Key("gcp.vertex.agent.invocation_id")
+
+	// Content capture attribute keys per OTel Semantic Conventions for GenAI.
+	// See: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/#capturing-instructions-inputs-and-outputs
+	genAISystemInstructions = attribute.Key("gen_ai.system_instructions")
+	genAIInputMessages      = attribute.Key("gen_ai.input.messages")
+	genAIOutputMessages     = attribute.Key("gen_ai.output.messages")
 )
 
 // tracer is the tracer instance for ADK go.
@@ -91,6 +98,8 @@ type StartGenerateContentSpanParams struct {
 	ModelName string
 	// InvocationID is the ID of the invocation.
 	InvocationID string
+	// LLMRequest is the full LLM request, used for content capture when enabled via SetGenAICaptureMessageContent.
+	LLMRequest *model.LLMRequest
 }
 
 // StartGenerateContentSpan starts a new semconv generate_content span.
@@ -102,6 +111,14 @@ func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSp
 		semconv.GenAIOperationNameGenerateContent,
 		semconv.GenAIRequestModel(modelName),
 	))
+	if getGenAICaptureMessageContent() && params.LLMRequest != nil {
+		if si := serializeSystemInstructions(params.LLMRequest); si != "" {
+			span.SetAttributes(genAISystemInstructions.String(si))
+		}
+		if im := serializeInputMessages(params.LLMRequest); im != "" {
+			span.SetAttributes(genAIInputMessages.String(im))
+		}
+	}
 	return spanCtx, span
 }
 
@@ -126,6 +143,9 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),
 			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount)),
 		)
+	}
+	if getGenAICaptureMessageContent() && params.Response != nil && params.Response.Content != nil {
+		span.SetAttributes(genAIOutputMessages.String(safeSerialize(params.Response.Content)))
 	}
 }
 
@@ -255,4 +275,29 @@ func safeSerialize(obj any) string {
 		return "<not serializable>"
 	}
 	return string(dump)
+}
+
+// serializeSystemInstructions extracts and serializes the system instructions from the request.
+func serializeSystemInstructions(req *model.LLMRequest) string {
+	if req.Config == nil || req.Config.SystemInstruction == nil {
+		return ""
+	}
+	var texts []string
+	for _, p := range req.Config.SystemInstruction.Parts {
+		if p.Text != "" {
+			texts = append(texts, p.Text)
+		}
+	}
+	if len(texts) == 0 {
+		return ""
+	}
+	return strings.Join(texts, "\n")
+}
+
+// serializeInputMessages serializes the input messages (contents) from the request.
+func serializeInputMessages(req *model.LLMRequest) string {
+	if len(req.Contents) == 0 {
+		return ""
+	}
+	return safeSerialize(req.Contents)
 }
