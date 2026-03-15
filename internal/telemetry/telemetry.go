@@ -112,11 +112,15 @@ func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSp
 		semconv.GenAIRequestModel(modelName),
 	))
 	if getGenAICaptureMessageContent() && params.LLMRequest != nil {
+		var attrs []attribute.KeyValue
 		if si := serializeSystemInstructions(params.LLMRequest); si != "" {
-			span.SetAttributes(genAISystemInstructions.String(si))
+			attrs = append(attrs, genAISystemInstructions.String(si))
 		}
 		if im := serializeInputMessages(params.LLMRequest); im != "" {
-			span.SetAttributes(genAIInputMessages.String(im))
+			attrs = append(attrs, genAIInputMessages.String(im))
+		}
+		if len(attrs) > 0 {
+			span.SetAttributes(attrs...)
 		}
 	}
 	return spanCtx, span
@@ -144,7 +148,7 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount)),
 		)
 	}
-	if getGenAICaptureMessageContent() && params.Response != nil && params.Response.Content != nil {
+	if getGenAICaptureMessageContent() && params.Response.Content != nil {
 		span.SetAttributes(genAIOutputMessages.String(safeSerialize(params.Response.Content)))
 	}
 }
@@ -287,9 +291,6 @@ func serializeSystemInstructions(req *model.LLMRequest) string {
 		if p.Text != "" {
 			texts = append(texts, p.Text)
 		}
-	}
-	if len(texts) == 0 {
-		return ""
 	}
 	return strings.Join(texts, "\n")
 }
