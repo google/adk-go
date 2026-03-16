@@ -116,8 +116,8 @@ type Artifacts interface {
 // Memory interface provides methods to access agent memory across the
 // sessions of the current user_id.
 type Memory interface {
-	AddSession(context.Context, session.Session) error
-	Search(ctx context.Context, query string) (*memory.SearchResponse, error)
+	AddSessionToMemory(context.Context, session.Session) error
+	SearchMemory(ctx context.Context, query string) (*memory.SearchMemoryResponse, error)
 }
 
 // BeforeAgentCallback is a function that is called before the agent starts
