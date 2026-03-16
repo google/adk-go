@@ -157,10 +157,10 @@ func TestMemory_Search_NoData(t *testing.T) {
 
 	got, err := memory.SearchMemory(t.Context(), "any query")
 	if err != nil {
-		t.Fatalf("Search() failed: %v", err)
+		t.Fatalf("SearchMemory() failed: %v", err)
 	}
 	if len(got.Memories) != 0 {
-		t.Errorf("Search() on empty memory returned %d items, want 0", len(got.Memories))
+		t.Errorf("SearchMemory() on empty memory returned %d items, want 0", len(got.Memories))
 	}
 }
 
