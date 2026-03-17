@@ -32,19 +32,19 @@ import (
 // It aggregates content from partial responses, and generates LlmResponses for
 // individual (partial) model responses, as well as for aggregated content.
 type streamingResponseAggregator struct {
-	usageMetadata 	*genai.GenerateContentResponseUsageMetadata
+	usageMetadata     *genai.GenerateContentResponseUsageMetadata
 	groundingMetadata *genai.GroundingMetadata
-	citationMetadata *genai.CitationMetadata
-	response    *model.LLMResponse
+	citationMetadata  *genai.CitationMetadata
+	response          *model.LLMResponse
 
-	sequence []*genai.Part
-	currentTextBuffer string
+	sequence             []*genai.Part
+	currentTextBuffer    string
 	currentTextIsThought bool
-	finishReason genai.FinishReason
-	
-	currentFunctionName string
-	currentFunctionID string
-	currentFunctionArgs map[string]any
+	finishReason         genai.FinishReason
+
+	currentFunctionName             string
+	currentFunctionID               string
+	currentFunctionArgs             map[string]any
 	currentFunctionThoughtSignature []byte
 }
 
@@ -105,7 +105,7 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 		if part.Text != "" {
 			if s.currentTextBuffer != "" && part.Thought != s.currentTextIsThought {
 				s.flushTextBufferToSequence()
-			} 
+			}
 			if s.currentTextBuffer == "" {
 				s.currentTextIsThought = part.Thought
 			}
@@ -140,7 +140,7 @@ func (s *streamingResponseAggregator) processFunctionCallPart(part *genai.Part) 
 	}
 }
 
-//Process a streaming function call with partialArgs.
+// Process a streaming function call with partialArgs.
 func (s *streamingResponseAggregator) processStreamingFunctionCallPart(part *genai.Part) {
 	if part.FunctionCall.Name != "" {
 		s.currentFunctionName = part.FunctionCall.Name
@@ -151,7 +151,7 @@ func (s *streamingResponseAggregator) processStreamingFunctionCallPart(part *gen
 	for _, arg := range part.FunctionCall.PartialArgs {
 		jsonPath := arg.JsonPath
 		if jsonPath == "" {
-			continue	
+			continue
 		}
 		value, ok := s.getValueFromPartialArg(arg, jsonPath)
 		if !ok {
@@ -236,19 +236,19 @@ func (s *streamingResponseAggregator) setValueByJSONPath(jsonPath string, value 
 
 	// Navigate to the correct location
 	current := s.currentFunctionArgs
-	
+
 	// Iterate through all parts except the last one
 	for _, part := range pathParts[:len(pathParts)-1] {
 		next, exists := current[part]
-		
-		// If the path doesn't exist, or the existing value isn't a map, 
+
+		// If the path doesn't exist, or the existing value isn't a map,
 		// create a new map at this node.
 		nextMap, ok := next.(map[string]any)
 		if !exists || !ok {
 			nextMap = make(map[string]any)
 			current[part] = nextMap
 		}
-		
+
 		current = nextMap
 	}
 
@@ -261,9 +261,9 @@ func (s *streamingResponseAggregator) flushTextBufferToSequence() {
 	// Check if buffer has content (strings.Builder.Len() is efficient)
 	if s.currentTextBuffer != "" {
 		s.sequence = append(s.sequence, &genai.Part{
-				Text:    s.currentTextBuffer,
-				Thought: s.currentTextIsThought,
-			})
+			Text:    s.currentTextBuffer,
+			Thought: s.currentTextIsThought,
+		})
 		// Reset the buffer and the state
 		s.currentTextBuffer = ""
 		s.currentTextIsThought = false
@@ -273,9 +273,9 @@ func (s *streamingResponseAggregator) flushTextBufferToSequence() {
 func (s *streamingResponseAggregator) flushFunctionCallToSequence() {
 	if s.currentFunctionName != "" {
 		fc := &genai.FunctionCall{
-			Name: s.currentFunctionName,	
+			Name: s.currentFunctionName,
 			Args: maps.Clone(s.currentFunctionArgs),
-			ID: s.currentFunctionID,
+			ID:   s.currentFunctionID,
 		}
 
 		fcPart := &genai.Part{
@@ -294,7 +294,6 @@ func (s *streamingResponseAggregator) flushFunctionCallToSequence() {
 	}
 }
 
-
 // Close generates an aggregated response at the end, if needed,
 // this should be called after all the model responses are processed.
 func (s *streamingResponseAggregator) Close() *model.LLMResponse {
@@ -311,13 +310,13 @@ func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 		return &model.LLMResponse{
 			Content: &genai.Content{
 				Parts: s.sequence,
-				Role: genai.RoleModel,
+				Role:  genai.RoleModel,
 			},
-			UsageMetadata: s.usageMetadata,
+			UsageMetadata:     s.usageMetadata,
 			GroundingMetadata: s.groundingMetadata,
-			CitationMetadata: s.citationMetadata,
-			ErrorCode: errorCode,
-			ErrorMessage: errorMessage,
+			CitationMetadata:  s.citationMetadata,
+			ErrorCode:         errorCode,
+			ErrorMessage:      errorMessage,
 		}
 	}
 	return nil

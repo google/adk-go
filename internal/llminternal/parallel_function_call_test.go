@@ -454,8 +454,8 @@ func TestParallelFunctionCalls(t *testing.T) {
 			}
 
 			ignoreFields := []cmp.Option{
-				cmpopts.IgnoreFields(genai.FunctionCall{}, "ID" ),
-				cmpopts.IgnoreFields(genai.Part{}, "ThoughtSignature" ),
+				cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
+				cmpopts.IgnoreFields(genai.Part{}, "ThoughtSignature"),
 				cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID"),
 				cmpopts.IgnoreFields(model.LLMResponse{}, "UsageMetadata"),
 			}
