@@ -491,7 +491,7 @@ func TestParallelFunctionCalls(t *testing.T) {
 				if diff := cmp.Diff(tt.wantLLMResponse[i], ev, ignoreFields...); diff != "" {
 					t.Errorf("diff in the events: got event[%d]: %v, want: %v, diff: %v", i, ev, tt.wantLLMResponse[i], diff)
 				}
-				if i == 0 {
+				if i == 0 || i == 3 {
 					if len(ev.Content.Parts[0].ThoughtSignature) == 0 {
 						t.Errorf("expected non-empty thought signature, got empty")
 					}
