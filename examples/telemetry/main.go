@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -35,7 +36,12 @@ import (
 	"google.golang.org/adk/tool/geminitool"
 )
 
+var (
+	adkFlags = full.DefineFlags()
+)
+
 func main() {
+	flag.Parse()
 	if err := run(); err != nil {
 		log.Fatal(err)
 	}
@@ -82,9 +88,8 @@ func run() error {
 	}
 
 	// Launcher automatically starts the telemetry.
-	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-		return fmt.Errorf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if err := full.Run(ctx, adkFlags, config); err != nil {
+		return fmt.Errorf("run failed: %w", err)
 	}
 	return nil
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package a2a
+package web
 
 import (
 	"iter"
@@ -28,7 +28,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/session"
 )
 
@@ -58,14 +57,16 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 
 	port := getFreePort(t)
 
-	l := web.NewLauncher(NewLauncher())
-	_, err := l.Parse([]string{
-		"--port", strconv.Itoa(port),
-		"a2a", "--a2a_agent_url", "http://localhost:" + strconv.Itoa(port),
-	})
-	if err != nil {
-		t.Fatalf("web.NewLauncher() error = %v", err)
+	cfg := &Config{
+		Port: port,
+
+		EnableA2A: true,
+		A2A: A2AConfig{
+			AgentURL: "http://localhost:" + strconv.Itoa(port),
+		},
 	}
+
+	l := NewLauncher(cfg)
 
 	wantMessage := "Hello, world!"
 	agnt, err := agent.New(agent.Config{
