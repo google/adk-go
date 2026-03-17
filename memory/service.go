@@ -32,26 +32,28 @@ type Service interface {
 	// AddSession adds a session to the memory service.
 	//
 	// A session can be added multiple times during its lifetime.
-	AddSession(ctx context.Context, s session.Session) error
-	// Search returns memory entries relevant to the given query.
+	AddSessionToMemory(ctx context.Context, s session.Session) error
+	// SearchMemory returns memory entries relevant to the given query.
 	// Empty slice is returned if there are no matches.
-	Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error)
+	SearchMemory(ctx context.Context, req *SearchMemoryRequest) (*SearchMemoryResponse, error)
 }
 
-// SearchRequest represents a request for memory search.
-type SearchRequest struct {
+// SearchMemoryRequest represents a request for memory search.
+type SearchMemoryRequest struct {
 	Query   string
 	UserID  string
 	AppName string
 }
 
-// SearchResponse represents the response from a memory search.
-type SearchResponse struct {
+// SearchMemoryResponse represents the response from a memory search.
+type SearchMemoryResponse struct {
 	Memories []Entry
 }
 
 // Entry represents a single memory entry.
 type Entry struct {
+	// ID is the unique identifier of the memory.
+	ID string
 	// Content contains the main content of the memory.
 	Content *genai.Content
 	// Author of the memory.
@@ -59,4 +61,6 @@ type Entry struct {
 	// Timestamp shows when the original content of this memory happened.
 	// This string will be forwarded to LLM. Preferred format is ISO 8601 format.
 	Timestamp time.Time
+	// CustomMetadata contains optional custom metadata associated with the memory.
+	CustomMetadata map[string]any
 }

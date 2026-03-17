@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
@@ -35,6 +36,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
@@ -43,6 +45,7 @@ import (
 
 type mockA2AExecutor struct {
 	executeFn func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error
+	cancelFn  func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error
 }
 
 var _ a2asrv.AgentExecutor = (*mockA2AExecutor)(nil)
@@ -55,7 +58,12 @@ func (e *mockA2AExecutor) Execute(ctx context.Context, reqCtx *a2asrv.RequestCon
 }
 
 func (e *mockA2AExecutor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
-	return fmt.Errorf("not implemented")
+	if e.cancelFn != nil {
+		return e.cancelFn(ctx, reqCtx, queue)
+	}
+	ev := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil)
+	ev.Final = true
+	return queue.Write(ctx, ev)
 }
 
 type testA2AServer struct {
@@ -74,20 +82,15 @@ func startA2AServer(agentExecutor a2asrv.AgentExecutor) *testA2AServer {
 func newA2ARemoteAgent(t *testing.T, name string, server *testA2AServer) agent.Agent {
 	t.Helper()
 	card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolJSONRPC, URL: server.URL, Capabilities: a2a.AgentCapabilities{Streaming: true}}
-	agent, err := NewA2A(A2AConfig{AgentCard: card, Name: name})
-	if err != nil {
-		t.Fatalf("remoteagent.NewA2A() error = %v", err)
-	}
-	return agent
+	return utils.Must(NewA2A(A2AConfig{AgentCard: card, Name: name}))
 }
 
 func newInvocationContext(t *testing.T, events []*session.Event) agent.InvocationContext {
 	return newInvocationContextWithStreamingMode(t, events, agent.StreamingModeSSE)
 }
 
-func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event, streamingMode agent.StreamingMode) agent.InvocationContext {
+func prepareSession(t *testing.T, ctx context.Context, events []*session.Event) session.Session {
 	t.Helper()
-	ctx := t.Context()
 	service := session.InMemoryService()
 	resp, err := service.Create(ctx, &session.CreateRequest{AppName: t.Name(), UserID: "test"})
 	if err != nil {
@@ -98,9 +101,15 @@ func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event
 			t.Fatalf("sessionService.AppendEvent() error = %v", err)
 		}
 	}
+	return resp.Session
+}
 
+func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event, streamingMode agent.StreamingMode) agent.InvocationContext {
+	t.Helper()
+	ctx := t.Context()
+	session := prepareSession(t, ctx, events)
 	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Session: resp.Session,
+		Session: session,
 		RunConfig: &agent.RunConfig{
 			StreamingMode: streamingMode,
 		},
@@ -804,14 +813,14 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 		},
 		{
 			name: "converter error",
-			converter: func(ctx agent.ReadonlyContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error) {
+			converter: func(ctx agent.InvocationContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error) {
 				return nil, fmt.Errorf("failed")
 			},
 			wantErr: fmt.Errorf("failed"),
 		},
 		{
 			name: "converter custom response",
-			converter: func(ctx agent.ReadonlyContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error) {
+			converter: func(ctx agent.InvocationContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error) {
 				return &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}}, nil
 			},
 			wantResponses: []model.LLMResponse{{Content: genai.NewContentFromText("hello", genai.RoleModel)}},
@@ -1209,7 +1218,149 @@ func TestRemoteAgent_CustomConverters(t *testing.T) {
 	}
 }
 
-func TestRemoteAgent_DoSVulnerability(t *testing.T) {
+func TestRemoteAgent_CleanupCallback(t *testing.T) {
+	testCases := []struct {
+		name                  string
+		events                func(*a2asrv.RequestContext) []a2a.Event
+		afterRequestCallbacks []AfterA2ARequestCallback
+		eventConverter        A2AEventConverter
+		breakAfter            int
+		cancelContextAfter    int
+		wantCause             string
+	}{
+		{
+			name: "after request callback error",
+			afterRequestCallbacks: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
+					return nil, fmt.Errorf("callback error")
+				},
+			},
+			wantCause: "callback error",
+		},
+		{
+			name: "part converter error",
+			eventConverter: func(ctx agent.InvocationContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error) {
+				if _, ok := event.(*a2a.TaskArtifactUpdateEvent); ok {
+					return nil, fmt.Errorf("converter error")
+				}
+				return adka2a.ToSessionEvent(ctx, event)
+			},
+			wantCause: "converter error",
+		},
+		{
+			name:               "agent run context canceled",
+			cancelContextAfter: 1,
+			wantCause:          "context canceled",
+		},
+		{
+			name:       "yield returns false",
+			breakAfter: 1,
+			wantCause:  "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				cleanupCalled bool
+				cleanupTaskID a2a.TaskID
+				cleanupCause  error
+			)
+			cleanupCallback := func(ctx context.Context, card *a2a.AgentCard, client *a2aclient.Client, task a2a.TaskInfo, cause error) {
+				cleanupCalled = true
+				cleanupTaskID = task.TaskID
+				cleanupCause = cause
+				if _, err := client.CancelTask(ctx, &a2a.TaskIDParams{ID: task.TaskID}); err != nil {
+					t.Errorf("client.CancelTask() error = %v", err)
+				}
+			}
+
+			remoteTaskIDChan := make(chan a2a.TaskID, 1)
+			executor := &mockA2AExecutor{
+				executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+					remoteTaskIDChan <- reqCtx.TaskID
+					if err := queue.Write(ctx, a2a.NewSubmittedTask(reqCtx, reqCtx.Message)); err != nil {
+						return err
+					}
+					for ctx.Err() == nil {
+						data := a2a.DataPart{Data: map[string]any{"foo": "bar"}}
+						if err := queue.Write(ctx, a2a.NewArtifactEvent(reqCtx, data)); err != nil {
+							return err
+						}
+						time.Sleep(1 * time.Millisecond)
+					}
+					finalUpdate := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCompleted, nil)
+					finalUpdate.Final = true
+					return queue.Write(ctx, finalUpdate)
+				},
+			}
+			server := startA2AServer(executor)
+			defer server.Close()
+
+			card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolJSONRPC, URL: server.URL, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+			remoteAgent, err := NewA2A(A2AConfig{
+				Name:                      "a2a",
+				AgentCard:                 card,
+				RemoteTaskCleanupCallback: cleanupCallback,
+				Converter:                 tc.eventConverter,
+				AfterRequestCallbacks:     tc.afterRequestCallbacks,
+			})
+			if err != nil {
+				t.Fatalf("NewA2A() error = %v", err)
+			}
+
+			ictxCtx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			session := prepareSession(t, ictxCtx, []*session.Event{newUserHello()})
+			ictx := icontext.NewInvocationContext(ictxCtx, icontext.InvocationContextParams{
+				Session:   session,
+				RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+			})
+
+			count := 0
+			for _, err := range remoteAgent.Run(ictx) {
+				if err != nil {
+					break
+				}
+				count++
+				if tc.cancelContextAfter > 0 && count >= tc.cancelContextAfter {
+					cancel()
+				}
+				if tc.breakAfter > 0 && count >= tc.breakAfter {
+					break
+				}
+			}
+
+			expectedTaskID := <-remoteTaskIDChan
+			if !cleanupCalled {
+				t.Fatal("RemoteTaskCleanupCallback was not called")
+			}
+			if cleanupTaskID != expectedTaskID {
+				t.Fatalf("cleanupTaskID = %v, want %v", cleanupTaskID, expectedTaskID)
+			}
+			if tc.wantCause != "" {
+				if cleanupCause == nil {
+					if tc.wantCause != "" {
+						t.Fatalf("cleanupCause is nil, want to contain %q", tc.wantCause)
+					}
+				} else if !strings.Contains(cleanupCause.Error(), tc.wantCause) {
+					t.Fatalf("cleanupCause = %v, want to contain %q", cleanupCause, tc.wantCause)
+				}
+			}
+
+			client := newA2AClient(t, server)
+			task, err := client.GetTask(t.Context(), &a2a.TaskQueryParams{ID: expectedTaskID})
+			if err != nil {
+				t.Fatalf("client.CancelTask() error = %v", err)
+			}
+			if task.Status.State != a2a.TaskStateCanceled {
+				t.Fatalf("task.Status.State = %q, want %q", task.Status.State, a2a.TaskStateCanceled)
+			}
+		})
+	}
+}
+
+func TestRemoteAgent_PartConverter(t *testing.T) {
 	event := &session.Event{
 		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
 			{Text: "KEEP"},

@@ -47,7 +47,7 @@ func (m *mockToolContext) Actions() *session.EventActions {
 	return &session.EventActions{}
 }
 
-func (m *mockToolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+func (m *mockToolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchMemoryResponse, error) {
 	return nil, nil
 }
 func (m *mockToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }

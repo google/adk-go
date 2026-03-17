@@ -40,9 +40,11 @@ type key struct {
 type sessionID string
 
 type value struct {
-	content   *genai.Content
-	author    string
-	timestamp time.Time
+	id             string
+	content        *genai.Content
+	author         string
+	timestamp      time.Time
+	customMetadata map[string]any
 
 	// precomputed set of words in the content for simple keyword matching.
 	words map[string]struct{}
@@ -54,7 +56,7 @@ type inMemoryService struct {
 	store map[key]map[sessionID][]value
 }
 
-func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Session) error {
+func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession session.Session) error {
 	var values []value
 
 	for event := range curSession.Events().All() {
@@ -76,10 +78,12 @@ func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Ses
 		}
 
 		values = append(values, value{
-			content:   event.LLMResponse.Content,
-			author:    event.Author,
-			timestamp: event.Timestamp,
-			words:     words,
+			id:             event.ID,
+			content:        event.LLMResponse.Content,
+			author:         event.Author,
+			timestamp:      event.Timestamp,
+			customMetadata: event.CustomMetadata,
+			words:          words,
 		})
 	}
 
@@ -102,7 +106,7 @@ func (s *inMemoryService) AddSession(ctx context.Context, curSession session.Ses
 	return nil
 }
 
-func (s *inMemoryService) Search(ctx context.Context, req *SearchRequest) (*SearchResponse, error) {
+func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchMemoryRequest) (*SearchMemoryResponse, error) {
 	queryWords := extractWords(req.Query)
 
 	k := key{
@@ -114,18 +118,20 @@ func (s *inMemoryService) Search(ctx context.Context, req *SearchRequest) (*Sear
 	values, ok := s.store[k]
 	s.mu.RUnlock()
 	if !ok {
-		return &SearchResponse{}, nil
+		return &SearchMemoryResponse{}, nil
 	}
 
-	res := &SearchResponse{}
+	res := &SearchMemoryResponse{}
 
 	for _, events := range values {
 		for _, e := range events {
 			if checkMapsIntersect(e.words, queryWords) {
 				res.Memories = append(res.Memories, Entry{
-					Content:   e.content,
-					Author:    e.author,
-					Timestamp: e.timestamp,
+					ID:             e.id,
+					Content:        e.content,
+					Author:         e.author,
+					Timestamp:      e.timestamp,
+					CustomMetadata: e.customMetadata,
 				})
 			}
 		}

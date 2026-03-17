@@ -63,7 +63,7 @@ type Context interface {
 	// agent, or perform other actions.
 	Actions() *session.EventActions
 	// SearchMemory performs a semantic search on the agent's memory.
-	SearchMemory(context.Context, string) (*memory.SearchResponse, error)
+	SearchMemory(context.Context, string) (*memory.SearchMemoryResponse, error)
 
 	// ToolConfirmation returns a handler for checking the Human-in-the-Loop
 	// confirmation status for the current tool context. This should be used within a tool's logic
@@ -116,7 +116,13 @@ type Toolset interface {
 type Predicate func(ctx agent.ReadonlyContext, tool Tool) bool
 
 // StringPredicate is a helper that creates a Predicate from a string slice.
+// Deprecated: use AllowedToolsPredicate instead.
 func StringPredicate(allowedTools []string) Predicate {
+	return AllowedToolsPredicate(allowedTools)
+}
+
+// AllowedToolsPredicate returns a Predicate that allows only the tools with the given names.
+func AllowedToolsPredicate(allowedTools []string) Predicate {
 	m := make(map[string]bool)
 	for _, t := range allowedTools {
 		m[t] = true

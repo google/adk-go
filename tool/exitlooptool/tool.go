@@ -22,10 +22,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
-// EmptyArgs is an empty struct used as an argument for the exitLoop tool.
-type EmptyArgs struct{}
-
-func exitLoop(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
+func exitLoop(ctx tool.Context, myArgs struct{}) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = true
 	return map[string]string{}, nil
