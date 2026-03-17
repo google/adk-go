@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"net/http"
 	"time"
 
@@ -64,17 +65,10 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 
 // RunAgent executes a non-streaming agent run for a given session and message.
 func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest models.RunAgentRequest) ([]*session.Event, error) {
-	err := c.validateSessionExists(ctx, runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
+	resp, err := c.prepareAndRun(ctx, runAgentRequest)
 	if err != nil {
 		return nil, err
 	}
-
-	r, rCfg, err := c.getRunner(runAgentRequest)
-	if err != nil {
-		return nil, err
-	}
-
-	resp := r.Run(ctx, runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg)
 
 	var events []*session.Event
 	for event, err := range resp {
@@ -105,21 +99,10 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		return err
 	}
 
-	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
+	resp, err := c.prepareAndRun(req.Context(), runAgentRequest)
 	if err != nil {
 		return err
 	}
-
-	r, rCfg, err := c.getRunner(runAgentRequest)
-	if err != nil {
-		return err
-	}
-
-	opts := []runner.RunOption{}
-	if runAgentRequest.StateDelta != nil {
-		opts = append(opts, runner.WithStateDelta(*runAgentRequest.StateDelta))
-	}
-	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg, opts...)
 
 	for event, err := range resp {
 		if err != nil {
@@ -160,6 +143,26 @@ func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, event sessi
 		return newStatusError(fmt.Errorf("failed to flush: %w", err), http.StatusInternalServerError)
 	}
 	return nil
+}
+
+// prepareAndRun validates the session, creates the runner, builds run options
+// (including stateDelta if present), and starts the agent run.
+func (c *RuntimeAPIController) prepareAndRun(ctx context.Context, req models.RunAgentRequest) (iter.Seq2[*session.Event, error], error) {
+	err := c.validateSessionExists(ctx, req.AppName, req.UserId, req.SessionId)
+	if err != nil {
+		return nil, err
+	}
+
+	r, rCfg, err := c.getRunner(req)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []runner.RunOption{}
+	if req.StateDelta != nil {
+		opts = append(opts, runner.WithStateDelta(*req.StateDelta))
+	}
+	return r.Run(ctx, req.UserId, req.SessionId, &req.NewMessage, *rCfg, opts...), nil
 }
 
 func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
