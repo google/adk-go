@@ -28,20 +28,21 @@ import (
 )
 
 type inputRequiredProcessor struct {
-	reqCtx *a2asrv.RequestContext
-	event  *a2a.TaskStatusUpdateEvent
+	reqCtx        *a2asrv.RequestContext
+	event         *a2a.TaskStatusUpdateEvent
+	partConverter GenAIPartConverter
 	// handles possible duplication in partial and non-partial events
 	addedParts []*genai.Part
 }
 
-func newInputRequiredProcessor(reqCtx *a2asrv.RequestContext) *inputRequiredProcessor {
-	return &inputRequiredProcessor{reqCtx: reqCtx}
+func newInputRequiredProcessor(reqCtx *a2asrv.RequestContext, partConverter GenAIPartConverter) *inputRequiredProcessor {
+	return &inputRequiredProcessor{reqCtx: reqCtx, partConverter: partConverter}
 }
 
 // process handles long-running function tool calls by accumulating them for the final task status update.
 // If a part was incorporated into the final task status update the original event is modified to not include it,
 // so that parts are not duplicated in the response.
-func (p *inputRequiredProcessor) process(event *session.Event) (*session.Event, error) {
+func (p *inputRequiredProcessor) process(ctx context.Context, event *session.Event) (*session.Event, error) {
 	resp := event.LLMResponse
 	if resp.Content == nil {
 		return event, nil
@@ -77,7 +78,7 @@ func (p *inputRequiredProcessor) process(event *session.Event) (*session.Event, 
 	}
 
 	if len(inputRequiredParts) > 0 {
-		a2aParts, err := ToA2AParts(inputRequiredParts, longRunningCallIDs)
+		a2aParts, err := p.convertParts(ctx, event, inputRequiredParts, longRunningCallIDs)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert input required parts to A2A parts: %w", err)
 		}
@@ -102,6 +103,24 @@ func (p *inputRequiredProcessor) process(event *session.Event) (*session.Event, 
 	modifiedEvent.LLMResponse.Content = &newContent
 
 	return &modifiedEvent, nil
+}
+
+func (p *inputRequiredProcessor) convertParts(ctx context.Context, event *session.Event, parts []*genai.Part, longRunningCallIDs []string) ([]a2a.Part, error) {
+	if p.partConverter == nil {
+		return ToA2AParts(parts, longRunningCallIDs)
+	}
+	converted := make([]a2a.Part, 0, len(parts))
+	for _, part := range parts {
+		cp, err := p.partConverter(ctx, event, part)
+		if err != nil {
+			return nil, err
+		}
+		if cp == nil {
+			continue
+		}
+		converted = append(converted, cp)
+	}
+	return converted, nil
 }
 
 func (p *inputRequiredProcessor) isLongRunningResponse(event *session.Event, part *genai.Part) bool {
