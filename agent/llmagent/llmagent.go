@@ -428,7 +428,28 @@ func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event
 	if req.LiveConfig == nil {
 		req.LiveConfig = &genai.LiveConnectConfig{}
 	}
-	req.LiveConfig.SystemInstruction = genai.NewContentFromText(a.instruction, "user")
+
+	// Resolve instruction dynamically (same precedence as text path):
+	// InstructionProvider > static Instruction. ConnectLive needs the resolved
+	// instruction upfront — unlike the text path where appendInstructions runs
+	// per model call, live mode sets it once at connection time.
+	instruction := a.instruction
+	agentState := llminternal.Reveal(a)
+	if agentState.InstructionProvider != nil {
+		resolved, err := agentState.InstructionProvider(icontext.NewReadonlyContext(ctx))
+		if err != nil {
+			return llminternal.ErrIter(fmt.Errorf("failed to resolve live instruction: %w", err))
+		}
+		instruction = resolved
+	}
+
+	// System instruction must have no Role — Gemini Live API rejects "user" role
+	// with "Please ensure that only text part is used to specify the system_instruction".
+	if instruction != "" {
+		req.LiveConfig.SystemInstruction = &genai.Content{
+			Parts: []*genai.Part{{Text: instruction}},
+		}
+	}
 	req.LiveConfig.Tools = buildLiveTools(a.Tools)
 
 	conn, err := liveLLM.ConnectLive(ctx, req)

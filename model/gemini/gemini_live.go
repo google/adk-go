@@ -51,9 +51,13 @@ func (c *geminiLiveConnection) Send(_ context.Context, req *model.LiveRequest) e
 			Text:  req.RealtimeInput.Text,
 		})
 	case req.Content != nil:
+		tc := true // default: model responds after this content
+		if req.TurnComplete != nil {
+			tc = *req.TurnComplete
+		}
 		return c.session.SendClientContent(genai.LiveClientContentInput{
 			Turns:        []*genai.Content{req.Content},
-			TurnComplete: genai.Ptr(true),
+			TurnComplete: &tc,
 		})
 	default:
 		return fmt.Errorf("empty LiveRequest: at least one field must be set")
@@ -97,15 +101,19 @@ func mapServerMessage(msg *genai.LiveServerMessage) *model.LLMResponse {
 		}
 
 		if sc.InputTranscription != nil && sc.InputTranscription.Text != "" {
-			resp.CustomMetadata["transcript_type"] = "input"
-			resp.CustomMetadata["transcript_text"] = sc.InputTranscription.Text
+			resp.InputTranscription = &genai.Transcription{
+				Text:     sc.InputTranscription.Text,
+				Finished: sc.InputTranscription.Finished,
+			}
 			if resp.Content == nil {
 				resp.Content = genai.NewContentFromText(sc.InputTranscription.Text, "user")
 			}
 		}
 		if sc.OutputTranscription != nil && sc.OutputTranscription.Text != "" {
-			resp.CustomMetadata["transcript_type"] = "output"
-			resp.CustomMetadata["transcript_text"] = sc.OutputTranscription.Text
+			resp.OutputTranscription = &genai.Transcription{
+				Text:     sc.OutputTranscription.Text,
+				Finished: sc.OutputTranscription.Finished,
+			}
 			if resp.Content == nil {
 				resp.Content = genai.NewContentFromText(sc.OutputTranscription.Text, "model")
 			}

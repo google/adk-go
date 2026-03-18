@@ -335,11 +335,20 @@ func audioResponse(data []byte) *model.LLMResponse {
 	}
 }
 
-func transcriptResponse(text, kind string) *model.LLMResponse {
-	return &model.LLMResponse{
-		Content:        genai.NewContentFromText(text, "model"),
-		CustomMetadata: map[string]any{"transcript_type": kind},
+func transcriptResponse(text, kind string, finished bool) *model.LLMResponse {
+	role := genai.Role("model")
+	if kind == "input" {
+		role = "user"
 	}
+	resp := &model.LLMResponse{
+		Content: genai.NewContentFromText(text, role),
+	}
+	if kind == "input" {
+		resp.InputTranscription = &genai.Transcription{Text: text, Finished: finished}
+	} else {
+		resp.OutputTranscription = &genai.Transcription{Text: text, Finished: finished}
+	}
+	return resp
 }
 
 func functionCallResponse(id, name string, args map[string]any) *model.LLMResponse {
@@ -423,7 +432,7 @@ func TestScenario2_AudioNotPersistedTranscriptPersisted(t *testing.T) {
 	conn := newMockLiveConnection()
 	conn.recvResponses = []*model.LLMResponse{
 		audioResponse([]byte{0x01, 0x02}),
-		transcriptResponse("Hello there", "output"),
+		transcriptResponse("Hello there", "output", true),
 		turnCompleteResponse(),
 	}
 
@@ -1009,5 +1018,199 @@ func TestScenario11_ModelSpeakingStateTransitions(t *testing.T) {
 		if states[i] != want {
 			t.Errorf("states[%d] = %v, want %v", i, states[i], want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 12: Input transcript chunking — buffered until Finished
+// ---------------------------------------------------------------------------
+
+func TestScenario12_InputTranscriptChunking(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		transcriptResponse("Hello ", "input", false),
+		transcriptResponse("world", "input", true),
+		turnCompleteResponse(),
+	}
+
+	r, svc, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, errs := collectEvents(t, r, queue)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 yielded events, got %d", len(events))
+	}
+
+	// Should persist one aggregated event with "Hello world"
+	persisted := svc.PersistedEvents()
+	found := false
+	for _, ev := range persisted {
+		if ev.Content != nil && len(ev.Content.Parts) > 0 &&
+			ev.Content.Parts[0].Text == "Hello world" {
+			found = true
+			if ev.Author != "user" {
+				t.Errorf("input transcript author = %q, want %q", ev.Author, "user")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected aggregated 'Hello world' in persisted events, got %d events: %v",
+			len(persisted), persistedTexts(persisted))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 13: Output transcript persisted as agent response
+// ---------------------------------------------------------------------------
+
+func TestScenario13_OutputTranscriptPersisted(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		transcriptResponse("I can help with that", "output", true),
+		turnCompleteResponse(),
+	}
+
+	r, svc, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, errs := collectEvents(t, r, queue)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 yielded events, got %d", len(events))
+	}
+
+	persisted := svc.PersistedEvents()
+	found := false
+	for _, ev := range persisted {
+		if ev.Content != nil && len(ev.Content.Parts) > 0 &&
+			ev.Content.Parts[0].Text == "I can help with that" {
+			found = true
+			// Author should be the agent name (set by runner from invCtx.Agent().Name())
+			if ev.Author == "" || ev.Author == "user" {
+				t.Errorf("output transcript author = %q, want agent name", ev.Author)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected output transcript persisted, got %d events: %v",
+			len(persisted), persistedTexts(persisted))
+	}
+}
+
+// persistedTexts extracts text from persisted events for test diagnostics.
+func persistedTexts(events []*session.Event) []string {
+	var texts []string
+	for _, ev := range events {
+		if ev.Content != nil {
+			for _, p := range ev.Content.Parts {
+				if p.Text != "" {
+					texts = append(texts, p.Text)
+				}
+			}
+		}
+	}
+	return texts
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 14: TurnComplete boundary flush — output transcription split per segment
+// ---------------------------------------------------------------------------
+
+func TestScenario14_TurnCompleteBoundaryFlush(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		// First speaking segment: two output chunks, then TurnComplete.
+		transcriptResponse("Hello, ", "output", false),
+		transcriptResponse("how are you?", "output", false),
+		turnCompleteResponse(),
+		// Second speaking segment: one chunk, then TurnComplete.
+		transcriptResponse("I found the patient.", "output", false),
+		turnCompleteResponse(),
+	}
+
+	r, svc, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, errs := collectEvents(t, r, queue)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(events) != 5 {
+		t.Fatalf("expected 5 yielded events, got %d", len(events))
+	}
+
+	// Should produce two separate persisted agent_response events.
+	persisted := svc.PersistedEvents()
+	texts := persistedTexts(persisted)
+
+	if len(texts) != 2 {
+		t.Fatalf("expected 2 persisted transcripts, got %d: %v", len(texts), texts)
+	}
+	if texts[0] != "Hello, how are you?" {
+		t.Errorf("first segment = %q, want %q", texts[0], "Hello, how are you?")
+	}
+	if texts[1] != "I found the patient." {
+		t.Errorf("second segment = %q, want %q", texts[1], "I found the patient.")
+	}
+
+	// Both should have agent name as author (not "user").
+	for i, ev := range persisted {
+		if ev.Author == "" || ev.Author == "user" {
+			t.Errorf("persisted[%d] author = %q, want agent name", i, ev.Author)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 15: Defer flush on consumer break — buffered text persisted on early exit
+// ---------------------------------------------------------------------------
+
+func TestScenario15_DeferFlushOnConsumerBreak(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvCh = make(chan *model.LLMResponse, 10)
+
+	r, svc, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+
+	// Feed output transcript chunks without Finished or TurnComplete.
+	conn.recvCh <- transcriptResponse("Partial one ", "output", false)
+	conn.recvCh <- transcriptResponse("partial two", "output", false)
+
+	// Consumer collects 2 events then breaks (simulates user pressing Stop).
+	collected := 0
+	for ev, err := range r.RunLive(context.Background(), "user1", "sess1", queue, agent.RunConfig{}) {
+		_ = ev
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		collected++
+		if collected >= 2 {
+			break
+		}
+	}
+
+	// Close resources after break.
+	queue.Close()
+
+	// The defer flush should have persisted the accumulated output transcription.
+	persisted := svc.PersistedEvents()
+	texts := persistedTexts(persisted)
+
+	if len(texts) != 1 {
+		t.Fatalf("expected 1 flushed transcript, got %d: %v", len(texts), texts)
+	}
+	if texts[0] != "Partial one partial two" {
+		t.Errorf("flushed text = %q, want %q", texts[0], "Partial one partial two")
+	}
+	if persisted[0].Author == "" || persisted[0].Author == "user" {
+		t.Errorf("flushed author = %q, want agent name", persisted[0].Author)
 	}
 }

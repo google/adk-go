@@ -146,12 +146,32 @@ func (lf *LiveFlow) sendHistory(
 	conn model.LiveConnection,
 ) error {
 	events := ctx.Session().Events()
+
+	// Collect non-nil content events.
+	var turns []*genai.Content
 	for i := range events.Len() {
 		ev := events.At(i)
-		if ev.Content == nil {
-			continue
+		if ev.Content != nil {
+			turns = append(turns, ev.Content)
 		}
-		if err := conn.Send(cancelCtx, &model.LiveRequest{Content: ev.Content}); err != nil {
+	}
+	if len(turns) == 0 {
+		return nil
+	}
+
+	// Send all history turns with TurnComplete=false so the model absorbs
+	// them as context without responding to each one individually.
+	// Only the last turn is sent with TurnComplete=true to signal
+	// that history replay is complete.
+	falseVal := false
+	for i, content := range turns {
+		isLast := i == len(turns)-1
+		req := &model.LiveRequest{Content: content}
+		if !isLast {
+			req.TurnComplete = &falseVal
+		}
+		// Last turn uses default (TurnComplete=nil → true).
+		if err := conn.Send(cancelCtx, req); err != nil {
 			return err
 		}
 	}
@@ -326,6 +346,13 @@ func (lf *LiveFlow) processMessage(
 
 	ev := session.NewEvent(invCtx.InvocationID())
 	ev.Author = invCtx.Agent().Name()
+	// Only relabel as "user" when the content is purely transcription-derived
+	// (no ModelTurn). A single server message can carry both modelTurn and
+	// inputTranscription; blindly overriding Author would misattribute model
+	// content as user-produced.
+	if resp.InputTranscription != nil && (resp.Content == nil || resp.Content.Role == "user") {
+		ev.Author = "user"
+	}
 	ev.Branch = invCtx.Branch()
 	ev.LLMResponse = *resp
 	sendEvent(ctx, eventCh, eventOrError{event: ev})
