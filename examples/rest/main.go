@@ -64,6 +64,9 @@ func main() {
 		SessionService:  session.InMemoryService(),
 		SSEWriteTimeout: 120 * time.Second,
 	})
+	if err != nil {
+		log.Fatalf("Failed to create REST API server: %v", err)
+	}
 
 	// Create a standard net/http ServeMux
 	mux := http.NewServeMux()
