@@ -86,8 +86,7 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		return fmt.Errorf("failed to create REST server: %w", err)
 	}
 
-	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(restServer.SpanProcessor()))
-	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithLogRecordProcessors(restServer.LogProcessor()))
+	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(restServer.SpanProcessor()), telemetry.WithLogRecordProcessors(restServer.LogProcessor()))
 
 	// Wrap it with CORS middleware
 	corsHandler := corsWithArgs(a.config.frontendAddress)(restServer)
