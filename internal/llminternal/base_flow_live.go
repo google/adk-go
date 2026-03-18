@@ -346,8 +346,12 @@ func (lf *LiveFlow) processMessage(
 
 	ev := session.NewEvent(invCtx.InvocationID())
 	ev.Author = invCtx.Agent().Name()
-	if resp.InputTranscription != nil {
-		ev.Author = "user" // Input transcription is the user speaking, not the model.
+	// Only relabel as "user" when the content is purely transcription-derived
+	// (no ModelTurn). A single server message can carry both modelTurn and
+	// inputTranscription; blindly overriding Author would misattribute model
+	// content as user-produced.
+	if resp.InputTranscription != nil && (resp.Content == nil || resp.Content.Role == "user") {
+		ev.Author = "user"
 	}
 	ev.Branch = invCtx.Branch()
 	ev.LLMResponse = *resp
