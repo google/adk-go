@@ -48,4 +48,10 @@ type RunConfig struct {
 	OutputAudioTranscription bool
 	ToolCoalesceWindow       time.Duration // default 150ms if zero
 	LiveBufferSize           int           // default 100 if zero
+	// Generation parameters — applied to the live session config when set.
+	ThinkingConfig  *genai.ThinkingConfig
+	Temperature     *float32
+	TopP            *float32
+	TopK            *float32
+	MaxOutputTokens *int32
 }
