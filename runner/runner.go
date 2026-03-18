@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
@@ -356,6 +357,35 @@ func (r *Runner) RunLive(
 			}
 		}
 
+		// Transcription buffers: accumulate chunks until Finished=true,
+		// then persist one aggregated event per transcription turn.
+		var inputTranscriptBuf strings.Builder
+		var outputTranscriptBuf strings.Builder
+
+		// Flush remaining buffers when the iterator exits — via defer so it runs
+		// even when the consumer breaks (yield returns false → early return).
+		// WithoutCancel preserves context values (e.g. tenant identity for RLS)
+		// while surviving parent cancellation.
+		defer func() {
+			flushCtx := context.WithoutCancel(ctx)
+			if inputTranscriptBuf.Len() > 0 {
+				tev := session.NewEvent(invCtx.InvocationID())
+				tev.Author = "user"
+				tev.LLMResponse.Content = genai.NewContentFromText(inputTranscriptBuf.String(), "user")
+				if err := r.sessionService.AppendEvent(flushCtx, storedSession, tev); err != nil {
+					log.Printf("failed to flush input transcript on exit: %v", err)
+				}
+			}
+			if outputTranscriptBuf.Len() > 0 {
+				tev := session.NewEvent(invCtx.InvocationID())
+				tev.Author = invCtx.Agent().Name()
+				tev.LLMResponse.Content = genai.NewContentFromText(outputTranscriptBuf.String(), "model")
+				if err := r.sessionService.AppendEvent(flushCtx, storedSession, tev); err != nil {
+					log.Printf("failed to flush output transcript on exit: %v", err)
+				}
+			}
+		}()
+
 		for event, err := range r.rootAgent.Run(invCtx) {
 			if err != nil {
 				if !yield(event, err) {
@@ -377,14 +407,67 @@ func (r *Runner) RunLive(
 				}
 			}
 
-			// Persist non-partial, non-audio events
+			// Handle input transcription: buffer chunks, persist on Finished.
+			if event.InputTranscription != nil {
+				inputTranscriptBuf.WriteString(event.InputTranscription.Text)
+				if event.InputTranscription.Finished && inputTranscriptBuf.Len() > 0 {
+					tev := session.NewEvent(invCtx.InvocationID())
+					tev.Author = "user"
+					tev.LLMResponse.Content = genai.NewContentFromText(inputTranscriptBuf.String(), "user")
+					if err := r.sessionService.AppendEvent(ctx, storedSession, tev); err != nil {
+						yield(nil, fmt.Errorf("failed to persist input transcript: %w", err))
+						return
+					}
+					inputTranscriptBuf.Reset()
+				}
+				if !yield(event, nil) {
+					return
+				}
+				continue
+			}
+
+			// Handle output transcription: buffer chunks, persist on Finished.
+			if event.OutputTranscription != nil {
+				outputTranscriptBuf.WriteString(event.OutputTranscription.Text)
+				if event.OutputTranscription.Finished && outputTranscriptBuf.Len() > 0 {
+					tev := session.NewEvent(invCtx.InvocationID())
+					tev.Author = invCtx.Agent().Name()
+					tev.LLMResponse.Content = genai.NewContentFromText(outputTranscriptBuf.String(), "model")
+					if err := r.sessionService.AppendEvent(ctx, storedSession, tev); err != nil {
+						yield(nil, fmt.Errorf("failed to persist output transcript: %w", err))
+						return
+					}
+					outputTranscriptBuf.Reset()
+				}
+				if !yield(event, nil) {
+					return
+				}
+				continue
+			}
+
+			// TurnComplete is the natural boundary between speaking segments.
+			// Flush accumulated output transcription so each segment gets its
+			// own persisted event with correct timeline positioning.
+			if event.TurnComplete && outputTranscriptBuf.Len() > 0 {
+				tev := session.NewEvent(invCtx.InvocationID())
+				tev.Author = invCtx.Agent().Name()
+				tev.LLMResponse.Content = genai.NewContentFromText(outputTranscriptBuf.String(), "model")
+				if err := r.sessionService.AppendEvent(ctx, storedSession, tev); err != nil {
+					yield(nil, fmt.Errorf("failed to persist output transcript on turn complete: %w", err))
+					return
+				}
+				outputTranscriptBuf.Reset()
+			}
+
+			// Persist non-partial, non-audio, non-transcript events with actual content.
 			isAudio := false
-			if event.LLMResponse.CustomMetadata != nil {
-				if v, ok := event.LLMResponse.CustomMetadata["is_audio"].(bool); ok {
+			if meta := event.CustomMetadata; meta != nil {
+				if v, ok := meta["is_audio"].(bool); ok {
 					isAudio = v
 				}
 			}
-			if !event.LLMResponse.Partial && !isAudio {
+			hasContent := event.Content != nil && len(event.Content.Parts) > 0
+			if !event.Partial && !isAudio && hasContent {
 				if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return

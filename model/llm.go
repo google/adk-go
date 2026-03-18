@@ -58,7 +58,14 @@ type LLMResponse struct {
 	TurnComplete bool
 	// Flag indicating that LLM was interrupted when generating the content.
 	// Usually it is due to user interruption during a bidi streaming.
-	Interrupted  bool
+	Interrupted bool
+
+	// Live-only: transcription of user audio input / model audio output.
+	// Populated by the model connector (e.g. gemini_live.go) from the Live API's
+	// ServerContent.InputTranscription / OutputTranscription fields.
+	InputTranscription  *genai.Transcription
+	OutputTranscription *genai.Transcription
+
 	ErrorCode    string
 	ErrorMessage string
 	FinishReason genai.FinishReason
@@ -86,4 +93,8 @@ type LiveRequest struct {
 	RealtimeInput *genai.LiveRealtimeInput
 	ToolResponse  []*genai.FunctionResponse
 	Close         bool
+	// TurnComplete controls whether the model should respond after this content.
+	// nil defaults to true (backwards compatible). Set to false when sending
+	// history turns that the model should absorb without responding.
+	TurnComplete *bool
 }
