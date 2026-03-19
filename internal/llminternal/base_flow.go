@@ -816,7 +816,12 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.StateDelta != nil {
 		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
 	}
-	// TODO add similar logic for state
+	if other.ArtifactDelta != nil {
+		if base.ArtifactDelta == nil {
+			base.ArtifactDelta = make(map[string]int64)
+		}
+		maps.Copy(base.ArtifactDelta, other.ArtifactDelta)
+	}
 	if other.RequestedToolConfirmations != nil {
 		if base.RequestedToolConfirmations == nil {
 			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
