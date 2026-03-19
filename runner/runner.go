@@ -53,7 +53,7 @@ type Config struct {
 	MemoryService memory.Service
 	// optional
 	PluginConfig PluginConfig
-	//optional
+	// optional
 	AutoCreateSession bool
 }
 
