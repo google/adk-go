@@ -26,7 +26,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/server/adkrest"
 	"google.golang.org/adk/session"
@@ -59,21 +58,22 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	// Configure the ADK REST API
-	config := &launcher.Config{
-		AgentLoader:    agent.NewSingleLoader(a),
-		SessionService: session.InMemoryService(),
+	// Configure the ADK REST API Server
+	restServer, err := adkrest.NewServer(adkrest.ServerConfig{
+		AgentLoader:     agent.NewSingleLoader(a),
+		SessionService:  session.InMemoryService(),
+		SSEWriteTimeout: 120 * time.Second,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create REST API server: %v", err)
 	}
-
-	// Create the REST API handler - this returns a standard http.Handler
-	apiHandler := adkrest.NewHandler(config, 120*time.Second)
 
 	// Create a standard net/http ServeMux
 	mux := http.NewServeMux()
 
 	// Register the API handler at the /api/ path
 	// You can use any HTTP server or router here - not tied to gorilla/mux
-	mux.Handle("/api/", http.StripPrefix("/api", apiHandler))
+	mux.Handle("/api/", http.StripPrefix("/api", restServer))
 
 	// Add a simple health check endpoint
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

@@ -72,8 +72,8 @@ func TestMemory_AddAndSearch(t *testing.T) {
 		}
 	}
 
-	if err := memoryService.AddSession(t.Context(), session); err != nil {
-		t.Fatalf("AddSession failed: %v", err)
+	if err := memoryService.AddSessionToMemory(t.Context(), session); err != nil {
+		t.Fatalf("AddSessionToMemory failed: %v", err)
 	}
 
 	// Expected MemoryEntry items
@@ -91,57 +91,57 @@ func TestMemory_AddAndSearch(t *testing.T) {
 	tests := []struct {
 		name  string
 		query string
-		want  *memory.SearchResponse
+		want  *memory.SearchMemoryResponse
 	}{
 		{
 			name:  "match first entry",
 			query: "fox",
-			want: &memory.SearchResponse{
+			want: &memory.SearchMemoryResponse{
 				Memories: []memory.Entry{entry1},
 			},
 		},
 		{
 			name:  "match second entry",
 			query: "DOG", // Search should be case-insensitive
-			want: &memory.SearchResponse{
+			want: &memory.SearchMemoryResponse{
 				Memories: []memory.Entry{entry2},
 			},
 		},
 		{
 			name:  "match both entries (any word)",
 			query: "quick dog",
-			want: &memory.SearchResponse{
+			want: &memory.SearchMemoryResponse{
 				Memories: []memory.Entry{entry1, entry2},
 			},
 		},
 		{
 			name:  "match word in both",
 			query: "the",
-			want: &memory.SearchResponse{
+			want: &memory.SearchMemoryResponse{
 				Memories: []memory.Entry{entry1, entry2},
 			},
 		},
 		{
 			name:  "no match",
 			query: "unrelated",
-			want:  &memory.SearchResponse{},
+			want:  &memory.SearchMemoryResponse{},
 		},
 		{
 			name:  "empty query",
 			query: "",
-			want:  &memory.SearchResponse{},
+			want:  &memory.SearchMemoryResponse{},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := memoryService.Search(t.Context(), tc.query)
+			got, err := memoryService.SearchMemory(t.Context(), tc.query)
 			if err != nil {
-				t.Fatalf("Search(%q) failed: %v", tc.query, err)
+				t.Fatalf("SearchMemory(%q) failed: %v", tc.query, err)
 			}
 
 			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
-				t.Errorf("Search(%q) returned diff (-want +got):\n%s", tc.query, diff)
+				t.Errorf("SearchMemory(%q) returned diff (-want +got):\n%s", tc.query, diff)
 			}
 		})
 	}
@@ -155,12 +155,12 @@ func TestMemory_Search_NoData(t *testing.T) {
 		SessionID: "sess2",
 	}
 
-	got, err := memory.Search(t.Context(), "any query")
+	got, err := memory.SearchMemory(t.Context(), "any query")
 	if err != nil {
-		t.Fatalf("Search() failed: %v", err)
+		t.Fatalf("SearchMemory() failed: %v", err)
 	}
 	if len(got.Memories) != 0 {
-		t.Errorf("Search() on empty memory returned %d items, want 0", len(got.Memories))
+		t.Errorf("SearchMemory() on empty memory returned %d items, want 0", len(got.Memories))
 	}
 }
 
@@ -195,8 +195,8 @@ func TestMemory_Search_Isolation(t *testing.T) {
 		t.Fatalf("Failed to append event: %v", err)
 	}
 
-	if err := memory1.AddSession(t.Context(), storedSession); err != nil {
-		t.Fatalf("AddSession failed: %v", err)
+	if err := memory1.AddSessionToMemory(t.Context(), storedSession); err != nil {
+		t.Fatalf("AddSessionToMemory failed: %v", err)
 	}
 
 	// Add data for User2
@@ -225,29 +225,29 @@ func TestMemory_Search_Isolation(t *testing.T) {
 		t.Fatalf("Failed to append event: %v", err)
 	}
 
-	if err := memory2.AddSession(t.Context(), storedSession2); err != nil {
-		t.Fatalf("AddSession failed: %v", err)
+	if err := memory2.AddSessionToMemory(t.Context(), storedSession2); err != nil {
+		t.Fatalf("AddSessionToMemory failed: %v", err)
 	}
 
 	// User1 search should only find user1's content
-	got1, err := memory1.Search(t.Context(), "Content")
+	got1, err := memory1.SearchMemory(t.Context(), "Content")
 	if err != nil {
-		t.Fatalf("memory1.Search failed: %v", err)
+		t.Fatalf("memory1.SearchMemory failed: %v", err)
 	}
 	if len(got1.Memories) != 1 {
-		t.Errorf("memory1.Search returned %d items, want 1", len(got1.Memories))
+		t.Errorf("memory1.SearchMemory returned %d items, want 1", len(got1.Memories))
 	} else if diff := cmp.Diff(content1, got1.Memories[0].Content); diff != "" {
-		t.Errorf("memory1.Search returned diff (-want +got):\n%s", diff)
+		t.Errorf("memory1.SearchMemory returned diff (-want +got):\n%s", diff)
 	}
 
 	// User2 search should only find user2's content
-	got2, err := memory2.Search(t.Context(), "Content")
+	got2, err := memory2.SearchMemory(t.Context(), "Content")
 	if err != nil {
-		t.Fatalf("memory2.Search failed: %v", err)
+		t.Fatalf("memory2.SearchMemory failed: %v", err)
 	}
 	if len(got2.Memories) != 1 {
-		t.Errorf("memory2.Search returned %d items, want 1", len(got2.Memories))
+		t.Errorf("memory2.SearchMemory returned %d items, want 1", len(got2.Memories))
 	} else if diff := cmp.Diff(content2, got2.Memories[0].Content); diff != "" {
-		t.Errorf("memory2.Search returned diff (-want +got):\n%s", diff)
+		t.Errorf("memory2.SearchMemory returned diff (-want +got):\n%s", diff)
 	}
 }

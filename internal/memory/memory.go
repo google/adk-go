@@ -28,12 +28,12 @@ type Memory struct {
 	AppName   string
 }
 
-func (a *Memory) AddSession(ctx context.Context, session session.Session) error {
-	return a.Service.AddSession(ctx, session)
+func (a *Memory) AddSessionToMemory(ctx context.Context, session session.Session) error {
+	return a.Service.AddSessionToMemory(ctx, session)
 }
 
-func (a *Memory) Search(ctx context.Context, query string) (*memory.SearchResponse, error) {
-	return a.Service.Search(ctx, &memory.SearchRequest{
+func (a *Memory) SearchMemory(ctx context.Context, query string) (*memory.SearchMemoryResponse, error) {
+	return a.Service.SearchMemory(ctx, &memory.SearchMemoryRequest{
 		AppName: a.AppName,
 		UserID:  a.UserID,
 		Query:   query,

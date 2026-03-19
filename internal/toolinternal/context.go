@@ -60,7 +60,10 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 	if actions.StateDelta == nil {
 		actions.StateDelta = make(map[string]any)
 	}
-	cbCtx := contextinternal.NewCallbackContextWithDelta(ctx, actions.StateDelta)
+	if actions.ArtifactDelta == nil {
+		actions.ArtifactDelta = make(map[string]int64)
+	}
+	cbCtx := contextinternal.NewCallbackContextWithDelta(ctx, actions.StateDelta, actions.ArtifactDelta)
 
 	return &toolContext{
 		CallbackContext:   cbCtx,
@@ -100,11 +103,11 @@ func (c *toolContext) AgentName() string {
 	return c.invocationContext.Agent().Name()
 }
 
-func (c *toolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+func (c *toolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchMemoryResponse, error) {
 	if c.invocationContext.Memory() == nil {
 		return nil, fmt.Errorf("memory service is not set")
 	}
-	return c.invocationContext.Memory().Search(ctx, query)
+	return c.invocationContext.Memory().SearchMemory(ctx, query)
 }
 
 func (c *toolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation {

@@ -62,7 +62,7 @@ func TestTypes(t *testing.T) {
 		},
 		{
 			name:          "geminitool",
-			constructor:   func() (tool.Tool, error) { return geminitool.New("", nil), nil },
+			constructor:   func() (tool.Tool, error) { return geminitool.New("", "", nil), nil },
 			expectedTypes: []string{requestProc},
 		},
 		{
@@ -135,7 +135,7 @@ func (c *testContext) Actions() *session.EventActions {
 	return c.eventActions
 }
 func (c *testContext) FunctionCallID() string { return "test-function-call-id" }
-func (c *testContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
+func (c *testContext) SearchMemory(context.Context, string) (*memory.SearchMemoryResponse, error) {
 	return nil, nil
 }
 func (c *testContext) AgentName() string                    { return "test-agent" }

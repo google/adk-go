@@ -24,7 +24,7 @@ func Genai2LLMResponse(res *genai.GenerateContentResponse) *model.LLMResponse {
 	usageMetadata := res.UsageMetadata
 	if len(res.Candidates) > 0 && res.Candidates[0] != nil {
 		candidate := res.Candidates[0]
-		if candidate.Content != nil && len(candidate.Content.Parts) > 0 {
+		if (candidate.Content != nil && len(candidate.Content.Parts) > 0) || candidate.FinishReason == genai.FinishReasonStop {
 			return &model.LLMResponse{
 				Content:           candidate.Content,
 				GroundingMetadata: candidate.GroundingMetadata,

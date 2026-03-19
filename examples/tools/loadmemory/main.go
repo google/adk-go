@@ -76,7 +76,7 @@ func main() {
 	}
 
 	// Add the previous session to memory so it can be searched.
-	if err := memoryService.AddSession(ctx, previousSession); err != nil {
+	if err := memoryService.AddSessionToMemory(ctx, previousSession); err != nil {
 		log.Fatalf("Failed to add session to memory: %v", err)
 	}
 
