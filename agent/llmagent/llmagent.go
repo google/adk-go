@@ -494,6 +494,21 @@ func liveConfigFromRunConfig(rc *agent.RunConfig) *genai.LiveConnectConfig {
 	if rc.OutputAudioTranscription {
 		cfg.OutputAudioTranscription = &genai.AudioTranscriptionConfig{}
 	}
+	if rc.ThinkingConfig != nil {
+		cfg.ThinkingConfig = rc.ThinkingConfig
+	}
+	if rc.Temperature != nil {
+		cfg.Temperature = rc.Temperature
+	}
+	if rc.TopP != nil {
+		cfg.TopP = rc.TopP
+	}
+	if rc.TopK != nil {
+		cfg.TopK = rc.TopK
+	}
+	if rc.MaxOutputTokens != nil {
+		cfg.MaxOutputTokens = *rc.MaxOutputTokens
+	}
 	return cfg
 }
 
