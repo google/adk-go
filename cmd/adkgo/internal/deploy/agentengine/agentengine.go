@@ -155,10 +155,10 @@ func (f *deployAgentEngineFlags) cleanTemp() error {
 	return util.LogStartStop("Cleaning temp",
 		func(p util.Printer) error {
 			p("Clean temp starting with", f.build.tempDir)
-			// err := os.RemoveAll(f.build.tempDir)
-			// if err != nil {
-			// 	return fmt.Errorf("failed to clean temp directory %v: %w", f.build.tempDir, err)
-			// }
+			err := os.RemoveAll(f.build.tempDir)
+			if err != nil {
+				return fmt.Errorf("failed to clean temp directory %v: %w", f.build.tempDir, err)
+			}
 			return nil
 		})
 }
