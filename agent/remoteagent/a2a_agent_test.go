@@ -46,6 +46,7 @@ import (
 type mockA2AExecutor struct {
 	executeFn func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error
 	cancelFn  func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error
+	cleanupFn func(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error)
 }
 
 var _ a2asrv.AgentExecutor = (*mockA2AExecutor)(nil)
@@ -64,6 +65,12 @@ func (e *mockA2AExecutor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestCont
 	ev := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil)
 	ev.Final = true
 	return queue.Write(ctx, ev)
+}
+
+func (e *mockA2AExecutor) Cleanup(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error) {
+	if e.cleanupFn != nil {
+		e.cleanupFn(ctx, reqCtx, result, cause)
+	}
 }
 
 type testA2AServer struct {
