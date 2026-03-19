@@ -601,6 +601,18 @@ func TestMergeEventActions(t *testing.T) {
 				ArtifactDelta: map[string]int64{"file_a.txt": 2},
 			},
 		},
+		{
+			name: "artifact delta - older version in other does not overwrite newer base",
+			base: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 3},
+			},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 1},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 3},
+			},
+		},
 	}
 
 	for _, tc := range tests {

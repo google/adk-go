@@ -820,7 +820,11 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		if base.ArtifactDelta == nil {
 			base.ArtifactDelta = make(map[string]int64)
 		}
-		maps.Copy(base.ArtifactDelta, other.ArtifactDelta)
+		for name, version := range other.ArtifactDelta {
+			if oldVersion, ok := base.ArtifactDelta[name]; !ok || version > oldVersion {
+				base.ArtifactDelta[name] = version
+			}
+		}
 	}
 	if other.RequestedToolConfirmations != nil {
 		if base.RequestedToolConfirmations == nil {
