@@ -59,25 +59,11 @@ func TestLiveConfigFromRunConfig(t *testing.T) {
 		}
 
 		got := liveConfigFromRunConfig(rc)
-
-		if got.ThinkingConfig != nil {
-			t.Error("ThinkingConfig should be nil")
+		want := &genai.LiveConnectConfig{
+			SpeechConfig: &genai.SpeechConfig{},
 		}
-		if got.Temperature != nil {
-			t.Error("Temperature should be nil")
-		}
-		if got.TopP != nil {
-			t.Error("TopP should be nil")
-		}
-		if got.TopK != nil {
-			t.Error("TopK should be nil")
-		}
-		if got.MaxOutputTokens != 0 {
-			t.Errorf("MaxOutputTokens = %d, want 0", got.MaxOutputTokens)
-		}
-		// SpeechConfig should still be mapped
-		if got.SpeechConfig == nil {
-			t.Error("SpeechConfig should be set")
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("mismatch (-want +got):\n%s", diff)
 		}
 	})
 }
