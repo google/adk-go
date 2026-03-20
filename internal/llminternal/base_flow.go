@@ -384,6 +384,7 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
 			ModelName:    m.Name(),
 			InvocationID: ctx.InvocationID(),
+			LLMRequest:   req,
 		})
 		ctx = ctx.WithContext(spanCtx)
 		backend := googlellm.GetGoogleLLMVariant(m)

@@ -291,6 +291,112 @@ func TestGenerateContent(t *testing.T) {
 	}
 }
 
+func TestGenerateContentContentCapture(t *testing.T) {
+	invocationID := "test-invocation-id"
+
+	llmRequest := &model.LLMRequest{
+		Model: "test-model",
+		Contents: []*genai.Content{
+			{
+				Role:  "user",
+				Parts: []*genai.Part{{Text: "Hello, world!"}},
+			},
+		},
+		Config: &genai.GenerateContentConfig{
+			SystemInstruction: &genai.Content{
+				Parts: []*genai.Part{
+					{Text: "You are a helpful assistant."},
+					{Text: "Be concise."},
+				},
+			},
+		},
+	}
+
+	llmResponse := &model.LLMResponse{
+		Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{Text: "Hi there!"}},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     5,
+			CandidatesTokenCount: 3,
+		},
+		FinishReason: genai.FinishReasonStop,
+	}
+
+	t.Run("ContentCaptureDisabled", func(t *testing.T) {
+		// Ensure content capture is disabled (default).
+		SetGenAICaptureMessageContent(false)
+		t.Cleanup(func() { SetGenAICaptureMessageContent(false) })
+
+		exporter := setupTestTracer(t)
+		ctx := t.Context()
+
+		_, span := StartGenerateContentSpan(ctx, StartGenerateContentSpanParams{
+			ModelName:    "test-model",
+			InvocationID: invocationID,
+			LLMRequest:   llmRequest,
+		})
+		TraceGenerateContentResult(span, TraceGenerateContentResultParams{
+			Response: llmResponse,
+		})
+		span.End()
+
+		spans := exporter.GetSpans()
+		if len(spans) != 1 {
+			t.Fatalf("expected 1 span, got %d", len(spans))
+		}
+		gotAttrs := attributesToMap(spans[0].Attributes)
+
+		// Content capture attributes should NOT be present.
+		for _, key := range []attribute.Key{"gen_ai.system_instructions", "gen_ai.input.messages", "gen_ai.output.messages"} {
+			if _, found := gotAttrs[key]; found {
+				t.Errorf("attribute %q should not be present when content capture is disabled", key)
+			}
+		}
+	})
+
+	t.Run("ContentCaptureEnabled", func(t *testing.T) {
+		SetGenAICaptureMessageContent(true)
+		t.Cleanup(func() { SetGenAICaptureMessageContent(false) })
+
+		exporter := setupTestTracer(t)
+		ctx := t.Context()
+
+		_, span := StartGenerateContentSpan(ctx, StartGenerateContentSpanParams{
+			ModelName:    "test-model",
+			InvocationID: invocationID,
+			LLMRequest:   llmRequest,
+		})
+		TraceGenerateContentResult(span, TraceGenerateContentResultParams{
+			Response: llmResponse,
+		})
+		span.End()
+
+		spans := exporter.GetSpans()
+		if len(spans) != 1 {
+			t.Fatalf("expected 1 span, got %d", len(spans))
+		}
+		gotAttrs := attributesToMap(spans[0].Attributes)
+
+		// System instructions should be present.
+		wantSysInstr := "You are a helpful assistant.\nBe concise."
+		if got := gotAttrs["gen_ai.system_instructions"]; got != wantSysInstr {
+			t.Errorf("gen_ai.system_instructions: got %q, want %q", got, wantSysInstr)
+		}
+
+		// Input messages should be present (JSON serialized).
+		if got, found := gotAttrs["gen_ai.input.messages"]; !found || got == "" {
+			t.Error("gen_ai.input.messages should be present and non-empty when content capture is enabled")
+		}
+
+		// Output messages should be present (JSON serialized).
+		if got, found := gotAttrs["gen_ai.output.messages"]; !found || got == "" {
+			t.Error("gen_ai.output.messages should be present and non-empty when content capture is enabled")
+		}
+	})
+}
+
 func TestExecuteTool(t *testing.T) {
 	tests := []struct {
 		name         string
