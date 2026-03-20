@@ -103,7 +103,7 @@ func (c *toolContext) AgentName() string {
 	return c.invocationContext.Agent().Name()
 }
 
-func (c *toolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchMemoryResponse, error) {
+func (c *toolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	if c.invocationContext.Memory() == nil {
 		return nil, fmt.Errorf("memory service is not set")
 	}

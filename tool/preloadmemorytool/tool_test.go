@@ -41,11 +41,11 @@ func (m *mockMemory) AddSessionToMemory(ctx context.Context, s session.Session) 
 	return nil
 }
 
-func (m *mockMemory) SearchMemory(ctx context.Context, query string) (*memory.SearchMemoryResponse, error) {
+func (m *mockMemory) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
-	return &memory.SearchMemoryResponse{Memories: m.memories}, nil
+	return &memory.SearchResponse{Memories: m.memories}, nil
 }
 
 func TestPreloadMemoryTool_BasicProperties(t *testing.T) {
