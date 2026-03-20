@@ -15,12 +15,16 @@
 package llminternal
 
 import (
+	"context"
 	"errors"
+	"iter"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/agent/runconfig"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
@@ -571,6 +575,120 @@ func TestMergeEventActions(t *testing.T) {
 			got := mergeEventActions(tc.base, tc.other)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("mergeEventActions() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// mockStreamingLLM is a mock LLM that returns a canned sequence of responses.
+// This simulates the scenario where the model's last streaming chunk has Partial=true,
+// for example when reaching a max token limit.
+type mockStreamingLLM struct {
+	responses []*model.LLMResponse
+}
+
+func (m *mockStreamingLLM) Name() string { return "mock-llm" }
+func (m *mockStreamingLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for _, r := range m.responses {
+			if !yield(r, nil) {
+				return
+			}
+		}
+	}
+}
+
+// TestFlowRunPartialLastEvent verifies that Flow.Run does not return an error
+// when the last event from runOneStep has Partial=true.
+// This is a regression test for https://github.com/google/adk-go/issues/600.
+func TestFlowRunPartialLastEvent(t *testing.T) {
+	tests := []struct {
+		name      string
+		responses []*model.LLMResponse
+		wantTexts []string
+	}{
+		{
+			name: "single partial response completes without error",
+			responses: []*model.LLMResponse{
+				{
+					Content: genai.NewContentFromText("Hello", genai.RoleModel),
+					Partial: true,
+				},
+			},
+			wantTexts: []string{"Hello"},
+		},
+		{
+			name: "multiple partial responses complete without error",
+			responses: []*model.LLMResponse{
+				{
+					Content: genai.NewContentFromText("Hello", genai.RoleModel),
+					Partial: true,
+				},
+				{
+					Content: genai.NewContentFromText(" World", genai.RoleModel),
+					Partial: true,
+				},
+			},
+			wantTexts: []string{"Hello", " World"},
+		},
+		{
+			name: "partial followed by non-partial completes without error",
+			responses: []*model.LLMResponse{
+				{
+					Content: genai.NewContentFromText("Hello", genai.RoleModel),
+					Partial: true,
+				},
+				{
+					Content: genai.NewContentFromText("Hello World", genai.RoleModel),
+					Partial: false,
+				},
+			},
+			wantTexts: []string{"Hello", "Hello World"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockAgent, err := agent.New(agent.Config{Name: "test-agent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx := runconfig.ToContext(t.Context(), &runconfig.RunConfig{
+				StreamingMode: runconfig.StreamingModeSSE,
+			})
+
+			invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+				Agent: mockAgent,
+			})
+
+			f := &Flow{
+				Model:             &mockStreamingLLM{responses: tc.responses},
+				RequestProcessors: nil, // no preprocessors needed
+			}
+
+			var gotTexts []string
+			var gotErr error
+			for ev, err := range f.Run(invCtx) {
+				if err != nil {
+					gotErr = err
+					break
+				}
+				if ev != nil && ev.Content != nil {
+					for _, p := range ev.Content.Parts {
+						if p.Text != "" {
+							gotTexts = append(gotTexts, p.Text)
+						}
+					}
+				}
+			}
+
+			if gotErr != nil {
+				t.Errorf("Flow.Run() returned unexpected error: %v", gotErr)
+			}
+
+			if diff := cmp.Diff(tc.wantTexts, gotTexts); diff != "" {
+				t.Errorf("Flow.Run() text mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
