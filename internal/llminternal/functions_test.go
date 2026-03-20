@@ -170,6 +170,63 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "confirmation requested with ThoughtSignature",
+			invocationContext: &mockInvocationContext{
+				invocationID: "inv_1",
+				agentName:    "agent_1",
+				branch:       "main",
+			},
+			functionCallEvent: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{
+								FunctionCall:     confirmingFunctionCall,
+								ThoughtSignature: []byte{0x01, 0x02, 0x03},
+							},
+						},
+					},
+				},
+			},
+			functionResponseEvent: &session.Event{
+				Actions: session.EventActions{
+					RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+						"call_1": {
+							Hint: "Are you sure?",
+						},
+					},
+				},
+			},
+			wantEvent: &session.Event{
+				InvocationID: "inv_1",
+				Author:       "agent_1",
+				Branch:       "main",
+				Actions: session.EventActions{
+					StateDelta:    map[string]any{},
+					ArtifactDelta: map[string]int64{},
+				},
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: genai.RoleModel,
+						Parts: []*genai.Part{
+							{
+								FunctionCall: &genai.FunctionCall{
+									Name: toolconfirmation.FunctionCallName,
+									Args: map[string]any{
+										"originalFunctionCall": confirmingFunctionCall,
+										"toolConfirmation": toolconfirmation.ToolConfirmation{
+											Hint: "Are you sure?",
+										},
+									},
+								},
+								ThoughtSignature: []byte{0x01, 0x02, 0x03},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {

@@ -47,6 +47,12 @@ func generateRequestConfirmationEvent(
 	for _, call := range utils.FunctionCalls(functionCallEvent.Content) {
 		functionCalls[call.ID] = call
 	}
+	thoughtSignatures := make(map[string][]byte)
+	for _, p := range functionCallEvent.Content.Parts {
+		if p.FunctionCall != nil && len(p.ThoughtSignature) > 0 {
+			thoughtSignatures[p.FunctionCall.ID] = p.ThoughtSignature
+		}
+	}
 
 	for funcID, confirmation := range functionResponseEvent.Actions.RequestedToolConfirmations {
 		originalFunctionCall, ok := functionCalls[funcID]
@@ -66,9 +72,13 @@ func generateRequestConfirmationEvent(
 			Args: args,
 		}
 
-		parts = append(parts, &genai.Part{
+		newPart := &genai.Part{
 			FunctionCall: requestConfirmationFC,
-		})
+		}
+		if sig, ok := thoughtSignatures[funcID]; ok {
+			newPart.ThoughtSignature = sig
+		}
+		parts = append(parts, newPart)
 		longRunningToolIDs = append(longRunningToolIDs, requestConfirmationFC.ID)
 	}
 
