@@ -430,6 +430,14 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 	}
 }
 
+// FindAgent finds a sub-agent by name.
+func (a *llmAgent) FindAgent(name string) agent.Agent {
+	if a.Name() == name {
+		return a
+	}
+	return a.Agent.FindSubAgent(name)
+}
+
 // InstructionProvider allows to create instructions dynamically. It is called
 // on each agent invocation.
 //
