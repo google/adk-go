@@ -63,7 +63,7 @@ type Context interface {
 	// agent, or perform other actions.
 	Actions() *session.EventActions
 	// SearchMemory performs a semantic search on the agent's memory.
-	SearchMemory(context.Context, string) (*memory.SearchMemoryResponse, error)
+	SearchMemory(context.Context, string) (*memory.SearchResponse, error)
 
 	// ToolConfirmation returns a handler for checking the Human-in-the-Loop
 	// confirmation status for the current tool context. This should be used within a tool's logic

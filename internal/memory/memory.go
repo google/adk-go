@@ -32,8 +32,8 @@ func (a *Memory) AddSessionToMemory(ctx context.Context, session session.Session
 	return a.Service.AddSessionToMemory(ctx, session)
 }
 
-func (a *Memory) SearchMemory(ctx context.Context, query string) (*memory.SearchMemoryResponse, error) {
-	return a.Service.SearchMemory(ctx, &memory.SearchMemoryRequest{
+func (a *Memory) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	return a.Service.SearchMemory(ctx, &memory.SearchRequest{
 		AppName: a.AppName,
 		UserID:  a.UserID,
 		Query:   query,

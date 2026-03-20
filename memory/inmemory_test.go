@@ -32,8 +32,8 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 	tests := []struct {
 		name         string
 		initSessions []session.Session
-		req          *memory.SearchMemoryRequest
-		wantResp     *memory.SearchMemoryResponse
+		req          *memory.SearchRequest
+		wantResp     *memory.SearchResponse
 		wantErr      bool
 	}{
 		{
@@ -66,12 +66,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memory.SearchMemoryRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "user1",
 				Query:   "quick hello",
 			},
-			wantResp: &memory.SearchMemoryResponse{
+			wantResp: &memory.SearchResponse{
 				Memories: []memory.Entry{
 					{
 						ID:             "event1",
@@ -95,12 +95,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memory.SearchMemoryRequest{
+			req: &memory.SearchRequest{
 				AppName: "other_app",
 				UserID:  "user1",
 				Query:   "test text",
 			},
-			wantResp: &memory.SearchMemoryResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 		{
 			name: "no leakage for different user",
@@ -109,12 +109,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memory.SearchMemoryRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "test text",
 			},
-			wantResp: &memory.SearchMemoryResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 		{
 			name: "no matches",
@@ -123,21 +123,21 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("test text", genai.RoleUser)}},
 				}),
 			},
-			req: &memory.SearchMemoryRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "something different",
 			},
-			wantResp: &memory.SearchMemoryResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 		{
 			name: "lookup on empty store",
-			req: &memory.SearchMemoryRequest{
+			req: &memory.SearchRequest{
 				AppName: "app1",
 				UserID:  "test_user",
 				Query:   "something different",
 			},
-			wantResp: &memory.SearchMemoryResponse{},
+			wantResp: &memory.SearchResponse{},
 		},
 	}
 	for _, tt := range tests {
@@ -172,7 +172,7 @@ func makeSession(t *testing.T, appName, userID, sessionID string, events []*sess
 	}
 }
 
-var sortMemories = cmp.Transformer("Sort", func(in *memory.SearchMemoryResponse) *memory.SearchMemoryResponse {
+var sortMemories = cmp.Transformer("Sort", func(in *memory.SearchResponse) *memory.SearchResponse {
 	slices.SortFunc(in.Memories, func(m1, m2 memory.Entry) int {
 		return m1.Timestamp.Compare(m2.Timestamp)
 	})

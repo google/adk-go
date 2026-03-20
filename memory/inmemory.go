@@ -106,7 +106,7 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 	return nil
 }
 
-func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchMemoryRequest) (*SearchMemoryResponse, error) {
+func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) (*SearchResponse, error) {
 	queryWords := extractWords(req.Query)
 
 	k := key{
@@ -118,10 +118,10 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchMemoryReq
 	values, ok := s.store[k]
 	s.mu.RUnlock()
 	if !ok {
-		return &SearchMemoryResponse{}, nil
+		return &SearchResponse{}, nil
 	}
 
-	res := &SearchMemoryResponse{}
+	res := &SearchResponse{}
 
 	for _, events := range values {
 		for _, e := range events {

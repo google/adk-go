@@ -91,45 +91,45 @@ func TestMemory_AddAndSearch(t *testing.T) {
 	tests := []struct {
 		name  string
 		query string
-		want  *memory.SearchMemoryResponse
+		want  *memory.SearchResponse
 	}{
 		{
 			name:  "match first entry",
 			query: "fox",
-			want: &memory.SearchMemoryResponse{
+			want: &memory.SearchResponse{
 				Memories: []memory.Entry{entry1},
 			},
 		},
 		{
 			name:  "match second entry",
 			query: "DOG", // Search should be case-insensitive
-			want: &memory.SearchMemoryResponse{
+			want: &memory.SearchResponse{
 				Memories: []memory.Entry{entry2},
 			},
 		},
 		{
 			name:  "match both entries (any word)",
 			query: "quick dog",
-			want: &memory.SearchMemoryResponse{
+			want: &memory.SearchResponse{
 				Memories: []memory.Entry{entry1, entry2},
 			},
 		},
 		{
 			name:  "match word in both",
 			query: "the",
-			want: &memory.SearchMemoryResponse{
+			want: &memory.SearchResponse{
 				Memories: []memory.Entry{entry1, entry2},
 			},
 		},
 		{
 			name:  "no match",
 			query: "unrelated",
-			want:  &memory.SearchMemoryResponse{},
+			want:  &memory.SearchResponse{},
 		},
 		{
 			name:  "empty query",
 			query: "",
-			want:  &memory.SearchMemoryResponse{},
+			want:  &memory.SearchResponse{},
 		},
 	}
 
