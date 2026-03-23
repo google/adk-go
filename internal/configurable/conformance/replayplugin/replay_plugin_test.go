@@ -60,11 +60,11 @@ recordings:
           - role: "user"
             parts:
               - text: "Hello"
-      llm_response:
-        content:
-          role: "model"
-          parts:
-            - text: "Recorded response"
+      llm_responses:
+        - content:
+            role: "model"
+            parts:
+              - text: "Recorded response"
 `
 		createRecordingsFile(t, tempDir, recordingsYaml)
 

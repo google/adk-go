@@ -236,15 +236,15 @@ func RegisterFunctions() error {
 		Name: "create_booking",
 		Description: `Creates a booking for a user.
 
-  Args:
-    user_id: The unique identifier for the user.
-    is_confirmed: Whether the booking is confirmed.
-    details: Any additional details for the booking.
+Args:
+  user_id: The unique identifier for the user.
+  is_confirmed: Whether the booking is confirmed.
+  details: Any additional details for the booking.
 
-  Returns:
-    A dictionary containing the booking information and the types of the
-    received arguments.
-  `,
+Returns:
+  A dictionary containing the booking information and the types of the
+  received arguments.
+`,
 	}, createBooking)
 	if err != nil {
 		return fmt.Errorf("error creating create booking tool: %w", err)
@@ -254,18 +254,18 @@ func RegisterFunctions() error {
 		Name: "search_flights",
 		Description: `Search for flights based on trip details and preferences.
 
-  This function demonstrates advanced parameter handling:
-  - Pydantic models as parameters (trip, preferences)
-  - Optional/nullable parameters (preferences, return_date, preferred_airline)
-  - Default values (cabin_class, max_stops, flexible_dates)
+This function demonstrates advanced parameter handling:
+- Pydantic models as parameters (trip, preferences)
+- Optional/nullable parameters (preferences, return_date, preferred_airline)
+- Default values (cabin_class, max_stops, flexible_dates)
 
-  Args:
-    trip: Core trip information including origin, destination, and dates.
-    preferences: Optional flight preferences. If not provided, uses defaults.
+Args:
+  trip: Core trip information including origin, destination, and dates.
+  preferences: Optional flight preferences. If not provided, uses defaults.
 
-  Returns:
-    A dictionary containing search results and parameters received.
-  `,
+Returns:
+  A dictionary containing search results and parameters received.
+`,
 	}, searchFlights)
 	if err != nil {
 		return fmt.Errorf("error creating search flights tool: %w", err)
@@ -275,21 +275,21 @@ func RegisterFunctions() error {
 		Name: "calculate_trip_cost",
 		Description: `Calculate total trip cost with various optional charges.
 
-  This function demonstrates:
-  - Mix of required and optional parameters
-  - Default values for common cases
-  - Nullable parameter that affects calculation logic
+This function demonstrates:
+- Mix of required and optional parameters
+- Default values for common cases
+- Nullable parameter that affects calculation logic
 
-  Args:
-    base_fare: Base ticket price per passenger.
-    num_passengers: Number of passengers (default: 1).
-    insurance: Whether to add travel insurance (default: False).
-    baggage_count: Number of checked bags per passenger, or None for carry-on
-      only.
+Args:
+  base_fare: Base ticket price per passenger.
+  num_passengers: Number of passengers (default: 1).
+  insurance: Whether to add travel insurance (default: False).
+  baggage_count: Number of checked bags per passenger, or None for carry-on
+    only.
 
-  Returns:
-    A dictionary with cost breakdown.
-  `,
+Returns:
+  A dictionary with cost breakdown.
+`,
 	}, calculateTripCost)
 	if err != nil {
 		return fmt.Errorf("error creating calculate trip cost tool: %w", err)

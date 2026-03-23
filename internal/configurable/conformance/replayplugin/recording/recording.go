@@ -54,7 +54,7 @@ type LLMRecording struct {
 	LLMRequest *model.LLMRequest `yaml:"llmrequest,omitempty"`
 
 	// Required. The LLM response.
-	LLMResponse *model.LLMResponse `yaml:"llmresponse,omitempty"`
+	LLMResponses []*model.LLMResponse `yaml:"llmresponses,omitempty"`
 }
 
 // ToolRecording represents a paired tool call and response.
