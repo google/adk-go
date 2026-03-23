@@ -129,7 +129,7 @@ func (p *replayPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequ
 		return nil, err
 	}
 
-	return recording.LLMResponse, nil
+	return recording.LLMResponses[0], nil
 }
 
 // beforeTool intercepts tool calls, verifies them against the recording, and returns the recorded response.
@@ -328,8 +328,12 @@ func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invoca
 			prevMessageId = recordings.Recordings[i].UserMessageIndex
 			index = 0
 		}
-		recordings.Recordings[i].Index = index
-		index++
+		if recordings.Recordings[i].LLMRecording != nil {
+			recordings.Recordings[i].Index = index
+			index++
+		} else {
+			recordings.Recordings[i].Index = -1 // Not used for sync
+		}
 	}
 
 	// 4. Create and Store State
@@ -507,26 +511,57 @@ func modifyString(input string) string {
 	})
 }
 
+// getNextToolRecordingForAgent retrieves the next unconsumed tool recording that matches the given function.
+func getNextToolRecordingForAgent(state *invocationReplayState, agentName string, matchFn func(*recording.Recording) (bool, error)) (*recording.Recording, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	var firstError error
+
+	for i := range state.recordings.Recordings {
+		rec := &state.recordings.Recordings[i]
+		if rec.UserMessageIndex != state.userMessageIndex || rec.AgentName != agentName {
+			continue
+		}
+		if state.consumedRecordings[i] {
+			continue
+		}
+
+		matched, err := matchFn(rec)
+		if matched {
+			state.consumedRecordings[i] = true
+			return rec, nil
+		}
+		if firstError == nil && err != nil {
+			firstError = err
+		}
+	}
+
+	if firstError != nil {
+		return nil, firstError
+	}
+
+	return nil, fmt.Errorf("no matching tool recording found for agent '%s' at user_message_index %d", agentName, state.userMessageIndex)
+}
+
 // verifyAndGetNextToolRecordingForAgent ensures the next recording is a tool call and matches the actual call.
 func (p *replayPlugin) verifyAndGetNextToolRecordingForAgent(state *invocationReplayState, agentName string, t tool.Tool, args map[string]any) (*recording.ToolRecording, error) {
-	currentAgentIndex, ok := state.GetAgentReplayIndex(agentName)
-	if !ok {
-		currentAgentIndex = 0
+	matchFn := func(rec *recording.Recording) (bool, error) {
+		if rec.ToolRecording == nil {
+			return false, fmt.Errorf("expected tool recording for agent '%s', but found LLM recording", agentName)
+		}
+		err := verifyToolCallMatch(rec.ToolRecording.ToolCall, t.Name(), args, agentName, state.agentReplayIndices[agentName])
+		return err == nil, err
 	}
-	expectedRecording, err := getNextRecordingForAgent(state, agentName)
+
+	expectedRecording, err := getNextToolRecordingForAgent(state, agentName, matchFn)
 	if err != nil {
 		return nil, err
 	}
 
-	if expectedRecording.ToolRecording == nil {
-		return nil, fmt.Errorf("expected tool recording for agent '%s' at index %d, but found LLM recording", agentName, currentAgentIndex)
-	}
-
-	// Strict verification of tool call
-	err = verifyToolCallMatch(expectedRecording.ToolRecording.ToolCall, t.Name(), args, agentName, currentAgentIndex)
-	if err != nil {
-		return nil, err
-	}
+	state.mu.Lock()
+	state.agentReplayIndices[agentName]++
+	state.mu.Unlock()
 
 	return expectedRecording.ToolRecording, nil
 }
