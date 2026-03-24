@@ -17,6 +17,7 @@ package memory
 import (
 	"context"
 	"maps"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -55,6 +56,9 @@ type inMemoryService struct {
 	mu    sync.RWMutex
 	store map[key]map[sessionID][]value
 }
+
+// Keep the in-memory tokenizer aligned with adk-python's ASCII-word extraction.
+var asciiWordPattern = regexp.MustCompile(`[A-Za-z]+`)
 
 func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession session.Session) error {
 	var values []value
@@ -162,10 +166,7 @@ func checkMapsIntersect(m1, m2 map[string]struct{}) bool {
 func extractWords(text string) map[string]struct{} {
 	res := make(map[string]struct{})
 
-	for s := range strings.SplitSeq(text, " ") {
-		if s == "" {
-			continue
-		}
+	for _, s := range asciiWordPattern.FindAllString(text, -1) {
 		res[strings.ToLower(s)] = struct{}{}
 	}
 
