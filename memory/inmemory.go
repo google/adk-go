@@ -17,10 +17,10 @@ package memory
 import (
 	"context"
 	"maps"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"google.golang.org/genai"
 
@@ -56,9 +56,6 @@ type inMemoryService struct {
 	mu    sync.RWMutex
 	store map[key]map[sessionID][]value
 }
-
-// Keep the in-memory tokenizer aligned with adk-python's ASCII-word extraction.
-var asciiWordPattern = regexp.MustCompile(`[A-Za-z]+`)
 
 func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession session.Session) error {
 	var values []value
@@ -166,8 +163,15 @@ func checkMapsIntersect(m1, m2 map[string]struct{}) bool {
 func extractWords(text string) map[string]struct{} {
 	res := make(map[string]struct{})
 
-	for _, s := range asciiWordPattern.FindAllString(text, -1) {
-		res[strings.ToLower(s)] = struct{}{}
+	for _, word := range strings.Fields(text) {
+		normalized := strings.TrimFunc(word, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+		})
+		if normalized == "" {
+			continue
+		}
+
+		res[strings.ToLower(normalized)] = struct{}{}
 	}
 
 	return res

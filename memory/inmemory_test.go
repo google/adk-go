@@ -169,6 +169,36 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "preserves unicode letters and digits while trimming punctuation",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess5", []*session.Event{
+					{
+						ID:     "event-unicode",
+						Author: "assistant",
+						LLMResponse: model.LLMResponse{
+							Content: genai.NewContentFromText("Привет, мир! Version v2 hit 404.", genai.RoleModel),
+						},
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-04T10:00:00Z")),
+					},
+				}),
+			},
+			req: &memory.SearchRequest{
+				AppName: "app1",
+				UserID:  "user1",
+				Query:   "привет v2 404",
+			},
+			wantResp: &memory.SearchResponse{
+				Memories: []memory.Entry{
+					{
+						ID:        "event-unicode",
+						Content:   genai.NewContentFromText("Привет, мир! Version v2 hit 404.", genai.RoleModel),
+						Author:    "assistant",
+						Timestamp: must(time.Parse(time.RFC3339, "2023-10-04T10:00:00Z")),
+					},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
