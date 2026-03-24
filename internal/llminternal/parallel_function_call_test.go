@@ -68,6 +68,7 @@ var expectedNonPartialLLMResponse25Flash = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 	{
 		Partial: false,
@@ -94,6 +95,7 @@ var expectedNonPartialLLMResponse25Flash = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 	{
 		Partial: false,
@@ -114,6 +116,7 @@ var expectedNonPartialLLMResponse25Flash = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 	{
 		Partial: false,
@@ -140,6 +143,7 @@ var expectedNonPartialLLMResponse25Flash = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 }
 
@@ -163,6 +167,7 @@ var expectedNonPartialLLMResponse3FlashPreview = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 	{
 		Partial: false,
@@ -189,6 +194,7 @@ var expectedNonPartialLLMResponse3FlashPreview = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 	{
 		Partial: false,
@@ -209,6 +215,7 @@ var expectedNonPartialLLMResponse3FlashPreview = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 	{
 		Partial: false,
@@ -235,6 +242,7 @@ var expectedNonPartialLLMResponse3FlashPreview = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 }
 
@@ -258,6 +266,7 @@ var expectedNonPartialLLMResponse3ProPreview = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 	{
 		Partial: false,
@@ -285,6 +294,7 @@ var expectedNonPartialLLMResponse3ProPreview = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 	{
 		Partial: false,
@@ -305,6 +315,7 @@ var expectedNonPartialLLMResponse3ProPreview = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 	{
 		Partial: false,
@@ -332,6 +343,7 @@ var expectedNonPartialLLMResponse3ProPreview = []*model.LLMResponse{
 			},
 			Role: "model",
 		},
+		FinishReason: genai.FinishReasonStop,
 	},
 }
 

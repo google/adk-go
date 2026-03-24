@@ -846,3 +846,44 @@ func TestPartialFunctionCallsNotExecutedInNoneStreamingMode(t *testing.T) {
 		t.Errorf("Expected 1 function response event, got %d", functionResponseEvents)
 	}
 }
+
+func TestFinishReasonUnexpectedToolCallPreservesErrorCode(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	// Simulate an LLM chunk that reports UNEXPECTED_TOOL_CALL
+	chunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "Some text"}},
+				},
+				FinishReason: genai.FinishReasonUnexpectedToolCall,
+			},
+		},
+	}
+
+	for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatalf("Close should return a valid response")
+	}
+
+	if finalResponse.FinishReason != genai.FinishReasonUnexpectedToolCall {
+		t.Errorf("Expected FinishReason '%s', got '%s'", genai.FinishReasonUnexpectedToolCall, finalResponse.FinishReason)
+	}
+
+	if finalResponse.ErrorCode != "" {
+		t.Errorf("ErrorCode was unexpectedly overwritten to '%s'", finalResponse.ErrorCode)
+	}
+
+	if finalResponse.ErrorMessage != "" {
+		t.Errorf("ErrorMessage was unexpectedly overwritten to '%s'", finalResponse.ErrorMessage)
+	}
+}
