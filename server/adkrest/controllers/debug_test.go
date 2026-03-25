@@ -259,7 +259,7 @@ type testTelemetry struct {
 }
 
 func setupTestTelemetry() *testTelemetry {
-	dt := services.NewDebugTelemetry()
+	dt := services.NewDebugTelemetry(nil)
 
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(dt.SpanProcessor()))
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(dt.LogProcessor()))
