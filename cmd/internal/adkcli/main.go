@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/internal/configurable"
 	"google.golang.org/adk/internal/configurable/conformance"
+	"google.golang.org/adk/internal/configurable/conformance/replayplugin"
 	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
 )
@@ -111,8 +112,7 @@ func main() {
 		AgentLoader: loader,
 		PluginConfig: runner.PluginConfig{
 			Plugins: []*plugin.Plugin{
-				// TODO: Add replay plugin
-				// replayplugin.MustNew(),
+				replayplugin.MustNew(cwd),
 			},
 		},
 	}

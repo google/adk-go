@@ -1,19 +1,18 @@
 httprr trace v1
-507 1897
+499 2185
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 261
+Content-Length: 253
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Tell me about the current weather"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a helpful assistant."},{"text":"You are an agent. Your internal name is \"model-agent\"."}],"role":"user"}}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Tell me about the current weather"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a helpful assistant.\n\nYou are an agent. Your internal name is \"model-agent\"."}],"role":"user"}}HTTP/2.0 200 OK
 Connection: close
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Disposition: attachment
 Content-Type: text/event-stream
-Date: Fri, 20 Feb 2026 12:34:18 GMT
+Date: Tue, 10 Mar 2026 14:12:22 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1227
+Server-Timing: gfet4t7; dur=2179
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -21,9 +20,11 @@ X-Content-Type-Options: nosniff
 X-Frame-Options: SAMEORIGIN
 X-Xss-Protection: 0
 
-data: {"candidates": [{"content": {"parts": [{"text": "I'm sorry, but I cannot tell you about the current weather. As an AI, I don't have access"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 28,"candidatesTokenCount": 25,"totalTokenCount": 92,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 28}],"thoughtsTokenCount": 39},"modelVersion": "gemini-2.5-flash","responseId": "yFSYaYHNPJPH1e8P6vyhqQY"}
+data: {"candidates": [{"content": {"parts": [{"text": "I can help you with that! However, I don'"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 29,"candidatesTokenCount": 12,"totalTokenCount": 240,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 29}],"thoughtsTokenCount": 199},"modelVersion": "gemini-2.5-flash","responseId": "wyawaZq1OqfNkdUPu_SioAU"}
 
-data: {"candidates": [{"content": {"parts": [{"text": " to real-time information or your current location.\n\nTo get the current weather, you can:\n*   **Check a weather app** on your phone (e.g., Apple Weather, Google Weather, AccuWeather, The Weather Channel"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 28,"candidatesTokenCount": 75,"totalTokenCount": 142,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 28}],"thoughtsTokenCount": 39},"modelVersion": "gemini-2.5-flash","responseId": "yFSYaYHNPJPH1e8P6vyhqQY"}
+data: {"candidates": [{"content": {"parts": [{"text": "t have access to real-time information or your current location.\n\nTo tell you about the weather, I'll need to know:\n\n*   **What city and country** are you interested in? (e.g., \"London"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 29,"candidatesTokenCount": 61,"totalTokenCount": 289,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 29}],"thoughtsTokenCount": 199},"modelVersion": "gemini-2.5-flash","responseId": "wyawaZq1OqfNkdUPu_SioAU"}
 
-data: {"candidates": [{"content": {"parts": [{"text": ")\n*   **Use a search engine** like Google or Bing and type \"weather near me\" or \"weather in [your city]\"\n*   **Look out your window!**"}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 28,"candidatesTokenCount": 114,"totalTokenCount": 181,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 28}],"thoughtsTokenCount": 39},"modelVersion": "gemini-2.5-flash","responseId": "yFSYaYHNPJPH1e8P6vyhqQY"}
+data: {"candidates": [{"content": {"parts": [{"text": ", UK\" or \"New York City, USA\")\n*   **What state or province** too, if applicable (e.g., \"Portland, Oregon, USA\")\n\nOnce you tell me the location, I can look up"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 29,"candidatesTokenCount": 109,"totalTokenCount": 337,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 29}],"thoughtsTokenCount": 199},"modelVersion": "gemini-2.5-flash","responseId": "wyawaZq1OqfNkdUPu_SioAU"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " the current weather for you!"}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 29,"candidatesTokenCount": 115,"totalTokenCount": 343,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 29}],"thoughtsTokenCount": 199},"modelVersion": "gemini-2.5-flash","responseId": "wyawaZq1OqfNkdUPu_SioAU"}
 

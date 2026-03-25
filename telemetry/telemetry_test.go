@@ -233,7 +233,7 @@ func extractResourceAttributes(res *resource.Resource) (projectID, serviceName, 
 			serviceVersion = attr.Value.AsString()
 		}
 	}
-	return
+	return projectID, serviceName, serviceVersion
 }
 
 func TestResolveResourceProject(t *testing.T) {

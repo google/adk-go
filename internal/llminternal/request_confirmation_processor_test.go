@@ -272,7 +272,7 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 					cmpopts.IgnoreFields(session.Event{}, "ID"),
 					cmpopts.IgnoreFields(session.Event{}, "Timestamp"),
 					cmpopts.IgnoreFields(session.Event{}, "InvocationID"),
-					cmpopts.IgnoreFields(session.EventActions{}, "StateDelta"),
+					cmpopts.IgnoreFields(session.EventActions{}, "StateDelta", "ArtifactDelta"),
 				}
 
 				if diff := cmp.Diff(tt.wantEvents, gotEvents, ignoreFields...); diff != "" {

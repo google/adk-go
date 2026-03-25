@@ -53,11 +53,26 @@ type Config struct {
 	MemoryService memory.Service
 	// optional
 	PluginConfig PluginConfig
+	// optional
+	AutoCreateSession bool
 }
 
 type PluginConfig struct {
 	Plugins      []*plugin.Plugin
 	CloseTimeout time.Duration
+}
+
+type RunOption func(*runOptions)
+
+type runOptions struct {
+	stateDelta map[string]any
+}
+
+// WithStateDelta sets a state delta for the run invocation.
+func WithStateDelta(delta map[string]any) RunOption {
+	return func(o *runOptions) {
+		o.stateDelta = delta
+	}
 }
 
 // New creates a new [Runner].
@@ -84,13 +99,14 @@ func New(cfg Config) (*Runner, error) {
 	}
 
 	return &Runner{
-		appName:         cfg.AppName,
-		rootAgent:       cfg.Agent,
-		sessionService:  cfg.SessionService,
-		artifactService: cfg.ArtifactService,
-		memoryService:   cfg.MemoryService,
-		parents:         parents,
-		pluginManager:   pluginManager,
+		appName:           cfg.AppName,
+		rootAgent:         cfg.Agent,
+		sessionService:    cfg.SessionService,
+		artifactService:   cfg.ArtifactService,
+		memoryService:     cfg.MemoryService,
+		parents:           parents,
+		pluginManager:     pluginManager,
+		autoCreateSession: cfg.AutoCreateSession,
 	}, nil
 }
 
@@ -104,29 +120,48 @@ type Runner struct {
 	artifactService artifact.Service
 	memoryService   memory.Service
 
-	parents       parentmap.Map
-	pluginManager *plugininternal.PluginManager
+	parents           parentmap.Map
+	pluginManager     *plugininternal.PluginManager
+	autoCreateSession bool
 }
 
 // Run runs the agent for the given user input, yielding events from agents.
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
-func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
 	return func(yield func(*session.Event, error) bool) {
-		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
+		options := runOptions{}
+		for _, opt := range opts {
+			opt(&options)
+		}
+
+		var storedSession session.Session
+		getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
 			AppName:   r.appName,
 			UserID:    userID,
 			SessionID: sessionID,
 		})
 		if err != nil {
-			yield(nil, err)
-			return
+			if !r.autoCreateSession {
+				yield(nil, err)
+				return
+			}
+			createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
+				AppName:   r.appName,
+				UserID:    userID,
+				SessionID: sessionID,
+			})
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			storedSession = createResp.Session
+		} else {
+			storedSession = getResp.Session
 		}
-
-		storedSession := resp.Session
 
 		agentToRun, err := r.findAgentToRun(storedSession, msg)
 		if err != nil {
@@ -168,7 +203,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			UserContent: msg,
 			RunConfig:   &cfg,
 		})
-		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager)
+		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -232,7 +267,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	}
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager) (agent.InvocationContext, error) {
+func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.InvocationContext, error) {
 	if msg == nil {
 		return ctx, nil
 	}
@@ -279,6 +314,9 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 	event.LLMResponse = model.LLMResponse{
 		Content: msg,
 	}
+	if stateDelta != nil {
+		event.Actions.StateDelta = stateDelta
+	}
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 		return ctx, fmt.Errorf("failed to append event to sessionService: %w", err)
@@ -290,7 +328,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 // session history.
 func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (agent.Agent, error) {
 	if event := handleUserFunctionCallResponse(session.Events(), msg); event != nil {
-		subAgent := findAgent(r.rootAgent, event.Author)
+		subAgent := r.rootAgent.FindAgent(event.Author)
 		if subAgent != nil {
 			return subAgent, nil
 		}
@@ -305,7 +343,7 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 			continue
 		}
 
-		subAgent := findAgent(r.rootAgent, event.Author)
+		subAgent := r.rootAgent.FindAgent(event.Author)
 		// Agent not found, continue looking for the other event.
 		if subAgent == nil {
 			log.Printf("Event from an unknown agent: %s, event id: %s", event.Author, event.ID)
@@ -362,17 +400,4 @@ func (r *Runner) isTransferableAcrossAgentTree(agentToRun agent.Agent) bool {
 	}
 
 	return true
-}
-
-func findAgent(curAgent agent.Agent, targetName string) agent.Agent {
-	if curAgent == nil || curAgent.Name() == targetName {
-		return curAgent
-	}
-
-	for _, subAgent := range curAgent.SubAgents() {
-		if agent := findAgent(subAgent, targetName); agent != nil {
-			return agent
-		}
-	}
-	return nil
 }
