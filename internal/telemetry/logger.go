@@ -17,6 +17,7 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"sync/atomic"
 
@@ -29,17 +30,25 @@ import (
 	"google.golang.org/adk/model"
 )
 
-// genAICaptureMessageContent is true if message content should be elided. False by default.
+// genAICaptureMessageContent is true if message content should be captured. False by default.
 var genAICaptureMessageContent atomic.Bool
 
-// SetGenAICaptureMessageContent sets whether message content should be elided.
+// SetGenAICaptureMessageContent sets whether message content should be captured.
 func SetGenAICaptureMessageContent(capture bool) {
 	genAICaptureMessageContent.Store(capture)
 }
 
-// getGenAICaptureMessageContent returns whether message content should be elided.
+// getGenAICaptureMessageContent returns whether message content should be captured.
+// It checks the programmatic flag first, then falls back to the standard OTel env var.
 func getGenAICaptureMessageContent() bool {
-	return genAICaptureMessageContent.Load()
+	if genAICaptureMessageContent.Load() {
+		return true
+	}
+	// Fall back to the standard OTel env var for content capture.
+	// Any non-empty value is treated as enabling content capture for now.
+	// In the future, this will support the full mode set (EVENT_ONLY, SPAN_ONLY, SPAN_AND_EVENT).
+	v := os.Getenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT")
+	return v != ""
 }
 
 const elidedContent = "<elided>"
