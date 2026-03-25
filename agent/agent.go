@@ -118,8 +118,8 @@ type Artifacts interface {
 // Memory interface provides methods to access agent memory across the
 // sessions of the current user_id.
 type Memory interface {
-	AddSession(context.Context, session.Session) error
-	Search(ctx context.Context, query string) (*memory.SearchResponse, error)
+	AddSessionToMemory(context.Context, session.Session) error
+	SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error)
 }
 
 // BeforeAgentCallback is a function that is called before the agent starts
@@ -251,7 +251,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
 	}
 
 	if pluginManager != nil {
@@ -313,7 +313,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
 	}
 
 	if pluginManager != nil {

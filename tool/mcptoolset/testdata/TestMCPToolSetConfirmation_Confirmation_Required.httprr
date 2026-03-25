@@ -1,17 +1,16 @@
 httprr trace v1
-1098 1493
+1090 1384
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 866
+Content-Length: 858
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"what is the weather in Lisbon?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."},{"text":"You are an agent. Your internal name is \"weather_time_agent\". The description about you is \"Agent to answer questions about the time and weather in a city.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+{"contents":[{"parts":[{"text":"what is the weather in Lisbon?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city.\n\nYou are an agent. Your internal name is \"weather_time_agent\". The description about you is \"Agent to answer questions about the time and weather in a city.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 20 Feb 2026 12:56:18 GMT
+Date: Tue, 10 Mar 2026 14:08:40 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=991
+Server-Timing: gfet4t7; dur=669
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -31,7 +30,7 @@ X-Xss-Protection: 0
                 "city": "Lisbon"
               }
             },
-            "thoughtSignature": "Co4CAb4+9vvNbXI7I9hHclP5VDd8ZdWXUvH2c4Z4g8K/kBOVlCLJdWWYDiRehokvj8VwUuUtCIR04Xn2xOLl4eXxgNVxKfVxAYuQGNlg9BetuEcoFI5oYcjn25XUHbM1hthJEJyKWQl/2dkzJiR8PCy7SK8BW60OhGABC6ytU9+DSjT/NvfotDWyHE9c7aw9PG5L6ssVVHFZwauk0Tk33Vjd5iPssdQ9+6spoC0X0DLojBWsC+oQ03t2QtaNORrthcplW/t8aE6SVhyNhc6r0u24a0Y0zRtk7OhG3Yeh8rwEZL9vz3vXeoZX52dKDfu1ArufXT8CgSlX8DCPgDIqZg8Y5CDOHg13Wm466ndp99Dm"
+            "thoughtSignature": "CuUBAb4+9vttS2eKqg6oxdrmGp4qnJEpsRkZXa4wp7zqIJI+UWEALW183sDZUc0YH5FcPayov3uWmB1iKgbNGkNnFtLJtCaszZVHrzyk+NBCN4gGveKQPvlnpwmfdJzc6xfWfje2E8rt9f9R38uDRAkZt6emcSule+CNaebgxpnm2iMvfgNl8Q7ndfDpkEFXrgRi1l43nh/Q9igFG6M827p2YkrP9W2tgmSYjafN00FNHhYosmNgFTJnhQwxoR2xznocNUXo0+Ze4bHLxTuhWspOD2jzaxIuCQpiKBl3/FmkZzAZ5euJvw=="
           }
         ],
         "role": "model"
@@ -42,17 +41,17 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 148,
+    "promptTokenCount": 149,
     "candidatesTokenCount": 16,
-    "totalTokenCount": 226,
+    "totalTokenCount": 213,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 148
+        "tokenCount": 149
       }
     ],
-    "thoughtsTokenCount": 62
+    "thoughtsTokenCount": 48
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "8VmYaZmCNZ7U2roP_dOf0Ao"
+  "responseId": "5yWwaauWMu30kdUP35_1gQw"
 }

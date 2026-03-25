@@ -44,11 +44,13 @@ func NewDebugTelemetry() *DebugTelemetry {
 }
 
 func (d *DebugTelemetry) SpanProcessor() sdktrace.SpanProcessor {
-	return sdktrace.NewBatchSpanProcessor(d.store)
+	// Use simple processor to avoid the lag between ending the span and it appearing in adk-web.
+	return sdktrace.NewSimpleSpanProcessor(d.store)
 }
 
 func (d *DebugTelemetry) LogProcessor() sdklog.Processor {
-	return sdklog.NewBatchProcessor(d.store)
+	// Use simple processor to avoid the lag between logging and it appearing in adk-web.
+	return sdklog.NewSimpleProcessor(d.store)
 }
 
 // GetSpansByEventID returns spans associated with the given event ID.

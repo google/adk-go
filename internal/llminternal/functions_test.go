@@ -147,7 +147,8 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 				Author:       "agent_1",
 				Branch:       "main",
 				Actions: session.EventActions{
-					StateDelta: map[string]any{},
+					StateDelta:    map[string]any{},
+					ArtifactDelta: map[string]int64{},
 				},
 				LLMResponse: model.LLMResponse{
 					Content: &genai.Content{

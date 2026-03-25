@@ -17,6 +17,7 @@ package configurable
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,6 +36,7 @@ import (
 	"google.golang.org/adk/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
+	"google.golang.org/adk/tool/exampletool"
 	"google.golang.org/adk/tool/exitlooptool"
 	"google.golang.org/adk/tool/geminitool"
 	"google.golang.org/adk/tool/mcptoolset"
@@ -80,15 +82,13 @@ func init() {
 		panic(err)
 	}
 	err = RegisterToolFactory("url_context", func(_ context.Context, _ map[string]any) (tool.Tool, error) {
-		// TODO: return geminitool.New("url_context", "url context", &genai.Tool{URLContext: &genai.URLContext{}}), nil
-		return geminitool.New("url_context", &genai.Tool{URLContext: &genai.URLContext{}}), nil
+		return geminitool.New("url_context", "url context", &genai.Tool{URLContext: &genai.URLContext{}}), nil
 	})
 	if err != nil {
 		panic(err)
 	}
 	err = RegisterToolFactory("google_maps_grounding", func(_ context.Context, _ map[string]any) (tool.Tool, error) {
-		// TODO: return geminitool.New("google_maps_grounding", "google maps grounding", &genai.Tool{GoogleMaps: &genai.GoogleMaps{}}), nil
-		return geminitool.New("google_maps_grounding", &genai.Tool{GoogleMaps: &genai.GoogleMaps{}}), nil
+		return geminitool.New("google_maps_grounding", "google maps grounding", &genai.Tool{GoogleMaps: &genai.GoogleMaps{}}), nil
 	})
 	if err != nil {
 		panic(err)
@@ -142,7 +142,56 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-	// TODO: ExampleTool
+	err = RegisterToolFactory("ExampleTool", func(ctx context.Context, args map[string]any) (tool.Tool, error) {
+		if args == nil {
+			return nil, fmt.Errorf("args is nil")
+		}
+
+		raw, ok := args["examples"]
+		if !ok {
+			return nil, fmt.Errorf("examples not found in args")
+		}
+
+		// 1. Cast the top-level 'examples' to a generic slice
+		examplesSlice, ok := raw.([]any)
+		if !ok {
+			return nil, fmt.Errorf("examples is not a list")
+		}
+
+		// 2. Iterate and normalize the 'output' field
+		for i, item := range examplesSlice {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			output := m["output"]
+			if output == nil {
+				continue
+			}
+
+			// Check if 'output' is NOT a slice. If it's a single object,
+			// wrap it in a new slice []any{output}
+			if _, isSlice := output.([]any); !isSlice {
+				m["output"] = []any{output}
+				examplesSlice[i] = m
+			}
+		}
+
+		// 3. Now marshal/unmarshal as usual into your clean struct
+		bytes, _ := json.Marshal(examplesSlice)
+		var examples []*exampletool.Example
+		if err := json.Unmarshal(bytes, &examples); err != nil {
+			return nil, fmt.Errorf("failed to decode normalized examples: %w", err)
+		}
+
+		return exampletool.New(exampletool.ExampleToolConfig{
+			Examples: examples,
+		})
+	})
+	if err != nil {
+		panic(err)
+	}
 	err = RegisterToolsetFactory("McpToolset", func(ctx context.Context, args map[string]any) (tool.Toolset, error) {
 		stdioConnectionParams, ok := args["stdio_connection_params"].(map[string]any)
 		if !ok {

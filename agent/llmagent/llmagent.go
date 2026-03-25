@@ -105,9 +105,23 @@ func New(cfg Config) (agent.Agent, error) {
 		return nil, fmt.Errorf("failed to create agent: %w", err)
 	}
 
+	// TODO: remove this in favor of the state reveal below.
 	a.Agent = baseAgent
 	a.AgentType = agentinternal.TypeLLMAgent
 	a.Config = cfg
+
+	// TODO: temporary hack to set the LLMAgent type field correctly. Currently, beforeAgentCallback for LLMAgent only
+	// sees basic *agent.agent type: http://google3/third_party/golang/adk/agent/agent.go;l=177-201;rcl=869633263
+	// So in BeforeAgentCallback, we cannot access llmAgent.State fields.
+	// We should remote llminternal.State in favor of agentinternal.State.
+
+	internalAgent, ok := baseAgent.(agentinternal.Agent)
+	if !ok {
+		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
+	}
+	state := agentinternal.Reveal(internalAgent)
+	state.AgentType = agentinternal.TypeLLMAgent
+	state.Config = cfg
 
 	return a, nil
 }

@@ -60,7 +60,7 @@ func newEventProcessor(
 	transform eventToArtifactTransform,
 ) *eventProcessor {
 	return &eventProcessor{
-		inputRequiredProcessor: newInputRequiredProcessor(reqCtx),
+		inputRequiredProcessor: newInputRequiredProcessor(reqCtx, converter),
 		partConverter:          converter,
 		reqCtx:                 reqCtx,
 		meta:                   meta,
@@ -91,7 +91,7 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		}
 	}
 
-	event, err = p.inputRequiredProcessor.process(event)
+	event, err = p.inputRequiredProcessor.process(ctx, event)
 	if err != nil {
 		return nil, fmt.Errorf("input required processing failed: %w", err)
 	}

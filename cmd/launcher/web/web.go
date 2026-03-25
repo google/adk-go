@@ -165,9 +165,11 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	}
 
 	// Setup subrouters
-	for _, l := range w.activeSublaunchers {
-		if err := l.SetupSubrouters(router, config); err != nil {
-			return fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
+	for _, l := range w.sublaunchers {
+		if _, isActive := w.activeSublaunchers[l.Keyword()]; isActive {
+			if err := l.SetupSubrouters(router, config); err != nil {
+				return fmt.Errorf("%s subrouter setup failed: %v", l.Keyword(), err)
+			}
 		}
 	}
 
