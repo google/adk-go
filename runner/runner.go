@@ -336,16 +336,30 @@ func (r *Runner) RunLive(
 ) iter.Seq2[*session.Event, error] {
 	cfg.StreamingMode = agent.StreamingModeBidi
 	return func(yield func(*session.Event, error) bool) {
-		resp, err := r.sessionService.Get(ctx, &session.GetRequest{
+		var storedSession session.Session
+		getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
 			AppName:   r.appName,
 			UserID:    userID,
 			SessionID: sessionID,
 		})
 		if err != nil {
-			yield(nil, err)
-			return
+			if !r.autoCreateSession {
+				yield(nil, err)
+				return
+			}
+			createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
+				AppName:   r.appName,
+				UserID:    userID,
+				SessionID: sessionID,
+			})
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			storedSession = createResp.Session
+		} else {
+			storedSession = getResp.Session
 		}
-		storedSession := resp.Session
 
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
