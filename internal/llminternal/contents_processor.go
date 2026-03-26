@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
@@ -83,6 +84,9 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 			continue
 		}
 		if isAuthEvent(ev) {
+			continue
+		}
+		if isConfirmationEvent(ev) {
 			continue
 		}
 		if isOtherAgentReply(agentName, ev) {
@@ -519,6 +523,26 @@ func isAuthEvent(ev *session.Event) bool {
 			return true
 		}
 		if p.FunctionResponse != nil && p.FunctionResponse.Name == requestEUCFunctionCallName {
+			return true
+		}
+	}
+	return false
+}
+
+// isConfirmationEvent returns true if the event contains an adk_request_confirmation
+// FunctionCall or FunctionResponse. These are ADK-internal events used for the tool
+// confirmation (HITL) flow and must be filtered from LLM history — the model never
+// declared this function and cannot interpret it.
+func isConfirmationEvent(ev *session.Event) bool {
+	c := utils.Content(ev)
+	if c == nil {
+		return false
+	}
+	for _, p := range c.Parts {
+		if p.FunctionCall != nil && p.FunctionCall.Name == toolconfirmation.FunctionCallName {
+			return true
+		}
+		if p.FunctionResponse != nil && p.FunctionResponse.Name == toolconfirmation.FunctionCallName {
 			return true
 		}
 	}

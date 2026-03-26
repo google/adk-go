@@ -372,6 +372,111 @@ func TestContentsRequestProcessor(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "ConfirmationFunctionCallEvent",
+			events: []*session.Event{
+				{
+					Author: agentName,
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{FunctionCall: &genai.FunctionCall{Name: "adk_request_confirmation"}},
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "ConfirmationFunctionResponseEvent",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{FunctionResponse: &genai.FunctionResponse{Name: "adk_request_confirmation"}},
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "ConfirmationEventsFilteredFromHistory",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("Create a vehicle", "user"),
+					},
+				},
+				{
+					Author: agentName,
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{FunctionCall: &genai.FunctionCall{Name: "batch_create_vehicles", ID: "call-1"}},
+							},
+						},
+					},
+				},
+				{
+					Author: agentName,
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{FunctionResponse: &genai.FunctionResponse{Name: "batch_create_vehicles", ID: "call-1", Response: map[string]any{"status": "pending"}}},
+							},
+						},
+					},
+				},
+				// These confirmation events should be filtered out:
+				{
+					Author: agentName,
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{FunctionCall: &genai.FunctionCall{Name: "adk_request_confirmation", ID: "confirm-1"}},
+							},
+						},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{FunctionResponse: &genai.FunctionResponse{Name: "adk_request_confirmation", ID: "confirm-1", Response: map[string]any{"confirmed": true}}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Create a vehicle", "user"),
+				{
+					Role: "model",
+					Parts: []*genai.Part{
+						{FunctionCall: &genai.FunctionCall{Name: "batch_create_vehicles", ID: "call-1"}},
+					},
+				},
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{FunctionResponse: &genai.FunctionResponse{Name: "batch_create_vehicles", ID: "call-1", Response: map[string]any{"status": "pending"}}},
+					},
+				},
+			},
+		},
+		{
 			name: "EventWithoutContent",
 			events: []*session.Event{
 				{Author: "user"},
