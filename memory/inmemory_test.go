@@ -41,9 +41,11 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess1", []*session.Event{
 					{
+						ID:     "event1",
 						Author: "user1",
 						LLMResponse: model.LLMResponse{
-							Content: genai.NewContentFromText("The Quick brown fox", genai.RoleUser),
+							Content:        genai.NewContentFromText("The Quick brown fox", genai.RoleUser),
+							CustomMetadata: map[string]any{"key": "value"},
 						},
 						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
 					},
@@ -72,9 +74,11 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			wantResp: &memory.SearchResponse{
 				Memories: []memory.Entry{
 					{
-						Content:   genai.NewContentFromText("The Quick brown fox", genai.RoleUser),
-						Author:    "user1",
-						Timestamp: must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+						ID:             "event1",
+						Content:        genai.NewContentFromText("The Quick brown fox", genai.RoleUser),
+						Author:         "user1",
+						Timestamp:      must(time.Parse(time.RFC3339, "2023-10-01T10:00:00Z")),
+						CustomMetadata: map[string]any{"key": "value"},
 					},
 					{
 						Content:   genai.NewContentFromText("hello world", genai.RoleModel),
@@ -141,12 +145,12 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			s := memory.InMemoryService()
 
 			for _, session := range tt.initSessions {
-				if err := s.AddSession(t.Context(), session); err != nil {
-					t.Fatalf("inMemoryService.AddSession() error = %v", err)
+				if err := s.AddSessionToMemory(t.Context(), session); err != nil {
+					t.Fatalf("inMemoryService.AddSessionToMemory() error = %v", err)
 				}
 			}
 
-			got, err := s.Search(t.Context(), tt.req)
+			got, err := s.SearchMemory(t.Context(), tt.req)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("inMemoryService.SearchMemory() error = %v, wantErr %v", err, tt.wantErr)
 			}

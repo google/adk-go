@@ -15,18 +15,19 @@
 package remoteagent
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"iter"
-	"os"
-	"strings"
+	"log"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
+	agentinternal "google.golang.org/adk/internal/agent"
+	iremoteagent "google.golang.org/adk/internal/agent/remoteagent"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
 )
@@ -38,7 +39,7 @@ import (
 type BeforeA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error)
 
 // A2AEventConverter can be used to provide a custom implementation of A2A event transformation logic.
-type A2AEventConverter func(ctx agent.ReadonlyContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error)
+type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error)
 
 // AfterA2ARequestCallback is called after receiving a response from the remote agent and converting it to a session.Event.
 // In streaming responses the callback is invoked for every request. Session event parameter might be nil if conversion logic
@@ -46,6 +47,9 @@ type A2AEventConverter func(ctx agent.ReadonlyContext, req *a2a.MessageSendParam
 //
 // If it returns non-nil result or error, it gets emitted instead of the original result.
 type AfterA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.MessageSendParams, resp *session.Event, err error) (*session.Event, error)
+
+// A2ARemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
+type A2ARemoteTaskCleanupCallback func(ctx context.Context, card *a2a.AgentCard, client *a2aclient.Client, taskInfo a2a.TaskInfo, cause error)
 
 // A2AConfig is used to describe and configure a remote agent.
 type A2AConfig struct {
@@ -106,6 +110,12 @@ type A2AConfig struct {
 	ClientFactory *a2aclient.Factory
 	// MessageSendConfig is attached to a2a.MessageSendParams sent on every agent invocation.
 	MessageSendConfig *a2a.MessageSendConfig
+
+	// RemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
+	// If Run exited due to an error including context cancellation it will be passed as cause.
+	// The context passed to this callback is the original context, but with Err() removed by context.WithoutCancel.
+	// If no callback is provided the default behavior is to make a cancel RPC request with 5 second timeout.
+	RemoteTaskCleanupCallback A2ARemoteTaskCleanupCallback
 }
 
 // NewA2A creates a remote A2A agent. A2A (Agent-To-Agent) protocol is used for communication with an
@@ -115,8 +125,15 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 		return nil, fmt.Errorf("either AgentCard or AgentCardSource must be provided")
 	}
 
-	remoteAgent := &a2aAgent{resolvedCard: cfg.AgentCard}
-	return agent.New(agent.Config{
+	remoteAgent := &a2aAgent{
+		serverConfig: &iremoteagent.A2AServerConfig{
+			AgentCard:          cfg.AgentCard,
+			AgentCardSource:    cfg.AgentCardSource,
+			CardResolveOptions: cfg.CardResolveOptions,
+			ClientFactory:      cfg.ClientFactory,
+		},
+	}
+	agent, err := agent.New(agent.Config{
 		Name:                 cfg.Name,
 		Description:          cfg.Description,
 		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
@@ -125,27 +142,28 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 			return remoteAgent.run(ic, cfg)
 		},
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	internalAgent, ok := agent.(agentinternal.Agent)
+	if !ok {
+		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
+	}
+	state := agentinternal.Reveal(internalAgent)
+	state.AgentType = agentinternal.TypeRemoteAgent
+	state.Config = iremoteagent.RemoteAgentState{A2A: remoteAgent.serverConfig}
+
+	return agent, nil
 }
 
 type a2aAgent struct {
-	resolvedCard *a2a.AgentCard
+	serverConfig *iremoteagent.A2AServerConfig
 }
 
 func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		card, err := resolveAgentCard(ctx, cfg)
-		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("agent card resolution failed: %w", err)), nil)
-			return
-		}
-		a.resolvedCard = card
-
-		var client *a2aclient.Client
-		if cfg.ClientFactory != nil {
-			client, err = cfg.ClientFactory.CreateFromCard(ctx, card)
-		} else {
-			client, err = a2aclient.NewFromCard(ctx, card)
-		}
+		agentCard, client, err := iremoteagent.CreateA2AClient(ctx, a.serverConfig)
 		if err != nil {
 			yield(toErrorEvent(ctx, fmt.Errorf("client creation failed: %w", err)), nil)
 			return
@@ -159,6 +177,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		}
 
 		req := &a2a.MessageSendParams{Message: msg, Config: cfg.MessageSendConfig}
+
 		processor := newRunProcessor(cfg, req)
 
 		if bcbResp, bcbErr := processor.runBeforeA2ARequestCallbacks(ctx); bcbResp != nil || bcbErr != nil {
@@ -180,25 +199,44 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return
 		}
 
+		var lastErr error
+		yieldErr := func(err error) bool {
+			lastErr = err
+			return yield(nil, err)
+		}
+
+		var lastEvent a2a.Event
+		defer func() {
+			err := lastErr
+			if err == nil && ctx.Err() != nil {
+				err = context.Cause(ctx)
+			}
+			cleanupRemoteTask(ctx, cfg, agentCard, client, lastEvent, err)
+		}()
+
 		processEvent := func(a2aEvent a2a.Event, a2aErr error) bool {
+			if a2aEvent != nil {
+				lastEvent = a2aEvent
+			}
+
 			var err error
 			var event *session.Event
 			if cfg.Converter != nil {
-				event, err = cfg.Converter(icontext.NewReadonlyContext(ctx), req, a2aEvent, a2aErr)
+				event, err = cfg.Converter(ctx, req, a2aEvent, a2aErr)
 			} else {
 				event, err = processor.convertToSessionEvent(ctx, a2aEvent, a2aErr)
 			}
 
 			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, event, err); cbResp != nil || cbErr != nil {
 				if cbErr != nil {
-					return yield(nil, cbErr)
+					return yieldErr(cbErr)
 				}
 				event = cbResp
 				err = nil
 			}
 
 			if err != nil {
-				return yield(nil, err)
+				return yieldErr(err)
 			}
 
 			if event != nil { // an event might be skipped
@@ -222,6 +260,46 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 				return
 			}
 		}
+	}
+}
+
+func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, client *a2aclient.Client, lastEvent a2a.Event, cause error) {
+	if lastEvent == nil {
+		return
+	}
+	taskID := lastEvent.TaskInfo().TaskID
+	if taskID == "" {
+		return
+	}
+	if _, ok := lastEvent.(*a2a.Message); ok {
+		return
+	}
+	var state a2a.TaskState
+	if tu, ok := lastEvent.(*a2a.TaskStatusUpdateEvent); ok {
+		state = tu.Status.State
+	}
+	if t, ok := lastEvent.(*a2a.Task); ok {
+		state = t.Status.State
+	}
+	if state.Terminal() {
+		return
+	}
+
+	ctx = context.WithoutCancel(ctx)
+
+	if cfg.RemoteTaskCleanupCallback != nil {
+		cfg.RemoteTaskCleanupCallback(ctx, card, client, lastEvent.TaskInfo(), cause)
+		return
+	}
+
+	if state == a2a.TaskStateInputRequired && cause == nil {
+		return
+	}
+	cancelCtx, cancelTimeout := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelTimeout()
+	_, err := client.CancelTask(cancelCtx, &a2a.TaskIDParams{ID: taskID})
+	if err != nil {
+		log.Printf("failed to cancel task %s: %v", taskID, err)
 	}
 }
 
@@ -253,31 +331,6 @@ func toErrorEvent(ctx agent.InvocationContext, err error) *session.Event {
 	return event
 }
 
-func resolveAgentCard(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.AgentCard, error) {
-	if cfg.AgentCard != nil {
-		return cfg.AgentCard, nil
-	}
-
-	if strings.HasPrefix(cfg.AgentCardSource, "http://") || strings.HasPrefix(cfg.AgentCardSource, "https://") {
-		card, err := agentcard.DefaultResolver.Resolve(ctx, cfg.AgentCardSource, cfg.CardResolveOptions...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch an agent card: %w", err)
-		}
-		return card, nil
-	}
-
-	fileBytes, err := os.ReadFile(cfg.AgentCardSource)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read agent card from %q: %w", cfg.AgentCardSource, err)
-	}
-
-	var card a2a.AgentCard
-	if err := json.Unmarshal(fileBytes, &card); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal an agent card: %w", err)
-	}
-	return &card, nil
-}
-
 func convertParts(ctx agent.InvocationContext, cfg A2AConfig, event *session.Event) ([]a2a.Part, error) {
 	parts := make([]a2a.Part, 0, len(event.Content.Parts))
 	if cfg.GenAIPartConverter != nil {
@@ -301,6 +354,7 @@ func convertParts(ctx agent.InvocationContext, cfg A2AConfig, event *session.Eve
 }
 
 func destroy(client *a2aclient.Client) {
-	// TODO(yarolegovich): log ignored error
-	_ = client.Destroy()
+	if err := client.Destroy(); err != nil {
+		log.Printf("failed to destroy client: %v", err)
+	}
 }

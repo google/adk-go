@@ -30,9 +30,6 @@ import (
 )
 
 type artifactAggregation struct {
-	aggregatedText     string
-	aggregatedThoughts string
-
 	parts      []*genai.Part
 	citations  *genai.CitationMetadata
 	grounding  *genai.GroundingMetadata
@@ -41,9 +38,9 @@ type artifactAggregation struct {
 }
 
 type a2aAgentRunProcessor struct {
-	config A2AConfig
-
-	request *a2a.MessageSendParams
+	config        A2AConfig
+	partConverter adka2a.A2APartConverter
+	request       *a2a.MessageSendParams
 
 	// partial event contents emitted before the terminal event
 	aggregations map[a2a.ArtifactID]*artifactAggregation
@@ -53,9 +50,10 @@ type a2aAgentRunProcessor struct {
 
 func newRunProcessor(config A2AConfig, request *a2a.MessageSendParams) *a2aAgentRunProcessor {
 	return &a2aAgentRunProcessor{
-		config:       config,
-		request:      request,
-		aggregations: make(map[a2a.ArtifactID]*artifactAggregation),
+		config:        config,
+		request:       request,
+		partConverter: config.A2APartConverter,
+		aggregations:  make(map[a2a.ArtifactID]*artifactAggregation),
 	}
 }
 
@@ -130,16 +128,24 @@ func (p *a2aAgentRunProcessor) removeFromOrder(aid a2a.ArtifactID) {
 }
 
 func (p *a2aAgentRunProcessor) updateAggregation(aid a2a.ArtifactID, agg *artifactAggregation, event *session.Event) {
-	for _, part := range event.Content.Parts {
-		if part.Text != "" { // collapse small text-block parts to bigger text blocks
-			if part.Thought {
-				agg.aggregatedThoughts += part.Text
+	if event.Content != nil {
+		for _, part := range event.Content.Parts {
+			if part.Text != "" { // collapse small text-block parts to bigger text blocks
+				if len(agg.parts) > 0 {
+					lastPart := agg.parts[len(agg.parts)-1]
+					// check if last part is a text block of the same 'Thought' type
+					if lastPart.Text != "" && lastPart.Thought == part.Thought {
+						lastPart.Text += part.Text
+						continue
+					}
+				}
+				agg.parts = append(agg.parts, &genai.Part{
+					Text:    part.Text,
+					Thought: part.Thought,
+				})
 			} else {
-				agg.aggregatedText += part.Text
+				agg.parts = append(agg.parts, part)
 			}
-		} else {
-			agg.promoteTextBlocksToParts()
-			agg.parts = append(agg.parts, part)
 		}
 	}
 
@@ -167,7 +173,6 @@ func (p *a2aAgentRunProcessor) updateAggregation(aid a2a.ArtifactID, agg *artifa
 }
 
 func (p *a2aAgentRunProcessor) buildNonPartialAggregation(ctx agent.InvocationContext, agg *artifactAggregation) *session.Event {
-	agg.promoteTextBlocksToParts()
 	parts := agg.parts
 	result := adka2a.NewRemoteAgentEvent(ctx)
 	result.Content = genai.NewContentFromParts(parts, genai.RoleModel)
@@ -178,17 +183,6 @@ func (p *a2aAgentRunProcessor) buildNonPartialAggregation(ctx agent.InvocationCo
 	return result
 }
 
-func (a *artifactAggregation) promoteTextBlocksToParts() {
-	if a.aggregatedThoughts != "" {
-		a.parts = append(a.parts, &genai.Part{Thought: true, Text: a.aggregatedThoughts})
-		a.aggregatedThoughts = ""
-	}
-	if a.aggregatedText != "" {
-		a.parts = append(a.parts, &genai.Part{Text: a.aggregatedText})
-		a.aggregatedText = ""
-	}
-}
-
 // convertToSessionEvent converts A2A client SendStreamingMessage result to a session event. Returns nil if nothing should be emitted.
 func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext, a2aEvent a2a.Event, err error) (*session.Event, error) {
 	if err != nil {
@@ -197,7 +191,7 @@ func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext
 		return event, nil
 	}
 
-	event, err := adka2a.ToSessionEvent(ctx, a2aEvent)
+	event, err := adka2a.ToSessionEventWithParts(ctx, a2aEvent, p.partConverter)
 	if err != nil {
 		event := toErrorEvent(ctx, fmt.Errorf("failed to convert a2aEvent: %w", err))
 		p.updateCustomMetadata(event, nil)

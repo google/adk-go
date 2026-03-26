@@ -30,6 +30,9 @@ type invocationReplayState struct {
 	// key: agent_name -> current replay index for that agent
 	agentReplayIndices map[string]int
 
+	// Track consumed recordings by index in recordings.Recordings
+	consumedRecordings map[int]bool
+
 	curIndex int
 	mu       sync.Mutex
 	cond     *sync.Cond
@@ -42,6 +45,7 @@ func newInvocationReplayState(testCasePath string, userMessageIndex int, recs *r
 		userMessageIndex:   userMessageIndex,
 		recordings:         recs,
 		agentReplayIndices: make(map[string]int),
+		consumedRecordings: make(map[int]bool),
 		curIndex:           0,
 		mu:                 sync.Mutex{},
 	}

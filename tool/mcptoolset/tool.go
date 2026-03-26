@@ -28,7 +28,7 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider) (tool.Tool, error) {
 	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
@@ -64,7 +64,7 @@ type mcpTool struct {
 
 	requireConfirmation bool
 
-	requireConfirmationProvider ConfirmationProvider
+	requireConfirmationProvider tool.ConfirmationProvider
 }
 
 // Name implements the tool.Tool.
