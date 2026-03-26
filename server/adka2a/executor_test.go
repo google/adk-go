@@ -33,6 +33,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 )
@@ -301,7 +302,7 @@ func TestExecutor_SessionReuse(t *testing.T) {
 		t.Fatalf("executor.Execute() error = %v, want nil", err)
 	}
 
-	meta := toInvocationMeta(ctx, config, reqCtx)
+	meta := toInvocationMeta(ctx, toInternalRunnerConfig(config.RunnerConfig), reqCtx)
 	sessions, err := sessionService.List(ctx, &session.ListRequest{AppName: runnerConfig.AppName, UserID: meta.userID})
 	if err != nil {
 		t.Fatalf("sessionService.List() error = %v, want nil", err)
@@ -311,7 +312,7 @@ func TestExecutor_SessionReuse(t *testing.T) {
 	}
 
 	reqCtx.ContextID = a2a.NewContextID()
-	otherContextMeta := toInvocationMeta(ctx, config, reqCtx)
+	otherContextMeta := toInvocationMeta(ctx, toInternalRunnerConfig(config.RunnerConfig), reqCtx)
 	if meta.sessionID == otherContextMeta.sessionID {
 		t.Fatal("want sessionID to be different for different contextIDs")
 	}
@@ -944,14 +945,15 @@ func TestExecutor_RunnerProvider(t *testing.T) {
 	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
 	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
 
+	runnerConfig := runner.Config{
+		AppName:        "test",
+		SessionService: session.InMemoryService(),
+		Agent:          utils.Must(agent.New(agent.Config{Name: "agent"})),
+	}
 	executor := NewExecutor(ExecutorConfig{
-		RunnerConfig: runner.Config{
-			AppName:        "test",
-			SessionService: session.InMemoryService(),
-			Agent:          utils.Must(agent.New(agent.Config{Name: "agent"})),
-		},
-		RunnerProvider: func(pCtx context.Context, pReqCtx *a2asrv.RequestContext, cfg runner.Config) (Runner, error) {
-			return &testRunner{
+		RunnerConfig: runnerConfig,
+		RunnerProvider: func(pCtx context.Context, pReqCtx *a2asrv.RequestContext, plugin *plugin.Plugin) (RunnerConfig, Runner, error) {
+			return toInternalRunnerConfig(runnerConfig), &testRunner{
 				runFunc: func(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
 					return func(yield func(*session.Event, error) bool) {
 						yield(&session.Event{LLMResponse: modelResponseFromParts(genai.NewPartFromText(wantText))}, nil)
