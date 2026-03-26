@@ -116,7 +116,13 @@ type Toolset interface {
 type Predicate func(ctx agent.ReadonlyContext, tool Tool) bool
 
 // StringPredicate is a helper that creates a Predicate from a string slice.
+// Deprecated: use AllowedToolsPredicate instead.
 func StringPredicate(allowedTools []string) Predicate {
+	return AllowedToolsPredicate(allowedTools)
+}
+
+// AllowedToolsPredicate returns a Predicate that allows only the tools with the given names.
+func AllowedToolsPredicate(allowedTools []string) Predicate {
 	m := make(map[string]bool)
 	for _, t := range allowedTools {
 		m[t] = true

@@ -107,7 +107,7 @@ func (c *toolContext) SearchMemory(ctx context.Context, query string) (*memory.S
 	if c.invocationContext.Memory() == nil {
 		return nil, fmt.Errorf("memory service is not set")
 	}
-	return c.invocationContext.Memory().Search(ctx, query)
+	return c.invocationContext.Memory().SearchMemory(ctx, query)
 }
 
 func (c *toolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation {
