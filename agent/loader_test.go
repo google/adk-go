@@ -47,6 +47,14 @@ func (a *testAgent) internal() *agent {
 	panic("not implemented")
 }
 
+func (a *testAgent) FindAgent(name string) Agent {
+	panic("not implemented")
+}
+
+func (a *testAgent) FindSubAgent(name string) Agent {
+	panic("not implemented")
+}
+
 func TestDuplicateName(t *testing.T) {
 	agent1 := &testAgent{name: "weather_time_agent"}
 	// duplicate name

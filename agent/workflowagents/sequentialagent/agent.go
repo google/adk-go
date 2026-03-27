@@ -17,10 +17,11 @@ package sequentialagent
 
 import (
 	"fmt"
+	"iter"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/agent/workflowagents/loopagent"
 	agentinternal "google.golang.org/adk/internal/agent"
+	"google.golang.org/adk/session"
 )
 
 // New creates a SequentialAgent.
@@ -30,12 +31,16 @@ import (
 // Use the SequentialAgent when you want the execution to occur in a fixed,
 // strict order.
 func New(cfg Config) (agent.Agent, error) {
-	sequentialAgent, err := loopagent.New(loopagent.Config{
-		AgentConfig:   cfg.AgentConfig,
-		MaxIterations: 1,
-	})
+	if cfg.AgentConfig.Run != nil {
+		return nil, fmt.Errorf("LoopAgent doesn't allow custom Run implementations")
+	}
+
+	sequentialAgentImpl := &sequentialAgent{}
+	cfg.AgentConfig.Run = sequentialAgentImpl.Run
+
+	sequentialAgent, err := agent.New(cfg.AgentConfig)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create base agent: %w", err)
 	}
 
 	internalAgent, ok := sequentialAgent.(agentinternal.Agent)
@@ -53,4 +58,19 @@ func New(cfg Config) (agent.Agent, error) {
 type Config struct {
 	// Basic agent setup.
 	AgentConfig agent.Config
+}
+
+type sequentialAgent struct{}
+
+func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		for _, subAgent := range ctx.Agent().SubAgents() {
+			for event, err := range subAgent.Run(ctx) {
+				// TODO: ensure consistency -- if there's an error, return and close iterator, verify everywhere in ADK.
+				if !yield(event, err) {
+					return
+				}
+			}
+		}
+	}
 }

@@ -15,31 +15,34 @@
 package adka2a
 
 import (
+	"context"
 	"fmt"
 	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/log"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/session"
 )
 
 type inputRequiredProcessor struct {
-	reqCtx *a2asrv.RequestContext
-	event  *a2a.TaskStatusUpdateEvent
+	reqCtx        *a2asrv.RequestContext
+	event         *a2a.TaskStatusUpdateEvent
+	partConverter GenAIPartConverter
 	// handles possible duplication in partial and non-partial events
 	addedParts []*genai.Part
 }
 
-func newInputRequiredProcessor(reqCtx *a2asrv.RequestContext) *inputRequiredProcessor {
-	return &inputRequiredProcessor{reqCtx: reqCtx}
+func newInputRequiredProcessor(reqCtx *a2asrv.RequestContext, partConverter GenAIPartConverter) *inputRequiredProcessor {
+	return &inputRequiredProcessor{reqCtx: reqCtx, partConverter: partConverter}
 }
 
 // process handles long-running function tool calls by accumulating them for the final task status update.
 // If a part was incorporated into the final task status update the original event is modified to not include it,
 // so that parts are not duplicated in the response.
-func (p *inputRequiredProcessor) process(event *session.Event) (*session.Event, error) {
+func (p *inputRequiredProcessor) process(ctx context.Context, event *session.Event) (*session.Event, error) {
 	resp := event.LLMResponse
 	if resp.Content == nil {
 		return event, nil
@@ -75,7 +78,7 @@ func (p *inputRequiredProcessor) process(event *session.Event) (*session.Event, 
 	}
 
 	if len(inputRequiredParts) > 0 {
-		a2aParts, err := ToA2AParts(inputRequiredParts, longRunningCallIDs)
+		a2aParts, err := p.convertParts(ctx, event, inputRequiredParts, longRunningCallIDs)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert input required parts to A2A parts: %w", err)
 		}
@@ -100,6 +103,24 @@ func (p *inputRequiredProcessor) process(event *session.Event) (*session.Event, 
 	modifiedEvent.LLMResponse.Content = &newContent
 
 	return &modifiedEvent, nil
+}
+
+func (p *inputRequiredProcessor) convertParts(ctx context.Context, event *session.Event, parts []*genai.Part, longRunningCallIDs []string) ([]a2a.Part, error) {
+	if p.partConverter == nil {
+		return ToA2AParts(parts, longRunningCallIDs)
+	}
+	converted := make([]a2a.Part, 0, len(parts))
+	for _, part := range parts {
+		cp, err := p.partConverter(ctx, event, part)
+		if err != nil {
+			return nil, err
+		}
+		if cp == nil {
+			continue
+		}
+		converted = append(converted, cp)
+	}
+	return converted, nil
 }
 
 func (p *inputRequiredProcessor) isLongRunningResponse(event *session.Event, part *genai.Part) bool {
@@ -160,6 +181,60 @@ func handleInputRequired(reqCtx *a2asrv.RequestContext, content *genai.Content) 
 	return nil, nil
 }
 
+func getSubagentTasksToCancel(ctx context.Context, status a2a.TaskStatus, session session.Session) ([]subagentTask, error) {
+	pendingCallIDs, err := getPendingLongRunningCallIDs(status)
+	if err != nil {
+		return nil, fmt.Errorf("malformed task status: %w", err)
+	}
+	if len(pendingCallIDs) == 0 {
+		return nil, nil
+	}
+
+	foundCalls := 0
+	var tasksToCancel []subagentTask
+	events := session.Events()
+	for i := events.Len() - 1; i >= 0; i-- {
+		event := events.At(i)
+		if event.Content != nil {
+			if slices.ContainsFunc(event.Content.Parts, func(p *genai.Part) bool {
+				return p.FunctionCall != nil && slices.Contains(pendingCallIDs, p.FunctionCall.ID)
+			}) {
+				foundCalls++
+				if taskID, _ := GetA2ATaskInfo(event); taskID != "" {
+					tasksToCancel = append(tasksToCancel, subagentTask{agentName: event.Author, taskID: a2a.TaskID(taskID)})
+				}
+			}
+		}
+		if foundCalls == len(pendingCallIDs) {
+			break
+		}
+	}
+
+	if foundCalls < len(pendingCallIDs) {
+		log.Warn(ctx, "could not find all function calls from status message", "found", foundCalls, "total", len(pendingCallIDs))
+	}
+
+	return tasksToCancel, nil
+}
+
+func getPendingLongRunningCallIDs(status a2a.TaskStatus) ([]string, error) {
+	statusMsg := status.Message
+	if status.State != a2a.TaskStateInputRequired || statusMsg == nil {
+		return nil, nil
+	}
+	taskParts, err := ToGenAIParts(statusMsg.Parts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse task status message: %w", err)
+	}
+	var callIDs []string
+	for _, statusPart := range taskParts {
+		if statusPart.FunctionCall != nil {
+			callIDs = append(callIDs, statusPart.FunctionCall.ID)
+		}
+	}
+	return callIDs, nil
+}
+
 func makeInputMissingErrorMessage(inputRequiredParts []a2a.Part, callID string) []a2a.Part {
 	errPart := a2a.TextPart{
 		Text:     fmt.Sprintf("no input provided for function call ID %q", callID),
@@ -175,4 +250,9 @@ func makeInputMissingErrorMessage(inputRequiredParts []a2a.Part, callID string) 
 		preservedParts = append(preservedParts, p)
 	}
 	return append(preservedParts, errPart)
+}
+
+type subagentTask struct {
+	agentName string
+	taskID    a2a.TaskID
 }

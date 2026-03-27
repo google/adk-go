@@ -57,7 +57,7 @@ type invocationMeta struct {
 	eventMeta map[string]any
 }
 
-func toInvocationMeta(ctx context.Context, config ExecutorConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
+func toInvocationMeta(ctx context.Context, config RunnerConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 
 	// a2a sdk attaches authn info to the call context, use it when provided
@@ -68,7 +68,7 @@ func toInvocationMeta(ctx context.Context, config ExecutorConfig, reqCtx *a2asrv
 	}
 
 	meta := map[string]any{
-		ToA2AMetaKey("app_name"):   config.RunnerConfig.AppName,
+		ToA2AMetaKey("app_name"):   config.AppName,
 		ToA2AMetaKey("user_id"):    userID,
 		ToA2AMetaKey("session_id"): sessionID,
 	}
@@ -76,7 +76,7 @@ func toInvocationMeta(ctx context.Context, config ExecutorConfig, reqCtx *a2asrv
 	return invocationMeta{
 		userID:    userID,
 		sessionID: sessionID,
-		agentName: config.RunnerConfig.Agent.Name(),
+		agentName: config.Agent.Name(),
 		eventMeta: meta,
 		reqCtx:    reqCtx,
 	}

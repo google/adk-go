@@ -31,7 +31,9 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 )
@@ -300,7 +302,7 @@ func TestExecutor_SessionReuse(t *testing.T) {
 		t.Fatalf("executor.Execute() error = %v, want nil", err)
 	}
 
-	meta := toInvocationMeta(ctx, config, reqCtx)
+	meta := toInvocationMeta(ctx, toInternalRunnerConfig(config.RunnerConfig), reqCtx)
 	sessions, err := sessionService.List(ctx, &session.ListRequest{AppName: runnerConfig.AppName, UserID: meta.userID})
 	if err != nil {
 		t.Fatalf("sessionService.List() error = %v, want nil", err)
@@ -310,7 +312,7 @@ func TestExecutor_SessionReuse(t *testing.T) {
 	}
 
 	reqCtx.ContextID = a2a.NewContextID()
-	otherContextMeta := toInvocationMeta(ctx, config, reqCtx)
+	otherContextMeta := toInvocationMeta(ctx, toInternalRunnerConfig(config.RunnerConfig), reqCtx)
 	if meta.sessionID == otherContextMeta.sessionID {
 		t.Fatal("want sessionID to be different for different contextIDs")
 	}
@@ -690,10 +692,8 @@ func TestExecutor_Converters(t *testing.T) {
 
 			for _, e := range queue.events {
 				if ae, ok := e.(*a2a.TaskArtifactUpdateEvent); ok {
-					for _, p := range ae.Artifact.Parts {
-						if tp, ok := p.(a2a.TextPart); ok && tp.Text == "world" {
-							t.Errorf("found 'world' but expected it to be filtered")
-						}
+					if len(ae.Artifact.Parts) != 0 {
+						t.Errorf("found %d parts but expected 0", len(ae.Artifact.Parts))
 					}
 				}
 			}
@@ -936,4 +936,50 @@ func TestExecutor_OutputArtifactPerEvent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExecutor_RunnerProvider(t *testing.T) {
+	wantText := "Hello"
+	ctx := t.Context()
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
+	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+
+	runnerConfig := runner.Config{
+		AppName:        "test",
+		SessionService: session.InMemoryService(),
+		Agent:          utils.Must(agent.New(agent.Config{Name: "agent"})),
+	}
+	executor := NewExecutor(ExecutorConfig{
+		RunnerConfig: runnerConfig,
+		RunnerProvider: func(pCtx context.Context, pReqCtx *a2asrv.RequestContext, plugin *plugin.Plugin) (RunnerConfig, Runner, error) {
+			return toInternalRunnerConfig(runnerConfig), &testRunner{
+				runFunc: func(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						yield(&session.Event{LLMResponse: modelResponseFromParts(genai.NewPartFromText(wantText))}, nil)
+					}
+				},
+			}, nil
+		},
+	})
+
+	queue := &testQueue{Queue: newInMemoryQueue(t)}
+	if err := executor.Execute(ctx, reqCtx, queue); err != nil {
+		t.Fatalf("executor.Execute() error = %v", err)
+	}
+	ta, ok := queue.events[1].(*a2a.TaskArtifactUpdateEvent)
+	if !ok {
+		t.Fatalf("queue.events[1] = %T, want a2a.TaskArtifactUpdateEvent", queue.events[1])
+	}
+	if tp, ok := ta.Artifact.Parts[0].(a2a.TextPart); !ok || tp.Text != wantText {
+		t.Fatalf("ta.Artifact.Parts[0] = %v, want text part with text = %q", tp, wantText)
+	}
+}
+
+type testRunner struct {
+	runFunc func(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error]
+}
+
+func (r *testRunner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+	return r.runFunc(ctx, userID, sessionID, msg, cfg)
 }
