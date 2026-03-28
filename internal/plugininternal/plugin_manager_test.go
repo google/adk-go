@@ -15,6 +15,7 @@
 package plugininternal
 
 import (
+	"context"
 	"testing"
 
 	"google.golang.org/adk/plugin"
@@ -41,6 +42,13 @@ func TestPluginManager_HasPlugins(t *testing.T) {
 		}
 	})
 
+	t.Run("nil manager has no plugins", func(t *testing.T) {
+		var pm *PluginManager
+		if pm.HasPlugins() {
+			t.Error("HasPlugins() = true, want false for nil manager")
+		}
+	})
+
 	t.Run("manager with plugins has plugins", func(t *testing.T) {
 		p, err := plugin.New(plugin.Config{Name: "test-plugin"})
 		if err != nil {
@@ -55,3 +63,25 @@ func TestPluginManager_HasPlugins(t *testing.T) {
 		}
 	})
 }
+
+func TestFromContext(t *testing.T) {
+	t.Run("round trip via ToContext and FromContext", func(t *testing.T) {
+		pm, err := NewPluginManager(PluginConfig{})
+		if err != nil {
+			t.Fatalf("NewPluginManager() error = %v", err)
+		}
+		ctx := ToContext(context.Background(), pm)
+		got := FromContext(ctx)
+		if got != pm {
+			t.Errorf("FromContext() = %v, want %v", got, pm)
+		}
+	})
+
+	t.Run("returns nil when no manager in context", func(t *testing.T) {
+		got := FromContext(context.Background())
+		if got != nil {
+			t.Errorf("FromContext() = %v, want nil", got)
+		}
+	})
+}
+

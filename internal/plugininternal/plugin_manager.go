@@ -76,6 +76,9 @@ func (pm *PluginManager) registerPlugin(plugin *plugin.Plugin) error {
 // This is used by the runner to decide whether to overwrite an inherited
 // plugin manager in context (e.g. from a parent runner via agenttool).
 func (pm *PluginManager) HasPlugins() bool {
+	if pm == nil {
+		return false
+	}
 	return len(pm.plugins) > 0
 }
 
@@ -292,4 +295,10 @@ func (pm *PluginManager) Close() error {
 
 func ToContext(ctx context.Context, cfg *PluginManager) context.Context {
 	return context.WithValue(ctx, plugincontext.PluginManagerCtxKey, cfg)
+}
+
+// FromContext retrieves the PluginManager from the context, or nil if none is set.
+func FromContext(ctx context.Context) *PluginManager {
+	m, _ := ctx.Value(plugincontext.PluginManagerCtxKey).(*PluginManager)
+	return m
 }
