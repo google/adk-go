@@ -28,6 +28,7 @@ import (
 	weblauncher "google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/internal/cli/util"
 	"google.golang.org/adk/server/adkrest"
+	"google.golang.org/adk/telemetry"
 )
 
 // apiConfig contains parametres for lauching ADK REST API
@@ -73,10 +74,22 @@ func (a *apiLauncher) UserMessage(webURL string, printer func(v ...any)) {
 // SetupSubrouters adds the API router to the parent router.
 func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
 	// Create the ADK REST API handler
-	apiHandler := adkrest.NewHandler(config, a.config.sseWriteTimeout)
+	restServer, err := adkrest.NewServer(adkrest.ServerConfig{
+		SessionService:  config.SessionService,
+		MemoryService:   config.MemoryService,
+		AgentLoader:     config.AgentLoader,
+		ArtifactService: config.ArtifactService,
+		SSEWriteTimeout: a.config.sseWriteTimeout,
+		PluginConfig:    config.PluginConfig,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create REST server: %w", err)
+	}
+
+	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(restServer.SpanProcessor()), telemetry.WithLogRecordProcessors(restServer.LogProcessor()))
 
 	// Wrap it with CORS middleware
-	corsHandler := corsWithArgs(a.config.frontendAddress)(apiHandler)
+	corsHandler := corsWithArgs(a.config.frontendAddress)(restServer)
 
 	// If prefix is empty, don't use PathPrefix("") because it's too greedy.
 	// Instead, attach the handler to the main router directly.
