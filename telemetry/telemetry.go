@@ -17,29 +17,49 @@ package telemetry
 
 import (
 	"context"
+	"errors"
+
+	internal "google.golang.org/adk/internal/telemetry"
 
 	"go.opentelemetry.io/otel"
+	logglobal "go.opentelemetry.io/otel/log/global"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 // Providers wraps all telemetry providers and provides [Shutdown] function.
 type Providers struct {
+	genAICaptureMessageContent bool
 	// TracerProvider is the configured TracerProvider or nil.
 	TracerProvider *sdktrace.TracerProvider
+	// LoggerProvider is the configured LoggerProvider or nil.
+	LoggerProvider *sdklog.LoggerProvider
 }
 
 // Shutdown shuts down underlying OTel providers.
 func (t *Providers) Shutdown(ctx context.Context) error {
+	var err error
 	if t.TracerProvider != nil {
-		return t.TracerProvider.Shutdown(ctx)
+		if tpErr := t.TracerProvider.Shutdown(ctx); tpErr != nil {
+			err = errors.Join(err, tpErr)
+		}
 	}
-	return nil
+	if t.LoggerProvider != nil {
+		if lpErr := t.LoggerProvider.Shutdown(ctx); lpErr != nil {
+			err = errors.Join(err, lpErr)
+		}
+	}
+	return err
 }
 
 // SetGlobalOtelProviders registers the configured providers as the global OTel providers.
 func (t *Providers) SetGlobalOtelProviders() {
+	internal.SetGenAICaptureMessageContent(t.genAICaptureMessageContent)
 	if t.TracerProvider != nil {
 		otel.SetTracerProvider(t.TracerProvider)
+	}
+	if t.LoggerProvider != nil {
+		logglobal.SetLoggerProvider(t.LoggerProvider)
 	}
 }
 

@@ -117,6 +117,7 @@ func (a *mockAgent) Description() string {
 
 func TestInvokeAgent(t *testing.T) {
 	sessionID := "test-session"
+	invocationID := "test-invocation-id"
 	agent := &mockAgent{}
 	tests := []struct {
 		name         string
@@ -137,6 +138,7 @@ func TestInvokeAgent(t *testing.T) {
 				semconv.GenAIAgentNameKey:        "test-agent",
 				semconv.GenAIAgentDescriptionKey: "test-agent-description",
 				semconv.GenAIConversationIDKey:   "test-session",
+				gcpVertexAgentInvocationID:       invocationID,
 			},
 		},
 		{
@@ -146,6 +148,13 @@ func TestInvokeAgent(t *testing.T) {
 			},
 			wantName:   "invoke_agent test-agent",
 			wantStatus: codes.Error,
+			wantAttrs: map[attribute.Key]string{
+				semconv.GenAIOperationNameKey:    "invoke_agent",
+				semconv.GenAIAgentNameKey:        "test-agent",
+				semconv.GenAIAgentDescriptionKey: "test-agent-description",
+				semconv.GenAIConversationIDKey:   "test-session",
+				gcpVertexAgentInvocationID:       invocationID,
+			},
 		},
 	}
 
@@ -154,7 +163,7 @@ func TestInvokeAgent(t *testing.T) {
 			exporter := setupTestTracer(t)
 			ctx := t.Context()
 
-			_, span := StartInvokeAgentSpan(ctx, agent, sessionID)
+			_, span := StartInvokeAgentSpan(ctx, agent, sessionID, invocationID)
 			TraceAgentResult(span, tc.resultParams)
 			span.End()
 
@@ -189,6 +198,7 @@ func TestInvokeAgent(t *testing.T) {
 }
 
 func TestGenerateContent(t *testing.T) {
+	invocationID := "test-invocation-id"
 	tests := []struct {
 		name         string
 		startParams  StartGenerateContentSpanParams
@@ -200,13 +210,14 @@ func TestGenerateContent(t *testing.T) {
 		{
 			name: "Success",
 			startParams: StartGenerateContentSpanParams{
-				ModelName: "test-model",
+				ModelName:    "test-model",
+				InvocationID: invocationID,
 			},
 			resultParams: TraceGenerateContentResultParams{
 				Response: &model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-						PromptTokenCount: 10,
-						TotalTokenCount:  20,
+						PromptTokenCount:     10,
+						CandidatesTokenCount: 20,
 					},
 					FinishReason: genai.FinishReasonStop,
 				},
@@ -219,18 +230,25 @@ func TestGenerateContent(t *testing.T) {
 				semconv.GenAIUsageInputTokensKey:      "10",
 				semconv.GenAIUsageOutputTokensKey:     "20",
 				semconv.GenAIResponseFinishReasonsKey: "[\"STOP\"]",
+				gcpVertexAgentInvocationID:            invocationID,
 			},
 		},
 		{
 			name: "Error",
 			startParams: StartGenerateContentSpanParams{
-				ModelName: "test-model",
+				ModelName:    "test-model",
+				InvocationID: invocationID,
 			},
 			resultParams: TraceGenerateContentResultParams{
 				Error: errTest,
 			},
 			wantName:   "generate_content test-model",
 			wantStatus: codes.Error,
+			wantAttrs: map[attribute.Key]string{
+				semconv.GenAIOperationNameKey: "generate_content",
+				semconv.GenAIRequestModelKey:  "test-model",
+				gcpVertexAgentInvocationID:    invocationID,
+			},
 		},
 	}
 
