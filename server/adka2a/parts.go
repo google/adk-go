@@ -65,8 +65,8 @@ func validateDataPartJSON(d *genai.Part) ([]byte, bool) {
 	if d.InlineData == nil || d.InlineData.MIMEType != "text/plain" {
 		return nil, false
 	}
-	if noPrefix, ok := bytes.CutPrefix(d.InlineData.Data, []byte("<json>")); ok {
-		if result, ok := bytes.CutSuffix(noPrefix, []byte("</json>")); ok {
+	if noPrefix, ok := bytes.CutPrefix(d.InlineData.Data, []byte("<a2a_datapart_json>")); ok {
+		if result, ok := bytes.CutSuffix(noPrefix, []byte("</a2a_datapart_json>")); ok {
 			return result, true
 		}
 	}
@@ -365,7 +365,7 @@ func toGenAIDataPart(part a2a.DataPart) (*genai.Part, error) {
 
 	default:
 		var jsonData []byte
-		prefix, suffix := []byte("<json>"), []byte("</json>")
+		prefix, suffix := []byte("<a2a_datapart_json>"), []byte("</a2a_datapart_json>")
 		jsonData = make([]byte, 0, len(prefix)+len(bytes)+len(suffix))
 		jsonData = append(jsonData, prefix...)
 		jsonData = append(jsonData, bytes...)

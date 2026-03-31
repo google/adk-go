@@ -171,7 +171,7 @@ func TestPartsTwoWayConversion(t *testing.T) {
 
 func TestPartsDataPartConversionRoundTrip(t *testing.T) {
 	a2aPart := a2a.DataPart{Data: map[string]any{"arbitrary": "data"}}
-	wantGenAI := &genai.Part{InlineData: &genai.Blob{Data: []byte("<json>{\"arbitrary\":\"data\"}</json>"), MIMEType: "text/plain"}}
+	wantGenAI := &genai.Part{InlineData: &genai.Blob{Data: []byte("<a2a_datapart_json>{\"arbitrary\":\"data\"}</a2a_datapart_json>"), MIMEType: "text/plain"}}
 
 	gotGenAI, err := ToGenAIParts([]a2a.Part{a2aPart})
 	if err != nil {
