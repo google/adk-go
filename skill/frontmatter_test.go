@@ -114,6 +114,15 @@ func TestParse_Valid(t *testing.T) {
 			wantInstruction: "Markdown Body",
 		},
 		{
+			name:  "valid minimal frontmatter with windows line endings",
+			input: "---\r\nname: skill\r\ndescription: skill\r\n---\r\nMarkdown Body",
+			want: &Frontmatter{
+				Name:        "skill",
+				Description: "skill",
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
 			name: "valid full frontmatter",
 			input: `---
 name: my-cool-skill

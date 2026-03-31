@@ -27,7 +27,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const frontmatterSeparator = "---\n"
+var (
+	frontmatterSeparator    = []byte("---\n")
+	frontmatterSeparatorWin = []byte("---\r\n")
+)
 
 // Frontmatter represents the YAML metadata at the top of a SKILL.md file.
 // For more details, see https://agentskills.io/specification#frontmatter.
@@ -48,7 +51,7 @@ func Parse(r *bufio.Reader) (*Frontmatter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading first line: %w", err)
 	}
-	if !bytes.Equal(line, []byte(frontmatterSeparator)) {
+	if !bytes.Equal(line, frontmatterSeparator) && !bytes.Equal(line, frontmatterSeparatorWin) {
 		return nil, fmt.Errorf("invalid frontmatter separator line: must be '---' followed by a new line")
 	}
 
@@ -61,7 +64,7 @@ func Parse(r *bufio.Reader) (*Frontmatter, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read a line of frontmatter: %w", err)
 		}
-		if bytes.Equal(line, []byte(frontmatterSeparator)) {
+		if bytes.Equal(line, frontmatterSeparator) || bytes.Equal(line, frontmatterSeparatorWin) {
 			break
 		}
 		yamlBytes.Write(line)
@@ -142,5 +145,5 @@ func Build(fm *Frontmatter, markdown string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal frontmatter: %v", err)
 	}
-	return slices.Concat([]byte(frontmatterSeparator), []byte("\n"), marshalled, []byte("\n"), []byte(frontmatterSeparator), []byte(markdown)), nil
+	return slices.Concat(frontmatterSeparator, marshalled, []byte("\n"), frontmatterSeparator, []byte(markdown)), nil
 }
