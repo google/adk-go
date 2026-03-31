@@ -61,10 +61,16 @@ func IsPartialFlagSet(meta map[string]any) bool {
 	return isSet
 }
 
-func isJSONTaggedInlineData(part *genai.Part) bool {
-	return part.InlineData != nil &&
-		bytes.HasPrefix(part.InlineData.Data, []byte("<json>")) &&
-		bytes.HasSuffix(part.InlineData.Data, []byte("</json>"))
+func validateDataPartJSON(d *genai.Part) ([]byte, bool) {
+	if d.InlineData == nil || d.InlineData.MIMEType != "text/plain" {
+		return nil, false
+	}
+	if noPrefix, ok := bytes.CutPrefix(d.InlineData.Data, []byte("<json>")); ok {
+		if result, ok := bytes.CutSuffix(noPrefix, []byte("</json>")); ok {
+			return result, true
+		}
+	}
+	return nil, false
 }
 
 // ToA2APart converts the provided genai part to A2A equivalent. Long running tool IDs are used for attaching metadata to
@@ -88,8 +94,7 @@ func ToA2AParts(parts []*genai.Part, longRunningToolIDs []string) ([]a2a.Part, e
 				r.Metadata = map[string]any{ToA2AMetaKey("thought"): true}
 			}
 			result[i] = r
-		} else if isJSONTaggedInlineData(part) {
-			jsonBytes := part.InlineData.Data[len("<json>") : len(part.InlineData.Data)-len("</json>")]
+		} else if jsonBytes, ok := validateDataPartJSON(part); ok {
 			var data map[string]any
 			if err := json.Unmarshal(jsonBytes, &data); err != nil {
 				return nil, err
@@ -359,7 +364,13 @@ func toGenAIDataPart(part a2a.DataPart) (*genai.Part, error) {
 		return &genai.Part{FunctionResponse: &val}, nil
 
 	default:
-		jsonData := []byte("<json>" + string(bytes) + "</json>")
+		var jsonData []byte
+		prefix, suffix := []byte("<json>"), []byte("</json>")
+		jsonData = make([]byte, 0, len(prefix)+len(bytes)+len(suffix))
+		jsonData = append(jsonData, prefix...)
+		jsonData = append(jsonData, bytes...)
+		jsonData = append(jsonData, suffix...)
+
 		return &genai.Part{InlineData: &genai.Blob{Data: jsonData, MIMEType: "text/plain"}}, nil
 	}
 }
