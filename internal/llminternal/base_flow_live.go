@@ -64,6 +64,33 @@ type recvResult struct {
 	err  error
 }
 
+// turnCycleGuard tracks turn-cycle boundaries within receiverLoop to
+// suppress duplicate model content caused by orphaned tool results.
+// NOT goroutine-safe — only accessed from the receiverLoop goroutine.
+type turnCycleGuard struct {
+	contentDelivered bool // model content emitted since last reset
+	suppressActive   bool // suppress subsequent model content
+}
+
+func (g *turnCycleGuard) onModelContent() bool {
+	if g.suppressActive {
+		return true // suppress
+	}
+	g.contentDelivered = true
+	return false
+}
+
+func (g *turnCycleGuard) onTurnComplete() {
+	if g.contentDelivered {
+		g.suppressActive = true
+	}
+}
+
+func (g *turnCycleGuard) reset() {
+	g.contentDelivered = false
+	g.suppressActive = false
+}
+
 // sendEvent sends a message to eventCh, aborting if ctx is cancelled.
 // This prevents goroutines from blocking on a full channel after shutdown.
 func sendEvent(ctx context.Context, eventCh chan<- eventOrError, msg eventOrError) {
@@ -103,11 +130,12 @@ func (lf *LiveFlow) RunLive(
 			inFlightCancel: make(map[string]context.CancelFunc),
 			flushCh:        make(chan struct{}, 1),
 		}
+		turnResetCh := make(chan struct{}, 1)
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			lf.senderLoop(cancelCtx, conn, queue, eventCh)
+			lf.senderLoop(cancelCtx, conn, queue, eventCh, turnResetCh)
 			// Close connection when sender is done (queue closed or error).
 			// This unblocks the receiver's conn.Receive without cancelling
 			// the context used by in-flight tool calls.
@@ -117,7 +145,7 @@ func (lf *LiveFlow) RunLive(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			lf.receiverLoop(cancelCtx, ctx, conn, queue, cs, toolsFuncMap, eventCh, &wg)
+			lf.receiverLoop(cancelCtx, ctx, conn, queue, cs, toolsFuncMap, eventCh, &wg, turnResetCh)
 		}()
 
 		// Closer goroutine: eventCh is closed only after ALL producers
@@ -180,33 +208,65 @@ func (lf *LiveFlow) sendHistory(
 
 // senderLoop forwards queue messages to the live connection.
 // On queue.Done(), it drains any remaining buffered messages before returning.
+// sendAndSignal sends a request on the connection and signals turnResetCh.
+// Returns a non-nil error if the send fails.
+func sendAndSignal(
+	ctx context.Context,
+	conn model.LiveConnection,
+	req *model.LiveRequest,
+	eventCh chan<- eventOrError,
+	turnResetCh chan<- struct{},
+) error {
+	if err := conn.Send(ctx, req); err != nil {
+		sendEvent(ctx, eventCh, eventOrError{err: err})
+		return err
+	}
+	// Signal receiverLoop that user activity occurred.
+	// Non-blocking: if signal already pending, skip — receiver will see it.
+	select {
+	case turnResetCh <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
 func (lf *LiveFlow) senderLoop(
 	ctx context.Context,
 	conn model.LiveConnection,
 	queue *agent.LiveRequestQueue,
 	eventCh chan<- eventOrError,
+	turnResetCh chan<- struct{},
 ) {
 	for {
 		select {
 		case req := <-queue.Events():
-			if err := conn.Send(ctx, req); err != nil {
-				sendEvent(ctx, eventCh, eventOrError{err: err})
+			if sendAndSignal(ctx, conn, req, eventCh, turnResetCh) != nil {
 				return
 			}
 		case <-queue.Done():
-			// Drain any buffered messages before exiting.
-			for {
-				select {
-				case req := <-queue.Events():
-					if err := conn.Send(ctx, req); err != nil {
-						sendEvent(ctx, eventCh, eventOrError{err: err})
-						return
-					}
-				default:
-					return
-				}
-			}
+			lf.drainQueue(ctx, conn, queue, eventCh, turnResetCh)
+			return
 		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// drainQueue sends any remaining buffered messages before senderLoop exits.
+func (lf *LiveFlow) drainQueue(
+	ctx context.Context,
+	conn model.LiveConnection,
+	queue *agent.LiveRequestQueue,
+	eventCh chan<- eventOrError,
+	turnResetCh chan<- struct{},
+) {
+	for {
+		select {
+		case req := <-queue.Events():
+			if sendAndSignal(ctx, conn, req, eventCh, turnResetCh) != nil {
+				return
+			}
+		default:
 			return
 		}
 	}
@@ -259,18 +319,38 @@ func (lf *LiveFlow) receiverLoop(
 	toolsFuncMap map[string]toolinternal.FunctionTool,
 	eventCh chan<- eventOrError,
 	wg *sync.WaitGroup,
+	turnResetCh <-chan struct{},
 ) {
 	defer stopCoalesceTimer(cs)
 	recvCh := startReceiveWorker(ctx, conn, cs, wg)
+	guard := &turnCycleGuard{}
 
 	for {
+		// Prioritize turnResetCh: drain any pending reset signal before
+		// processing a receive or flush. This ensures the guard is in the
+		// correct state even when both channels are ready simultaneously.
+		select {
+		case <-turnResetCh:
+			guard.reset()
+		default:
+		}
+
 		select {
 		case r := <-recvCh:
-			if done := lf.handleRecv(ctx, invCtx, conn, queue, cs, toolsFuncMap, r, eventCh); done {
+			// Double-check for a reset that arrived between the priority
+			// drain and this select (narrow but possible window).
+			select {
+			case <-turnResetCh:
+				guard.reset()
+			default:
+			}
+			if done := lf.handleRecv(ctx, invCtx, conn, queue, cs, toolsFuncMap, r, eventCh, guard); done {
 				return
 			}
 		case <-cs.flushCh:
 			lf.flushToolCalls(ctx, invCtx, conn, cs, toolsFuncMap, eventCh)
+		case <-turnResetCh:
+			guard.reset()
 		case <-ctx.Done():
 			return
 		}
@@ -296,6 +376,7 @@ func (lf *LiveFlow) handleRecv(
 	toolsFuncMap map[string]toolinternal.FunctionTool,
 	r recvResult,
 	eventCh chan<- eventOrError,
+	guard *turnCycleGuard,
 ) bool {
 	if r.err != nil {
 		if ctx.Err() != nil || isEOF(r.err) {
@@ -304,7 +385,7 @@ func (lf *LiveFlow) handleRecv(
 		sendEvent(ctx, eventCh, eventOrError{err: r.err})
 		return true
 	}
-	lf.processMessage(ctx, invCtx, conn, queue, cs, toolsFuncMap, r.resp, eventCh)
+	lf.processMessage(ctx, invCtx, conn, queue, cs, toolsFuncMap, r.resp, eventCh, guard)
 	return false
 }
 
@@ -317,6 +398,7 @@ func (lf *LiveFlow) processMessage(
 	toolsFuncMap map[string]toolinternal.FunctionTool,
 	resp *model.LLMResponse,
 	eventCh chan<- eventOrError,
+	guard *turnCycleGuard,
 ) {
 	if ids, ok := resp.CustomMetadata["tool_cancellation_ids"].([]string); ok {
 		handleToolCancellation(cs, ids)
@@ -324,6 +406,7 @@ func (lf *LiveFlow) processMessage(
 	}
 
 	if hasFunctionCallParts(resp) {
+		guard.reset() // model-initiated tool call = new conversational context
 		lf.bufferToolCalls(cs, resp)
 		return
 	}
@@ -337,11 +420,18 @@ func (lf *LiveFlow) processMessage(
 		}
 	}
 
+	// Audio speaking state (unchanged).
 	if isAudio {
 		queue.SetModelSpeaking(true)
 	}
 	if resp.TurnComplete || resp.Interrupted {
-		queue.SetModelSpeaking(false)
+		queue.SetModelSpeaking(false) // ALWAYS fires, even when suppressing
+	}
+
+	// Guard logic: suppress duplicate model content across turn boundaries.
+	resp = applyTurnCycleGuard(resp, guard, isAudio)
+	if resp == nil {
+		return // fully suppressed
 	}
 
 	ev := session.NewEvent(invCtx.InvocationID())
@@ -356,6 +446,38 @@ func (lf *LiveFlow) processMessage(
 	ev.Branch = invCtx.Branch()
 	ev.LLMResponse = *resp
 	sendEvent(ctx, eventCh, eventOrError{event: ev})
+}
+
+// applyTurnCycleGuard evaluates the guard for the given response.
+// Returns nil if the message should be fully suppressed.
+// Returns a (possibly modified) response otherwise.
+func applyTurnCycleGuard(resp *model.LLMResponse, guard *turnCycleGuard, isAudio bool) *model.LLMResponse {
+	isModelContent := resp.Content != nil && resp.Content.Role == "model" && !isAudio
+	hasTranscription := resp.InputTranscription != nil || resp.OutputTranscription != nil
+
+	// Check guard INDEPENDENTLY of transcription.
+	suppressModelContent := false
+	if isModelContent {
+		suppressModelContent = guard.onModelContent()
+	}
+
+	// Track TurnComplete in guard regardless of suppress decision.
+	if resp.TurnComplete || resp.Interrupted {
+		guard.onTurnComplete()
+	}
+
+	if !suppressModelContent {
+		return resp
+	}
+
+	if !hasTranscription {
+		return nil // pure model content, fully suppressed
+	}
+
+	// Mixed message: strip model content, keep transcription.
+	stripped := *resp
+	stripped.Content = nil
+	return &stripped
 }
 
 func hasFunctionCallParts(resp *model.LLMResponse) bool {

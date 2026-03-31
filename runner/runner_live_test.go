@@ -368,6 +368,50 @@ func toolCancellationResponse(ids []string) *model.LLMResponse {
 	}
 }
 
+// textResponseWithTurnComplete creates a single model response carrying both
+// content text and TurnComplete=true. This exercises the code path where
+// guard suppression and TurnComplete/SetModelSpeaking handling happen on
+// the same LLMResponse — not on two separate messages.
+func textResponseWithTurnComplete(text string) *model.LLMResponse {
+	return &model.LLMResponse{
+		Content:      genai.NewContentFromText(text, "model"),
+		TurnComplete: true,
+	}
+}
+
+// textResponseInterrupted creates a single model response with content and
+// Interrupted=true. Used to test post-interruption guard behavior.
+func textResponseInterrupted(text string) *model.LLMResponse {
+	return &model.LLMResponse{
+		Content:     genai.NewContentFromText(text, "model"),
+		Interrupted: true,
+	}
+}
+
+// mixedResponse creates a model response with both model content and
+// an output transcription. Used to test mixed-message guard handling.
+func mixedResponse(text, transcriptionText string) *model.LLMResponse {
+	return &model.LLMResponse{
+		Content:             genai.NewContentFromText(text, "model"),
+		OutputTranscription: &genai.Transcription{Text: transcriptionText, Finished: true},
+	}
+}
+
+// modelContentTexts extracts text from model-content events.
+func modelContentTexts(events []*session.Event) []string {
+	var texts []string
+	for _, ev := range events {
+		if ev.Content != nil && ev.Content.Role == "model" {
+			for _, p := range ev.Content.Parts {
+				if p.Text != "" {
+					texts = append(texts, p.Text)
+				}
+			}
+		}
+	}
+	return texts
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 1: Happy path — text query with tool call
 // ---------------------------------------------------------------------------
@@ -1212,5 +1256,403 @@ func TestScenario15_DeferFlushOnConsumerBreak(t *testing.T) {
 	}
 	if persisted[0].Author == "" || persisted[0].Author == "user" {
 		t.Errorf("flushed author = %q, want agent name", persisted[0].Author)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 16: Suppresses duplicate content after TurnComplete
+// ---------------------------------------------------------------------------
+
+func TestScenario16_SuppressesDuplicateAfterTurnComplete(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		textResponse("Hello"),
+		turnCompleteResponse(),
+		textResponse("Hello"), // duplicate — should be suppressed
+	}
+
+	r, svc, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, errs := collectEvents(t, r, queue)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	texts := modelContentTexts(events)
+	if len(texts) != 1 || texts[0] != "Hello" {
+		t.Errorf("expected [Hello], got %v", texts)
+	}
+
+	// Verify only 1 model-content text persisted.
+	pTexts := persistedTexts(svc.PersistedEvents())
+	if len(pTexts) != 1 || pTexts[0] != "Hello" {
+		t.Errorf("expected 1 persisted text [Hello], got %v", pTexts)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 17: Guard resets on function call
+// ---------------------------------------------------------------------------
+
+func TestScenario17_GuardResetsOnFunctionCall(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		textResponse("A"),
+		turnCompleteResponse(),
+		functionCallResponse("fc1", "greet", nil), // resets guard
+		textResponse("B"),
+		turnCompleteResponse(),
+	}
+
+	greetTool := &mockTool{name: "greet", result: map[string]any{"msg": "hi"}}
+	r, _, _ := setupRunner(t, conn, []tool.Tool{greetTool}, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, errs := collectEvents(t, r, queue)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	texts := modelContentTexts(events)
+	if len(texts) != 2 || texts[0] != "A" || texts[1] != "B" {
+		t.Errorf("expected [A B], got %v", texts)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 18: Input transcriptions are never suppressed
+// ---------------------------------------------------------------------------
+
+func TestScenario18_TranscriptionNeverSuppressed(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		textResponse("Model"),
+		turnCompleteResponse(),
+		transcriptResponse("User speaks", "input", true),
+	}
+
+	r, _, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, errs := collectEvents(t, r, queue)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+
+	// Transcription must be present.
+	found := false
+	for _, ev := range events {
+		if ev.InputTranscription != nil && ev.InputTranscription.Text == "User speaks" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("input transcription event should not be suppressed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 19: Empty TurnComplete does not arm suppression
+// ---------------------------------------------------------------------------
+
+func TestScenario19_EmptyTurnCompleteNoArm(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		turnCompleteResponse(), // empty TC — guard no-op
+		textResponse("Hello"),  // should NOT be suppressed
+		turnCompleteResponse(),
+	}
+
+	r, _, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, errs := collectEvents(t, r, queue)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+
+	texts := modelContentTexts(events)
+	if len(texts) != 1 || texts[0] != "Hello" {
+		t.Errorf("expected [Hello], got %v", texts)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 20: Multi-turn text — guard resets on user turn via turnResetCh
+// ---------------------------------------------------------------------------
+
+func TestScenario20_MultiTurnResetViaTurnResetCh(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvCh = make(chan *model.LLMResponse, 20)
+
+	r, svc, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+
+	go func() {
+		// Turn 1: model responds.
+		conn.recvCh <- textResponse("Turn1")
+		conn.recvCh <- turnCompleteResponse()
+
+		// Allow receiverLoop to process Turn 1.
+		time.Sleep(50 * time.Millisecond)
+
+		// User sends new message — triggers turnResetCh via senderLoop.
+		_ = queue.Send(context.Background(), &model.LiveRequest{
+			Content: genai.NewContentFromText("hello", "user"),
+		})
+
+		// Allow senderLoop to signal turnResetCh.
+		time.Sleep(50 * time.Millisecond)
+
+		// Turn 2: model responds — should NOT be suppressed.
+		conn.recvCh <- textResponse("Turn2")
+		conn.recvCh <- turnCompleteResponse()
+
+		time.Sleep(50 * time.Millisecond)
+		queue.Close()
+	}()
+
+	events, errs := collectEvents(t, r, queue)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	texts := modelContentTexts(events)
+	if len(texts) != 2 || texts[0] != "Turn1" || texts[1] != "Turn2" {
+		t.Errorf("expected [Turn1 Turn2], got %v", texts)
+	}
+
+	// Both turns must be persisted (not filtered).
+	pTexts := persistedTexts(svc.PersistedEvents())
+	if len(pTexts) < 2 {
+		t.Fatalf("expected at least 2 persisted texts, got %d: %v", len(pTexts), pTexts)
+	}
+	foundTurn1, foundTurn2 := false, false
+	for _, pt := range pTexts {
+		if pt == "Turn1" {
+			foundTurn1 = true
+		}
+		if pt == "Turn2" {
+			foundTurn2 = true
+		}
+	}
+	if !foundTurn1 || !foundTurn2 {
+		t.Errorf("expected both Turn1 and Turn2 persisted, got %v", pTexts)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 21: Late orphan tool flush — duplicate suppressed after tool completes
+// ---------------------------------------------------------------------------
+
+func TestScenario21_LateOrphanFlushAfterTurnComplete(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvCh = make(chan *model.LLMResponse, 20)
+
+	slowTool := &mockTool{
+		name: "slow_tool",
+		runFunc: func(ctx context.Context, _ map[string]any) (map[string]any, error) {
+			time.Sleep(500 * time.Millisecond)
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	llm := &mockLiveLLM{conn: conn}
+	a, _ := llmagent.New(llmagent.Config{
+		Name:  "test_agent",
+		Model: llm,
+		Tools: []tool.Tool{slowTool},
+	})
+
+	svc := &mockSessionService{Service: session.InMemoryService()}
+	_, _ = svc.Service.Create(context.Background(), &session.CreateRequest{
+		AppName: "test", UserID: "user1", SessionID: "sess1",
+	})
+
+	r, _ := New(Config{
+		AppName:        "test",
+		Agent:          a,
+		SessionService: svc,
+	})
+
+	queue := agent.NewLiveRequestQueue(100)
+
+	go func() {
+		// Phase 1: Model sends function call — triggers buffering + timer.
+		conn.recvCh <- functionCallResponse("fc1", "slow_tool", nil)
+
+		// Phase 2: Wait for timer to fire and slow tool to start executing.
+		time.Sleep(300 * time.Millisecond)
+
+		// Phase 3: While slow_tool blocks, feed content + TC (pile up in recvCh).
+		conn.recvCh <- textResponse("A")
+		conn.recvCh <- turnCompleteResponse()
+
+		// Phase 4: Wait for slow_tool to complete + flushToolCalls to return.
+		time.Sleep(500 * time.Millisecond)
+
+		// Phase 5: Duplicate (model re-response after receiving orphan result).
+		conn.recvCh <- textResponse("A")
+		conn.recvCh <- turnCompleteResponse()
+
+		time.Sleep(100 * time.Millisecond)
+		close(conn.recvCh) // signal EOF to receiver — all messages drained first
+		queue.Close()      // terminate sender so RunLive can shut down
+	}()
+
+	cfg := agent.RunConfig{ToolCoalesceWindow: 10 * time.Millisecond}
+	var events []*session.Event
+	for ev, err := range r.RunLive(context.Background(), "user1", "sess1", queue, cfg) {
+		if err != nil {
+			break
+		}
+		if ev != nil {
+			events = append(events, ev)
+		}
+	}
+
+	// Assert: slow_tool was actually called.
+	if slowTool.CallCount() < 1 {
+		t.Error("expected slow_tool to have been called")
+	}
+
+	// Assert: content "A" emitted exactly once.
+	contentCount := 0
+	for _, ev := range events {
+		if ev.Content != nil && ev.Content.Role == "model" {
+			for _, p := range ev.Content.Parts {
+				if p.Text == "A" {
+					contentCount++
+				}
+			}
+		}
+	}
+	if contentCount != 1 {
+		t.Errorf("expected content 'A' emitted once, got %d", contentCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 22: Suppressed TurnComplete on same message drives SetModelSpeaking(false)
+// ---------------------------------------------------------------------------
+
+func TestScenario22_SuppressedTurnCompleteDrivesSetModelSpeaking(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		// Turn 1: genuine.
+		audioResponse([]byte{0x01}),
+		textResponseWithTurnComplete("Hello"),
+		// Turn 2: duplicate — single message with content + TurnComplete.
+		audioResponse([]byte{0x02}),
+		textResponseWithTurnComplete("Hello"),
+	}
+
+	r, _, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, _ := collectEvents(t, r, queue)
+
+	// Assert: "Hello" content emitted once (duplicate suppressed).
+	helloCount := 0
+	for _, ev := range events {
+		if ev.Content != nil && ev.Content.Role == "model" {
+			for _, p := range ev.Content.Parts {
+				if p.Text == "Hello" {
+					helloCount++
+				}
+			}
+		}
+	}
+	if helloCount != 1 {
+		t.Errorf("expected 'Hello' emitted once, got %d", helloCount)
+	}
+
+	// Assert: ModelSpeaking is false — proves suppressed TurnComplete
+	// called SetModelSpeaking(false) after audio set it to true.
+	if queue.ModelSpeaking() {
+		t.Error("ModelSpeaking should be false: suppressed TurnComplete must call SetModelSpeaking(false)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 23: Mixed transcription+content — content suppressed, transcription emitted
+// ---------------------------------------------------------------------------
+
+func TestScenario23_MixedMessageContentSuppressedTranscriptionEmitted(t *testing.T) {
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		textResponse("A"),
+		turnCompleteResponse(),
+		mixedResponse("A", "hello"), // duplicate content + transcription
+	}
+
+	r, _, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, errs := collectEvents(t, r, queue)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	// Model content "A" should appear only once.
+	texts := modelContentTexts(events)
+	if len(texts) != 1 || texts[0] != "A" {
+		t.Errorf("expected [A], got %v", texts)
+	}
+
+	// The mixed message event should have Content==nil but transcription intact.
+	lastEv := events[len(events)-1]
+	if lastEv.Content != nil {
+		t.Error("mixed message event should have Content stripped (nil)")
+	}
+	if lastEv.OutputTranscription == nil || lastEv.OutputTranscription.Text != "hello" {
+		t.Error("mixed message event should preserve output transcription")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 24: Post-Interrupted known limitation — out of scope for #34
+// ---------------------------------------------------------------------------
+
+func TestScenario24_PostInterruptedKnownLimitation(t *testing.T) {
+	// Documents known false positive — out of scope for issue #34.
+	// If the model is Interrupted and immediately sends new content
+	// before turnResetCh fires, the guard may suppress it.
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		textResponseWithTurnComplete("A"),
+		textResponseInterrupted("B"),
+	}
+
+	r, _, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, _ := collectEvents(t, r, queue)
+
+	// "A" is emitted. "B" is suppressed (known false positive).
+	texts := modelContentTexts(events)
+	if len(texts) != 1 || texts[0] != "A" {
+		t.Errorf("expected only [A] emitted (B suppressed as known limitation), got %v", texts)
+	}
+
+	// SetModelSpeaking(false) must still fire for Interrupted.
+	if queue.ModelSpeaking() {
+		t.Error("ModelSpeaking should be false: Interrupted must call SetModelSpeaking(false)")
 	}
 }
