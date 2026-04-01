@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"slices"
 
 	"github.com/a2aproject/a2a-go/a2a"
@@ -30,6 +31,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	iremoteagent "google.golang.org/adk/internal/agent/remoteagent"
+	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 )
@@ -59,6 +61,17 @@ type A2AExecutionCleanupCallback func(ctx context.Context, reqCtx *a2asrv.Reques
 // OutputMode controls how artifacts are produced.
 type OutputMode string
 
+// Runner is an interface matching [runner.Runner] API.
+// It exists to let users use custom runner implementations with A2A agent executor.
+type Runner interface {
+	// Run runs the agent for the given user input, yielding events from agents.
+	Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error]
+}
+
+// RunnerProvider is a [Runner] factory function. The provided plugin must be installed in the returned [Runner] for
+// callbacks taking [ExecutorContext] to work correctly.
+type RunnerProvider func(ctx context.Context, reqCtx *a2asrv.RequestContext, plugin *plugin.Plugin) (RunnerConfig, Runner, error)
+
 const (
 	// OutputArtifactPerRun produces a single artifact per [runner.Runner.Run].
 	OutputArtifactPerRun OutputMode = "artifact-per-run"
@@ -69,10 +82,24 @@ const (
 	OutputArtifactPerEvent OutputMode = "artifact-per-event"
 )
 
+// RunnerConfig is part of the runner configuration executor code depends on.
+// Custom [RunnerProvider] needs to return it back to callers.
+type RunnerConfig struct {
+	// AppName is the name of the application used in [session.Service] keys and A2A event metadata.
+	AppName string
+	// Agent is the root agent. It isued
+	Agent agent.Agent
+	// SessionService is the session service to use.
+	SessionService session.Service
+}
+
 // ExecutorConfig allows to configure Executor.
 type ExecutorConfig struct {
-	// RunnerConfig is the configuration which will be used for [runner.New] during A2A Execute invocation.
+	// RunnerConfig is used for creating a default RunnerProvider. The field is ignored when RunnerProvider is set.
 	RunnerConfig runner.Config
+	// RunnerProvider is a function which allows to control how a runner is created.
+	// If not provided the default provider is used which calls [runner.New] with the RunnerConfig field.
+	RunnerProvider RunnerProvider
 
 	// RunConfig is the configuration which will be passed to [runner.Runner.Run] during A2A Execute invocation.
 	RunConfig agent.RunConfig
@@ -127,6 +154,9 @@ type Executor struct {
 
 // NewExecutor creates an initialized [Executor] instance.
 func NewExecutor(config ExecutorConfig) *Executor {
+	if config.RunnerProvider == nil {
+		config.RunnerProvider = newDefaultRunnerProvider(config.RunnerConfig)
+	}
 	return &Executor{config: config}
 }
 
@@ -140,15 +170,16 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 		return fmt.Errorf("a2a message conversion failed: %w", err)
 	}
 
-	runnerCfg, executorPlugin, err := withExecutorPlugin(e.config.RunnerConfig)
+	executorPlugin, err := newExecutorPlugin()
 	if err != nil {
-		return fmt.Errorf("failed to install a2a-executor plugin: %w", err)
+		return fmt.Errorf("failed to create a2a-executor plugin: %w", err)
 	}
 
-	r, err := runner.New(runnerCfg)
+	cfg, r, err := e.config.RunnerProvider(ctx, reqCtx, executorPlugin.plugin)
 	if err != nil {
 		return fmt.Errorf("failed to create a runner: %w", err)
 	}
+
 	if e.config.BeforeExecuteCallback != nil {
 		ctx, err = e.config.BeforeExecuteCallback(ctx, reqCtx)
 		if err != nil {
@@ -170,9 +201,9 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 		}
 	}
 
-	invocationMeta := toInvocationMeta(ctx, e.config, reqCtx)
+	invocationMeta := toInvocationMeta(ctx, cfg, reqCtx)
 
-	err = e.prepareSession(ctx, invocationMeta)
+	err = e.prepareSession(ctx, cfg, invocationMeta)
 	if err != nil {
 		event := toTaskFailedUpdateEvent(reqCtx, err, invocationMeta.eventMeta)
 		execCtx := newExecutorContext(ctx, invocationMeta, executorPlugin, content)
@@ -204,7 +235,13 @@ func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, qu
 }
 
 func (e *Executor) Cleanup(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error) {
-	remoteSubagents := findRemoteSubagents(e.config.RunnerConfig.Agent)
+	cfg, err := e.createRunnerConfig(ctx, reqCtx)
+	if err != nil {
+		log.Error(ctx, "failed to create runner config", err)
+		return
+	}
+
+	remoteSubagents := findRemoteSubagents(cfg.Agent)
 
 	// If task was in input-required and got successfully cancelled - run the cleanup logic
 	if reqCtx.StoredTask != nil && reqCtx.StoredTask.Status.State == a2a.TaskStateInputRequired {
@@ -235,9 +272,14 @@ func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2
 		return nil
 	}
 
-	meta := toInvocationMeta(ctx, e.config, reqCtx)
-	getSessionResponse, err := e.config.RunnerConfig.SessionService.Get(ctx, &session.GetRequest{
-		AppName:   e.config.RunnerConfig.AppName,
+	cfg, err := e.createRunnerConfig(ctx, reqCtx)
+	if err != nil {
+		return fmt.Errorf("failed to create runner config: %w", err)
+	}
+
+	meta := toInvocationMeta(ctx, cfg, reqCtx)
+	getSessionResponse, err := cfg.SessionService.Get(ctx, &session.GetRequest{
+		AppName:   cfg.AppName,
 		UserID:    meta.userID,
 		SessionID: meta.sessionID,
 	})
@@ -286,7 +328,7 @@ func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2
 }
 
 // Processing failures should be delivered as Task failed events. An error is returned from this method if an event write fails.
-func (e *Executor) process(ctx ExecutorContext, r *runner.Runner, processor *eventProcessor, q eventqueue.Queue) error {
+func (e *Executor) process(ctx ExecutorContext, r Runner, processor *eventProcessor, q eventqueue.Queue) error {
 	meta := processor.meta
 	for adkEvent, adkErr := range r.Run(ctx, meta.userID, meta.sessionID, ctx.UserContent(), e.config.RunConfig) {
 		if adkErr != nil {
@@ -338,11 +380,11 @@ func (e *Executor) writeFinalTaskStatus(
 	return nil
 }
 
-func (e *Executor) prepareSession(ctx context.Context, meta invocationMeta) error {
-	service := e.config.RunnerConfig.SessionService
+func (e *Executor) prepareSession(ctx context.Context, cfg RunnerConfig, meta invocationMeta) error {
+	service := cfg.SessionService
 
 	_, err := service.Get(ctx, &session.GetRequest{
-		AppName:   e.config.RunnerConfig.AppName,
+		AppName:   cfg.AppName,
 		UserID:    meta.userID,
 		SessionID: meta.sessionID,
 	})
@@ -351,7 +393,7 @@ func (e *Executor) prepareSession(ctx context.Context, meta invocationMeta) erro
 	}
 
 	_, err = service.Create(ctx, &session.CreateRequest{
-		AppName:   e.config.RunnerConfig.AppName,
+		AppName:   cfg.AppName,
 		UserID:    meta.userID,
 		SessionID: meta.sessionID,
 		State:     make(map[string]any),
@@ -361,4 +403,47 @@ func (e *Executor) prepareSession(ctx context.Context, meta invocationMeta) erro
 	}
 
 	return nil
+}
+
+func (e *Executor) createRunnerConfig(ctx context.Context, reqCtx *a2asrv.RequestContext) (RunnerConfig, error) {
+	executorPlugin, err := newExecutorPlugin()
+	if err != nil {
+		return RunnerConfig{}, fmt.Errorf("failed to create a2a-plugin: %w", err)
+	}
+	cfg, _, err := e.config.RunnerProvider(ctx, reqCtx, executorPlugin.plugin)
+	if err != nil {
+		return RunnerConfig{}, fmt.Errorf("runner provider failed: %w", err)
+	}
+	return cfg, nil
+}
+
+func newDefaultRunnerProvider(baseConfig runner.Config) RunnerProvider {
+	return func(ctx context.Context, reqCtx *a2asrv.RequestContext, plugin *plugin.Plugin) (RunnerConfig, Runner, error) {
+		if baseConfig.Agent == nil {
+			return RunnerConfig{}, nil, fmt.Errorf("runner.Config.Agent is not provided")
+		}
+		if baseConfig.Agent == nil {
+			return RunnerConfig{}, nil, fmt.Errorf("runner.Config.SessionService is not provided")
+		}
+
+		cfg := baseConfig
+		cfg.PluginConfig.Plugins = append(slices.Clone(cfg.PluginConfig.Plugins), plugin)
+		r, err := runner.New(cfg)
+		if err != nil {
+			return RunnerConfig{}, nil, err
+		}
+		return toInternalRunnerConfig(cfg), &defaultRunner{runner: r}, nil
+	}
+}
+
+type defaultRunner struct {
+	runner *runner.Runner
+}
+
+func (r *defaultRunner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
+	return r.runner.Run(ctx, userID, sessionID, msg, cfg)
+}
+
+func toInternalRunnerConfig(cfg runner.Config) RunnerConfig {
+	return RunnerConfig{Agent: cfg.Agent, AppName: cfg.AppName, SessionService: cfg.SessionService}
 }

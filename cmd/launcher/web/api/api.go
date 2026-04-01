@@ -95,9 +95,9 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 	// Instead, attach the handler to the main router directly.
 	if a.config.pathPrefix == "" || a.config.pathPrefix == "/" {
 		// This allows other routes (like /ui/) to match first if registered
-		router.Methods("GET", "POST", "DELETE", "PATCH", "OPTIONS").Handler(corsHandler)
+		router.Methods("GET", "POST", "DELETE", "OPTIONS").Handler(corsHandler)
 	} else {
-		router.Methods("GET", "POST", "DELETE", "PATCH", "OPTIONS").
+		router.Methods("GET", "POST", "DELETE", "OPTIONS").
 			PathPrefix(a.config.pathPrefix).
 			Handler(http.StripPrefix(a.config.pathPrefix, corsHandler))
 	}
