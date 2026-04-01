@@ -18,6 +18,7 @@
 package remoteagent
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"iter"
@@ -31,6 +32,7 @@ import (
 	"google.golang.org/adk/agent"
 	v1 "google.golang.org/adk/agent/remoteagent/v1"
 	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
 
 // BeforeA2ARequestCallback is called before sending a request to the remote agent.
@@ -182,6 +184,18 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	}
 
 	return v1.NewA2A(v1Cfg)
+}
+
+func validateDataPartJSON(d *genai.Part) ([]byte, bool) {
+	if d.InlineData == nil || d.InlineData.MIMEType != "text/plain" {
+		return nil, false
+	}
+	if noPrefix, ok := bytes.CutPrefix(d.InlineData.Data, []byte("<json>")); ok {
+		if result, ok := bytes.CutSuffix(noPrefix, []byte("</json>")); ok {
+			return result, true
+		}
+	}
+	return nil, false
 }
 
 type compatSender struct {

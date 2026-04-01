@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go v0.123.0
 	cloud.google.com/go/aiplatform v1.105.0
 	cloud.google.com/go/storage v1.56.1
-	github.com/a2aproject/a2a-go v0.3.7
+	github.com/a2aproject/a2a-go v0.3.12
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/glebarez/sqlite v1.8.0
 	github.com/google/go-cmp v0.7.0
@@ -28,7 +28,7 @@ require (
 	golang.org/x/sync v0.19.0
 	google.golang.org/api v0.252.0
 	google.golang.org/genai v1.40.0
-	google.golang.org/grpc v1.78.0
+	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
 	gorm.io/gorm v1.31.0
 	rsc.io/omap v1.2.0
@@ -36,12 +36,12 @@ require (
 )
 
 require (
-	github.com/a2aproject/a2a-go/v2 v2.0.0-20260309103159-97bf2ed0abf6
+	github.com/a2aproject/a2a-go/v2 v2.0.1
 	golang.org/x/mod v0.33.0 // indirect
 )
 
 require (
-	cel.dev/expr v0.24.0 // indirect
+	cel.dev/expr v0.25.1 // indirect
 	cloud.google.com/go/auth v0.17.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
@@ -53,10 +53,10 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.53.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/cncf/xds/go v0.0.0-20251022180443-0feb69152e9f // indirect
+	github.com/cncf/xds/go v0.0.0-20251210132809-ee656c7534f5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/envoyproxy/go-control-plane/envoy v1.35.0 // indirect
-	github.com/envoyproxy/protoc-gen-validate v1.2.1 // indirect
+	github.com/envoyproxy/go-control-plane/envoy v1.36.0 // indirect
+	github.com/envoyproxy/protoc-gen-validate v1.3.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/glebarez/go-sqlite v1.21.1 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.3 // indirect
