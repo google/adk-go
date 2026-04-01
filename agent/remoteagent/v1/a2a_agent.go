@@ -52,7 +52,7 @@ type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.SendMessageReq
 type AfterA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error)
 
 // A2ARemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
-type A2ARemoteTaskCleanupCallback func(ctx context.Context, card *a2a.AgentCard, client *a2aclient.Client, taskInfo a2a.TaskInfo, cause error)
+type A2ARemoteTaskCleanupCallback func(ctx context.Context, card *a2a.AgentCard, client A2AClient, taskInfo a2a.TaskInfo, cause error)
 
 // A2AConfig is used to describe and configure a remote agent.
 type A2AConfig struct {
@@ -109,8 +109,8 @@ type A2AConfig struct {
 	// nil returns are considered intentionally dropped parts.
 	GenAIPartConverter adka2a.GenAIPartConverter
 
-	// MessageSenderProvider can be used to provide a custom implementation of A2A message sending.
-	MessageSenderProvider A2AMessageSenderProvider
+	// ClientProvider can be used to provide a custom implementation of A2A message sending.
+	ClientProvider A2AClientProvider
 	// MessageSendConfig is attached to a2a.MessageSendParams sent on every agent invocation.
 	MessageSendConfig *a2a.SendMessageConfig
 
@@ -127,8 +127,8 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.AgentCard == nil && cfg.AgentCardSource == "" {
 		return nil, fmt.Errorf("either AgentCard or AgentCardSource must be provided")
 	}
-	if cfg.MessageSenderProvider == nil {
-		cfg.MessageSenderProvider = NewA2AMessageSenderProvider(a2aclient.NewFactory())
+	if cfg.ClientProvider == nil {
+		cfg.ClientProvider = NewA2AClientProvider(a2aclient.NewFactory())
 	}
 
 	remoteAgent := &a2aAgent{
@@ -136,7 +136,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 			AgentCard:          cfg.AgentCard,
 			AgentCardSource:    cfg.AgentCardSource,
 			CardResolveOptions: cfg.CardResolveOptions,
-			ClientFactory:      cfg.ClientFactory,
+			ClientProvider:     cfg.ClientProvider,
 		},
 	}
 	agent, err := agent.New(agent.Config{
@@ -176,7 +176,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return
 		}
 
-		sender, err := cfg.MessageSenderProvider(ctx, card)
+		sender, err := cfg.ClientProvider(ctx, card)
 		if err != nil {
 			yield(toErrorEvent(ctx, fmt.Errorf("sender creation failed: %w", err)), nil)
 			return
@@ -223,7 +223,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			if err == nil && ctx.Err() != nil {
 				err = context.Cause(ctx)
 			}
-			cleanupRemoteTask(ctx, cfg, agentCard, client, lastEvent, err)
+			cleanupRemoteTask(ctx, cfg, card, sender, lastEvent, err)
 		}()
 
 		processEvent := func(a2aEvent a2a.Event, a2aErr error) bool {
@@ -275,7 +275,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 	}
 }
 
-func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, client *a2aclient.Client, lastEvent a2a.Event, cause error) {
+func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, client A2AClient, lastEvent a2a.Event, cause error) {
 	if lastEvent == nil {
 		return
 	}
@@ -368,7 +368,7 @@ func resolveAgentCard(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.AgentCar
 	return &card, nil
 }
 
-func destroy(client A2AMessageSender) {
+func destroy(client A2AClient) {
 	if err := client.Destroy(); err != nil {
 		log.Printf("failed to destroy client: %v", err)
 	}

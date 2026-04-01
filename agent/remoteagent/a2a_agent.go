@@ -145,7 +145,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	}
 
 	if cfg.ClientFactory != nil {
-		v1Cfg.MessageSenderProvider = func(ctx agent.InvocationContext, card *v2a2a.AgentCard) (v1.A2AClient, error) {
+		v1Cfg.ClientProvider = func(ctx context.Context, card *v2a2a.AgentCard) (v1.A2AClient, error) {
 			legacyCard := a2av0.FromV1AgentCard(card)
 			var client *a2aclient.Client
 			var err error

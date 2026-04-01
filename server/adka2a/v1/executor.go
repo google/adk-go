@@ -22,7 +22,6 @@ import (
 	"slices"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
-	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/log"
 
@@ -305,7 +304,7 @@ func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2
 	}
 
 	var failures []error
-	clientCache := map[string]*a2aclient.Client{}
+	clientCache := map[string]iremoteagent.A2AClient{}
 	for _, task := range tasksToCancel { // TODO(yarolegovich): run in parallel (how to limit?)
 		remoteSubagentIdx := slices.IndexFunc(subagents, func(a remoteAgent) bool { return a.agent.Name() == task.agentName })
 		if remoteSubagentIdx < 0 {

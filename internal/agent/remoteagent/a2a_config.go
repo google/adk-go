@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"os"
 	"strings"
 
@@ -25,6 +26,24 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
 )
+
+// A2AClient abstracts a2a-go client so that we can use different SDK versions.
+type A2AClient interface {
+	// SendMessage sends a message to the remote agent and returns the result.
+	SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error)
+	// SendStreamingMessage sends a message to the remote agent and returns a stream of events.
+	SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error]
+	// SendStreamingMessage sends a message to the remote agent and returns a stream of events.
+	CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error)
+	// Destroy is called in the end of agent invocation.
+	Destroy() error
+}
+
+// A2AClientProvider creates an [A2AClient].
+type A2AClientProvider interface {
+	// CreateClient creates an [A2AClient].
+	CreateClient(context.Context, *a2a.AgentCard) (A2AClient, error)
+}
 
 // RemoteAgentState holds the internal state of a remote agent.
 type RemoteAgentState struct {
@@ -40,19 +59,19 @@ type A2AServerConfig struct {
 	AgentCardSource string
 	// CardResolveOptions can be used to provide a set of agencard.Resolver configurations.
 	CardResolveOptions []agentcard.ResolveOption
-	// ClientFactory can be used to provide a set of a2aclient.Client configurations.
-	ClientFactory *a2aclient.Factory
+	// ClientProvider is used to create an [A2AClient] implementation.
+	ClientProvider A2AClientProvider
 }
 
-func CreateA2AClient(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, *a2aclient.Client, error) {
+func CreateA2AClient(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, A2AClient, error) {
 	card, err := resolveAgentCard(ctx, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent card resolution failed: %w", err)
 	}
 
-	var client *a2aclient.Client
-	if cfg.ClientFactory != nil {
-		client, err = cfg.ClientFactory.CreateFromCard(ctx, card)
+	var client A2AClient
+	if cfg.ClientProvider != nil {
+		client, err = cfg.ClientProvider.CreateClient(ctx, card)
 	} else {
 		client, err = a2aclient.NewFromCard(ctx, card)
 	}

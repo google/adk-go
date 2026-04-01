@@ -1160,7 +1160,7 @@ func TestRemoteAgent_ErrorEventIfNoCompatibleTransport(t *testing.T) {
 	remoteAgent, err := NewA2A(A2AConfig{
 		Name:      name,
 		AgentCard: cardResource,
-		MessageSenderProvider: NewA2AMessageSenderProvider(
+		ClientProvider: NewA2AClientProvider(
 			a2aclient.NewFactory(a2aclient.WithDefaultsDisabled()),
 		),
 	})
@@ -1293,7 +1293,7 @@ func TestRemoteAgent_CleanupCallback(t *testing.T) {
 				cleanupTaskID a2a.TaskID
 				cleanupCause  error
 			)
-			cleanupCallback := func(ctx context.Context, card *a2a.AgentCard, client *a2aclient.Client, task a2a.TaskInfo, cause error) {
+			cleanupCallback := func(ctx context.Context, card *a2a.AgentCard, client A2AClient, task a2a.TaskInfo, cause error) {
 				cleanupCalled = true
 				cleanupTaskID = task.TaskID
 				cleanupCause = cause
