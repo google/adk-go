@@ -24,21 +24,23 @@ import (
 )
 
 // A2AMessageSender is used to send messages to a remote agent.
-type A2AMessageSender interface {
+type A2AClient interface {
 	// SendMessage sends a message to the remote agent and returns the result.
 	SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error)
 	// SendStreamingMessage sends a message to the remote agent and returns a stream of events.
 	SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error]
+	// SendStreamingMessage sends a message to the remote agent and returns a stream of events.
+	CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error)
 	// Destroy is called in the end of agent invocation.
 	Destroy() error
 }
 
 // A2AMessageSenderProvider is a function that creates an A2AMessageSender.
-type A2AMessageSenderProvider func(agent.InvocationContext, *a2a.AgentCard) (A2AMessageSender, error)
+type A2AMessageSenderProvider func(agent.InvocationContext, *a2a.AgentCard) (A2AClient, error)
 
 // NewA2AMessageSenderProvider creates a default A2AMessageSenderProvider from the configured factory.
 func NewA2AMessageSenderProvider(factory *a2aclient.Factory) A2AMessageSenderProvider {
-	return func(ctx agent.InvocationContext, card *a2a.AgentCard) (A2AMessageSender, error) {
+	return func(ctx agent.InvocationContext, card *a2a.AgentCard) (A2AClient, error) {
 		var client *a2aclient.Client
 		var err error
 		if factory != nil {
@@ -63,6 +65,10 @@ func (s *defaultA2AMessageSender) SendMessage(ctx context.Context, req *a2a.Send
 
 func (s *defaultA2AMessageSender) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
 	return s.client.SendStreamingMessage(ctx, req)
+}
+
+func (s *defaultA2AMessageSender) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+	return s.client.CancelTask(ctx, req)
 }
 
 func (s *defaultA2AMessageSender) Destroy() error {

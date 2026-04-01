@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -251,37 +252,5 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 
 // ProcessRequest adds the agent tool's function declaration to the LLM request.
 func (t *agentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
-	// TODO extract this function somewhere else, simillar operations are done for
-	// other tools with function declaration.
-	if req.Tools == nil {
-		req.Tools = make(map[string]any)
-	}
-
-	name := t.Name()
-	if _, ok := req.Tools[name]; ok {
-		return fmt.Errorf("duplicate tool: %q", name)
-	}
-	req.Tools[name] = t
-
-	if req.Config == nil {
-		req.Config = &genai.GenerateContentConfig{}
-	}
-	if decl := t.Declaration(); decl == nil {
-		return nil
-	}
-	var funcTool *genai.Tool
-	for _, tool := range req.Config.Tools {
-		if tool != nil && tool.FunctionDeclarations != nil {
-			funcTool = tool
-			break
-		}
-	}
-	if funcTool == nil {
-		req.Config.Tools = append(req.Config.Tools, &genai.Tool{
-			FunctionDeclarations: []*genai.FunctionDeclaration{t.Declaration()},
-		})
-	} else {
-		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, t.Declaration())
-	}
-	return nil
+	return toolutils.PackTool(req, t)
 }

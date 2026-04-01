@@ -15,6 +15,7 @@
 package adka2a
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -59,6 +60,18 @@ func IsPartialFlagSet(meta map[string]any) bool {
 	return isSet
 }
 
+func validateDataPartJSON(d *genai.Part) ([]byte, bool) {
+	if d.InlineData == nil || d.InlineData.MIMEType != "text/plain" {
+		return nil, false
+	}
+	if noPrefix, ok := bytes.CutPrefix(d.InlineData.Data, []byte("<a2a_datapart_json>")); ok {
+		if result, ok := bytes.CutSuffix(noPrefix, []byte("</a2a_datapart_json>")); ok {
+			return result, true
+		}
+	}
+	return nil, false
+}
+
 // ToA2APart converts the provided genai part to A2A equivalent. Long running tool IDs are used for attaching metadata to
 // the relevant data parts.
 func ToA2APart(part *genai.Part, longRunningToolIDs []string) (*a2a.Part, error) {
@@ -80,6 +93,12 @@ func ToA2AParts(parts []*genai.Part, longRunningToolIDs []string) ([]*a2a.Part, 
 				r.SetMeta(ToA2AMetaKey("thought"), true)
 			}
 			result[i] = r
+		} else if jsonBytes, ok := validateDataPartJSON(part); ok {
+			var data map[string]any
+			if err := json.Unmarshal(jsonBytes, &data); err != nil {
+				return nil, err
+			}
+			result[i] = a2a.NewDataPart(data)
 		} else if part.InlineData != nil || part.FileData != nil {
 			if part.InlineData != nil && part.InlineData.DisplayName == "a2a_data_part" {
 				var val map[string]any
@@ -272,19 +291,12 @@ func toGenAIFilePart(part *a2a.Part) (*genai.Part, error) {
 
 func toGenAIDataPart(part *a2a.Part) (*genai.Part, error) {
 	data := part.Data()
-	if data == nil {
-		return toGenAITextPart(part)
-	}
-	adkMetaType, ok := part.Meta()[a2aDataPartMetaTypeKey]
-	if !ok {
-		return toGenAITextPart(part)
-	}
-
 	bytes, err := json.Marshal(data)
 	if err != nil {
 		return nil, err
 	}
 
+	adkMetaType := part.Metadata[a2aDataPartMetaTypeKey]
 	switch adkMetaType {
 	case a2aDataPartTypeCodeExecResult:
 		var val genai.CodeExecutionResult
@@ -315,21 +327,13 @@ func toGenAIDataPart(part *a2a.Part) (*genai.Part, error) {
 		return &genai.Part{FunctionResponse: &val}, nil
 
 	default:
-		return &genai.Part{
-			InlineData: &genai.Blob{
-				Data:        bytes,
-				DisplayName: "a2a_data_part",
-				MIMEType:    "application/json",
-			},
-		}, nil
-	}
-}
+		var jsonData []byte
+		prefix, suffix := []byte("<a2a_datapart_json>"), []byte("</a2a_datapart_json>")
+		jsonData = make([]byte, 0, len(prefix)+len(bytes)+len(suffix))
+		jsonData = append(jsonData, prefix...)
+		jsonData = append(jsonData, bytes...)
+		jsonData = append(jsonData, suffix...)
 
-func toGenAITextPart(part *a2a.Part) (*genai.Part, error) {
-	data := part.Data()
-	bytes, err := json.Marshal(data)
-	if err != nil {
-		return nil, err
+		return &genai.Part{InlineData: &genai.Blob{Data: jsonData, MIMEType: "text/plain"}}, nil
 	}
-	return &genai.Part{Text: string(bytes)}, nil
 }

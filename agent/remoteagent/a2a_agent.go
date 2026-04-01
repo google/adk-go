@@ -18,7 +18,6 @@
 package remoteagent
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"iter"
@@ -31,8 +30,8 @@ import (
 
 	"google.golang.org/adk/agent"
 	v1 "google.golang.org/adk/agent/remoteagent/v1"
+	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // BeforeA2ARequestCallback is called before sending a request to the remote agent.
@@ -42,7 +41,7 @@ import (
 type BeforeA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.MessageSendParams) (*session.Event, error)
 
 // A2AEventConverter can be used to provide a custom implementation of A2A event transformation logic.
-type A2AEventConverter func(ctx agent.ReadonlyContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error)
+type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error)
 
 // AfterA2ARequestCallback is called after receiving a response from the remote agent and converting it to a session.Event.
 // In streaming responses the callback is invoked for every request. Session event parameter might be nil if conversion logic
@@ -50,6 +49,9 @@ type A2AEventConverter func(ctx agent.ReadonlyContext, req *a2a.MessageSendParam
 //
 // If it returns non-nil result or error, it gets emitted instead of the original result.
 type AfterA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.MessageSendParams, resp *session.Event, err error) (*session.Event, error)
+
+// A2ARemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
+type A2ARemoteTaskCleanupCallback func(ctx context.Context, card *a2a.AgentCard, client *a2aclient.Client, taskInfo a2a.TaskInfo, cause error)
 
 // A2AConfig is used to describe and configure a remote agent.
 type A2AConfig struct {
@@ -96,10 +98,26 @@ type A2AConfig struct {
 	// callbacks will be skipped.
 	AfterAgentCallbacks []agent.AfterAgentCallback
 
+	// A2APartConverter is a custom converter for converting A2A parts to GenAI parts.
+	// Implementations should generally remember to leverage adka2a.ToGenAiPart for default conversions
+	// nil returns are considered intentionally dropped parts.
+	A2APartConverter adka2a.A2APartConverter
+
+	// GenAIPartConverter is a custom converter for converting GenAI parts to A2A parts.
+	// Implementations should generally remember to leverage adka2a.ToA2APart for default conversions
+	// nil returns are considered intentionally dropped parts.
+	GenAIPartConverter adka2a.GenAIPartConverter
+
 	// ClientFactory can be used to provide a set of a2aclient.Client configurations.
 	ClientFactory *a2aclient.Factory
 	// MessageSendConfig is attached to a2a.MessageSendParams sent on every agent invocation.
 	MessageSendConfig *a2a.MessageSendConfig
+
+	// RemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
+	// If Run exited due to an error including context cancellation it will be passed as cause.
+	// The context passed to this callback is the original context, but with Err() removed by context.WithoutCancel.
+	// If no callback is provided the default behavior is to make a cancel RPC request with 5 second timeout.
+	RemoteTaskCleanupCallback A2ARemoteTaskCleanupCallback
 }
 
 // NewA2A creates a remote A2A agent. A2A (Agent-To-Agent) protocol is used for communication with an
@@ -127,7 +145,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	}
 
 	if cfg.ClientFactory != nil {
-		v1Cfg.MessageSenderProvider = func(ctx agent.InvocationContext, card *v2a2a.AgentCard) (v1.A2AMessageSender, error) {
+		v1Cfg.MessageSenderProvider = func(ctx agent.InvocationContext, card *v2a2a.AgentCard) (v1.A2AClient, error) {
 			legacyCard := a2av0.FromV1AgentCard(card)
 			var client *a2aclient.Client
 			var err error
@@ -139,12 +157,12 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 			if err != nil {
 				return nil, err
 			}
-			return &compatSender{client: client}, nil
+			return &compatClient{client: client}, nil
 		}
 	}
 
 	if cfg.Converter != nil {
-		v1Cfg.Converter = func(ctx agent.ReadonlyContext, req *v2a2a.SendMessageRequest, event v2a2a.Event, err error) (*session.Event, error) {
+		v1Cfg.Converter = func(ctx agent.InvocationContext, req *v2a2a.SendMessageRequest, event v2a2a.Event, err error) (*session.Event, error) {
 			legacyReq := a2av0.FromV1SendMessageRequest(req)
 			legacyEvent, _ := a2av0.FromV1Event(event)
 			return cfg.Converter(ctx, legacyReq, legacyEvent, err)
@@ -186,23 +204,11 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	return v1.NewA2A(v1Cfg)
 }
 
-func validateDataPartJSON(d *genai.Part) ([]byte, bool) {
-	if d.InlineData == nil || d.InlineData.MIMEType != "text/plain" {
-		return nil, false
-	}
-	if noPrefix, ok := bytes.CutPrefix(d.InlineData.Data, []byte("<json>")); ok {
-		if result, ok := bytes.CutSuffix(noPrefix, []byte("</json>")); ok {
-			return result, true
-		}
-	}
-	return nil, false
-}
-
-type compatSender struct {
+type compatClient struct {
 	client *a2aclient.Client
 }
 
-func (s *compatSender) SendMessage(ctx context.Context, req *v2a2a.SendMessageRequest) (v2a2a.SendMessageResult, error) {
+func (s *compatClient) SendMessage(ctx context.Context, req *v2a2a.SendMessageRequest) (v2a2a.SendMessageResult, error) {
 	legacyReq := a2av0.FromV1SendMessageRequest(req)
 	legacyResp, err := s.client.SendMessage(ctx, legacyReq)
 	if err != nil {
@@ -219,24 +225,30 @@ func (s *compatSender) SendMessage(ctx context.Context, req *v2a2a.SendMessageRe
 	return res, nil
 }
 
-func (s *compatSender) SendStreamingMessage(ctx context.Context, req *v2a2a.SendMessageRequest) iter.Seq2[v2a2a.Event, error] {
+func (s *compatClient) SendStreamingMessage(ctx context.Context, req *v2a2a.SendMessageRequest) iter.Seq2[v2a2a.Event, error] {
 	return func(yield func(v2a2a.Event, error) bool) {
 		legacyReq := a2av0.FromV1SendMessageRequest(req)
 		for legacyEvent, err := range s.client.SendStreamingMessage(ctx, legacyReq) {
 			if err != nil {
-				if !yield(nil, err) {
-					return
-				}
-				continue
+				yield(nil, err)
+				return
 			}
-			v1Event, err := a2av0.ToV1Event(legacyEvent)
-			if !yield(v1Event, err) {
+			if !yield(a2av0.ToV1Event(legacyEvent)) {
 				return
 			}
 		}
 	}
 }
 
-func (s *compatSender) Destroy() error {
+func (s *compatClient) CancelTask(ctx context.Context, req *v2a2a.CancelTaskRequest) (*v2a2a.Task, error) {
+	legacyReq := a2av0.FromV1CancelTaskRequest(req)
+	legacyResp, err := s.client.CancelTask(ctx, legacyReq)
+	if err != nil {
+		return nil, err
+	}
+	return a2av0.ToV1Task(legacyResp)
+}
+
+func (s *compatClient) Destroy() error {
 	return s.client.Destroy()
 }

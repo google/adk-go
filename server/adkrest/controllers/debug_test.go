@@ -78,6 +78,7 @@ func TestSessionSpansHandler(t *testing.T) {
 			sessionID:    "test-session",
 			reqSessionID: "other-session",
 			wantStatus:   http.StatusOK,
+			wantBody:     []map[string]any{},
 		},
 		{
 			name:         "empty_session_id_param",

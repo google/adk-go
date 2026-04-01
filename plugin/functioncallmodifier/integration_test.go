@@ -35,7 +35,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
-//go:generate go test -httprecord=testdata/.*\.httprr
+//go:generate go test -v -httprecord=testdata/.*\.httprr
 
 func TestPluginCallbackIntegration(t *testing.T) {
 	functionTool, err := functiontool.New(functiontool.Config{
@@ -66,7 +66,7 @@ func TestPluginCallbackIntegration(t *testing.T) {
 				return []tool.Tool{agentToolDefault}
 			},
 			wantSkillStateValue:      "add",
-			wantRationaleStateValue:  "The user is asking to add two numbers, and the calculator tool with the add skill can perform this operation.",
+			wantRationaleStateValue:  "The user wants to add two numbers, and the calculator tool has an 'add' skill that can perform this operation. Providing the request as '2+2' and explicitly setting the skill_id to 'add' should allow the calculator to correctly perform the addition.",
 			shouldHaveSkillState:     true,
 			shouldHaveRationaleState: true,
 		},

@@ -89,7 +89,7 @@ func getFunctionResponseCallID(event *session.Event) (string, bool) {
 // Parts from all events we processed are returned as a single list.
 // The returned contextID might be an empty string. This means the current remote agent invocation is not associates with
 // any of the previous one. In this case a new contextID will be generated on the remote server.
-func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Events) ([]*a2a.Part, string) {
+func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Events, cfg A2AConfig) ([]*a2a.Part, string) {
 	partCount, contextID := 0, ""
 	// only events after this index are not in the remote session
 	lastRemoteResponseIndex := -1
@@ -114,7 +114,7 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 		if event.Content == nil || len(event.Content.Parts) == 0 {
 			continue
 		}
-		parts, err := adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
+		parts, err := convertParts(ctx, cfg, event)
 		if err != nil {
 			// TODO(yarolegovich): log error
 			continue
@@ -157,4 +157,26 @@ func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event
 		event.Content = genai.NewContentFromParts(parts, genai.RoleUser)
 	}
 	return event
+}
+
+func convertParts(ctx agent.InvocationContext, cfg A2AConfig, event *session.Event) ([]*a2a.Part, error) {
+	parts := make([]*a2a.Part, 0, len(event.Content.Parts))
+	if cfg.GenAIPartConverter != nil {
+		for _, part := range event.Content.Parts {
+			cp, err := cfg.GenAIPartConverter(ctx, event, part)
+			if err != nil {
+				return nil, err
+			}
+			if cp != nil {
+				parts = append(parts, cp)
+			}
+		}
+	} else {
+		var err error
+		parts, err = adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
+		if err != nil {
+			return nil, fmt.Errorf("event part conversion failed: %w", err)
+		}
+	}
+	return parts, nil
 }

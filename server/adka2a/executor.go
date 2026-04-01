@@ -27,7 +27,6 @@ import (
 	v2a2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	v2asrv "github.com/a2aproject/a2a-go/v2/a2asrv"
-
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -55,23 +54,48 @@ type A2APartConverter func(ctx context.Context, a2aEvent a2a.Event, part a2a.Par
 // nil returns are considered intentionally dropped parts.
 type GenAIPartConverter func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (a2a.Part, error)
 
+// A2AExecutionCleanupCallback is a callback which will be called after an execution or cancellatio has completed or failed.
+type A2AExecutionCleanupCallback func(ctx context.Context, reqCtx *a2asrv.RequestContext, subAgentCards []*a2a.AgentCard, result a2a.SendMessageResult, cause error)
+
 // OutputMode controls how artifacts are produced.
-type OutputMode string
+type OutputMode = v1.OutputMode
+
+// Runner is an interface matching [runner.Runner] API.
+// It exists to let users use custom runner implementations with A2A agent executor.
+type Runner = v1.Runner
+
+// RunnerProvider is a [Runner] factory function. The provided plugin must be installed in the returned [Runner] for
+// callbacks taking [ExecutorContext] to work correctly.
+type RunnerProvider = v1.RunnerProvider
 
 const (
 	// OutputArtifactPerRun produces a single artifact per [runner.Runner.Run].
-	OutputArtifactPerRun OutputMode = "artifact-per-run"
+	OutputArtifactPerRun OutputMode = v1.OutputArtifactPerRun
 	// OutputArtifactPerEvent produces an artifact per non-partial [session.Event].
 	// While agent is emitting events an artifact is build incrementally (parts are append to it).
 	// The next partial event replaces accumulated contents and seals the artifact, meaning
 	// the next event from this agent will create a new artifact.
-	OutputArtifactPerEvent OutputMode = "artifact-per-event"
+	OutputArtifactPerEvent OutputMode = v1.OutputArtifactPerEvent
 )
+
+// RunnerConfig is part of the runner configuration executor code depends on.
+// Custom [RunnerProvider] needs to return it back to callers.
+type RunnerConfig struct {
+	// AppName is the name of the application used in [session.Service] keys and A2A event metadata.
+	AppName string
+	// Agent is the root agent. It isued
+	Agent agent.Agent
+	// SessionService is the session service to use.
+	SessionService session.Service
+}
 
 // ExecutorConfig allows to configure Executor.
 type ExecutorConfig struct {
-	// RunnerConfig is the configuration which will be used for [runner.New] during A2A Execute invocation.
+	// RunnerConfig is used for creating a default RunnerProvider. The field is ignored when RunnerProvider is set.
 	RunnerConfig runner.Config
+	// RunnerProvider is a function which allows to control how a runner is created.
+	// If not provided the default provider is used which calls [runner.New] with the RunnerConfig field.
+	RunnerProvider RunnerProvider
 
 	// RunConfig is the configuration which will be passed to [runner.Runner.Run] during A2A Execute invocation.
 	RunConfig agent.RunConfig
@@ -103,6 +127,10 @@ type ExecutorConfig struct {
 	// OutputMode controls how artifacts are produced. Can be [OutputArtifactPerRun] or [OutputArtifactPerEvent].
 	// Defaults to [OutputArtifactPerRun].
 	OutputMode OutputMode
+
+	// A2AExecutionCleanupCallback is a callback which will be called after an execution or cancellation has completed or failed.
+	// If not provided, the default behavior is to log the failure cause, if any.
+	A2AExecutionCleanupCallback A2AExecutionCleanupCallback
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
@@ -115,9 +143,10 @@ type Executor struct {
 // NewExecutor creates an initialized [Executor] instance.
 func NewExecutor(config ExecutorConfig) *Executor {
 	v1Config := v1.ExecutorConfig{
-		RunnerConfig: config.RunnerConfig,
-		RunConfig:    config.RunConfig,
-		OutputMode:   v1.OutputMode(config.OutputMode),
+		RunnerConfig:   config.RunnerConfig,
+		RunnerProvider: config.RunnerProvider,
+		RunConfig:      config.RunConfig,
+		OutputMode:     v1.OutputMode(config.OutputMode),
 	}
 
 	if config.BeforeExecuteCallback != nil {
@@ -224,6 +253,7 @@ func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, qu
 			return err
 		}
 	}
+
 	return nil
 }
 

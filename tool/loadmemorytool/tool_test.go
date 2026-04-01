@@ -36,11 +36,11 @@ type mockMemory struct {
 	err      error
 }
 
-func (m *mockMemory) AddSession(ctx context.Context, s session.Session) error {
+func (m *mockMemory) AddSessionToMemory(ctx context.Context, s session.Session) error {
 	return nil
 }
 
-func (m *mockMemory) Search(ctx context.Context, query string) (*memory.SearchResponse, error) {
+func (m *mockMemory) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	if m.err != nil {
 		return nil, m.err
 	}

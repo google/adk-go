@@ -179,24 +179,23 @@ func TestPartsTwoWayConversion(t *testing.T) {
 	}
 }
 
-func TestPartsOneWayConversion(t *testing.T) {
-	part := a2a.NewDataPart(map[string]any{"arbitrary": "data"})
-	wantGenAI := &genai.Part{Text: `{"arbitrary":"data"}`}
+func TestPartsDataPartConversionRoundTrip(t *testing.T) {
+	a2aPart := a2a.NewDataPart(map[string]any{"arbitrary": "data"})
+	wantGenAI := &genai.Part{InlineData: &genai.Blob{Data: []byte("<a2a_datapart_json>{\"arbitrary\":\"data\"}</a2a_datapart_json>"), MIMEType: "text/plain"}}
 
-	gotGenAI, err := ToGenAIParts([]*a2a.Part{part})
+	gotGenAI, err := ToGenAIParts([]*a2a.Part{a2aPart})
 	if err != nil {
 		t.Fatalf("toGenAI() error = %v, want nil", err)
 	}
 	if diff := cmp.Diff([]*genai.Part{wantGenAI}, gotGenAI); diff != "" {
-		t.Fatalf("toGenAI() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotGenAI, part, diff)
+		t.Fatalf("toGenAI() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotGenAI, a2aPart, diff)
 	}
 
-	wantA2A := a2a.NewTextPart(`{"arbitrary":"data"}`)
-	gotA2A, err := ToA2AParts(gotGenAI, nil)
+	gotbackA2A, err := ToA2AParts(gotGenAI, nil)
 	if err != nil {
 		t.Fatalf("toA2AParts() error = %v, want nil", err)
 	}
-	if diff := cmp.Diff([]*a2a.Part{wantA2A}, gotA2A); diff != "" {
-		t.Fatalf("toA2AParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotA2A, wantA2A, diff)
+	if diff := cmp.Diff([]*a2a.Part{a2aPart}, gotbackA2A); diff != "" {
+		t.Fatalf("toA2AParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotbackA2A, a2aPart, diff)
 	}
 }

@@ -253,6 +253,41 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 				newCompletedEvent(),
 			},
 		},
+		{
+			name: "interleaved thought and text",
+			events: []a2a.Event{
+				a2a.NewArtifactUpdateEvent(task, "a1", &a2a.Part{
+					Content:  a2a.Text("thinking1"),
+					Metadata: map[string]any{adka2a.ToA2AMetaKey("thought"): true},
+				}),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("text1")),
+				a2a.NewArtifactUpdateEvent(task, "a1", &a2a.Part{
+					Content:  a2a.Text("thinking2"),
+					Metadata: map[string]any{adka2a.ToA2AMetaKey("thought"): true},
+				}),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("text2")),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				{LLMResponse: model.LLMResponse{
+					Partial: true,
+					Content: &genai.Content{Parts: []*genai.Part{{Thought: true, Text: "thinking1"}}, Role: genai.RoleModel},
+				}},
+				newPartialEvent("text1"),
+				{LLMResponse: model.LLMResponse{
+					Partial: true,
+					Content: &genai.Content{Parts: []*genai.Part{{Thought: true, Text: "thinking2"}}, Role: genai.RoleModel},
+				}},
+				newPartialEvent("text2"),
+				newEvent(
+					&genai.Part{Thought: true, Text: "thinking1"},
+					&genai.Part{Text: "text1"},
+					&genai.Part{Thought: true, Text: "thinking2"},
+					&genai.Part{Text: "text2"},
+				),
+				newCompletedEvent(),
+			},
+		},
 	}
 
 	for _, tc := range tests {

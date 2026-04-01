@@ -22,6 +22,7 @@ package retryandreflect
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -142,12 +143,17 @@ func (r *retryAndReflect) onToolError(ctx tool.Context, tool tool.Tool, args map
 	return r.handleToolError(ctx, tool, args, err)
 }
 
-func (r *retryAndReflect) handleToolError(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+func (r *retryAndReflect) handleToolError(ctx tool.Context, failedTool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+	// skip if the error is tool.ErrConfirmationRequired.
+	if errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmationRejected) {
+		return nil, nil
+	}
+
 	if r.maxRetries == 0 {
 		if r.errorIfRetryExceeded {
 			return nil, err
 		}
-		return r.createToolRetryExceedMsg(tool, args, err), nil
+		return r.createToolRetryExceedMsg(failedTool, args, err), nil
 	}
 
 	scopeKey := r.scopeKey(ctx)
@@ -159,18 +165,18 @@ func (r *retryAndReflect) handleToolError(ctx tool.Context, tool tool.Tool, args
 		toolFailureCounter = make(map[string]int)
 		r.scopedFailureCounters[scopeKey] = toolFailureCounter
 	}
-	currentRetries := toolFailureCounter[tool.Name()] + 1
-	toolFailureCounter[tool.Name()] = currentRetries
+	currentRetries := toolFailureCounter[failedTool.Name()] + 1
+	toolFailureCounter[failedTool.Name()] = currentRetries
 
 	if currentRetries <= r.maxRetries {
-		return r.createToolReflectionResponse(tool, args, err, currentRetries), nil
+		return r.createToolReflectionResponse(failedTool, args, err, currentRetries), nil
 	}
 
 	// Max Retry exceeded
 	if r.errorIfRetryExceeded {
 		return nil, err
 	}
-	return r.createToolRetryExceedMsg(tool, args, err), nil
+	return r.createToolRetryExceedMsg(failedTool, args, err), nil
 }
 
 func (r *retryAndReflect) scopeKey(ctx tool.Context) string {
@@ -187,6 +193,9 @@ func (r *retryAndReflect) resetFailuresForTool(ctx tool.Context, toolName string
 	defer r.mu.Unlock()
 	if scope, ok := r.scopedFailureCounters[scopeKey]; ok {
 		delete(scope, toolName)
+		if len(scope) == 0 {
+			delete(r.scopedFailureCounters, scopeKey)
+		}
 	}
 }
 

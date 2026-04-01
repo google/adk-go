@@ -46,6 +46,7 @@ type LLMResponse struct {
 	UsageMetadata     *genai.GenerateContentResponseUsageMetadata
 	CustomMetadata    map[string]any
 	LogprobsResult    *genai.LogprobsResult
+	ModelVersion      string
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
 	// The Runner fully processes only the final non-partial event, partial
