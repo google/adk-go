@@ -672,6 +672,20 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		Response: map[string]any{"error": "no matching call"},
 	}
 
+	// Separate model events for tool + adk_request_confirmation (confirmation flows).
+	fcConfirmTool := &genai.FunctionCall{ID: "tool_call_X", Name: "tool_a"}
+	fcConfirmADK := &genai.FunctionCall{ID: "confirm_call_Y", Name: "adk_request_confirmation"}
+	frConfirmADK := &genai.FunctionResponse{
+		ID:       "confirm_call_Y",
+		Name:     "adk_request_confirmation",
+		Response: map[string]any{"confirmed": true},
+	}
+	frConfirmTool := &genai.FunctionResponse{
+		ID:       "tool_call_X",
+		Name:     "tool_a",
+		Response: map[string]any{"status": "done"},
+	}
+
 	// --- Test Cases ---
 	testCases := []struct {
 		name    string
@@ -854,6 +868,24 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 					{Text: "Final prefix"},
 					{Text: "Final suffix"},
 				}},
+			},
+		},
+		{
+			// Latest event is FR(tool); rearrangement must keep the intermediate FC(confirm) event.
+			name: "Preserves intermediate function call events",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run a tool that needs confirmation", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcConfirmTool, "model")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcConfirmADK, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frConfirmADK, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frConfirmTool, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Run a tool that needs confirmation", "user"),
+				NewContentFromFunctionCall(fcConfirmTool, "model"),
+				NewContentFromFunctionResponse(frConfirmTool, "user"),
+				NewContentFromFunctionCall(fcConfirmADK, "model"),
+				NewContentFromFunctionResponse(frConfirmADK, "user"),
 			},
 		},
 		{
