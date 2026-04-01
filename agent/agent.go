@@ -116,8 +116,8 @@ type Artifacts interface {
 // Memory interface provides methods to access agent memory across the
 // sessions of the current user_id.
 type Memory interface {
-	AddSession(context.Context, session.Session) error
-	Search(ctx context.Context, query string) (*memory.SearchResponse, error)
+	AddSessionToMemory(context.Context, session.Session) error
+	SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error)
 }
 
 // BeforeAgentCallback is a function that is called before the agent starts
@@ -159,7 +159,7 @@ func (a *agent) SubAgents() []Agent {
 
 func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		spanCtx, span := telemetry.StartInvokeAgentSpan(ctx, a, ctx.Session().ID())
+		spanCtx, span := telemetry.StartInvokeAgentSpan(ctx, a, ctx.Session().ID(), ctx.InvocationID())
 		yield, endSpan := telemetry.WrapYield(span, yield, func(span trace.Span, event *session.Event, err error) {
 			telemetry.TraceAgentResult(span, telemetry.TraceAgentResultParams{
 				ResponseEvent: event,
@@ -233,7 +233,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
 	}
 
 	if pluginManager != nil {
@@ -295,7 +295,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
 	}
 
 	if pluginManager != nil {

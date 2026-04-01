@@ -46,19 +46,17 @@ func (m *mockTool) Run(ctx tool.Context, args any) (map[string]any, error) { ret
 
 type mockLLM struct {
 	model.LLM
-	name string
+	name    string
+	variant *genai.Backend
 }
 
 func (m *mockLLM) Name() string { return m.name }
 
-// mockLLMAgent satisfies both agent.Agent (via embedding) and llminternal.Agent (via internal() implementation)
-type mockLLMAgent struct {
-	agent.Agent
-	s *State
-}
-
-func (m *mockLLMAgent) internal() *State {
-	return m.s
+func (m *mockLLM) GetGoogleLLMVariant() genai.Backend {
+	if m.variant != nil {
+		return *m.variant
+	}
+	return genai.BackendGeminiAPI
 }
 
 func TestOutputSchemaRequestProcessor(t *testing.T) {
@@ -77,7 +75,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		mockAgent := &mockLLMAgent{
 			Agent: baseAgent,
 			s: &State{
-				Model:        &mockLLM{name: "gemini-1.5-flash"},
+				Model:        &mockLLM{name: "gemini-2.5-flash"},
 				OutputSchema: schema,
 				Tools:        []tool.Tool{&mockTool{name: "other_tool"}},
 			},
@@ -117,7 +115,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		mockAgent := &mockLLMAgent{
 			Agent: baseAgent,
 			s: &State{
-				Model:        &mockLLM{name: "gemini-1.5-flash"},
+				Model:        &mockLLM{name: "gemini-2.5-flash"},
 				OutputSchema: schema,
 				Tools:        nil, // No tools -> optimization skips processor
 			},
@@ -143,7 +141,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		mockAgent := &mockLLMAgent{
 			Agent: baseAgent,
 			s: &State{
-				Model:        &mockLLM{name: "gemini-1.5-flash"},
+				Model:        &mockLLM{name: "gemini-2.5-flash"},
 				OutputSchema: nil,
 				Tools:        []tool.Tool{&mockTool{name: "other_tool"}},
 			},
@@ -165,14 +163,17 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 	})
 
 	t.Run("NoOpWhenNativeSupportAvailable", func(t *testing.T) {
-		// Native support = Vertex AI + Gemini 2.0+
-		t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "1")
+		// Native support = Vertex AI + Gemini 2.5+
+		llm := &mockLLM{
+			name:    "gemini-2.5-flash",
+			variant: func() *genai.Backend { x := genai.BackendVertexAI; return &x }(),
+		}
 
 		baseAgent := utils.Must(agent.New(agent.Config{Name: "VertexGemini2Agent"}))
 		mockAgent := &mockLLMAgent{
 			Agent: baseAgent,
 			s: &State{
-				Model:        &mockLLM{name: "gemini-2.0-flash"},
+				Model:        llm,
 				OutputSchema: schema,
 				Tools:        []tool.Tool{&mockTool{name: "other_tool"}},
 			},

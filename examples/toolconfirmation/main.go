@@ -302,11 +302,11 @@ func runVacationSession(ctx context.Context, vacationAgent agent.Agent, sessionS
 			break
 		}
 
-		if strings.HasPrefix(inputLower, "approve ") {
-			requestID := strings.TrimSpace(strings.TrimPrefix(inputLower, "approve "))
+		if after, ok := strings.CutPrefix(inputLower, "approve "); ok {
+			requestID := strings.TrimSpace(after)
 			processApproval(ctx, r, sessionID, requestID, true, reader)
-		} else if strings.HasPrefix(inputLower, "reject ") {
-			requestID := strings.TrimSpace(strings.TrimPrefix(inputLower, "reject "))
+		} else if after, ok := strings.CutPrefix(inputLower, "reject "); ok {
+			requestID := strings.TrimSpace(after)
 			processApproval(ctx, r, sessionID, requestID, false, reader)
 		} else if userInput != "" {
 			// Allow free text to interact with the vacation agent

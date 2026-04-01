@@ -27,6 +27,7 @@ import (
 
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/llminternal/converters"
+	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/internal/version"
 	"google.golang.org/adk/model"
 )
@@ -46,9 +47,26 @@ type geminiModel struct {
 //
 // An error is returned if the [genai.Client] fails to initialize.
 func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (model.LLM, error) {
+	// Create a copy of the config to avoid mutating the caller's config
+	// or the underlying http.Client.
+	if cfg != nil {
+		cfgCopy := *cfg
+		if cfg.HTTPClient != nil {
+			clientCopy := *cfg.HTTPClient
+			cfgCopy.HTTPClient = &clientCopy
+		}
+		cfg = &cfgCopy
+	}
+
 	client, err := genai.NewClient(ctx, cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	if client.ClientConfig().HTTPClient != nil {
+		client.ClientConfig().HTTPClient.Transport = &mergeHeadersInterceptor{
+			base: client.ClientConfig().HTTPClient.Transport,
+		}
 	}
 
 	// Create header value once, when the model is created
@@ -96,9 +114,19 @@ func (m *geminiModel) addHeaders(headers http.Header) {
 	headers.Set("user-agent", m.versionHeaderValue)
 }
 
+// modelName returns the model name to use for the API call.
+// It prefers req.Model (which can be set by BeforeModelCallback),
+// falling back to the construction-time name if unset.
+func (m *geminiModel) modelName(req *model.LLMRequest) string {
+	if req.Model != "" {
+		return req.Model
+	}
+	return m.name
+}
+
 // generate calls the model synchronously returning result from the first candidate.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	resp, err := m.client.Models.GenerateContent(ctx, m.name, req.Contents, req.Config)
+	resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), req.Contents, req.Config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
 	}
@@ -114,7 +142,7 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 	aggregator := llminternal.NewStreamingResponseAggregator()
 
 	return func(yield func(*model.LLMResponse, error) bool) {
-		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.name, req.Contents, req.Config) {
+		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), req.Contents, req.Config) {
 			if err != nil {
 				yield(nil, err)
 				return
@@ -141,3 +169,31 @@ func (m *geminiModel) maybeAppendUserContent(req *model.LLMRequest) {
 		req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
 	}
 }
+
+// mergeHeadersInterceptor is a http.RoundTripper that merges headers from the request
+// with the model's headers before delegating to the base transport.
+type mergeHeadersInterceptor struct {
+	base http.RoundTripper
+}
+
+func (h *mergeHeadersInterceptor) RoundTrip(req *http.Request) (*http.Response, error) {
+	for _, headerName := range []string{"x-goog-api-client", "user-agent"} {
+		if values := req.Header.Values(headerName); len(values) > 0 {
+			req.Header.Set(headerName, strings.Join(values, " "))
+		}
+	}
+
+	if h.base == nil {
+		return http.DefaultTransport.RoundTrip(req)
+	}
+	return h.base.RoundTrip(req)
+}
+
+func (m *geminiModel) GetGoogleLLMVariant() genai.Backend {
+	if m == nil || m.client == nil {
+		return genai.BackendUnspecified
+	}
+	return m.client.ClientConfig().Backend
+}
+
+var _ googlellm.GoogleLLM = &geminiModel{}

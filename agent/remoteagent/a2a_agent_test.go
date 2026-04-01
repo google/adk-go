@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
@@ -35,6 +36,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
@@ -43,6 +45,8 @@ import (
 
 type mockA2AExecutor struct {
 	executeFn func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error
+	cancelFn  func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error
+	cleanupFn func(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error)
 }
 
 var _ a2asrv.AgentExecutor = (*mockA2AExecutor)(nil)
@@ -55,7 +59,18 @@ func (e *mockA2AExecutor) Execute(ctx context.Context, reqCtx *a2asrv.RequestCon
 }
 
 func (e *mockA2AExecutor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
-	return fmt.Errorf("not implemented")
+	if e.cancelFn != nil {
+		return e.cancelFn(ctx, reqCtx, queue)
+	}
+	ev := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil)
+	ev.Final = true
+	return queue.Write(ctx, ev)
+}
+
+func (e *mockA2AExecutor) Cleanup(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error) {
+	if e.cleanupFn != nil {
+		e.cleanupFn(ctx, reqCtx, result, cause)
+	}
 }
 
 type testA2AServer struct {
@@ -74,20 +89,15 @@ func startA2AServer(agentExecutor a2asrv.AgentExecutor) *testA2AServer {
 func newA2ARemoteAgent(t *testing.T, name string, server *testA2AServer) agent.Agent {
 	t.Helper()
 	card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolJSONRPC, URL: server.URL, Capabilities: a2a.AgentCapabilities{Streaming: true}}
-	agent, err := NewA2A(A2AConfig{AgentCard: card, Name: name})
-	if err != nil {
-		t.Fatalf("remoteagent.NewA2A() error = %v", err)
-	}
-	return agent
+	return utils.Must(NewA2A(A2AConfig{AgentCard: card, Name: name}))
 }
 
 func newInvocationContext(t *testing.T, events []*session.Event) agent.InvocationContext {
 	return newInvocationContextWithStreamingMode(t, events, agent.StreamingModeSSE)
 }
 
-func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event, streamingMode agent.StreamingMode) agent.InvocationContext {
+func prepareSession(t *testing.T, ctx context.Context, events []*session.Event) session.Session {
 	t.Helper()
-	ctx := t.Context()
 	service := session.InMemoryService()
 	resp, err := service.Create(ctx, &session.CreateRequest{AppName: t.Name(), UserID: "test"})
 	if err != nil {
@@ -98,9 +108,15 @@ func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event
 			t.Fatalf("sessionService.AppendEvent() error = %v", err)
 		}
 	}
+	return resp.Session
+}
 
+func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event, streamingMode agent.StreamingMode) agent.InvocationContext {
+	t.Helper()
+	ctx := t.Context()
+	session := prepareSession(t, ctx, events)
 	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Session: resp.Session,
+		Session: session,
 		RunConfig: &agent.RunConfig{
 			StreamingMode: streamingMode,
 		},
@@ -148,17 +164,6 @@ func newADKEventReplay(t *testing.T, name string, events []*session.Event) agent
 		t.Fatalf("agent.New() error = %v", err)
 	}
 	return agnt
-}
-
-func newADKEventReplayExecutor(t *testing.T, events []*session.Event) a2asrv.AgentExecutor {
-	t.Helper()
-	return adka2a.NewExecutor(adka2a.ExecutorConfig{
-		RunnerConfig: runner.Config{
-			AppName:        "RemoteAgentTest",
-			SessionService: session.InMemoryService(),
-			Agent:          newADKEventReplay(t, "root", events),
-		},
-	})
 }
 
 func newA2AEventReplay(t *testing.T, events []a2a.Event) a2asrv.AgentExecutor {
@@ -372,44 +377,53 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 		cmpopts.IgnoreFields(model.LLMResponse{}, "CustomMetadata"),
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			executor := newADKEventReplayExecutor(t, tc.remoteEvents)
-			remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
+	for _, outputMode := range []adka2a.OutputMode{adka2a.OutputArtifactPerRun, adka2a.OutputArtifactPerEvent} {
+		for _, tc := range testCases {
+			t.Run(tc.name+" "+string(outputMode), func(t *testing.T) {
+				executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
+					OutputMode: outputMode,
+					RunnerConfig: runner.Config{
+						AppName:        "RemoteAgentTest",
+						SessionService: session.InMemoryService(),
+						Agent:          newADKEventReplay(t, "root", tc.remoteEvents),
+					},
+				})
+				remoteAgent := newA2ARemoteAgent(t, "a2a", startA2AServer(executor))
 
-			mode := agent.StreamingModeSSE
-			if tc.noStreaming {
-				mode = agent.StreamingModeNone
-			}
-			ictx := newInvocationContextWithStreamingMode(t, []*session.Event{newUserHello()}, mode)
-			gotEvents, err := runAndCollect(ictx, remoteAgent)
-			if err != nil {
-				t.Fatalf("agent.Run() error = %v", err)
-			}
-			gotResponses := toLLMResponses(gotEvents)
-			if diff := cmp.Diff(tc.wantResponses, gotResponses, ignoreFields...); diff != "" {
-				t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
-			}
-			var lastActions *session.EventActions
-			for i, event := range gotEvents {
-				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("response")]; !ok {
-					if aggregated, _ := event.CustomMetadata[adka2a.ToADKMetaKey("aggregated")].(bool); !aggregated {
-						t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original event or meta[%q] = true", event.CustomMetadata, adka2a.ToADKMetaKey("response"), adka2a.ToADKMetaKey("aggregated"))
+				mode := agent.StreamingModeSSE
+				if tc.noStreaming {
+					mode = agent.StreamingModeNone
+				}
+				ictx := newInvocationContextWithStreamingMode(t, []*session.Event{newUserHello()}, mode)
+				gotEvents, err := runAndCollect(ictx, remoteAgent)
+				if err != nil {
+					t.Fatalf("agent.Run() error = %v", err)
+				}
+				gotResponses := toLLMResponses(gotEvents)
+				if diff := cmp.Diff(tc.wantResponses, gotResponses, ignoreFields...); diff != "" {
+					t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotResponses, tc.wantResponses, diff)
+				}
+				var lastActions *session.EventActions
+				for i, event := range gotEvents {
+					if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("response")]; !ok {
+						if aggregated, _ := event.CustomMetadata[adka2a.ToADKMetaKey("aggregated")].(bool); !aggregated {
+							t.Fatalf("event.CustomMetadata = %v, want meta[%q] = original event or meta[%q] = true", event.CustomMetadata, adka2a.ToADKMetaKey("response"), adka2a.ToADKMetaKey("aggregated"))
+						}
 					}
+					wantRequest := i == len(gotEvents)-1
+					if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; ok != wantRequest {
+						t.Fatalf("event.CustomMetadata = %v, want request = %v", event.CustomMetadata, wantRequest)
+					}
+					lastActions = &event.Actions
 				}
-				wantRequest := i == len(gotEvents)-1
-				if _, ok := event.CustomMetadata[adka2a.ToADKMetaKey("request")]; ok != wantRequest {
-					t.Fatalf("event.CustomMetadata = %v, want request = %v", event.CustomMetadata, wantRequest)
+				if tc.wantEscalate != lastActions.Escalate {
+					t.Fatalf("lastActions.Escalate = %v, want %v", lastActions.Escalate, tc.wantEscalate)
 				}
-				lastActions = &event.Actions
-			}
-			if tc.wantEscalate != lastActions.Escalate {
-				t.Fatalf("lastActions.Escalate = %v, want %v", lastActions.Escalate, tc.wantEscalate)
-			}
-			if tc.wantTransfer != lastActions.TransferToAgent {
-				t.Fatalf("lastActions.TransferToAgent = %v, want %v", lastActions.TransferToAgent, tc.wantTransfer)
-			}
-		})
+				if tc.wantTransfer != lastActions.TransferToAgent {
+					t.Fatalf("lastActions.TransferToAgent = %v, want %v", lastActions.TransferToAgent, tc.wantTransfer)
+				}
+			})
+		}
 	}
 }
 
@@ -533,10 +547,8 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			wantResponses: []model.LLMResponse{
 				{Content: genai.NewContentFromText("hello", genai.RoleModel), Partial: true},
 				{Content: genai.NewContentFromText("world", genai.RoleModel), Partial: true},
-				{
-					Content:      genai.NewContentFromText("helloworld", genai.RoleModel),
-					TurnComplete: true,
-				},
+				{Content: genai.NewContentFromText("helloworld", genai.RoleModel)},
+				{TurnComplete: true},
 			},
 		},
 		{
@@ -549,7 +561,6 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			wantResponses: []model.LLMResponse{
 				{Content: &genai.Content{Parts: []*genai.Part{{Text: "submitted...\n", Thought: true}}, Role: genai.RoleModel}, Partial: true},
 				{Content: &genai.Content{Parts: []*genai.Part{{Text: "working...\n", Thought: true}}, Role: genai.RoleModel}, Partial: true},
-				{Content: genai.NewContentFromParts([]*genai.Part{{Thought: true, Text: "submitted...\nworking...\n"}}, genai.RoleModel)},
 				{Content: genai.NewContentFromText("completed!", genai.RoleModel), TurnComplete: true},
 			},
 		},
@@ -706,8 +717,11 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 					CustomMetadata: map[string]any{"foo": "bar"},
 				},
 				{
-					TurnComplete:   true,
 					Content:        genai.NewContentFromText("Hello, world!", genai.RoleModel),
+					CustomMetadata: map[string]any{"foo": "bar"},
+				},
+				{
+					TurnComplete:   true,
 					CustomMetadata: map[string]any{"foo": "bar"},
 				},
 			},
@@ -806,14 +820,14 @@ func TestRemoteAgent_RequestCallbacks(t *testing.T) {
 		},
 		{
 			name: "converter error",
-			converter: func(ctx agent.ReadonlyContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error) {
+			converter: func(ctx agent.InvocationContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error) {
 				return nil, fmt.Errorf("failed")
 			},
 			wantErr: fmt.Errorf("failed"),
 		},
 		{
 			name: "converter custom response",
-			converter: func(ctx agent.ReadonlyContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error) {
+			converter: func(ctx agent.InvocationContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error) {
 				return &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}}, nil
 			},
 			wantResponses: []model.LLMResponse{{Content: genai.NewContentFromText("hello", genai.RoleModel)}},
@@ -1065,12 +1079,14 @@ func TestRemoteAgent_EmptyResultForEmptySession(t *testing.T) {
 	}
 
 	wantEvents := []*session.Event{
-		{InvocationID: ictx.InvocationID(), Author: agentName, Branch: ictx.Branch()},
+		{
+			InvocationID: ictx.InvocationID(), Author: agentName, Branch: ictx.Branch(),
+			Actions: session.EventActions{StateDelta: map[string]any{}, ArtifactDelta: map[string]int64{}},
+		},
 	}
 	ignoreFields := []cmp.Option{
 		cmpopts.IgnoreFields(session.Event{}, "ID"),
 		cmpopts.IgnoreFields(session.Event{}, "Timestamp"),
-		cmpopts.IgnoreFields(session.EventActions{}, "StateDelta"),
 	}
 	if diff := cmp.Diff(wantEvents, gotEvents, ignoreFields...); diff != "" {
 		t.Fatalf("agent.Run() wrong result (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotEvents, wantEvents, diff)
@@ -1168,5 +1184,224 @@ func TestRemoteAgent_ErrorEventOnServerError(t *testing.T) {
 	}
 	if gotEvents[0].ErrorMessage == "" {
 		t.Fatal("event.ErrorMessage empty, want non-empty")
+	}
+}
+
+func TestRemoteAgent_CustomConverters(t *testing.T) {
+	originalA2APart := a2a.TextPart{Text: "hello"}
+	customA2APart := a2a.TextPart{Text: "modified"}
+	mockGenAIPartConverter := func(ctx context.Context, event *session.Event, part *genai.Part) (a2a.Part, error) {
+		return customA2APart, nil
+	}
+
+	tests := []struct {
+		name string
+		cfg  A2AConfig
+		want a2a.Part
+	}{
+		{
+			name: "custom converter",
+			cfg:  A2AConfig{GenAIPartConverter: mockGenAIPartConverter},
+			want: customA2APart,
+		},
+		{
+			name: "default converter",
+			want: originalA2APart,
+		},
+	}
+	for _, tc := range tests {
+		events := []*session.Event{newUserHello()}
+		ictx := newTestInvocationContext(t, "a2a agent", events...)
+		msg, err := newMessage(ictx, tc.cfg)
+		if err != nil {
+			t.Fatalf("newMessage() error = %v", err)
+		}
+		if len(msg.Parts) != 1 {
+			t.Fatalf("len(msg.Parts) = %d, want 1", len(msg.Parts))
+		}
+		if textPart, ok := msg.Parts[0].(a2a.TextPart); !ok || textPart.Text != tc.want.(a2a.TextPart).Text {
+			t.Fatalf("msg.Parts[0] = %+v, want %+v", msg.Parts[0], tc.want)
+		}
+	}
+}
+
+func TestRemoteAgent_CleanupCallback(t *testing.T) {
+	testCases := []struct {
+		name                  string
+		events                func(*a2asrv.RequestContext) []a2a.Event
+		afterRequestCallbacks []AfterA2ARequestCallback
+		eventConverter        A2AEventConverter
+		breakAfter            int
+		cancelContextAfter    int
+		wantCause             string
+	}{
+		{
+			name: "after request callback error",
+			afterRequestCallbacks: []AfterA2ARequestCallback{
+				func(ctx agent.CallbackContext, req *a2a.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
+					return nil, fmt.Errorf("callback error")
+				},
+			},
+			wantCause: "callback error",
+		},
+		{
+			name: "part converter error",
+			eventConverter: func(ctx agent.InvocationContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error) {
+				if _, ok := event.(*a2a.TaskArtifactUpdateEvent); ok {
+					return nil, fmt.Errorf("converter error")
+				}
+				return adka2a.ToSessionEvent(ctx, event)
+			},
+			wantCause: "converter error",
+		},
+		{
+			name:               "agent run context canceled",
+			cancelContextAfter: 1,
+			wantCause:          "context canceled",
+		},
+		{
+			name:       "yield returns false",
+			breakAfter: 1,
+			wantCause:  "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				cleanupCalled bool
+				cleanupTaskID a2a.TaskID
+				cleanupCause  error
+			)
+			cleanupCallback := func(ctx context.Context, card *a2a.AgentCard, client *a2aclient.Client, task a2a.TaskInfo, cause error) {
+				cleanupCalled = true
+				cleanupTaskID = task.TaskID
+				cleanupCause = cause
+				if _, err := client.CancelTask(ctx, &a2a.TaskIDParams{ID: task.TaskID}); err != nil {
+					t.Errorf("client.CancelTask() error = %v", err)
+				}
+			}
+
+			remoteTaskIDChan := make(chan a2a.TaskID, 1)
+			executor := &mockA2AExecutor{
+				executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+					remoteTaskIDChan <- reqCtx.TaskID
+					if err := queue.Write(ctx, a2a.NewSubmittedTask(reqCtx, reqCtx.Message)); err != nil {
+						return err
+					}
+					for ctx.Err() == nil {
+						data := a2a.DataPart{Data: map[string]any{"foo": "bar"}}
+						if err := queue.Write(ctx, a2a.NewArtifactEvent(reqCtx, data)); err != nil {
+							return err
+						}
+						time.Sleep(1 * time.Millisecond)
+					}
+					finalUpdate := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCompleted, nil)
+					finalUpdate.Final = true
+					return queue.Write(ctx, finalUpdate)
+				},
+			}
+			server := startA2AServer(executor)
+			defer server.Close()
+
+			card := &a2a.AgentCard{PreferredTransport: a2a.TransportProtocolJSONRPC, URL: server.URL, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+			remoteAgent, err := NewA2A(A2AConfig{
+				Name:                      "a2a",
+				AgentCard:                 card,
+				RemoteTaskCleanupCallback: cleanupCallback,
+				Converter:                 tc.eventConverter,
+				AfterRequestCallbacks:     tc.afterRequestCallbacks,
+			})
+			if err != nil {
+				t.Fatalf("NewA2A() error = %v", err)
+			}
+
+			ictxCtx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			session := prepareSession(t, ictxCtx, []*session.Event{newUserHello()})
+			ictx := icontext.NewInvocationContext(ictxCtx, icontext.InvocationContextParams{
+				Session:   session,
+				RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+			})
+
+			count := 0
+			for _, err := range remoteAgent.Run(ictx) {
+				if err != nil {
+					break
+				}
+				count++
+				if tc.cancelContextAfter > 0 && count >= tc.cancelContextAfter {
+					cancel()
+				}
+				if tc.breakAfter > 0 && count >= tc.breakAfter {
+					break
+				}
+			}
+
+			expectedTaskID := <-remoteTaskIDChan
+			if !cleanupCalled {
+				t.Fatal("RemoteTaskCleanupCallback was not called")
+			}
+			if cleanupTaskID != expectedTaskID {
+				t.Fatalf("cleanupTaskID = %v, want %v", cleanupTaskID, expectedTaskID)
+			}
+			if tc.wantCause != "" {
+				if cleanupCause == nil {
+					if tc.wantCause != "" {
+						t.Fatalf("cleanupCause is nil, want to contain %q", tc.wantCause)
+					}
+				} else if !strings.Contains(cleanupCause.Error(), tc.wantCause) {
+					t.Fatalf("cleanupCause = %v, want to contain %q", cleanupCause, tc.wantCause)
+				}
+			}
+
+			client := newA2AClient(t, server)
+			task, err := client.GetTask(t.Context(), &a2a.TaskQueryParams{ID: expectedTaskID})
+			if err != nil {
+				t.Fatalf("client.CancelTask() error = %v", err)
+			}
+			if task.Status.State != a2a.TaskStateCanceled {
+				t.Fatalf("task.Status.State = %q, want %q", task.Status.State, a2a.TaskStateCanceled)
+			}
+		})
+	}
+}
+
+func TestRemoteAgent_PartConverter(t *testing.T) {
+	event := &session.Event{
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			{Text: "KEEP"},
+			{Text: "DROP"},
+		}, genai.RoleModel)},
+	}
+
+	cfg := A2AConfig{
+		GenAIPartConverter: func(ctx context.Context, event *session.Event, p *genai.Part) (a2a.Part, error) {
+			if p.Text == "DROP" {
+				return nil, nil
+			}
+			return a2a.TextPart{Text: p.Text}, nil
+		},
+	}
+
+	ictx := newTestInvocationContext(t, "test-agent", newUserHello())
+
+	parts, err := convertParts(ictx, cfg, event)
+	if err != nil {
+		t.Fatalf("convertParts() error = %v", err)
+	}
+
+	if len(parts) != 1 {
+		t.Errorf("Expected 1 part after filtering, got %d", len(parts))
+	}
+
+	for _, p := range parts {
+		if p == nil {
+			t.Fatalf("got nil part, want it filtered out.")
+		}
+
+		if tp, ok := p.(a2a.TextPart); ok && tp.Text != "KEEP" {
+			t.Errorf("got %s, want 'KEEP'", tp.Text)
+		}
 	}
 }

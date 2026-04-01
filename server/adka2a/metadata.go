@@ -134,6 +134,13 @@ func setActionsMeta(meta map[string]any, actions session.EventActions) map[strin
 func processA2AMeta(a2aEvent a2a.Event, event *session.Event) error {
 	taskInfo, meta := a2aEvent.TaskInfo(), a2aEvent.Meta()
 
+	if au, ok := a2aEvent.(*a2a.TaskArtifactUpdateEvent); ok && len(au.Artifact.Metadata) > 0 {
+		if meta == nil {
+			meta = make(map[string]any)
+		}
+		maps.Copy(meta, au.Artifact.Metadata)
+	}
+
 	if err := processMeta(metadataCitationKey, meta, &event.CitationMetadata); err != nil {
 		return err
 	}

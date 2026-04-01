@@ -70,7 +70,7 @@ func TestGeminiTool_ProcessRequest(t *testing.T) {
 
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
-			geminiTool := geminitool.New("test_tool", tt.inputTool)
+			geminiTool := geminitool.New("test_tool", "test_description", tt.inputTool)
 
 			requestProcessor, ok := geminiTool.(toolinternal.RequestProcessor)
 			if !ok {

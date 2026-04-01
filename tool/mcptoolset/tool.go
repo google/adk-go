@@ -28,7 +28,7 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider) (tool.Tool, error) {
 	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
@@ -64,7 +64,7 @@ type mcpTool struct {
 
 	requireConfirmation bool
 
-	requireConfirmationProvider ConfirmationProvider
+	requireConfirmationProvider tool.ConfirmationProvider
 }
 
 // Name implements the tool.Tool.
@@ -93,7 +93,7 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
-			return nil, fmt.Errorf("error tool %q call is rejected", t.Name())
+			return nil, fmt.Errorf("error tool %q %w", t.Name(), tool.ErrConfirmationRejected)
 		}
 	} else {
 		requireConfirmation := t.requireConfirmation
@@ -112,7 +112,7 @@ func (t *mcpTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 				return nil, err
 			}
 			ctx.Actions().SkipSummarization = true
-			return nil, fmt.Errorf("error tool %q requires confirmation, please approve or reject", t.Name())
+			return nil, fmt.Errorf("error tool %q %w", t.Name(), tool.ErrConfirmationRequired)
 		}
 	}
 

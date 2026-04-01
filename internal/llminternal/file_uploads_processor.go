@@ -30,18 +30,26 @@ func removeDisplayNameIfExists(ctx agent.InvocationContext, req *model.LLMReques
 		if req.Contents == nil {
 			return
 		}
+
+		llmAgent := asLLMAgent(ctx.Agent())
+		if llmAgent == nil {
+			return
+		}
+
+		if !googlellm.IsGeminiAPIVariant(llmAgent.internal().Model) {
+			return
+		}
+
 		for _, content := range req.Contents {
 			if content.Parts == nil {
 				continue
 			}
-			if googlellm.GetGoogleLLMVariant() == googlellm.GoogleLLMVariantGeminiAPI {
-				for _, part := range content.Parts {
-					if part.InlineData != nil {
-						part.InlineData.DisplayName = ""
-					}
-					if part.FileData != nil {
-						part.FileData.DisplayName = ""
-					}
+			for _, part := range content.Parts {
+				if part.InlineData != nil {
+					part.InlineData.DisplayName = ""
+				}
+				if part.FileData != nil {
+					part.FileData.DisplayName = ""
 				}
 			}
 		}

@@ -16,6 +16,7 @@
 package telemetry
 
 import (
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/oauth2/google"
@@ -24,6 +25,10 @@ import (
 type config struct {
 	// Enables/disables telemetry export to GCP.
 	oTelToCloud bool
+
+	// genAICaptureMessageContent enables/disables logging of message content. The default value is taken from OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT env variable.
+	// If set to true, the message content will be logged in message body. Otherwise it will be elided.
+	genAICaptureMessageContent bool
 
 	// gcpResourceProject is used as the gcp.project.id resource attribute.
 	// If it's empty, the project will be read from ADC or GOOGLE_CLOUD_PROJECT env variable.
@@ -38,11 +43,18 @@ type config struct {
 
 	// resource customizes the OTel resource. It will be merged with default detectors.
 	resource *resource.Resource
+
 	// spanProcessors registers additional span processors, e.g. for custom span exporters.
 	spanProcessors []sdktrace.SpanProcessor
 
+	// logProcessors registers additional log processors, e.g. for custom log exporters.
+	logProcessors []sdklog.Processor
+
 	// tracerProvider overrides the default TracerProvider.
 	tracerProvider *sdktrace.TracerProvider
+
+	// loggerProvider overrides the default LoggerProvider.
+	loggerProvider *sdklog.LoggerProvider
 }
 
 // Option configures adk telemetry.
@@ -104,10 +116,34 @@ func WithSpanProcessors(p ...sdktrace.SpanProcessor) Option {
 	})
 }
 
+// WithLogRecordProcessors registers additional log processors.
+func WithLogRecordProcessors(p ...sdklog.Processor) Option {
+	return optionFunc(func(cfg *config) error {
+		cfg.logProcessors = append(cfg.logProcessors, p...)
+		return nil
+	})
+}
+
 // WithTracerProvider overrides the default TracerProvider with preconfigured instance.
 func WithTracerProvider(tp *sdktrace.TracerProvider) Option {
 	return optionFunc(func(cfg *config) error {
 		cfg.tracerProvider = tp
+		return nil
+	})
+}
+
+// WithLoggerProvider overrides the default LoggerProvider with preconfigured instance.
+func WithLoggerProvider(lp *sdklog.LoggerProvider) Option {
+	return optionFunc(func(cfg *config) error {
+		cfg.loggerProvider = lp
+		return nil
+	})
+}
+
+// WithGenAICaptureMessageContent overrides the default [config.genAICaptureMessageContent].
+func WithGenAICaptureMessageContent(capture bool) Option {
+	return optionFunc(func(cfg *config) error {
+		cfg.genAICaptureMessageContent = capture
 		return nil
 	})
 }

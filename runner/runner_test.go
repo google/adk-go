@@ -393,3 +393,104 @@ func createSession(t *testing.T, ctx context.Context, sessionID, appName, userID
 
 	return resp.Session
 }
+
+func TestRunner_AutoCreateSession(t *testing.T) {
+	t.Parallel()
+
+	appName := "testApp"
+	userID := "testUser"
+	sessionID := "testSession"
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// no-op, we are testing logic before agent run.
+			}
+		},
+	}))
+
+	tests := []struct {
+		name              string
+		autoCreateSession bool
+		setupSession      bool
+		wantErr           bool
+	}{
+		{
+			name:              "auto_create_true_session_missing",
+			autoCreateSession: true,
+			setupSession:      false,
+			wantErr:           false,
+		},
+		{
+			name:              "auto_create_false_session_missing",
+			autoCreateSession: false,
+			setupSession:      false,
+			wantErr:           true,
+		},
+		{
+			name:              "auto_create_false_session_exists",
+			autoCreateSession: false,
+			setupSession:      true,
+			wantErr:           false,
+		},
+		{
+			name:              "auto_create_true_session_exists",
+			autoCreateSession: true,
+			setupSession:      true,
+			wantErr:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			sessionService := session.InMemoryService()
+
+			if tt.setupSession {
+				_, err := sessionService.Create(ctx, &session.CreateRequest{
+					AppName:   appName,
+					UserID:    userID,
+					SessionID: sessionID,
+				})
+				if err != nil {
+					t.Fatalf("failed to setup session: %v", err)
+				}
+			}
+
+			r, err := New(Config{
+				AppName:           appName,
+				Agent:             testAgent,
+				SessionService:    sessionService,
+				AutoCreateSession: tt.autoCreateSession,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+			gotError := false
+			for _, err := range r.Run(ctx, userID, sessionID, msg, agent.RunConfig{}) {
+				if err != nil {
+					gotError = true
+				}
+			}
+
+			if gotError != tt.wantErr {
+				t.Errorf("Runner.Run() error = %v, wantErr %v", gotError, tt.wantErr)
+			}
+
+			// If we expected success, verify session exists/persists
+			if !tt.wantErr {
+				_, err = sessionService.Get(ctx, &session.GetRequest{
+					AppName:   appName,
+					UserID:    userID,
+					SessionID: sessionID,
+				})
+				if err != nil {
+					t.Errorf("expected session to exist, but got error: %v", err)
+				}
+			}
+		})
+	}
+}

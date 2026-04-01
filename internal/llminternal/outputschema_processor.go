@@ -101,8 +101,7 @@ func needOutputSchemaProcessor(state *State) bool {
 		return false
 	}
 	hasTools := len(state.Tools) > 0 || len(state.Toolsets) > 0
-	canUseOutputSchemaWithTools := googlellm.CanGeminiModelUseOutputSchemaWithTools(state.Model.Name())
-	return hasTools && !canUseOutputSchemaWithTools
+	return hasTools && googlellm.NeedsOutputSchemaProcessor(state.Model)
 }
 
 // setModelResponseTool implements tool.Tool and toolinternal.FunctionTool.
