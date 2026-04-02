@@ -212,7 +212,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			debugTelemetry, tp, lp := setup()
+			debugTelemetry, tp, lp := setup(t)
 
 			if tt.testSetup != nil {
 				tt.testSetup(ctx, tp.Tracer("test-tracer"), lp.Logger("test-logger"))
@@ -349,7 +349,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			debugTelemetry, tp, lp := setup()
+			debugTelemetry, tp, lp := setup(t)
 
 			if tt.testSetup != nil {
 				tt.testSetup(ctx, tp.Tracer("test-tracer"), lp.Logger("test-logger"))
@@ -380,7 +380,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 func TestDebugTelemetryLRU(t *testing.T) {
 	ctx := t.Context()
 
-	debugTelemetry, tp, lp := setupWithConfig(&DebugTelemetryConfig{TraceCapacity: 2})
+	debugTelemetry, tp, lp := setupWithConfig(t, &DebugTelemetryConfig{TraceCapacity: 2})
 	tracer := tp.Tracer("test-tracer")
 
 	// 1. Add Trace 1.
@@ -456,8 +456,11 @@ func TestDebugTelemetryLRU(t *testing.T) {
 	}
 }
 
-func setupWithConfig(cfg *DebugTelemetryConfig) (*DebugTelemetry, *sdktrace.TracerProvider, *sdklog.LoggerProvider) {
-	debugTelemetry := NewDebugTelemetry(cfg)
+func setupWithConfig(t *testing.T, cfg *DebugTelemetryConfig) (*DebugTelemetry, *sdktrace.TracerProvider, *sdklog.LoggerProvider) {
+	debugTelemetry, err := NewDebugTelemetryWithConfig(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create debug telemetry: %v", err)
+	}
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(debugTelemetry.SpanProcessor()),
 	)
@@ -466,12 +469,6 @@ func setupWithConfig(cfg *DebugTelemetryConfig) (*DebugTelemetry, *sdktrace.Trac
 	return debugTelemetry, tp, lp
 }
 
-func setup() (*DebugTelemetry, *sdktrace.TracerProvider, *sdklog.LoggerProvider) {
-	debugTelemetry := NewDebugTelemetry(nil)
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSpanProcessor(debugTelemetry.SpanProcessor()),
-	)
-	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(debugTelemetry.LogProcessor()))
-
-	return debugTelemetry, tp, lp
+func setup(t *testing.T) (*DebugTelemetry, *sdktrace.TracerProvider, *sdklog.LoggerProvider) {
+	return setupWithConfig(t, nil)
 }

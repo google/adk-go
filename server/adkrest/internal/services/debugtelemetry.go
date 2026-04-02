@@ -17,6 +17,7 @@ package services
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -44,19 +45,23 @@ type DebugTelemetry struct {
 
 type DebugTelemetryConfig struct {
 	// Maximum number of traces to keep in memory.
-	// If 0, default capacity (10k) is used.
+	// If <= 0, default capacity (10_000) is used.
 	TraceCapacity int
 }
 
-// NewDebugTelemetry returns a new DebugTelemetry instance with default capacity (10k).
-func NewDebugTelemetry(cfg *DebugTelemetryConfig) *DebugTelemetry {
+// NewDebugTelemetryWithConfig returns a new DebugTelemetry instance with custom capacity.
+func NewDebugTelemetryWithConfig(cfg *DebugTelemetryConfig) (*DebugTelemetry, error) {
 	capacity := defaultTraceCapacity
 	if cfg != nil && cfg.TraceCapacity > 0 {
 		capacity = cfg.TraceCapacity
 	}
-	return &DebugTelemetry{
-		store: newSpanStore(capacity),
+	store, err := newSpanStore(capacity)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create span store: %w", err)
 	}
+	return &DebugTelemetry{
+		store: store,
+	}, nil
 }
 
 func (d *DebugTelemetry) SpanProcessor() sdktrace.SpanProcessor {
@@ -132,17 +137,18 @@ type spanStore struct {
 	recordsByEventID map[string][]*spanRecord
 }
 
-func newSpanStore(capacity int) *spanStore {
+func newSpanStore(capacity int) (*spanStore, error) {
 	store := &spanStore{
 		recordsBySpanID:     make(map[string]*spanRecord),
 		traceIDsBySessionID: make(map[string]map[string]struct{}),
 		recordsByEventID:    make(map[string][]*spanRecord),
 	}
-	cache, err := lru.NewWithEvict(capacity, store.evict)
-	if err == nil {
-		store.recordsByTraceID = cache
+	var err error
+	store.recordsByTraceID, err = lru.NewWithEvict(capacity, store.evict)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create LRU cache: %w", err)
 	}
-	return store
+	return store, nil
 }
 
 func (s *spanStore) getSpansByEventID(id string) []DebugSpan {
