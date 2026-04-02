@@ -156,15 +156,22 @@ func (s *spanStore) getSpansByEventID(id string) []DebugSpan {
 	defer s.mu.RUnlock()
 	// Create a copy of the slice to avoid race conditions.
 	records := slices.Clone(s.recordsByEventID[id])
-	seenTraces := make(map[string]bool)
+	s.touchTraces(records)
+	return convertRecords(records)
+}
+
+// touchTraces marks traces as recently used. Required because fetching by event ID bypasses the trace LRU cache.
+func (s *spanStore) touchTraces(records []*spanRecord) {
+	// touchedTraces is used to avoid touching the same trace multiple times.
+	touchedTraces := make(map[string]bool)
 	for _, r := range records {
 		traceIDStr := r.Context.TraceID().String()
-		if traceIDStr != "" && !seenTraces[traceIDStr] {
+		if traceIDStr != "" && !touchedTraces[traceIDStr] {
+			touchedTraces[traceIDStr] = true
+			// Get the trace to update its access time in the LRU cache, ignore the result.
 			s.recordsByTraceID.Get(traceIDStr)
-			seenTraces[traceIDStr] = true
 		}
 	}
-	return convertRecords(records)
 }
 
 func (s *spanStore) getSpansBySessionID(sessionID string) []DebugSpan {
@@ -304,7 +311,7 @@ func (s *spanStore) evict(traceID string, spans []*spanRecord) {
 func (s *spanStore) evictRecordsByEventID(eventID string, span *spanRecord) {
 	records := s.recordsByEventID[eventID]
 	records = slices.DeleteFunc(records, func(r *spanRecord) bool {
-		return r == span
+		return r.Context.SpanID() == span.Context.SpanID()
 	})
 	if len(records) == 0 {
 		delete(s.recordsByEventID, eventID)
