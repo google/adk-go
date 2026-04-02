@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adkrest/controllers"
@@ -45,6 +46,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
 		routers.NewDebugAPIRouter(controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)),
 		routers.NewArtifactsAPIRouter(controllers.NewArtifactsAPIController(cfg.ArtifactService)),
+		routers.NewTriggersAPIRouter(controllers.NewTriggersAPIController(cfg.SessionService, cfg.AgentLoader, cfg.MemoryService, cfg.ArtifactService, cfg.PluginConfig, cfg.TriggerConfig), cfg.TriggerSources),
 		&routers.EvalAPIRouter{},
 	)
 	return &Server{
@@ -61,6 +63,8 @@ type ServerConfig struct {
 	ArtifactService artifact.Service
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
+	TriggerSources  []string
+	TriggerConfig   launcher.TriggerConfig
 }
 
 // Server is an HTTP server that serves the ADK REST API.

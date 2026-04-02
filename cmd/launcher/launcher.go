@@ -17,6 +17,7 @@ package launcher
 
 import (
 	"context"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2asrv"
 
@@ -54,6 +55,18 @@ type SubLauncher interface {
 	Run(ctx context.Context, config *Config) error
 }
 
+// TriggerConfig contains configuration options for triggers.
+type TriggerConfig struct {
+	// MaxRetries is the maximum number of times to retry a failed agent execution.
+	MaxRetries int
+	// BaseDelay is the base delay between retries.
+	BaseDelay time.Duration
+	// MaxDelay is the maximum delay between retries.
+	MaxDelay time.Duration
+	// MaxConcurrentRuns is the maximum number of concurrent runs.
+	MaxConcurrentRuns int
+}
+
 // Config contains parameters for web & console execution: sessions, artifacts, agents etc
 type Config struct {
 	SessionService   session.Service
@@ -63,4 +76,6 @@ type Config struct {
 	A2AOptions       []a2asrv.RequestHandlerOption
 	PluginConfig     runner.PluginConfig
 	TelemetryOptions []telemetry.Option
+	TriggerSources   []string
+	TriggerConfig    TriggerConfig
 }
