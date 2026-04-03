@@ -48,6 +48,9 @@ type CreateRequest struct {
 	SessionID string
 	// State is the initial state of the session.
 	State map[string]any
+	// DisplayName is a human-readable name for the session.
+	// Optional: only used by backends that support it (e.g. Vertex AI).
+	DisplayName string
 }
 
 // CreateResponse represents a response for newly created session.

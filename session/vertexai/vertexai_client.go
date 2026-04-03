@@ -64,7 +64,8 @@ func (c *vertexAiClient) Close() error {
 
 func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateRequest) (*localSession, error) {
 	pbSession := &aiplatformpb.Session{
-		UserId: req.UserID,
+		UserId:      req.UserID,
+		DisplayName: req.DisplayName,
 	}
 	// Convert and set the initial state if provided
 	if len(req.State) > 0 {
