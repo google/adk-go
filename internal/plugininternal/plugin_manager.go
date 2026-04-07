@@ -167,6 +167,23 @@ func (pm *PluginManager) RunAfterAgentCallback(cctx agent.CallbackContext) (*gen
 	return nil, nil
 }
 
+// RunOnAgentErrorCallback runs the OnAgentErrorCallback for all plugins.
+func (pm *PluginManager) RunOnAgentErrorCallback(cctx agent.CallbackContext, err error) (*genai.Content, error) {
+       for _, plugin := range pm.plugins {
+               callback := plugin.OnAgentErrorCallback()
+               if callback != nil {
+                       newContent, callbackErr := callback(cctx, err)
+                       if callbackErr != nil {
+                               return nil, callbackErr
+                       }
+                       if newContent != nil {
+                               return newContent, nil // Early exit
+                       }
+               }
+       }
+       return nil, nil
+}
+
 // RunBeforeToolCallback runs the BeforeToolCallback for all plugins.
 func (pm *PluginManager) RunBeforeToolCallback(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 	for _, plugin := range pm.plugins {
