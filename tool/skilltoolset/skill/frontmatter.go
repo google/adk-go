@@ -71,7 +71,9 @@ func Parse(r *bufio.Reader) (*Frontmatter, error) {
 	}
 
 	fm := Frontmatter{}
-	if err := yaml.Unmarshal(yamlBytes.Bytes(), &fm); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(yamlBytes.Bytes()))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&fm); err != nil {
 		return nil, fmt.Errorf("parse frontmatter: %w", err)
 	}
 	if err := Validate(&fm); err != nil {
@@ -145,5 +147,5 @@ func Build(fm *Frontmatter, markdown string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal frontmatter: %v", err)
 	}
-	return slices.Concat(frontmatterSeparator, marshalled, []byte("\n"), frontmatterSeparator, []byte(markdown)), nil
+	return slices.Concat(frontmatterSeparator, marshalled, frontmatterSeparator, []byte(markdown)), nil
 }

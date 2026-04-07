@@ -219,6 +219,10 @@ func TestParse_InvalidFormat(t *testing.T) {
 			name:  "fails frontmatter validation",
 			input: "---\nname: INVALID_NAME\ndescription: test\n---\n# Markdown\nBody",
 		},
+		{
+			name:  "unknown fields",
+			input: "---\nname: skill\ndescription: skill\nunknown-field: field\n---\n# Markdown\nBody",
+		},
 	}
 	for _, testcase := range tests {
 		t.Run(testcase.name, func(t *testing.T) {
