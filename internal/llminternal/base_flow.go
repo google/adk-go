@@ -123,6 +123,118 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 	}
 }
 
+func (f *Flow) RunLive(ctx agent.InvocationContext, requestChan <-chan agent.LiveRequest) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		clientProvider, ok := f.Model.(interface {
+			Client() *genai.Client
+		})
+		if !ok {
+			yield(nil, fmt.Errorf("model does not support live connection"))
+			return
+		}
+		client := clientProvider.Client()
+
+		runCfg := runconfig.FromContext(ctx)
+		if runCfg == nil || runCfg.Live == nil {
+			yield(nil, fmt.Errorf("live run config not found"))
+			return
+		}
+
+		liveCfg, ok := runCfg.Live.(*agent.LiveRunConfig)
+		if !ok {
+			yield(nil, fmt.Errorf("invalid live run config type"))
+			return
+		}
+
+		liveSession, err := client.Live.Connect(ctx, f.Model.Name(), &genai.LiveConnectConfig{
+			ResponseModalities:       liveCfg.ResponseModalities,
+			SpeechConfig:             liveCfg.SpeechConfig,
+			SystemInstruction: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						Text: "You are a real-time voice assistant. Keep your answers concise and useful.",
+					},
+				},
+			},
+		})
+		if err != nil {
+			yield(nil, fmt.Errorf("failed to connect live session: %w", err))
+			return
+		}
+
+		liveConn := googlellm.NewLiveConnection(liveSession)
+		defer liveConn.Close()
+
+		eventsChan := make(chan *session.Event)
+		errChan := make(chan error)
+
+		// Debug event to verify UI connection
+		go func() {
+			ev := session.NewEvent(ctx.InvocationID())
+			ev.Author = "system"
+			ev.LLMResponse = model.LLMResponse{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "WebSocket connection established - Debug"},
+					},
+				},
+			}
+			eventsChan <- ev
+		}()
+
+		// Reading from model loop
+		go func() {
+			for {
+				resp, err := liveConn.Recv(ctx)
+				if err != nil {
+					errChan <- err
+					return
+				}
+				if resp != nil {
+					ev := session.NewEvent(ctx.InvocationID())
+					ev.Author = ctx.Agent().Name()
+					ev.LLMResponse = *resp
+					eventsChan <- ev
+				}
+			}
+		}()
+
+		// Sending to model loop
+		go func() {
+			for req := range requestChan {
+				if req.Content != nil {
+					if err := liveConn.SendContent(ctx, req.Content); err != nil {
+						errChan <- err
+						return
+					}
+				}
+				if req.RealtimeInput != nil {
+					if err := liveConn.SendRealtime(ctx, req.RealtimeInput); err != nil {
+						errChan <- err
+						return
+					}
+				}
+			}
+		}()
+
+		for {
+			select {
+			case ev := <-eventsChan:
+				if !yield(ev, nil) {
+					return
+				}
+			case err := <-errChan:
+				yield(nil, err)
+				return
+			case <-ctx.Done():
+				yield(nil, ctx.Err())
+				return
+			}
+		}
+	}
+}
+
 func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if f.Model == nil {

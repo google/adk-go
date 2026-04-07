@@ -50,3 +50,12 @@ func (req RunAgentRequest) AssertRunAgentRequestRequired() error {
 
 	return nil
 }
+
+// LiveRequest represents the client request format for real-time interactions over WebSocket.
+type LiveRequest struct {
+	Content       *genai.Content       `json:"content,omitempty"`
+	Blob          *genai.Blob          `json:"blob,omitempty"`
+	ActivityStart *genai.ActivityStart `json:"activityStart,omitempty"`
+	ActivityEnd   *genai.ActivityEnd   `json:"activityEnd,omitempty"`
+	Close         bool                 `json:"close,omitempty"`
+}

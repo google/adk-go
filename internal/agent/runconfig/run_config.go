@@ -14,7 +14,9 @@
 
 package runconfig
 
-import "context"
+import (
+	"context"
+)
 
 type StreamingMode string
 
@@ -26,6 +28,7 @@ const (
 
 type RunConfig struct {
 	StreamingMode StreamingMode
+	Live any
 }
 
 func ToContext(ctx context.Context, cfg *RunConfig) context.Context {

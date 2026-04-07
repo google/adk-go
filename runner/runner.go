@@ -267,6 +267,122 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	}
 }
 
+// RunLive runs a live session for the agent, supporting bidirectional streaming.
+func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, requestChan <-chan agent.LiveRequest, cfg agent.LiveRunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		options := runOptions{}
+		for _, opt := range opts {
+			opt(&options)
+		}
+
+		var storedSession session.Session
+		getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
+			AppName:   r.appName,
+			UserID:    userID,
+			SessionID: sessionID,
+		})
+		if err != nil {
+			if !r.autoCreateSession {
+				yield(nil, err)
+				return
+			}
+			createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
+				AppName:   r.appName,
+				UserID:    userID,
+				SessionID: sessionID,
+			})
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			storedSession = createResp.Session
+		} else {
+			storedSession = getResp.Session
+		}
+
+		// msg is nil for Live run as it's streaming
+		agentToRun, err := r.findAgentToRun(storedSession, nil)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
+		liveAgent, ok := agentToRun.(agent.LiveAgent)
+		if !ok {
+			yield(nil, fmt.Errorf("agent %s does not support Live Run", agentToRun.Name()))
+			return
+		}
+
+		ctx = parentmap.ToContext(ctx, r.parents)
+		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
+			StreamingMode: runconfig.StreamingModeBidi, // Live is always bidirectional streaming
+			Live:          &cfg,
+		})
+		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+
+		var artifacts agent.Artifacts
+		if r.artifactService != nil {
+			artifacts = &artifactinternal.Artifacts{
+				Service:   r.artifactService,
+				SessionID: storedSession.ID(),
+				AppName:   storedSession.AppName(),
+				UserID:    storedSession.UserID(),
+			}
+		}
+
+		var memoryImpl agent.Memory = nil
+		if r.memoryService != nil {
+			memoryImpl = &imemory.Memory{
+				Service:   r.memoryService,
+				SessionID: storedSession.ID(),
+				UserID:    storedSession.UserID(),
+				AppName:   storedSession.AppName(),
+			}
+		}
+
+		iCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+			Artifacts:   artifacts,
+			Memory:      memoryImpl,
+			Session:     storedSession,
+			Agent:       agentToRun,
+			UserContent: nil,
+		})
+
+		for event, err := range liveAgent.RunLive(iCtx, requestChan) {
+			if err != nil {
+				if !yield(event, err) {
+					return
+				}
+				continue
+			}
+
+			if r.pluginManager != nil {
+				modifiedEvent, err := r.pluginManager.RunOnEventCallback(iCtx, event)
+				if err != nil {
+					if !yield(nil, err) {
+						return
+					}
+					continue
+				}
+				if modifiedEvent != nil {
+					event = modifiedEvent
+				}
+			}
+
+			if !event.LLMResponse.Partial {
+				if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
+					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+					return
+				}
+			}
+
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
 func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.InvocationContext, error) {
 	if msg == nil {
 		return ctx, nil
