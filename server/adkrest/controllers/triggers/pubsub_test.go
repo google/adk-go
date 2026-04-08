@@ -51,7 +51,7 @@ func TestPubSubTriggerHandler(t *testing.T) {
 		expectedRunCount   int
 		requestAttributes  map[string]string
 		expectedAttributes map[string]string
-		requestData string
+		requestData        string
 	}{
 		{
 			name:             "Success_Immediate",
@@ -74,7 +74,7 @@ func TestPubSubTriggerHandler(t *testing.T) {
 			expectedRunCount:   1,
 			requestAttributes:  map[string]string{"key1": "val1", "key2": "val2"},
 			expectedAttributes: map[string]string{"key1": "val1", "key2": "val2"},
-			requestData:      "Hello agent",
+			requestData:        "Hello agent",
 		},
 		{
 			name:             "Empty Data",
