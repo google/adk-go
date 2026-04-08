@@ -22,10 +22,11 @@ import (
 	"google.golang.org/adk/cmd/launcher/web"
 	"google.golang.org/adk/cmd/launcher/web/a2a"
 	"google.golang.org/adk/cmd/launcher/web/api"
+	"google.golang.org/adk/cmd/launcher/web/triggers/pubsub"
 	"google.golang.org/adk/cmd/launcher/web/webui"
 )
 
 // NewLauncher returnes the most versatile universal launcher with all options built-in.
 func NewLauncher() launcher.Launcher {
-	return universal.NewLauncher(console.NewLauncher(), web.NewLauncher(webui.NewLauncher(), a2a.NewLauncher(), api.NewLauncher()))
+	return universal.NewLauncher(console.NewLauncher(), web.NewLauncher(webui.NewLauncher(), a2a.NewLauncher(), pubsub.NewLauncher(), api.NewLauncher()))
 }
