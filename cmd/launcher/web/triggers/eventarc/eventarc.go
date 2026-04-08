@@ -68,19 +68,19 @@ func (e *eventarcLauncher) Keyword() string {
 // Parse parses the command-line arguments for the eventarc launcher.
 func (e *eventarcLauncher) Parse(args []string) ([]string, error) {
 	err := e.flags.Parse(args)
-	if err != nil || !p.flags.Parsed() {
-		return nil, fmt.Errorf("failed to parse pubsub flags: %v", err)
+	if err != nil || !e.flags.Parsed() {
+		return nil, fmt.Errorf("failed to parse eventarc flags: %v", err)
 	}
-	if p.config.triggerMaxRetries <= 0 {
+	if e.config.triggerMaxRetries <= 0 {
 		return nil, fmt.Errorf("trigger_max_retries must be > 0")
 	}
-	if p.config.triggerBaseDelay < 0 {
+	if e.config.triggerBaseDelay < 0 {
 		return nil, fmt.Errorf("trigger_base_delay must be >= 0")
 	}
-	if p.config.triggerMaxDelay <= 0 {
+	if e.config.triggerMaxDelay <= 0 {
 		return nil, fmt.Errorf("trigger_max_delay must be > 0")
 	}
-	if p.config.triggerMaxRuns <= 0 {
+	if e.config.triggerMaxRuns <= 0 {
 		return nil, fmt.Errorf("trigger_max_concurrent_runs must be > 0")
 	}
 

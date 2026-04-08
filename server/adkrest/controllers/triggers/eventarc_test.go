@@ -20,8 +20,9 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
-	"github.com/google/go-cmp/cmp"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 
 	"github.com/gorilla/mux"
 
