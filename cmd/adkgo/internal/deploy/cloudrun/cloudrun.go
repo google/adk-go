@@ -217,6 +217,7 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cl
 				b.WriteString(fmt.Sprintf(`, "--trigger_max_delay", "%s"`, flags.cloudRun.pubsubTrigger.maxDelay.String()))
 				b.WriteString(fmt.Sprintf(`, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.pubsubTrigger.maxRuns))
 			}
+			b.WriteString(`]`)
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
 		})
 }
