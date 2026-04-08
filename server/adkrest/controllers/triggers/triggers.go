@@ -45,10 +45,6 @@ type RetriableRunner struct {
 }
 
 func (r *RetriableRunner) RunAgent(ctx context.Context, appName, userID, messageContent string) ([]*session.Event, error) {
-	if userID == "" {
-		userID = defaultUserID
-	}
-
 	// Each retry = new session
 	sessReq := &session.CreateRequest{
 		AppName: appName,
