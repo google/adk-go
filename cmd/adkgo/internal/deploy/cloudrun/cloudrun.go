@@ -36,6 +36,13 @@ type gCloudFlags struct {
 	projectName string
 }
 
+type triggerConfigFlags struct {
+	maxRetries int
+	baseDelay  time.Duration
+	maxDelay   time.Duration
+	maxRuns    int
+}
+
 type cloudRunServiceFlags struct {
 	serviceName     string
 	serverPort      int
@@ -43,6 +50,8 @@ type cloudRunServiceFlags struct {
 	a2a             bool // enable a2a or not
 	api             bool // enable api or not
 	webui           bool // enable webui or not
+	pubsub          bool // enable pubsub trigger or not
+	pubsubTrigger   triggerConfigFlags
 }
 
 type localProxyFlags struct {
@@ -99,6 +108,11 @@ func init() {
 	cloudrunCmd.PersistentFlags().StringVarP(&flags.cloudRun.a2aAgentCardURL, "a2a_agent_url", "a", "http://127.0.0.1:8081", "A2A agent card URL as advertised in the public agent card")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.api, "api", true, "Enable API")
 	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.webui, "webui", true, "Enable Web UI")
+	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.pubsub, "pubsub", false, "Enable PubSub subrouter")
+	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.pubsubTrigger.maxRetries, "pubsub_max_retries", 3, "Maximum retries for HTTP 429 errors from PubSub triggers")
+	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.pubsubTrigger.baseDelay, "pubsub_base_delay", 1*time.Second, "Base delay for PubSub trigger retry exponential backoff")
+	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.pubsubTrigger.maxDelay, "pubsub_max_delay", 10*time.Second, "Maximum delay for PubSub trigger retry exponential backoff")
+	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.pubsubTrigger.maxRuns, "pubsub_max_concurrent_runs", 100, "Maximum concurrent PubSub trigger runs")
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -194,9 +208,16 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cl
 				b.WriteString(`, "a2a", "--a2a_agent_url", "` + flags.cloudRun.a2aAgentCardURL + `"`)
 			}
 			if flags.cloudRun.webui {
-				b.WriteString(`, "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"]
-				`)
+				b.WriteString(`, "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"`)
 			}
+			if flags.cloudRun.pubsub {
+				b.WriteString(`, "pubsub"`)
+				b.WriteString(fmt.Sprintf(`, "--trigger_max_retries", "%d"`, flags.cloudRun.pubsubTrigger.maxRetries))
+				b.WriteString(fmt.Sprintf(`, "--trigger_base_delay", "%s"`, flags.cloudRun.pubsubTrigger.baseDelay.String()))
+				b.WriteString(fmt.Sprintf(`, "--trigger_max_delay", "%s"`, flags.cloudRun.pubsubTrigger.maxDelay.String()))
+				b.WriteString(fmt.Sprintf(`, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.pubsubTrigger.maxRuns))
+			}
+			b.WriteString(`]`)
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
 		})
 }
