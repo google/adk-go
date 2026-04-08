@@ -51,18 +51,21 @@ func TestPubSubTriggerHandler(t *testing.T) {
 		expectedRunCount   int
 		requestAttributes  map[string]string
 		expectedAttributes map[string]string
+		requestData string
 	}{
 		{
 			name:             "Success_Immediate",
 			mockAgentResults: nil,
 			expectedCode:     http.StatusOK,
 			expectedRunCount: 1,
+			requestData:      "Hello agent",
 		},
 		{
 			name:             "ResourceExhaustedRetry",
 			mockAgentResults: []error{fmt.Errorf("429 ResourceExhausted"), fmt.Errorf("429 ResourceExhausted")},
 			expectedCode:     http.StatusOK,
 			expectedRunCount: 3,
+			requestData:      "Hello agent",
 		},
 		{
 			name:               "With_Attributes",
@@ -71,6 +74,14 @@ func TestPubSubTriggerHandler(t *testing.T) {
 			expectedRunCount:   1,
 			requestAttributes:  map[string]string{"key1": "val1", "key2": "val2"},
 			expectedAttributes: map[string]string{"key1": "val1", "key2": "val2"},
+			requestData:      "Hello agent",
+		},
+		{
+			name:             "Empty Data",
+			mockAgentResults: nil,
+			expectedCode:     http.StatusBadRequest,
+			expectedRunCount: 0,
+			requestData:      "",
 		},
 	}
 
@@ -83,7 +94,7 @@ func TestPubSubTriggerHandler(t *testing.T) {
 
 			reqObj := models.PubSubTriggerRequest{
 				Message: models.PubSubMessage{
-					Data:       []byte(base64.StdEncoding.EncodeToString([]byte("Hello agent"))),
+					Data:       []byte(base64.StdEncoding.EncodeToString([]byte(tc.requestData))),
 					Attributes: tc.requestAttributes,
 				},
 				Subscription: "test-sub",

@@ -75,6 +75,11 @@ func (c *PubSubController) PubSubTriggerHandler(w http.ResponseWriter, r *http.R
 		messageContent["attributes"] = req.Message.Attributes
 	}
 
+	if len(messageContent) == 0 {
+		respondError(w, http.StatusBadRequest, "empty message data and attributes")
+		return
+	}
+
 	agentMessage, err := json.Marshal(messageContent)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to marshal agent message: %v", err))
