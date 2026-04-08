@@ -217,7 +217,7 @@ func TestGenerateContent(t *testing.T) {
 				Response: &model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 						PromptTokenCount:        10,
-						CandidatesTokenCount:   20,
+						CandidatesTokenCount:    20,
 						CachedContentTokenCount: 5,
 						ThoughtsTokenCount:      15,
 					},
