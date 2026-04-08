@@ -42,10 +42,10 @@ const (
 )
 
 var (
-	gcpVertexAgentToolCallArgsName = attribute.Key("gcp.vertex.agent.tool_call_args")
-	gcpVertexAgentEventID          = attribute.Key("gcp.vertex.agent.event_id")
-	gcpVertexAgentToolResponseName = attribute.Key("gcp.vertex.agent.tool_response")
-	gcpVertexAgentInvocationID     = attribute.Key("gcp.vertex.agent.invocation_id")
+	gcpVertexAgentToolCallArgsName        = attribute.Key("gcp.vertex.agent.tool_call_args")
+	gcpVertexAgentEventID                 = attribute.Key("gcp.vertex.agent.event_id")
+	gcpVertexAgentToolResponseName        = attribute.Key("gcp.vertex.agent.tool_response")
+	gcpVertexAgentInvocationID            = attribute.Key("gcp.vertex.agent.invocation_id")
 	genAIUsageCacheReadInputTokens        = attribute.Key("gen_ai.usage.cache_read.input_tokens")
 	genAIUsageExperimentalReasoningTokens = attribute.Key("gen_ai.usage.experimental.reasoning_tokens")
 )
