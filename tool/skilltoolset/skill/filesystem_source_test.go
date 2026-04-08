@@ -35,7 +35,7 @@ func TestFileSystemSource_ListFrontmatters(t *testing.T) {
 	}{
 		{
 			name: "Success",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"math-skill/SKILL.md": &fstest.MapFile{
 					Data: []byte("---\nname: math-skill\ndescription: test\n---\n"),
 				},
@@ -46,7 +46,7 @@ func TestFileSystemSource_ListFrontmatters(t *testing.T) {
 				"SKILL.md":          &fstest.MapFile{Data: []byte("should be ignored")},
 				"dir/not-skill.txt": &fstest.MapFile{Data: []byte("should be ignored")},
 				"sub/dir/SKILL.md":  &fstest.MapFile{Data: []byte("should be ignored")},
-			}),
+			}}),
 			want: []*Frontmatter{
 				{Name: "math-skill", Description: "test"},
 				{Name: "weather-skill", Description: "test"},
@@ -54,16 +54,16 @@ func TestFileSystemSource_ListFrontmatters(t *testing.T) {
 		},
 		{
 			name: "Name mismatch",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: wrong-skill\ndescription: test\n---\n")},
-			}),
+			}}),
 			wantErr: ErrInvalidSkillName,
 		},
 		{
 			name: "Invalid frontmatter",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---[INVALID_YAML")},
-			}),
+			}}),
 			wantErr: ErrInvalidFrontmatter,
 		},
 	}
@@ -91,28 +91,28 @@ func TestFileSystemSource_LoadFrontmatter(t *testing.T) {
 	}{
 		{
 			name: "Success",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
-			}),
+			}}),
 			want: &Frontmatter{Name: "test-skill", Description: "test"},
 		},
 		{
 			name: "Name mismatch",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: wrong-skill\ndescription: test\n---\n")},
-			}),
+			}}),
 			wantErr: ErrInvalidSkillName,
 		},
 		{
 			name: "Invalid frontmatter",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---[INVALID_YAML")},
-			}),
+			}}),
 			wantErr: ErrInvalidFrontmatter,
 		},
 		{
 			name:    "Skill not found",
-			source:  mustMakeFileSystemSource(t, fstest.MapFS{}),
+			source:  NewFileSystemSource(plainFS{fstest.MapFS{}}),
 			wantErr: ErrSkillNotFound,
 		},
 	}
@@ -140,28 +140,28 @@ func TestFileSystemSource_LoadInstructions(t *testing.T) {
 	}{
 		{
 			name: "Success",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\nMath instructions.")},
-			}),
+			}}),
 			want: "Math instructions.",
 		},
 		{
 			name: "Name mismatch",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: wrong-name\ndescription: test\n---\n")},
-			}),
+			}}),
 			wantErr: ErrInvalidSkillName,
 		},
 		{
 			name: "Invalid YAML",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---[INVALID_YAML")},
-			}),
+			}}),
 			wantErr: ErrInvalidFrontmatter,
 		},
 		{
 			name:    "Skill not found",
-			source:  mustMakeFileSystemSource(t, fstest.MapFS{}),
+			source:  NewFileSystemSource(plainFS{fstest.MapFS{}}),
 			wantErr: ErrSkillNotFound,
 		},
 	}
@@ -191,95 +191,95 @@ func TestFileSystemSource_LoadResource(t *testing.T) {
 		{
 			name:         "Success Asset",
 			resourcePath: "assets/image.png",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md":         &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
 				"test-skill/assets/image.png": &fstest.MapFile{Data: []byte("image-data")},
-			}),
+			}}),
 			want: []byte("image-data"),
 		},
 		{
 			name:         "Success Reference",
 			resourcePath: "references/doc.txt",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md":           &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
 				"test-skill/references/doc.txt": &fstest.MapFile{Data: []byte("doc-data")},
-			}),
+			}}),
 			want: []byte("doc-data"),
 		},
 		{
 			name:         "Success Script",
 			resourcePath: "scripts/script.py",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md":          &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
 				"test-skill/scripts/script.py": &fstest.MapFile{Data: []byte("python-code")},
-			}),
+			}}),
 			want: []byte("python-code"),
 		},
 		{
 			name:         "Success Clean Path resolves traversal safely",
 			resourcePath: "assets/../assets/images/../images/./image.png",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md":                &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
 				"test-skill/assets/images/image.png": &fstest.MapFile{Data: []byte("image-data")},
-			}),
+			}}),
 			want: []byte("image-data"),
 		},
 		{
 			name:         "Error Skill Not Found",
 			resourcePath: "assets/image.png",
-			source:       mustMakeFileSystemSource(t, fstest.MapFS{}),
+			source:       NewFileSystemSource(plainFS{fstest.MapFS{}}),
 			wantErr:      ErrSkillNotFound,
 		},
 		{
 			name:         "Error Not a Skill",
 			resourcePath: "assets/image.png",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				// No SKILL.md file - not a skill.
 				"test-skill/assets/image.png": &fstest.MapFile{Data: []byte("image-data")},
-			}),
+			}}),
 			wantErr: ErrSkillNotFound,
 		},
 		{
 			name:         "Error Invalid Skill Name",
 			resourcePath: "assets/image.png",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md":         &fstest.MapFile{Data: []byte("---\nname: wrong-name\ndescription: test\n---\n")},
 				"test-skill/assets/image.png": &fstest.MapFile{Data: []byte("image-data")},
-			}),
+			}}),
 			wantErr: ErrInvalidSkillName,
 		},
 		{
 			name:         "Error Invalid Frontmatter",
 			resourcePath: "assets/image.png",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md":         &fstest.MapFile{Data: []byte("Invalid YAML")},
 				"test-skill/assets/image.png": &fstest.MapFile{Data: []byte("image-data")},
-			}),
+			}}),
 			wantErr: ErrInvalidFrontmatter,
 		},
 		{
 			name:         "Error Traversal Attempt",
 			resourcePath: "../../etc/passwd",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
-			}),
+			}}),
 			wantErr: ErrInvalidResourcePath,
 		},
 		{
 			name:         "Error Unauthorized Directory",
 			resourcePath: "unauthorized/file.txt",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md":              &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
 				"test-skill/unauthorized/file.txt": &fstest.MapFile{Data: []byte("secret")},
-			}),
+			}}),
 			wantErr: ErrInvalidResourcePath,
 		},
 		{
 			name:         "Error File Not Found",
 			resourcePath: "assets/missing.png",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
-			}),
+			}}),
 			wantErr: ErrResourceNotFound,
 		},
 	}
@@ -319,14 +319,14 @@ func TestFileSystemSource_ListResources(t *testing.T) {
 		{
 			name:       "Success Root",
 			searchPath: ".",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md":               &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
 				"test-skill/unauthorized/file.txt":  &fstest.MapFile{Data: []byte("")},
 				"test-skill/references/doc.txt":     &fstest.MapFile{Data: []byte("")},
 				"test-skill/references/sub/doc.txt": &fstest.MapFile{Data: []byte("")},
 				"test-skill/assets/image.png":       &fstest.MapFile{Data: []byte("")},
 				"test-skill/scripts/script.py":      &fstest.MapFile{Data: []byte("")},
-			}),
+			}}),
 			want: []string{
 				"references/doc.txt",
 				"references/sub/doc.txt",
@@ -337,60 +337,60 @@ func TestFileSystemSource_ListResources(t *testing.T) {
 		{
 			name:       "Success Root Empty search path",
 			searchPath: ".",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md":           &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
 				"test-skill/references/doc.txt": &fstest.MapFile{Data: []byte("")},
-			}),
+			}}),
 			want: []string{"references/doc.txt"},
 		},
 		{
 			name:       "Success Specific Dir",
 			searchPath: "assets",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md":                &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
 				"test-skill/references/doc.txt":      &fstest.MapFile{Data: []byte("")},
 				"test-skill/assets/image.png":        &fstest.MapFile{Data: []byte("")},
 				"test-skill/assets/images/image.png": &fstest.MapFile{Data: []byte("")},
-			}),
+			}}),
 			want: []string{"assets/image.png", "assets/images/image.png"},
 		},
 		{
 			name:       "Error Skill Not Found",
 			searchPath: ".",
-			source:     mustMakeFileSystemSource(t, fstest.MapFS{}),
+			source:     NewFileSystemSource(plainFS{fstest.MapFS{}}),
 			wantErr:    ErrSkillNotFound,
 		},
 		{
 			name:       "Error Skill name mismatch",
 			searchPath: ".",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: wrong-skill\ndescription: test\n---\n")},
-			}),
+			}}),
 			wantErr: ErrInvalidSkillName,
 		},
 		{
 			name:       "Error Invalid frontmatter",
 			searchPath: ".",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("Invalid YAML")},
-			}),
+			}}),
 			wantErr: ErrInvalidFrontmatter,
 		},
 		{
 			name:       "Error Unauthorized Directory",
 			searchPath: "unauthorized",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md":              &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
 				"test-skill/unauthorized/file.txt": &fstest.MapFile{Data: []byte("")},
-			}),
+			}}),
 			wantErr: ErrInvalidResourcePath,
 		},
 		{
 			name:       "Error Directory Not Found",
 			searchPath: "references/missing_dir",
-			source: mustMakeFileSystemSource(t, fstest.MapFS{
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
-			}),
+			}}),
 			wantErr: ErrResourceNotFound,
 		},
 	}
@@ -407,15 +407,6 @@ func TestFileSystemSource_ListResources(t *testing.T) {
 			}
 		})
 	}
-}
-
-func mustMakeFileSystemSource(t *testing.T, fs fstest.MapFS) Source {
-	t.Helper()
-	source, err := NewFileSystemSource(plainFS{fs})
-	if err != nil {
-		t.Fatalf("NewFileSystemSource() unexpected error %v", err)
-	}
-	return source
 }
 
 // plainFS is a minimal implementation of fs.FS that deliberately hides optional

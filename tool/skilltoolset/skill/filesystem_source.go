@@ -41,8 +41,8 @@ import (
 //		   SKILL.md
 //		   references/
 //		   scripts/
-func NewFileSystemSource(filesystem fs.FS) (Source, error) {
-	return &fileSystemSource{filesystem: filesystem}, nil
+func NewFileSystemSource(filesystem fs.FS) Source {
+	return &fileSystemSource{filesystem: filesystem}
 }
 
 type fileSystemSource struct {
