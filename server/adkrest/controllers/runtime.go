@@ -34,17 +34,18 @@ import (
 
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
-	sseTimeout      time.Duration
-	sessionService  session.Service
-	memoryService   memory.Service
-	artifactService artifact.Service
-	agentLoader     agent.Loader
-	pluginConfig    runner.PluginConfig
+	sseTimeout        time.Duration
+	sessionService    session.Service
+	memoryService     memory.Service
+	artifactService   artifact.Service
+	agentLoader       agent.Loader
+	pluginConfig      runner.PluginConfig
+	autoCreateSession bool
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
-func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig) *RuntimeAPIController {
-	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig}
+func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig, autoCreateSession bool) *RuntimeAPIController {
+	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig, autoCreateSession: autoCreateSession}
 }
 
 // RunAgent executes a non-streaming agent run for a given session and message.
@@ -184,12 +185,13 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 	}
 
 	r, err := runner.New(runner.Config{
-		AppName:         req.AppName,
-		Agent:           curAgent,
-		SessionService:  c.sessionService,
-		MemoryService:   c.memoryService,
-		ArtifactService: c.artifactService,
-		PluginConfig:    c.pluginConfig,
+		AppName:           req.AppName,
+		Agent:             curAgent,
+		SessionService:    c.sessionService,
+		MemoryService:     c.memoryService,
+		ArtifactService:   c.artifactService,
+		PluginConfig:      c.pluginConfig,
+		AutoCreateSession: c.autoCreateSession,
 	},
 	)
 	if err != nil {
@@ -222,9 +224,9 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
-		CheckOrigin: func(r *http.Request) bool { return true },
+		CheckOrigin:     func(r *http.Request) bool { return true },
 	}
-	
+
 	q := req.URL.Query()
 	appName := q.Get("appName")
 	if appName == "" {
@@ -238,7 +240,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	if sessionID == "" {
 		sessionID = q.Get("session_id")
 	}
-	
+
 	if appName == "" || userID == "" || sessionID == "" {
 		return fmt.Errorf("appName, userId, and sessionId are required")
 	}
@@ -256,38 +258,51 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	}
 
 	requestChan := make(chan agent.LiveRequest)
-	
+
 	// Spawning goroutine for reading from the client over WebSocket and pushing it to Runner
 	go func() {
 		defer close(requestChan)
 		for {
-			var apiReq models.LiveRequest
-			err := ws.ReadJSON(&apiReq)
+			messageType, p, err := ws.ReadMessage()
 			if err != nil {
 				// WebSocket is closed or error occurred
 				break
 			}
-			
-			if apiReq.Close {
-				break
-			}
 
-			liveReq := agent.LiveRequest{
-				Content: apiReq.Content,
-			}
-
-			if apiReq.ActivityStart != nil {
-				liveReq.RealtimeInput = apiReq.ActivityStart
-			} else if apiReq.ActivityEnd != nil {
-				liveReq.RealtimeInput = apiReq.ActivityEnd
-			} else if apiReq.Blob != nil {
-				liveReq.RealtimeInput = &genai.Blob{
-					MIMEType: apiReq.Blob.MIMEType,
-					Data:     apiReq.Blob.Data,
+			if messageType == websocket.BinaryMessage {
+				requestChan <- agent.LiveRequest{
+					RealtimeInput: &genai.Blob{
+						MIMEType: "audio/pcm;rate=16000",
+						Data:     p,
+					},
 				}
-			}
+			} else if messageType == websocket.TextMessage {
+				var apiReq models.LiveRequest
+				if err := json.Unmarshal(p, &apiReq); err != nil {
+					continue
+				}
 
-			requestChan <- liveReq
+				if apiReq.Close {
+					break
+				}
+
+				liveReq := agent.LiveRequest{
+					Content: apiReq.Content,
+				}
+
+				if apiReq.ActivityStart != nil {
+					liveReq.RealtimeInput = apiReq.ActivityStart
+				} else if apiReq.ActivityEnd != nil {
+					liveReq.RealtimeInput = apiReq.ActivityEnd
+				} else if apiReq.Blob != nil {
+					liveReq.RealtimeInput = &genai.Blob{
+						MIMEType: apiReq.Blob.MIMEType,
+						Data:     apiReq.Blob.Data,
+					}
+				}
+
+				requestChan <- liveReq
+			}
 		}
 	}()
 
@@ -302,7 +317,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 				},
 			},
 		},
-		InputAudioTranscription: &genai.AudioTranscriptionConfig{},
+		InputAudioTranscription:  &genai.AudioTranscriptionConfig{},
 		OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
 	})
 
@@ -312,7 +327,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 			ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
 			break
 		}
-		
+
 		err = ws.WriteJSON(models.FromSessionEvent(*event))
 		if err != nil {
 			break
@@ -321,4 +336,3 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 
 	return nil
 }
-

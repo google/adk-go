@@ -369,7 +369,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, requestC
 				}
 			}
 
-			if !event.LLMResponse.Partial {
+			if !event.LLMResponse.Partial && !hasInlineData(event) {
 				if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return
@@ -529,4 +529,16 @@ func findAgent(curAgent agent.Agent, targetName string) agent.Agent {
 		}
 	}
 	return nil
+}
+
+func hasInlineData(event *session.Event) bool {
+	if event.LLMResponse.Content == nil {
+		return false
+	}
+	for _, part := range event.LLMResponse.Content.Parts {
+		if part.InlineData != nil {
+			return true
+		}
+	}
+	return false
 }

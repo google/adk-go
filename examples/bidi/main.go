@@ -17,16 +17,19 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/runner"
+	"google.golang.org/adk/server/adkrest/controllers"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
 )
@@ -42,7 +45,7 @@ func main() {
 	}
 
 	a, err := llmagent.New(llmagent.Config{
-		Name:        "bidi_live_agent",
+		Name:        "bidi-demo",
 		Model:       model,
 		Description: "Agent optimized for real-time bidirectional streaming.",
 		Instruction: "You are a real-time voice assistant. Be proactive and immediately comment on what you see in the video stream without waiting for me to speak. Whenever you recieve a picture and the person has both hands lifted up, say 'I got you'.",
@@ -54,12 +57,26 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	config := &launcher.Config{
-		AgentLoader: agent.NewSingleLoader(a),
-	}
+	uiMode := true
 
-	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
-		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
+	if uiMode {
+		// Create runner
+		ss := session.InMemoryService()
+
+		fs := http.FileServer(http.Dir("examples/bidi/static"))
+		http.Handle("/", fs)
+		http.Handle("/static/", http.StripPrefix("/static/", fs))
+
+		controller := controllers.NewRuntimeAPIController(ss, nil, agent.NewSingleLoader(a), nil, 0, runner.PluginConfig{}, true)
+
+		http.HandleFunc("/run_live", func(w http.ResponseWriter, req *http.Request) {
+			err := controller.RunLiveHandler(w, req)
+			if err != nil {
+				log.Printf("RunLiveHandler failed: %v", err)
+			}
+		})
+
+		fmt.Println("Serving UI on http://localhost:8081")
+		log.Fatal(http.ListenAndServe(":8081", nil))
 	}
 }

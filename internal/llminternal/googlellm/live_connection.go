@@ -50,8 +50,9 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 			if part == nil {
 				continue
 			}
-			// In Python, we filter audio parts because Live API doesn't support them well via SendContent.
-			// Let's assume content.Parts contains standard text or function calls.
+			if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
+				continue
+			}
 			filteredParts = append(filteredParts, part)
 		}
 		if len(filteredParts) > 0 {
@@ -61,10 +62,12 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 			})
 		}
 	}
-
+	fmt.Printf("sending history: of size %d\n", len(filteredHistory))
+	turnComplete := true
 	if len(filteredHistory) > 0 {
 		err := c.sdkSession.SendClientContent(genai.LiveClientContentInput{
 			Turns: filteredHistory,
+			TurnComplete: &turnComplete,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to send history: %w", err)
@@ -94,8 +97,21 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 			return fmt.Errorf("failed to send tool response: %w", err)
 		}
 	} else {
+		if len(content.Parts) == 1 && content.Parts[0].Text != "" {
+			fmt.Printf("Attempting to send text via SendRealtimeInput\n")
+			err := c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
+				Text: content.Parts[0].Text,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to send realtime text: %w", err)
+			}
+			return nil
+		}
+
+		turnComplete := true
 		err := c.sdkSession.SendClientContent(genai.LiveClientContentInput{
-			Turns: []*genai.Content{content},
+			Turns:        []*genai.Content{content},
+			TurnComplete: &turnComplete,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to send content: %w", err)
@@ -131,7 +147,6 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 			})
 		}
 
-		fmt.Printf("sending audio (%s)\n", v.MIMEType)
 		return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 			Audio: v,
 		})
