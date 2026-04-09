@@ -163,8 +163,6 @@ func (f *deployAgentEngineFlags) cleanTemp() error {
 		})
 }
 
-
-
 // prepareDockerfile creates a temporary Dockerfile which will be executed by agentEngine
 func (f *deployAgentEngineFlags) prepareDockerfile() error {
 	return util.LogStartStop("Preparing Dockerfile",
