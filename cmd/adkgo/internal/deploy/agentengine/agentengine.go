@@ -50,10 +50,6 @@ type agentEngineServiceFlags struct {
 	webui           bool // enable webui or not
 }
 
-type localProxyFlags struct {
-	port int
-}
-
 type buildFlags struct {
 	tempDir             string
 	execPath            string
@@ -71,7 +67,6 @@ type sourceFlags struct {
 type deployAgentEngineFlags struct {
 	gcloud      gCloudFlags
 	agentEngine agentEngineServiceFlags
-	proxy       localProxyFlags
 	build       buildFlags
 	source      sourceFlags
 }
@@ -82,10 +77,7 @@ var flags deployAgentEngineFlags
 var agentEngineCmd = &cobra.Command{
 	Use:   "agentengine",
 	Short: "Deploys the application to Agent Engine.",
-	// TODO(kdroste): add description
-	Long: `????????????????????????????????????????????????????????????????????????????
-	Local proxy adding authentication is started. 
-	`,
+	Long:  `Deploys the application to Agent Engine. It creates a source archive, uploads it to create a Reasoning Engine, and cleans up temporary files.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return flags.deployOnagentEngine()
 	},
@@ -99,7 +91,6 @@ func init() {
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.gcloud.projectName, "project_name", "p", "", "GCP Project Name")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.agentEngine.name, "name", "s", "", "Agent Engine name")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "temp_dir", "t", "", "Temp dir for build, defaults to os.TempDir() if not specified")
-	agentEngineCmd.PersistentFlags().IntVar(&flags.proxy.port, "proxy_port", 8081, "Local proxy port")
 	agentEngineCmd.PersistentFlags().IntVar(&flags.agentEngine.serverPort, "server_port", 8080, "agentEngine server port")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.a2a, "a2a", true, "Enable A2A")
@@ -184,13 +175,13 @@ EXPOSE ` + strconv.Itoa(flags.agentEngine.serverPort) + `
 CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.agentEngine.serverPort) + `"`)
 
 			if flags.agentEngine.api {
-				b.WriteString(`, "api", "-webui_address", "127.0.0.1:` + strconv.Itoa(f.proxy.port) + `"`)
+				b.WriteString(`, "api", "-webui_address", "127.0.0.1:` + strconv.Itoa(flags.agentEngine.serverPort) + `"`)
 			}
 			if flags.agentEngine.a2a {
 				b.WriteString(`, "a2a", "--a2a_agent_url", "` + flags.agentEngine.a2aAgentCardURL + `"`)
 			}
 			if flags.agentEngine.webui {
-				b.WriteString(`, "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(f.proxy.port) + `/api"]
+				b.WriteString(`, "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(flags.agentEngine.serverPort) + `/api"]
 				`)
 			}
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
@@ -294,26 +285,6 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 		})
 }
 
-// runGcloudProxy invokes gcloud to create a proxy which will add authentication headers to requests
-func (f *deployAgentEngineFlags) runGcloudProxy() error {
-	return util.LogStartStop("Running local gcloud authenticating proxy",
-		func(p util.Printer) error {
-			targetWidth := 80
-
-			p(strings.Repeat("-", targetWidth))
-			p(util.CenterString("", targetWidth))
-			p(util.CenterString("Running ADK Web UI on http://127.0.0.1:"+strconv.Itoa(f.proxy.port)+"/ui/    <-- open this", targetWidth))
-			p(util.CenterString("ADK REST API on http://127.0.0.1:"+strconv.Itoa(f.proxy.port)+"/api/         ", targetWidth))
-			p(util.CenterString("", targetWidth))
-			p(util.CenterString("Press Ctrl-C to stop", targetWidth))
-			p(util.CenterString("", targetWidth))
-			p(strings.Repeat("-", targetWidth))
-
-			cmd := exec.Command("gcloud", "run", "services", "proxy", f.agentEngine.name, "--project", f.gcloud.projectName, "--port", strconv.Itoa(f.proxy.port), "--region", f.gcloud.region)
-			return util.LogCommand(cmd, p)
-		})
-}
-
 // deployOnagentEngine executes the sequence of actions preparing and deploying the agent to agentEngine. Then runs authenticating proxy to newly deployed service
 func (f *deployAgentEngineFlags) deployOnagentEngine() error {
 	fmt.Println(flags)
@@ -335,10 +306,6 @@ func (f *deployAgentEngineFlags) deployOnagentEngine() error {
 		return err
 	}
 	err = f.cleanTemp()
-	if err != nil {
-		return err
-	}
-	err = f.runGcloudProxy()
 	if err != nil {
 		return err
 	}
