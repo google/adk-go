@@ -32,8 +32,7 @@ import (
 )
 
 // agentEngineConfig contains parameters for launching ADK Agent Engine server
-type agentEngineConfig struct {
-}
+type agentEngineConfig struct{}
 
 type agentEngineLauncher struct {
 	flags        *flag.FlagSet // flags are used to parse command-line arguments
@@ -118,7 +117,7 @@ func (a *agentEngineLauncher) Parse(args []string) ([]string, error) {
 }
 
 func (a *agentEngineLauncher) handleApiReasoningEngine(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "Hello from handleApiReasoningEngine: Not implemented")
+	_, _ = fmt.Fprintf(w, "Hello from handleApiReasoningEngine: Not implemented")
 }
 
 type payload struct {
@@ -171,7 +170,7 @@ func (f *FakeWriter) Write(p []byte) (n int, err error) {
 }
 
 func (a *agentEngineLauncher) handleApiSteamReasoningEngine(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "Hello from handleApiSteamReasoningEngine")
+	_, _ = fmt.Fprintf(w, "Hello from handleApiSteamReasoningEngine")
 
 	if r == nil {
 		log.Printf("req is nil")
@@ -200,8 +199,8 @@ func (a *agentEngineLauncher) handleApiSteamReasoningEngine(w http.ResponseWrite
 
 	logReq(r, body)
 
-	switch {
-	case p.ClassMethod == "create_session":
+	switch p.ClassMethod {
+	case "create_session":
 		log.Printf("Hello from create_session")
 		req, err := http.NewRequest("POST", "/api/apps/{app_name}/users/{user_id}/sessions", nil)
 		if err != nil {
@@ -227,7 +226,7 @@ func (a *agentEngineLauncher) handleApiSteamReasoningEngine(w http.ResponseWrite
 		// w.Write([]byte(resp))
 
 	default:
-		err = fmt.Errorf("unrecognized class method: %v", p.ClassMethod)
+		log.Printf("unrecognized class method: %v", p.ClassMethod)
 	}
 
 }
@@ -251,7 +250,7 @@ func (a *agentEngineLauncher) SetupSubrouters(router *mux.Router, config *launch
 // SimpleDescription implements web.Sublauncher
 func (a *agentEngineLauncher) SimpleDescription() string {
 	// TODO(kdroste) description
-	return fmt.Sprintf("starts AgentEngine server which handles ??????????")
+	return "starts AgentEngine server which handles ??????????"
 }
 
 // UserMessage implements web.Sublauncher.

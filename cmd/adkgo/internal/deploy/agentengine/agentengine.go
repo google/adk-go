@@ -63,8 +63,8 @@ type buildFlags struct {
 }
 
 type sourceFlags struct {
-	srcBasePath    string
-	entryPointPath string
+	srcBasePath        string
+	entryPointPath     string
 	origEntryPointPath string
 }
 
@@ -163,23 +163,7 @@ func (f *deployAgentEngineFlags) cleanTemp() error {
 		})
 }
 
-// compileEntryPoint builds locally the server using flags and environment variables in order to be run in agentEngine containter
-func (f *deployAgentEngineFlags) compileEntryPoint() error {
-	return util.LogStartStop("Compiling server",
-		func(p util.Printer) error {
-			p("Using", f.source.entryPointPath, "as entry point")
-			// for help on ldflags you can run go build -ldflags="--help" ./examples/quickstart/main.go
-			//    -s    disable symbol table
-			//    -w    disable DWARF generation
-			//   using those flags reduces the size of an executable
-			cmd := exec.Command("go", "build", "-ldflags", "-s -w", "-o", f.build.execPath, f.source.entryPointPath)
 
-			cmd.Dir = f.source.srcBasePath
-			// build using staticallly linked libs, for linux/amd64
-			cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
-			return util.LogCommand(cmd, p)
-		})
-}
 
 // prepareDockerfile creates a temporary Dockerfile which will be executed by agentEngine
 func (f *deployAgentEngineFlags) prepareDockerfile() error {
@@ -244,7 +228,11 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 			if err != nil {
 				return fmt.Errorf("cannot create ReasoningEngineClient: %w", err)
 			}
-			defer client.Close()
+			defer func() {
+				if err := client.Close(); err != nil {
+					p("Warning: failed to close ReasoningEngineClient: %v", err)
+				}
+			}()
 
 			archiveContent, err := os.ReadFile(f.build.archivePath)
 			if err != nil {
