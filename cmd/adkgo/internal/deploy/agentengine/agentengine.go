@@ -163,8 +163,6 @@ func (f *deployAgentEngineFlags) cleanTemp() error {
 		})
 }
 
-
-
 // prepareDockerfile creates a temporary Dockerfile which will be executed by agentEngine
 func (f *deployAgentEngineFlags) prepareDockerfile() error {
 	return util.LogStartStop("Preparing Dockerfile",
@@ -220,7 +218,6 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 	return util.LogStartStop("Deploying to Agent Engine",
 		func(p util.Printer) error {
 			ctx := context.Background()
-			
 			parent := fmt.Sprintf("projects/%s/locations/%s", f.gcloud.projectName, f.gcloud.region)
 			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
 			

@@ -135,8 +135,8 @@ func logReq(req *http.Request, body []byte) {
 		Method:  req.Method,
 		URL:     req.URL.String(),
 		Body:    string(body),
-		Headers: req.Header})
-
+		Headers: req.Header,
+	})
 	if err != nil {
 		log.Printf("json.Marshal() failed: %v", err)
 		return
