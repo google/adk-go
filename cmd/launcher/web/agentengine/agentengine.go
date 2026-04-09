@@ -227,7 +227,6 @@ func (a *agentEngineLauncher) handleApiSteamReasoningEngine(w http.ResponseWrite
 	default:
 		log.Printf("unrecognized class method: %v", p.ClassMethod)
 	}
-
 }
 
 // SetupSubrouters implements the web.Sublauncher interface.
