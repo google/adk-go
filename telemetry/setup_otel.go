@@ -18,10 +18,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"go.opentelemetry.io/contrib/detectors/gcp"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/oauth2"
@@ -29,15 +32,11 @@ import (
 )
 
 func configure(ctx context.Context, opts ...Option) (*config, error) {
-	cfg := &config{}
-
-	for _, opt := range opts {
-		if err := opt.apply(cfg); err != nil {
-			return nil, fmt.Errorf("failed to apply option: %w", err)
-		}
+	cfg, err := configFromOpts(opts...)
+	if err != nil {
+		return nil, err
 	}
 
-	var err error
 	if cfg.oTelToCloud {
 		// Load ADC if no credentials are provided in the config.
 		if cfg.googleCredentials == nil {
@@ -63,25 +62,38 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 		return nil, fmt.Errorf("failed to resolve resource: %w", err)
 	}
 
-	spanProcessors, err := configureExporters(ctx, cfg)
+	spanProcessors, logProcessors, err := configureExporters(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure exporters: %w", err)
 	}
 	cfg.spanProcessors = append(cfg.spanProcessors, spanProcessors...)
+	cfg.logProcessors = append(cfg.logProcessors, logProcessors...)
+	return cfg, nil
+}
 
+func configFromOpts(opts ...Option) (*config, error) {
+	cfg := &config{
+		genAICaptureMessageContent: strings.TrimSpace(os.Getenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT")) == "true",
+	}
+
+	for _, opt := range opts {
+		if err := opt.apply(cfg); err != nil {
+			return nil, fmt.Errorf("failed to apply option: %w", err)
+		}
+	}
 	return cfg, nil
 }
 
 func newInternal(cfg *config) (*Providers, error) {
-	tp, err := initTracerProvider(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize tracer provider: %w", err)
-	}
-	// TODO(#479) init logger provider
+	tp := initTracerProvider(cfg)
+	lp := initLoggerProvider(cfg)
+
 	// TODO(#479) init meter provider
 
 	return &Providers{
-		TracerProvider: tp,
+		TracerProvider:             tp,
+		genAICaptureMessageContent: cfg.genAICaptureMessageContent,
+		LoggerProvider:             lp,
 	}, nil
 }
 
@@ -104,6 +116,7 @@ func resolveGcpResourceProject(cfg *config) (string, error) {
 }
 
 func resolveProject(configuredProject string, creds *google.Credentials, requireProject bool, projectType string) (string, error) {
+	configuredProject = strings.TrimSpace(configuredProject)
 	if configuredProject != "" {
 		return configuredProject, nil
 	}
@@ -112,8 +125,8 @@ func resolveProject(configuredProject string, creds *google.Credentials, require
 	}
 	// The project was always empty during testing, even though it was set in ADC JSON file.
 	// Using fallback to env variable to resolve the project as a workaround.
-	project, ok := os.LookupEnv("GOOGLE_CLOUD_PROJECT")
-	if !ok && requireProject {
+	project := strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_PROJECT"))
+	if requireProject && project == "" {
 		return "", fmt.Errorf("telemetry.googleapis.com requires setting the %s project. Refer to telemetry.config for the available options to set the %s project", projectType, projectType)
 	}
 	return project, nil
@@ -157,15 +170,17 @@ func resolveResource(ctx context.Context, cfg *config) (*resource.Resource, erro
 }
 
 // configureExporters initializes OTel exporters from environment variables and otelToCloud.
-func configureExporters(ctx context.Context, cfg *config) ([]sdktrace.SpanProcessor, error) {
+func configureExporters(ctx context.Context, cfg *config) ([]sdktrace.SpanProcessor, []sdklog.Processor, error) {
 	var spanProcessors []sdktrace.SpanProcessor
+	var logProcessors []sdklog.Processor
 
-	_, otelEndpointExists := os.LookupEnv("OTEL_EXPORTER_OTLP_ENDPOINT")
-	_, otelTracesEndpointExists := os.LookupEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-	if otelEndpointExists || otelTracesEndpointExists {
+	otelEndpointEnv := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	// Tracing section.
+	otelTracesEndpointEnv := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
+	if otelEndpointEnv != "" || otelTracesEndpointEnv != "" {
 		exporter, err := otlptracehttp.New(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create OTLP HTTP exporter: %w", err)
+			return nil, nil, fmt.Errorf("failed to create OTLP HTTP exporter: %w", err)
 		}
 		spanProcessors = append(spanProcessors, sdktrace.NewBatchSpanProcessor(
 			exporter,
@@ -174,19 +189,31 @@ func configureExporters(ctx context.Context, cfg *config) ([]sdktrace.SpanProces
 	if cfg.oTelToCloud {
 		spanExporter, err := newGcpSpanExporter(ctx, cfg)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create GCP span exporter: %w", err)
+			return nil, nil, fmt.Errorf("failed to create GCP span exporter: %w", err)
 		}
 		spanProcessors = append(spanProcessors, sdktrace.NewBatchSpanProcessor(spanExporter))
 	}
-	return spanProcessors, nil
+	// Logs section.
+	otelLogsEndpointEnv := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"))
+	if otelEndpointEnv != "" || otelLogsEndpointEnv != "" {
+		exporter, err := otlploghttp.New(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create OTLP HTTP log exporter: %w", err)
+		}
+		logProcessors = append(logProcessors, sdklog.NewBatchProcessor(
+			exporter,
+		))
+	}
+	// Golang OTel exporter to CloudLogging is not yet available.
+	return spanProcessors, logProcessors, nil
 }
 
-func initTracerProvider(cfg *config) (*sdktrace.TracerProvider, error) {
+func initTracerProvider(cfg *config) *sdktrace.TracerProvider {
 	if cfg.tracerProvider != nil {
-		return cfg.tracerProvider, nil
+		return cfg.tracerProvider
 	}
 	if len(cfg.spanProcessors) == 0 {
-		return nil, nil
+		return nil
 	}
 	opts := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(cfg.resource),
@@ -196,7 +223,25 @@ func initTracerProvider(cfg *config) (*sdktrace.TracerProvider, error) {
 	}
 	tp := sdktrace.NewTracerProvider(opts...)
 
-	return tp, nil
+	return tp
+}
+
+func initLoggerProvider(cfg *config) *sdklog.LoggerProvider {
+	if cfg.loggerProvider != nil {
+		return cfg.loggerProvider
+	}
+	if len(cfg.logProcessors) == 0 {
+		return nil
+	}
+	opts := []sdklog.LoggerProviderOption{
+		sdklog.WithResource(cfg.resource),
+	}
+	for _, p := range cfg.logProcessors {
+		opts = append(opts, sdklog.WithProcessor(p))
+	}
+	lp := sdklog.NewLoggerProvider(opts...)
+
+	return lp
 }
 
 func newGcpSpanExporter(ctx context.Context, cfg *config) (sdktrace.SpanExporter, error) {

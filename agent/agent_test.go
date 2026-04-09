@@ -50,6 +50,10 @@ func TestAgentCallbacks(t *testing.T) {
 					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel),
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 			},
 		},
@@ -95,6 +99,10 @@ func TestAgentCallbacks(t *testing.T) {
 					LLMResponse: model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel),
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 			},
 		},
@@ -116,6 +124,7 @@ func TestAgentCallbacks(t *testing.T) {
 			ctx := &invocationContext{
 				Context: t.Context(),
 				agent:   testAgent,
+				session: &mockSession{sessionID: "test-session"},
 			}
 			var gotEvents []*session.Event
 			for event, err := range testAgent.Run(ctx) {
@@ -135,8 +144,7 @@ func TestAgentCallbacks(t *testing.T) {
 			}
 
 			for i, gotEvent := range gotEvents {
-				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID"),
-					cmpopts.IgnoreFields(session.EventActions{}, "StateDelta")); diff != "" {
+				if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID")); diff != "" {
 					t.Errorf("diff in the events: got event[%d]: %v, want: %v, diff: %v", i, gotEvent, tt.wantEvents[i], diff)
 				}
 			}
@@ -164,6 +172,7 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 		Context:       t.Context(),
 		agent:         testAgent,
 		endInvocation: true,
+		session:       &mockSession{sessionID: "test-session"},
 	}
 	for _, err := range testAgent.Run(ctx) {
 		if err != nil {
@@ -197,6 +206,7 @@ func TestEndInvocation_EndsAfterMainCall(t *testing.T) {
 	ctx := &invocationContext{
 		Context: t.Context(),
 		agent:   testAgent,
+		session: &mockSession{sessionID: "test-session"},
 	}
 	var gotEvents []*session.Event
 	for event, err := range testAgent.Run(ctx) {
@@ -266,5 +276,78 @@ func TestWithContext(t *testing.T) {
 	}
 	if diff := cmp.Diff(inv, got, cmp.AllowUnexported(invocationContext{}), cmpopts.IgnoreFields(invocationContext{}, "Context")); diff != "" {
 		t.Errorf("WithContext() params mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type mockSession struct {
+	session.Session
+	sessionID string
+}
+
+func (m *mockSession) ID() string { return m.sessionID }
+
+func TestFindAgent(t *testing.T) {
+	t.Parallel()
+
+	noOpRun := func(InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(func(*session.Event, error) bool) {}
+	}
+
+	createAgent := func(name string, subAgents ...Agent) Agent {
+		t.Helper()
+		a, err := New(Config{Name: name, Run: noOpRun, SubAgents: subAgents})
+		if err != nil {
+			t.Fatalf("failed to create agent %s: %v", name, err)
+		}
+		return a
+	}
+
+	// Setup hierarchy:
+	// root -> child1
+	// root -> child2 -> grandchild
+	grandchild := createAgent("grandchild")
+	child2 := createAgent("child2", grandchild)
+	child1 := createAgent("child1")
+	root := createAgent("root", child1, child2)
+
+	tests := []struct {
+		name      string
+		agentName string
+		want      Agent
+	}{
+		{
+			name:      "Find self",
+			agentName: "root",
+			want:      root,
+		},
+		{
+			name:      "Find direct child1",
+			agentName: "child1",
+			want:      child1,
+		},
+		{
+			name:      "Find direct child2",
+			agentName: "child2",
+			want:      child2,
+		},
+		{
+			name:      "Find nested grandchild",
+			agentName: "grandchild",
+			want:      grandchild,
+		},
+		{
+			name:      "Find non-existent agent",
+			agentName: "unknown",
+			want:      nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := root.FindAgent(tt.agentName)
+			if got != tt.want {
+				t.Errorf("FindAgent(%q) = %v, want %v", tt.agentName, got, tt.want)
+			}
+		})
 	}
 }

@@ -1,17 +1,16 @@
 httprr trace v1
-824 1140
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+980 1354
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 592
+Content-Length: 748
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"what is the sum of 1 + 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"computes the sum of two numbers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+{"contents":[{"parts":[{"text":"what is the sum of 1 + 2?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"IMPORTANT: output ONLY the result computed by the provided function, if the result of 10 + 32 is 42 print only 42\n\nYou are an agent. Your internal name is \"agent\". The description about you is \"math agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"computes the sum of two numbers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 05 Sep 2025 16:15:32 GMT
+Date: Tue, 10 Mar 2026 14:57:34 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=413
+Server-Timing: gfet4t7; dur=922
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -31,48 +30,44 @@ X-Xss-Protection: 0
                 "a": 1,
                 "b": 2
               }
-            }
+            },
+            "thoughtSignature": "CssBAb4+9vtA0YNySGDhNbWUekpgT0C4JzfoLAMCUxxSlERpI2LVij53p/T9qWJSHxNvQmxdYycF8yf/oRMZ0cnD1wKxww2tYiJpDtgJXwJRLKNaB6YpvNLH7gbW/3Sd2qNzdOlcbbenmh6gYBvjrngYKV8PYSoGj58y7BmJ7bpdwar93Q+wTGQNaeJLQeAJM+KqpF1IB6fZWk4EtotwxKnePkkMgFtwFGYXOZQjhnCudMJprOkORFhhoF4mujrSVU9uqWAIpkhahJn6d2I="
           }
         ],
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": -0.0020935086533427237
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 28,
-    "candidatesTokenCount": 5,
-    "totalTokenCount": 33,
+    "promptTokenCount": 155,
+    "candidatesTokenCount": 18,
+    "totalTokenCount": 223,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 28
+        "tokenCount": 155
       }
     ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 5
-      }
-    ]
+    "thoughtsTokenCount": 50
   },
-  "modelVersion": "gemini-2.0-flash",
-  "responseId": "pAy7aJbkIe2m1MkPgbz0iAo"
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "XTGwabD8KpaxkdUP3MTwoAk"
 }
-987 1007
-POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent HTTP/1.1
+1442 815
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 755
+Content-Length: 1209
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"what is the sum of 1 + 2?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":1,"b":2},"name":"sum"}}],"role":"model"},{"parts":[{"functionResponse":{"name":"sum","response":{"sum":3}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"output ONLY the result computed by the provided function"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"computes the sum of two numbers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
-Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+{"contents":[{"parts":[{"text":"what is the sum of 1 + 2?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"a":1,"b":2},"name":"sum"},"thoughtSignature":"CssBAb4+9vtA0YNySGDhNbWUekpgT0C4JzfoLAMCUxxSlERpI2LVij53p/T9qWJSHxNvQmxdYycF8yf/oRMZ0cnD1wKxww2tYiJpDtgJXwJRLKNaB6YpvNLH7gbW/3Sd2qNzdOlcbbenmh6gYBvjrngYKV8PYSoGj58y7BmJ7bpdwar93Q+wTGQNaeJLQeAJM+KqpF1IB6fZWk4EtotwxKnePkkMgFtwFGYXOZQjhnCudMJprOkORFhhoF4mujrSVU9uqWAIpkhahJn6d2I="}],"role":"model"},{"parts":[{"functionResponse":{"name":"sum","response":{"sum":3}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"IMPORTANT: output ONLY the result computed by the provided function, if the result of 10 + 32 is 42 print only 42\n\nYou are an agent. Your internal name is \"agent\". The description about you is \"math agent\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"computes the sum of two numbers","name":"sum","parametersJsonSchema":{"additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"sum":{"type":"integer"}},"required":["sum"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 05 Sep 2025 16:15:33 GMT
+Date: Tue, 10 Mar 2026 14:57:35 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=372
+Server-Timing: gfet4t7; dur=571
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -86,32 +81,26 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "3\n"
+            "text": "3"
           }
         ],
         "role": "model"
       },
       "finishReason": "STOP",
-      "avgLogprobs": -0.00046650832518935204
+      "index": 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 36,
-    "candidatesTokenCount": 2,
-    "totalTokenCount": 38,
+    "promptTokenCount": 186,
+    "candidatesTokenCount": 1,
+    "totalTokenCount": 187,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 36
-      }
-    ],
-    "candidatesTokensDetails": [
-      {
-        "modality": "TEXT",
-        "tokenCount": 2
+        "tokenCount": 186
       }
     ]
   },
-  "modelVersion": "gemini-2.0-flash",
-  "responseId": "pAy7aMmdPJWh1MkPy7zUkAE"
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "XjGwaaPEI_H3nsEP2v-88AQ"
 }

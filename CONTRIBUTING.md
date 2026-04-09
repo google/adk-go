@@ -122,6 +122,15 @@ Depending on your change:
     -   Include the command used and console output showing test results.
     -   Highlight sections of the log that directly relate to your change.
 
+# ADK Web
+
+## Updating ADK web version to latest
+
+-   Run `./scripts/adk-web/update-adk-web.sh` to update the web UI to the latest version from [GitHub](https://github.com/google/adk-web).
+-   Run `docker run -it adk-web-builder:latest sh -c "<COMMAND>"` to start the container and debug the build, e.g.:
+    -   `docker run -it adk-web-builder:latest sh -c "ls -alh dist/agent_framework_web/browser"` to view the built files.
+    -   `docker run -it adk-web-builder:latest sh -c "npm run build"` to debug the build output.
+
 ### Documentation
 
 For any changes that impact user-facing documentation (guides, API reference,

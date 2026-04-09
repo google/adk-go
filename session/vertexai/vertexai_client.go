@@ -114,16 +114,13 @@ func (c *vertexAiClient) waitForOperation(ctx context.Context, appName, userId, 
 		maxDelay   = 5 * time.Second
 	)
 
-	for i := 0; i < maxRetries; i++ {
+	for i := range maxRetries {
 		// Get the latest status of the operation.
 		ls, err := c.getSession(ctx, &session.GetRequest{AppName: appName, UserID: userId, SessionID: sessionID})
 		if err != nil {
 			// Basic retry on "not found" which might be due to propagation
 			if i < maxRetries-1 && isNotFoundError(err) {
-				delay := time.Duration(i*i) * baseDelay
-				if delay > maxDelay {
-					delay = maxDelay
-				}
+				delay := min(time.Duration(i*i)*baseDelay, maxDelay)
 				time.Sleep(delay)
 				continue
 			}

@@ -19,11 +19,13 @@ import (
 	"fmt"
 	"iter"
 
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/artifact"
 	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/internal/plugininternal/plugincontext"
+	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -43,6 +45,8 @@ type Agent interface {
 	Description() string
 	Run(InvocationContext) iter.Seq2[*session.Event, error]
 	SubAgents() []Agent
+	FindAgent(name string) Agent
+	FindSubAgent(name string) Agent
 
 	internal() *agent
 }
@@ -114,8 +118,8 @@ type Artifacts interface {
 // Memory interface provides methods to access agent memory across the
 // sessions of the current user_id.
 type Memory interface {
-	AddSession(context.Context, session.Session) error
-	Search(ctx context.Context, query string) (*memory.SearchResponse, error)
+	AddSessionToMemory(context.Context, session.Session) error
+	SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error)
 }
 
 // BeforeAgentCallback is a function that is called before the agent starts
@@ -157,9 +161,17 @@ func (a *agent) SubAgents() []Agent {
 
 func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		spanCtx, span := telemetry.StartInvokeAgentSpan(ctx, a, ctx.Session().ID(), ctx.InvocationID())
+		yield, endSpan := telemetry.WrapYield(span, yield, func(span trace.Span, event *session.Event, err error) {
+			telemetry.TraceAgentResult(span, telemetry.TraceAgentResultParams{
+				ResponseEvent: event,
+				Error:         err,
+			})
+		})
+		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
 		ctx := &invocationContext{
-			Context:   ctx,
+			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
 			artifacts: ctx.Artifacts(),
 			memory:    ctx.Memory(),
@@ -206,6 +218,22 @@ func (a *agent) internal() *agent {
 	return a
 }
 
+func (a *agent) FindAgent(name string) Agent {
+	if a.Name() == name {
+		return a
+	}
+	return a.FindSubAgent(name)
+}
+
+func (a *agent) FindSubAgent(name string) Agent {
+	for _, subAgent := range a.SubAgents() {
+		if result := subAgent.FindAgent(name); result != nil {
+			return result
+		}
+	}
+	return nil
+}
+
 func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
 	if event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
 		return genai.RoleUser
@@ -223,7 +251,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
 	}
 
 	if pluginManager != nil {
@@ -285,7 +313,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	callbackCtx := &callbackContext{
 		Context:           ctx,
 		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any)},
+		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
 	}
 
 	if pluginManager != nil {

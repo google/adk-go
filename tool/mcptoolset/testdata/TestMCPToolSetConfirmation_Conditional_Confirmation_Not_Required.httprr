@@ -1,16 +1,16 @@
 httprr trace v1
-924 1435
+1089 1499
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 692
+Content-Length: 857
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"what is the weather in Porto?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"what is the weather in Porto?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city.\n\nYou are an agent. Your internal name is \"weather_time_agent\". The description about you is \"Agent to answer questions about the time and weather in a city.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 30 Jan 2026 13:14:21 GMT
+Date: Tue, 10 Mar 2026 14:08:44 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=865
+Server-Timing: gfet4t7; dur=733
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -30,7 +30,7 @@ X-Xss-Protection: 0
                 "city": "Porto"
               }
             },
-            "thoughtSignature": "CowCAXLI2nyLoxhCGquNldpcT0kOANmW7oh3i4/yAujVF9ulf+KtYLxRqzlWfk6sDxj/N5GgUL2xCjZ7k5kkljgVEY21UR+zEJDkjLqoY68B4sZsC/IS75IDdiP2mWu5ZeBZhOqky/ty+wlWxAW74URfzrbmAuz8l4ggKAZn4JBv+I++2DFizATurldaYGSHb4dGrp9ytg2ewOyT8TN/kOjChhGS7XVRiTqPtpNGXzweZ8FZxO2PlmA2C2DFFyl9e+XQZi9xUQ4+MSXKjvuwx+SkTk0XKaejHdQPdQEiJQOY2T1/RqaI3T4VdCRjMI2M18OCUFyVN2sCqTSZsurixZRj4gKkyzeEpSpnhN/bHw=="
+            "thoughtSignature": "CrwCAb4+9vsuvs2W3gqNDffylURPr+r1NjkdtDGegBWRhMfeZBBxJ8oIuQAl3LwxUxMOjCJcj6t3/vFY1wFIFPgDhkYmXV0cJjyinX7wSgQG0SR4qJwGMcc5Db9MO9+5IVJipYnjTgh2CQUkNWU2AwYJ5JJxTmR3sXelhh8LHnfvnzMQeKbkuhqWWw9AuOjWqflEfd4kyoxr9nuC7WzE1y2k8m/ZLMqOttgXwJ8cLCWCyDLLu8leyCtjDg4jusnqo4HnIY1UruEMEiFuDFaAyuHXamRexWRoypQzyht4UuFPL9fgFOLKEMnaedZ9Jy9yYEr8k88x0MaLx8wX9Kki8SbDWshduBqvPn5B2bafyYxd8gQGdJa9ujn7CC6wloibeZUlPS+1yi9jhOn52X0w0KES62KZHBaH9GOpj85cTg=="
           }
         ],
         "role": "model"
@@ -41,32 +41,32 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 113,
+    "promptTokenCount": 149,
     "candidatesTokenCount": 16,
-    "totalTokenCount": 191,
+    "totalTokenCount": 238,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 113
+        "tokenCount": 149
       }
     ],
-    "thoughtsTokenCount": 62
+    "thoughtsTokenCount": 73
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "ra58aYaTKOWWxN8PgI_1sQE"
+  "responseId": "6yWwacjDOIzGnsEP3Ja76Ag"
 }
-1544 842
+1773 841
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1311
+Content-Length: 1540
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"what is the weather in Porto?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Porto"},"name":"get_weather"},"thoughtSignature":"CowCAXLI2nyLoxhCGquNldpcT0kOANmW7oh3i4/yAujVF9ulf+KtYLxRqzlWfk6sDxj/N5GgUL2xCjZ7k5kkljgVEY21UR+zEJDkjLqoY68B4sZsC/IS75IDdiP2mWu5ZeBZhOqky/ty+wlWxAW74URfzrbmAuz8l4ggKAZn4JBv+I++2DFizATurldaYGSHb4dGrp9ytg2ewOyT8TN/kOjChhGS7XVRiTqPtpNGXzweZ8FZxO2PlmA2C2DFFyl9e+XQZi9xUQ4+MSXKjvuwx+SkTk0XKaejHdQPdQEiJQOY2T1/RqaI3T4VdCRjMI2M18OCUFyVN2sCqTSZsurixZRj4gKkyzeEpSpnhN/bHw=="}],"role":"model"},{"parts":[{"functionResponse":{"name":"get_weather","response":{"output":{"weather_summary":"Today in \"Porto\" is sunny"}}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"what is the weather in Porto?"}],"role":"user"},{"parts":[{"functionCall":{"args":{"city":"Porto"},"name":"get_weather"},"thoughtSignature":"CrwCAb4+9vsuvs2W3gqNDffylURPr+r1NjkdtDGegBWRhMfeZBBxJ8oIuQAl3LwxUxMOjCJcj6t3/vFY1wFIFPgDhkYmXV0cJjyinX7wSgQG0SR4qJwGMcc5Db9MO9+5IVJipYnjTgh2CQUkNWU2AwYJ5JJxTmR3sXelhh8LHnfvnzMQeKbkuhqWWw9AuOjWqflEfd4kyoxr9nuC7WzE1y2k8m/ZLMqOttgXwJ8cLCWCyDLLu8leyCtjDg4jusnqo4HnIY1UruEMEiFuDFaAyuHXamRexWRoypQzyht4UuFPL9fgFOLKEMnaedZ9Jy9yYEr8k88x0MaLx8wX9Kki8SbDWshduBqvPn5B2bafyYxd8gQGdJa9ujn7CC6wloibeZUlPS+1yi9jhOn52X0w0KES62KZHBaH9GOpj85cTg=="}],"role":"model"},{"parts":[{"functionResponse":{"name":"get_weather","response":{"output":{"weather_summary":"Today in \"Porto\" is sunny"}}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"I can answer your questions about the time and weather in a city.\n\nYou are an agent. Your internal name is \"weather_time_agent\". The description about you is \"Agent to answer questions about the time and weather in a city.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"returns weather in the given city","name":"get_weather","parametersJsonSchema":{"additionalProperties":false,"properties":{"city":{"description":"city name","type":"string"}},"required":["city"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"weather_summary":{"description":"weather summary in the given city","type":"string"}},"required":["weather_summary"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
-Date: Fri, 30 Jan 2026 13:14:23 GMT
+Date: Tue, 10 Mar 2026 14:08:45 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1798
+Server-Timing: gfet4t7; dur=906
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -90,16 +90,16 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 157,
+    "promptTokenCount": 193,
     "candidatesTokenCount": 8,
-    "totalTokenCount": 165,
+    "totalTokenCount": 201,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 157
+        "tokenCount": 193
       }
     ]
   },
   "modelVersion": "gemini-2.5-flash",
-  "responseId": "r658aeTKGvbYvdIPz4TXkQQ"
+  "responseId": "7CWwaeWaKLyvnsEP3tfsiQk"
 }

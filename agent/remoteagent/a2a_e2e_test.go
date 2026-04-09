@@ -27,10 +27,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
@@ -136,7 +138,7 @@ func TestA2AInputRequired(t *testing.T) {
 
 			// Server
 			inputRequestingAgent := newInputRequestingAgent(t, "agent-b", tc.tool)
-			executor := newAgentExecutor(inputRequestingAgent, nil)
+			executor := newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerRun)
 			server := startA2AServer(executor)
 			defer server.Close()
 
@@ -304,14 +306,14 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 
 			// Server B
 			inputRequestingAgent := newInputRequestingAgent(t, "agent-b", tc.tool)
-			executorB := newAgentExecutor(inputRequestingAgent, nil)
+			executorB := newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerEvent)
 			serverB := startA2AServer(executorB)
 			defer serverB.Close()
 
 			// Server A
 			remoteAgent := newA2ARemoteAgent(t, remoteAgentName, serverB)
 			rootAgent := newRootAgent("root", remoteAgent)
-			executorA := newAgentExecutor(rootAgent, nil)
+			executorA := newAgentExecutor(rootAgent, nil, adka2a.OutputArtifactPerRun)
 			serverA := startA2AServer(executorA)
 			defer serverA.Close()
 
@@ -367,6 +369,99 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 				t.Fatalf("unexpected artifact parts (+got,-want) diff:\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestA2ACleanupPropagation(t *testing.T) {
+	// Remote A2A server publishes a submitted task and start generating artifact updates
+	// until it detects a context cancelation
+	remoteTaskIDChan, remoteCleanupCalledChan := make(chan a2a.TaskID, 1), make(chan struct{}, 2)
+	serverB := startA2AServer(&mockA2AExecutor{
+		executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+			remoteTaskIDChan <- reqCtx.TaskID
+			if err := queue.Write(ctx, a2a.NewSubmittedTask(reqCtx, reqCtx.Message)); err != nil {
+				return err
+			}
+			for ctx.Err() == nil {
+				if err := queue.Write(ctx, a2a.NewArtifactEvent(reqCtx, a2a.TextPart{Text: "foo"})); err != nil {
+					return err
+				}
+				time.Sleep(1 * time.Millisecond)
+			}
+			finalUpdate := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCompleted, nil)
+			finalUpdate.Final = true
+			return queue.Write(ctx, finalUpdate)
+		},
+		cleanupFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error) {
+			remoteCleanupCalledChan <- struct{}{}
+		},
+	})
+	defer serverB.Close()
+
+	// Root server connects to server B through remote subagent
+	remoteAgentB := newA2ARemoteAgent(t, "remote-agent-b", serverB)
+	rootA := newRootAgent("agent-b", remoteAgentB)
+	executorA := newAgentExecutor(rootA, nil, adka2a.OutputArtifactPerEvent)
+	serverA := startA2AServer(executorA)
+	defer serverA.Close()
+
+	client := newA2AClient(t, serverA)
+
+	// Send a streaming message in a detached goroutine, passing status update through chan
+	statusUpdateEventChan := make(chan a2a.Event, 10)
+	go func() {
+		defer close(statusUpdateEventChan)
+		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "work"})
+		for event, err := range client.SendStreamingMessage(t.Context(), &a2a.MessageSendParams{Message: msg}) {
+			if err != nil {
+				t.Errorf("client.SendStreamingMessage() error = %v", err)
+				return
+			}
+			if _, ok := event.(*a2a.TaskArtifactUpdateEvent); ok {
+				continue
+			}
+			statusUpdateEventChan <- event
+		}
+	}()
+
+	// Issue a task cancellation request
+	taskID := (<-statusUpdateEventChan).TaskInfo().TaskID
+	cancelResultChan := make(chan *a2a.Task, 1)
+	go func() {
+		defer close(cancelResultChan)
+		task, err := client.CancelTask(t.Context(), &a2a.TaskIDParams{ID: taskID})
+		if err != nil {
+			t.Errorf("client.CancelTask() error = %v", err)
+			return
+		}
+		cancelResultChan <- task
+	}()
+
+	// Check the streaming message sender got a cancelled state task in their response
+	var lastStreamingUpdate a2a.Event
+	for event := range statusUpdateEventChan {
+		lastStreamingUpdate = event
+	}
+	if tu, ok := lastStreamingUpdate.(*a2a.TaskStatusUpdateEvent); ok {
+		if tu.Status.State != a2a.TaskStateCanceled {
+			t.Errorf("lastStreamingUpdate.Status.State = %q, want %q", tu.Status.State, a2a.TaskStateCanceled)
+		}
+	} else {
+		t.Fatalf("type(lastStreamingUpdate) = %T, want *a2a.TaskStatusUpdateEvent", lastStreamingUpdate)
+	}
+
+	// Check subagent task got cancelled when the parent task was cancelled.
+	// Reads from channel twice because cleanup gets called both for cancelation and execution.
+	<-remoteCleanupCalledChan
+	<-remoteCleanupCalledChan
+	remoteTaskID := <-remoteTaskIDChan
+	remoteClient := newA2AClient(t, serverB)
+	remoteTask, err := remoteClient.GetTask(t.Context(), &a2a.TaskQueryParams{ID: remoteTaskID})
+	if err != nil {
+		t.Fatalf("remoteClient.GetTask() error = %v", err)
+	}
+	if remoteTask.Status.State != a2a.TaskStateCanceled {
+		t.Errorf("remoteTask.Status.State = %q, want %q", remoteTask.Status.State, a2a.TaskStateCanceled)
 	}
 }
 
@@ -489,7 +584,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			executor := newAgentExecutor(tc.agentFn(t), nil)
+			executor := newAgentExecutor(tc.agentFn(t), nil, adka2a.OutputArtifactPerRun)
 			server := startA2AServer(executor)
 			defer server.Close()
 
@@ -556,14 +651,14 @@ func TestA2ARemoteAgentStreamingGeminiSuccess(t *testing.T) {
 		Model:       llmModel,
 		Instruction: "You are a helpful assistant.",
 	}))
-	executorB := newAgentExecutor(modelAgent, nil)
+	executorB := newAgentExecutor(modelAgent, nil, adka2a.OutputArtifactPerEvent)
 	serverB := startA2AServer(executorB)
 	defer serverB.Close()
 
 	// Server A with RemoteAgent
 	remoteAgent := newA2ARemoteAgent(t, "remote-agent", serverB)
 	serviceA := session.InMemoryService()
-	executorA := newAgentExecutor(remoteAgent, serviceA)
+	executorA := newAgentExecutor(remoteAgent, serviceA, adka2a.OutputArtifactPerRun)
 	serverA := startA2AServer(executorA)
 	defer serverA.Close()
 
@@ -668,14 +763,14 @@ func TestA2ARemoteAgentStreamingGeminiError(t *testing.T) {
 			},
 		},
 	}))
-	executorB := newAgentExecutor(modelAgent, nil)
+	executorB := newAgentExecutor(modelAgent, nil, adka2a.OutputArtifactPerRun)
 	serverB := startA2AServer(executorB)
 	defer serverB.Close()
 
 	// Server A with RemoteAgent
 	remoteAgent := newA2ARemoteAgent(t, "remote-agent", serverB)
 	serviceA := session.InMemoryService()
-	executorA := newAgentExecutor(remoteAgent, serviceA)
+	executorA := newAgentExecutor(remoteAgent, serviceA, adka2a.OutputArtifactPerRun)
 	serverA := startA2AServer(executorA)
 	defer serverA.Close()
 
@@ -843,11 +938,12 @@ func newRootAgent(name string, subAgent agent.Agent) agent.Agent {
 	}))
 }
 
-func newAgentExecutor(agnt agent.Agent, service session.Service) a2asrv.AgentExecutor {
+func newAgentExecutor(agnt agent.Agent, service session.Service, mode adka2a.OutputMode) a2asrv.AgentExecutor {
 	if service == nil {
 		service = session.InMemoryService()
 	}
 	return adka2a.NewExecutor(adka2a.ExecutorConfig{
+		OutputMode: mode,
 		RunnerConfig: runner.Config{
 			AppName:        agnt.Name(),
 			SessionService: service,
@@ -1027,4 +1123,58 @@ func newGeminiModel(t *testing.T, modelName string) model.LLM {
 		t.Fatalf("failed to create model: %v", err)
 	}
 	return model
+}
+
+func TestA2AMultiHopInputRequiredCancellation(t *testing.T) {
+	remoteAgentName := "remote-agent-B"
+	remoteTaskIDChan := make(chan a2a.TaskID, 1)
+	serverB := startA2AServer(&mockA2AExecutor{
+		executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+			remoteTaskIDChan <- reqCtx.TaskID
+			ev := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateInputRequired, a2a.NewMessage(a2a.MessageRoleAgent, a2a.DataPart{
+				Data:     map[string]any{"id": "call-1", "name": "foo"},
+				Metadata: map[string]any{"adk_is_long_running": true, "adk_type": "function_call"},
+			}))
+			ev.Final = true
+			return queue.Write(ctx, ev)
+		},
+		cancelFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
+			ev := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil)
+			ev.Final = true
+			return queue.Write(ctx, ev)
+		},
+	})
+	defer serverB.Close()
+
+	// Server A
+	remoteAgent := newA2ARemoteAgent(t, remoteAgentName, serverB)
+	rootAgent := newRootAgent("root", remoteAgent)
+	executorA := newAgentExecutor(rootAgent, nil, adka2a.OutputArtifactPerRun)
+	serverA := startA2AServer(executorA)
+	defer serverA.Close()
+
+	// Send message
+	clientA := newA2AClient(t, serverA)
+	msg1 := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "Hello"})
+	task1 := mustSendMessage(t, clientA, msg1)
+	if task1.Status.State != a2a.TaskStateInputRequired {
+		t.Fatalf("task1.Status.State = %q, want %q", task1.Status.State, a2a.TaskStateInputRequired)
+	}
+
+	// Cancel the task on Server A
+	_, err := clientA.CancelTask(t.Context(), &a2a.TaskIDParams{ID: task1.ID})
+	if err != nil {
+		t.Fatalf("client.CancelTask() error = %v", err)
+	}
+
+	// Verify that Server B's task was cancelled
+	remoteTaskID := <-remoteTaskIDChan
+	clientB := newA2AClient(t, serverB)
+	remoteTask, err := clientB.GetTask(t.Context(), &a2a.TaskQueryParams{ID: remoteTaskID})
+	if err != nil {
+		t.Fatalf("client.CancelTask() error = %v", err)
+	}
+	if remoteTask.Status.State != a2a.TaskStateCanceled {
+		t.Fatalf("remoteTask.Status.State = %q, want %q", remoteTask.Status.State, a2a.TaskStateCanceled)
+	}
 }

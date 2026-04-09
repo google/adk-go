@@ -64,6 +64,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 				{
 					Author: "custom_agent_1",
@@ -74,6 +78,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							},
 							Role: genai.RoleModel,
 						},
+					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
 					},
 				},
 			},
@@ -95,6 +103,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 				{
 					Author: "custom_agent_1",
@@ -105,6 +117,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							},
 							Role: genai.RoleModel,
 						},
+					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
 					},
 				},
 				{
@@ -117,6 +133,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							Role: genai.RoleModel,
 						},
 					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
+					},
 				},
 				{
 					Author: "custom_agent_3",
@@ -127,6 +147,10 @@ func TestNewSequentialAgent(t *testing.T) {
 							},
 							Role: genai.RoleModel,
 						},
+					},
+					Actions: session.EventActions{
+						StateDelta:    map[string]any{},
+						ArtifactDelta: map[string]int64{},
 					},
 				},
 			},
@@ -253,8 +277,7 @@ func TestNewSequentialAgent(t *testing.T) {
 
 				for i, gotEvent := range gotEvents {
 					tt.wantEvents[i].Timestamp = gotEvent.Timestamp
-					if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID"),
-						cmpopts.IgnoreFields(session.EventActions{}, "StateDelta")); diff != "" {
+					if diff := cmp.Diff(tt.wantEvents[i], gotEvent, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID")); diff != "" {
 						t.Errorf("event[i] mismatch (-want +got):\n%s", diff)
 					}
 				}

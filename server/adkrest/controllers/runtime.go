@@ -115,9 +115,12 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		return err
 	}
 
-	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg)
+	opts := []runner.RunOption{}
+	if runAgentRequest.StateDelta != nil {
+		opts = append(opts, runner.WithStateDelta(*runAgentRequest.StateDelta))
+	}
+	resp := r.Run(req.Context(), runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg, opts...)
 
-	rw.WriteHeader(http.StatusOK)
 	for event, err := range resp {
 		if err != nil {
 			_, err := fmt.Fprintf(rw, "Error while running agent: %v\n", err)

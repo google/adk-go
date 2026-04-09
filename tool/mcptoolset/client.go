@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -48,6 +47,7 @@ type connectionRefresher struct {
 // refreshableErrors is a list of errors that should trigger a connection refresh.
 var refreshableErrors = []error{
 	mcp.ErrConnectionClosed,
+	mcp.ErrSessionMissing,
 	io.ErrClosedPipe,
 	io.EOF,
 }
@@ -141,10 +141,6 @@ func shouldRefreshConnection(err error) bool {
 		if errors.Is(err, target) {
 			return true
 		}
-	}
-	// TODO: replace with mcp.ErrSessionMissing when it's available https://github.com/modelcontextprotocol/go-sdk/issues/715
-	if strings.Contains(err.Error(), "session not found") {
-		return true
 	}
 	return false
 }

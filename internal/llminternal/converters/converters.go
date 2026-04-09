@@ -24,7 +24,7 @@ func Genai2LLMResponse(res *genai.GenerateContentResponse) *model.LLMResponse {
 	usageMetadata := res.UsageMetadata
 	if len(res.Candidates) > 0 && res.Candidates[0] != nil {
 		candidate := res.Candidates[0]
-		if candidate.Content != nil && len(candidate.Content.Parts) > 0 {
+		if (candidate.Content != nil && len(candidate.Content.Parts) > 0) || candidate.FinishReason == genai.FinishReasonStop {
 			return &model.LLMResponse{
 				Content:           candidate.Content,
 				GroundingMetadata: candidate.GroundingMetadata,
@@ -33,6 +33,7 @@ func Genai2LLMResponse(res *genai.GenerateContentResponse) *model.LLMResponse {
 				AvgLogprobs:       candidate.AvgLogprobs,
 				LogprobsResult:    candidate.LogprobsResult,
 				UsageMetadata:     usageMetadata,
+				ModelVersion:      res.ModelVersion,
 			}
 		}
 		return &model.LLMResponse{
@@ -44,19 +45,21 @@ func Genai2LLMResponse(res *genai.GenerateContentResponse) *model.LLMResponse {
 			AvgLogprobs:       candidate.AvgLogprobs,
 			LogprobsResult:    candidate.LogprobsResult,
 			UsageMetadata:     usageMetadata,
+			ModelVersion:      res.ModelVersion,
 		}
-
 	}
 	if res.PromptFeedback != nil {
 		return &model.LLMResponse{
 			ErrorCode:     string(res.PromptFeedback.BlockReason),
 			ErrorMessage:  res.PromptFeedback.BlockReasonMessage,
 			UsageMetadata: usageMetadata,
+			ModelVersion:  res.ModelVersion,
 		}
 	}
 	return &model.LLMResponse{
 		ErrorCode:     "UNKNOWN_ERROR",
 		ErrorMessage:  "Unknown error.",
 		UsageMetadata: usageMetadata,
+		ModelVersion:  res.ModelVersion,
 	}
 }
