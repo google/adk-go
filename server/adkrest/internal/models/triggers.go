@@ -65,8 +65,8 @@ type EventarcTriggerRequest struct {
 	Time string `json:"time,omitempty"`
 	// In structured mode, ``data`` is always present.
 	// In binary mode, the entire body is the data (often a Pub/Sub wrapper).
-	// json.RawMessage captures the raw JSON payload (Storage, PubSub, whatever)
-	// without needing to know its internal structure!
+	// But sometimes it can be just a JSON object.
+	// E.g. https://googleapis.github.io/google-cloudevents/examples/binary/firestore/DocumentEventData-simple.json
 	Data json.RawMessage `json:"data,omitempty"`
 }
 

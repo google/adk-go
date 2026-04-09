@@ -100,9 +100,9 @@ func (c *EventarcController) EventarcTriggerHandler(w http.ResponseWriter, r *ht
 			respondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+	} else {
 		// Otherwise just marshal the whole event as an input data.
 		// E.g. as https://googleapis.github.io/google-cloudevents/examples/binary/storage/StorageObjectData-simple.json
-	} else {
 		messageBytes, err := json.Marshal(event)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to marshal agent message: %v", err))
