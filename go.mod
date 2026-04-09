@@ -36,6 +36,8 @@ require (
 	rsc.io/ordered v1.1.1
 )
 
+require github.com/hashicorp/golang-lru/v2 v2.0.7
+
 require (
 	cel.dev/expr v0.25.1 // indirect
 	cloud.google.com/go/auth v0.17.0 // indirect

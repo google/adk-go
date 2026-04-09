@@ -212,7 +212,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			debugTelemetry, tp, lp := setup()
+			debugTelemetry, tp, lp := setup(t)
 
 			if tt.testSetup != nil {
 				tt.testSetup(ctx, tp.Tracer("test-tracer"), lp.Logger("test-logger"))
@@ -349,7 +349,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			debugTelemetry, tp, lp := setup()
+			debugTelemetry, tp, lp := setup(t)
 
 			if tt.testSetup != nil {
 				tt.testSetup(ctx, tp.Tracer("test-tracer"), lp.Logger("test-logger"))
@@ -377,12 +377,98 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 	}
 }
 
-func setup() (*DebugTelemetry, *sdktrace.TracerProvider, *sdklog.LoggerProvider) {
-	debugTelemetry := NewDebugTelemetry()
+func TestDebugTelemetryLRU(t *testing.T) {
+	ctx := t.Context()
+
+	debugTelemetry, tp, lp := setupWithConfig(t, &DebugTelemetryConfig{TraceCapacity: 2})
+	tracer := tp.Tracer("test-tracer")
+
+	// 1. Add Trace 1.
+	_, span1 := tracer.Start(ctx, "root-1", trace.WithAttributes(
+		semconv.GenAIConversationID("session-1"),
+		attribute.String("gcp.vertex.agent.event_id", "event-1"),
+	))
+	span1.End()
+
+	// 2. Add Trace 2.
+	_, span2 := tracer.Start(ctx, "root-2", trace.WithAttributes(
+		semconv.GenAIConversationID("session-2"),
+		attribute.String("gcp.vertex.agent.event_id", "event-2"),
+	))
+	span2.End()
+
+	_ = tp.ForceFlush(ctx)
+	_ = lp.ForceFlush(ctx)
+
+	// 3. Verify both traces are present.
+	if gotSpans := len(debugTelemetry.GetSpansBySessionID("session-1")); gotSpans != 1 {
+		t.Errorf("expected 1 span for session-1, got %d", gotSpans)
+	}
+	if gotSpans := len(debugTelemetry.GetSpansBySessionID("session-2")); gotSpans != 1 {
+		t.Errorf("expected 1 span for session-2, got %d", gotSpans)
+	}
+
+	// 4. Access session-2 making it the most recently used.
+	_ = debugTelemetry.GetSpansBySessionID("session-2")
+
+	// 5. Add Trace 3 - should evict Trace 1 because it's the least recently used.
+	_, span3 := tracer.Start(ctx, "root-3", trace.WithAttributes(
+		semconv.GenAIConversationID("session-3"),
+		attribute.String("gcp.vertex.agent.event_id", "event-3"),
+	))
+	span3.End()
+
+	// 6. Verify Trace 1 is evicted, Trace 2 and 3 are present.
+	if gotSpans := len(debugTelemetry.GetSpansBySessionID("session-1")); gotSpans != 0 {
+		t.Errorf("expected 0 spans for session-1, got %d", gotSpans)
+	}
+	if gotSpans := len(debugTelemetry.GetSpansBySessionID("session-2")); gotSpans != 1 {
+		t.Errorf("expected 1 span for session-2, got %d", gotSpans)
+	}
+	if gotSpans := len(debugTelemetry.GetSpansBySessionID("session-3")); gotSpans != 1 {
+		t.Errorf("expected 1 span for session-3, got %d", gotSpans)
+	}
+
+	// 7. Verify Trace 1 spans are removed from event index.
+	if gotSpans := len(debugTelemetry.GetSpansByEventID("event-1")); gotSpans != 0 {
+		t.Errorf("expected 0 spans for event-1, got %d", gotSpans)
+	}
+
+	// 8. Access Trace 2 via GetSpansByEventID, making it the most recently used.
+	_ = debugTelemetry.GetSpansByEventID("event-2")
+
+	// 9. Add Trace 4 - should evict Trace 3 because it's the least recently used.
+	_, span4 := tracer.Start(ctx, "root-4", trace.WithAttributes(
+		semconv.GenAIConversationID("session-4"),
+		attribute.String("gcp.vertex.agent.event_id", "event-4"),
+	))
+	span4.End()
+
+	// 10. Verify Trace 3 is evicted, Trace 2 and 4 are present.
+	if gotSpans := len(debugTelemetry.GetSpansBySessionID("session-2")); gotSpans != 1 {
+		t.Errorf("expected 1 span for session-2, got %d", gotSpans)
+	}
+	if gotSpans := len(debugTelemetry.GetSpansBySessionID("session-4")); gotSpans != 1 {
+		t.Errorf("expected 1 span for session-4, got %d", gotSpans)
+	}
+	if gotSpans := len(debugTelemetry.GetSpansBySessionID("session-3")); gotSpans != 0 {
+		t.Errorf("expected 0 spans for session-3, got %d", gotSpans)
+	}
+}
+
+func setupWithConfig(t *testing.T, cfg *DebugTelemetryConfig) (*DebugTelemetry, *sdktrace.TracerProvider, *sdklog.LoggerProvider) {
+	debugTelemetry, err := NewDebugTelemetryWithConfig(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create debug telemetry: %v", err)
+	}
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(debugTelemetry.SpanProcessor()),
 	)
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(debugTelemetry.LogProcessor()))
 
 	return debugTelemetry, tp, lp
+}
+
+func setup(t *testing.T) (*DebugTelemetry, *sdktrace.TracerProvider, *sdklog.LoggerProvider) {
+	return setupWithConfig(t, nil)
 }

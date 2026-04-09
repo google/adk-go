@@ -15,6 +15,7 @@
 package adkrest
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -34,7 +35,12 @@ import (
 
 // NewServer creates a new ADK REST API server which implements [http.Handler] interface.
 func NewServer(cfg ServerConfig) (*Server, error) {
-	debugTelemetry := services.NewDebugTelemetry()
+	debugTelemetry, err := services.NewDebugTelemetryWithConfig(&services.DebugTelemetryConfig{
+		TraceCapacity: cfg.DebugConfig.TraceCapacity,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create debug telemetry service: %w", err)
+	}
 
 	router := mux.NewRouter().StrictSlash(true)
 	// TODO: Allow taking a prefix to allow customizing the path
@@ -61,6 +67,14 @@ type ServerConfig struct {
 	ArtifactService artifact.Service
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
+	DebugConfig     *DebugTelemetryConfig
+}
+
+// DebugTelemetryConfig contains parameters for the debug telemetry.
+type DebugTelemetryConfig struct {
+	// Maximum number of traces to keep in memory.
+	// If <= 0, the default capacity 10_000 is used.
+	TraceCapacity int
 }
 
 // Server is an HTTP server that serves the ADK REST API.
