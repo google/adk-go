@@ -161,7 +161,6 @@ func (f *FakeWriter) WriteHeader(statusCode int) {
 var _ http.ResponseWriter = &FakeWriter{}
 
 func (f *FakeWriter) Write(p []byte) (n int, err error) {
-
 	log.Printf("Write(): p= %v", p)
 	s := string(p)
 	log.Printf("Write(): s= %v", s)

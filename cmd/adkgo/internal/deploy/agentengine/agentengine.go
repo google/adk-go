@@ -220,7 +220,6 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 			ctx := context.Background()
 			parent := fmt.Sprintf("projects/%s/locations/%s", f.gcloud.projectName, f.gcloud.region)
 			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
-			
 			client, err := aiplatform.NewReasoningEngineClient(ctx, option.WithEndpoint(endpoint))
 			if err != nil {
 				return fmt.Errorf("cannot create ReasoningEngineClient: %w", err)
