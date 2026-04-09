@@ -35,9 +35,11 @@ import (
 
 // NewServer creates a new ADK REST API server which implements [http.Handler] interface.
 func NewServer(cfg ServerConfig) (*Server, error) {
-	debugTelemetry, err := services.NewDebugTelemetryWithConfig(&services.DebugTelemetryConfig{
-		TraceCapacity: cfg.DebugConfig.TraceCapacity,
-	})
+	var debugTelemetryCfg services.DebugTelemetryConfig
+	if cfg.DebugConfig != nil {
+		debugTelemetryCfg.TraceCapacity = cfg.DebugConfig.TraceCapacity
+	}
+	debugTelemetry, err := services.NewDebugTelemetryWithConfig(&debugTelemetryCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create debug telemetry service: %w", err)
 	}
