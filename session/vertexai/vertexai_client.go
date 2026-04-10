@@ -80,8 +80,9 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 		return nil, err
 	}
 	rpcReq := &aiplatformpb.CreateSessionRequest{
-		Parent:  fmt.Sprintf(engineResourceTemplate, c.projectID, c.location, reasoningEngine),
-		Session: pbSession,
+		Parent:    fmt.Sprintf(engineResourceTemplate, c.projectID, c.location, reasoningEngine),
+		Session:   pbSession,
+		SessionId: req.SessionID,
 	}
 	lro, err := c.rpcClient.CreateSession(ctx, rpcReq)
 	if err != nil {
