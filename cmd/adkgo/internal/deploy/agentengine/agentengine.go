@@ -178,7 +178,7 @@ EXPOSE ` + strconv.Itoa(flags.agentEngine.serverPort) + `
 CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.agentEngine.serverPort) + `"`)
 
 			if flags.agentEngine.api {
-				b.WriteString(`, "api", "-webui_address", "127.0.0.1:` + strconv.Itoa(flags.agentEngine.serverPort) + `"`)
+				b.WriteString(`, "api"`)
 			}
 
 			b.WriteString(`]`)
@@ -258,8 +258,32 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 				},
 			}
 
-			if apiKey := os.Getenv("GOOGLE_API_KEY"); apiKey != "" {
+			apiKey := ""
+			p("Attempting to fetch GOOGLE_API_KEY from Secret Manager...")
+			args := []string{"secrets", "versions", "access", "latest", "--secret=GOOGLE_API_KEY"}
+			if f.gcloud.projectName != "" {
+				args = append(args, "--project", f.gcloud.projectName)
+			}
+			cmd := exec.Command("gcloud", args...)
+			output, err := cmd.Output()
+			if err != nil {
+				p("Warning: Failed to fetch GOOGLE_API_KEY from Secret Manager: %v", err)
+			} else {
+				apiKey = strings.TrimSpace(string(output))
+				if apiKey != "" {
+					p("Successfully fetched GOOGLE_API_KEY from Secret Manager.")
+				}
+			}
+
+			if apiKey == "" {
+				p("Attempting to use GOOGLE_API_KEY from local environment...")
+				apiKey = os.Getenv("GOOGLE_API_KEY")
+			}
+
+			if apiKey != "" {
 				req.ReasoningEngine.Spec.DeploymentSpec.Env = append(req.ReasoningEngine.Spec.DeploymentSpec.Env, &aiplatformpb.EnvVar{Name: "GOOGLE_API_KEY", Value: apiKey})
+			} else {
+				p("Warning: GOOGLE_API_KEY is not set. Deployment may fail if needed.")
 			}
 
 			p("Sending CreateReasoningEngine request...")
@@ -281,7 +305,7 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 		})
 }
 
-// deployOnagentEngine executes the sequence of actions preparing and deploying the agent to agentEngine. Then runs authenticating proxy to newly deployed service
+// deployOnagentEngine executes the sequence of actions preparing and deploying the agent to agentEngine
 func (f *deployAgentEngineFlags) deployOnagentEngine() error {
 	fmt.Println(flags)
 
