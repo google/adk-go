@@ -42,12 +42,10 @@ type gCloudFlags struct {
 }
 
 type agentEngineServiceFlags struct {
-	name            string
-	serverPort      int
-	a2aAgentCardURL string
-	a2a             bool // enable a2a or not
-	api             bool // enable api or not
-	webui           bool // enable webui or not
+	name        string
+	displayName string
+	serverPort  int
+	api         bool // enable api or not
 }
 
 type buildFlags struct {
@@ -62,6 +60,7 @@ type sourceFlags struct {
 	srcBasePath        string
 	entryPointPath     string
 	origEntryPointPath string
+	sourceDir          string
 }
 
 type deployAgentEngineFlags struct {
@@ -93,10 +92,8 @@ func init() {
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.build.tempDir, "temp_dir", "t", "", "Temp dir for build, defaults to os.TempDir() if not specified")
 	agentEngineCmd.PersistentFlags().IntVar(&flags.agentEngine.serverPort, "server_port", 8080, "agentEngine server port")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
-	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.a2a, "a2a", true, "Enable A2A")
-	agentEngineCmd.PersistentFlags().StringVarP(&flags.agentEngine.a2aAgentCardURL, "a2a_agent_url", "a", "http://127.0.0.1:8081", "A2A agent card URL as advertised in the public agent card")
+	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.sourceDir, "source_dir", "d", "", "Directory to archive, defaults to current working directory")
 	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.api, "api", true, "Enable API")
-	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.webui, "webui", true, "Enable Web UI")
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -138,6 +135,12 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
 			f.build.archivePath = path.Join(f.build.tempDir, "archive.tgz")
 
+			dateTimeString := time.Now().Format(time.RFC3339)
+			f.agentEngine.displayName = f.agentEngine.name
+			if f.agentEngine.displayName == "" {
+				f.agentEngine.displayName = "ADK Agent: " + dateTimeString
+			}
+
 			return nil
 		})
 }
@@ -177,13 +180,8 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.ag
 			if flags.agentEngine.api {
 				b.WriteString(`, "api", "-webui_address", "127.0.0.1:` + strconv.Itoa(flags.agentEngine.serverPort) + `"`)
 			}
-			if flags.agentEngine.a2a {
-				b.WriteString(`, "a2a", "--a2a_agent_url", "` + flags.agentEngine.a2aAgentCardURL + `"`)
-			}
-			if flags.agentEngine.webui {
-				b.WriteString(`, "webui", "--api_server_address", "http://127.0.0.1:` + strconv.Itoa(flags.agentEngine.serverPort) + `/api"]
-				`)
-			}
+
+			b.WriteString(`]`)
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
 		})
 }
@@ -192,9 +190,13 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.ag
 func (f *deployAgentEngineFlags) createArchive() error {
 	return util.LogStartStop("Creating source archive",
 		func(p util.Printer) error {
-			workspaceRoot, err := os.Getwd()
-			if err != nil {
-				return fmt.Errorf("cannot get current working directory: %w", err)
+			workspaceRoot := f.source.sourceDir
+			if workspaceRoot == "" {
+				var err error
+				workspaceRoot, err = os.Getwd()
+				if err != nil {
+					return fmt.Errorf("cannot get current working directory: %w", err)
+				}
 			}
 			p("Creating:", f.build.archivePath)
 			cmd := exec.Command("tar", "-czf", f.build.archivePath,
@@ -226,16 +228,10 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 				return fmt.Errorf("cannot read archive file: %w", err)
 			}
 
-			dateTimeString := time.Now().Format(time.RFC3339)
-			displayName := f.agentEngine.name
-			if displayName == "" {
-				displayName = "ADK Agent: " + dateTimeString
-			}
-
 			req := &aiplatformpb.CreateReasoningEngineRequest{
 				Parent: parent,
 				ReasoningEngine: &aiplatformpb.ReasoningEngine{
-					DisplayName: displayName,
+					DisplayName: f.agentEngine.displayName,
 					Spec: &aiplatformpb.ReasoningEngineSpec{
 						DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
 							SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
