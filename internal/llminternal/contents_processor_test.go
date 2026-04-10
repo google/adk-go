@@ -909,6 +909,155 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 	}
 }
 
+// Scenario: ParallelAgent with sub-agents "run-alpha" and "run-beta",
+// branches "parallel.run-alpha" and "parallel.run-beta". The user message
+// has empty branch (visible to all). After alpha yields its FunctionCall
+// event, beta's model call reads the session.
+func TestContentsRequestProcessor_IncludeContentsNone_ParallelBranch(t *testing.T) {
+	t.Parallel()
+
+	const (
+		betaAgent   = "run-beta"
+		alphaBranch = "parallel.run-alpha"
+		betaBranch  = "parallel.run-beta"
+	)
+	testModel := &testModel{}
+
+	betaFC := &genai.FunctionCall{
+		ID:   "beta_call_1",
+		Name: "run_command",
+		Args: map[string]any{"command": "ls"},
+	}
+	betaFR := &genai.FunctionResponse{
+		ID:       "beta_call_1",
+		Name:     "run_command",
+		Response: map[string]any{"output": "file1 file2"},
+	}
+
+	testCases := []struct {
+		name   string
+		events []*session.Event
+		want   []*genai.Content
+	}{
+		{
+			// Beta's first model call. Session has:
+			// [user(branch=""), alpha:FC(branch=alpha)]
+			// Expected: beta should see [user message] only.
+			// Bug: buildContentsCurrentTurnContextOnly finds alpha:FC
+			//   as "other agent reply", skips user message, then
+			//   buildContentsDefault filters alpha:FC by branch → empty.
+			name: "FirstModelCall_AlphaFCPresent",
+			events: []*session.Event{
+				{
+					Author: "user",
+					Branch: "", // User message — empty branch, visible to all.
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("Run the parallel test", "user"),
+					},
+				},
+				{
+					Author: "run-alpha",
+					Branch: alphaBranch, // Alpha's FunctionCall on alpha's branch.
+					LLMResponse: model.LLMResponse{
+						Content: NewContentFromFunctionCall(
+							&genai.FunctionCall{
+								ID:   "alpha_call_1",
+								Name: "run_command",
+								Args: map[string]any{"command": "pwd"},
+							}, "model"),
+					},
+				},
+			},
+			want: []*genai.Content{
+				// Must include the user message.
+				genai.NewContentFromText("Run the parallel test", "user"),
+			},
+		},
+		{
+			// Beta's second model call (after beta's tool confirmation).
+			// Session has:
+			// [user(branch=""), alpha:FC(branch=alpha), beta:FC(branch=beta), beta:FR(branch=beta)]
+			// Expected: beta should see [user, beta:FC, beta:FR].
+			// Bug: backward scan finds alpha:FC as "other agent reply",
+			//   starts from there, skips user. After branch filter:
+			//   [beta:FC, beta:FR] — no user message → Gemini 400.
+			name: "SecondModelCall_BetaFCFRPresent",
+			events: []*session.Event{
+				{
+					Author: "user",
+					Branch: "",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("Run the parallel test", "user"),
+					},
+				},
+				{
+					Author: "run-alpha",
+					Branch: alphaBranch,
+					LLMResponse: model.LLMResponse{
+						Content: NewContentFromFunctionCall(
+							&genai.FunctionCall{
+								ID:   "alpha_call_1",
+								Name: "run_command",
+								Args: map[string]any{"command": "pwd"},
+							}, "model"),
+					},
+				},
+				{
+					Author: betaAgent,
+					Branch: betaBranch,
+					LLMResponse: model.LLMResponse{
+						Content: NewContentFromFunctionCall(betaFC, "model"),
+					},
+				},
+				{
+					Author: betaAgent,
+					Branch: betaBranch,
+					LLMResponse: model.LLMResponse{
+						Content: NewContentFromFunctionResponse(betaFR, "user"),
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Run the parallel test", "user"),
+				NewContentFromFunctionCall(betaFC, "model"),
+				NewContentFromFunctionResponse(betaFR, "user"),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			testAgent := utils.Must(llmagent.New(llmagent.Config{
+				Name:            betaAgent,
+				Model:           testModel,
+				IncludeContents: llmagent.IncludeContentsNone,
+			}))
+
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Agent:  testAgent,
+				Branch: betaBranch,
+				Session: &fakeSession{
+					events: tc.events,
+				},
+			})
+
+			req := &model.LLMRequest{}
+			for ev, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if ev != nil {
+					t.Fatal("ContentsRequestProcessor generated an unexpected event")
+				}
+				if err != nil {
+					t.Fatalf("ContentsRequestProcessor failed: %v", err)
+				}
+			}
+			got := req.Contents
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // NewContentFromFunctionCall creates a new Content struct with a single FunctionCall part.
 // It assigns the provided role to the Content.
 func NewContentFromFunctionCall(fc *genai.FunctionCall, role string) *genai.Content {
