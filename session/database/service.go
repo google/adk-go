@@ -49,6 +49,19 @@ func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.S
 	return &databaseService{db: db}, nil
 }
 
+// NewSessionServiceFromDB creates a new [session.Service] implementation using
+// an existing [*gorm.DB] connection. This is useful when the application
+// already manages a database connection and wants to share it across multiple
+// services.
+//
+// It returns an error if db is nil.
+func NewSessionServiceFromDB(db *gorm.DB) (session.Service, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db must not be nil")
+	}
+	return &databaseService{db: db}, nil
+}
+
 // AutoMigrate runs the GORM auto-migration tool to ensure the database schema
 // matches the internal storage models (e.g., storageSession, storageEvent).
 //
