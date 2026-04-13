@@ -62,7 +62,7 @@ func (c *EventarcController) EventarcTriggerHandler(w http.ResponseWriter, r *ht
 		// The entire event is in the body. Decode it.
 		// The payload (Storage or Pub/Sub) gets safely trapped in event.Data as bytes.
 		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
-			http.Error(w, "Bad Request", http.StatusBadRequest)
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("failed to unmarshal eventarc request: %v", err))
 			return
 		}
 	} else {
@@ -78,7 +78,7 @@ func (c *EventarcController) EventarcTriggerHandler(w http.ResponseWriter, r *ht
 		// We just read it as raw bytes into event.Data.
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, "Failed to read body", http.StatusInternalServerError)
+			respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to read body: %v", err))
 			return
 		}
 		event.Data = bodyBytes

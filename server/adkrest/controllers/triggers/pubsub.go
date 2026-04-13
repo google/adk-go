@@ -61,13 +61,13 @@ func (c *PubSubController) PubSubTriggerHandler(w http.ResponseWriter, r *http.R
 
 	agentMessage, err := messageContentFromPubSub(req)
 	if err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("failed to retrieve message content: %v", err))
 		return
 	}
 
 	appName, err := appName(r)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to retrieve app name: %v", err))
 		return
 	}
 
