@@ -253,39 +253,13 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
 								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
 							},
+							SecretEnv: []*aiplatformpb.SecretEnvVar{
+								{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
+							},
 						},
 					},
 				},
 			}
-
-			apiKey := ""
-			p("Attempting to fetch GOOGLE_API_KEY from Secret Manager...")
-			args := []string{"secrets", "versions", "access", "latest", "--secret=GOOGLE_API_KEY"}
-			if f.gcloud.projectName != "" {
-				args = append(args, "--project", f.gcloud.projectName)
-			}
-			cmd := exec.Command("gcloud", args...)
-			output, err := cmd.Output()
-			if err != nil {
-				p("Warning: Failed to fetch GOOGLE_API_KEY from Secret Manager: %v", err)
-			} else {
-				apiKey = strings.TrimSpace(string(output))
-				if apiKey != "" {
-					p("Successfully fetched GOOGLE_API_KEY from Secret Manager.")
-				}
-			}
-
-			if apiKey == "" {
-				p("Attempting to use GOOGLE_API_KEY from local environment...")
-				apiKey = os.Getenv("GOOGLE_API_KEY")
-			}
-
-			if apiKey != "" {
-				req.ReasoningEngine.Spec.DeploymentSpec.Env = append(req.ReasoningEngine.Spec.DeploymentSpec.Env, &aiplatformpb.EnvVar{Name: "GOOGLE_API_KEY", Value: apiKey})
-			} else {
-				p("Warning: GOOGLE_API_KEY is not set. Deployment may fail if needed.")
-			}
-
 			p("Sending CreateReasoningEngine request...")
 			op, err := client.CreateReasoningEngine(ctx, req)
 			if err != nil {
