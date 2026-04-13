@@ -97,7 +97,7 @@ func (c *EventarcController) EventarcTriggerHandler(w http.ResponseWriter, r *ht
 		}
 		messageContent, err = messageContentFromPubSub(pubsub)
 		if err != nil {
-			respondError(w, http.StatusBadRequest, err.Error())
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("failed to retrieve message content: %v", err))
 			return
 		}
 	} else {
@@ -113,7 +113,7 @@ func (c *EventarcController) EventarcTriggerHandler(w http.ResponseWriter, r *ht
 
 	appName, err := appName(r)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to retrieve app name: %v", err))
 		return
 	}
 
