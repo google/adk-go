@@ -114,9 +114,10 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				return
 			}
 			if lastEvent.LLMResponse.Partial {
-				// We may have reached max token limit during streaming mode.
-				// TODO: handle Partial response in model level. CL 781377328
-				yield(nil, fmt.Errorf("TODO: last event is not final"))
+				// The last event is a partial streaming response (e.g., reached
+				// max token limit during streaming, or a sub-agent emitted
+				// partial events). The turn is complete so we simply return
+				// instead of looping again.
 				return
 			}
 		}
