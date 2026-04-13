@@ -15,12 +15,15 @@
 package llminternal
 
 import (
+	"context"
 	"errors"
+	"iter"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/agent/runconfig"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
@@ -573,5 +576,46 @@ func TestMergeEventActions(t *testing.T) {
 				t.Errorf("mergeEventActions() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// mockModel implements model.LLM for testing callLLM.
+type mockModel struct {
+	name            string
+	generateContent func(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error]
+}
+
+func (m *mockModel) Name() string { return m.name }
+
+func (m *mockModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if m.generateContent != nil {
+		return m.generateContent(ctx, req, stream)
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {}
+}
+
+func TestCallLLMNilResponse(t *testing.T) {
+	// Verify that callLLM does not panic when the model yields a nil LLMResponse.
+	// This is a regression test for issue #586.
+	mm := &mockModel{
+		name: "test-model",
+		generateContent: func(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+			return func(yield func(*model.LLMResponse, error) bool) {
+				// Yield a nil LLMResponse without an error.
+				yield(nil, nil)
+			}
+		},
+	}
+
+	f := &Flow{Model: mm}
+	baseCtx := runconfig.ToContext(t.Context(), &runconfig.RunConfig{})
+	ctx := icontext.NewInvocationContext(baseCtx, icontext.InvocationContextParams{})
+	stateDelta := make(map[string]any)
+
+	// Iterate over callLLM results; the test passes if no panic occurs.
+	for _, err := range f.callLLM(ctx, &model.LLMRequest{}, stateDelta) {
+		if err != nil {
+			t.Fatalf("callLLM returned unexpected error: %v", err)
+		}
 	}
 }
