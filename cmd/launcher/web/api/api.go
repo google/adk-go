@@ -81,7 +81,6 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		ArtifactService: config.ArtifactService,
 		SSEWriteTimeout: a.config.sseWriteTimeout,
 		PluginConfig:    config.PluginConfig,
-		DebugConfig:     &adkrest.DebugTelemetryConfig{},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create REST server: %w", err)
