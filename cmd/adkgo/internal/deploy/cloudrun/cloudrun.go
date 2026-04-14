@@ -52,6 +52,8 @@ type cloudRunServiceFlags struct {
 	webui           bool // enable webui or not
 	pubsub          bool // enable pubsub trigger or not
 	pubsubTrigger   triggerConfigFlags
+	eventarc        bool // enable eventarc trigger or not
+	eventarcTrigger triggerConfigFlags
 }
 
 type localProxyFlags struct {
@@ -113,6 +115,11 @@ func init() {
 	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.pubsubTrigger.baseDelay, "pubsub_base_delay", 1*time.Second, "Base delay for PubSub trigger retry exponential backoff")
 	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.pubsubTrigger.maxDelay, "pubsub_max_delay", 10*time.Second, "Maximum delay for PubSub trigger retry exponential backoff")
 	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.pubsubTrigger.maxRuns, "pubsub_max_concurrent_runs", 100, "Maximum concurrent PubSub trigger runs")
+	cloudrunCmd.PersistentFlags().BoolVar(&flags.cloudRun.eventarc, "eventarc", false, "Enable Eventarc subrouter")
+	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.eventarcTrigger.maxRetries, "eventarc_max_retries", 3, "Maximum retries for HTTP 429 errors from Eventarc triggers")
+	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.eventarcTrigger.baseDelay, "eventarc_base_delay", 1*time.Second, "Base delay for Eventarc trigger retry exponential backoff")
+	cloudrunCmd.PersistentFlags().DurationVar(&flags.cloudRun.eventarcTrigger.maxDelay, "eventarc_max_delay", 10*time.Second, "Maximum delay for Eventarc trigger retry exponential backoff")
+	cloudrunCmd.PersistentFlags().IntVar(&flags.cloudRun.eventarcTrigger.maxRuns, "eventarc_max_concurrent_runs", 100, "Maximum concurrent Eventarc trigger runs")
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -216,6 +223,13 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cl
 				b.WriteString(fmt.Sprintf(`, "--trigger_base_delay", "%s"`, flags.cloudRun.pubsubTrigger.baseDelay.String()))
 				b.WriteString(fmt.Sprintf(`, "--trigger_max_delay", "%s"`, flags.cloudRun.pubsubTrigger.maxDelay.String()))
 				b.WriteString(fmt.Sprintf(`, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.pubsubTrigger.maxRuns))
+			}
+			if flags.cloudRun.eventarc {
+				b.WriteString(`, "eventarc"`)
+				b.WriteString(fmt.Sprintf(`, "--trigger_max_retries", "%d"`, flags.cloudRun.eventarcTrigger.maxRetries))
+				b.WriteString(fmt.Sprintf(`, "--trigger_base_delay", "%s"`, flags.cloudRun.eventarcTrigger.baseDelay.String()))
+				b.WriteString(fmt.Sprintf(`, "--trigger_max_delay", "%s"`, flags.cloudRun.eventarcTrigger.maxDelay.String()))
+				b.WriteString(fmt.Sprintf(`, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.eventarcTrigger.maxRuns))
 			}
 			b.WriteString(`]`)
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
