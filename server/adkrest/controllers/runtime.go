@@ -123,18 +123,13 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	for event, err := range resp {
 		if err != nil {
-			_, err := fmt.Fprintf(rw, "Error while running agent: %v\n", err)
+			err := flashErrorEvent(rc, rw, map[string]string{"error": err.Error()})
 			if err != nil {
-				return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
+				return err
 			}
-			err = rc.Flush()
-			if err != nil {
-				return newStatusError(fmt.Errorf("failed to flush: %w", err), http.StatusInternalServerError)
-			}
-
 			continue
 		}
-		err := flashEvent(rc, rw, *event)
+		err := flashEvent(rc, rw, models.FromSessionEvent(*event))
 		if err != nil {
 			return err
 		}
@@ -142,12 +137,20 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	return nil
 }
 
-func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, event session.Event) error {
+func flashErrorEvent(rc *http.ResponseController, rw http.ResponseWriter, data any) error {
+	_, err := fmt.Fprintf(rw, "event: error\n")
+	if err != nil {
+		return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
+	}
+	return flashEvent(rc, rw, data)
+}
+
+func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data any) error {
 	_, err := fmt.Fprintf(rw, "data: ")
 	if err != nil {
 		return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
 	}
-	err = json.NewEncoder(rw).Encode(models.FromSessionEvent(event))
+	err = json.NewEncoder(rw).Encode(data)
 	if err != nil {
 		return newStatusError(fmt.Errorf("failed to encode response: %w", err), http.StatusInternalServerError)
 	}
