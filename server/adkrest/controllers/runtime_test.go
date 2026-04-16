@@ -25,13 +25,14 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adkrest/internal/fakes"
 	"google.golang.org/adk/server/adkrest/internal/models"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
