@@ -17,12 +17,9 @@ package skilltoolset
 import (
 	"context"
 	"fmt"
-	"html"
-	"strings"
-
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/skilltoolset/internal/skilltool"
@@ -115,38 +112,6 @@ func (ts *SkillToolset) ProcessRequest(ctx tool.Context, req *model.LLMRequest) 
 	if len(skills) == 0 {
 		return nil
 	}
-	appendInstruction(req, ts.systemInstruction+"\n"+skillsToXML(skills))
+	utils.AppendInstructions(req, ts.systemInstruction, skilltool.SkillsToXML(skills))
 	return nil
-}
-
-func skillsToXML(frontmatters []*skill.Frontmatter) string {
-	var sb strings.Builder
-	sb.WriteString("<available_skills>\n")
-	for _, fm := range frontmatters {
-		sb.WriteString("<skill>\n")
-		sb.WriteString("<name>\n")
-		sb.WriteString(html.EscapeString(fm.Name))
-		sb.WriteString("\n</name>\n")
-		sb.WriteString("<description>\n")
-		sb.WriteString(html.EscapeString(fm.Description))
-		sb.WriteString("\n</description>\n")
-		sb.WriteString("</skill>\n")
-	}
-	sb.WriteString("</available_skills>")
-	return sb.String()
-}
-
-func appendInstruction(req *model.LLMRequest, instruction string) {
-	if req.Config == nil {
-		req.Config = &genai.GenerateContentConfig{}
-	}
-	if req.Config.SystemInstruction == nil {
-		req.Config.SystemInstruction = &genai.Content{
-			Role: genai.RoleUser,
-		}
-	}
-	req.Config.SystemInstruction.Parts = append(
-		req.Config.SystemInstruction.Parts,
-		genai.NewPartFromText(instruction),
-	)
 }

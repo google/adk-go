@@ -23,6 +23,8 @@ import (
 	"google.golang.org/adk/tool/skilltoolset/skill"
 )
 
+const maxResourceSize = 10 * 1024 * 1024 // 10 MiB
+
 // LoadSkillResourceArgs represents the input for retrieving a resource out of a skill's resources.
 type LoadSkillResourceArgs struct {
 	SkillName    string `json:"skill_name" jsonschema:"The name of the skill."`
@@ -63,9 +65,12 @@ func loadSkillResource(ctx tool.Context, args LoadSkillResourceArgs, source skil
 	defer func() {
 		_ = reader.Close()
 	}()
-	content, err := io.ReadAll(reader)
+	content, err := io.ReadAll(io.LimitReader(reader, maxResourceSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("read resource '%s' from skill '%s': %w", args.ResourcePath, args.SkillName, err)
+	}
+	if int64(len(content)) > maxResourceSize {
+		return nil, fmt.Errorf("resource '%s' from skill '%s' is too large (limit: %d bytes)", args.ResourcePath, args.SkillName, maxResourceSize)
 	}
 	return &LoadSkillResourceResult{
 		SkillName: args.SkillName,

@@ -49,10 +49,10 @@ func listSkills(ctx tool.Context, _ ListSkillsArgs, source skill.Source) (*ListS
 	if err != nil {
 		return nil, err
 	}
-	return &ListSkillsResult{SkillsXML: skillsToXML(skills)}, nil
+	return &ListSkillsResult{SkillsXML: SkillsToXML(skills)}, nil
 }
 
-func skillsToXML(frontmatters []*skill.Frontmatter) string {
+func SkillsToXML(frontmatters []*skill.Frontmatter) string {
 	var sb strings.Builder
 	sb.WriteString("<available_skills>\n")
 	for _, fm := range frontmatters {
