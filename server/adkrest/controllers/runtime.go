@@ -129,6 +129,9 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 			}
 			continue
 		}
+		if event == nil {
+			continue
+		}
 		err := flashEvent(rc, rw, models.FromSessionEvent(*event))
 		if err != nil {
 			return err
@@ -146,15 +149,11 @@ func flashErrorEvent(rc *http.ResponseController, rw http.ResponseWriter, data a
 }
 
 func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data any) error {
-	_, err := fmt.Fprintf(rw, "data: ")
+	marshalledData, err := json.Marshal(data)
 	if err != nil {
-		return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
+		return newStatusError(fmt.Errorf("failed to marshal response: %w", err), http.StatusInternalServerError)
 	}
-	err = json.NewEncoder(rw).Encode(data)
-	if err != nil {
-		return newStatusError(fmt.Errorf("failed to encode response: %w", err), http.StatusInternalServerError)
-	}
-	_, err = fmt.Fprintf(rw, "\n")
+	_, err = fmt.Fprintf(rw, "data: %s\n\n", marshalledData)
 	if err != nil {
 		return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
 	}
