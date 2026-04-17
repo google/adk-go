@@ -28,8 +28,6 @@ import (
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
 )
 
 func main() {
@@ -44,23 +42,6 @@ func main() {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
-	type ParsedData struct {
-		Data       string         `json:"data"`
-		Attributes map[string]any `json:"attributes"`
-	}
-
-	handler := func(ctx tool.Context, input ParsedData) (ParsedData, error) {
-		return input, nil
-	}
-
-	parseEventTool, err := functiontool.New(functiontool.Config{
-		Name:        "parse_event",
-		Description: "parses raw event data",
-	}, handler)
-	if err != nil {
-		log.Fatalf("Failed to create tool: %v", err)
-	}
-
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "event_processor",
 		Model:       model,
@@ -70,14 +51,10 @@ func main() {
 		events from Pub/Sub and Eventarc triggers.
 
 		When you receive an event:
-		1. Use the "parse_event" tool to extract the event data and attributes.
-		2. Analyze the event contents and determine what action to take.
-		3. Summarize what you found and what action you would recommend.
+		1. Analyze the event contents and determine what action to take.
+		2. Summarize what you found and what action you would recommend.
 
 		Be concise and structured in your responses.`,
-		Tools: []tool.Tool{
-			parseEventTool,
-		},
 	})
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
