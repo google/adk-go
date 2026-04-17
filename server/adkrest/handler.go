@@ -67,7 +67,7 @@ type ServerConfig struct {
 	ArtifactService artifact.Service
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
-	DebugConfig     *DebugTelemetryConfig
+	DebugConfig     DebugTelemetryConfig
 }
 
 // DebugTelemetryConfig contains parameters for the debug telemetry.
