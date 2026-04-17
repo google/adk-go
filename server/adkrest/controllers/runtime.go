@@ -104,13 +104,13 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
-		http.Error(rw, "failed to decode request body: "+err.Error(), http.StatusInternalServerError)
+		http.Error(rw, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
-		http.Error(rw, "failed to validate session: "+err.Error(), http.StatusInternalServerError)
+		http.Error(rw, "failed to find the session: "+err.Error(), http.StatusNotFound)
 		return
 	}
 
@@ -135,7 +135,7 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	for event, err := range resp {
 		if err != nil {
 			err := flashErrorEvent(rc, rw, err)
-			// The error returned only when we cannot communicate with the client.
+			// The error is returned only when we cannot communicate with the client
 			// Exit the handler as connection is closed.
 			if err != nil {
 				log.Printf("failed to flash error event: %v", err)
