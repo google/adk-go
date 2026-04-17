@@ -49,8 +49,8 @@ type Config struct {
 	Source skill.Source
 	// Optional name of the toolset. If empty, default name will be used.
 	Name string
-	// Optional system instruction. If not provided, default instruction will be used.
-	SystemInstruction *string
+	// Optional system instruction. If empty, default instruction will be used.
+	SystemInstruction string
 }
 
 // SkillToolset provides a toolset for skills.
@@ -71,8 +71,8 @@ func New(ctx context.Context, cfg Config) (*SkillToolset, error) {
 		name = cfg.Name
 	}
 	instruction := defaultSkillSystemInstruction
-	if cfg.SystemInstruction != nil {
-		instruction = *cfg.SystemInstruction
+	if cfg.SystemInstruction != "" {
+		instruction = cfg.SystemInstruction
 	}
 	listTool, err := skilltool.ListSkills(cfg.Source)
 	if err != nil {
