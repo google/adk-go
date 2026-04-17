@@ -101,27 +101,27 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		return
 	}
 
-	// Flush as soon as possible so the client doesn't drop connection.
-	if err := rc.Flush(); err != nil {
-		http.Error(rw, "failed to flush headers", http.StatusInternalServerError)
-		return
-	}
-
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
-		_ = flashErrorEvent(rc, rw, fmt.Errorf("failed to decode request body: %w", err))
+		http.Error(rw, "failed to decode request body: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
-		_ = flashErrorEvent(rc, rw, fmt.Errorf("failed to validate session: %w", err))
+		http.Error(rw, "failed to validate session: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	r, rCfg, err := c.getRunner(runAgentRequest)
 	if err != nil {
-		_ = flashErrorEvent(rc, rw, fmt.Errorf("failed to get runner: %w", err))
+		http.Error(rw, "failed to get runner: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Flush as soon as possible so the client doesn't drop connection.
+	if err := rc.Flush(); err != nil {
+		http.Error(rw, "failed to flush headers", http.StatusInternalServerError)
 		return
 	}
 
