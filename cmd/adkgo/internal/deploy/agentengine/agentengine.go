@@ -32,6 +32,7 @@ import (
 	"cloud.google.com/go/aiplatform/apiv1/aiplatformpb"
 	"github.com/spf13/cobra"
 	"google.golang.org/api/option"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	"google.golang.org/adk/cmd/adkgo/internal/deploy"
 	"google.golang.org/adk/internal/cli/util"
@@ -44,9 +45,11 @@ type gCloudFlags struct {
 }
 
 type agentEngineServiceFlags struct {
-	name        string
-	displayName string
-	serverPort  int
+	name         string
+	displayName  string
+	serverPort   int
+	update       bool
+	instanceName string
 }
 
 type buildFlags struct {
@@ -94,6 +97,8 @@ func init() {
 	agentEngineCmd.PersistentFlags().IntVar(&flags.agentEngine.serverPort, "server_port", 8080, "agentEngine server port")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.sourceDir, "source_dir", "d", "", "Directory to archive, defaults to current working directory")
+	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.update, "update", false, "Update an existing Agent Engine instance")
+	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.instanceName, "instance_name", "", "Full resource name of the Agent Engine instance to update")
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -288,6 +293,78 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 		})
 }
 
+// gcloudUpdateAgentEngine invokes gcloud to update source on agentEngine
+func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
+	return util.LogStartStop("Updating Agent Engine",
+		func(p util.Printer) error {
+			ctx := context.Background()
+			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
+			client, err := aiplatform.NewReasoningEngineClient(ctx, option.WithEndpoint(endpoint))
+			if err != nil {
+				return fmt.Errorf("cannot create ReasoningEngineClient: %w", err)
+			}
+			defer func() {
+				if err := client.Close(); err != nil {
+					p("Warning: failed to close ReasoningEngineClient: %v", err)
+				}
+			}()
+
+			archiveContent, err := os.ReadFile(f.build.archivePath)
+			if err != nil {
+				return fmt.Errorf("cannot read archive file: %w", err)
+			}
+
+			req := &aiplatformpb.UpdateReasoningEngineRequest{
+				ReasoningEngine: &aiplatformpb.ReasoningEngine{
+					Name: f.agentEngine.instanceName,
+					Spec: &aiplatformpb.ReasoningEngineSpec{
+						DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
+							SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
+								Source: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource_{
+									InlineSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource{
+										SourceArchive: archiveContent,
+									},
+								},
+								LanguageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec_{
+									ImageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec{},
+								},
+							},
+						},
+						AgentFramework: "google-adk",
+						DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
+							Env: []*aiplatformpb.EnvVar{
+								{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
+								{Name: "NUM_WORKERS", Value: "1"},
+								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
+								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
+							},
+							SecretEnv: []*aiplatformpb.SecretEnvVar{
+								{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
+							},
+						},
+					},
+				},
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec"}},
+			}
+			p("Sending UpdateReasoningEngine request...")
+			op, err := client.UpdateReasoningEngine(ctx, req)
+			if err != nil {
+				return fmt.Errorf("UpdateReasoningEngine failed: %w", err)
+			}
+
+			p("Waiting for operation to complete...")
+			re, err := op.Wait(ctx)
+			if err != nil {
+				return fmt.Errorf("operation failed: %w", err)
+			}
+
+			p("Updated Reasoning Engine:", re.Name)
+			p("Display Name:", re.DisplayName)
+
+			return nil
+		})
+}
+
 // deployOnagentEngine executes the sequence of actions preparing and deploying the agent to agentEngine
 func (f *deployAgentEngineFlags) deployOnagentEngine() error {
 	fmt.Println(flags)
@@ -304,7 +381,14 @@ func (f *deployAgentEngineFlags) deployOnagentEngine() error {
 	if err != nil {
 		return err
 	}
-	err = f.gcloudDeployToAgentEngine()
+	if f.agentEngine.update {
+		if f.agentEngine.instanceName == "" {
+			return fmt.Errorf("--instance_name is required when --update is set")
+		}
+		err = f.gcloudUpdateAgentEngine()
+	} else {
+		err = f.gcloudDeployToAgentEngine()
+	}
 	if err != nil {
 		return err
 	}
