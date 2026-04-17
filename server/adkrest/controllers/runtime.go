@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -137,7 +138,7 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 			// The error returned only when we cannot communicate with the client.
 			// Exit the handler as connection is closed.
 			if err != nil {
-				fmt.Printf("failed to flash error event: %v", err)
+				log.Printf("failed to flash error event: %v", err)
 				return
 			}
 			continue
@@ -145,35 +146,18 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		if event == nil {
 			continue
 		}
-		marshalledData, err := marshalSSEEvent(rc, rw, event)
+		// Skip reporting error if it fails to marshal to the client (to avoid recursive error reporting).
+		marshalledData, err := json.Marshal(models.FromSessionEvent(*event))
 		if err != nil {
-			fmt.Printf("failed to marshal event: %v", err)
+			log.Printf("failed to marshal event: %v", err)
 			return
-		}
-		if marshalledData == nil {
-			continue
 		}
 		err = flashEvent(rc, rw, string(marshalledData))
 		if err != nil {
-			fmt.Printf("failed to flash event: %v", err)
+			log.Printf("failed to flash event: %v", err)
 			return
 		}
 	}
-}
-
-func marshalSSEEvent(rc *http.ResponseController, rw http.ResponseWriter, event *session.Event) ([]byte, error) {
-	marshalledData, err := json.Marshal(models.FromSessionEvent(*event))
-	if err != nil {
-		// Marshalling isn't connected to the connection issues, let's try to communicate error
-		// to the client.
-		writeErr := flashErrorEvent(rc, rw, err)
-		// If error while flashing the error - connection issues, close connection.
-		if writeErr != nil {
-			return nil, fmt.Errorf("flash error event: %w", writeErr)
-		}
-		return nil, nil
-	}
-	return marshalledData, nil
 }
 
 func flashErrorEvent(rc *http.ResponseController, rw http.ResponseWriter, origError error) error {
@@ -181,8 +165,12 @@ func flashErrorEvent(rc *http.ResponseController, rw http.ResponseWriter, origEr
 	if err != nil {
 		return fmt.Errorf("write error event: %w", err)
 	}
-	safeErrorJSON := fmt.Sprintf(`{"error":%q}`, origError.Error())
-	return flashEvent(rc, rw, safeErrorJSON)
+	safeErrorJSON, err := json.Marshal(map[string]string{"error": origError.Error()})
+	if err != nil {
+		// Skip reporting error if it fails to marshal to the client (to avoid recursive error reporting).
+		return fmt.Errorf("marshal error event: %w", err)
+	}
+	return flashEvent(rc, rw, string(safeErrorJSON))
 }
 
 func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data string) error {
