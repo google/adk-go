@@ -221,10 +221,7 @@ func TestRunSSEHandler(t *testing.T) {
 			w := &recorderWithDeadline{rr}
 
 			// Call handler
-			err = controller.RunSSEHandler(w, req)
-			if err != nil {
-				t.Fatalf("RunSSEHandler failed: %v", err)
-			}
+			controller.RunSSEHandler(w, req)
 
 			// Verify response
 			if rr.Code != tt.wantStatus {
