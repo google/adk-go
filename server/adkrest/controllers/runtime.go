@@ -89,10 +89,6 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 
 // RunSSEHandler executes an agent run and streams the resulting events using Server-Sent Events (SSE).
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) {
-	rw.Header().Set("Content-Type", "text/event-stream")
-	rw.Header().Set("Cache-Control", "no-cache")
-	rw.Header().Set("Connection", "keep-alive")
-
 	// set custom deadlines for this request - it overrides server-wide timeouts
 	rc := http.NewResponseController(rw)
 	deadline := time.Now().Add(c.sseTimeout)
@@ -121,6 +117,10 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	}
 
 	// Flush as soon as possible so the client doesn't drop connection.
+	// Add the headers after the error handling to avoid wrong content type.
+	rw.Header().Set("Content-Type", "text/event-stream")
+	rw.Header().Set("Cache-Control", "no-cache")
+	rw.Header().Set("Connection", "keep-alive")
 	if err := rc.Flush(); err != nil {
 		http.Error(rw, "failed to flush headers", http.StatusInternalServerError)
 		return
