@@ -22,63 +22,134 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-func TestAiplatformToGenaiContent_PreservesFunctionCallAndResponseIDs(t *testing.T) {
-	callID := "test-call-id-123"
-	argsStruct, err := structpb.NewStruct(map[string]any{"param": "value"})
-	if err != nil {
-		t.Fatalf("failed to create args struct: %v", err)
-	}
-	respStruct, err := structpb.NewStruct(map[string]any{"result": "ok"})
-	if err != nil {
-		t.Fatalf("failed to create response struct: %v", err)
+func TestAiplatformToGenaiContent_FunctionCallMapping(t *testing.T) {
+	makeArgs := func(m map[string]any) *structpb.Struct {
+		s, err := structpb.NewStruct(m)
+		if err != nil {
+			t.Fatalf("failed to create struct: %v", err)
+		}
+		return s
 	}
 
-	sessionEvent := &aiplatformpb.SessionEvent{
-		Content: &aiplatformpb.Content{
-			Role: "model",
-			Parts: []*aiplatformpb.Part{
-				{
-					Data: &aiplatformpb.Part_FunctionCall{
-						FunctionCall: &aiplatformpb.FunctionCall{
-							Id:   callID,
-							Name: "my_tool",
-							Args: argsStruct,
+	tests := []struct {
+		name         string
+		input        *aiplatformpb.SessionEvent
+		wantID       string
+		wantName     string
+		wantArgKey   string
+		wantArgVal   string
+		isResponse   bool
+		wantRespKey  string
+		wantRespVal  string
+	}{
+		{
+			name: "FunctionCall preserves ID, Name, and Args",
+			input: &aiplatformpb.SessionEvent{
+				Content: &aiplatformpb.Content{
+					Role: "model",
+					Parts: []*aiplatformpb.Part{
+						{
+							Data: &aiplatformpb.Part_FunctionCall{
+								FunctionCall: &aiplatformpb.FunctionCall{
+									Id:   "call-id-abc",
+									Name: "my_tool",
+									Args: makeArgs(map[string]any{"param": "value"}),
+								},
+							},
 						},
 					},
 				},
 			},
+			wantID:     "call-id-abc",
+			wantName:   "my_tool",
+			wantArgKey: "param",
+			wantArgVal: "value",
 		},
-	}
-	gotCall := aiplatformToGenaiContent(sessionEvent)
-	if gotCall == nil || len(gotCall.Parts) == 0 || gotCall.Parts[0].FunctionCall == nil {
-		t.Fatal("expected FunctionCall part, got nil")
-	}
-	if got := gotCall.Parts[0].FunctionCall.ID; got != callID {
-		t.Errorf("FunctionCall.ID = %q, want %q", got, callID)
-	}
-
-	sessionEvent2 := &aiplatformpb.SessionEvent{
-		Content: &aiplatformpb.Content{
-			Role: "user",
-			Parts: []*aiplatformpb.Part{
-				{
-					Data: &aiplatformpb.Part_FunctionResponse{
-						FunctionResponse: &aiplatformpb.FunctionResponse{
-							Id:       callID,
-							Name:     "my_tool",
-							Response: respStruct,
+		{
+			name: "FunctionCall with empty ID is preserved as empty",
+			input: &aiplatformpb.SessionEvent{
+				Content: &aiplatformpb.Content{
+					Role: "model",
+					Parts: []*aiplatformpb.Part{
+						{
+							Data: &aiplatformpb.Part_FunctionCall{
+								FunctionCall: &aiplatformpb.FunctionCall{
+									Id:   "",
+									Name: "tool_no_id",
+									Args: makeArgs(map[string]any{"x": "y"}),
+								},
+							},
 						},
 					},
 				},
 			},
+			wantID:     "",
+			wantName:   "tool_no_id",
+			wantArgKey: "x",
+			wantArgVal: "y",
+		},
+		{
+			name:       "FunctionResponse preserves ID, Name, and Response",
+			isResponse: true,
+			input: &aiplatformpb.SessionEvent{
+				Content: &aiplatformpb.Content{
+					Role: "user",
+					Parts: []*aiplatformpb.Part{
+						{
+							Data: &aiplatformpb.Part_FunctionResponse{
+								FunctionResponse: &aiplatformpb.FunctionResponse{
+									Id:       "call-id-abc",
+									Name:     "my_tool",
+									Response: makeArgs(map[string]any{"result": "ok"}),
+								},
+							},
+						},
+					},
+				},
+			},
+			wantID:      "call-id-abc",
+			wantName:    "my_tool",
+			wantRespKey: "result",
+			wantRespVal: "ok",
 		},
 	}
-	gotResp := aiplatformToGenaiContent(sessionEvent2)
-	if gotResp == nil || len(gotResp.Parts) == 0 || gotResp.Parts[0].FunctionResponse == nil {
-		t.Fatal("expected FunctionResponse part, got nil")
-	}
-	if got := gotResp.Parts[0].FunctionResponse.ID; got != callID {
-		t.Errorf("FunctionResponse.ID = %q, want %q", got, callID)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := aiplatformToGenaiContent(tt.input)
+			if got == nil || len(got.Parts) == 0 {
+				t.Fatal("expected at least one part, got nil or empty")
+			}
+			if tt.isResponse {
+				fr := got.Parts[0].FunctionResponse
+				if fr == nil {
+					t.Fatal("expected FunctionResponse part, got nil")
+				}
+				if fr.ID != tt.wantID {
+					t.Errorf("FunctionResponse.ID = %q, want %q", fr.ID, tt.wantID)
+				}
+				if fr.Name != tt.wantName {
+					t.Errorf("FunctionResponse.Name = %q, want %q", fr.Name, tt.wantName)
+				}
+				if got, ok := fr.Response[tt.wantRespKey]; !ok || got != tt.wantRespVal {
+					t.Errorf("FunctionResponse.Response[%q] = %v, want %q", tt.wantRespKey, got, tt.wantRespVal)
+				}
+			} else {
+				fc := got.Parts[0].FunctionCall
+				if fc == nil {
+					t.Fatal("expected FunctionCall part, got nil")
+				}
+				if fc.ID != tt.wantID {
+					t.Errorf("FunctionCall.ID = %q, want %q", fc.ID, tt.wantID)
+				}
+				if fc.Name != tt.wantName {
+					t.Errorf("FunctionCall.Name = %q, want %q", fc.Name, tt.wantName)
+				}
+				if got, ok := fc.Args[tt.wantArgKey]; !ok || got != tt.wantArgVal {
+					t.Errorf("FunctionCall.Args[%q] = %v, want %q", tt.wantArgKey, got, tt.wantArgVal)
+				}
+			}
+		})
 	}
 }
 
