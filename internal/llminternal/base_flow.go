@@ -262,10 +262,13 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 			}
 		}
 
-		if f.Tools != nil {
-			if err := toolPreprocess(ctx, req, f.Tools); err != nil {
-				yield(nil, err)
-			}
+		if err := toolPreprocess(ctx, req, f.Tools); err != nil {
+			yield(nil, err)
+			return
+		}
+		if err := toolsetPreprocess(ctx, req); err != nil {
+			yield(nil, err)
+			return
 		}
 	}
 }
@@ -283,6 +286,24 @@ func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []
 		toolCtx := toolinternal.NewToolContext(ctx, "", &session.EventActions{}, nil)
 		if err := requestProcessor.ProcessRequest(toolCtx, req); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func toolsetPreprocess(ctx agent.InvocationContext, req *model.LLMRequest) error {
+	llmAgent, ok := ctx.Agent().(Agent)
+	if !ok {
+		return nil
+	}
+	for _, toolset := range Reveal(llmAgent).Toolsets {
+		processor, ok := toolset.(toolinternal.RequestProcessor)
+		if !ok {
+			continue // Not all toolsets implement RequestProcessor.
+		}
+		toolCtx := toolinternal.NewToolContext(ctx, "", nil, nil)
+		if err := processor.ProcessRequest(toolCtx, req); err != nil {
+			return fmt.Errorf("process request by toolset %q: %w", toolset.Name(), err)
 		}
 	}
 	return nil
