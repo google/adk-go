@@ -17,8 +17,70 @@ package vertexai
 import (
 	"testing"
 
+	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 	"google.golang.org/adk/util/vertexai"
+	"google.golang.org/protobuf/types/known/structpb"
 )
+
+func TestAiplatformToGenaiContent_PreservesFunctionCallAndResponseIDs(t *testing.T) {
+	callID := "test-call-id-123"
+	argsStruct, err := structpb.NewStruct(map[string]any{"param": "value"})
+	if err != nil {
+		t.Fatalf("failed to create args struct: %v", err)
+	}
+	respStruct, err := structpb.NewStruct(map[string]any{"result": "ok"})
+	if err != nil {
+		t.Fatalf("failed to create response struct: %v", err)
+	}
+
+	sessionEvent := &aiplatformpb.SessionEvent{
+		Content: &aiplatformpb.Content{
+			Role: "model",
+			Parts: []*aiplatformpb.Part{
+				{
+					Data: &aiplatformpb.Part_FunctionCall{
+						FunctionCall: &aiplatformpb.FunctionCall{
+							Id:   callID,
+							Name: "my_tool",
+							Args: argsStruct,
+						},
+					},
+				},
+			},
+		},
+	}
+	gotCall := aiplatformToGenaiContent(sessionEvent)
+	if gotCall == nil || len(gotCall.Parts) == 0 || gotCall.Parts[0].FunctionCall == nil {
+		t.Fatal("expected FunctionCall part, got nil")
+	}
+	if got := gotCall.Parts[0].FunctionCall.ID; got != callID {
+		t.Errorf("FunctionCall.ID = %q, want %q", got, callID)
+	}
+
+	sessionEvent2 := &aiplatformpb.SessionEvent{
+		Content: &aiplatformpb.Content{
+			Role: "user",
+			Parts: []*aiplatformpb.Part{
+				{
+					Data: &aiplatformpb.Part_FunctionResponse{
+						FunctionResponse: &aiplatformpb.FunctionResponse{
+							Id:       callID,
+							Name:     "my_tool",
+							Response: respStruct,
+						},
+					},
+				},
+			},
+		},
+	}
+	gotResp := aiplatformToGenaiContent(sessionEvent2)
+	if gotResp == nil || len(gotResp.Parts) == 0 || gotResp.Parts[0].FunctionResponse == nil {
+		t.Fatal("expected FunctionResponse part, got nil")
+	}
+	if got := gotResp.Parts[0].FunctionResponse.ID; got != callID {
+		t.Errorf("FunctionResponse.ID = %q, want %q", got, callID)
+	}
+}
 
 func TestGetReasoningEngineID(t *testing.T) {
 	tests := []struct {
