@@ -590,6 +590,64 @@ func TestMergeEventActions(t *testing.T) {
 				Escalate:          true,
 			},
 		},
+		{
+			name: "artifact delta merged with non-overlapping keys",
+			base: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 1},
+			},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_b.txt": 2},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 1, "file_b.txt": 2},
+			},
+		},
+		{
+			name: "artifact delta - highest version wins for same key",
+			base: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 3},
+			},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 1},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 3},
+			},
+		},
+		{
+			name: "artifact delta - other has higher version for same key",
+			base: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 1},
+			},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 3},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 3},
+			},
+		},
+		{
+			name: "artifact delta - base nil, other has values",
+			base: &session.EventActions{},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 2},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"file_a.txt": 2},
+			},
+		},
+		{
+			name: "artifact delta from multiple parallel tools all preserved",
+			base: &session.EventActions{
+				ArtifactDelta: map[string]int64{"tool1_out.txt": 1, "shared.txt": 2},
+			},
+			other: &session.EventActions{
+				ArtifactDelta: map[string]int64{"tool2_out.txt": 1, "shared.txt": 3},
+			},
+			want: &session.EventActions{
+				ArtifactDelta: map[string]int64{"tool1_out.txt": 1, "tool2_out.txt": 1, "shared.txt": 3},
+			},
+		},
 	}
 
 	for _, tc := range tests {
