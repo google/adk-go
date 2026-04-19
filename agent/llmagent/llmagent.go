@@ -412,9 +412,9 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		}
 		result := sb.String()
 
-		// TODO: add output schema validation and unmarshalling
+		// TODO: add output schema validation and unmarshaling
 		if a.OutputSchema != nil {
-			// If the result from the final chunk is just whitespace or empty,
+			// If the result from the final chunk is just white space or empty,
 			// it means this is an empty final chunk of a stream.
 			// Do not attempt to parse it as JSON.
 			if strings.TrimSpace(result) == "" {

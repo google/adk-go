@@ -176,7 +176,7 @@ func contentToJSONLikeValue(c *genai.Content) any {
 		return nil
 	}
 
-	// Marshall to JSON first to preserve the json key names, omit null fields, etc.
+	// Marshal to JSON first to preserve the json key names, omit null fields, etc.
 	b, err := json.Marshal(c)
 	if err != nil {
 		return "<not_serializable>"

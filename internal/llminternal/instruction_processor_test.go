@@ -216,7 +216,7 @@ And another optional artifact:
 					t.Fatalf("did not expect an error but got: %v", err)
 				}
 				if got != tc.want {
-					// Use %q to clearly show differences in strings, especially with whitespace.
+					// Use %q to clearly show differences in strings, especially with white space.
 					t.Errorf("got %q, want %q", got, tc.want)
 				}
 			}

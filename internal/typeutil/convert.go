@@ -33,7 +33,7 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 	if resolvedSchema != nil {
 		// See https://github.com/google/jsonschema-go/issues/23: in order to
 		// validate, we must validate against a map[string]any. Struct validation
-		// does not work as it cannot account for `omitempty` or custom marshalling.
+		// does not work as it cannot account for `omitempty` or custom marshaling.
 		var m map[string]any
 		if err := json.Unmarshal(rawArgs, &m); err != nil {
 			return zero, err
