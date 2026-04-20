@@ -55,7 +55,7 @@ func TestRunAgent_UserIDTrimming(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
-			
+
 			mockAgent, err := agent.New(agent.Config{
 				Name: "test-agent",
 				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -71,9 +71,9 @@ func TestRunAgent_UserIDTrimming(t *testing.T) {
 			agentLoader := agent.NewSingleLoader(mockAgent)
 
 			r := &RetriableRunner{
-				sessionService:  sessionService,
-				agentLoader:     agentLoader,
-				triggerConfig:   TriggerConfig{MaxRetries: 0},
+				sessionService: sessionService,
+				agentLoader:    agentLoader,
+				triggerConfig:  TriggerConfig{MaxRetries: 0},
 			}
 
 			_, err = r.RunAgent(context.Background(), "test-agent", tc.inputUserID, "hello")
