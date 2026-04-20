@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 func TestWithCompletePreloadSource(t *testing.T) {
@@ -173,9 +174,12 @@ func TestWithCompletePreloadSource_ListResources_Filtering(t *testing.T) {
 		instructions: map[string]string{"skill1": "instructions1"},
 		resources: map[string]map[string][]byte{
 			"skill1": {
-				"assets/image.png":   []byte("image-data"),
-				"references/doc.txt": []byte("doc-data"),
-				"scripts/script.py":  []byte("script-data"),
+				"assets/image.png":              []byte("image-data"),
+				"references/doc.txt":            []byte("doc-data"),
+				"scripts/script.py.js":          []byte("js-script-data"),
+				"scripts/script.py":             []byte("py-script-data"),
+				"scripts/script":                []byte("script-data"),
+				"scripts/script/another_script": []byte("another-script-data"),
 			},
 		},
 	}
@@ -206,6 +210,18 @@ func TestWithCompletePreloadSource_ListResources_Filtering(t *testing.T) {
 			wantPaths: []string{"references/doc.txt"},
 		},
 		{
+			name:      "Specific resource request",
+			subpath:   "scripts/script.py",
+			wantPaths: []string{"scripts/script.py"},
+		},
+		{
+			// Whether or not it is possible to have both a file and a directory
+			// with the same name is dependent on the base source implementation.
+			name:      "Match both directory and file with the same name",
+			subpath:   "scripts/script",
+			wantPaths: []string{"scripts/script/another_script", "scripts/script"},
+		},
+		{
 			name:      "No match",
 			subpath:   "nonexistent",
 			wantPaths: nil,
@@ -213,7 +229,7 @@ func TestWithCompletePreloadSource_ListResources_Filtering(t *testing.T) {
 		{
 			name:      "Root match",
 			subpath:   ".",
-			wantPaths: []string{"assets/image.png", "references/doc.txt", "scripts/script.py"},
+			wantPaths: []string{"assets/image.png", "references/doc.txt", "scripts/script", "scripts/script.py", "scripts/script/another_script", "scripts/script.py.js"},
 		},
 	}
 
@@ -223,7 +239,7 @@ func TestWithCompletePreloadSource_ListResources_Filtering(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ListResources failed: %v", err)
 			}
-			if diff := cmp.Diff(tc.wantPaths, paths); diff != "" {
+			if diff := cmp.Diff(tc.wantPaths, paths, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
 				t.Errorf("ListResources mismatch (-want +got):\n%s", diff)
 			}
 		})

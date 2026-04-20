@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -109,19 +110,21 @@ func (s *completePreloadSource) ListResources(ctx context.Context, name, subpath
 		return nil, ErrSkillNotFound
 	}
 
-	prefix := subpath
-	if !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
-	}
-	isRoot := prefix == "./" || prefix == "/"
-	if isRoot {
+	cleanPath := path.Clean(subpath)
+	if cleanPath == "." || cleanPath == "/" {
 		return data.sortedResourcePaths, nil
 	}
 
+	var result []string
+	if !strings.HasSuffix(subpath, "/") {
+		if _, matchesSpecificResource := data.resources[cleanPath]; matchesSpecificResource {
+			result = append(result, cleanPath)
+		}
+	}
 	// Optimization for skills with many resources: binary search to find the
 	// first resource path that could match the prefix.
+	prefix := cleanPath + "/" // clean path is guaranteed to not end with "/".
 	startIdx, _ := slices.BinarySearch(data.sortedResourcePaths, prefix)
-	var result []string
 	for i := startIdx; i < len(data.sortedResourcePaths); i++ {
 		resourcePath := data.sortedResourcePaths[i]
 		if !strings.HasPrefix(resourcePath, prefix) {
@@ -144,6 +147,10 @@ func (s *completePreloadSource) reload(ctx context.Context) error {
 
 	skills := make(map[string]*completePreloadSkillData, len(frontmatters))
 	for _, frontmatter := range frontmatters {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		if _, exists := skills[frontmatter.Name]; exists {
 			return fmt.Errorf("%w: %q", ErrDuplicateSkill, frontmatter.Name)
 		}
@@ -158,10 +165,16 @@ func (s *completePreloadSource) reload(ctx context.Context) error {
 			return fmt.Errorf("list resources for skill %q: %w", frontmatter.Name, err)
 		}
 		resourcePaths = slices.Clone(resourcePaths)
+		for i := range resourcePaths {
+			resourcePaths[i] = path.Clean(resourcePaths[i])
+		}
 		slices.Sort(resourcePaths)
 
 		resources := make(map[string][]byte)
 		for _, resourcePath := range resourcePaths {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			resource, err := s.base.LoadResource(ctx, frontmatter.Name, resourcePath)
 			if err != nil {
 				return fmt.Errorf("resource path %q in skill %q: %w", resourcePath, frontmatter.Name, err)
