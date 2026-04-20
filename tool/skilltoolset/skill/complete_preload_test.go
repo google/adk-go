@@ -246,6 +246,66 @@ func TestWithCompletePreloadSource_ListResources_Filtering(t *testing.T) {
 	}
 }
 
+func TestWithCompletePreloadSource_LoadResource(t *testing.T) {
+	mock := &mockCompletePreloadBaseSource{
+		frontmatters: []*Frontmatter{{Name: "skill1"}},
+		instructions: map[string]string{"skill1": "instructions1"},
+		resources: map[string]map[string][]byte{
+			"skill1": {
+				"assets/image1.png":          []byte("image-data-1"),
+				"assets/dir/.././image2.png": []byte("image-data-2"),
+			},
+		},
+	}
+	source, _, err := WithCompletePreloadSource(t.Context(), mock)
+	if err != nil {
+		t.Fatalf("WithCompletePreloadSource failed: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		want    string
+		wantErr error
+	}{
+		{
+			name: "Direct path",
+			path: "assets/image1.png",
+			want: "image-data-1",
+		},
+		{
+			name: "Complex path",
+			path: "assets/../././assets/./image2.png",
+			want: "image-data-2",
+		},
+		{
+			name:    "Not existing resource",
+			path:    "assets/nonexistent.png",
+			wantErr: ErrResourceNotFound,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resource, err := source.LoadResource(t.Context(), "skill1", tc.path)
+
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("LoadResource(%q, %q) error: %v, wantErr: %v", "skill1", tc.path, err, tc.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			data, err := io.ReadAll(resource)
+			if err != nil {
+				t.Fatalf("LoadResource(%q, %q): io.ReadAll failed: %v", "skill1", tc.path, err)
+			}
+			if tc.want != string(data) {
+				t.Fatalf("LoadResource(%q, %q) = %q, want %q", "skill1", tc.path, string(data), tc.want)
+			}
+		})
+	}
+}
+
 func TestWithCompletePreloadSource_ResourceSizeLimit(t *testing.T) {
 	maximumSizeData := make([]byte, maxResourceSize)
 	mock := &mockCompletePreloadBaseSource{

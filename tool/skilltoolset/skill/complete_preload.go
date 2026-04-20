@@ -95,7 +95,7 @@ func (s *completePreloadSource) LoadResource(ctx context.Context, name, resource
 	if !ok {
 		return nil, ErrSkillNotFound
 	}
-	resource, ok := skill.resources[resourcePath]
+	resource, ok := skill.resources[path.Clean(resourcePath)]
 	if !ok {
 		return nil, ErrResourceNotFound
 	}
@@ -164,12 +164,8 @@ func (s *completePreloadSource) reload(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("list resources for skill %q: %w", frontmatter.Name, err)
 		}
-		resourcePaths = slices.Clone(resourcePaths)
-		for i := range resourcePaths {
-			resourcePaths[i] = path.Clean(resourcePaths[i])
-		}
-		slices.Sort(resourcePaths)
 
+		var cleanResourcePaths []string
 		resources := make(map[string][]byte)
 		for _, resourcePath := range resourcePaths {
 			if err := ctx.Err(); err != nil {
@@ -187,13 +183,16 @@ func (s *completePreloadSource) reload(ctx context.Context) error {
 			if len(data) > maxResourceSize {
 				return fmt.Errorf("resource %q in skill %q exceeds %d bytes limit", resourcePath, frontmatter.Name, maxResourceSize)
 			}
-			resources[resourcePath] = data
+			cleanPath := path.Clean(resourcePath)
+			resources[cleanPath] = data
+			cleanResourcePaths = append(cleanResourcePaths, cleanPath)
 		}
+		slices.Sort(cleanResourcePaths)
 
 		skills[frontmatter.Name] = &completePreloadSkillData{
 			frontmatter:         frontmatter,
 			instructions:        instructions,
-			sortedResourcePaths: resourcePaths,
+			sortedResourcePaths: cleanResourcePaths,
 			resources:           resources,
 		}
 	}
