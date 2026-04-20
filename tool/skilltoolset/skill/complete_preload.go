@@ -168,6 +168,9 @@ func (s *completePreloadSource) reload(ctx context.Context) error {
 			}
 			data, err := io.ReadAll(io.LimitReader(resource, maxResourceSize+1))
 			_ = resource.Close()
+			if err != nil {
+				return fmt.Errorf("read resource path %q in skill %q: %w", resourcePath, frontmatter.Name, err)
+			}
 			if len(data) > maxResourceSize {
 				return fmt.Errorf("resource %q in skill %q exceeds %d bytes limit", resourcePath, frontmatter.Name, maxResourceSize)
 			}
