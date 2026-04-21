@@ -31,7 +31,7 @@ type mergedSource struct {
 // Source implementations. The sources are queried in the order they are
 // provided.
 func NewMergedSource(sources ...Source) Source {
-	return &mergedSource{sources: sources}
+	return &mergedSource{sources: slices.Clone(sources)}
 }
 
 func (m *mergedSource) ListFrontmatters(ctx context.Context) ([]*Frontmatter, error) {
@@ -45,7 +45,7 @@ func (m *mergedSource) ListFrontmatters(ctx context.Context) ([]*Frontmatter, er
 		}
 		for _, fm := range frontmatters {
 			if names[fm.Name] {
-				return nil, fmt.Errorf("%w: %q (found in multiple sources)", ErrDuplicateSkill, fm.Name)
+				return nil, fmt.Errorf("%w: %q", ErrDuplicateSkill, fm.Name)
 			}
 			names[fm.Name] = true
 		}
