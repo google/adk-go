@@ -298,6 +298,14 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 	return util.LogStartStop("Updating Agent Engine",
 		func(p util.Printer) error {
 			ctx := context.Background()
+			// Try to extract region from instance name if available
+			parts := strings.Split(f.agentEngine.instanceName, "/")
+			if len(parts) >= 4 && parts[2] == "locations" {
+				f.gcloud.region = parts[3]
+			}
+			if f.gcloud.region == "" {
+				return fmt.Errorf("GCP region is required, please specify with --region flag")
+			}
 			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
 			client, err := aiplatform.NewReasoningEngineClient(ctx, option.WithEndpoint(endpoint))
 			if err != nil {
@@ -330,21 +338,9 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 								},
 							},
 						},
-						AgentFramework: "google-adk",
-						DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
-							Env: []*aiplatformpb.EnvVar{
-								{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
-								{Name: "NUM_WORKERS", Value: "1"},
-								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
-								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
-							},
-							SecretEnv: []*aiplatformpb.SecretEnvVar{
-								{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
-							},
-						},
 					},
 				},
-				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec"}},
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.source_code_spec"}},
 			}
 			p("Sending UpdateReasoningEngine request...")
 			op, err := client.UpdateReasoningEngine(ctx, req)
