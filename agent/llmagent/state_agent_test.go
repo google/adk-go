@@ -29,6 +29,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
@@ -647,5 +648,72 @@ func TestToolCallbacksAgent(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type mockToolset struct{}
+
+func (m *mockToolset) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+	utils.AppendInstructions(req, "Extra instruction from mockToolset")
+	return nil
+}
+func (m *mockToolset) Name() string                                         { return "test_toolset" }
+func (m *mockToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) { return nil, nil }
+
+func TestAgentToolsetPreprocessEffect(t *testing.T) {
+	var capturedReq *model.LLMRequest
+	ctx := t.Context()
+	service := session.InMemoryService()
+	fakeLLM := &FakeLLM{
+		GenerateContentFunc: func(ctx context.Context, req *model.LLMRequest, stream bool) (model.LLMResponse, error) {
+			capturedReq = req
+			return model.LLMResponse{
+				Content: genai.NewContentFromText("fake response", genai.RoleModel),
+			}, nil
+		},
+	}
+	toolset := &mockToolset{}
+	agentConfig := llmagent.Config{
+		Name:        "toolset_effect_agent",
+		Instruction: "Agent instruction.",
+		Model:       fakeLLM,
+		Toolsets:    []tool.Toolset{toolset},
+	}
+	rootAgent, err := llmagent.New(agentConfig)
+	if err != nil {
+		t.Fatalf("Failed to create LLM Agent: %v", err)
+	}
+	runner, err := runner.New(runner.Config{
+		AppName:        "test_app",
+		Agent:          rootAgent,
+		SessionService: service,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create runner: %v", err)
+	}
+	createSessionReq := &session.CreateRequest{AppName: "test_app", UserID: "test_user"}
+	createSessionResp, err := service.Create(ctx, createSessionReq)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+	sessionID := createSessionResp.Session.ID()
+	userContent := genai.NewContentFromText("Hello", genai.RoleUser)
+
+	eventStream := runner.Run(ctx, "test_user", sessionID, userContent, agent.RunConfig{})
+
+	for _, err := range eventStream {
+		if err != nil {
+			t.Fatalf("Error during agent run: %v", err)
+		}
+	}
+	if capturedReq == nil {
+		t.Fatalf("LLMRequest was not captured")
+	}
+	systemInstruction := ""
+	if capturedReq.Config != nil && capturedReq.Config.SystemInstruction != nil {
+		systemInstruction = strings.Join(utils.TextParts(capturedReq.Config.SystemInstruction), " ")
+	}
+	if got, want := systemInstruction, "Extra instruction from mockToolset"; !strings.Contains(got, want) {
+		t.Errorf("got SystemInstruction = %q, want it to contain %q", got, want)
 	}
 }

@@ -27,7 +27,7 @@ import (
 	"google.golang.org/adk/session"
 )
 
-const defaultUserID = "pubsub-caller"
+const pubSubDefaultUserID = "pubsub-caller"
 
 // PubSubController handles the PubSub trigger endpoints.
 type PubSubController struct {
@@ -52,11 +52,6 @@ func NewPubSubController(sessionService session.Service, agentLoader agent.Loade
 
 // PubSubTriggerHandler handles the PubSub trigger endpoint.
 func (c *PubSubController) PubSubTriggerHandler(w http.ResponseWriter, r *http.Request) {
-	if c.semaphore != nil {
-		c.semaphore <- struct{}{}
-		defer func() { <-c.semaphore }()
-	}
-
 	// Parse the request to the request model.
 	var req models.PubSubTriggerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -64,10 +59,40 @@ func (c *PubSubController) PubSubTriggerHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Decode base64 message data.
+	agentMessage, err := messageContentFromPubSub(req)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("failed to retrieve message content: %v", err))
+		return
+	}
+
+	appName, err := appName(r)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to retrieve app name: %v", err))
+		return
+	}
+
+	userID := req.Subscription
+	if userID == "" {
+		userID = pubSubDefaultUserID
+	}
+
+	// Semaphore limits concurrent agent calls based on the TriggerConfig.
+	if c.semaphore != nil {
+		c.semaphore <- struct{}{}
+		defer func() { <-c.semaphore }()
+	}
+
+	if _, err := c.runner.RunAgent(r.Context(), appName, userID, agentMessage); err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to run agent: %v", err))
+		return
+	}
+
+	respondSuccess(w)
+}
+
+func messageContentFromPubSub(req models.PubSubTriggerRequest) (string, error) {
 	messageContent := make(map[string]any)
 	if len(req.Message.Data) > 0 {
-		// Avoids encoding the data twice later with json.Marshal.
 		messageContent["data"] = string(req.Message.Data)
 	}
 	// Add attributes to the messageContent if present
@@ -76,26 +101,12 @@ func (c *PubSubController) PubSubTriggerHandler(w http.ResponseWriter, r *http.R
 	}
 
 	if len(messageContent) == 0 {
-		respondError(w, http.StatusBadRequest, "empty message data and attributes")
-		return
+		return "", fmt.Errorf("empty message data and attributes")
 	}
 
 	agentMessage, err := json.Marshal(messageContent)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to marshal agent message: %v", err))
-		return
+		return "", fmt.Errorf("failed to marshal agent message: %v", err)
 	}
-
-	appName, err := appName(r)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	if _, err := c.runner.RunAgent(r.Context(), appName, req.Subscription, string(agentMessage)); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("failed to run agent: %v", err))
-		return
-	}
-
-	respondSuccess(w)
+	return string(agentMessage), nil
 }

@@ -36,6 +36,7 @@ type apiConfig struct {
 	frontendAddress string
 	pathPrefix      string
 	sseWriteTimeout time.Duration
+	traceCapacity   int
 }
 
 // apiLauncher can launch ADK REST API
@@ -81,6 +82,9 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		ArtifactService: config.ArtifactService,
 		SSEWriteTimeout: a.config.sseWriteTimeout,
 		PluginConfig:    config.PluginConfig,
+		DebugConfig: adkrest.DebugTelemetryConfig{
+			TraceCapacity: a.config.traceCapacity,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create REST server: %w", err)
@@ -138,6 +142,7 @@ func NewLauncher() weblauncher.Sublauncher {
 	fs.StringVar(&config.frontendAddress, "webui_address", "localhost:8080", "ADK WebUI address as seen from the user browser. It's used to allow CORS requests. Please specify only hostname and (optionally) port.")
 	fs.StringVar(&config.pathPrefix, "path_prefix", "/api", "ADK REST API path prefix. Default is '/api'.")
 	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
+	fs.IntVar(&config.traceCapacity, "trace_capacity", 10000, "Maximum number of traces to keep in memory.")
 
 	return &apiLauncher{
 		config: config,
