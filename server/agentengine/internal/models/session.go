@@ -34,9 +34,9 @@ type CreateSessionResponse struct {
 
 type SessionData struct {
 	UserID         string         `json:"user_id"`
-	LastUpdateTime float64        `json:"lastUpdateTime"`
-	AppName        string         `json:"appName"`
-	Id             string         `json:"id"`
+	LastUpdateTime float64        `json:"last_update_time"`
+	AppName        string         `json:"app_name"`
+	ID             string         `json:"id"`
 	State          map[string]any `json:"state"`
 	Events         session.Events `json:"events"`
 }

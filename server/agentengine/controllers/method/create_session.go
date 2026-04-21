@@ -59,7 +59,7 @@ func (c *createSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 			UserID:         resp.Session.UserID(),
 			LastUpdateTime: float64(resp.Session.LastUpdateTime().UnixNano()) / 1e9, // converts nanosec to sec
 			AppName:        resp.Session.AppName(),
-			Id:             resp.Session.ID(),
+			ID:             resp.Session.ID(),
 			State:          stateMap,
 			Events:         resp.Session.Events(),
 		},

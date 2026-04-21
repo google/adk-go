@@ -32,7 +32,7 @@ import (
 func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration) (http.Handler, error) {
 	router := mux.NewRouter().StrictSlash(true)
 
-	reasonginEngineController, err := controllers.NewReasoningEngineAPIController(config.SessionService, []method.MethodHandler{
+	reasoningEngineController, err := controllers.NewReasoningEngineAPIController(config.SessionService, []method.MethodHandler{
 		method.NewCreateSessionHandler(config.SessionService),
 		method.NewListSessionHandler(config.SessionService),
 		method.NewGetSessionHandler(config.SessionService),
@@ -45,7 +45,7 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration) (http.Ha
 	}
 
 	setupRouter(router,
-		routers.NewReasoningEngineAPIRouter(reasonginEngineController),
+		routers.NewReasoningEngineAPIRouter(reasoningEngineController),
 	)
 	return router, nil
 }
