@@ -22,14 +22,15 @@ import (
 	"log"
 	"net/http"
 
+	"google.golang.org/genai"
+	"google.golang.org/protobuf/types/known/structpb"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/agentengine/internal/helper"
 	"google.golang.org/adk/server/agentengine/internal/models"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
 type streamQueryHandler struct {

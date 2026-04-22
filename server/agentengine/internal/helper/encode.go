@@ -194,11 +194,11 @@ func addIfNotEmpty(val any, m map[string]any, newName string) {
 // pathToName allows to provide a list of exceptions for a known input structures.
 // key is a path for a name to be converted. Value is its custom replacement.
 var pathToName = map[string]string{
-	".LongRunningToolIDs": "long_running_tool_ids", //long_running_tool_i_ds
+	".LongRunningToolIDs": "long_running_tool_ids", // long_running_tool_i_ds
 }
 
 // convertName converts a name to snake case.
-func convertName(path string, name string) string {
+func convertName(path, name string) string {
 	// uncomment this to check how your data is processed
 	// fmt.Printf("convert(%s, %s)\n", path, name)
 	if res, ok := pathToName[path]; ok {
@@ -230,7 +230,7 @@ func convertName(path string, name string) string {
 // parseTag handles json tags. Accepted format is comma-separated list of strings.
 // "-", "omitempty" and "omitzero" are recognized. The remaining one is treated as a name
 // returns an error if duplicates are found
-func parseTag(tag string) (name string, omitEmpty bool, omitZero bool, skip bool, err error) {
+func parseTag(tag string) (name string, omitEmpty, omitZero, skip bool, err error) {
 	if tag == "" {
 		return "", false, false, false, nil
 	}
@@ -270,7 +270,7 @@ func parseTag(tag string) (name string, omitEmpty bool, omitZero bool, skip bool
 }
 
 // fieldName returns a name for the field after json tag is taken into the consideration
-func fieldName(name string, tag string) (newName string, omitEmpty bool, omitZero bool, skip bool, err error) {
+func fieldName(name, tag string) (newName string, omitEmpty, omitZero, skip bool, err error) {
 	newName, omitEmpty, omitZero, skip, err = parseTag(tag)
 	if newName == "" {
 		newName = name

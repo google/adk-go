@@ -18,9 +18,10 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func TestNames(t *testing.T) {
@@ -213,7 +214,8 @@ func TestOmitEmpty(t *testing.T) {
 			want: map[string]any{
 				"must_array": []any{},
 				"must_map":   map[string]any{},
-			}},
+			},
+		},
 		{
 			name: "empty, nil, nil, nil",
 			a: A{
@@ -222,7 +224,8 @@ func TestOmitEmpty(t *testing.T) {
 			want: map[string]any{
 				"must_array": []any{},
 				"must_map":   map[string]any{},
-			}},
+			},
+		},
 		{
 			name: "nil, [1], nil, nil",
 			a: A{
@@ -233,7 +236,8 @@ func TestOmitEmpty(t *testing.T) {
 				"optional_array": []any{
 					int64(1),
 				},
-			}},
+			},
+		},
 	}
 	for _, tc := range tests {
 		got, err := convertSnake("", "", tc.a)
@@ -246,5 +250,4 @@ func TestOmitEmpty(t *testing.T) {
 		}
 
 	}
-
 }

@@ -26,11 +26,12 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"google.golang.org/protobuf/types/known/structpb"
+
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/server/agentengine/controllers"
 	"google.golang.org/adk/server/agentengine/controllers/method"
 	"google.golang.org/adk/server/agentengine/internal/routers"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // NewHandler creates and returns an http.Handler for the AgentEngine API.

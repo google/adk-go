@@ -20,9 +20,10 @@ import (
 	"fmt"
 	"net/http"
 
+	"google.golang.org/protobuf/types/known/structpb"
+
 	"google.golang.org/adk/server/agentengine/internal/models"
 	"google.golang.org/adk/session"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
 type createSessionHandler struct {
