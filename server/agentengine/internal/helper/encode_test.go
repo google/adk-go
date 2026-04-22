@@ -17,6 +17,7 @@ package helper
 import (
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -160,5 +161,38 @@ func TestEventLogProbs(t *testing.T) {
 		}
 	} else {
 		t.Errorf("o is not a map")
+	}
+}
+
+func TestEmbedded(t *testing.T) {
+	type A struct {
+		anInteger int
+		aString   string
+	}
+	type B struct {
+		A
+		anotherString string
+	}
+	b := B{
+		A: A{
+			anInteger: 1,
+			aString:   "a",
+		},
+		anotherString: "b",
+	}
+	got, err := convertSnake("", "", b)
+	if err != nil {
+		t.Errorf("convertSnake() failed: %v", err)
+	}
+
+	want := map[string]any{
+		"an_integer":     int64(1),
+		"a_string":       "a",
+		"another_string": "b",
+	}
+
+	diff := cmp.Diff(got, want)
+	if diff != "" {
+		t.Errorf("convertSnake() = %v, want %v, diff: \n%v", got, want, diff)
 	}
 }

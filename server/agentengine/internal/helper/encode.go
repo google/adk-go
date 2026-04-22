@@ -48,7 +48,7 @@ func convertSnake(path string, indent string, o any) (any, error) {
 	switch v.Kind() {
 	case reflect.String:
 		// return string as-is
-		return o, nil
+		return o.(string), nil
 	case reflect.Struct:
 		vt := v.Type()
 		// handle time.Time in a special way
@@ -270,7 +270,7 @@ func fieldName(name string, tag string) (newName string, omitEmpty bool, omitZer
 	return newName, omitEmpty, omitZero, skip, err
 }
 
-// convertValue handles Int, Uint and Float
+// convertValue handles String, Int, Uint and Float
 func convertValue(o reflect.Value) any {
 	if o.CanInt() {
 		return o.Int()
@@ -280,6 +280,9 @@ func convertValue(o reflect.Value) any {
 	}
 	if o.CanFloat() {
 		return o.Float()
+	}
+	if o.Kind() == reflect.String {
+		return o.String()
 	}
 	return o
 }
