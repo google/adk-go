@@ -48,7 +48,7 @@ func convertSnake(path string, indent string, o any) (any, error) {
 	switch v.Kind() {
 	case reflect.String:
 		// return string as-is
-		return o
+		return o, nil
 	case reflect.Struct:
 		vt := v.Type()
 		// handle time.Time in a special way
@@ -139,7 +139,7 @@ func convertSnake(path string, indent string, o any) (any, error) {
 				}
 			}
 		}
-		return m
+		return m, nil
 	case reflect.Slice:
 		res := []any{}
 		for i := 0; i < v.Len(); i++ {

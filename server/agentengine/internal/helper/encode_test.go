@@ -84,7 +84,10 @@ func TestEvent(t *testing.T) {
 			"2",
 		},
 	}
-	o := convertSnake("", "", event)
+	o, err := convertSnake("", "", event)
+	if err != nil {
+		t.Errorf("convertSnake() failed: %v", err)
+	}
 	if m, ok := o.(map[string]any); ok {
 		o = m
 		if arr, ok := m["long_running_tool_ids"]; ok {
@@ -129,7 +132,10 @@ func TestEventLogProbs(t *testing.T) {
 			},
 		},
 	}
-	o := convertSnake("", "", event)
+	o, err := convertSnake("", "", event)
+	if err != nil {
+		t.Errorf("convertSnake() failed: %v", err)
+	}
 	if m, ok := o.(map[string]any); ok {
 		o = m
 		if arr, ok := m["long_running_tool_ids"]; ok {
