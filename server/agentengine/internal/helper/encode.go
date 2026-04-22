@@ -48,7 +48,12 @@ func convertSnake(path string, indent string, o any) (any, error) {
 	switch v.Kind() {
 	case reflect.String:
 		// return string as-is
-		return o.(string), nil
+		s, ok := o.(string)
+		if !ok {
+			// not a string, but a derived type
+			return o, nil
+		}
+		return s, nil
 	case reflect.Struct:
 		vt := v.Type()
 		// handle time.Time in a special way
