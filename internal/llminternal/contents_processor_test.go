@@ -309,6 +309,46 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 		},
 		{
+			name: "ExcludeToolConfirmation",
+			events: []*session.Event{
+				{
+					Author: "AgentA",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										ID:   "call_confirm_123",
+										Name: "adk_request_confirmation",
+										Args: map[string]any{"message": "Confirm delete?"},
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{
+									FunctionResponse: &genai.FunctionResponse{
+										ID:       "call_confirm_123",
+										Name:     "adk_request_confirmation",
+										Response: map[string]any{"confirmed": true},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
 			name:   "FilterByBranch",
 			branch: "branch1.task1",
 			events: []*session.Event{

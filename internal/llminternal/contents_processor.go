@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
@@ -82,7 +83,7 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 		if !eventBelongsToBranch(invocationBranch, ev) {
 			continue
 		}
-		if isAuthEvent(ev) {
+		if shouldExcludeEvent(ev) {
 			continue
 		}
 		if isOtherAgentReply(agentName, ev) {
@@ -507,19 +508,27 @@ func stringify(v any) string {
 
 // requestEUCFunctionCallName is a special function to handle credential
 // request.
-const requestEUCFunctionCallName = "adk_request_credential"
+const (
+	requestEUCFunctionCallName = "adk_request_credential"
+)
 
-func isAuthEvent(ev *session.Event) bool {
+func shouldExcludeEvent(ev *session.Event) bool {
 	c := utils.Content(ev)
 	if c == nil {
 		return false
 	}
 	for _, p := range c.Parts {
-		if p.FunctionCall != nil && p.FunctionCall.Name == requestEUCFunctionCallName {
-			return true
+		if p.FunctionCall != nil {
+			switch p.FunctionCall.Name {
+			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
+				return true
+			}
 		}
-		if p.FunctionResponse != nil && p.FunctionResponse.Name == requestEUCFunctionCallName {
-			return true
+		if p.FunctionResponse != nil {
+			switch p.FunctionResponse.Name {
+			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
+				return true
+			}
 		}
 	}
 	return false

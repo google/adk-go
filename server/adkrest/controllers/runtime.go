@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -87,32 +88,42 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 }
 
 // RunSSEHandler executes an agent run and streams the resulting events using Server-Sent Events (SSE).
-func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) error {
-	rw.Header().Set("Content-Type", "text/event-stream")
-	rw.Header().Set("Cache-Control", "no-cache")
-	rw.Header().Set("Connection", "keep-alive")
-
+func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) {
 	// set custom deadlines for this request - it overrides server-wide timeouts
 	rc := http.NewResponseController(rw)
 	deadline := time.Now().Add(c.sseTimeout)
 	err := rc.SetWriteDeadline(deadline)
 	if err != nil {
-		return newStatusError(fmt.Errorf("failed to set write deadline: %w", err), http.StatusInternalServerError)
+		http.Error(rw, "failed to set write deadline: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
-		return err
+		http.Error(rw, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
-		return err
+		http.Error(rw, "failed to find the session: "+err.Error(), http.StatusNotFound)
+		return
 	}
 
 	r, rCfg, err := c.getRunner(runAgentRequest)
 	if err != nil {
-		return err
+		http.Error(rw, "failed to get runner: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Flush as soon as possible so the client doesn't drop connection.
+	// Add the headers after the error handling to avoid wrong content type.
+	rw.Header().Set("Content-Type", "text/event-stream")
+	rw.Header().Set("Cache-Control", "no-cache")
+	rw.Header().Set("Connection", "keep-alive")
+	if err := rc.Flush(); err != nil {
+		http.Error(rw, "failed to flush headers", http.StatusInternalServerError)
+		return
 	}
 
 	opts := []runner.RunOption{}
@@ -123,41 +134,53 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	for event, err := range resp {
 		if err != nil {
-			_, err := fmt.Fprintf(rw, "Error while running agent: %v\n", err)
+			err := flashErrorEvent(rc, rw, err)
+			// The error is returned only when we cannot communicate with the client
+			// Exit the handler as connection is closed.
 			if err != nil {
-				return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
+				log.Printf("failed to flash error event: %v", err)
+				return
 			}
-			err = rc.Flush()
-			if err != nil {
-				return newStatusError(fmt.Errorf("failed to flush: %w", err), http.StatusInternalServerError)
-			}
-
 			continue
 		}
-		err := flashEvent(rc, rw, *event)
+		if event == nil {
+			continue
+		}
+		// Skip reporting error if it fails to marshal to the client (to avoid recursive error reporting).
+		marshalledData, err := json.Marshal(models.FromSessionEvent(*event))
 		if err != nil {
-			return err
+			log.Printf("failed to marshal event: %v", err)
+			return
+		}
+		err = flashEvent(rc, rw, string(marshalledData))
+		if err != nil {
+			log.Printf("failed to flash event: %v", err)
+			return
 		}
 	}
-	return nil
 }
 
-func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, event session.Event) error {
-	_, err := fmt.Fprintf(rw, "data: ")
+func flashErrorEvent(rc *http.ResponseController, rw http.ResponseWriter, origError error) error {
+	_, err := fmt.Fprintf(rw, "event: error\n")
 	if err != nil {
-		return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
+		return fmt.Errorf("write error event: %w", err)
 	}
-	err = json.NewEncoder(rw).Encode(models.FromSessionEvent(event))
+	safeErrorJSON, err := json.Marshal(map[string]string{"error": origError.Error()})
 	if err != nil {
-		return newStatusError(fmt.Errorf("failed to encode response: %w", err), http.StatusInternalServerError)
+		// Skip reporting error if it fails to marshal to the client (to avoid recursive error reporting).
+		return fmt.Errorf("marshal error event: %w", err)
 	}
-	_, err = fmt.Fprintf(rw, "\n")
+	return flashEvent(rc, rw, string(safeErrorJSON))
+}
+
+func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data string) error {
+	_, err := fmt.Fprintf(rw, "data: %s\n\n", data)
 	if err != nil {
-		return newStatusError(fmt.Errorf("failed to write response: %w", err), http.StatusInternalServerError)
+		return fmt.Errorf("write response: %w", err)
 	}
 	err = rc.Flush()
 	if err != nil {
-		return newStatusError(fmt.Errorf("failed to flush: %w", err), http.StatusInternalServerError)
+		return fmt.Errorf("flush event: %w", err)
 	}
 	return nil
 }
