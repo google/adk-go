@@ -52,7 +52,7 @@ func convertSnake(path string, indent string, o any) (any, error) {
 	case reflect.Struct:
 		vt := v.Type()
 		// handle time.Time in a special way
-		if vt.String() == "time.Time" {
+		if vt == reflect.TypeOf(time.Time{}) {
 			var t time.Time
 			t = o.(time.Time)
 			return t.UnixMilli() / 1000.0, nil // returns a number of seconds "Unix-way"
@@ -97,7 +97,7 @@ func convertSnake(path string, indent string, o any) (any, error) {
 						if val != nil {
 							// empty map
 							if mapVal, ok := val.(map[string]any); ok {
-								if mapVal != nil && len(mapVal) != 0 {
+								if len(mapVal) != 0 {
 									m[newName] = val
 								}
 							} else {
