@@ -43,7 +43,7 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for non-streaming): %v", err)
 	}
 
-	streamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService, maxPayloadSize,
+	streamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService, sseWriteTimeout, maxPayloadSize,
 		listStreamHandlers(config, agentEngineID))
 	if err != nil {
 		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for streaming): %v", err)

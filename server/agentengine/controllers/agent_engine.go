@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"time"
 
 	"google.golang.org/adk/server/agentengine/controllers/method"
 	"google.golang.org/adk/server/agentengine/internal/models"
@@ -32,10 +33,11 @@ type AgentEngineAPIController struct {
 	handlers       map[string]method.MethodHandler
 	service        session.Service
 	maxPayloadSize int64
+	sseTimeout     time.Duration
 }
 
 // NewAgentEngineAPIController creates a new AgentEngineAPIController. Verifies if registered methods are unique by name
-func NewAgentEngineAPIController(service session.Service, maxPayloadSize int64, handlers []method.MethodHandler) (*AgentEngineAPIController, error) {
+func NewAgentEngineAPIController(service session.Service, sseTimeout time.Duration, maxPayloadSize int64, handlers []method.MethodHandler) (*AgentEngineAPIController, error) {
 	methodHandlers := map[string]method.MethodHandler{}
 	for _, handler := range handlers {
 		if _, ok := methodHandlers[handler.Name()]; ok {
@@ -43,11 +45,12 @@ func NewAgentEngineAPIController(service session.Service, maxPayloadSize int64, 
 		}
 		methodHandlers[handler.Name()] = handler
 	}
-	return &AgentEngineAPIController{service: service, handlers: methodHandlers, maxPayloadSize: maxPayloadSize}, nil
+	return &AgentEngineAPIController{service: service, handlers: methodHandlers, maxPayloadSize: maxPayloadSize, sseTimeout: sseTimeout}, nil
 }
 
 // Query provides a way to invoke all the methods
 func (c *AgentEngineAPIController) Query(rw http.ResponseWriter, req *http.Request) {
+	deadline := time.Now().Add(c.sseTimeout)
 	query := models.Query{}
 	var payload []byte
 
