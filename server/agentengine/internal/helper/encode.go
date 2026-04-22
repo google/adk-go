@@ -100,34 +100,7 @@ func convertSnake(path, indent string, o any) (any, error) {
 						// check for emptiness
 						if val != nil {
 							// empty map
-							if mapVal, ok := val.(map[string]any); ok {
-								if len(mapVal) != 0 {
-									m[newName] = val
-								}
-							} else {
-								// empty array
-								if arrVal, ok := val.([]any); ok {
-									if len(arrVal) != 0 {
-										m[newName] = val
-									}
-								} else {
-									// bool with false
-									if boolVal, ok := val.(bool); ok {
-										if boolVal {
-											m[newName] = val
-										}
-									} else {
-										// empty string
-										if strVal, ok := val.(string); ok {
-											if strVal != "" {
-												m[newName] = val
-											}
-										} else {
-											m[newName] = val
-										}
-									}
-								}
-							}
+							addIfNotEmpty(val, m, newName)
 						}
 					} else {
 						if val != nil {
@@ -184,6 +157,37 @@ func convertSnake(path, indent string, o any) (any, error) {
 
 	default:
 		return nil, fmt.Errorf("unsupported type: %v", v.Kind())
+	}
+}
+
+func addIfNotEmpty(val any, m map[string]any, newName string) {
+	if mapVal, ok := val.(map[string]any); ok {
+		if len(mapVal) != 0 {
+			m[newName] = val
+		}
+	} else {
+		// empty array
+		if arrVal, ok := val.([]any); ok {
+			if len(arrVal) != 0 {
+				m[newName] = val
+			}
+		} else {
+			// bool with false
+			if boolVal, ok := val.(bool); ok {
+				if boolVal {
+					m[newName] = val
+				}
+			} else {
+				// empty string
+				if strVal, ok := val.(string); ok {
+					if strVal != "" {
+						m[newName] = val
+					}
+				} else {
+					m[newName] = val
+				}
+			}
+		}
 	}
 }
 
