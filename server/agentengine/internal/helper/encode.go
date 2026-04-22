@@ -58,8 +58,7 @@ func convertSnake(path string, indent string, o any) (any, error) {
 		vt := v.Type()
 		// handle time.Time in a special way
 		if vt == reflect.TypeOf(time.Time{}) {
-			var t time.Time
-			t = o.(time.Time)
+			t := o.(time.Time)
 			return t.UnixMilli() / 1000.0, nil // returns a number of seconds "Unix-way"
 		}
 
@@ -72,7 +71,7 @@ func convertSnake(path string, indent string, o any) (any, error) {
 			tag := fvt.Tag.Get("json")
 			name, omitEmpty, omitZero, skip, err := fieldName(fvt.Name, tag)
 			if err != nil {
-				return nil, fmt.Errorf("Failed to parse tag (%v): %w", tag, err)
+				return nil, fmt.Errorf("failed to parse tag (%v): %w", tag, err)
 			}
 			// respect json "-"
 			if skip {
@@ -184,7 +183,7 @@ func convertSnake(path string, indent string, o any) (any, error) {
 		return v.Int(), nil
 
 	default:
-		return nil, fmt.Errorf("Unsupported type: %v", v.Kind())
+		return nil, fmt.Errorf("unsupported type: %v", v.Kind())
 	}
 }
 

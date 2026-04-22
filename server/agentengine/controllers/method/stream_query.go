@@ -82,7 +82,11 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 		log.Printf("Processing event: %+v err: %+v\n", event, err)
 		if err != nil {
 			log.Printf("error in events: %v\n", err)
-			helper.EmitJSONError(rw, err)
+			e := helper.EmitJSONError(rw, err)
+			if e != nil {
+				e = fmt.Errorf("helper.EmitJSONError() failed: %w", e)
+				log.Print(e.Error())
+			}
 			break
 		}
 		if event == nil {

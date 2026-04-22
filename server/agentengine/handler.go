@@ -61,7 +61,10 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 
 	for _, m := range methods {
 		sb := &strings.Builder{}
-		json.NewEncoder(sb).Encode(m)
+		err = json.NewEncoder(sb).Encode(m)
+		if err != nil {
+			return nil, fmt.Errorf("json.NewEncoder failed: %v", err)
+		}
 		log.Println(sb.String())
 	}
 
