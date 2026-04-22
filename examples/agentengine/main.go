@@ -88,8 +88,7 @@ func main() {
 		ctx, vertexai.VertexAIServiceConfig{
 			ProjectID:       projectID,
 			Location:        location,
-			ReasoningEngine: agentEngineID,
-		})
+			ReasoningEngine: agentEngineID})
 
 	if err != nil {
 		log.Fatalf("Failed to create session service: %v", err)

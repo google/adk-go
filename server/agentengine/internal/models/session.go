@@ -102,7 +102,6 @@ type DeleteSessionResponse struct {
 }
 
 func FromSession(sess session.Session) SessionData {
-
 	stateMap := make(map[string]any)
 	for k, v := range sess.State().All() {
 		stateMap[k] = v

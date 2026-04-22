@@ -39,7 +39,7 @@ func ConvertSnake(o any) any {
 
 // convertSnake does the job. It includes indent for debugging purposes
 // uses reflect to traverse the object
-func convertSnake(path string, indent string, o any) (any, error) {
+func convertSnake(path, indent string, o any) (any, error) {
 	// handle nil
 	if o == nil {
 		return nil, nil
