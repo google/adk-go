@@ -34,6 +34,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
@@ -86,3 +87,5 @@ func setTool(req *model.LLMRequest, t *genai.Tool) error {
 	req.Config.Tools = append(req.Config.Tools, t)
 	return nil
 }
+
+var _ toolinternal.RequestProcessor = (*geminiTool)(nil)
