@@ -443,18 +443,23 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
 func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*session.Event) ([]*genai.Content, error) {
-	// Find the latest event that starts the current turn and process from there
-	for i := len(events) - 1; i >= 0; i-- {
-		event := events[i]
-		if event.Author == "user" || isOtherAgentReply(agentName, event) {
-			return buildContentsDefault(agentName, branch, events[i:])
-		}
-	}
-	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
-	// but that may be a bug.
-	return buildContentsDefault(agentName, branch, events)
+    var filteredEvents []*session.Event
+    for _, e := range events {
+        if branch == "" || e.Branch == "" || e.Branch == branch {
+            filteredEvents = append(filteredEvents, e)
+        }
+    }
+    
+    for i := len(filteredEvents) - 1; i >= 0; i-- {
+        event := filteredEvents[i]
+        if event.Author == "user" || isOtherAgentReply(agentName, event) {
+            return buildContentsDefault(agentName, branch, filteredEvents[i:])
+        }        
+    }
+    
+    res, err := buildContentsDefault(agentName, branch, filteredEvents)
+    return res, err
 }
-
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 	return ev.Author != currentAgentName && ev.Author != "user"
 }

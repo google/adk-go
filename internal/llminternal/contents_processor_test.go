@@ -20,17 +20,17 @@ import (
 	"strings"
 	"testing"
 	"time"
-
+    "fmt"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+    "google.golang.org/adk/internal/llminternal"
 )
 
 type testModel struct {
@@ -1011,3 +1011,47 @@ var (
 	_ session.Session = (*fakeSession)(nil)
 	_ session.Events  = (*fakeSession)(nil)
 )
+
+func TestBuildContentsCurrentTurnContextOnly_BranchFiltering(t *testing.T) {
+	events := []*session.Event{
+		{
+			Author: "user",
+			Branch: "branch-A",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("Hello ", "user"),
+			},
+		},
+		{
+			Author: "user",
+			Branch: "branch-B",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("Hy to all!!!", "user"),
+			},
+		},
+		{
+			Author: "user",
+			Branch: "branch-A",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("world !!!", "user"),
+			},
+		}, 
+	} 
+
+	got, err := llminternal.BuildContentsCurrentTurnContextOnlyForTest("agent", "branch-A", events)
+    
+    if err != nil {
+        t.Fatalf("Eroare la apel: %v", err)
+    }
+
+    if len(got) != 1 {
+        t.Errorf("Filtrarea a eșuat la număr, am primit %d evenimente", len(got))
+        return 
+    }
+
+    gotText := fmt.Sprintf("%v", got[0].Parts[0])
+
+    expectedText := "world !!!"
+    if !strings.Contains(gotText, expectedText) {
+        t.Errorf("Filtrarea a eșuat la conținut! Așteptam [%s], dar am primit [%s]", expectedText, gotText)
+    }
+}
