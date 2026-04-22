@@ -32,14 +32,15 @@ import (
 
 // agentEngineConfig contains parameters for launching ADK Agent Engine server
 type agentEngineConfig struct {
-	pathPrefix    string
-	agentEngineID string
+	pathPrefix      string
+	agentEngineID   string
+	maxPayloadSize  int64
+	sseWriteTimeout time.Duration
 }
 
 type agentEngineLauncher struct {
 	flags  *flag.FlagSet // flags are used to parse command-line arguments
 	config *agentEngineConfig
-	router *mux.Router
 }
 
 // NewLauncher creates new api launcher. It extends Web launcher
@@ -48,6 +49,8 @@ func NewLauncher(agentEngineId string) weblauncher.Sublauncher {
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
 	fs.StringVar(&config.pathPrefix, "path_prefix", "/api", "ADK Agent Engine API path prefix. Default is '/api'.")
+	fs.Int64Var(&config.maxPayloadSize, "max_payload_size", 10*1024*1024, "The payload will be truncated after this amount of bytes")
+	fs.DurationVar(&config.sseWriteTimeout, "sse-write-timeout", 120*time.Second, "SSE server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the SSE response after reading the headers & body")
 
 	config.agentEngineID = agentEngineId
 
@@ -80,7 +83,7 @@ func (a *agentEngineLauncher) UserMessage(webUrl string, printer func(v ...any))
 // SetupSubrouters adds the API router to the parent router.
 func (a *agentEngineLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
 	// Create the ADK AgentEngine API handler
-	apiHandler, err := agentengine.NewHandler(config, 60*time.Second, a.config.agentEngineID)
+	apiHandler, err := agentengine.NewHandler(config, a.config.sseWriteTimeout, a.config.maxPayloadSize, a.config.agentEngineID)
 	if err != nil {
 		return fmt.Errorf("agentengine.NewHandler failed: %v", err)
 	}

@@ -18,6 +18,7 @@ package agentengine
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -33,16 +34,16 @@ import (
 
 // NewHandler creates and returns an http.Handler for the AgentEngine API.
 // Handles both streaming and non-streaming versions
-func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, agentEngineID string) (http.Handler, error) {
+func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPayloadSize int64, agentEngineID string) (http.Handler, error) {
 	router := mux.NewRouter().StrictSlash(true)
 
-	nonStreamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService,
+	nonStreamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService, maxPayloadSize,
 		listNonStreamHandlers(config, agentEngineID))
 	if err != nil {
 		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for non-streaming): %v", err)
 	}
 
-	streamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService,
+	streamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService, maxPayloadSize,
 		listStreamHandlers(config, agentEngineID))
 	if err != nil {
 		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for streaming): %v", err)
@@ -61,7 +62,7 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, agentEng
 	for _, m := range methods {
 		sb := &strings.Builder{}
 		json.NewEncoder(sb).Encode(m)
-		fmt.Println(sb.String())
+		log.Println(sb.String())
 	}
 
 	return router, nil

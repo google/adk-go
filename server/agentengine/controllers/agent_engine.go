@@ -29,12 +29,13 @@ import (
 
 // AgentEngineAPIController holds information about the supported methods
 type AgentEngineAPIController struct {
-	handlers map[string]method.MethodHandler
-	service  session.Service
+	handlers       map[string]method.MethodHandler
+	service        session.Service
+	maxPayloadSize int64
 }
 
 // NewAgentEngineAPIController creates a new AgentEngineAPIController. Verifies if registered methods are unique by name
-func NewAgentEngineAPIController(service session.Service, handlers []method.MethodHandler) (*AgentEngineAPIController, error) {
+func NewAgentEngineAPIController(service session.Service, maxPayloadSize int64, handlers []method.MethodHandler) (*AgentEngineAPIController, error) {
 	methodHandlers := map[string]method.MethodHandler{}
 	for _, handler := range handlers {
 		if _, ok := methodHandlers[handler.Name()]; ok {
@@ -42,7 +43,7 @@ func NewAgentEngineAPIController(service session.Service, handlers []method.Meth
 		}
 		methodHandlers[handler.Name()] = handler
 	}
-	return &AgentEngineAPIController{service: service, handlers: methodHandlers}, nil
+	return &AgentEngineAPIController{service: service, handlers: methodHandlers, maxPayloadSize: maxPayloadSize}, nil
 }
 
 // Query provides a way to invoke all the methods
@@ -50,9 +51,10 @@ func (c *AgentEngineAPIController) Query(rw http.ResponseWriter, req *http.Reque
 	query := models.Query{}
 	var payload []byte
 
-	if req.ContentLength > 0 {
+	if req.Body != nil && req.Body != http.NoBody {
 		var err error
-		payload, err = io.ReadAll(req.Body)
+
+		payload, err = io.ReadAll(io.LimitReader(req.Body, c.maxPayloadSize))
 		if err != nil {
 			http.Error(rw, fmt.Errorf("ioutil.ReadAll failed: %v", err).Error(), http.StatusBadRequest)
 			return

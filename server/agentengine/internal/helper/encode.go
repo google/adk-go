@@ -28,15 +28,21 @@ import (
 // json tags are supported.
 // struct embedding is supported.
 func ConvertSnake(o any) any {
-	return convertSnake("", "", o)
+	res, err := convertSnake("", "", o)
+	if err != nil {
+		log.Printf("Failed to convert: %+v of type %T: %v", o, o, err)
+		// better to return an original version than nothing
+		return o
+	}
+	return res
 }
 
 // converSnake does the job. It includes indent for debugging purposes
 // uses reflect to traverse the object
-func convertSnake(path string, indent string, o any) any {
+func convertSnake(path string, indent string, o any) (any, error) {
 	// handle nil
 	if o == nil {
-		return nil
+		return nil, nil
 	}
 	v := reflect.ValueOf(o)
 	switch v.Kind() {
@@ -49,7 +55,7 @@ func convertSnake(path string, indent string, o any) any {
 		if vt.String() == "time.Time" {
 			var t time.Time
 			t = o.(time.Time)
-			return t.UnixMilli() / 1000.0 // returns a number of seconds "Unix-way"
+			return t.UnixMilli() / 1000.0, nil // returns a number of seconds "Unix-way"
 		}
 
 		// this map will hold all the fields
@@ -61,7 +67,7 @@ func convertSnake(path string, indent string, o any) any {
 			tag := fvt.Tag.Get("json")
 			name, omitEmpty, omitZero, skip, err := fieldName(fvt.Name, tag)
 			if err != nil {
-				log.Fatalf("Failed to parse tag: %v", err)
+				return nil, fmt.Errorf("Failed to parse tag (%v): %w", tag, err)
 			}
 			// respect json "-"
 			if skip {
@@ -69,7 +75,10 @@ func convertSnake(path string, indent string, o any) any {
 			}
 			// handle embedded structs
 			if fvt.Anonymous {
-				embed := convertSnake(path+"."+name, indent+".   ", fv.Interface())
+				embed, err := convertSnake(path+"."+name, indent+".   ", fv.Interface())
+				if err != nil {
+					return nil, fmt.Errorf("failed to convert embedded struct with name:%v o: %v %+v %T err: %w", name, fv.Interface(), fv.Interface(), err)
+				}
 				// merge them to m
 				for k, v := range embed.(map[string]any) {
 					m[k] = v
@@ -79,7 +88,10 @@ func convertSnake(path string, indent string, o any) any {
 				newPath := path + "." + name
 				newName := convertName(newPath, name)
 				if fv.CanInterface() {
-					val := convertSnake(newPath, indent+".   ", fv.Interface())
+					val, err := convertSnake(newPath, indent+".   ", fv.Interface())
+					if err != nil {
+						return nil, fmt.Errorf("failed to convert regular struct field with path: %v err: %w", newPath, err)
+					}
 					if omitEmpty {
 						// check for emptiness
 						if val != nil {
@@ -131,37 +143,44 @@ func convertSnake(path string, indent string, o any) any {
 	case reflect.Slice:
 		res := []any{}
 		for i := 0; i < v.Len(); i++ {
-			res = append(res, convertSnake(path+".[]", indent+"    ", v.Index(i).Interface()))
+			elem, err := convertSnake(path+".[]", indent+"    ", v.Index(i).Interface())
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert slice element with path: %v err: %w", path+".[]", err)
+			}
+			res = append(res, elem)
 		}
 		if len(res) == 0 {
-			return []any{}
+			return []any{}, nil
 		}
-		return res
+		return res, nil
 	case reflect.Map:
 		res := make(map[string]any)
 		for _, k := range v.MapKeys() {
-			res[k.String()] = convertSnake(path+"->", indent+"    ", v.MapIndex(k).Interface())
+			elem, err := convertSnake(path+"->", indent+"    ", v.MapIndex(k).Interface())
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert map element with path: %v err: %w", path+"->", err)
+			}
+			res[k.String()] = elem
 		}
 		if len(res) == 0 {
-			return map[string]any{}
+			return map[string]any{}, nil
 		}
-		return res
+		return res, nil
 	case reflect.Ptr:
 		if v.IsNil() {
-			return nil
+			return nil, nil
 		}
 		return convertSnake(path+"*", indent+"    ", v.Elem().Interface())
 	case reflect.Bool:
-		return v.Bool()
+		return v.Bool(), nil
 	case reflect.Float32, reflect.Float64:
-		return v.Float()
+		return v.Float(), nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return v.Int()
+		return v.Int(), nil
 
 	default:
-		log.Fatalf("Unsupported type: %v", v.Kind())
+		return nil, fmt.Errorf("Unsupported type: %v", v.Kind())
 	}
-	return nil
 }
 
 // pathToName allows to provide a list of exceptions for a known input structures.
