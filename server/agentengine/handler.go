@@ -37,7 +37,7 @@ import (
 func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPayloadSize int64, agentEngineID string) (http.Handler, error) {
 	router := mux.NewRouter().StrictSlash(true)
 
-	nonStreamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService, maxPayloadSize,
+	nonStreamAgentEngineController, err := controllers.NewAgentEngineAPIController(config.SessionService, sseWriteTimeout, maxPayloadSize,
 		listNonStreamHandlers(config, agentEngineID))
 	if err != nil {
 		return nil, fmt.Errorf("controllers.NewAgentEngineAPIController failed (for non-streaming): %v", err)
