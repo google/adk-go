@@ -33,7 +33,7 @@ type deleteSessionHandler struct {
 }
 
 // NewDeleteSessionHandler creates a new deleteSessionHandler. It can be used to serve "async_delete_session" method
-func NewDeleteSessionHandler(sessionservice session.Service, agentEngineID string, methodName string, apiMode string) *deleteSessionHandler {
+func NewDeleteSessionHandler(sessionservice session.Service, agentEngineID, methodName, apiMode string) *deleteSessionHandler {
 	return &deleteSessionHandler{sessionservice: sessionservice, agentEngineID: agentEngineID, methodName: methodName, apiMode: apiMode}
 }
 

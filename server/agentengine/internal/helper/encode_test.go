@@ -194,3 +194,57 @@ func TestEmbedded(t *testing.T) {
 		t.Errorf("convertSnake() = %v, want %v, diff: \n%v", got, want, diff)
 	}
 }
+
+func TestOmitEmpty(t *testing.T) {
+	type A struct {
+		OmittableArr         []int       `json:"optional_array,omitempty"`
+		MandatoryArr         []int       `json:"must_array"`
+		OmmitableIntToIntMap map[int]int `json:"optional_map,omitempty"`
+		MandatoryIntToIntMap map[int]int `json:"must_map"`
+	}
+	tests := []struct {
+		name string
+		a    A
+		want map[string]any
+	}{
+		{
+			name: "nil, nil, nil, nil",
+			a:    A{},
+			want: map[string]any{
+				"must_array": []any{},
+				"must_map":   map[string]any{},
+			}},
+		{
+			name: "empty, nil, nil, nil",
+			a: A{
+				OmittableArr: []int{},
+			},
+			want: map[string]any{
+				"must_array": []any{},
+				"must_map":   map[string]any{},
+			}},
+		{
+			name: "nil, [1], nil, nil",
+			a: A{
+				OmittableArr: []int{1},
+			}, want: map[string]any{
+				"must_array": []any{},
+				"must_map":   map[string]any{},
+				"optional_array": []any{
+					int64(1),
+				},
+			}},
+	}
+	for _, tc := range tests {
+		got, err := convertSnake("", "", tc.a)
+		if err != nil {
+			t.Errorf("convertSnake() failed: %v", err)
+		}
+		diff := cmp.Diff(got, tc.want)
+		if diff != "" {
+			t.Errorf("convertSnake() = %v, want %v, diff: \n%v", got, tc.want, diff)
+		}
+
+	}
+
+}

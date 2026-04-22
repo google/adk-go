@@ -33,7 +33,7 @@ type listSessionHandler struct {
 }
 
 // NewListSessionHandler creates a new listSessionHandler. It can be used to serve "async_list_session" method
-func NewListSessionHandler(sessionservice session.Service, agentEngineID string, methodName string, apiMode string) *listSessionHandler {
+func NewListSessionHandler(sessionservice session.Service, agentEngineID, methodName, apiMode string) *listSessionHandler {
 	return &listSessionHandler{sessionservice: sessionservice, agentEngineID: agentEngineID, methodName: methodName, apiMode: apiMode}
 }
 

@@ -33,7 +33,7 @@ type createSessionHandler struct {
 }
 
 // NewCreateSessionHandler creates a new createSessionHandler. It can be used to serve "asynch_create_session" method
-func NewCreateSessionHandler(sessionService session.Service, agentEngineID string, methodName string, apiMode string) *createSessionHandler {
+func NewCreateSessionHandler(sessionService session.Service, agentEngineID, methodName, apiMode string) *createSessionHandler {
 	return &createSessionHandler{sessionService: sessionService, agentEngineID: agentEngineID, methodName: methodName, apiMode: apiMode}
 }
 

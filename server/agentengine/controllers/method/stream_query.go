@@ -40,7 +40,7 @@ type streamQueryHandler struct {
 }
 
 // NewStreamQueryHandler creates a new streamQueryHandler. It can be used to serve "async_stream_query" method
-func NewStreamQueryHandler(config *launcher.Config, agentEngineID string, methodName string, apiMode string) *streamQueryHandler {
+func NewStreamQueryHandler(config *launcher.Config, agentEngineID, methodName, apiMode string) *streamQueryHandler {
 	return &streamQueryHandler{config: config, agentEngineID: agentEngineID, methodName: methodName, apiMode: apiMode}
 }
 

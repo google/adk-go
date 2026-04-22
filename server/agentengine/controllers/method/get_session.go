@@ -33,7 +33,7 @@ type getSessionHandler struct {
 }
 
 // NewGetSessionHandler creates a new getSessionHandler. It can be used to serve "async_get_session" method
-func NewGetSessionHandler(sessionservice session.Service, agentEngineID string, methodName string, apiMode string) *getSessionHandler {
+func NewGetSessionHandler(sessionservice session.Service, agentEngineID, methodName, apiMode string) *getSessionHandler {
 	return &getSessionHandler{sessionservice: sessionservice, agentEngineID: agentEngineID, methodName: methodName, apiMode: apiMode}
 }
 
