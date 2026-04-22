@@ -15,8 +15,6 @@
 package helper
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
 
 	"google.golang.org/adk/model"
@@ -157,11 +155,4 @@ func TestEventLogProbs(t *testing.T) {
 	} else {
 		t.Errorf("o is not a map")
 	}
-
-	sb := &strings.Builder{}
-	json.NewEncoder(sb).Encode(o)
-	oEnc := sb.String()
-	t.Logf("oEnc: %s", oEnc)
-
-	t.Fatalf("%v", o)
 }
