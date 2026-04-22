@@ -46,20 +46,11 @@ func NewStreamQueryHandler(config *launcher.Config, agentEngineID string, method
 
 // Handle generates stream of json-encoded responses based on the payload. Error are also emitted as errors
 func (s *streamQueryHandler) Handle(ctx context.Context, rw http.ResponseWriter, payload []byte) error {
-	rw.Header().Set("Content-Type", "application/json")
-	rw.Header().Set("Cache-Control", "no-cache")
-	rw.Header().Set("Connection", "keep-alive")
-
 	streamErr := s.streamJSONL(ctx, rw, payload)
+	// streamJSONL will return error only before streaming. In that case we can handle it with HTTP Status, which is done in upstream
 	if streamErr != nil {
 		err := fmt.Errorf("s.streamJSONL() failed: %w", streamErr)
-		log.Print(err.Error())
-		err = helper.EmitJSONError(rw, err)
-		if err != nil {
-			err = fmt.Errorf("helper.EmitJSONError() failed: %w", err)
-			log.Print(err.Error())
-		}
-		return nil
+		return err
 	}
 	return nil
 }
@@ -81,6 +72,11 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 		log.Print(err.Error())
 		return err
 	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	rw.Header().Set("Cache-Control", "no-cache")
+	rw.Header().Set("Connection", "keep-alive")
+	// from this moment on we must not return error. Instead, it should be handled by using helper.EmitJSONError
 
 	for event, err := range events {
 		log.Printf("Processing event: %+v err: %+v\n", event, err)
