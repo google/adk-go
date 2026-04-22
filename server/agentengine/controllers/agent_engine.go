@@ -51,6 +51,8 @@ func NewAgentEngineAPIController(service session.Service, sseTimeout time.Durati
 // Query provides a way to invoke all the methods
 func (c *AgentEngineAPIController) Query(rw http.ResponseWriter, req *http.Request) {
 	deadline := time.Now().Add(c.sseTimeout)
+	rc := http.NewResponseController(rw)
+	rc.SetWriteDeadline(deadline)
 	query := models.Query{}
 	var payload []byte
 
