@@ -60,12 +60,12 @@ func TestMergedSource_ListFrontmatters(t *testing.T) {
 			wantErr: testErr,
 		},
 		{
-			name: "frontmatters are sorted",
+			name: "frontmatters are in the order of sources",
 			sources: []Source{
 				&mockMergedBaseSource{frontmatters: []*Frontmatter{{Name: "D"}, {Name: "B"}}},
 				&mockMergedBaseSource{frontmatters: []*Frontmatter{{Name: "A"}, {Name: "C"}}},
 			},
-			want: []*Frontmatter{{Name: "A"}, {Name: "B"}, {Name: "C"}, {Name: "D"}},
+			want: []*Frontmatter{{Name: "D"}, {Name: "B"}, {Name: "A"}, {Name: "C"}},
 		},
 	}
 

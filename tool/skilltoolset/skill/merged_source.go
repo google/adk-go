@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strings"
 )
 
 type mergedSource struct {
@@ -52,10 +51,6 @@ func (m *mergedSource) ListFrontmatters(ctx context.Context) ([]*Frontmatter, er
 		allFrontmatters = append(allFrontmatters, frontmatters...)
 	}
 
-	// Sort for determinism.
-	slices.SortFunc(allFrontmatters, func(a, b *Frontmatter) int {
-		return strings.Compare(a.Name, b.Name)
-	})
 	return allFrontmatters, nil
 }
 
