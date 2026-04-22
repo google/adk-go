@@ -97,7 +97,7 @@ func convertSnake(path string, indent string, o any) (any, error) {
 						if val != nil {
 							// empty map
 							if mapVal, ok := val.(map[string]any); ok {
-								if mapVal != nil {
+								if mapVal != nil && len(mapVal) != 0 {
 									m[newName] = val
 								}
 							} else {
