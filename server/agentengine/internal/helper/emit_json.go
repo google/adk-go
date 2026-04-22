@@ -60,7 +60,10 @@ func EmitJSON(rw http.ResponseWriter, o any) error {
 
 // EmitJSONError emits a line with json describing the error
 func EmitJSONError(rw http.ResponseWriter, origError error) error {
-	err := EmitJSON(rw, origError)
+	jsonErr := map[string]any{
+		"error": origError.Error(),
+	}
+	err := EmitJSON(rw, jsonErr)
 	if err != nil {
 		return fmt.Errorf("failed to emit error: %w", err)
 	}

@@ -77,7 +77,7 @@ func convertSnake(path string, indent string, o any) (any, error) {
 			if fvt.Anonymous {
 				embed, err := convertSnake(path+"."+name, indent+".   ", fv.Interface())
 				if err != nil {
-					return nil, fmt.Errorf("failed to convert embedded struct with name:%v o: %v %+v %T err: %w", name, fv.Interface(), fv.Interface(), err)
+					return nil, fmt.Errorf("failed to convert embedded struct with name:%v o: %+v %T err: %w", name, fv.Interface(), fv.Interface(), err)
 				}
 				// merge them to m
 				for k, v := range embed.(map[string]any) {
