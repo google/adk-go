@@ -1,0 +1,167 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package helper
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
+	"google.golang.org/genai"
+)
+
+func TestNames(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{
+			name: "a",
+			want: "a",
+		},
+		{
+			name: "A",
+			want: "a",
+		},
+		{
+			name: "aa",
+			want: "aa",
+		},
+		{
+			name: "Aa",
+			want: "aa",
+		},
+		{
+			name: "AaAa",
+			want: "aa_aa",
+		},
+		{
+			name: "ArtifactDelta",
+			want: "artifact_delta",
+		},
+		{
+			name: "RequestedToolConfirmations",
+			want: "requested_tool_confirmations",
+		},
+		{
+			name: "ID",
+			want: "id",
+		},
+		{
+			name: "InvocationID",
+			want: "invocation_id",
+		},
+		{
+			name: "LongRunningToolIDs",
+			want: "long_running_tool_i_ds", // special case, handled by exception - see pathName
+		},
+	}
+	for _, tt := range tests {
+		snake := convertName("", tt.name)
+		if snake != tt.want {
+			t.Errorf("convertName(%q) = %q, want %q", tt.name, snake, tt.want)
+		}
+	}
+}
+
+func TestEvent(t *testing.T) {
+	event := session.Event{
+		ID: "1",
+		LongRunningToolIDs: []string{
+			"1",
+			"2",
+		},
+	}
+	o := convertSnake("", "", event)
+	if m, ok := o.(map[string]any); ok {
+		o = m
+		if arr, ok := m["long_running_tool_ids"]; ok {
+			t.Logf("long_running_tool_ids: %v %T", arr, arr)
+			if arr, ok := arr.([]any); ok {
+				if len(arr) == 2 {
+					if arr[0] != "1" {
+						t.Errorf("long_running_tool_ids[0] is not 1")
+					}
+					if arr[1] != "2" {
+						t.Errorf("long_running_tool_ids[1] is not 2")
+					}
+
+				} else {
+					t.Errorf("long_running_tool_ids is not an array of length 2")
+				}
+			} else {
+				t.Errorf("long_running_tool_ids is not an array")
+			}
+		} else {
+			t.Errorf("long_running_tool_ids not found")
+		}
+	} else {
+		t.Errorf("o is not a map")
+	}
+}
+
+func TestEventLogProbs(t *testing.T) {
+	event := session.Event{
+		ID: "1",
+		LongRunningToolIDs: []string{
+			"1",
+			"2",
+		},
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						Text: "Hello",
+					},
+				},
+			},
+		},
+	}
+	o := convertSnake("", "", event)
+	if m, ok := o.(map[string]any); ok {
+		o = m
+		if arr, ok := m["long_running_tool_ids"]; ok {
+			t.Logf("long_running_tool_ids: %v %T", arr, arr)
+			if arr, ok := arr.([]any); ok {
+				if len(arr) == 2 {
+					if arr[0] != "1" {
+						t.Errorf("long_running_tool_ids[0] is not 1")
+					}
+					if arr[1] != "2" {
+						t.Errorf("long_running_tool_ids[1] is not 2")
+					}
+
+				} else {
+					t.Errorf("long_running_tool_ids is not an array of length 2")
+				}
+			} else {
+				t.Errorf("long_running_tool_ids is not an array")
+			}
+		} else {
+			t.Errorf("long_running_tool_ids not found")
+		}
+	} else {
+		t.Errorf("o is not a map")
+	}
+
+	sb := &strings.Builder{}
+	json.NewEncoder(sb).Encode(o)
+	oEnc := sb.String()
+	t.Logf("oEnc: %s", oEnc)
+
+	t.Fatalf("%v", o)
+}
