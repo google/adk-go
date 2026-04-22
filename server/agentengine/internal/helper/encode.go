@@ -37,7 +37,7 @@ func ConvertSnake(o any) any {
 	return res
 }
 
-// converSnake does the job. It includes indent for debugging purposes
+// convertSnake does the job. It includes indent for debugging purposes
 // uses reflect to traverse the object
 func convertSnake(path string, indent string, o any) (any, error) {
 	// handle nil

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -59,6 +60,7 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 		return nil, fmt.Errorf("ListClassMethods() failed: %v", err)
 	}
 
+	log.Println("Supported methods:")
 	for _, m := range methods {
 		sb := &strings.Builder{}
 		err = json.NewEncoder(sb).Encode(m)
@@ -100,14 +102,8 @@ func ListClassMethods() ([]*structpb.Struct, error) {
 
 	result := []*structpb.Struct{}
 
-	for _, handler := range listNonStreamHandlers(config, "") {
-		m, err := handler.Metadata()
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, m)
-	}
-	for _, handler := range listStreamHandlers(config, "") {
+	handlers := slices.Concat(listNonStreamHandlers(config, ""), listStreamHandlers(config, ""))
+	for _, handler := range handlers {
 		m, err := handler.Metadata()
 		if err != nil {
 			return nil, err

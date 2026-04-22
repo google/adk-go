@@ -25,7 +25,7 @@ import (
 
 // MethodHandler is an interface which provides a structured way to serve methods on agentEngine
 type MethodHandler interface {
-	Name() string
-	Handle(ctx context.Context, rw http.ResponseWriter, payload []byte) error
-	Metadata() (*structpb.Struct, error) // Metadata returns a struct which is used to specify application capabilities during the deployment
+	Name() string                                                             // Name returns a name of the method, by which you call it
+	Handle(ctx context.Context, rw http.ResponseWriter, payload []byte) error // Handle provides a response to given payload
+	Metadata() (*structpb.Struct, error)                                      // Metadata returns a struct which is used to specify application capabilities during the deployment
 }

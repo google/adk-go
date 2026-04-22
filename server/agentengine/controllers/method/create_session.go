@@ -101,25 +101,10 @@ func (c *createSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 		return fmt.Errorf("c.sessionservice.Create() failed: %v", err)
 	}
 
-	stateMap := make(map[string]any)
-	for k, v := range resp.Session.State().All() {
-		stateMap[k] = v
-	}
-
-	evs := []session.Event{}
-	for ev := range resp.Session.Events().All() {
-		evs = append(evs, *ev)
-	}
+	sd := models.FromSession(resp.Session)
 
 	result := models.CreateSessionResponse{
-		Output: models.SessionData{
-			UserID:         resp.Session.UserID(),
-			LastUpdateTime: float64(resp.Session.LastUpdateTime().UnixNano()) / 1e9, // converts nanosec to sec
-			AppName:        resp.Session.AppName(),
-			ID:             resp.Session.ID(),
-			State:          stateMap,
-			Events:         evs,
-		},
+		Output: sd,
 	}
 	err = json.NewEncoder(rw).Encode(result)
 	if err != nil {

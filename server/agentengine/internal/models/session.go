@@ -100,3 +100,25 @@ type DeleteSessionInput struct {
 type DeleteSessionResponse struct {
 	Output string `json:"output"`
 }
+
+func FromSession(sess session.Session) SessionData {
+
+	stateMap := make(map[string]any)
+	for k, v := range sess.State().All() {
+		stateMap[k] = v
+	}
+
+	evs := []session.Event{}
+	for ev := range sess.Events().All() {
+		evs = append(evs, *ev)
+	}
+
+	return SessionData{
+		UserID:         sess.UserID(),
+		LastUpdateTime: float64(sess.LastUpdateTime().UnixNano()) / 1e9, // converts nanosec to sec
+		AppName:        sess.AppName(),
+		ID:             sess.ID(),
+		State:          stateMap,
+		Events:         evs,
+	}
+}

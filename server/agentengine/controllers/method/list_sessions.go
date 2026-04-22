@@ -89,24 +89,8 @@ func (l *listSessionHandler) Handle(ctx context.Context, rw http.ResponseWriter,
 
 	sessions := []models.SessionData{}
 	for _, sess := range resp.Sessions {
-		state := make(map[string]any)
-		for k, v := range sess.State().All() {
-			state[k] = v
-		}
-
-		evs := []session.Event{}
-		for ev := range sess.Events().All() {
-			evs = append(evs, *ev)
-		}
-
-		sessions = append(sessions, models.SessionData{
-			ID:             sess.ID(),
-			UserID:         sess.UserID(),
-			AppName:        sess.AppName(),
-			LastUpdateTime: float64(sess.LastUpdateTime().UnixNano()) / 1e9, // converts nanosec to sec
-			State:          state,
-			Events:         evs,
-		})
+		sd := models.FromSession(sess)
+		sessions = append(sessions, sd)
 	}
 
 	result := models.ListSessionResponse{
