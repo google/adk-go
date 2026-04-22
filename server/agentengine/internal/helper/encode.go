@@ -87,34 +87,36 @@ func convertSnake(path, indent string, o any) (any, error) {
 				for k, v := range embed.(map[string]any) {
 					m[k] = v
 				}
-			} else {
-				// regular struct
-				newPath := path + "." + name
-				newName := convertName(newPath, name)
-				if fv.CanInterface() {
-					val, err := convertSnake(newPath, indent+".   ", fv.Interface())
-					if err != nil {
-						return nil, fmt.Errorf("failed to convert regular struct field with path: %v err: %w", newPath, err)
-					}
-					if omitEmpty {
-						// check for emptiness
-						if val != nil {
-							// empty map
-							addIfNotEmpty(val, m, newName)
-						}
-					} else {
-						if val != nil {
-							m[newName] = val
-						}
+				continue
+			}
+
+			// regular field
+			newPath := path + "." + name
+			newName := convertName(newPath, name)
+			if fv.CanInterface() {
+				val, err := convertSnake(newPath, indent+".   ", fv.Interface())
+				if err != nil {
+					return nil, fmt.Errorf("failed to convert regular struct field with path: %v err: %w", newPath, err)
+				}
+				if omitEmpty {
+					// check for emptiness
+					if val != nil {
+						// empty map
+						addIfNotEmpty(val, m, newName)
 					}
 				} else {
-					// respect omitZero
-					val := convertValue(fv)
-					if val != 0 || !omitZero {
+					if val != nil {
 						m[newName] = val
 					}
 				}
+			} else {
+				// respect omitZero
+				val := convertValue(fv)
+				if val != 0 || !omitZero {
+					m[newName] = val
+				}
 			}
+
 		}
 		return m, nil
 	case reflect.Slice:
@@ -161,33 +163,25 @@ func convertSnake(path, indent string, o any) (any, error) {
 }
 
 func addIfNotEmpty(val any, m map[string]any, newName string) {
-	if mapVal, ok := val.(map[string]any); ok {
-		if len(mapVal) != 0 {
+	switch t := val.(type) {
+	case map[string]any:
+		if len(t) != 0 {
 			m[newName] = val
 		}
-	} else {
-		// empty array
-		if arrVal, ok := val.([]any); ok {
-			if len(arrVal) != 0 {
-				m[newName] = val
-			}
-		} else {
-			// bool with false
-			if boolVal, ok := val.(bool); ok {
-				if boolVal {
-					m[newName] = val
-				}
-			} else {
-				// empty string
-				if strVal, ok := val.(string); ok {
-					if strVal != "" {
-						m[newName] = val
-					}
-				} else {
-					m[newName] = val
-				}
-			}
+	case []any:
+		if len(t) != 0 {
+			m[newName] = val
 		}
+	case bool:
+		if t {
+			m[newName] = val
+		}
+	case string:
+		if t != "" {
+			m[newName] = val
+		}
+	default:
+		m[newName] = val
 	}
 }
 
