@@ -19,6 +19,7 @@ package adka2a
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 
@@ -231,11 +232,13 @@ func NewExecutor(config ExecutorConfig) *Executor {
 			legacyEvent, err := a2av0.FromV1Event(result)
 			if err != nil {
 				log.Warn(ctx, "failed to convert SendMessageResult to legacy format", "error", err)
+				config.A2AExecutionCleanupCallback(ctx, legacyReqCtx, legacySubAgentCards, nil, errors.Join(cause, fmt.Errorf("SendMessageResult conversion failed: %w", err)))
 				return
 			}
 			legacyResult, ok := legacyEvent.(a2a.SendMessageResult)
 			if !ok {
 				log.Warn(ctx, "conversion result is not a2a.SendMessageResult", "type", fmt.Sprintf("%T", legacyResult))
+				config.A2AExecutionCleanupCallback(ctx, legacyReqCtx, legacySubAgentCards, nil, errors.Join(cause, fmt.Errorf("conversion result is not a2a.SendMessageResult: %T", legacyEvent)))
 				return
 			}
 			config.A2AExecutionCleanupCallback(ctx, legacyReqCtx, legacySubAgentCards, legacyResult, cause)

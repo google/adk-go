@@ -174,9 +174,13 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.Converter != nil {
 		v1Cfg.Converter = func(ctx agent.InvocationContext, req *v2a2a.SendMessageRequest, event v2a2a.Event, err error) (*session.Event, error) {
 			legacyReq := a2av0.FromV1SendMessageRequest(req)
-			legacyEvent, convErr := a2av0.FromV1Event(event)
-			if convErr != nil {
-				return nil, errors.Join(fmt.Errorf("a2a event conversion failed: %w", convErr), err)
+			var legacyEvent a2a.Event
+			if event != nil {
+				var convErr error
+				legacyEvent, convErr = a2av0.FromV1Event(event)
+				if convErr != nil {
+					return nil, errors.Join(fmt.Errorf("a2a event conversion failed: %w", convErr), err)
+				}
 			}
 			return cfg.Converter(ctx, legacyReq, legacyEvent, err)
 		}
@@ -212,7 +216,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 				newResp, newErr := cb(ctx, legacyReq, resp, err)
 				v1Req, convErr := a2av0.ToV1SendMessageRequest(legacyReq)
 				if convErr != nil {
-					return nil, convErr
+					return nil, errors.Join(convErr, newErr)
 				}
 				*req = *v1Req
 				return newResp, newErr
@@ -243,6 +247,15 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.RemoteTaskCleanupCallback != nil {
 		v1Cfg.RemoteTaskCleanupCallback = func(ctx context.Context, card *v2a2a.AgentCard, client v2.A2AClient, taskInfo v2a2a.TaskInfo, cause error) {
 			legacyCard := a2av0.FromV1AgentCard(card)
+			legacyTaskInfo := a2a.TaskInfo{TaskID: a2a.TaskID(taskInfo.TaskID), ContextID: taskInfo.ContextID}
+
+			if cc, ok := client.(*compatClient); ok {
+				cfg.RemoteTaskCleanupCallback(ctx, legacyCard, cc.client, legacyTaskInfo, cause)
+				return
+			}
+
+			log.Warn(ctx, "client is not an instance of compatClient, fallback to creating a new client", "type", fmt.Sprintf("%T", client))
+
 			factory := cfg.ClientFactory
 			if factory == nil {
 				factory = a2aclient.NewFactory()
@@ -254,10 +267,10 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 			}
 			defer func() {
 				if err := legacyClient.Destroy(); err != nil {
-					log.Warn(ctx, "RemoteTaskCleanupCallback failed to destroy a legacy client", "error", err)
+					log.Warn(ctx, "RemoteTaskCleanupCallback: failed to destroy a legacy client", "error", err)
 				}
 			}()
-			cfg.RemoteTaskCleanupCallback(ctx, legacyCard, legacyClient, a2a.TaskInfo{TaskID: a2a.TaskID(taskInfo.TaskID), ContextID: taskInfo.ContextID}, cause)
+			cfg.RemoteTaskCleanupCallback(ctx, legacyCard, legacyClient, legacyTaskInfo, cause)
 		}
 	}
 
