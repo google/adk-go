@@ -173,7 +173,10 @@ func NewExecutor(config ExecutorConfig) *Executor {
 			if err := config.AfterEventCallback(executorContextWrapper{ctx}, adkEvent, legacyEvent); err != nil {
 				return err
 			}
-			newV1Event, _ := a2av0.ToV1Event(legacyEvent)
+			newV1Event, err := a2av0.ToV1Event(legacyEvent)
+			if err != nil {
+				return err
+			}
 			if converted, ok := newV1Event.(*a2av2.TaskArtifactUpdateEvent); ok {
 				*a2aEvent = *converted
 			}
@@ -187,7 +190,10 @@ func NewExecutor(config ExecutorConfig) *Executor {
 			if cbErr := config.AfterExecuteCallback(executorContextWrapper{ctx}, legacyEvent, err); cbErr != nil {
 				return cbErr
 			}
-			newV1Event, _ := a2av0.ToV1Event(legacyEvent)
+			newV1Event, convErr := a2av0.ToV1Event(legacyEvent)
+			if convErr != nil {
+				return convErr
+			}
 			if converted, ok := newV1Event.(*a2av2.TaskStatusUpdateEvent); ok {
 				*finalEvent = *converted
 			}

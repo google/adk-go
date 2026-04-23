@@ -25,13 +25,14 @@ import (
 	v2a2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	v2asrv "github.com/a2aproject/a2a-go/v2/a2asrv"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 func TestCompat_OldExecutor_Direct(t *testing.T) {

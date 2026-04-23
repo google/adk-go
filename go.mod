@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go v0.123.0
 	cloud.google.com/go/aiplatform v1.121.0
 	cloud.google.com/go/storage v1.56.1
-	github.com/a2aproject/a2a-go v0.3.13
+	github.com/a2aproject/a2a-go v0.3.14-0.20260404065426-6a9878f8f8a8
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/glebarez/sqlite v1.8.0
 	github.com/google/go-cmp v0.7.0
@@ -16,7 +16,7 @@ require (
 	github.com/gorilla/mux v1.8.1
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/modelcontextprotocol/go-sdk v1.4.1
-	github.com/spf13/cobra v1.8.1
+	github.com/spf13/cobra v1.10.2
 	go.opentelemetry.io/contrib/detectors/gcp v1.40.0
 	go.opentelemetry.io/otel v1.40.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.16.0
@@ -39,7 +39,7 @@ require (
 require github.com/hashicorp/golang-lru/v2 v2.0.7
 
 require (
-	github.com/a2aproject/a2a-go/v2 v2.0.1
+	github.com/a2aproject/a2a-go/v2 v2.2.0
 	golang.org/x/mod v0.33.0 // indirect
 )
 

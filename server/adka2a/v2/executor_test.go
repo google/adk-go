@@ -71,10 +71,6 @@ func newEventReplayAgent(events []*session.Event, failWith error) (agent.Agent, 
 	})
 }
 
-func newInMemoryQueue(t *testing.T) []a2a.Event {
-	return nil
-}
-
 type eventIndex struct{ i int }
 
 func TestExecutor_Execute(t *testing.T) {

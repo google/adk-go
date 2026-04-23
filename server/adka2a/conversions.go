@@ -15,14 +15,18 @@
 package adka2a
 
 import (
+	"context"
+
 	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/log"
 	v2a2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	v2 "google.golang.org/adk/server/adka2a/v2"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // BuildAgentSkills attempts to create a list of [a2a.AgentSkill]s based on agent descriptions and types.
@@ -129,7 +133,11 @@ func ToGenAIParts(parts []a2a.Part) ([]*genai.Part, error) {
 func WithoutPartialArtifacts(artifacts []*a2a.Artifact) []*a2a.Artifact {
 	v1Artifacts := make([]*v2a2a.Artifact, 0, len(artifacts))
 	for _, a := range artifacts {
-		v1a, _ := a2av0.ToV1Artifact(a)
+		v1a, err := a2av0.ToV1Artifact(a)
+		if err != nil {
+			log.Warn(context.Background(), "artifact skipped, because conversion failed", "cause", err)
+			continue
+		}
 		v1Artifacts = append(v1Artifacts, v1a)
 	}
 

@@ -440,7 +440,7 @@ func TestToSessionEvent(t *testing.T) {
 						ID: "artifact-1",
 						Parts: []*a2a.Part{
 							a2a.NewTextPart("Checking weather..."),
-							&a2a.Part{
+							{
 								Content: a2a.Data{Value: map[string]any{"id": "tool_1", "name": "GetWeather", "args": map[string]any{"city": "London"}}},
 								Metadata: map[string]any{
 									a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
@@ -452,7 +452,7 @@ func TestToSessionEvent(t *testing.T) {
 					{
 						ID: "artifact-2",
 						Parts: []*a2a.Part{
-							&a2a.Part{
+							{
 								Content: a2a.Data{Value: map[string]any{"id": "tool_2", "name": "GetNews", "args": map[string]any{"topic": "tech"}}},
 								Metadata: map[string]any{
 									a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,

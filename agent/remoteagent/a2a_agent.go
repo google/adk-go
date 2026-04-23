@@ -147,13 +147,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.ClientFactory != nil {
 		v1Cfg.ClientProvider = func(ctx context.Context, card *v2a2a.AgentCard) (v2.A2AClient, error) {
 			legacyCard := a2av0.FromV1AgentCard(card)
-			var client *a2aclient.Client
-			var err error
-			if cfg.ClientFactory != nil {
-				client, err = cfg.ClientFactory.CreateFromCard(ctx, legacyCard)
-			} else {
-				client, err = a2aclient.NewFromCard(ctx, legacyCard)
-			}
+			client, err := cfg.ClientFactory.CreateFromCard(ctx, legacyCard)
 			if err != nil {
 				return nil, err
 			}
@@ -164,7 +158,10 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.Converter != nil {
 		v1Cfg.Converter = func(ctx agent.InvocationContext, req *v2a2a.SendMessageRequest, event v2a2a.Event, err error) (*session.Event, error) {
 			legacyReq := a2av0.FromV1SendMessageRequest(req)
-			legacyEvent, _ := a2av0.FromV1Event(event)
+			legacyEvent, convErr := a2av0.FromV1Event(event)
+			if convErr != nil {
+				return nil, convErr
+			}
 			return cfg.Converter(ctx, legacyReq, legacyEvent, err)
 		}
 	}
@@ -181,7 +178,10 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 				if resp != nil {
 					return resp, nil
 				}
-				v1Req, _ := a2av0.ToV1SendMessageRequest(legacyReq)
+				v1Req, convErr := a2av0.ToV1SendMessageRequest(legacyReq)
+				if convErr != nil {
+					return nil, convErr
+				}
 				*req = *v1Req
 				return nil, nil
 			})
@@ -194,7 +194,10 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 			v1Cfg.AfterRequestCallbacks = append(v1Cfg.AfterRequestCallbacks, func(ctx agent.CallbackContext, req *v2a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error) {
 				legacyReq := a2av0.FromV1SendMessageRequest(req)
 				newResp, newErr := cb(ctx, legacyReq, resp, err)
-				v1Req, _ := a2av0.ToV1SendMessageRequest(legacyReq)
+				v1Req, convErr := a2av0.ToV1SendMessageRequest(legacyReq)
+				if convErr != nil {
+					return nil, convErr
+				}
 				*req = *v1Req
 				return newResp, newErr
 			})

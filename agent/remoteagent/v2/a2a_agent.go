@@ -148,7 +148,6 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 			return remoteAgent.run(ic, cfg)
 		},
 	})
-
 	if err != nil {
 		return nil, err
 	}
