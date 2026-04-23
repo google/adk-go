@@ -85,7 +85,7 @@ type RunnerProvider func(ctx context.Context, reqCtx *a2asrv.ExecutorContext, pl
 type RunnerConfig struct {
 	// AppName is the name of the application used in [session.Service] keys and A2A event metadata.
 	AppName string
-	// Agent is the root agent. It isued
+	// Agent is the root agent.
 	Agent agent.Agent
 	// SessionService is the session service to use.
 	SessionService session.Service
@@ -429,7 +429,7 @@ func newDefaultRunnerProvider(baseConfig runner.Config) RunnerProvider {
 		if baseConfig.Agent == nil {
 			return RunnerConfig{}, nil, fmt.Errorf("runner.Config.Agent is not provided")
 		}
-		if baseConfig.Agent == nil {
+		if baseConfig.SessionService == nil {
 			return RunnerConfig{}, nil, fmt.Errorf("runner.Config.SessionService is not provided")
 		}
 

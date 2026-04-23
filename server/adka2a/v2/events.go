@@ -119,7 +119,6 @@ func ToSessionEventWithParts(ctx agent.InvocationContext, event a2a.Event, partC
 			return nil, nil
 		}
 		event, err := messageToEvent(ctx, v.Status.Message, partConverter)
-		event.TurnComplete = false
 		if err != nil {
 			return nil, fmt.Errorf("custom metadata conversion failed: %w", err)
 		}

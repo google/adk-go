@@ -216,7 +216,7 @@ func (p *a2aAgentRunProcessor) runBeforeA2ARequestCallbacks(ctx agent.Invocation
 }
 
 func (p *a2aAgentRunProcessor) runAfterA2ARequestCallbacks(ctx agent.InvocationContext, resp *session.Event, err error) (*session.Event, error) {
-	if resp == nil {
+	if resp == nil && err == nil {
 		return nil, nil
 	}
 	cctx := icontext.NewCallbackContext(ctx)

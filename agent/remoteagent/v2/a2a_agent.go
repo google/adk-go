@@ -54,17 +54,46 @@ type AfterA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.SendMessag
 // A2ARemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
 type A2ARemoteTaskCleanupCallback func(ctx context.Context, card *a2a.AgentCard, client A2AClient, taskInfo a2a.TaskInfo, cause error)
 
+// AgentCardProvider resolves an agent card lazily during the first agent invocation.
+// Use [NewAgentCardProvider] to create a provider from a URL or file path.
+type AgentCardProvider func(ctx context.Context) (*a2a.AgentCard, error)
+
+// NewAgentCardProvider creates an [AgentCardProvider] that resolves an agent card from the given source.
+// The source can be an http(s) URL or a local file path.
+func NewAgentCardProvider(source string, opts ...agentcard.ResolveOption) AgentCardProvider {
+	return func(ctx context.Context) (*a2a.AgentCard, error) {
+		if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+			card, err := agentcard.DefaultResolver.Resolve(ctx, source, opts...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch an agent card: %w", err)
+			}
+			return card, nil
+		}
+
+		fileBytes, err := os.ReadFile(source)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read agent card from %q: %w", source, err)
+		}
+
+		var card a2a.AgentCard
+		if err := json.Unmarshal(fileBytes, &card); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal an agent card: %w", err)
+		}
+		return &card, nil
+	}
+}
+
 // A2AConfig is used to describe and configure a remote agent.
 type A2AConfig struct {
 	Name        string
 	Description string
 
-	// AgentCardSource can be either an http(s) URL or a local file path. If a2a.AgentCard
-	// is not provided, the source is used to resolve the card during the first agent invocation.
-	AgentCard       *a2a.AgentCard
-	AgentCardSource string
-	// CardResolveOptions can be used to provide a set of agencard.Resolver configurations.
-	CardResolveOptions []agentcard.ResolveOption
+	// AgentCard is a static agent card. Either AgentCard or AgentCardProvider must be set.
+	AgentCard *a2a.AgentCard
+	// AgentCardProvider resolves an agent card lazily during the first agent invocation.
+	// Use [NewAgentCardProvider] to create a provider from a URL or file path.
+	// Either AgentCard or AgentCardProvider must be set.
+	AgentCardProvider AgentCardProvider
 
 	// BeforeAgentCallbacks is a list of callbacks that are called sequentially
 	// before the agent starts its run.
@@ -124,8 +153,8 @@ type A2AConfig struct {
 // NewA2A creates a remote A2A agent. A2A (Agent-To-Agent) protocol is used for communication with an
 // agent which can run in a different process or on a different host.
 func NewA2A(cfg A2AConfig) (agent.Agent, error) {
-	if cfg.AgentCard == nil && cfg.AgentCardSource == "" {
-		return nil, fmt.Errorf("either AgentCard or AgentCardSource must be provided")
+	if cfg.AgentCard == nil && cfg.AgentCardProvider == nil {
+		return nil, fmt.Errorf("either AgentCard or AgentCardProvider must be provided")
 	}
 	if cfg.ClientProvider == nil {
 		cfg.ClientProvider = NewA2AClientProvider(a2aclient.NewFactory())
@@ -133,10 +162,9 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 
 	remoteAgent := &a2aAgent{
 		serverConfig: &iremoteagent.A2AServerConfig{
-			AgentCard:          cfg.AgentCard,
-			AgentCardSource:    cfg.AgentCardSource,
-			CardResolveOptions: cfg.CardResolveOptions,
-			ClientProvider:     cfg.ClientProvider,
+			AgentCard:         cfg.AgentCard,
+			AgentCardProvider: cfg.AgentCardProvider,
+			ClientProvider:    cfg.ClientProvider,
 		},
 	}
 	agent, err := agent.New(agent.Config{
@@ -346,25 +374,10 @@ func resolveAgentCard(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.AgentCar
 	if cfg.AgentCard != nil {
 		return cfg.AgentCard, nil
 	}
-
-	if strings.HasPrefix(cfg.AgentCardSource, "http://") || strings.HasPrefix(cfg.AgentCardSource, "https://") {
-		card, err := agentcard.DefaultResolver.Resolve(ctx, cfg.AgentCardSource, cfg.CardResolveOptions...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch an agent card: %w", err)
-		}
-		return card, nil
+	if cfg.AgentCardProvider != nil {
+		return cfg.AgentCardProvider(ctx)
 	}
-
-	fileBytes, err := os.ReadFile(cfg.AgentCardSource)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read agent card from %q: %w", cfg.AgentCardSource, err)
-	}
-
-	var card a2a.AgentCard
-	if err := json.Unmarshal(fileBytes, &card); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal an agent card: %w", err)
-	}
-	return &card, nil
+	return nil, fmt.Errorf("either AgentCard or AgentCardProvider must be set")
 }
 
 func destroy(client A2AClient) {

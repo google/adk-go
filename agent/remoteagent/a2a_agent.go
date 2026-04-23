@@ -21,12 +21,15 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"log"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
 	v2a2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	v2 "google.golang.org/adk/agent/remoteagent/v2"
@@ -130,17 +133,28 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	v1Cfg := v2.A2AConfig{
 		Name:                 cfg.Name,
 		Description:          cfg.Description,
-		AgentCardSource:      cfg.AgentCardSource,
 		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
 	}
 
 	if cfg.AgentCard != nil {
 		v1Cfg.AgentCard = a2av0.ToV1AgentCard(cfg.AgentCard)
+	} else if cfg.AgentCardSource != "" {
+		source := cfg.AgentCardSource
+		v1Cfg.AgentCardProvider = func(ctx context.Context) (*v2a2a.AgentCard, error) {
+			v0Card, err := agentcard.DefaultResolver.Resolve(ctx, source)
+			if err != nil {
+				return nil, err
+			}
+			return a2av0.ToV1AgentCard(v0Card), nil
+		}
 	}
 
 	if cfg.MessageSendConfig != nil {
-		req, _ := a2av0.ToV1SendMessageRequest(&a2a.MessageSendParams{Config: cfg.MessageSendConfig})
+		req, err := a2av0.ToV1SendMessageRequest(&a2a.MessageSendParams{Config: cfg.MessageSendConfig})
+		if err != nil {
+			return nil, fmt.Errorf("MessageSendConfig conversion failed: %w", err)
+		}
 		v1Cfg.MessageSendConfig = req.Config
 	}
 
@@ -201,6 +215,43 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 				*req = *v1Req
 				return newResp, newErr
 			})
+		}
+	}
+
+	if cfg.A2APartConverter != nil {
+		v1Cfg.A2APartConverter = func(ctx context.Context, a2aEvent v2a2a.Event, part *v2a2a.Part) (*genai.Part, error) {
+			legacyEvent, convErr := a2av0.FromV1Event(a2aEvent)
+			if convErr != nil {
+				return nil, convErr
+			}
+			return cfg.A2APartConverter(ctx, legacyEvent, a2av0.FromV1Part(part))
+		}
+	}
+
+	if cfg.GenAIPartConverter != nil {
+		v1Cfg.GenAIPartConverter = func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (*v2a2a.Part, error) {
+			legacyPart, err := cfg.GenAIPartConverter(ctx, adkEvent, part)
+			if err != nil {
+				return nil, err
+			}
+			return a2av0.ToV1Part(legacyPart), nil
+		}
+	}
+
+	if cfg.RemoteTaskCleanupCallback != nil {
+		v1Cfg.RemoteTaskCleanupCallback = func(ctx context.Context, card *v2a2a.AgentCard, client v2.A2AClient, taskInfo v2a2a.TaskInfo, cause error) {
+			legacyCard := a2av0.FromV1AgentCard(card)
+			factory := cfg.ClientFactory
+			if factory == nil {
+				factory = a2aclient.NewFactory()
+			}
+			legacyClient, err := factory.CreateFromCard(ctx, legacyCard)
+			if err != nil {
+				log.Printf("RemoteTaskCleanupCallback: failed to create legacy client: %v", err)
+				return
+			}
+			defer legacyClient.Destroy()
+			cfg.RemoteTaskCleanupCallback(ctx, legacyCard, legacyClient, a2a.TaskInfo{TaskID: a2a.TaskID(taskInfo.TaskID), ContextID: taskInfo.ContextID}, cause)
 		}
 	}
 

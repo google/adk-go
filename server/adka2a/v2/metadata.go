@@ -39,12 +39,12 @@ var (
 	metadataPartialKey         = ToA2AMetaKey("partial")
 )
 
-// ToA2AMetaKey adds a prefix used to differentiage ADK-related values stored in Metadata an A2A event.
+// ToA2AMetaKey adds a prefix used to differentiate ADK-related values stored in Metadata an A2A event.
 func ToA2AMetaKey(key string) string {
 	return "adk_" + key
 }
 
-// ToADKMetaKey adds a prefix used to differentiage A2A-related values stored in custom metadata of an ADK session event.
+// ToADKMetaKey adds a prefix used to differentiate A2A-related values stored in custom metadata of an ADK session event.
 func ToADKMetaKey(key string) string {
 	return "a2a:" + key
 }

@@ -85,7 +85,7 @@ const (
 type RunnerConfig struct {
 	// AppName is the name of the application used in [session.Service] keys and A2A event metadata.
 	AppName string
-	// Agent is the root agent. It isued
+	// Agent is the root agent.
 	Agent agent.Agent
 	// SessionService is the session service to use.
 	SessionService session.Service
@@ -203,7 +203,10 @@ func NewExecutor(config ExecutorConfig) *Executor {
 
 	if config.A2APartConverter != nil {
 		v1Config.A2APartConverter = func(ctx context.Context, a2aEvent a2av2.Event, part *a2av2.Part) (*genai.Part, error) {
-			legacyEvent, _ := a2av0.FromV1Event(a2aEvent)
+			legacyEvent, err := a2av0.FromV1Event(a2aEvent)
+			if err != nil {
+				return nil, fmt.Errorf("a2a event conversion failed: %w", err)
+			}
 			return config.A2APartConverter(ctx, legacyEvent, a2av0.FromV1Part(part))
 		}
 	}

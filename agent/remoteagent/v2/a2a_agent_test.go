@@ -1127,7 +1127,7 @@ func TestRemoteAgent_ResolvesAgentCard(t *testing.T) {
 	})
 	cardServer = httptest.NewServer(mux)
 
-	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCardSource: cardServer.URL})
+	remoteAgent, err := NewA2A(A2AConfig{Name: "a2a", AgentCardProvider: NewAgentCardProvider(cardServer.URL)})
 	if err != nil {
 		t.Fatalf("remoteagent.NewA2A() error = %v", err)
 	}
