@@ -21,11 +21,11 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"log"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
+	"github.com/a2aproject/a2a-go/log"
 	v2a2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 
@@ -141,8 +141,9 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 		v1Cfg.AgentCard = a2av0.ToV1AgentCard(cfg.AgentCard)
 	} else if cfg.AgentCardSource != "" {
 		source := cfg.AgentCardSource
+		resolveOpts := cfg.CardResolveOptions
 		v1Cfg.AgentCardProvider = func(ctx context.Context) (*v2a2a.AgentCard, error) {
-			v0Card, err := agentcard.DefaultResolver.Resolve(ctx, source)
+			v0Card, err := agentcard.DefaultResolver.Resolve(ctx, source, resolveOpts...)
 			if err != nil {
 				return nil, err
 			}
@@ -247,10 +248,14 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 			}
 			legacyClient, err := factory.CreateFromCard(ctx, legacyCard)
 			if err != nil {
-				log.Printf("RemoteTaskCleanupCallback: failed to create legacy client: %v", err)
+				log.Warn(ctx, "RemoteTaskCleanupCallback: failed to create legacy client", "error", err)
 				return
 			}
-			defer legacyClient.Destroy()
+			defer func() {
+				if err := legacyClient.Destroy(); err != nil {
+					log.Warn(ctx, "RemoteTaskCleanupCallback failed to destroy a legacy client", "error", err)
+				}
+			}()
 			cfg.RemoteTaskCleanupCallback(ctx, legacyCard, legacyClient, a2a.TaskInfo{TaskID: a2a.TaskID(taskInfo.TaskID), ContextID: taskInfo.ContextID}, cause)
 		}
 	}
@@ -285,7 +290,12 @@ func (s *compatClient) SendStreamingMessage(ctx context.Context, req *v2a2a.Send
 				yield(nil, err)
 				return
 			}
-			if !yield(a2av0.ToV1Event(legacyEvent)) {
+			v1Event, convErr := a2av0.ToV1Event(legacyEvent)
+			if convErr != nil {
+				yield(nil, convErr)
+				return
+			}
+			if !yield(v1Event, nil) {
 				return
 			}
 		}

@@ -53,7 +53,7 @@ type A2APartConverter func(ctx context.Context, a2aEvent a2a.Event, part *a2a.Pa
 // nil returns are considered intentionally dropped parts.
 type GenAIPartConverter func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (*a2a.Part, error)
 
-// A2AExecutionCleanupCallback is a callback which will be called after an execution or cancellatio has completed or failed.
+// A2AExecutionCleanupCallback is a callback which will be called after an execution or cancellation has completed or failed.
 type A2AExecutionCleanupCallback func(ctx context.Context, reqCtx *a2asrv.ExecutorContext, subAgentCards []*a2a.AgentCard, result a2a.SendMessageResult, cause error)
 
 // OutputMode controls how artifacts are produced.

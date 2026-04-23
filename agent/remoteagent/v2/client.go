@@ -35,7 +35,7 @@ func (fn A2AClientProvider) CreateClient(ctx context.Context, card *a2a.AgentCar
 	return fn(ctx, card)
 }
 
-// NewA2AMessageSenderProvider creates a default A2AMessageSenderProvider from the configured factory.
+// NewA2AClientProvider creates a default A2AClientProvider from the configured factory.
 func NewA2AClientProvider(factory *a2aclient.Factory) A2AClientProvider {
 	return func(ctx context.Context, card *a2a.AgentCard) (A2AClient, error) {
 		var client *a2aclient.Client

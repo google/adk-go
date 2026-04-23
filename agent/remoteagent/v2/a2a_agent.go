@@ -140,7 +140,7 @@ type A2AConfig struct {
 
 	// ClientProvider can be used to provide a custom implementation of A2A message sending.
 	ClientProvider A2AClientProvider
-	// MessageSendConfig is attached to a2a.MessageSendParams sent on every agent invocation.
+	// MessageSendConfig is attached to a2a.SendMessageRequest sent on every agent invocation.
 	MessageSendConfig *a2a.SendMessageConfig
 
 	// RemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
@@ -346,7 +346,7 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 	events := ctx.Session().Events()
 	if userFnCall := getUserFunctionCallAt(events, events.Len()-1); userFnCall != nil {
 		event := userFnCall.response
-		parts, err := adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
+		parts, err := convertParts(ctx, cfg, event)
 		if err != nil {
 			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}
