@@ -54,8 +54,9 @@ type AfterA2ARequestCallback func(ctx agent.CallbackContext, req *a2a.SendMessag
 // A2ARemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
 type A2ARemoteTaskCleanupCallback func(ctx context.Context, card *a2a.AgentCard, client A2AClient, taskInfo a2a.TaskInfo, cause error)
 
-// AgentCardProvider resolves an agent card lazily during the first agent invocation.
+// AgentCardProvider resolves an agent card on each agent invocation.
 // Use [NewAgentCardProvider] to create a provider from a URL or file path.
+// Callers that want lazy/cached resolution should implement caching within the provider function.
 type AgentCardProvider func(ctx context.Context) (*a2a.AgentCard, error)
 
 // NewAgentCardProvider creates an [AgentCardProvider] that resolves an agent card from the given source.
@@ -90,7 +91,7 @@ type A2AConfig struct {
 
 	// AgentCard is a static agent card. Either AgentCard or AgentCardProvider must be set.
 	AgentCard *a2a.AgentCard
-	// AgentCardProvider resolves an agent card lazily during the first agent invocation.
+	// AgentCardProvider resolves an agent card on each agent invocation.
 	// Use [NewAgentCardProvider] to create a provider from a URL or file path.
 	// Either AgentCard or AgentCardProvider must be set.
 	AgentCardProvider AgentCardProvider

@@ -19,6 +19,7 @@ package remoteagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 
@@ -175,7 +176,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 			legacyReq := a2av0.FromV1SendMessageRequest(req)
 			legacyEvent, convErr := a2av0.FromV1Event(event)
 			if convErr != nil {
-				return nil, convErr
+				return nil, errors.Join(fmt.Errorf("a2a event conversion failed: %w", convErr), err)
 			}
 			return cfg.Converter(ctx, legacyReq, legacyEvent, err)
 		}

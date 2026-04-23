@@ -188,6 +188,10 @@ func (e *Executor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext)
 				yield(nil, fmt.Errorf("before execute: %w", err))
 				return
 			}
+			if ctx == nil {
+				yield(nil, fmt.Errorf("before execute: callback returned nil context"))
+				return
+			}
 		}
 
 		if event, err := HandleInputRequired(execCtx, content); event != nil || err != nil {
@@ -254,7 +258,7 @@ func (e *Executor) Cleanup(ctx context.Context, execCtx *a2asrv.ExecutorContext,
 	// If task was in input-required and got successfully cancelled - run the cleanup logic
 	if execCtx.StoredTask != nil && execCtx.StoredTask.Status.State == a2a.TaskStateInputRequired {
 		if task, ok := result.(*a2a.Task); ok && task.Status.State == a2a.TaskStateCanceled && execCtx.Message == nil {
-			if err := e.cancelChildInputRequiredTasks(ctx, execCtx, execCtx.StoredTask.Status, remoteSubagents); err != nil {
+			if err := e.cancelChildInputRequiredTasks(ctx, execCtx, execCtx.StoredTask.Status, cfg, remoteSubagents); err != nil {
 				log.Warn(ctx, "failed to cancel subagent tasks waiting for input", "cause", err)
 			}
 		}
@@ -275,14 +279,9 @@ func (e *Executor) Cleanup(ctx context.Context, execCtx *a2asrv.ExecutorContext,
 	}
 }
 
-func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2asrv.ExecutorContext, status a2a.TaskStatus, subagents []remoteAgent) error {
+func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2asrv.ExecutorContext, status a2a.TaskStatus, cfg RunnerConfig, subagents []remoteAgent) error {
 	if len(subagents) == 0 {
 		return nil
-	}
-
-	cfg, err := e.createRunnerConfig(ctx, reqCtx)
-	if err != nil {
-		return fmt.Errorf("failed to create runner config: %w", err)
 	}
 
 	meta := toInvocationMeta(ctx, cfg, reqCtx)

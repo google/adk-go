@@ -16,6 +16,7 @@ package remoteagent
 
 import (
 	"fmt"
+	"log"
 	"slices"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -116,7 +117,7 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 		}
 		parts, err := convertParts(ctx, cfg, event)
 		if err != nil {
-			// TODO(yarolegovich): log error
+			log.Printf("failed to convert parts for session event at index %d: %v", i, err)
 			continue
 		}
 		result = append(result, parts...)

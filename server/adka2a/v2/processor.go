@@ -17,6 +17,7 @@ package adka2a
 import (
 	"context"
 	"fmt"
+	"log"
 	"maps"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -136,7 +137,7 @@ func (p *eventProcessor) makeTaskFailedEvent(cause error, event *session.Event) 
 	meta := p.meta.eventMeta
 	if event != nil {
 		if eventMeta, err := toEventMeta(p.meta, event); err != nil {
-			// TODO(yarolegovich): log ignored error
+			log.Printf("failed to convert event metadata for task failed event: %v", err)
 		} else {
 			meta = eventMeta
 		}
