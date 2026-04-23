@@ -15,22 +15,22 @@
 package llminternal_test
 
 import (
+	"fmt"
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/genai"
 	"iter"
 	"slices"
 	"strings"
 	"testing"
 	"time"
-    "fmt"
-	"github.com/google/go-cmp/cmp"
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-    "google.golang.org/adk/internal/llminternal"
 )
 
 type testModel struct {
@@ -1034,24 +1034,72 @@ func TestBuildContentsCurrentTurnContextOnly_BranchFiltering(t *testing.T) {
 			LLMResponse: model.LLMResponse{
 				Content: genai.NewContentFromText("world !!!", "user"),
 			},
-		}, 
-	} 
+		},
+	}
 
 	got, err := llminternal.BuildContentsCurrentTurnContextOnlyForTest("agent", "branch-A", events)
-    
-    if err != nil {
-        t.Fatalf("Eroare la apel: %v", err)
-    }
 
-    if len(got) != 1 {
-        t.Errorf("Filtrarea a eșuat la număr, am primit %d evenimente", len(got))
-        return 
-    }
+	if err != nil {
+		t.Fatalf("Call erorr: %v", err)
+	}
 
-    gotText := fmt.Sprintf("%v", got[0].Parts[0])
+	if len(got) != 1 {
+		t.Errorf("Filter failed !!!")
+		return
+	}
 
-    expectedText := "world !!!"
-    if !strings.Contains(gotText, expectedText) {
-        t.Errorf("Filtrarea a eșuat la conținut! Așteptam [%s], dar am primit [%s]", expectedText, gotText)
-    }
+	gotText := fmt.Sprintf("%v", got[0].Parts[0])
+
+	expectedText := "world !!!"
+	if !strings.Contains(gotText, expectedText) {
+		t.Errorf("Filter failed! Expected [%s], and received [%s]", expectedText, gotText)
+	}
+}
+
+func TestIssue719_BranchAnchoringBug(t *testing.T) {
+	const (
+		alphaBranch = "parallel.run-alpha"
+		betaBranch  = "parallel.run-beta"
+	)
+
+	events := []*session.Event{
+		{
+			Author: "user",
+			Branch: "",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("Mesajul original de la User", "user"),
+			},
+		},
+		{
+			Author: "run-alpha",
+			Branch: alphaBranch,
+			LLMResponse: model.LLMResponse{
+				Content: NewContentFromFunctionCall(&genai.FunctionCall{
+					Name: "alpha_tool",
+				}, "model"),
+			},
+		},
+	}
+
+	got, err := llminternal.BuildContentsCurrentTurnContextOnlyForTest("run-beta", betaBranch, events)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(got) == 0 {
+		t.Errorf("Context is empty! Scan branch %s", alphaBranch)
+	} else {
+		foundUserMessage := false
+		for _, c := range got {
+			if c.Role == "user" {
+				foundUserMessage = true
+				break
+			}
+		}
+		if !foundUserMessage {
+			t.Errorf("FAIL: Received roles: %v", got[0].Role)
+		} else {
+			t.Log("SUCCESS")
+		}
+	}
 }
