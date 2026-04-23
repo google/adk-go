@@ -322,6 +322,16 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 				return fmt.Errorf("cannot read archive file: %w", err)
 			}
 
+			methods, err := agentengine.ListClassMethods()
+			if err != nil {
+				return fmt.Errorf("cannot list class methods: %w", err)
+			}
+			methodsJSON, err := json.Marshal(methods)
+			if err != nil {
+				return fmt.Errorf("cannot marshal methods: %w", err)
+			}
+			p("Methods:", string(methodsJSON))
+
 			req := &aiplatformpb.UpdateReasoningEngineRequest{
 				ReasoningEngine: &aiplatformpb.ReasoningEngine{
 					Name: f.agentEngine.instanceName,
@@ -338,9 +348,10 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 								},
 							},
 						},
+						ClassMethods: methods,
 					},
 				},
-				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.source_code_spec"}},
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.source_code_spec", "spec.class_methods"}},
 			}
 			p("Sending UpdateReasoningEngine request...")
 			op, err := client.UpdateReasoningEngine(ctx, req)
