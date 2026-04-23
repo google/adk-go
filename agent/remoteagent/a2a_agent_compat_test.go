@@ -296,7 +296,9 @@ func TestCompat_RemoteAgent(t *testing.T) {
 					}
 				}
 			}
-			t.Errorf("expected text %q in events, got texts: %v", tc.name, texts)
+			if !foundText {
+				t.Errorf("expected text %q in events, got texts: %v", tc.wantEventWithText, texts)
+			}
 		})
 	}
 }
