@@ -21,6 +21,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
@@ -66,6 +67,31 @@ func (m *mockFunctionTool) Run(ctx tool.Context, args any) (map[string]any, erro
 
 func (m *mockFunctionTool) Declaration() *genai.FunctionDeclaration {
 	return nil
+}
+
+type mockToolset struct {
+	name string
+}
+
+func (m *mockToolset) Name() string { return m.name }
+func (m *mockToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
+	return nil, nil
+}
+
+type mockRequestProcessorToolset struct {
+	name    string
+	process func(ctx tool.Context, req *model.LLMRequest) error
+}
+
+func (m *mockRequestProcessorToolset) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+	if m.process != nil {
+		return m.process(ctx, req)
+	}
+	return nil
+}
+func (m *mockRequestProcessorToolset) Name() string { return m.name }
+func (m *mockRequestProcessorToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
+	return nil, nil
 }
 
 type testCase struct {
@@ -571,6 +597,88 @@ func TestMergeEventActions(t *testing.T) {
 			got := mergeEventActions(tc.base, tc.other)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("mergeEventActions() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestPreprocess_Toolset(t *testing.T) {
+	noOpAgent, err := agent.New(agent.Config{Name: "no-op"})
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		agent     agent.Agent
+		wantModel string
+		wantError bool
+	}{
+		{
+			name:      "agent not llminternal.Agent",
+			agent:     noOpAgent,
+			wantError: false,
+		},
+		{
+			name:      "agent has no toolsets",
+			agent:     &mockLLMAgent{s: &State{}},
+			wantError: false,
+		},
+		{
+			name: "toolset implements RequestProcessor, error",
+			agent: &mockLLMAgent{
+				s: &State{
+					Toolsets: []tool.Toolset{&mockRequestProcessorToolset{
+						name: "toolset",
+						process: func(_ tool.Context, _ *model.LLMRequest) error {
+							return errors.New("process error")
+						},
+					}},
+				},
+			},
+			wantError: true,
+		},
+		{
+			name: "toolsets, success",
+			agent: &mockLLMAgent{
+				s: &State{
+					Toolsets: []tool.Toolset{
+						&mockToolset{name: "toolset_without_processor"},
+						&mockRequestProcessorToolset{
+							name: "toolset_with_processor",
+							process: func(_ tool.Context, req *model.LLMRequest) error {
+								req.Model = "modified-model"
+								return nil
+							},
+						},
+					},
+				},
+			},
+			wantError: false,
+			wantModel: "modified-model",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &Flow{}
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: tc.agent})
+			req := &model.LLMRequest{}
+
+			events := f.preprocess(ctx, req)
+
+			var gotErr error
+			for _, err := range events {
+				if err != nil {
+					gotErr = err
+					break
+				}
+			}
+			if (gotErr != nil) != tc.wantError {
+				t.Errorf("preprocess() error = %v, wantError %v", gotErr, tc.wantError)
+			}
+			if req.Model != tc.wantModel {
+				t.Errorf("preprocess() model = %s, wantModel %s", req.Model, tc.wantModel)
 			}
 		})
 	}

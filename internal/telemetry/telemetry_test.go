@@ -216,8 +216,10 @@ func TestGenerateContent(t *testing.T) {
 			resultParams: TraceGenerateContentResultParams{
 				Response: &model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-						PromptTokenCount:     10,
-						CandidatesTokenCount: 20,
+						PromptTokenCount:        10,
+						CandidatesTokenCount:    20,
+						CachedContentTokenCount: 5,
+						ThoughtsTokenCount:      15,
 					},
 					FinishReason: genai.FinishReasonStop,
 				},
@@ -229,6 +231,8 @@ func TestGenerateContent(t *testing.T) {
 				semconv.GenAIRequestModelKey:          "test-model",
 				semconv.GenAIUsageInputTokensKey:      "10",
 				semconv.GenAIUsageOutputTokensKey:     "20",
+				genAIUsageCacheReadInputTokens:        "5",
+				genAIUsageExperimentalReasoningTokens: "15",
 				semconv.GenAIResponseFinishReasonsKey: "[\"STOP\"]",
 				gcpVertexAgentInvocationID:            invocationID,
 			},
