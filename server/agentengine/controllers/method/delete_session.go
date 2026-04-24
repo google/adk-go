@@ -94,7 +94,7 @@ func (g *deleteSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 	err = g.sessionservice.Delete(ctx, ssReq)
 	output := ""
 	if err != nil {
-		output = err.Error()
+		return fmt.Errorf("g.sessionservice.Delete() failed: %v", err)
 	}
 
 	result := models.DeleteSessionResponse{
