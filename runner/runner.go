@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"google.golang.org/genai"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
@@ -145,7 +147,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			SessionID: sessionID,
 		})
 		if err != nil {
-			if !r.autoCreateSession {
+			if !r.autoCreateSession || status.Code(err) != codes.NotFound {
 				yield(nil, err)
 				return
 			}
