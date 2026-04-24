@@ -250,6 +250,10 @@ func (e *Executor) Cleanup(ctx context.Context, execCtx *a2asrv.ExecutorContext,
 	cfg, err := e.createRunnerConfig(ctx, execCtx)
 	if err != nil {
 		log.Error(ctx, "failed to create runner config", err)
+
+		if e.config.A2AExecutionCleanupCallback != nil {
+			e.config.A2AExecutionCleanupCallback(ctx, execCtx, []*a2a.AgentCard{}, result, cause)
+		}
 		return
 	}
 

@@ -192,12 +192,10 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 			v1Cfg.BeforeRequestCallbacks = append(v1Cfg.BeforeRequestCallbacks, func(ctx agent.CallbackContext, req *v2a2a.SendMessageRequest) (*session.Event, error) {
 				legacyReq := a2av0.FromV1SendMessageRequest(req)
 				resp, err := cb(ctx, legacyReq)
-				if err != nil {
-					return nil, err
+				if resp != nil || err != nil { // short-circuit, no need to convert the request back
+					return resp, err
 				}
-				if resp != nil {
-					return resp, nil
-				}
+				// callback pass-through request modifications
 				v1Req, convErr := a2av0.ToV1SendMessageRequest(legacyReq)
 				if convErr != nil {
 					return nil, convErr
@@ -214,12 +212,16 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 			v1Cfg.AfterRequestCallbacks = append(v1Cfg.AfterRequestCallbacks, func(ctx agent.CallbackContext, req *v2a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error) {
 				legacyReq := a2av0.FromV1SendMessageRequest(req)
 				newResp, newErr := cb(ctx, legacyReq, resp, err)
+				if newResp != nil || newErr != nil { // short-circuit, no need to convert the request back
+					return newResp, newErr
+				}
+				// callback pass-through request modifications
 				v1Req, convErr := a2av0.ToV1SendMessageRequest(legacyReq)
 				if convErr != nil {
-					return nil, errors.Join(convErr, newErr)
+					return nil, convErr
 				}
 				*req = *v1Req
-				return newResp, newErr
+				return nil, nil
 			})
 		}
 	}

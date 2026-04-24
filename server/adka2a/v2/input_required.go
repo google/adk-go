@@ -24,6 +24,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/log"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/session"
 )
 
@@ -188,28 +189,36 @@ func getSubagentTasksToCancel(ctx context.Context, status a2a.TaskStatus, sessio
 		return nil, nil
 	}
 
-	foundCalls := 0
+	foundCalls, foundTaskIDs := map[string]bool{}, 0
 	var tasksToCancel []subagentTask
 	events := session.Events()
 	for i := events.Len() - 1; i >= 0; i-- {
 		event := events.At(i)
-		if event.Content != nil {
-			if slices.ContainsFunc(event.Content.Parts, func(p *genai.Part) bool {
-				return p.FunctionCall != nil && slices.Contains(pendingCallIDs, p.FunctionCall.ID)
-			}) {
-				foundCalls++
-				if taskID, _ := GetA2ATaskInfo(event); taskID != "" {
-					tasksToCancel = append(tasksToCancel, subagentTask{agentName: event.Author, taskID: a2a.TaskID(taskID)})
-				}
+		for _, call := range utils.FunctionCalls(event.Content) {
+			if !slices.Contains(pendingCallIDs, call.ID) {
+				continue
+			}
+			if foundCalls[call.ID] {
+				log.Warn(ctx, "duplicate function call id", "id", call.ID)
+				continue
+			}
+			foundCalls[call.ID] = true
+			if taskID, _ := GetA2ATaskInfo(event); taskID != "" {
+				tasksToCancel = append(tasksToCancel, subagentTask{agentName: event.Author, taskID: a2a.TaskID(taskID)})
+				foundTaskIDs++
 			}
 		}
-		if foundCalls == len(pendingCallIDs) {
+		if len(foundCalls) == len(pendingCallIDs) {
 			break
 		}
 	}
 
-	if foundCalls < len(pendingCallIDs) {
-		log.Warn(ctx, "could not find all function calls from status message", "found", foundCalls, "total", len(pendingCallIDs))
+	if len(foundCalls) < len(pendingCallIDs) {
+		log.Warn(ctx, "could not find all function calls from status message", "found", len(foundCalls), "total", len(pendingCallIDs))
+	}
+
+	if foundTaskIDs < len(foundCalls) {
+		log.Warn(ctx, "not all function calls had a taskID", "found_calls", len(foundCalls), "found_ids", foundTaskIDs)
 	}
 
 	return tasksToCancel, nil
