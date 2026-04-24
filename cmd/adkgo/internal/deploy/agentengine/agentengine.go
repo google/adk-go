@@ -18,6 +18,7 @@ package agentengine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -34,6 +35,7 @@ import (
 
 	"google.golang.org/adk/cmd/adkgo/internal/deploy"
 	"google.golang.org/adk/internal/cli/util"
+	"google.golang.org/adk/server/agentengine"
 )
 
 type gCloudFlags struct {
@@ -45,7 +47,6 @@ type agentEngineServiceFlags struct {
 	name        string
 	displayName string
 	serverPort  int
-	api         bool // enable api or not
 }
 
 type buildFlags struct {
@@ -93,7 +94,6 @@ func init() {
 	agentEngineCmd.PersistentFlags().IntVar(&flags.agentEngine.serverPort, "server_port", 8080, "agentEngine server port")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.sourceDir, "source_dir", "d", "", "Directory to archive, defaults to current working directory")
-	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.api, "api", true, "Enable API")
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -168,7 +168,7 @@ func (f *deployAgentEngineFlags) prepareDockerfile() error {
 FROM golang:1.25 as builder
 WORKDIR /app
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ` + f.build.execFile + ` ` + f.source.origEntryPointPath + `
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o ` + f.build.execFile + ` ` + f.source.origEntryPointPath + `
 
 FROM gcr.io/distroless/static-debian11
 
@@ -177,9 +177,7 @@ EXPOSE ` + strconv.Itoa(flags.agentEngine.serverPort) + `
 # Command to run the executable when the container starts
 CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.agentEngine.serverPort) + `"`)
 
-			if flags.agentEngine.api {
-				b.WriteString(`, "api"`)
-			}
+			b.WriteString(`, "agentengine"`)
 
 			b.WriteString(`]`)
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
@@ -228,6 +226,16 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 				return fmt.Errorf("cannot read archive file: %w", err)
 			}
 
+			methods, err := agentengine.ListClassMethods()
+			if err != nil {
+				return fmt.Errorf("cannot list class methods: %w", err)
+			}
+			methodsJSON, err := json.Marshal(methods)
+			if err != nil {
+				return fmt.Errorf("cannot marshal methods: %w", err)
+			}
+			p("Methods:", string(methodsJSON))
+
 			req := &aiplatformpb.CreateReasoningEngineRequest{
 				Parent: parent,
 				ReasoningEngine: &aiplatformpb.ReasoningEngine{
@@ -257,6 +265,7 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 								{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
 							},
 						},
+						ClassMethods: methods,
 					},
 				},
 			}
