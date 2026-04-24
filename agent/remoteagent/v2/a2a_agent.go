@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -27,6 +26,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
+	"github.com/a2aproject/a2a-go/v2/log"
 
 	"google.golang.org/adk/agent"
 	agentinternal "google.golang.org/adk/internal/agent"
@@ -209,7 +209,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			yield(toErrorEvent(ctx, fmt.Errorf("sender creation failed: %w", err)), nil)
 			return
 		}
-		defer destroy(sender)
+		defer destroy(ctx, sender)
 
 		msg, err := newMessage(ctx, cfg)
 		if err != nil {
@@ -339,7 +339,7 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 	defer cancelTimeout()
 	_, err := client.CancelTask(cancelCtx, &a2a.CancelTaskRequest{ID: taskID})
 	if err != nil {
-		log.Printf("failed to cancel task %s: %v", taskID, err)
+		log.Warn(ctx, "failed to cancel task", "task_id", taskID, "error", err)
 	}
 }
 
@@ -381,8 +381,8 @@ func resolveAgentCard(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.AgentCar
 	return nil, fmt.Errorf("either AgentCard or AgentCardProvider must be set")
 }
 
-func destroy(client A2AClient) {
+func destroy(ctx context.Context, client A2AClient) {
 	if err := client.Destroy(); err != nil {
-		log.Printf("failed to destroy client: %v", err)
+		log.Warn(ctx, "failed to destroy client", "error", err)
 	}
 }

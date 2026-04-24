@@ -39,8 +39,11 @@ func EventToMessage(event *session.Event) (*a2a.Message, error) {
 	if event == nil {
 		return nil, nil
 	}
-
-	parts, err := ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
+	var eventParts []*genai.Part
+	if event.Content != nil {
+		eventParts = event.Content.Parts
+	}
+	parts, err := ToA2AParts(eventParts, event.LongRunningToolIDs)
 	if err != nil {
 		return nil, fmt.Errorf("part conversion failed: %w", err)
 	}
@@ -58,7 +61,13 @@ func EventToMessage(event *session.Event) (*a2a.Message, error) {
 
 	msg := a2a.NewMessage(role, parts...)
 	msg.Metadata = setActionsMeta(msg.Metadata, event.Actions)
-	maps.Copy(msg.Metadata, eventMeta)
+	if len(eventMeta) > 0 {
+		if msg.Metadata == nil {
+			msg.Metadata = maps.Clone(eventMeta)
+		} else {
+			maps.Copy(msg.Metadata, eventMeta)
+		}
+	}
 	return msg, nil
 }
 

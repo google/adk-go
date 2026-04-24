@@ -17,11 +17,11 @@ package adka2a
 import (
 	"context"
 	"fmt"
-	"log"
 	"maps"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/log"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -133,11 +133,11 @@ func (p *eventProcessor) makeFinalStatusUpdate() *a2a.TaskStatusUpdateEvent {
 	return ev
 }
 
-func (p *eventProcessor) makeTaskFailedEvent(cause error, event *session.Event) *a2a.TaskStatusUpdateEvent {
+func (p *eventProcessor) makeTaskFailedEvent(ctx context.Context, cause error, event *session.Event) *a2a.TaskStatusUpdateEvent {
 	meta := p.meta.eventMeta
 	if event != nil {
 		if eventMeta, err := toEventMeta(p.meta, event); err != nil {
-			log.Printf("failed to convert event metadata for task failed event: %v", err)
+			log.Warn(ctx, "failed to convert event metadata for task failed event", "cause", err)
 		} else {
 			meta = eventMeta
 		}

@@ -339,7 +339,7 @@ func (e *Executor) process(ctx ExecutorContext, r Runner, processor *eventProces
 	meta := processor.meta
 	for adkEvent, adkErr := range r.Run(ctx, meta.userID, meta.sessionID, ctx.UserContent(), e.config.RunConfig) {
 		if adkErr != nil {
-			event := processor.makeTaskFailedEvent(fmt.Errorf("agent run failed: %w", adkErr), nil)
+			event := processor.makeTaskFailedEvent(ctx, fmt.Errorf("agent run failed: %w", adkErr), nil)
 			e.writeFinalTaskStatus(ctx, yield, processor.makeFinalArtifactUpdate(), event, adkErr)
 			return
 		}
@@ -350,7 +350,7 @@ func (e *Executor) process(ctx ExecutorContext, r Runner, processor *eventProces
 		}
 
 		if pErr != nil {
-			event := processor.makeTaskFailedEvent(fmt.Errorf("processor failed: %w", pErr), adkEvent)
+			event := processor.makeTaskFailedEvent(ctx, fmt.Errorf("processor failed: %w", pErr), adkEvent)
 			e.writeFinalTaskStatus(ctx, yield, processor.makeFinalArtifactUpdate(), event, pErr)
 			return
 		}

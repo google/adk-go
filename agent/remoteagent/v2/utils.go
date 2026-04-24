@@ -16,10 +16,10 @@ package remoteagent
 
 import (
 	"fmt"
-	"log"
 	"slices"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/log"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -96,13 +96,13 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 	lastRemoteResponseIndex := -1
 	for i := events.Len() - 1; i >= 0; i-- {
 		event := events.At(i)
-		if event.LLMResponse.Content != nil {
-			partCount += len(event.Content.Parts)
-		}
 		if event.Author == ctx.Agent().Name() {
 			lastRemoteResponseIndex = i
 			_, contextID = adka2a.GetA2ATaskInfo(event)
 			break
+		}
+		if event.LLMResponse.Content != nil {
+			partCount += len(event.Content.Parts)
 		}
 	}
 
@@ -117,7 +117,7 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 		}
 		parts, err := convertParts(ctx, cfg, event)
 		if err != nil {
-			log.Printf("failed to convert parts for session event at index %d: %v", i, err)
+			log.Warn(ctx, "failed to convert parts for session event", "index", i, "error", err)
 			continue
 		}
 		result = append(result, parts...)
