@@ -8,7 +8,8 @@
 
 // Connect the server with a WebSocket connection
 const userId = "demo-user";
-let sessionId = "demo-session-" + Math.random().toString(36).substring(7);
+//let sessionId = "demo-session-" + Math.random().toString(36).substring(7);
+let sessionId = "fixed-demo-session";
 let websocket = null;
 let is_audio = false;
 let audioBuffer = [];
@@ -26,8 +27,8 @@ function handleRunConfigChange() {
       affective_dialog: enableAffectiveDialogCheckbox.checked
     }, '🔄', 'system');
 
-    // Generate new session ID to start fresh
-    sessionId = "demo-session-" + Math.random().toString(36).substring(7);
+    // Keep same session ID for testing history
+    // sessionId = "demo-session-" + Math.random().toString(36).substring(7);
 
     websocket.close();
     // connectWebsocket() will be called by onclose handler after delay

@@ -129,6 +129,7 @@ type liveSessionImpl struct {
 	outputCh  chan eventOrError
 	done      chan struct{}
 	closeOnce sync.Once
+	audioMgr  *AudioCacheManager
 }
 
 type eventOrError struct {
@@ -141,6 +142,7 @@ func newLiveSessionImpl() *liveSessionImpl {
 		inputCh:  make(chan agent.LiveRequest),
 		outputCh: make(chan eventOrError),
 		done:     make(chan struct{}),
+		audioMgr: NewAudioCacheManager(),
 	}
 }
 
@@ -255,26 +257,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, error) {
 		eventsChan := make(chan *session.Event)
 		errChan := make(chan error)
 
-		// Debug event to verify UI connection
-		go func() {
-			ev := session.NewEvent(ctx.InvocationID())
-			ev.Author = "system"
-			ev.LLMResponse = model.LLMResponse{
-				Content: &genai.Content{
-					Role: "model",
-					Parts: []*genai.Part{
-						{Text: "WebSocket connection established - Debug"},
-					},
-				},
-			}
-			eventsChan <- ev
-		}()
-
 		fmt.Printf("sending preprocessed content %d\n", len(nreq.Contents))
 		// Send preprocessed content directly to model if any exists after early preprocessing
 		if len(nreq.Contents) > 0 {
-			if err := liveConn.SendContent(ctx, nreq.Contents[0]); err != nil {
-				fmt.Printf("failed to send content: %v\n", err)
+			if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
+				fmt.Printf("failed to send history: %v\n", err)
 				sess.pushError(err)
 				return
 			}
@@ -289,6 +276,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, error) {
 					return
 				}
 				if resp != nil {
+					if liveCfg.SaveLiveBlob && resp.Content != nil {
+						for _, part := range resp.Content.Parts {
+							if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
+								sess.audioMgr.CacheOutput(part.InlineData.Data, part.InlineData.MIMEType)
+							}
+						}
+					}
 					ev := session.NewEvent(ctx.InvocationID())
 					ev.Author = ctx.Agent().Name()
 					ev.LLMResponse = *resp
@@ -314,6 +308,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, error) {
 					}
 				}
 				if req.RealtimeInput != nil {
+					if blob, ok := req.RealtimeInput.(*genai.Blob); ok {
+						sess.audioMgr.CacheInput(blob.Data, blob.MIMEType)
+					}
 					if err := liveConn.SendRealtime(ctx, req.RealtimeInput); err != nil {
 						errChan <- err
 						return
@@ -327,6 +324,29 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, error) {
 			case ev := <-eventsChan:
 				if !sess.pushEvent(ev) {
 					return
+				}
+				// Flush caches if needed
+				if liveCfg.SaveLiveBlob {
+					var flushUser, flushModel bool
+					if ev.LLMResponse.Interrupted {
+						flushModel = true
+					}
+					if ev.LLMResponse.TurnComplete {
+						flushUser = true
+						flushModel = true
+					}
+					if flushUser || flushModel {
+						flushedEvents, err := sess.audioMgr.FlushCaches(ctx, flushUser, flushModel)
+						if err != nil {
+							sess.pushError(err)
+							return
+						}
+						for _, fev := range flushedEvents {
+							if !sess.pushEvent(fev) {
+								return
+							}
+						}
+					}
 				}
 				// Handle function calls if present in the event
 				fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)

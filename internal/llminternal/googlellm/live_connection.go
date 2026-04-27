@@ -31,6 +31,7 @@ type LiveConnection struct {
 
 	inputTranscriptionText  string
 	outputTranscriptionText string
+	bufferedResponses       []*model.LLMResponse
 }
 
 // NewLiveConnection creates a new LiveConnection.
@@ -54,6 +55,7 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 				continue
 			}
 			filteredParts = append(filteredParts, part)
+			fmt.Printf("filtered part: %v\n", part.Text)
 		}
 		if len(filteredParts) > 0 {
 			filteredHistory = append(filteredHistory, &genai.Content{
@@ -63,10 +65,10 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 		}
 	}
 	fmt.Printf("sending history: of size %d\n", len(filteredHistory))
-	turnComplete := true
+	turnComplete := false
 	if len(filteredHistory) > 0 {
 		err := c.sdkSession.SendClientContent(genai.LiveClientContentInput{
-			Turns: filteredHistory,
+			Turns:        filteredHistory,
 			TurnComplete: &turnComplete,
 		})
 		if err != nil {
@@ -167,6 +169,12 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 
 // Recv receives a response from the live server connection.
 func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
+	if len(c.bufferedResponses) > 0 {
+		resp := c.bufferedResponses[0]
+		c.bufferedResponses = c.bufferedResponses[1:]
+		return resp, nil
+	}
+
 	msg, err := c.sdkSession.Receive()
 	if err != nil {
 		return nil, fmt.Errorf("failed to receive message: %w", err)
@@ -191,22 +199,51 @@ func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
 		resp.Interrupted = content.Interrupted
 
 		if content.InputTranscription != nil {
-			if resp.Content == nil {
-				resp.Content = &genai.Content{Role: "user"}
-			}
-			resp.Content.Parts = append(resp.Content.Parts, &genai.Part{
-				Text: content.InputTranscription.Text,
-			})
+			resp.InputTranscription = content.InputTranscription
 			c.inputTranscriptionText += content.InputTranscription.Text
+			resp.Partial = true // Mark chunks as partial so they are not saved to session
 		}
 		if content.OutputTranscription != nil {
-			if resp.Content == nil {
-				resp.Content = &genai.Content{Role: "model"}
-			}
+			resp.OutputTranscription = content.OutputTranscription
 			c.outputTranscriptionText += content.OutputTranscription.Text
-			resp.Content.Parts = append(resp.Content.Parts, &genai.Part{
-				Text: content.OutputTranscription.Text,
-			})
+			resp.Partial = true // Mark chunks as partial so they are not saved to session
+		}
+
+		// Handle transcription finalization on completion signals
+		if content.TurnComplete || content.Interrupted {
+			if c.inputTranscriptionText != "" || c.outputTranscriptionText != "" {
+				if c.inputTranscriptionText != "" {
+					inputResp := &model.LLMResponse{
+						Partial: false,
+						InputTranscription: &genai.Transcription{
+							Text:     c.inputTranscriptionText,
+							Finished: true,
+						},
+					}
+					c.inputTranscriptionText = ""
+					c.bufferedResponses = append(c.bufferedResponses, inputResp)
+				}
+				if c.outputTranscriptionText != "" {
+					outputResp := &model.LLMResponse{
+						Partial: false,
+						OutputTranscription: &genai.Transcription{
+							Text:     c.outputTranscriptionText,
+							Finished: true,
+						},
+					}
+					c.outputTranscriptionText = ""
+					c.bufferedResponses = append(c.bufferedResponses, outputResp)
+				}
+
+				// Append the current response (which has TurnComplete or Interrupted) to the buffer
+				// so it is delivered AFTER the transcriptions
+				c.bufferedResponses = append(c.bufferedResponses, resp)
+
+				// Return the first one from buffer
+				first := c.bufferedResponses[0]
+				c.bufferedResponses = c.bufferedResponses[1:]
+				return first, nil
+			}
 		}
 	}
 

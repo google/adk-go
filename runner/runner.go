@@ -276,7 +276,35 @@ type runnerLiveSession struct {
 }
 
 func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
-	return s.sess.Send(req)
+	err := s.sess.Send(req)
+	if err != nil {
+		return err
+	}
+
+	// Save user text content to session history
+	if req.Content != nil && len(req.Content.Parts) > 0 {
+		// Skip function responses - they are handled separately
+		isFunctionResponse := false
+		for _, part := range req.Content.Parts {
+			if part.FunctionResponse != nil {
+				isFunctionResponse = true
+				break
+			}
+		}
+
+		if !isFunctionResponse {
+			event := session.NewEvent(s.iCtx.InvocationID())
+			event.Author = "user"
+			event.LLMResponse = model.LLMResponse{
+				Content: req.Content,
+			}
+			if err := s.r.sessionService.AppendEvent(s.iCtx, s.storedSession, event); err != nil {
+				return fmt.Errorf("failed to add user event to session: %w", err)
+			}
+		}
+	}
+
+	return nil
 }
 
 func (s *runnerLiveSession) Recv() (*session.Event, error) {

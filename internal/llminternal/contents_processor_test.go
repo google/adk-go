@@ -378,6 +378,46 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 			want: nil,
 		},
+		{
+			name: "TranscriptionAggregation",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						InputTranscription: &genai.Transcription{Text: "hello ", Finished: false},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						InputTranscription: &genai.Transcription{Text: "world", Finished: true},
+					},
+				},
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						OutputTranscription: &genai.Transcription{Text: "hi ", Finished: false},
+					},
+				},
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						OutputTranscription: &genai.Transcription{Text: "there", Finished: true},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						InputTranscription: &genai.Transcription{Text: "ok", Finished: true},
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("hello world", "user"),
+				genai.NewContentFromText("hi there", "model"),
+				genai.NewContentFromText("ok", "user"),
+			},
+		},
 	}
 
 	for _, tc := range testCases {

@@ -46,6 +46,8 @@ type LLMResponse struct {
 	UsageMetadata     *genai.GenerateContentResponseUsageMetadata
 	CustomMetadata    map[string]any
 	LogprobsResult    *genai.LogprobsResult
+	InputTranscription  *genai.Transcription
+	OutputTranscription *genai.Transcription
 	ModelVersion      string
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
