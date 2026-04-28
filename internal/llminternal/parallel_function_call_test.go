@@ -15,6 +15,8 @@
 package llminternal_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -35,6 +37,67 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
+
+// stripPropagatedThoughtSignatures removes thought signatures from sibling
+// parallel function-call parts so the outgoing request matches httprr fixtures
+// recorded before propagateThoughtSignature was added. The first signed sibling
+// is preserved. Replay-time only — recordings keep what the model actually sent.
+func stripPropagatedThoughtSignatures(req *http.Request) error {
+	body, ok := req.Body.(*httprr.Body)
+	if !ok {
+		return nil
+	}
+	if ctype := req.Header.Get("Content-Type"); ctype != "application/json" && !strings.HasPrefix(ctype, "application/json;") {
+		return nil
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body.Data, &payload); err != nil {
+		return nil
+	}
+	contents, ok := payload["contents"].([]any)
+	if !ok {
+		return nil
+	}
+	for _, raw := range contents {
+		content, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := content["role"].(string); role != "model" {
+			continue
+		}
+		parts, ok := content["parts"].([]any)
+		if !ok {
+			continue
+		}
+		seenSigned := false
+		for _, rp := range parts {
+			part, ok := rp.(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, ok := part["functionCall"]; !ok {
+				continue
+			}
+			if _, hasSig := part["thoughtSignature"]; !hasSig {
+				continue
+			}
+			if !seenSigned {
+				seenSigned = true
+				continue
+			}
+			delete(part, "thoughtSignature")
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		return nil
+	}
+	body.Data = bytes.TrimRight(buf.Bytes(), "\n")
+	return nil
+}
 
 type SumArgs struct {
 	A int `json:"a"` // an integer to sum
@@ -364,6 +427,9 @@ func TestParallelFunctionCalls(t *testing.T) {
 			baseTransport, err := testutil.NewGeminiTransport(httpRecordFilename)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if rr, ok := baseTransport.(*httprr.RecordReplay); ok {
+				rr.ScrubReq(stripPropagatedThoughtSignatures)
 			}
 
 			apiKey := ""
