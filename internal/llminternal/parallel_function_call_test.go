@@ -53,7 +53,7 @@ func stripPropagatedThoughtSignatures(req *http.Request) error {
 
 	var payload map[string]any
 	if err := json.Unmarshal(body.Data, &payload); err != nil {
-		return nil
+		return err
 	}
 	contents, ok := payload["contents"].([]any)
 	if !ok {
@@ -93,7 +93,7 @@ func stripPropagatedThoughtSignatures(req *http.Request) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
-		return nil
+		return err
 	}
 	body.Data = bytes.TrimRight(buf.Bytes(), "\n")
 	return nil
