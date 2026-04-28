@@ -897,13 +897,26 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			},
 		},
 		{
-			name: "Error on function response without matching call",
+			name: "Orphaned function response without matching call is dropped",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "Regular message"}}}}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: frOrphaned}}}}},
 			},
-			want:    nil,
-			wantErr: "no function call event found",
+			want: []*genai.Content{
+				genai.NewContentFromText("Regular message", "user"),
+			},
+		},
+		{
+			name: "Orphaned function response after text reply is dropped",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hello", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Hi there", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{FunctionResponse: frOrphaned}}}}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Hello", "user"),
+				genai.NewContentFromText("Hi there", "model"),
+			},
 		},
 	}
 

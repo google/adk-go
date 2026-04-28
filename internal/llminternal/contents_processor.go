@@ -219,10 +219,10 @@ SearchLoop: // A label to allow breaking out of the nested loop
 	}
 
 	if functionCallEventIdx == -1 {
-		return nil, fmt.Errorf(
-			"no function call event found for function responses ids: %v",
-			responseIDs,
-		)
+		// Trailing function-response event has no matching call in history;
+		// treat as stale (e.g. retry/reconnect) and drop it instead of failing
+		// the whole turn. Earlier valid history is preserved.
+		return events[:len(events)-1], nil
 	}
 
 	// Collect all function response events *between* the call and the last response.
