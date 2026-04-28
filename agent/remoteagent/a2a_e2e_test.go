@@ -374,7 +374,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 
 func TestA2ACleanupPropagation(t *testing.T) {
 	// Remote A2A server publishes a submitted task and start generating artifact updates
-	// until it detects a context cancelation
+	// until it detects a context cancellation
 	remoteTaskIDChan, remoteCleanupCalledChan := make(chan a2a.TaskID, 1), make(chan struct{}, 2)
 	serverB := startA2AServer(&mockA2AExecutor{
 		executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
@@ -437,7 +437,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 		cancelResultChan <- task
 	}()
 
-	// Check the streaming message sender got a cancelled state task in their response
+	// Check the streaming message sender got a canceled state task in their response
 	var lastStreamingUpdate a2a.Event
 	for event := range statusUpdateEventChan {
 		lastStreamingUpdate = event
@@ -450,8 +450,8 @@ func TestA2ACleanupPropagation(t *testing.T) {
 		t.Fatalf("type(lastStreamingUpdate) = %T, want *a2a.TaskStatusUpdateEvent", lastStreamingUpdate)
 	}
 
-	// Check subagent task got cancelled when the parent task was cancelled.
-	// Reads from channel twice because cleanup gets called both for cancelation and execution.
+	// Check subagent task got canceled when the parent task was canceled.
+	// Reads from channel twice because cleanup gets called both for cancellation and execution.
 	<-remoteCleanupCalledChan
 	<-remoteCleanupCalledChan
 	remoteTaskID := <-remoteTaskIDChan
@@ -875,11 +875,11 @@ func newToolConfirmation(t *testing.T) tool.Tool {
 		}
 		jsonBytes, err := json.Marshal(confirmation.Payload)
 		if err != nil {
-			return approval{}, fmt.Errorf("error marshalling payload %s: %w", confirmation.Payload, err)
+			return approval{}, fmt.Errorf("error marshaling payload %s: %w", confirmation.Payload, err)
 		}
 		var payload approval
 		if err := json.Unmarshal(jsonBytes, &payload); err != nil {
-			return approval{}, fmt.Errorf("error unmarshalling payload %s: %w", confirmation.Payload, err)
+			return approval{}, fmt.Errorf("error unmarshaling payload %s: %w", confirmation.Payload, err)
 		}
 		return approval{Status: approvalStatusVerified, TicketID: payload.TicketID}, nil
 	})
@@ -1167,7 +1167,7 @@ func TestA2AMultiHopInputRequiredCancellation(t *testing.T) {
 		t.Fatalf("client.CancelTask() error = %v", err)
 	}
 
-	// Verify that Server B's task was cancelled
+	// Verify that Server B's task was canceled
 	remoteTaskID := <-remoteTaskIDChan
 	clientB := newA2AClient(t, serverB)
 	remoteTask, err := clientB.GetTask(t.Context(), &a2a.TaskQueryParams{ID: remoteTaskID})

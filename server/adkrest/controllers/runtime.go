@@ -147,12 +147,12 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 			continue
 		}
 		// Skip reporting error if it fails to marshal to the client (to avoid recursive error reporting).
-		marshalledData, err := json.Marshal(models.FromSessionEvent(*event))
+		marshaledData, err := json.Marshal(models.FromSessionEvent(*event))
 		if err != nil {
 			log.Printf("failed to marshal event: %v", err)
 			return
 		}
-		err = flashEvent(rc, rw, string(marshalledData))
+		err = flashEvent(rc, rw, string(marshaledData))
 		if err != nil {
 			log.Printf("failed to flash event: %v", err)
 			return

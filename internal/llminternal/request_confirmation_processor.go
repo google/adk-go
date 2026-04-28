@@ -76,7 +76,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 						if jsonString, ok := resp.(string); ok {
 							err := json.Unmarshal([]byte(jsonString), &tc)
 							if err != nil {
-								yield(nil, fmt.Errorf("error 'response' key found but failed unmarshalling confirmation function response for event id %q: %w", event.ID, err))
+								yield(nil, fmt.Errorf("error 'response' key found but failed unmarshaling confirmation function response for event id %q: %w", event.ID, err))
 								return
 							}
 						} else {
@@ -86,12 +86,12 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 					} else {
 						tempJSON, err := json.Marshal(funcResp.Response)
 						if err != nil {
-							yield(nil, fmt.Errorf("error failed marshalling confirmation function response for event id %q: %w", event.ID, err))
+							yield(nil, fmt.Errorf("error failed marshaling confirmation function response for event id %q: %w", event.ID, err))
 							return
 						}
 						err = json.Unmarshal(tempJSON, &tc)
 						if err != nil {
-							yield(nil, fmt.Errorf("error failed unmarshalling confirmation function response for event id %q: %w", event.ID, err))
+							yield(nil, fmt.Errorf("error failed unmarshaling confirmation function response for event id %q: %w", event.ID, err))
 							return
 						}
 					}

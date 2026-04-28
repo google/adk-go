@@ -61,7 +61,7 @@ type ToolConfig struct {
 
 // baseAgentConfig matches the Python baseAgentConfig Pydantic model.
 //
-// Usage: Do not use this struct directly for unmarshalling specific agents.
+// Usage: Do not use this struct directly for unmarshaling specific agents.
 // Embed it into concrete agent configs (see Example below).
 type baseAgentConfig struct {
 	// Required. The class of the agent.

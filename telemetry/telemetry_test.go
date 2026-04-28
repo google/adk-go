@@ -287,7 +287,7 @@ func TestResolveResourceProject(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "env var whitespace",
+			name: "env var white space",
 			opts: []Option{
 				WithOtelToCloud(true),
 				WithGoogleCredentials(&google.Credentials{}),
@@ -296,7 +296,7 @@ func TestResolveResourceProject(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "option project whitespace",
+			name: "option project white space",
 			opts: []Option{
 				WithOtelToCloud(true),
 				WithGcpResourceProject(" "),
@@ -389,7 +389,7 @@ func TestResolveQuotaProject(t *testing.T) {
 			wantProject: "",
 		},
 		{
-			name: "env var whitespace",
+			name: "env var white space",
 			opts: []Option{
 				WithOtelToCloud(true),
 				WithGoogleCredentials(&google.Credentials{}),
@@ -398,7 +398,7 @@ func TestResolveQuotaProject(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "option project whitespace",
+			name: "option project white space",
 			opts: []Option{
 				WithOtelToCloud(true),
 				WithGcpQuotaProject(" "),
