@@ -16,6 +16,11 @@ package vertexai
 
 import (
 	"testing"
+
+	"google.golang.org/genai"
+	"google.golang.org/protobuf/types/known/structpb"
+
+	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 )
 
 func TestGetReasoningEngineID(t *testing.T) {
@@ -98,5 +103,65 @@ func TestGetReasoningEngineID(t *testing.T) {
 				t.Errorf("getReasoningEngineID() got = %v, want %v", got, tt.expectedID)
 			}
 		})
+	}
+}
+
+func TestAiplatformToGenaiContentPreservesFunctionIDs(t *testing.T) {
+	args, err := structpb.NewStruct(map[string]any{"city": "Stockholm"})
+	if err != nil {
+		t.Fatalf("structpb.NewStruct(args) failed: %v", err)
+	}
+	response, err := structpb.NewStruct(map[string]any{"temperature": 21})
+	if err != nil {
+		t.Fatalf("structpb.NewStruct(response) failed: %v", err)
+	}
+
+	content := aiplatformToGenaiContent(&aiplatformpb.SessionEvent{
+		Content: &aiplatformpb.Content{
+			Role: string(genai.RoleModel),
+			Parts: []*aiplatformpb.Part{
+				{
+					Data: &aiplatformpb.Part_FunctionCall{
+						FunctionCall: &aiplatformpb.FunctionCall{
+							Id:   "call-123",
+							Name: "get_weather",
+							Args: args,
+						},
+					},
+				},
+				{
+					Data: &aiplatformpb.Part_FunctionResponse{
+						FunctionResponse: &aiplatformpb.FunctionResponse{
+							Id:       "call-123",
+							Name:     "get_weather",
+							Response: response,
+						},
+					},
+				},
+			},
+		},
+	})
+
+	if content == nil {
+		t.Fatal("aiplatformToGenaiContent() returned nil content")
+	}
+	if got, want := len(content.Parts), 2; got != want {
+		t.Fatalf("len(content.Parts) = %d, want %d", got, want)
+	}
+
+	functionCall := content.Parts[0].FunctionCall
+	if functionCall == nil {
+		t.Fatal("content.Parts[0].FunctionCall is nil")
+	}
+	if got, want := functionCall.ID, "call-123"; got != want {
+		t.Errorf("FunctionCall.ID = %q, want %q", got, want)
+	}
+
+	functionResponse := content.Parts[1].FunctionResponse
+	if functionResponse == nil {
+		t.Fatal("content.Parts[1].FunctionResponse is nil")
+	}
+	if got, want := functionResponse.ID, "call-123"; got != want {
+		t.Errorf("FunctionResponse.ID = %q, want %q", got, want)
 	}
 }
