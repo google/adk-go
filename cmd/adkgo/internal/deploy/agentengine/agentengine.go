@@ -45,11 +45,10 @@ type gCloudFlags struct {
 }
 
 type agentEngineServiceFlags struct {
-	name         string
-	displayName  string
-	serverPort   int
-	update       bool
-	instanceName string
+	name          string
+	displayName   string
+	serverPort    int
+	agentEngineID string
 }
 
 type buildFlags struct {
@@ -97,8 +96,7 @@ func init() {
 	agentEngineCmd.PersistentFlags().IntVar(&flags.agentEngine.serverPort, "server_port", 8080, "agentEngine server port")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.sourceDir, "source_dir", "d", "", "Directory to archive, defaults to current working directory")
-	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.update, "update", false, "Update an existing Agent Engine instance")
-	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.instanceName, "instance_name", "", "Full resource name of the Agent Engine instance to update")
+	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.agentEngineID, "agent_engine_id", "", "ID of the Agent Engine instance to update if it exists (default: None, which means a new instance will be created).")
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -298,14 +296,7 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 	return util.LogStartStop("Updating Agent Engine",
 		func(p util.Printer) error {
 			ctx := context.Background()
-			// Try to extract region from instance name if available
-			parts := strings.Split(f.agentEngine.instanceName, "/")
-			if len(parts) >= 4 && parts[2] == "locations" {
-				f.gcloud.region = parts[3]
-			}
-			if f.gcloud.region == "" {
-				return fmt.Errorf("GCP region is required, please specify with --region flag")
-			}
+			name := fmt.Sprintf("projects/%s/locations/%s/reasoningEngines/%s", f.gcloud.projectName, f.gcloud.region, f.agentEngine.agentEngineID)
 			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
 			client, err := aiplatform.NewReasoningEngineClient(ctx, option.WithEndpoint(endpoint))
 			if err != nil {
@@ -334,7 +325,7 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 
 			req := &aiplatformpb.UpdateReasoningEngineRequest{
 				ReasoningEngine: &aiplatformpb.ReasoningEngine{
-					Name: f.agentEngine.instanceName,
+					Name: name,
 					Spec: &aiplatformpb.ReasoningEngineSpec{
 						DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
 							SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
@@ -388,10 +379,7 @@ func (f *deployAgentEngineFlags) deployOnagentEngine() error {
 	if err != nil {
 		return err
 	}
-	if f.agentEngine.update {
-		if f.agentEngine.instanceName == "" {
-			return fmt.Errorf("--instance_name is required when --update is set")
-		}
+	if f.agentEngine.agentEngineID != "" {
 		err = f.gcloudUpdateAgentEngine()
 	} else {
 		err = f.gcloudDeployToAgentEngine()
