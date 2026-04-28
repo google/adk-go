@@ -92,14 +92,11 @@ func (g *deleteSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 		SessionID: req.Input.SessionID,
 	}
 	err = g.sessionservice.Delete(ctx, ssReq)
-	output := ""
 	if err != nil {
-		output = err.Error()
+		return fmt.Errorf("g.sessionservice.Delete() failed: %v", err)
 	}
 
-	result := models.DeleteSessionResponse{
-		Output: output,
-	}
+	result := models.DeleteSessionResponse{}
 	err = json.NewEncoder(rw).Encode(result)
 	if err != nil {
 		return fmt.Errorf("json.NewEncoder failed: %v", err)
