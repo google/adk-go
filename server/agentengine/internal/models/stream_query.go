@@ -39,7 +39,7 @@ type StreamQueryTextRequest struct {
 	Input       StreamQueryTextInput `json:"input"`
 }
 
-// StreamQueryInput is the actual Input for async_stream_query method.
+// StreamQueryTextInput is the actual Input for async_stream_query method.
 type StreamQueryTextInput struct {
 	UserID    string `json:"user_id"`
 	SessionID string `json:"session_id"`

@@ -68,7 +68,7 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 		errText := json.Unmarshal(payload, &reqText)
 		if errText != nil {
 			// cannot unmarshall to models.StreamQueryRequest and models.StreamQueryTextRequest
-			err = fmt.Errorf("json.Unmarshal() failed both for models.StreamQueryRequest (%v) and models.StreamQueryTextRequest (%v) ", err, errText)
+			err = fmt.Errorf("json.Unmarshal() failed both for models.StreamQueryRequest (%v) and models.StreamQueryTextRequest (%v)", err, errText)
 			log.Print(err.Error())
 			return err
 		}
