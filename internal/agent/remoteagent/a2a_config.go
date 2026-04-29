@@ -58,7 +58,7 @@ type A2AServerConfig struct {
 }
 
 func CreateA2AClient(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, A2AClient, error) {
-	card, err := resolveAgentCard(ctx, cfg)
+	card, err := ResolveAgentCard(ctx, cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent card resolution failed: %w", err)
 	}
