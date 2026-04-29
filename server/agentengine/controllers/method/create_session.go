@@ -45,10 +45,6 @@ func (c *createSessionHandler) Metadata() (*structpb.Struct, error) {
 		"name":     c.methodName,
 		"parameters": map[string]any{
 			"properties": map[string]any{
-				"session_id": map[string]any{
-					"nullable": true,
-					"type":     "string",
-				},
 				"user_id": map[string]any{
 					"type": "string",
 				},
@@ -67,8 +63,6 @@ func (c *createSessionHandler) Metadata() (*structpb.Struct, error) {
 Args:
     user_id (str):
 	        Required. The ID of the user.
-    session_id (str):
-        Optional. The ID of the session. If not provided, an ID will be generated for the session.
     state (dict[str, Any]):
         Optional. The initial state of the session.
 
@@ -92,10 +86,9 @@ func (c *createSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 	}
 
 	ssReq := &session.CreateRequest{
-		AppName:   c.agentEngineID,
-		UserID:    req.Input.UserID,
-		SessionID: req.Input.SessionID,
-		State:     req.Input.State,
+		AppName: c.agentEngineID,
+		UserID:  req.Input.UserID,
+		State:   req.Input.State,
 	}
 	resp, err := c.sessionService.Create(ctx, ssReq)
 	if err != nil {
