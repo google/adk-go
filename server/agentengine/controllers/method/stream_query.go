@@ -82,6 +82,17 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 			},
 		}
 	}
+	requestedSessionID, err := normalizeStreamQueryRequest(&req)
+	if err != nil {
+		err = fmt.Errorf("normalizeStreamQueryRequest() failed: %w", err)
+		log.Print(err.Error())
+		return err
+	}
+	if err := s.ensureBackendSession(ctx, &req, requestedSessionID); err != nil {
+		err = fmt.Errorf("s.ensureBackendSession() failed: %w", err)
+		log.Print(err.Error())
+		return err
+	}
 
 	events, err := s.run(ctx, &req, &req.Input.Message, s.config)
 	if err != nil {
@@ -113,7 +124,7 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 			continue
 		}
 
-		chunk := *event
+		chunk := s.responseChunk(&req, event)
 		err = helper.EmitJSON(rw, chunk)
 		if err != nil {
 			e := fmt.Errorf("helper.EmitJSON() failed: %w", err)
@@ -129,6 +140,107 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 	return nil
 }
 
+func (s *streamQueryHandler) isAgentSpaceMethod() bool {
+	return s.methodName == "streaming_agent_run_with_events"
+}
+
+func (s *streamQueryHandler) responseChunk(req *models.StreamQueryRequest, event *session.Event) any {
+	if !s.isAgentSpaceMethod() {
+		return *event
+	}
+
+	// AgentSpace / Gemini Enterprise expects the Python AdkApp-style stream
+	// envelope, not a raw ADK event JSON line. Return the backend ADK session ID
+	// so Gemini Enterprise can use it on later turns, matching Python AdkApp.
+	return models.StreamingAgentRunWithEventsResponse{
+		Events:    []*session.Event{event},
+		SessionID: req.Input.SessionID,
+	}
+}
+
+// normalizeStreamQueryRequest normalizes the two stream request shapes handled
+// by this endpoint.
+//
+// Standard async_stream_query requests send message, user_id, and session_id as
+// direct input fields. Gemini Enterprise / AgentSpace instead calls
+// streaming_agent_run_with_events with the actual request encoded as a JSON
+// string in input.request_json. When request_json is present, this function
+// decodes it and replaces req.Input with the embedded request.
+//
+// The returned string is the caller-requested session_id before any backend ADK
+// session normalization. For direct async_stream_query requests this is simply
+// req.Input.SessionID. For Gemini Enterprise requests it is the session_id from
+// the decoded request_json, which may be either a first-turn Gemini Enterprise
+// session resource or a backend ADK session ID returned by a previous response.
+func normalizeStreamQueryRequest(req *models.StreamQueryRequest) (string, error) {
+	if req.Input.RequestJSON == "" {
+		return req.Input.SessionID, nil
+	}
+
+	var input models.StreamQueryInput
+	if err := json.Unmarshal([]byte(req.Input.RequestJSON), &input); err != nil {
+		return "", fmt.Errorf("json.Unmarshal(input.request_json) failed: %w", err)
+	}
+	requestedSessionID := input.SessionID
+
+	req.Input = input
+	return requestedSessionID, nil
+}
+
+// ensureBackendSession normalizes AgentSpace / Gemini Enterprise requests so
+// the runner always receives a backend ADK session ID.
+//
+// Gemini Enterprise calls streaming_agent_run_with_events with the actual
+// request encoded in input.request_json. On the first turn, the embedded
+// session_id is usually a Gemini Enterprise / Discovery Engine session resource:
+//
+//	projects/{project}/locations/global/collections/default_collection/engines/{engine}/sessions/{session}
+//
+// VertexAISessionService cannot use that resource name as a caller-provided
+// backend session ID. This method therefore treats the incoming session_id as
+// either:
+//
+//  1. A returned backend ADK session ID from a previous response. If it exists
+//     in the configured session service, reuse it directly.
+//  2. A first-turn Gemini Enterprise session resource. If no backend session
+//     exists with that ID, create a new backend ADK session with a generated ID.
+//
+// The selected backend ID replaces req.Input.SessionID before the runner is
+// invoked. The response envelope then returns that backend ID so Gemini
+// Enterprise can send it on later turns, matching Python AdkApp behavior.
+func (s *streamQueryHandler) ensureBackendSession(ctx context.Context, req *models.StreamQueryRequest, requestedSessionID string) error {
+	if requestedSessionID == "" {
+		return nil
+	}
+	if req.Input.UserID == "" {
+		return fmt.Errorf("user_id is required for backend session handling")
+	}
+	if s.config == nil || s.config.SessionService == nil {
+		return fmt.Errorf("session service is required for backend session handling")
+	}
+
+	getResp, err := s.config.SessionService.Get(ctx, &session.GetRequest{
+		AppName:   s.agentEngineID,
+		UserID:    req.Input.UserID,
+		SessionID: requestedSessionID,
+	})
+	if err == nil && getResp.Session != nil {
+		req.Input.SessionID = getResp.Session.ID()
+		return nil
+	}
+
+	createResp, err := s.config.SessionService.Create(ctx, &session.CreateRequest{
+		AppName: s.agentEngineID,
+		UserID:  req.Input.UserID,
+	})
+	if err != nil {
+		return fmt.Errorf("sessionService.Create() failed: %w", err)
+	}
+
+	req.Input.SessionID = createResp.Session.ID()
+	return nil
+}
+
 // Name implements MethodHandler.
 func (s *streamQueryHandler) Name() string {
 	return s.methodName
@@ -138,6 +250,10 @@ var _ MethodHandler = (*streamQueryHandler)(nil)
 
 // Metadata implements MethodHandler.
 func (s *streamQueryHandler) Metadata() (*structpb.Struct, error) {
+	if s.methodName == "streaming_agent_run_with_events" {
+		return s.agentSpaceMetadata()
+	}
+
 	classAsyncMethod, err := structpb.NewStruct(map[string]any{
 		"api_mode": s.apiMode,
 		"name":     s.methodName,
@@ -188,6 +304,39 @@ Yields:
 	return classAsyncMethod, nil
 }
 
+func (s *streamQueryHandler) agentSpaceMetadata() (*structpb.Struct, error) {
+	classAsyncMethod, err := structpb.NewStruct(map[string]any{
+		"api_mode": s.apiMode,
+		"name":     s.methodName,
+		"parameters": map[string]any{
+			"properties": map[string]any{
+				"request_json": map[string]any{
+					"type": "string",
+				},
+			},
+			"required": []any{
+				"request_json",
+			},
+			"type": "object",
+		},
+		"description": `Streams responses asynchronously from the ADK application.
+
+In general, you should use async_stream_query instead, as it has a more
+structured API. This method is primarily meant for invocation from AgentSpace
+and Gemini Enterprise.
+
+Args:
+    request_json (str):
+        Required. The request to stream responses for.
+
+`,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cannot create %s: %w", s.Name(), err)
+	}
+	return classAsyncMethod, nil
+}
+
 func (s *streamQueryHandler) run(ctx context.Context, req *models.StreamQueryRequest, message *genai.Content, config *launcher.Config) (iter.Seq2[*session.Event, error], error) {
 	rootAgent := config.AgentLoader.RootAgent()
 
@@ -203,7 +352,15 @@ func (s *streamQueryHandler) run(ctx context.Context, req *models.StreamQueryReq
 		return nil, fmt.Errorf("failed to create runner: %v", err)
 	}
 
+	streamingMode := agent.StreamingModeSSE
+	if s.methodName == "streaming_agent_run_with_events" {
+		// The AgentSpace path mirrors Python AdkApp.streaming_agent_run_with_events,
+		// which does not force SSE mode. Sending both partial and final events here
+		// causes Gemini Enterprise to render duplicate answer text.
+		streamingMode = agent.StreamingModeNone
+	}
+
 	return r.Run(ctx, req.Input.UserID, req.Input.SessionID, message, agent.RunConfig{
-		StreamingMode: agent.StreamingModeSSE,
+		StreamingMode: streamingMode,
 	}), nil
 }
