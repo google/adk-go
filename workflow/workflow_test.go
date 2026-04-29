@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -32,16 +33,18 @@ type MockInvocationContext struct {
 	userContent *genai.Content
 }
 
-func (m *MockInvocationContext) Session() session.Session {
-	return m.sess
-}
-
-func (m *MockInvocationContext) InvocationID() string {
-	return "test-invocation-id"
-}
-
-func (m *MockInvocationContext) UserContent() *genai.Content {
-	return m.userContent
+func (m *MockInvocationContext) Session() session.Session    { return m.sess }
+func (m *MockInvocationContext) InvocationID() string        { return "test-invocation-id" }
+func (m *MockInvocationContext) UserContent() *genai.Content { return m.userContent }
+func (m *MockInvocationContext) Artifacts() agent.Artifacts  { return nil }
+func (m *MockInvocationContext) Memory() agent.Memory        { return nil }
+func (m *MockInvocationContext) Agent() agent.Agent          { return nil }
+func (m *MockInvocationContext) Branch() string              { return "" }
+func (m *MockInvocationContext) RunConfig() *agent.RunConfig { return nil }
+func (m *MockInvocationContext) EndInvocation()              {}
+func (m *MockInvocationContext) Ended() bool                 { return false }
+func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
+	return m
 }
 
 func TestFunctionNode(t *testing.T) {
@@ -63,7 +66,7 @@ func TestFunctionNode(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		count++
-		
+
 		output, ok := ev.Actions.StateDelta["output"]
 		if !ok {
 			t.Errorf("expected output in state delta")

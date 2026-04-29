@@ -63,7 +63,7 @@ type FunctionNode struct {
 }
 
 // NewFunctionNode creates a new node wrapping a custom function using generics to automatically infer input and output types.
-func NewFunctionNode[IN any, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error)) *FunctionNode {
+func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error)) *FunctionNode {
 	wrappedFn := func(ctx agent.InvocationContext, input any) (any, error) {
 		if input == nil {
 			var zero IN
@@ -77,7 +77,7 @@ func NewFunctionNode[IN any, OUT any](name string, fn func(ctx agent.InvocationC
 	}
 	return &FunctionNode{
 		baseNode: baseNode{name: name},
-		fn:        wrappedFn,
+		fn:       wrappedFn,
 	}
 }
 
@@ -88,7 +88,7 @@ func (n *FunctionNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*se
 			yield(nil, err)
 			return
 		}
-		
+
 		event := session.NewEvent(ctx.InvocationID())
 		event.Actions.StateDelta["output"] = output
 		if s, ok := output.(string); ok {
