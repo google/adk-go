@@ -48,15 +48,13 @@ func main() {
 	nodeB := workflow.NewFunctionNode("suffix", suffixFn)
 
 	// 3. Define flow (Edges)
-	edges := workflow.Chain(workflow.START, nodeA, nodeB)
+	edges := workflow.Chain(workflow.Start, nodeA, nodeB)
 
 	// 4. Create Workflow Agent
 	myWorkflow, err := workflowagent.New(workflowagent.Config{
-		AgentConfig: agent.Config{
-			Name:        "simple_sequence_workflow",
-			Description: "Converts string to uppercase and appends a suffix",
-		},
-		Edges: edges,
+		Name:        "simple_sequence_workflow",
+		Description: "Converts string to uppercase and appends a suffix",
+		Edges:       edges,
 	})
 	if err != nil {
 		log.Fatalf("failed to create workflow: %v", err)
