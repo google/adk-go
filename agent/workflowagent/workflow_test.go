@@ -109,12 +109,10 @@ func TestWorkflowAgent(t *testing.T) {
 	nodeA := workflow.NewFunctionNode("upper", upperFn)
 	nodeB := workflow.NewFunctionNode("suffix", suffixFn)
 
-	edges := workflow.Chain(workflow.START, nodeA, nodeB)
+	edges := workflow.Chain(workflow.Start, nodeA, nodeB)
 
 	myWorkflow, err := New(Config{
-		AgentConfig: agent.Config{
-			Name: "test_workflow",
-		},
+		Name:  "test_workflow",
 		Edges: edges,
 	})
 	if err != nil {

@@ -94,7 +94,7 @@ func TestSequentialWorkflow(t *testing.T) {
 	nodeA := NewFunctionNode("upper", upperFn)
 	nodeB := NewFunctionNode("suffix", suffixFn)
 
-	edges := Chain(START, nodeA, nodeB)
+	edges := Chain(Start, nodeA, nodeB)
 
 	w := New(edges)
 
