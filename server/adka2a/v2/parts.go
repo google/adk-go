@@ -40,7 +40,7 @@ const (
 	a2aDataPartTypeCodeExecutableCode = "executable_code"
 )
 
-// IsPartial takes metadata of an A2A object (eg. a2a.Part, a2a.Artifact) and returs true if
+// IsPartial takes metadata of an A2A object (eg. a2a.Part, a2a.Artifact) and returns true if
 // it was marked as partial based on the ADK partial flag set on the original ADK object.
 func IsPartial(meta map[string]any) bool {
 	if meta == nil {
@@ -50,7 +50,7 @@ func IsPartial(meta map[string]any) bool {
 	return isPartial
 }
 
-// IsPartialFlagSet takes metadata of an A2A object (eg. a2a.Part, a2a.Artifact) and returs true if
+// IsPartialFlagSet takes metadata of an A2A object (eg. a2a.Part, a2a.Artifact) and returns true if
 // the ADK partial flag was set on it.
 func IsPartialFlagSet(meta map[string]any) bool {
 	if meta == nil {

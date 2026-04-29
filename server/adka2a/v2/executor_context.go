@@ -42,7 +42,7 @@ type ExecutorContext interface {
 	Events() session.Events
 	// UserContent is a converted A2A message which is passed to runner.Run.
 	UserContent() *genai.Content
-	// RequestContext containts information about the original A2A Request, the current task and related tasks.
+	// RequestContext contains information about the original A2A Request, the current task and related tasks.
 	RequestContext() *a2asrv.ExecutorContext
 }
 

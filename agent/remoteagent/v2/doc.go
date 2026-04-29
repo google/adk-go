@@ -12,5 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package remoteagent allows to use a remote ADK agents.
+// Package remoteagent allows using a remote ADK agents.
 package remoteagent

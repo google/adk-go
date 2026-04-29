@@ -75,7 +75,7 @@ func CreateA2AClient(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard,
 	return card, client, nil
 }
 
-func resolveAgentCard(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, error) {
+func ResolveAgentCard(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, error) {
 	if cfg.AgentCard != nil {
 		return cfg.AgentCard, nil
 	}

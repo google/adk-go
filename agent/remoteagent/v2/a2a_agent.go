@@ -198,7 +198,7 @@ type a2aAgent struct {
 
 func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		card, err := resolveAgentCard(ctx, cfg)
+		card, err := iremoteagent.ResolveAgentCard(ctx, a.serverConfig)
 		if err != nil {
 			yield(toErrorEvent(ctx, fmt.Errorf("agent card resolution failed: %w", err)), nil)
 			return
@@ -369,16 +369,6 @@ func toErrorEvent(ctx agent.InvocationContext, err error) *session.Event {
 	event.CustomMetadata = map[string]any{adka2a.ToADKMetaKey("error"): err.Error()}
 	event.TurnComplete = true
 	return event
-}
-
-func resolveAgentCard(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.AgentCard, error) {
-	if cfg.AgentCard != nil {
-		return cfg.AgentCard, nil
-	}
-	if cfg.AgentCardProvider != nil {
-		return cfg.AgentCardProvider(ctx)
-	}
-	return nil, fmt.Errorf("either AgentCard or AgentCardProvider must be set")
 }
 
 func destroy(ctx context.Context, client A2AClient) {
