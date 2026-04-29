@@ -107,6 +107,30 @@ func init() {
 func (f *deployAgentEngineFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags & preparing temp",
 		func(p util.Printer) error {
+			dateTimeString := time.Now().Format(time.RFC3339)
+			f.agentEngine.displayName = f.agentEngine.name
+			if f.agentEngine.displayName == "" {
+				f.agentEngine.displayName = "ADK Agent: " + dateTimeString
+			}
+
+			f.source.imageURL = strings.TrimSpace(flags.source.imageURL)
+			if f.source.imageURL != "" {
+				if flags.source.entryPointPath != "" {
+					return fmt.Errorf("entry_point_path is not needed and should not be provided when image_url is set")
+				}
+				if flags.source.sourceDir != "" {
+					return fmt.Errorf("source_dir is not needed and should not be provided when image_url is set")
+				}
+				if flags.build.tempDir != "" {
+					return fmt.Errorf("temp_dir is not needed and should not be provided when image_url is set")
+				}
+				if f.agentEngine.serverPortSet {
+					return fmt.Errorf("server_port is not needed and should not be provided when image_url is set")
+				}
+				p("Using container image:", f.source.imageURL)
+				return nil
+			}
+
 			f.source.origEntryPointPath = flags.source.entryPointPath
 			absp, err := filepath.Abs(flags.source.entryPointPath)
 			if err != nil {
@@ -127,24 +151,6 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 			}
 			p("Using temp dir:", f.build.tempDir)
 
-			f.source.imageURL = strings.TrimSpace(flags.source.imageURL)
-			if f.source.imageURL != "" {
-				if flags.source.entryPointPath != "" {
-					return fmt.Errorf("entry_point_path is not needed and should not be provided when image_url is set")
-				}
-				if flags.source.sourceDir != "" {
-					return fmt.Errorf("source_dir is not needed and should not be provided when image_url is set")
-				}
-				if flags.build.tempDir != "" {
-					return fmt.Errorf("temp_dir is not needed and should not be provided when image_url is set")
-				}
-				if f.agentEngine.serverPortSet {
-					return fmt.Errorf("server_port is not needed and should not be provided when image_url is set")
-				}
-				p("Using container image:", f.source.imageURL)
-				return nil
-			}
-
 			// come up with a executable name based on entry point path
 			dir, file := path.Split(f.source.entryPointPath)
 			f.source.srcBasePath = dir
@@ -159,12 +165,6 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 			}
 			f.build.dockerfileBuildPath = path.Join(f.build.tempDir, "Dockerfile")
 			f.build.archivePath = path.Join(f.build.tempDir, "archive.tgz")
-
-			dateTimeString := time.Now().Format(time.RFC3339)
-			f.agentEngine.displayName = f.agentEngine.name
-			if f.agentEngine.displayName == "" {
-				f.agentEngine.displayName = "ADK Agent: " + dateTimeString
-			}
 
 			return nil
 		})
