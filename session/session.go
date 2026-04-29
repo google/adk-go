@@ -116,7 +116,7 @@ type Event struct {
 	// Only valid for function call event.
 	LongRunningToolIDs []string
 	// Routing information for workflow execution
-	Route []string
+	Routes []string
 }
 
 // IsFinalResponse returns whether the event is the final response of an agent.
