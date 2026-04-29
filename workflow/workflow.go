@@ -195,12 +195,14 @@ func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Eve
 		}
 		if edge.Route == nil {
 			queue = append(queue, nodeInput{node: edge.To, input: input})
+			added[edge.To] = struct{}{}
 			matched = true
 			continue
 		}
 
 		if edge.Route.Matches(event) {
 			queue = append(queue, nodeInput{node: edge.To, input: input})
+			added[edge.To] = struct{}{}
 			matched = true
 		}
 	}
