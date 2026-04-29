@@ -21,16 +21,24 @@ import (
 
 // Config is the configuration for creating a new Workflow agent.
 type Config struct {
-	AgentConfig agent.Config
-	Edges       []workflow.Edge
+	Name                 string
+	Description          string
+	SubAgents            []agent.Agent
+	BeforeAgentCallbacks []agent.BeforeAgentCallback
+	AfterAgentCallbacks  []agent.AfterAgentCallback
+	Edges                []workflow.Edge
 }
 
 // New creates a new Workflow agent.
 func New(cfg Config) (agent.Agent, error) {
 	w := workflow.New(cfg.Edges)
 
-	agentCfg := cfg.AgentConfig
-	agentCfg.Run = w.Run
-
-	return agent.New(agentCfg)
+	return agent.New(agent.Config{
+		Name:                 cfg.Name,
+		Description:          cfg.Description,
+		SubAgents:            cfg.SubAgents,
+		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
+		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
+		Run:                  w.Run,
+	})
 }
