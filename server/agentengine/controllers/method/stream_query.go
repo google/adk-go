@@ -60,11 +60,27 @@ func (s *streamQueryHandler) Handle(ctx context.Context, rw http.ResponseWriter,
 func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWriter, payload []byte) error {
 	var req models.StreamQueryRequest
 
+	// try to unmarshal models.StreamQueryRequest first
 	err := json.Unmarshal(payload, &req)
 	if err != nil {
-		err = fmt.Errorf("json.Unmarshal() failed: %v", err)
-		log.Print(err.Error())
-		return err
+		// try to unmarshal models.StreamQueryTextRequest
+		var reqText models.StreamQueryTextRequest
+		errText := json.Unmarshal(payload, &reqText)
+		if errText != nil {
+			// cannot unmarshall to models.StreamQueryRequest and models.StreamQueryTextRequest
+			err = fmt.Errorf("json.Unmarshal() failed both for models.StreamQueryRequest (%v) and models.StreamQueryTextRequest (%v)", err, errText)
+			log.Print(err.Error())
+			return err
+		}
+		// got text, create a full content based on that text
+		req = models.StreamQueryRequest{
+			ClassMethod: reqText.ClassMethod,
+			Input: models.StreamQueryInput{
+				UserID:    reqText.Input.UserID,
+				SessionID: reqText.Input.SessionID,
+				Message:   *genai.NewContentFromText(reqText.Input.Message, genai.RoleUser),
+			},
+		}
 	}
 
 	events, err := s.run(ctx, &req, &req.Input.Message, s.config)
@@ -135,8 +151,15 @@ func (s *streamQueryHandler) Metadata() (*structpb.Struct, error) {
 					"type":     "string",
 				},
 				"message": map[string]any{
-					"additionalProperties": true,
-					"type":                 "object",
+					"anyOf": []any{
+						map[string]any{
+							"type": "string",
+						},
+						map[string]any{
+							"additionalProperties": true,
+							"type":                 "object",
+						},
+					},
 				},
 			},
 			"required": []any{
@@ -169,11 +192,12 @@ func (s *streamQueryHandler) run(ctx context.Context, req *models.StreamQueryReq
 	rootAgent := config.AgentLoader.RootAgent()
 
 	r, err := runner.New(runner.Config{
-		AppName:         s.agentEngineID,
-		Agent:           rootAgent,
-		SessionService:  config.SessionService,
-		ArtifactService: config.ArtifactService,
-		PluginConfig:    config.PluginConfig,
+		AppName:           s.agentEngineID,
+		Agent:             rootAgent,
+		SessionService:    config.SessionService,
+		ArtifactService:   config.ArtifactService,
+		PluginConfig:      config.PluginConfig,
+		AutoCreateSession: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create runner: %v", err)
