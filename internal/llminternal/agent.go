@@ -27,13 +27,21 @@ type Agent interface {
 	internal() *State
 }
 
+// IncludeContents defines the policy for including content in LLM requests.
+type IncludeContents string
+
+const (
+	IncludeContentsAll  IncludeContents = "all"
+	IncludeContentsNone IncludeContents = "none"
+)
+
 type State struct {
 	Model model.LLM
 
 	Tools    []tool.Tool
 	Toolsets []tool.Toolset
 
-	IncludeContents string
+	IncludeContents IncludeContents `json:"include_contents"`
 
 	GenerateContentConfig *genai.GenerateContentConfig
 
