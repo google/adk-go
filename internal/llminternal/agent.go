@@ -31,7 +31,7 @@ type Agent interface {
 type IncludeContents string
 
 const (
-	IncludeContentsAll  IncludeContents = "all"
+	IncludeContentsAll  IncludeContents = "default"
 	IncludeContentsNone IncludeContents = "none"
 )
 
