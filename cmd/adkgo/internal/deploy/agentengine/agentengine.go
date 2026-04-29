@@ -48,6 +48,7 @@ type agentEngineServiceFlags struct {
 	name          string
 	displayName   string
 	serverPort    int
+	serverPortSet bool
 	agentEngineID string
 }
 
@@ -64,6 +65,7 @@ type sourceFlags struct {
 	entryPointPath     string
 	origEntryPointPath string
 	sourceDir          string
+	imageURL           string
 }
 
 type deployAgentEngineFlags struct {
@@ -79,9 +81,10 @@ var flags deployAgentEngineFlags
 var agentEngineCmd = &cobra.Command{
 	Use:   "agentengine",
 	Short: "Deploys the application to Agent Engine.",
-	Long:  `Deploys the application to Agent Engine. It creates a source archive, uploads it to create a Reasoning Engine, and cleans up temporary files.`,
+	Long:  `Deploys the application to Agent Engine from local source or a prebuilt Artifact Registry Docker image.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return flags.deployOnagentEngine()
+		flags.agentEngine.serverPortSet = cmd.Flags().Changed("server_port")
+		return flags.deployOnAgentEngine()
 	},
 }
 
@@ -96,6 +99,7 @@ func init() {
 	agentEngineCmd.PersistentFlags().IntVar(&flags.agentEngine.serverPort, "server_port", 8080, "agentEngine server port")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.sourceDir, "source_dir", "d", "", "Directory to archive, defaults to current working directory")
+	agentEngineCmd.PersistentFlags().StringVar(&flags.source.imageURL, "image_url", "", "Artifact Registry Docker image URI to deploy instead of local source_dir, for example us-central1-docker.pkg.dev/my-project/my-repo/my-image:tag")
 	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.agentEngineID, "agent_engine_id", "", "ID of the Agent Engine instance to update if it exists (default: \"\", which means a new instance will be created).")
 }
 
@@ -122,6 +126,24 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 				return fmt.Errorf("cannot create a temporary sub directory in '%v': %w", absp, err)
 			}
 			p("Using temp dir:", f.build.tempDir)
+
+			f.source.imageURL = strings.TrimSpace(flags.source.imageURL)
+			if f.source.imageURL != "" {
+				if flags.source.entryPointPath != "" {
+					return fmt.Errorf("entry_point_path is not needed and should not be provided when image_url is set")
+				}
+				if flags.source.sourceDir != "" {
+					return fmt.Errorf("source_dir is not needed and should not be provided when image_url is set")
+				}
+				if flags.build.tempDir != "" {
+					return fmt.Errorf("temp_dir is not needed and should not be provided when image_url is set")
+				}
+				if f.agentEngine.serverPortSet {
+					return fmt.Errorf("server_port is not needed and should not be provided when image_url is set")
+				}
+				p("Using container image:", f.source.imageURL)
+				return nil
+			}
 
 			// come up with a executable name based on entry point path
 			dir, file := path.Split(f.source.entryPointPath)
@@ -151,6 +173,10 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 func (f *deployAgentEngineFlags) cleanTemp() error {
 	return util.LogStartStop("Cleaning temp",
 		func(p util.Printer) error {
+			if f.build.tempDir == "" {
+				p("No temp dir to clean")
+				return nil
+			}
 			p("Clean temp starting with", f.build.tempDir)
 			err := os.RemoveAll(f.build.tempDir)
 			if err != nil {
@@ -207,8 +233,41 @@ func (f *deployAgentEngineFlags) createArchive() error {
 		})
 }
 
-// gcloudDeployToAgentEngine invokes gcloud to deploy source on agentEngine
-func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
+// applyDeploymentSource configures the Reasoning Engine deployment source from either an image URL or the prepared source archive.
+func (f *deployAgentEngineFlags) applyDeploymentSource(spec *aiplatformpb.ReasoningEngineSpec) error {
+	if f.source.imageURL != "" {
+		// Image deployments use the prebuilt Artifact Registry container directly.
+		spec.DeploymentSource = &aiplatformpb.ReasoningEngineSpec_ContainerSpec_{
+			ContainerSpec: &aiplatformpb.ReasoningEngineSpec_ContainerSpec{
+				ImageUri: f.source.imageURL,
+			},
+		}
+		return nil
+	}
+
+	// Source deployments upload the prepared archive with the generated Dockerfile.
+	archiveContent, err := os.ReadFile(f.build.archivePath)
+	if err != nil {
+		return fmt.Errorf("cannot read archive file: %w", err)
+	}
+
+	spec.DeploymentSource = &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
+		SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
+			Source: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource_{
+				InlineSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource{
+					SourceArchive: archiveContent,
+				},
+			},
+			LanguageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec_{
+				ImageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec{},
+			},
+		},
+	}
+	return nil
+}
+
+// deployToAgentEngine deploys source or a container image to Agent Engine.
+func (f *deployAgentEngineFlags) deployToAgentEngine() error {
 	return util.LogStartStop("Deploying to Agent Engine",
 		func(p util.Printer) error {
 			ctx := context.Background()
@@ -224,11 +283,6 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 				}
 			}()
 
-			archiveContent, err := os.ReadFile(f.build.archivePath)
-			if err != nil {
-				return fmt.Errorf("cannot read archive file: %w", err)
-			}
-
 			methods, err := agentengine.ListClassMethods()
 			if err != nil {
 				return fmt.Errorf("cannot list class methods: %w", err)
@@ -239,37 +293,30 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 			}
 			p("Methods:", string(methodsJSON))
 
+			spec := &aiplatformpb.ReasoningEngineSpec{
+				AgentFramework: "google-adk",
+				DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
+					Env: []*aiplatformpb.EnvVar{
+						{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
+						{Name: "NUM_WORKERS", Value: "1"},
+						{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
+						{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
+					},
+					SecretEnv: []*aiplatformpb.SecretEnvVar{
+						{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
+					},
+				},
+				ClassMethods: methods,
+			}
+			if err := f.applyDeploymentSource(spec); err != nil {
+				return err
+			}
+
 			req := &aiplatformpb.CreateReasoningEngineRequest{
 				Parent: parent,
 				ReasoningEngine: &aiplatformpb.ReasoningEngine{
 					DisplayName: f.agentEngine.displayName,
-					Spec: &aiplatformpb.ReasoningEngineSpec{
-						DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
-							SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
-								Source: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource_{
-									InlineSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource{
-										SourceArchive: archiveContent,
-									},
-								},
-								LanguageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec_{
-									ImageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec{},
-								},
-							},
-						},
-						AgentFramework: "google-adk",
-						DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
-							Env: []*aiplatformpb.EnvVar{
-								{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
-								{Name: "NUM_WORKERS", Value: "1"},
-								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
-								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
-							},
-							SecretEnv: []*aiplatformpb.SecretEnvVar{
-								{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
-							},
-						},
-						ClassMethods: methods,
-					},
+					Spec:        spec,
 				},
 			}
 			p("Sending CreateReasoningEngine request...")
@@ -308,11 +355,6 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 				}
 			}()
 
-			archiveContent, err := os.ReadFile(f.build.archivePath)
-			if err != nil {
-				return fmt.Errorf("cannot read archive file: %w", err)
-			}
-
 			methods, err := agentengine.ListClassMethods()
 			if err != nil {
 				return fmt.Errorf("cannot list class methods: %w", err)
@@ -323,26 +365,28 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 			}
 			p("Methods:", string(methodsJSON))
 
+			// Prepare the spec
+			spec := &aiplatformpb.ReasoningEngineSpec{
+				ClassMethods: methods,
+			}
+			if err := f.applyDeploymentSource(spec); err != nil {
+				return err
+			}
+
+			// Set the appropriate deployment source update mask.
+			updateMask := &fieldmaskpb.FieldMask{Paths: []string{"spec.class_methods"}}
+			if f.source.imageURL != "" {
+				updateMask.Paths = append(updateMask.Paths, "spec.container_spec")
+			} else {
+				updateMask.Paths = append(updateMask.Paths, "spec.source_code_spec")
+			}
+
 			req := &aiplatformpb.UpdateReasoningEngineRequest{
 				ReasoningEngine: &aiplatformpb.ReasoningEngine{
 					Name: name,
-					Spec: &aiplatformpb.ReasoningEngineSpec{
-						DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
-							SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
-								Source: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource_{
-									InlineSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource{
-										SourceArchive: archiveContent,
-									},
-								},
-								LanguageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec_{
-									ImageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec{},
-								},
-							},
-						},
-						ClassMethods: methods,
-					},
+					Spec: spec,
 				},
-				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.source_code_spec", "spec.class_methods"}},
+				UpdateMask: updateMask,
 			}
 			p("Sending UpdateReasoningEngine request...")
 			op, err := client.UpdateReasoningEngine(ctx, req)
@@ -363,26 +407,28 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 		})
 }
 
-// deployOnagentEngine executes the sequence of actions preparing and deploying the agent to agentEngine
-func (f *deployAgentEngineFlags) deployOnagentEngine() error {
+// deployOnAgentEngine executes the sequence of actions preparing and deploying the agent to agentEngine
+func (f *deployAgentEngineFlags) deployOnAgentEngine() error {
 	fmt.Println(flags)
 
 	err := f.computeFlags()
 	if err != nil {
 		return err
 	}
-	err = f.prepareDockerfile()
-	if err != nil {
-		return err
-	}
-	err = f.createArchive()
-	if err != nil {
-		return err
+	if f.source.imageURL == "" {
+		err = f.prepareDockerfile()
+		if err != nil {
+			return err
+		}
+		err = f.createArchive()
+		if err != nil {
+			return err
+		}
 	}
 	if f.agentEngine.agentEngineID != "" {
 		err = f.gcloudUpdateAgentEngine()
 	} else {
-		err = f.gcloudDeployToAgentEngine()
+		err = f.deployToAgentEngine()
 	}
 	if err != nil {
 		return err
