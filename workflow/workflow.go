@@ -37,39 +37,31 @@ type Route interface {
 	Matches(event *session.Event) bool
 }
 
-type StringRoute string
-
-func (r StringRoute) Matches(event *session.Event) bool {
-	for _, v := range event.Route {
-		if v == string(r) {
+func matchRoute(routeValue string, event *session.Event) bool {
+	for _, v := range event.Routes {
+		if v == routeValue {
 			return true
 		}
 	}
 	return false
+}
+
+type StringRoute string
+
+func (r StringRoute) Matches(event *session.Event) bool {
+	return matchRoute(string(r), event)
 }
 
 type IntRoute int
 
 func (r IntRoute) Matches(event *session.Event) bool {
-	str := fmt.Sprint(r)
-	for _, v := range event.Route {
-		if v == str {
-			return true
-		}
-	}
-	return false
+	return matchRoute(fmt.Sprint(r), event)
 }
 
 type BoolRoute bool
 
 func (r BoolRoute) Matches(event *session.Event) bool {
-	str := fmt.Sprint(r)
-	for _, v := range event.Route {
-		if v == str {
-			return true
-		}
-	}
-	return false
+	return matchRoute(fmt.Sprint(r), event)
 }
 
 // BaseNode provides common fields for all nodes.
@@ -185,34 +177,35 @@ func New(edges []Edge) *Workflow {
 	return &Workflow{edges: adj}
 }
 
-type queueItem struct {
+type nodeInput struct {
 	node  Node
 	input any
 }
 
-func (w *Workflow) findNextNodes(currentNode Node, input any, eventList []*session.Event) ([]queueItem, error) {
+func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Event) ([]nodeInput, error) {
 	if len(w.edges[currentNode]) == 0 {
 		return nil, nil
 	}
 	matched := false
-	queue := []queueItem{}
+	queue := []nodeInput{}
+	added := make(map[Node]struct{})
 	for _, edge := range w.edges[currentNode] {
+		if _, ok := added[edge.To]; ok {
+			continue
+		}
 		if edge.Route == nil {
-			queue = append(queue, queueItem{node: edge.To, input: input})
+			queue = append(queue, nodeInput{node: edge.To, input: input})
 			matched = true
 			continue
 		}
 
-		for _, event := range eventList {
-			if edge.Route.Matches(event) {
-				queue = append(queue, queueItem{node: edge.To, input: input})
-				matched = true
-				break
-			}
+		if edge.Route.Matches(event) {
+			queue = append(queue, nodeInput{node: edge.To, input: input})
+			matched = true
 		}
 	}
 	if !matched {
-		return nil, fmt.Errorf("node %s produces route tags that do not match any valid outgoing edge", currentNode.Name())
+		return nil, fmt.Errorf("no outgoing edge matches the event with routes %v emitted by node %s", event.Routes, currentNode.Name())
 	}
 	return queue, nil
 }
@@ -231,10 +224,10 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			input = sb.String()
 		}
 
-		var queue []queueItem
+		var queue []nodeInput
 		if startEdges, ok := w.edges[START]; ok {
 			for _, edge := range startEdges {
-				queue = append(queue, queueItem{node: edge.To, input: input})
+				queue = append(queue, nodeInput{node: edge.To, input: input})
 			}
 		}
 
@@ -248,9 +241,9 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			input = queue[0].input
 			queue = queue[1:]
 
-			var eventList []*session.Event
-			events := currentNode.Run(ctx, input)
-			for ev, err := range events {
+			var eventsWithRoutes []*session.Event
+			var outputData any
+			for ev, err := range currentNode.Run(ctx, input) {
 				if err != nil {
 					yield(nil, err)
 					return
@@ -259,16 +252,28 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					return
 				}
 
-				eventList = append(eventList, ev)
+				if ev.Routes != nil {
+					eventsWithRoutes = append(eventsWithRoutes, ev)
+				}
 
 				// Extract output for next node
 				if ev.Actions.StateDelta != nil {
 					if out, ok := ev.Actions.StateDelta["output"]; ok {
-						input = out
+						outputData = out
 					}
 				}
 			}
-			nextNodes, err := w.findNextNodes(currentNode, input, eventList)
+
+			if len(eventsWithRoutes) > 1 {
+				yield(nil, fmt.Errorf("node %s produced multiple events with route tags. Only one event per execution can specify routes.", currentNode.Name()))
+				return
+			}
+			var event *session.Event
+			if len(eventsWithRoutes) == 1 {
+				event = eventsWithRoutes[0]
+			}
+			input = outputData
+			nextNodes, err := w.findNextNodes(currentNode, input, event)
 			if err != nil {
 				yield(nil, err)
 				return

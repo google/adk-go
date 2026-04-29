@@ -132,9 +132,9 @@ func TestSequentialWorkflow(t *testing.T) {
 	}
 }
 
-func TestRoutes(t *testing.T) {
+func TestStringRoute(t *testing.T) {
 	event := &session.Event{
-		Route: []string{"hello", "42", "true"},
+		Routes: []string{"hello", "42", "true"},
 	}
 
 	if !StringRoute("hello").Matches(event) {
@@ -143,12 +143,24 @@ func TestRoutes(t *testing.T) {
 	if StringRoute("world").Matches(event) {
 		t.Errorf("StringRoute should not match")
 	}
+}
+
+func TestIntRoute(t *testing.T) {
+	event := &session.Event{
+		Routes: []string{"hello", "42", "true"},
+	}
 
 	if !IntRoute(42).Matches(event) {
 		t.Errorf("IntRoute should match")
 	}
 	if IntRoute(10).Matches(event) {
 		t.Errorf("IntRoute should not match")
+	}
+}
+
+func TestBoolRoute(t *testing.T) {
+	event := &session.Event{
+		Routes: []string{"hello", "42", "true"},
 	}
 
 	if !BoolRoute(true).Matches(event) {
@@ -171,7 +183,7 @@ func (n *CustomRouteNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[
 	}
 	return func(yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
-		ev.Route = n.route
+		ev.Routes = n.route
 		yield(ev, nil)
 	}
 }
@@ -184,7 +196,7 @@ func TestWorkflowRouting(t *testing.T) {
 	type testCase struct {
 		name           string
 		startRoutes    []string
-		edges          func(START Node, nodeStart *CustomRouteNode, nodeA, nodeB *FunctionNode, nodeC *CustomRouteNode, nodeD *FunctionNode) []Edge
+		edges          func(nodeStart *CustomRouteNode, nodeA, nodeB *FunctionNode, nodeC *CustomRouteNode, nodeD *FunctionNode) []Edge
 		expectedExec   []string
 		expectErrorMsg string
 	}
@@ -220,7 +232,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "all edges don't have routing",
 			startRoutes: []string{"branchA", "branchB"},
-			edges: func(START Node, start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: START, To: start},
 					{From: start, To: a},
@@ -234,7 +246,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "only one edge has correct routing and the rest have no routing",
 			startRoutes: []string{"branchA"},
-			edges: func(START Node, start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: START, To: start},
 					{From: start, To: a, Route: StringRoute("branchA")},
@@ -248,7 +260,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "one edge has no routing and the rest have a correct routing",
 			startRoutes: []string{"branchA", "branchB"},
-			edges: func(START Node, start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: START, To: start},
 					{From: start, To: a, Route: StringRoute("branchA")},
@@ -262,7 +274,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "any edge has incorrect routing",
 			startRoutes: []string{"invalid"},
-			edges: func(START Node, start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: START, To: start},
 					{From: start, To: a, Route: StringRoute("branchA")},
@@ -271,7 +283,7 @@ func TestWorkflowRouting(t *testing.T) {
 					{From: c, To: d},
 				}
 			},
-			expectErrorMsg: "produces route tags that do not match any valid outgoing edge",
+			expectErrorMsg: "no outgoing edge matches the event with routes",
 		},
 	}
 
@@ -279,7 +291,7 @@ func TestWorkflowRouting(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			start, a, b, c, d, tracker := createNodes()
 			start.route = tc.startRoutes
-			edges := tc.edges(START, start, a, b, c, d)
+			edges := tc.edges(start, a, b, c, d)
 
 			w := New(edges)
 			mockCtx := &MockInvocationContext{sess: nil}
