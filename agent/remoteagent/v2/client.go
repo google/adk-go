@@ -16,7 +16,6 @@ package remoteagent
 
 import (
 	"context"
-	"iter"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
@@ -48,28 +47,6 @@ func NewA2AClientProvider(factory *a2aclient.Factory) A2AClientProvider {
 		if err != nil {
 			return nil, err
 		}
-		return &defaultA2AClient{client: client}, nil
+		return client, nil
 	}
-}
-
-type defaultA2AClient struct {
-	client *a2aclient.Client
-}
-
-var _ A2AClient = (*defaultA2AClient)(nil)
-
-func (s *defaultA2AClient) SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
-	return s.client.SendMessage(ctx, req)
-}
-
-func (s *defaultA2AClient) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
-	return s.client.SendStreamingMessage(ctx, req)
-}
-
-func (s *defaultA2AClient) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
-	return s.client.CancelTask(ctx, req)
-}
-
-func (s *defaultA2AClient) Destroy() error {
-	return s.client.Destroy()
 }

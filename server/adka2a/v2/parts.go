@@ -100,14 +100,6 @@ func ToA2AParts(parts []*genai.Part, longRunningToolIDs []string) ([]*a2a.Part, 
 			}
 			result[i] = a2a.NewDataPart(data)
 		} else if part.InlineData != nil || part.FileData != nil {
-			if part.InlineData != nil && part.InlineData.DisplayName == "a2a_data_part" {
-				var val map[string]any
-				if err := json.Unmarshal(part.InlineData.Data, &val); err != nil {
-					return nil, err
-				}
-				result[i] = a2a.NewDataPart(val)
-				continue
-			}
 			r, err := toA2AFilePart(part)
 			if err != nil {
 				return nil, err
