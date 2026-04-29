@@ -79,7 +79,8 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 				UserID:    reqText.Input.UserID,
 				SessionID: reqText.Input.SessionID,
 				Message:   *genai.NewContentFromText(reqText.Input.Message, genai.RoleUser),
-			}}
+			},
+		}
 	}
 
 	events, err := s.run(ctx, &req, &req.Input.Message, s.config)

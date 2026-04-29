@@ -21,11 +21,12 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 type simpleEvent struct {
@@ -44,7 +45,8 @@ func TestSimpleText(t *testing.T) {
 		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
 			func(cc agent.CallbackContext) (*genai.Content, error) {
 				return cc.UserContent(), nil
-			}},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -110,7 +112,6 @@ func TestSimpleText(t *testing.T) {
 		p := w.sb.String()
 
 		err = json.Unmarshal([]byte(p), &ev)
-
 		if err != nil {
 			t.Fatalf("json.Unmarshal() failed: %v", err)
 		}
@@ -151,8 +152,10 @@ func (s *stringWriter) Flush() {
 	// do nothing
 }
 
-var _ http.ResponseWriter = (*stringWriter)(nil)
-var _ http.Flusher = (*stringWriter)(nil)
+var (
+	_ http.ResponseWriter = (*stringWriter)(nil)
+	_ http.Flusher        = (*stringWriter)(nil)
+)
 
 func newStringWriter() *stringWriter {
 	return &stringWriter{
