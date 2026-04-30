@@ -26,6 +26,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/compaction"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -53,6 +54,9 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 				events = append(events, e)
 			}
 		}
+		// Fold compacted older events into a single synthesized turn
+		// (no-op when no compaction events exist). Phase 1E.
+		events = compaction.Fold(events)
 		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), events)
 		if err != nil {
 			yield(nil, err)

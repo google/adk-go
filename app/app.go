@@ -21,12 +21,14 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"unicode"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/plugin"
+	"google.golang.org/adk/session"
 )
 
 // App is the top-level container for an agentic application.
@@ -123,30 +125,15 @@ type EventsCompactionConfig struct {
 }
 
 // EventsSummarizer is the runner-facing contract for producing a compacted
-// summary event from a range of session events. Concrete implementations
-// (e.g. an LLM-backed summarizer) live in this package; see Phase 1E.
+// summary event from a range of session events.
 //
-// MaybeSummarize returns nil if the implementation decides no summary is
-// warranted (e.g. trivial range), in which case the runner skips the
-// compaction event for this turn.
+// MaybeSummarize returns nil (without error) if the implementation decides
+// no summary is warranted (e.g. trivial range), in which case the runner
+// skips the compaction event for this turn. The returned Event must have
+// Actions.Compaction populated with the start/end timestamps and synthesized
+// content; the runner appends it to the session as-is.
 type EventsSummarizer interface {
-	MaybeSummarize(input SummarizeInput) (*SummarizeOutput, error)
-}
-
-// SummarizeInput is the payload handed to a summarizer.
-type SummarizeInput struct {
-	// Events is the ordered slice of session events to summarize.
-	Events []any // narrowed to *session.Event in Phase 1E; kept any here to avoid an import cycle.
-	// AppName is forwarded for telemetry / prompt construction.
-	AppName string
-}
-
-// SummarizeOutput is what a summarizer returns. The runner converts this
-// into a *session.Event with Actions.Compaction set.
-type SummarizeOutput struct {
-	// Content is the synthesized summary content (typically a single text
-	// part). Type erased to any here so this package doesn't pull in genai.
-	Content any
+	MaybeSummarize(ctx context.Context, events []*session.Event) (*session.Event, error)
 }
 
 // New constructs and validates an App. Returns an error if the name is not a

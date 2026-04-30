@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/internal/artifact"
+	"google.golang.org/adk/internal/compaction"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	imemory "google.golang.org/adk/internal/memory"
@@ -306,7 +307,37 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				return
 			}
 		}
+
+		// Post-invocation compaction (Phase 1E). Runs only when an App with
+		// EventsCompactionConfig was supplied. Failures are logged but do not
+		// abort the invocation since compaction is best-effort.
+		if cc := r.compactionConfig(); cc != nil {
+			if _, err := compaction.MaybeRun(ctx, compaction.MaybeRunInput{
+				Summarizer:         cc.Summarizer,
+				CompactionInterval: cc.CompactionInterval,
+				OverlapSize:        cc.OverlapSize,
+				TokenThreshold:     cc.TokenThreshold,
+				EventRetentionSize: cc.EventRetentionSize,
+				Session:            storedSession,
+				SessionService:     r.sessionService,
+				AppName:            r.appName,
+				UserID:             storedSession.UserID(),
+				SessionID:          storedSession.ID(),
+				CurrentBranch:      ctx.Branch(),
+				AgentName:          agentToRun.Name(),
+			}); err != nil {
+				log.Printf("compaction error (non-fatal): %v", err)
+			}
+		}
 	}
+}
+
+// compactionConfig returns the App's EventsCompactionConfig, or nil if none.
+func (r *Runner) compactionConfig() *app.EventsCompactionConfig {
+	if r.appCfg == nil {
+		return nil
+	}
+	return r.appCfg.EventsCompactionConfig
 }
 
 func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.InvocationContext, error) {
