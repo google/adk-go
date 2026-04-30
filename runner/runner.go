@@ -17,6 +17,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
@@ -25,6 +26,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/app"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
@@ -41,17 +43,27 @@ import (
 )
 
 // Config is used to create a [Runner].
+//
+// Either Agent (v1 form) or App (v2 form) must be supplied — but not both.
+// When App is set, AppName, Agent, and PluginConfig are read from it; the
+// equivalent top-level fields are then optional and ignored if also set.
 type Config struct {
 	AppName string
-	// Root agent which starts the execution.
+	// Root agent which starts the execution. v1 form. Mutually exclusive
+	// with App. Future Phase 2 will allow workflow.Node here too.
 	Agent          agent.Agent
 	SessionService session.Service
+
+	// App is the v2 container that pairs the root agent with shared plugins
+	// and runtime configurations (event compaction, context cache,
+	// resumability). Mutually exclusive with the top-level Agent field.
+	App *app.App
 
 	// optional
 	ArtifactService artifact.Service
 	// optional
 	MemoryService memory.Service
-	// optional
+	// optional. Ignored when App is set; use App.Plugins instead.
 	PluginConfig PluginConfig
 	// optional
 	AutoCreateSession bool
@@ -76,8 +88,32 @@ func WithStateDelta(delta map[string]any) RunOption {
 }
 
 // New creates a new [Runner].
+//
+// Accepts both v1-style (Config.Agent + Config.PluginConfig) and v2-style
+// (Config.App) construction. When Config.App is set, it takes precedence
+// over the v1 fields except for SessionService and ArtifactService /
+// MemoryService, which always come from Config.
 func New(cfg Config) (*Runner, error) {
-	if cfg.Agent == nil {
+	if cfg.App != nil && cfg.Agent != nil {
+		return nil, errors.New("runner: set either Config.Agent or Config.App, not both")
+	}
+
+	rootAgent := cfg.Agent
+	appName := cfg.AppName
+	plugins := cfg.PluginConfig.Plugins
+	closeTimeout := cfg.PluginConfig.CloseTimeout
+
+	if cfg.App != nil {
+		rootAgent = cfg.App.RootAgent
+		if appName == "" {
+			appName = cfg.App.Name
+		}
+		plugins = cfg.App.Plugins
+		// closeTimeout stays from PluginConfig if caller supplied it
+		// alongside the App; App itself doesn't model a timeout today.
+	}
+
+	if rootAgent == nil {
 		return nil, fmt.Errorf("root agent is required")
 	}
 
@@ -85,28 +121,29 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("session service is required")
 	}
 
-	parents, err := parentmap.New(cfg.Agent)
+	parents, err := parentmap.New(rootAgent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent tree: %w", err)
 	}
 
 	pluginManager, err := plugininternal.NewPluginManager(plugininternal.PluginConfig{
-		Plugins:      cfg.PluginConfig.Plugins,
-		CloseTimeout: cfg.PluginConfig.CloseTimeout,
+		Plugins:      plugins,
+		CloseTimeout: closeTimeout,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create plugin manager: %w", err)
 	}
 
 	return &Runner{
-		appName:           cfg.AppName,
-		rootAgent:         cfg.Agent,
+		appName:           appName,
+		rootAgent:         rootAgent,
 		sessionService:    cfg.SessionService,
 		artifactService:   cfg.ArtifactService,
 		memoryService:     cfg.MemoryService,
 		parents:           parents,
 		pluginManager:     pluginManager,
 		autoCreateSession: cfg.AutoCreateSession,
+		appCfg:            cfg.App,
 	}, nil
 }
 
@@ -123,6 +160,11 @@ type Runner struct {
 	parents           parentmap.Map
 	pluginManager     *plugininternal.PluginManager
 	autoCreateSession bool
+
+	// appCfg is set when Runner was constructed via Config.App. It carries
+	// app-level configuration (event compaction, context cache, resumability)
+	// to runtime hooks introduced in later Phase 1 tracks.
+	appCfg *app.App
 }
 
 // Run runs the agent for the given user input, yielding events from agents.

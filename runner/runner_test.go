@@ -26,8 +26,10 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	adkapp "google.golang.org/adk/app"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/session"
 )
 
@@ -446,4 +448,86 @@ func TestRunner_AutoCreateSession(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunner_New_AppConfig(t *testing.T) {
+	t.Parallel()
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "from_app",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	}))
+
+	t.Run("App-only construction works", func(t *testing.T) {
+		appCfg, err := adkapp.New(adkapp.App{Name: "myapp", RootAgent: testAgent})
+		if err != nil {
+			t.Fatalf("app.New: %v", err)
+		}
+		r, err := New(Config{
+			App:               appCfg,
+			SessionService:    session.InMemoryService(),
+			AutoCreateSession: true,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if r.appName != "myapp" {
+			t.Errorf("appName = %q, want myapp", r.appName)
+		}
+		if r.rootAgent.Name() != "from_app" {
+			t.Errorf("rootAgent = %q, want from_app", r.rootAgent.Name())
+		}
+		if r.appCfg != appCfg {
+			t.Error("appCfg should be retained on Runner")
+		}
+	})
+
+	t.Run("App with plugins forwards plugin list", func(t *testing.T) {
+		p, err := plugin.New(plugin.Config{Name: "p1"})
+		if err != nil {
+			t.Fatalf("plugin.New: %v", err)
+		}
+		appCfg, err := adkapp.New(adkapp.App{
+			Name: "myapp", RootAgent: testAgent, Plugins: []*plugin.Plugin{p},
+		})
+		if err != nil {
+			t.Fatalf("app.New: %v", err)
+		}
+		_, err = New(Config{App: appCfg, SessionService: session.InMemoryService()})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+	})
+
+	t.Run("Agent and App both set returns error", func(t *testing.T) {
+		appCfg, err := adkapp.New(adkapp.App{Name: "myapp", RootAgent: testAgent})
+		if err != nil {
+			t.Fatalf("app.New: %v", err)
+		}
+		_, err = New(Config{
+			Agent:          testAgent,
+			App:            appCfg,
+			SessionService: session.InMemoryService(),
+		})
+		if err == nil {
+			t.Error("expected error when both Agent and App are set")
+		}
+	})
+
+	t.Run("Top-level AppName overrides App.Name when supplied", func(t *testing.T) {
+		appCfg, _ := adkapp.New(adkapp.App{Name: "from_app_name", RootAgent: testAgent})
+		r, err := New(Config{
+			AppName:        "explicit",
+			App:            appCfg,
+			SessionService: session.InMemoryService(),
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if r.appName != "explicit" {
+			t.Errorf("appName = %q, want explicit (top-level wins when set)", r.appName)
+		}
+	})
 }
