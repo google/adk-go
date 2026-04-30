@@ -64,18 +64,18 @@ func (r BoolRoute) Matches(event *session.Event) bool {
 	return matchRoute(fmt.Sprint(r), event)
 }
 
-// BaseNode provides common fields for all nodes.
-type BaseNode struct {
+// baseNode provides common fields for all nodes.
+type baseNode struct {
 	name        string
 	description string
 }
 
-func (b *BaseNode) Name() string        { return b.name }
-func (b *BaseNode) Description() string { return b.description }
+func (b *baseNode) Name() string        { return b.name }
+func (b *baseNode) Description() string { return b.description }
 
 // FunctionNode wraps a custom function.
 type FunctionNode struct {
-	BaseNode
+	baseNode
 	fn func(ctx agent.InvocationContext, input any) (any, error)
 }
 
@@ -93,7 +93,7 @@ func NewFunctionNode[IN any, OUT any](name string, fn func(ctx agent.InvocationC
 		return fn(ctx, typedInput)
 	}
 	return &FunctionNode{
-		BaseNode: BaseNode{name: name},
+		baseNode: baseNode{name: name},
 		fn:       wrappedFn,
 	}
 }
@@ -150,8 +150,8 @@ func Concat(items ...any) []Edge {
 	return edges
 }
 
-// START is a sentinel node used to indicate the entry point of the workflow.
-var START Node = &startNode{}
+// Start is a sentinel node used to indicate the entry point of the workflow.
+var Start Node = &startNode{}
 
 type startNode struct{}
 
@@ -226,7 +226,7 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			input = sb.String()
 		}
 
-		queue := []nodeInput{{START, input}}
+		queue := []nodeInput{{Start, input}}
 
 		for len(queue) > 0 {
 			currentNode := queue[0].node
@@ -264,7 +264,7 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			if len(eventsWithRoutes) == 1 {
 				event = eventsWithRoutes[0]
 			}
-			if currentNode != START {
+			if currentNode != Start {
 				input = outputData
 			}
 			nextNodes, err := w.findNextNodes(currentNode, input, event)

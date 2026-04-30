@@ -95,7 +95,7 @@ func TestSequentialWorkflow(t *testing.T) {
 	nodeA := NewFunctionNode("upper", upperFn)
 	nodeB := NewFunctionNode("suffix", suffixFn)
 
-	edges := Chain(START, nodeA, nodeB)
+	edges := Chain(Start, nodeA, nodeB)
 
 	w := New(edges)
 
@@ -172,7 +172,7 @@ func TestBoolRoute(t *testing.T) {
 }
 
 type CustomRouteNode struct {
-	BaseNode
+	baseNode
 	route []string
 	onRun func()
 }
@@ -203,8 +203,8 @@ func TestWorkflowRouting(t *testing.T) {
 
 	createNodes := func() (*CustomRouteNode, *FunctionNode, *FunctionNode, *CustomRouteNode, *FunctionNode, *testTracker) {
 		tracker := &testTracker{}
-		nodeStart := &CustomRouteNode{
-			BaseNode: BaseNode{name: "START_NODE"},
+		nodeX := &CustomRouteNode{
+			baseNode: baseNode{name: "X"},
 		}
 		nodeA := NewFunctionNode("A", func(ctx agent.InvocationContext, input any) (string, error) {
 			tracker.executed = append(tracker.executed, "A")
@@ -215,7 +215,7 @@ func TestWorkflowRouting(t *testing.T) {
 			return "pathB", nil
 		})
 		nodeC := &CustomRouteNode{
-			BaseNode: BaseNode{name: "C"},
+			baseNode: baseNode{name: "C"},
 			route:    []string{"branchD"},
 			onRun: func() {
 				tracker.executed = append(tracker.executed, "C")
@@ -225,19 +225,19 @@ func TestWorkflowRouting(t *testing.T) {
 			tracker.executed = append(tracker.executed, "D")
 			return "pathD", nil
 		})
-		return nodeStart, nodeA, nodeB, nodeC, nodeD, tracker
+		return nodeX, nodeA, nodeB, nodeC, nodeD, tracker
 	}
 
 	tests := []testCase{
 		{
 			name:        "all edges don't have routing",
 			startRoutes: []string{"branchA", "branchB"},
-			edges: func(start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
-					{From: START, To: start},
-					{From: start, To: a},
-					{From: start, To: b},
-					{From: start, To: c},
+					{From: Start, To: x},
+					{From: x, To: a},
+					{From: x, To: b},
+					{From: x, To: c},
 					{From: c, To: d},
 				}
 			},
@@ -246,12 +246,12 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "only one edge has correct routing and the rest have no routing",
 			startRoutes: []string{"branchA"},
-			edges: func(start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
-					{From: START, To: start},
-					{From: start, To: a, Route: StringRoute("branchA")},
-					{From: start, To: b},
-					{From: start, To: c},
+					{From: Start, To: x},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b},
+					{From: x, To: c},
 					{From: c, To: d},
 				}
 			},
@@ -260,12 +260,12 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "one edge has no routing and the rest have a correct routing",
 			startRoutes: []string{"branchA", "branchB"},
-			edges: func(start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
-					{From: START, To: start},
-					{From: start, To: a, Route: StringRoute("branchA")},
-					{From: start, To: b, Route: StringRoute("branchB")},
-					{From: start, To: c},
+					{From: Start, To: x},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b, Route: StringRoute("branchB")},
+					{From: x, To: c},
 					{From: c, To: d, Route: StringRoute("branchD")},
 				}
 			},
@@ -274,12 +274,12 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "any edge has incorrect routing",
 			startRoutes: []string{"invalid"},
-			edges: func(start *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
-					{From: START, To: start},
-					{From: start, To: a, Route: StringRoute("branchA")},
-					{From: start, To: b, Route: StringRoute("branchB")},
-					{From: start, To: c, Route: StringRoute("branchC")},
+					{From: Start, To: x},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b, Route: StringRoute("branchB")},
+					{From: x, To: c, Route: StringRoute("branchC")},
 					{From: c, To: d},
 				}
 			},
