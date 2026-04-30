@@ -16,6 +16,7 @@ package workflow
 
 import (
 	"fmt"
+	"iter"
 	"strings"
 	"testing"
 
@@ -128,5 +129,197 @@ func TestSequentialWorkflow(t *testing.T) {
 
 	if lastOutput != "HELLO done" {
 		t.Errorf("expected last output 'HELLO done', got %v", lastOutput)
+	}
+}
+
+func TestStringRoute(t *testing.T) {
+	event := &session.Event{
+		Routes: []string{"hello", "42", "true"},
+	}
+
+	if !StringRoute("hello").Matches(event) {
+		t.Errorf("StringRoute should match")
+	}
+	if StringRoute("world").Matches(event) {
+		t.Errorf("StringRoute should not match")
+	}
+}
+
+func TestIntRoute(t *testing.T) {
+	event := &session.Event{
+		Routes: []string{"hello", "42", "true"},
+	}
+
+	if !IntRoute(42).Matches(event) {
+		t.Errorf("IntRoute should match")
+	}
+	if IntRoute(10).Matches(event) {
+		t.Errorf("IntRoute should not match")
+	}
+}
+
+func TestBoolRoute(t *testing.T) {
+	event := &session.Event{
+		Routes: []string{"hello", "42", "true"},
+	}
+
+	if !BoolRoute(true).Matches(event) {
+		t.Errorf("BoolRoute should match")
+	}
+	if BoolRoute(false).Matches(event) {
+		t.Errorf("BoolRoute should not match")
+	}
+}
+
+type CustomRouteNode struct {
+	baseNode
+	route []string
+	onRun func()
+}
+
+func (n *CustomRouteNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	if n.onRun != nil {
+		n.onRun()
+	}
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Routes = n.route
+		yield(ev, nil)
+	}
+}
+
+func TestWorkflowRouting(t *testing.T) {
+	type testTracker struct {
+		executed []string
+	}
+
+	type testCase struct {
+		name           string
+		startRoutes    []string
+		edges          func(nodeStart *CustomRouteNode, nodeA, nodeB *FunctionNode, nodeC *CustomRouteNode, nodeD *FunctionNode) []Edge
+		expectedExec   []string
+		expectErrorMsg string
+	}
+
+	createNodes := func() (*CustomRouteNode, *FunctionNode, *FunctionNode, *CustomRouteNode, *FunctionNode, *testTracker) {
+		tracker := &testTracker{}
+		nodeX := &CustomRouteNode{
+			baseNode: baseNode{name: "X"},
+		}
+		nodeA := NewFunctionNode("A", func(ctx agent.InvocationContext, input any) (string, error) {
+			tracker.executed = append(tracker.executed, "A")
+			return "pathA", nil
+		})
+		nodeB := NewFunctionNode("B", func(ctx agent.InvocationContext, input any) (string, error) {
+			tracker.executed = append(tracker.executed, "B")
+			return "pathB", nil
+		})
+		nodeC := &CustomRouteNode{
+			baseNode: baseNode{name: "C"},
+			route:    []string{"branchD"},
+			onRun: func() {
+				tracker.executed = append(tracker.executed, "C")
+			},
+		}
+		nodeD := NewFunctionNode("D", func(ctx agent.InvocationContext, input any) (string, error) {
+			tracker.executed = append(tracker.executed, "D")
+			return "pathD", nil
+		})
+		return nodeX, nodeA, nodeB, nodeC, nodeD, tracker
+	}
+
+	tests := []testCase{
+		{
+			name:        "all edges don't have routing",
+			startRoutes: []string{"branchA", "branchB"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a},
+					{From: x, To: b},
+					{From: x, To: c},
+					{From: c, To: d},
+				}
+			},
+			expectedExec: []string{"A", "B", "C", "D"},
+		},
+		{
+			name:        "only one edge has correct routing and the rest have no routing",
+			startRoutes: []string{"branchA"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b},
+					{From: x, To: c},
+					{From: c, To: d},
+				}
+			},
+			expectedExec: []string{"A", "B", "C", "D"},
+		},
+		{
+			name:        "one edge has no routing and the rest have a correct routing",
+			startRoutes: []string{"branchA", "branchB"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b, Route: StringRoute("branchB")},
+					{From: x, To: c},
+					{From: c, To: d, Route: StringRoute("branchD")},
+				}
+			},
+			expectedExec: []string{"A", "B", "C", "D"},
+		},
+		{
+			name:        "any edge has incorrect routing",
+			startRoutes: []string{"invalid"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b, Route: StringRoute("branchB")},
+					{From: x, To: c, Route: StringRoute("branchC")},
+					{From: c, To: d},
+				}
+			},
+			expectErrorMsg: "no outgoing edge matches the event with routes",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			start, a, b, c, d, tracker := createNodes()
+			start.route = tc.startRoutes
+			edges := tc.edges(start, a, b, c, d)
+
+			w := New(edges)
+			mockCtx := &MockInvocationContext{sess: nil}
+
+			var err error
+			for _, testErr := range w.Run(mockCtx) {
+				if testErr != nil {
+					err = testErr
+					break
+				}
+			}
+
+			if tc.expectErrorMsg != "" {
+				if err == nil {
+					t.Errorf("expected error matching %q, got none", tc.expectErrorMsg)
+				} else if !strings.Contains(err.Error(), tc.expectErrorMsg) {
+					t.Errorf("expected error containing %q, got %v", tc.expectErrorMsg, err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(tracker.executed) != len(tc.expectedExec) {
+				t.Errorf("expected %v executed, got %v", tc.expectedExec, tracker.executed)
+			}
+		})
 	}
 }
