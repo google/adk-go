@@ -34,17 +34,34 @@ type Node interface {
 
 // Route defines the interface for matching execution results to edges.
 type Route interface {
-	Matches(output any) bool
+	Matches(event *session.Event) bool
 }
 
-// StringRoute matches an exact string value.
-type StringRoute struct {
-	Value string
+func matchRoute(routeValue string, event *session.Event) bool {
+	for _, v := range event.Routes {
+		if v == routeValue {
+			return true
+		}
+	}
+	return false
 }
 
-func (r StringRoute) Matches(output any) bool {
-	s, ok := output.(string)
-	return ok && s == r.Value
+type StringRoute string
+
+func (r StringRoute) Matches(event *session.Event) bool {
+	return matchRoute(string(r), event)
+}
+
+type IntRoute int
+
+func (r IntRoute) Matches(event *session.Event) bool {
+	return matchRoute(fmt.Sprint(r), event)
+}
+
+type BoolRoute bool
+
+func (r BoolRoute) Matches(event *session.Event) bool {
+	return matchRoute(fmt.Sprint(r), event)
 }
 
 // baseNode provides common fields for all nodes.
@@ -77,7 +94,7 @@ func NewFunctionNode[IN any, OUT any](name string, fn func(ctx agent.InvocationC
 	}
 	return &FunctionNode{
 		baseNode: baseNode{name: name},
-		fn:        wrappedFn,
+		fn:       wrappedFn,
 	}
 }
 
@@ -88,7 +105,7 @@ func (n *FunctionNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*se
 			yield(nil, err)
 			return
 		}
-		
+
 		event := session.NewEvent(ctx.InvocationID())
 		event.Actions.StateDelta["output"] = output
 		if s, ok := output.(string); ok {
@@ -148,29 +165,55 @@ const DEFAULT_ROUTE = "__DEFAULT__"
 
 // Workflow manages the workflow graph execution.
 type Workflow struct {
-	edges []Edge
+	edges map[Node][]Edge
 }
 
 // New creates a new Workflow engine with the given edges.
 func New(edges []Edge) *Workflow {
-	return &Workflow{edges: edges}
+	adj := make(map[Node][]Edge)
+	for _, edge := range edges {
+		adj[edge.From] = append(adj[edge.From], edge)
+	}
+	return &Workflow{edges: adj}
+}
+
+type nodeInput struct {
+	node  Node
+	input any
+}
+
+func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Event) ([]nodeInput, error) {
+	if len(w.edges[currentNode]) == 0 {
+		return nil, nil
+	}
+	matched := false
+	queue := []nodeInput{}
+	added := make(map[Node]struct{})
+	for _, edge := range w.edges[currentNode] {
+		if _, ok := added[edge.To]; ok {
+			continue
+		}
+		if edge.Route == nil {
+			queue = append(queue, nodeInput{node: edge.To, input: input})
+			added[edge.To] = struct{}{}
+			matched = true
+			continue
+		}
+
+		if edge.Route.Matches(event) {
+			queue = append(queue, nodeInput{node: edge.To, input: input})
+			added[edge.To] = struct{}{}
+			matched = true
+		}
+	}
+	if !matched {
+		return nil, fmt.Errorf("no outgoing edge matches the event with routes %v emitted by node %s", event.Routes, currentNode.Name())
+	}
+	return queue, nil
 }
 
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		var currentNode Node
-		for _, edge := range w.edges {
-			if edge.From == Start {
-				currentNode = edge.To
-				break
-			}
-		}
-
-		if currentNode == nil {
-			yield(nil, fmt.Errorf("no start node found"))
-			return
-		}
-
 		var input any
 		userContent := ctx.UserContent()
 		if userContent != nil {
@@ -183,7 +226,15 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			input = sb.String()
 		}
 
-		for currentNode != nil {
+		queue := []nodeInput{{Start, input}}
+
+		for len(queue) > 0 {
+			currentNode := queue[0].node
+			input = queue[0].input
+			queue = queue[1:]
+
+			var eventsWithRoutes []*session.Event
+			var outputData any
 			for ev, err := range currentNode.Run(ctx, input) {
 				if err != nil {
 					yield(nil, err)
@@ -193,23 +244,35 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 					return
 				}
 
+				if ev.Routes != nil {
+					eventsWithRoutes = append(eventsWithRoutes, ev)
+				}
+
 				// Extract output for next node
 				if ev.Actions.StateDelta != nil {
 					if out, ok := ev.Actions.StateDelta["output"]; ok {
-						input = out
+						outputData = out
 					}
 				}
 			}
 
-			// Find next node (assuming linear chain for now)
-			var nextNode Node
-			for _, edge := range w.edges {
-				if edge.From == currentNode {
-					nextNode = edge.To
-					break
-				}
+			if len(eventsWithRoutes) > 1 {
+				yield(nil, fmt.Errorf("node %s produced multiple events with route tags. Only one event per execution can specify routes.", currentNode.Name()))
+				return
 			}
-			currentNode = nextNode
+			var event *session.Event
+			if len(eventsWithRoutes) == 1 {
+				event = eventsWithRoutes[0]
+			}
+			if currentNode != Start {
+				input = outputData
+			}
+			nextNodes, err := w.findNextNodes(currentNode, input, event)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			queue = append(queue, nextNodes...)
 		}
 	}
 }
