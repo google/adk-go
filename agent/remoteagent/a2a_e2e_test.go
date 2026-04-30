@@ -375,7 +375,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 func TestA2ACleanupPropagation(t *testing.T) {
 	// Remote A2A server publishes a submitted task and start generating artifact updates
 	// until it detects a context cancelation
-	remoteTaskIDChan, remoteCleanupCalledChan := make(chan a2a.TaskID, 1), make(chan struct{})
+	remoteTaskIDChan, remoteCleanupCalledChan := make(chan a2a.TaskID, 1), make(chan struct{}, 2)
 	serverB := startA2AServer(&mockA2AExecutor{
 		executeFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
 			remoteTaskIDChan <- reqCtx.TaskID
@@ -393,7 +393,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 			return queue.Write(ctx, finalUpdate)
 		},
 		cleanupFn: func(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error) {
-			close(remoteCleanupCalledChan)
+			remoteCleanupCalledChan <- struct{}{}
 		},
 	})
 	defer serverB.Close()
@@ -450,7 +450,9 @@ func TestA2ACleanupPropagation(t *testing.T) {
 		t.Fatalf("type(lastStreamingUpdate) = %T, want *a2a.TaskStatusUpdateEvent", lastStreamingUpdate)
 	}
 
-	// Check subagent task got cancelled when the parent task was cancelled
+	// Check subagent task got cancelled when the parent task was cancelled.
+	// Reads from channel twice because cleanup gets called both for cancelation and execution.
+	<-remoteCleanupCalledChan
 	<-remoteCleanupCalledChan
 	remoteTaskID := <-remoteTaskIDChan
 	remoteClient := newA2AClient(t, serverB)

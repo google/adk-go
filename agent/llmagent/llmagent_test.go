@@ -1114,3 +1114,82 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
 }
+
+func TestFindAgent(t *testing.T) {
+	t.Parallel()
+
+	// Create a nested agent structure:
+	// root -> [child1, child2 -> [grandchild]]
+	grandchild, err := llmagent.New(llmagent.Config{Name: "grandchild"})
+	if err != nil {
+		t.Fatalf("failed to create grandchild agent: %v", err)
+	}
+
+	child1, err := llmagent.New(llmagent.Config{Name: "child1"})
+	if err != nil {
+		t.Fatalf("failed to create child1 agent: %v", err)
+	}
+
+	child2, err := llmagent.New(llmagent.Config{
+		Name:      "child2",
+		SubAgents: []agent.Agent{grandchild},
+	})
+	if err != nil {
+		t.Fatalf("failed to create child2 agent: %v", err)
+	}
+
+	root, err := llmagent.New(llmagent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{child1, child2},
+	})
+	if err != nil {
+		t.Fatalf("failed to create root agent: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		agentToSearch agent.Agent
+		targetName    string
+		wantAgent     agent.Agent
+	}{
+		{
+			name:          "find root itself",
+			agentToSearch: root,
+			targetName:    "root",
+			wantAgent:     root,
+		},
+		{
+			name:          "find direct child",
+			agentToSearch: root,
+			targetName:    "child1",
+			wantAgent:     child1,
+		},
+		{
+			name:          "find nested child",
+			agentToSearch: root,
+			targetName:    "grandchild",
+			wantAgent:     grandchild,
+		},
+		{
+			name:          "find non-existent agent",
+			agentToSearch: root,
+			targetName:    "non_existent",
+			wantAgent:     nil,
+		},
+		{
+			name:          "find child from child",
+			agentToSearch: child2,
+			targetName:    "grandchild",
+			wantAgent:     grandchild,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.agentToSearch.FindAgent(tc.targetName)
+			if got != tc.wantAgent {
+				t.Errorf("FindAgent(%q) = %v, want %v", tc.targetName, got, tc.wantAgent)
+			}
+		})
+	}
+}

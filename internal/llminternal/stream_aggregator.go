@@ -303,16 +303,8 @@ func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 		errorCode := ""
 		errorMessage := ""
 		if s.finishReason != genai.FinishReasonStop {
-			if s.response.ErrorCode != "" {
-				errorCode = s.response.ErrorCode
-			} else {
-				errorCode = "error"
-			}
-			if s.response.ErrorMessage != "" {
-				errorMessage = s.response.ErrorMessage
-			} else {
-				errorMessage = "error"
-			}
+			errorCode = s.response.ErrorCode
+			errorMessage = s.response.ErrorMessage
 		}
 
 		return &model.LLMResponse{
@@ -325,6 +317,7 @@ func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 			CitationMetadata:  s.citationMetadata,
 			ErrorCode:         errorCode,
 			ErrorMessage:      errorMessage,
+			FinishReason:      s.finishReason,
 		}
 	}
 	return nil

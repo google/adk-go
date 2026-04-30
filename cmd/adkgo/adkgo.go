@@ -16,6 +16,7 @@
 package main
 
 import (
+	_ "google.golang.org/adk/cmd/adkgo/internal/deploy/agentengine"
 	_ "google.golang.org/adk/cmd/adkgo/internal/deploy/cloudrun"
 	"google.golang.org/adk/cmd/adkgo/internal/root"
 )
