@@ -79,6 +79,7 @@ type storageEvent struct {
 	// equivalent. Unpickling would require a custom library or service.
 	Actions                []byte
 	LongRunningToolIDsJSON dynamicJSON
+	RoutesJSON              dynamicJSON
 	Branch                 *string
 	Timestamp              time.Time `gorm:"precision:6"`
 
@@ -133,6 +134,14 @@ func createStorageEvent(session session.Session, event *session.Event) (*storage
 			return nil, fmt.Errorf("failed to marshal long running tool IDs: %w", err)
 		}
 		storageEv.LongRunningToolIDsJSON = toolIDsJSON
+	}
+
+	if len(event.Routes) > 0 {
+		routesJSON, err := json.Marshal(event.Routes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal event route: %w", err)
+		}
+		storageEv.RoutesJSON = routesJSON
 	}
 
 	// Handle optional fields by taking the address of the value.
@@ -250,6 +259,13 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		}
 	}
 
+	var routes []string
+	if se.RoutesJSON != nil {
+		if err := json.Unmarshal([]byte(se.RoutesJSON), &routes); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal event route: %w", err)
+		}
+	}
+
 	// --- Handle simple pointer fields (dereference or use zero value) ---
 	// Use the helper to safely get the value or its zero-value default
 	branch := derefOrZero(se.Branch)
@@ -267,6 +283,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		Timestamp:          se.Timestamp,
 		Actions:            actions,
 		LongRunningToolIDs: toolIDs,
+		Routes:             routes,
 		Branch:             branch,
 		LLMResponse: model.LLMResponse{
 			Content:           content,
