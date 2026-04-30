@@ -157,6 +157,33 @@ type EventActions struct {
 	TransferToAgent string
 	// The agent is escalating to a higher level agent.
 	Escalate bool
+
+	// --- v2 additions (additive; nil/zero is the v1-equivalent default) ---
+
+	// NodeInfo is set by the workflow engine on events emitted from a graph
+	// node. Non-workflow agents leave it nil.
+	NodeInfo *NodeInfo
+
+	// RequestTask is keyed by the originating function_call_id and carries a
+	// task delegation request produced by RequestTaskTool (Task API, v2).
+	RequestTask map[string]TaskRequest
+
+	// FinishTask is keyed by the originating function_call_id and carries the
+	// completion payload produced by FinishTaskTool (Task API, v2).
+	FinishTask map[string]TaskResult
+
+	// Route is the routing value emitted by a workflow node. Type matches
+	// the workflow.Route value model (string|int|bool|sentinel).
+	Route any
+
+	// RewindBeforeInvocationID, when set, instructs the runner to rewind the
+	// session to before the named invocation as part of resume.
+	RewindBeforeInvocationID string
+
+	// Compaction, when set, marks this event as a synthesized summary of the
+	// timestamp range it covers. The contents-builder uses it in place of the
+	// subsumed raw events when constructing an LLM prompt.
+	Compaction *EventCompaction
 }
 
 // Prefixes for defining session's state scopes
