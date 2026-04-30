@@ -16,7 +16,6 @@ package llminternal
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"maps"
 	"reflect"
@@ -58,8 +57,10 @@ func NewStreamingResponseAggregator() *streamingResponseAggregator {
 func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genResp *genai.GenerateContentResponse) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if len(genResp.Candidates) == 0 {
-			// shouldn't happen?
-			yield(nil, fmt.Errorf("empty response"))
+			// Vertex AI occasionally emits leading SSE chunks that contain only
+			// response metadata (createTime, modelVersion, usageMetadata, etc.)
+			// but no Candidates. These are valid and should be skipped; the actual
+			// content arrives in subsequent chunks.
 			return
 		}
 		candidate := genResp.Candidates[0]
