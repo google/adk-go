@@ -47,7 +47,7 @@ var (
 	gcpVertexAgentToolResponseName        = attribute.Key("gcp.vertex.agent.tool_response")
 	gcpVertexAgentInvocationID            = attribute.Key("gcp.vertex.agent.invocation_id")
 	genAIUsageCacheReadInputTokens        = attribute.Key("gen_ai.usage.cache_read.input_tokens")
-	genAIUsageExperimentalReasoningTokens = attribute.Key("gen_ai.usage.experimental.reasoning_tokens")
+	genAIUsageReasoningOutputTokens       = attribute.Key("gen_ai.usage.reasoning.output_tokens")
 )
 
 // tracer is the tracer instance for ADK go.
@@ -128,7 +128,7 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),
 			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount)),
 			genAIUsageCacheReadInputTokens.Int(int(params.Response.UsageMetadata.CachedContentTokenCount)),
-			genAIUsageExperimentalReasoningTokens.Int(int(params.Response.UsageMetadata.ThoughtsTokenCount)),
+			genAIUsageReasoningOutputTokens.Int(int(params.Response.UsageMetadata.ThoughtsTokenCount)),
 		)
 	}
 }

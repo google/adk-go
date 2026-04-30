@@ -232,7 +232,7 @@ func TestGenerateContent(t *testing.T) {
 				semconv.GenAIUsageInputTokensKey:      "10",
 				semconv.GenAIUsageOutputTokensKey:     "20",
 				genAIUsageCacheReadInputTokens:        "5",
-				genAIUsageExperimentalReasoningTokens: "15",
+				genAIUsageReasoningOutputTokens:       "15",
 				semconv.GenAIResponseFinishReasonsKey: "[\"STOP\"]",
 				gcpVertexAgentInvocationID:            invocationID,
 			},
