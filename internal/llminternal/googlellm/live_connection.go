@@ -190,6 +190,11 @@ func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
 
 	resp := &model.LLMResponse{}
 
+	if msg.SessionResumptionUpdate != nil {
+		resp.SessionResumptionHandle = msg.SessionResumptionUpdate.NewHandle
+		return resp, nil
+	}
+
 	if msg.ServerContent != nil {
 		content := msg.ServerContent
 		if content.ModelTurn != nil {

@@ -240,12 +240,26 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, error) {
 			}
 		}
 
-		liveSession, err := client.Live.Connect(ctx, f.Model.Name(), &genai.LiveConnectConfig{
-			ResponseModalities:       liveCfg.ResponseModalities,
-			SpeechConfig:             liveCfg.SpeechConfig,
-			SystemInstruction:        nreq.Config.SystemInstruction,
-			Tools:                    nreq.Config.Tools,
-		})
+		liveConnectConfig := &genai.LiveConnectConfig{
+			ResponseModalities: liveCfg.ResponseModalities,
+			SpeechConfig:       liveCfg.SpeechConfig,
+			SystemInstruction:  nreq.Config.SystemInstruction,
+			Tools:              nreq.Config.Tools,
+			SessionResumption:  liveCfg.SessionResumption,
+		}
+
+		if iCtx, ok := ctx.(*icontext.InvocationContext); ok {
+			handle := iCtx.LiveSessionResumptionHandle()
+			if handle != "" {
+				if liveConnectConfig.SessionResumption == nil {
+					liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
+				}
+				fmt.Printf("DEBUG: Resuming with handle: %s\n", handle)
+				liveConnectConfig.SessionResumption.Handle = handle
+			}
+		}
+
+		liveSession, err := client.Live.Connect(ctx, f.Model.Name(), liveConnectConfig)
 		if err != nil {
 			sess.pushError(fmt.Errorf("failed to connect live session: %w", err))
 			return
@@ -276,6 +290,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, error) {
 					return
 				}
 				if resp != nil {
+					if resp.SessionResumptionHandle != "" {
+						if iCtx, ok := ctx.(*icontext.InvocationContext); ok {
+							fmt.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
+							iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
+						}
+					}
 					if liveCfg.SaveLiveBlob && resp.Content != nil {
 						for _, part := range resp.Content.Parts {
 							if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {

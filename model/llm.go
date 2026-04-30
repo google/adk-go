@@ -60,6 +60,7 @@ type LLMResponse struct {
 	// Flag indicating that LLM was interrupted when generating the content.
 	// Usually it is due to user interruption during a bidi streaming.
 	Interrupted  bool
+	SessionResumptionHandle string
 	ErrorCode    string
 	ErrorMessage string
 	FinishReason genai.FinishReason

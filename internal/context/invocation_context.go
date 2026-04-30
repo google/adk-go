@@ -32,10 +32,11 @@ type InvocationContextParams struct {
 	Branch string
 	Agent  agent.Agent
 
-	UserContent   *genai.Content
-	RunConfig     *agent.RunConfig
-	EndInvocation bool
-	InvocationID  string
+	UserContent                 *genai.Content
+	RunConfig                   *agent.RunConfig
+	EndInvocation               bool
+	InvocationID                string
+	LiveSessionResumptionHandle string
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
@@ -92,6 +93,14 @@ func (c *InvocationContext) EndInvocation() {
 
 func (c *InvocationContext) Ended() bool {
 	return c.params.EndInvocation
+}
+
+func (c *InvocationContext) LiveSessionResumptionHandle() string {
+	return c.params.LiveSessionResumptionHandle
+}
+
+func (c *InvocationContext) SetLiveSessionResumptionHandle(handle string) {
+	c.params.LiveSessionResumptionHandle = handle
 }
 
 func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
