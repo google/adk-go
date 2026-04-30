@@ -46,6 +46,11 @@ func (w *Workflow) runSequential(
 		path := engine.JoinPath(parentPath, w.Name(), 1)
 		state := newRunState(w.graph, input, path)
 
+		// Phase 4: rehydrate from session events. If the session already has
+		// completed events for nodes in this workflow, skip them and queue
+		// only the non-completed successors.
+		w.rehydrate(state, ic, path)
+
 		ctx, cancel := context.WithCancel(ic)
 		defer cancel()
 

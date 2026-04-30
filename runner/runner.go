@@ -168,6 +168,18 @@ type Runner struct {
 	appCfg *app.App
 }
 
+// Resume re-enters an existing session without appending a new user
+// message. The root agent (typically a workflow) gets a chance to
+// rehydrate from prior session events and continue from the first
+// non-completed point.
+//
+// Phase 4: workflow agents skip already-completed direct children based on
+// session events whose Actions.NodeInfo.Output is set. WAITING nodes (HITL
+// interrupts) and dynamic-node rehydration land in Phase 5.
+func (r *Runner) Resume(ctx context.Context, userID, sessionID string, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
+	return r.Run(ctx, userID, sessionID, nil, cfg, opts...)
+}
+
 // Run runs the agent for the given user input, yielding events from agents.
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.

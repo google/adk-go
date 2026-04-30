@@ -236,6 +236,15 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,
+			// v2 additions: pointer/slice/map fields are shallow-copied. The
+			// runtime treats them as immutable after AppendEvent so a shallow
+			// copy is safe.
+			NodeInfo:                 event.Actions.NodeInfo,
+			RequestTask:              maps.Clone(event.Actions.RequestTask),
+			FinishTask:               maps.Clone(event.Actions.FinishTask),
+			Route:                    event.Actions.Route,
+			RewindBeforeInvocationID: event.Actions.RewindBeforeInvocationID,
+			Compaction:               event.Actions.Compaction,
 		},
 		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
 		LLMResponse:        event.LLMResponse,
