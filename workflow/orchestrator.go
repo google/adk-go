@@ -22,6 +22,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -218,6 +221,8 @@ func (w *Workflow) runNode(
 				StateDelta:    map[string]any{},
 				ArtifactDelta: map[string]int64{},
 			},
+			parentEmitter: em,
+			resumeInputs:  ref.resumeInputs,
 		}
 		em.ctx = nodeCtx
 
@@ -350,13 +355,19 @@ type runState struct {
 	// strictly needed in Phase 3 but kept for Phase 4 resume).
 	completed map[string]bool
 
+	// resumeInputs maps interrupt IDs (originally emitted as
+	// adk_request_input FunctionCall ids) to the user's matching
+	// FunctionResponse value. Populated by rehydrate on resume.
+	resumeInputs map[string]any
+
 	mu sync.Mutex
 }
 
 type readyRef struct {
-	name  string
-	runID int
-	input any
+	name         string
+	runID        int
+	input        any
+	resumeInputs map[string]any
 }
 
 func newRunState(g *workflowGraph, input any, _ string) *runState {
@@ -425,13 +436,19 @@ func (s *runState) complete(name string, outputs []any, route *Route) {
 			if s.pendingPredecessors[e.to] <= 0 {
 				s.runIDs[e.to]++
 				agg := s.joinedInputs[e.to]
-				s.queue = append(s.queue, readyRef{name: e.to, runID: s.runIDs[e.to], input: agg})
+				s.queue = append(s.queue, readyRef{
+					name: e.to, runID: s.runIDs[e.to], input: agg,
+					resumeInputs: s.resumeInputs,
+				})
 				delete(s.joinedInputs, e.to)
 			}
 			continue
 		}
 		s.runIDs[e.to]++
-		s.queue = append(s.queue, readyRef{name: e.to, runID: s.runIDs[e.to], input: lastOut})
+		s.queue = append(s.queue, readyRef{
+			name: e.to, runID: s.runIDs[e.to], input: lastOut,
+			resumeInputs: s.resumeInputs,
+		})
 	}
 }
 
@@ -472,10 +489,11 @@ type collectingEmitter struct {
 	runID    int
 	nodePath string
 
-	ctx     *NodeContext
-	events  []*session.Event
-	outputs []any
-	route   *Route
+	ctx          *NodeContext
+	events       []*session.Event
+	outputs      []any
+	route        *Route
+	interruptIDs []string
 }
 
 func newCollectingEmitter(node Node, ic agent.InvocationContext, runID int, nodePath string) *collectingEmitter {
@@ -508,12 +526,35 @@ func (e *collectingEmitter) Output(v any) error {
 }
 
 func (e *collectingEmitter) RequestInput(r RequestInput) error {
+	if r.InterruptID == "" {
+		r.InterruptID = uuid.NewString()
+	}
+	args := map[string]any{}
+	if r.Prompt != "" {
+		args["prompt"] = r.Prompt
+	}
+	// Encode the interrupt as a long-running FunctionCall so the existing
+	// runner / agent client semantics treat it as a pause point.
 	ev := session.NewEvent(e.ic.InvocationID())
 	ev.Author = e.node.Name()
 	ev.Branch = e.ic.Branch()
+	ev.LLMResponse = model.LLMResponse{
+		Content: &genai.Content{
+			Role: genai.RoleModel,
+			Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{
+					ID:   r.InterruptID,
+					Name: "adk_request_input",
+					Args: args,
+				},
+			}},
+		},
+	}
+	ev.LongRunningToolIDs = []string{r.InterruptID}
 	e.attachNodeInfo(ev, true)
 	ev.Actions.NodeInfo.InterruptID = r.InterruptID
 	e.events = append(e.events, ev)
+	e.interruptIDs = append(e.interruptIDs, r.InterruptID)
 	return nil
 }
 

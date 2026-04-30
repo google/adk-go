@@ -45,6 +45,15 @@ type NodeContext struct {
 	// actions accumulates state and artifact deltas emitted via the
 	// EventEmitter; the engine flushes them onto outgoing events.
 	actions *session.EventActions
+
+	// scheduler is the dynamic-node scheduler for this context. It is
+	// created lazily on the first RunNode call.
+	scheduler *dynamicScheduler
+
+	// parentEmitter is the EventEmitter the orchestrator handed to the
+	// surrounding RunImpl. RunNode forwards child events through it so
+	// they reach the workflow's iter.Seq2.
+	parentEmitter EventEmitter
 }
 
 // NodePath returns the node's hierarchical address.
@@ -63,6 +72,19 @@ func (c *NodeContext) Actions() *session.EventActions {
 		}
 	}
 	return c.actions
+}
+
+// ResumeInput returns the user's response to a prior RequestInput, keyed
+// by interrupt ID. Returns (nil, false) when no response is available
+// (the node was never interrupted with that ID, or this is the first run).
+//
+// Mirrors adk-python's ctx.resume_inputs[interrupt_id] access pattern.
+func (c *NodeContext) ResumeInput(interruptID string) (any, bool) {
+	if c.resumeInputs == nil {
+		return nil, false
+	}
+	v, ok := c.resumeInputs[interruptID]
+	return v, ok
 }
 
 // RequestInput represents a human-in-the-loop interrupt yielded from a

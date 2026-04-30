@@ -87,6 +87,48 @@ func (w *Workflow) rehydrate(state *runState, ic agent.InvocationContext, workfl
 		ordered = append(ordered, repl{name: name, output: ni.Output})
 	}
 
+	// Collect resume inputs: for each FunctionResponse event whose ID
+	// matches an interrupt emitted by this workflow's nodes, capture the
+	// response payload. Mirrors adk-python's ctx.resume_inputs.
+	openInterrupts := map[string]bool{}
+	for ev := range evs.All() {
+		if ev == nil {
+			continue
+		}
+		for _, id := range ev.LongRunningToolIDs {
+			openInterrupts[id] = true
+		}
+	}
+	resumeInputs := map[string]any{}
+	for ev := range evs.All() {
+		if ev == nil || ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p == nil || p.FunctionResponse == nil {
+				continue
+			}
+			id := p.FunctionResponse.ID
+			if id == "" || !openInterrupts[id] {
+				continue
+			}
+			// Use the response payload if present, otherwise the whole
+			// FunctionResponse so callers can inspect it.
+			if p.FunctionResponse.Response != nil {
+				resumeInputs[id] = p.FunctionResponse.Response
+			} else {
+				resumeInputs[id] = p.FunctionResponse
+			}
+		}
+	}
+	state.mu.Lock()
+	state.resumeInputs = resumeInputs
+	// Propagate resume inputs onto already-queued start refs.
+	for i := range state.queue {
+		state.queue[i].resumeInputs = resumeInputs
+	}
+	state.mu.Unlock()
+
 	if len(ordered) == 0 {
 		return
 	}
@@ -108,6 +150,8 @@ func (w *Workflow) rehydrate(state *runState, ic agent.InvocationContext, workfl
 		if completedSet[ref.name] {
 			continue
 		}
+		// Make sure resumeInputs is propagated even after the strip pass.
+		ref.resumeInputs = resumeInputs
 		keep = append(keep, ref)
 	}
 	state.queue = keep
