@@ -20,3 +20,15 @@ profile.cov
 # Go workspace file
 go.work
 go.work.sum
+
+# Stray binaries from running go build at repo root
+/code_reviewer
+/incident_responder
+/pr_triage
+/production_llm_agent
+/qa_evaluator
+/refund_approval
+/research_assistant
+/research_planner
+/support_with_compaction
+/travel_concierge
