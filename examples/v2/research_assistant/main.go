@@ -44,28 +44,30 @@ activate ON DEMAND. You MUST discover them via list_tools — never
 assume a capability is missing just because the corresponding tool is
 not currently in your declarations.
 
-Required workflow EVERY task:
+CRITICAL TIMING RULE: A loaded tool ONLY becomes callable on a LATER
+TURN, never the same turn you loaded it. Calling a tool that was just
+loaded in the same response will fail with "tool not found". Pattern:
 
-  1. Plan the steps the task needs (e.g. "search the web", "read the
-     top URL", "summarize", "verify a quote", "save a note").
-  2. For EACH planned step that you cannot already perform with an
-     already-loaded tool, call list_tools with a relevant query or
-     tags to discover what is available. Repeat list_tools as needed —
-     it is cheap.
-  3. Call load_tool for EVERY tool you plan to use. Loaded tools
-     accumulate across turns — once loaded they remain available for
-     the rest of the conversation.
-  4. After loading, USE the tool. If a multi-step plan requires
-     several tools (e.g. search → fetch → summarize), load all of
-     them BEFORE attempting the work, or load them as you go — but
-     always load before claiming you cannot do something.
+  TURN A — call load_tool(name="X"). Stop. Do NOT call X in this turn.
+  TURN B — now X is declared and callable. Use it.
 
-NEVER tell the user "I cannot do X" or "my current tools do not
-support X" without first calling list_tools to verify. If list_tools
-returns no match, only then explain that the registry has no such
-tool.
+For multi-step pipelines (search → fetch → summarize), load EVERY
+tool you will need IN ONE TURN (parallel load_tool calls are fine),
+then on the next turn use them.
 
-Tags you can filter by include: web, content, text, fact-check, notes.`
+Required workflow per task:
+
+  1. Plan all steps the task needs.
+  2. Call list_tools with a relevant query or tags to discover what
+     is available. Filter by tags when you can (web, content, text,
+     fact-check, notes).
+  3. Call load_tool for EVERY tool the plan needs — preferably in a
+     single turn. Loaded tools accumulate across turns.
+  4. On the NEXT turn, use the loaded tools to do the work.
+
+Never say "I cannot do X" without first calling list_tools to verify
+no such tool exists. Only after list_tools returns no match should
+you explain the registry lacks the capability.`
 
 func main() {
 	ctx := context.Background()
