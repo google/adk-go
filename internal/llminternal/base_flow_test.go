@@ -683,3 +683,65 @@ func TestPreprocess_Toolset(t *testing.T) {
 		})
 	}
 }
+
+// dynamicToolset returns different tools on each call to simulate a toolset
+// whose output depends on session state written by an earlier tool in the run.
+type dynamicToolset struct {
+	callCount int
+	toolsByCall map[int][]tool.Tool
+}
+
+func (d *dynamicToolset) Name() string { return "dynamic" }
+func (d *dynamicToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) {
+	tools := d.toolsByCall[d.callCount]
+	d.callCount++
+	return tools, nil
+}
+
+// TestToolProcessorReEvaluatesToolsetsEachStep verifies that toolProcessor
+// calls Toolset.Tools() on every step, not just the first. This ensures that
+// tools activated by session-state changes in an earlier step are visible to
+// subsequent model calls within the same Runner.Run().
+func TestToolProcessorReEvaluatesToolsetsEachStep(t *testing.T) {
+	extraTool := &mockFunctionTool{name: "extra_tool"}
+
+	// Call 0: no tools yet. Call 1+: return extraTool.
+	ts := &dynamicToolset{
+		toolsByCall: map[int][]tool.Tool{
+			0: nil,
+			1: {extraTool},
+		},
+	}
+
+	agentState := &State{Toolsets: []tool.Toolset{ts}}
+	mockAgent := &mockLLMAgent{s: agentState}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: mockAgent})
+
+	f := &Flow{}
+
+	// First call: toolset returns nil — f.Tools should be empty.
+	req1 := &model.LLMRequest{}
+	for _, err := range toolProcessor(ctx, req1, f) {
+		if err != nil {
+			t.Fatalf("toolProcessor call 1 error: %v", err)
+		}
+	}
+	if len(f.Tools) != 0 {
+		t.Errorf("after call 1: got %d tools, want 0", len(f.Tools))
+	}
+
+	// Second call: toolset now returns extraTool — f.Tools must be updated.
+	req2 := &model.LLMRequest{}
+	for _, err := range toolProcessor(ctx, req2, f) {
+		if err != nil {
+			t.Fatalf("toolProcessor call 2 error: %v", err)
+		}
+	}
+	if len(f.Tools) != 1 || f.Tools[0].Name() != extraTool.Name() {
+		t.Errorf("after call 2: got tools %v, want [%s]", f.Tools, extraTool.Name())
+	}
+
+	if ts.callCount != 2 {
+		t.Errorf("toolset.Tools() called %d times, want 2", ts.callCount)
+	}
+}
