@@ -19,6 +19,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/adk/model"
 )
@@ -58,6 +59,7 @@ func NewLiveRequestQueue(bufferSize int) *LiveRequestQueue {
 // When q.ch <- req wins, Send returns nil and the message is enqueued —
 // senderLoop's drain guarantees it will be processed.
 func (q *LiveRequestQueue) Send(ctx context.Context, req *model.LiveRequest) error {
+	req.EnqueuedAt = time.Now()
 	// Fast-path: honour already-cancelled context deterministically.
 	if err := ctx.Err(); err != nil {
 		return err
@@ -95,6 +97,11 @@ func (q *LiveRequestQueue) Events() <-chan *model.LiveRequest {
 // Done returns a channel that is closed when the queue is closed.
 func (q *LiveRequestQueue) Done() <-chan struct{} {
 	return q.done
+}
+
+// Len returns the current number of buffered requests (snapshot).
+func (q *LiveRequestQueue) Len() int {
+	return len(q.ch)
 }
 
 // ModelSpeaking returns whether the model is currently producing audio output.

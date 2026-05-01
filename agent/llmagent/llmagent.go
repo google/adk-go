@@ -422,6 +422,12 @@ func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event
 	}
 
 	req := &model.LLMRequest{Model: a.model.Name()}
+	// Allow per-run model override (e.g. switching voice models without
+	// rebuilding the agent tree). The gemini layer's modelName() already
+	// prefers req.Model over the construction-time name.
+	if ctx.RunConfig() != nil && ctx.RunConfig().Model != "" {
+		req.Model = ctx.RunConfig().Model
+	}
 	if ctx.RunConfig() != nil {
 		req.LiveConfig = liveConfigFromRunConfig(ctx.RunConfig())
 	}
@@ -509,7 +515,27 @@ func liveConfigFromRunConfig(rc *agent.RunConfig) *genai.LiveConnectConfig {
 	if rc.MaxOutputTokens != nil {
 		cfg.MaxOutputTokens = *rc.MaxOutputTokens
 	}
+	applyLiveCapabilities(rc, cfg)
 	return cfg
+}
+
+// applyLiveCapabilities maps v1.51.0 live session capabilities from RunConfig.
+func applyLiveCapabilities(rc *agent.RunConfig, cfg *genai.LiveConnectConfig) {
+	if rc.RealtimeInputConfig != nil {
+		cfg.RealtimeInputConfig = rc.RealtimeInputConfig
+	}
+	if rc.Proactivity != nil {
+		cfg.Proactivity = rc.Proactivity
+	}
+	if rc.EnableAffectiveDialog != nil {
+		cfg.EnableAffectiveDialog = rc.EnableAffectiveDialog
+	}
+	if rc.ContextWindowCompression != nil {
+		cfg.ContextWindowCompression = rc.ContextWindowCompression
+	}
+	if rc.SessionResumption != nil {
+		cfg.SessionResumption = rc.SessionResumption
+	}
 }
 
 type declarable interface {

@@ -115,6 +115,11 @@ type Event struct {
 	// Agent client will know from this field about which function call is long running.
 	// Only valid for function call event.
 	LongRunningToolIDs []string
+
+	// LiveDiagnostics is populated only for events from RunLive sessions.
+	// EPHEMERAL: not persisted to storage. Nil for standard Run() events
+	// and for events loaded from storage.
+	LiveDiagnostics *LiveDiagnostics
 }
 
 // IsFinalResponse returns whether the event is the final response of an agent.
@@ -126,7 +131,7 @@ func (e *Event) IsFinalResponse() bool {
 		return true
 	}
 
-	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
+	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
 }
 
 // NewEvent creates a new event defining now as the timestamp.

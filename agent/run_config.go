@@ -41,6 +41,11 @@ type RunConfig struct {
 	// If true, ADK runner will save each part of the user input that is a blob
 	// (e.g., images, files) as an artifact.
 	SaveInputBlobsAsArtifacts bool
+	// Model overrides the model name for this run. When non-empty, the live
+	// connect call uses this model instead of the agent's base model. This
+	// allows per-session model selection (e.g. switching between flash and pro
+	// voice models) without rebuilding the agent tree.
+	Model string
 	// Live-specific configuration
 	ResponseModalities       []genai.Modality
 	SpeechConfig             *genai.SpeechConfig
@@ -54,4 +59,11 @@ type RunConfig struct {
 	TopP            *float32
 	TopK            *float32
 	MaxOutputTokens *int32
+
+	// Live session capabilities (require genai v1.51.0).
+	RealtimeInputConfig      *genai.RealtimeInputConfig
+	Proactivity              *genai.ProactivityConfig
+	EnableAffectiveDialog    *bool
+	ContextWindowCompression *genai.ContextWindowCompressionConfig
+	SessionResumption        *genai.SessionResumptionConfig
 }

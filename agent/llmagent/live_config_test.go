@@ -80,4 +80,101 @@ func TestLiveConfigFromRunConfig(t *testing.T) {
 			t.Errorf("mismatch (-want +got):\n%s", diff)
 		}
 	})
+
+	t.Run("new_live_config_fields_mapped", func(t *testing.T) {
+		enableAffective := true
+		proactiveAudio := true
+		targetTokens := int64(1024)
+		rc := &agent.RunConfig{
+			RealtimeInputConfig: &genai.RealtimeInputConfig{
+				AutomaticActivityDetection: &genai.AutomaticActivityDetection{
+					Disabled: true,
+				},
+			},
+			Proactivity: &genai.ProactivityConfig{
+				ProactiveAudio: &proactiveAudio,
+			},
+			EnableAffectiveDialog: &enableAffective,
+			ContextWindowCompression: &genai.ContextWindowCompressionConfig{
+				SlidingWindow: &genai.SlidingWindow{
+					TargetTokens: &targetTokens,
+				},
+			},
+			SessionResumption: &genai.SessionResumptionConfig{
+				Handle: "prev-session-handle",
+			},
+		}
+
+		got := liveConfigFromRunConfig(rc)
+		want := &genai.LiveConnectConfig{
+			RealtimeInputConfig:      rc.RealtimeInputConfig,
+			Proactivity:              rc.Proactivity,
+			EnableAffectiveDialog:    &enableAffective,
+			ContextWindowCompression: rc.ContextWindowCompression,
+			SessionResumption:        rc.SessionResumption,
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("new_live_config_fields_nil_not_mapped", func(t *testing.T) {
+		rc := &agent.RunConfig{
+			SpeechConfig: &genai.SpeechConfig{},
+		}
+		got := liveConfigFromRunConfig(rc)
+		if got.RealtimeInputConfig != nil {
+			t.Error("RealtimeInputConfig should be nil")
+		}
+		if got.Proactivity != nil {
+			t.Error("Proactivity should be nil")
+		}
+		if got.EnableAffectiveDialog != nil {
+			t.Error("EnableAffectiveDialog should be nil")
+		}
+		if got.ContextWindowCompression != nil {
+			t.Error("ContextWindowCompression should be nil")
+		}
+		if got.SessionResumption != nil {
+			t.Error("SessionResumption should be nil")
+		}
+	})
+
+	t.Run("mixed_old_and_new_fields", func(t *testing.T) {
+		temp := float32(0.5)
+		enableAffective := false
+		rc := &agent.RunConfig{
+			// Existing fields
+			Temperature:             &temp,
+			SpeechConfig:            &genai.SpeechConfig{},
+			InputAudioTranscription: true,
+			// New fields — only two of five set
+			EnableAffectiveDialog: &enableAffective,
+			SessionResumption: &genai.SessionResumptionConfig{
+				Handle: "resume-token-abc",
+			},
+		}
+
+		got := liveConfigFromRunConfig(rc)
+		want := &genai.LiveConnectConfig{
+			Temperature:             &temp,
+			SpeechConfig:            &genai.SpeechConfig{},
+			InputAudioTranscription: &genai.AudioTranscriptionConfig{},
+			EnableAffectiveDialog:   &enableAffective,
+			SessionResumption:       &genai.SessionResumptionConfig{Handle: "resume-token-abc"},
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("mismatch (-want +got):\n%s", diff)
+		}
+		// Unset new fields must remain nil.
+		if got.RealtimeInputConfig != nil {
+			t.Error("RealtimeInputConfig should be nil when not set")
+		}
+		if got.Proactivity != nil {
+			t.Error("Proactivity should be nil when not set")
+		}
+		if got.ContextWindowCompression != nil {
+			t.Error("ContextWindowCompression should be nil when not set")
+		}
+	})
 }

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -45,10 +46,13 @@ func (c *geminiLiveConnection) Send(_ context.Context, req *model.LiveRequest) e
 		})
 	case req.RealtimeInput != nil:
 		return c.session.SendRealtimeInput(genai.LiveRealtimeInput{
-			Media: req.RealtimeInput.Media,
-			Audio: req.RealtimeInput.Audio,
-			Video: req.RealtimeInput.Video,
-			Text:  req.RealtimeInput.Text,
+			Media:          req.RealtimeInput.Media,
+			Audio:          req.RealtimeInput.Audio,
+			Video:          req.RealtimeInput.Video,
+			Text:           req.RealtimeInput.Text,
+			ActivityStart:  req.RealtimeInput.ActivityStart,
+			ActivityEnd:    req.RealtimeInput.ActivityEnd,
+			AudioStreamEnd: req.RealtimeInput.AudioStreamEnd,
 		})
 	case req.Content != nil:
 		tc := true // default: model responds after this content
@@ -65,11 +69,16 @@ func (c *geminiLiveConnection) Send(_ context.Context, req *model.LiveRequest) e
 }
 
 func (c *geminiLiveConnection) Receive(_ context.Context) (*model.LLMResponse, error) {
+	beforeRecv := time.Now()
 	msg, err := c.session.Receive()
 	if err != nil {
 		return nil, err
 	}
-	return mapServerMessage(msg), nil
+	now := time.Now()
+	resp := mapServerMessage(msg)
+	resp.ReceivedAt = now
+	resp.ReceiveLatency = now.Sub(beforeRecv)
+	return resp, nil
 }
 
 func (c *geminiLiveConnection) Close() error {
@@ -85,70 +94,150 @@ func mapServerMessage(msg *genai.LiveServerMessage) *model.LLMResponse {
 	}
 
 	if msg.ServerContent != nil {
-		sc := msg.ServerContent
-		resp.TurnComplete = sc.TurnComplete
-		resp.Interrupted = sc.Interrupted
-
-		if sc.ModelTurn != nil {
-			resp.Content = sc.ModelTurn
-			// Detect audio content
-			for _, part := range sc.ModelTurn.Parts {
-				if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
-					resp.CustomMetadata["is_audio"] = true
-					break
-				}
-			}
-		}
-
-		if sc.InputTranscription != nil && sc.InputTranscription.Text != "" {
-			resp.InputTranscription = &genai.Transcription{
-				Text:     sc.InputTranscription.Text,
-				Finished: sc.InputTranscription.Finished,
-			}
-			if resp.Content == nil {
-				resp.Content = genai.NewContentFromText(sc.InputTranscription.Text, "user")
-			}
-		}
-		if sc.OutputTranscription != nil && sc.OutputTranscription.Text != "" {
-			resp.OutputTranscription = &genai.Transcription{
-				Text:     sc.OutputTranscription.Text,
-				Finished: sc.OutputTranscription.Finished,
-			}
-			if resp.Content == nil {
-				resp.Content = genai.NewContentFromText(sc.OutputTranscription.Text, "model")
-			}
-		}
-
-		if sc.GroundingMetadata != nil {
-			resp.GroundingMetadata = sc.GroundingMetadata
-		}
+		mapServerContent(msg.ServerContent, resp)
 	}
-
 	if msg.ToolCall != nil {
-		parts := make([]*genai.Part, 0, len(msg.ToolCall.FunctionCalls))
-		for _, fc := range msg.ToolCall.FunctionCalls {
-			parts = append(parts, &genai.Part{FunctionCall: fc})
-		}
-		resp.Content = &genai.Content{Role: "model", Parts: parts}
+		mapToolCall(msg.ToolCall, resp)
 	}
-
 	if msg.ToolCallCancellation != nil {
 		resp.CustomMetadata["tool_cancellation_ids"] = msg.ToolCallCancellation.IDs
 	}
-
-	if msg.GoAway != nil {
-		resp.CustomMetadata["go_away"] = true
+	mapGoAway(msg, resp)
+	mapSessionResumptionUpdate(msg, resp)
+	if msg.VoiceActivityDetectionSignal != nil {
+		resp.CustomMetadata["vad_signal_type"] = string(msg.VoiceActivityDetectionSignal.VADSignalType)
 	}
-
 	if msg.UsageMetadata != nil {
-		resp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
-			PromptTokenCount:     msg.UsageMetadata.PromptTokenCount,
-			CandidatesTokenCount: msg.UsageMetadata.ResponseTokenCount,
-			TotalTokenCount:      msg.UsageMetadata.TotalTokenCount,
-		}
+		mapUsageMetadata(msg.UsageMetadata, resp)
 	}
 
 	return resp
+}
+
+func mapServerContent(sc *genai.LiveServerContent, resp *model.LLMResponse) {
+	resp.TurnComplete = sc.TurnComplete
+	resp.Interrupted = sc.Interrupted
+
+	if sc.ModelTurn != nil {
+		resp.Content = sc.ModelTurn
+		for _, part := range sc.ModelTurn.Parts {
+			if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
+				resp.CustomMetadata["is_audio"] = true
+				break
+			}
+		}
+	}
+
+	mapTranscriptions(sc, resp)
+
+	if sc.GroundingMetadata != nil {
+		resp.GroundingMetadata = sc.GroundingMetadata
+	}
+	if sc.TurnComplete && sc.TurnCompleteReason != "" {
+		resp.CustomMetadata["turn_complete_reason"] = string(sc.TurnCompleteReason)
+	}
+	if sc.GenerationComplete {
+		resp.CustomMetadata["generation_complete"] = true
+	}
+	if sc.WaitingForInput {
+		resp.CustomMetadata["waiting_for_input"] = true
+	}
+}
+
+func mapTranscriptions(sc *genai.LiveServerContent, resp *model.LLMResponse) {
+	if sc.InputTranscription != nil && sc.InputTranscription.Text != "" {
+		resp.InputTranscription = &genai.Transcription{
+			Text:     sc.InputTranscription.Text,
+			Finished: sc.InputTranscription.Finished,
+		}
+		if resp.Content == nil {
+			resp.Content = genai.NewContentFromText(sc.InputTranscription.Text, "user")
+		}
+	}
+	if sc.OutputTranscription != nil && sc.OutputTranscription.Text != "" {
+		resp.OutputTranscription = &genai.Transcription{
+			Text:     sc.OutputTranscription.Text,
+			Finished: sc.OutputTranscription.Finished,
+		}
+		if resp.Content == nil {
+			resp.Content = genai.NewContentFromText(sc.OutputTranscription.Text, "model")
+		}
+	}
+}
+
+func mapToolCall(tc *genai.LiveServerToolCall, resp *model.LLMResponse) {
+	parts := make([]*genai.Part, 0, len(tc.FunctionCalls))
+	for _, fc := range tc.FunctionCalls {
+		parts = append(parts, &genai.Part{FunctionCall: fc})
+	}
+	resp.Content = &genai.Content{Role: "model", Parts: parts}
+}
+
+func mapGoAway(msg *genai.LiveServerMessage, resp *model.LLMResponse) {
+	if msg.GoAway == nil {
+		return
+	}
+	resp.CustomMetadata["go_away"] = true
+	if msg.GoAway.TimeLeft > 0 {
+		resp.CustomMetadata["go_away_time_left_ms"] = float64(msg.GoAway.TimeLeft.Milliseconds())
+	}
+}
+
+func mapSessionResumptionUpdate(msg *genai.LiveServerMessage, resp *model.LLMResponse) {
+	if msg.SessionResumptionUpdate == nil {
+		return
+	}
+	resp.CustomMetadata["session_resumption"] = true
+	if msg.SessionResumptionUpdate.NewHandle != "" {
+		resp.CustomMetadata["session_resumption_handle"] = msg.SessionResumptionUpdate.NewHandle
+	}
+	resp.CustomMetadata["session_resumption_resumable"] = msg.SessionResumptionUpdate.Resumable
+	if msg.SessionResumptionUpdate.LastConsumedClientMessageIndex > 0 {
+		resp.CustomMetadata["last_consumed_client_message_index"] = float64(msg.SessionResumptionUpdate.LastConsumedClientMessageIndex)
+	}
+}
+
+func mapUsageMetadata(um *genai.UsageMetadata, resp *model.LLMResponse) {
+	resp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     um.PromptTokenCount,
+		CandidatesTokenCount: um.ResponseTokenCount,
+		TotalTokenCount:      um.TotalTokenCount,
+	}
+	if um.CachedContentTokenCount > 0 {
+		resp.CustomMetadata["usage_cached_token_count"] = float64(um.CachedContentTokenCount)
+	}
+	if um.ToolUsePromptTokenCount > 0 {
+		resp.CustomMetadata["usage_tool_use_prompt_tokens"] = float64(um.ToolUsePromptTokenCount)
+	}
+	if um.ThoughtsTokenCount > 0 {
+		resp.CustomMetadata["usage_thoughts_token_count"] = float64(um.ThoughtsTokenCount)
+	}
+	mapTokenDetails(um, resp)
+}
+
+func mapTokenDetails(um *genai.UsageMetadata, resp *model.LLMResponse) {
+	flattenTokenDetails := func(details []*genai.ModalityTokenCount) []any {
+		out := make([]any, 0, len(details))
+		for _, d := range details {
+			out = append(out, map[string]any{
+				"modality":    string(d.Modality),
+				"token_count": float64(d.TokenCount),
+			})
+		}
+		return out
+	}
+	if len(um.PromptTokensDetails) > 0 {
+		resp.CustomMetadata["usage_prompt_tokens_details"] = flattenTokenDetails(um.PromptTokensDetails)
+	}
+	if len(um.CacheTokensDetails) > 0 {
+		resp.CustomMetadata["usage_cache_tokens_details"] = flattenTokenDetails(um.CacheTokensDetails)
+	}
+	if len(um.ResponseTokensDetails) > 0 {
+		resp.CustomMetadata["usage_response_tokens_details"] = flattenTokenDetails(um.ResponseTokensDetails)
+	}
+	if len(um.ToolUsePromptTokensDetails) > 0 {
+		resp.CustomMetadata["usage_tool_use_prompt_tokens_details"] = flattenTokenDetails(um.ToolUsePromptTokensDetails)
+	}
 }
 
 // ConnectLive establishes a live bidirectional connection.

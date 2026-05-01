@@ -18,6 +18,7 @@ package model
 import (
 	"context"
 	"iter"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -70,6 +71,12 @@ type LLMResponse struct {
 	ErrorMessage string
 	FinishReason genai.FinishReason
 	AvgLogprobs  float64
+
+	// Live-only: wall-clock time when conn.Receive() returned this message.
+	ReceivedAt time.Time
+	// Live-only: wall-clock duration of the blocking conn.Receive() call.
+	// Low values = rapid streaming (audio chunks); high values = model thinking.
+	ReceiveLatency time.Duration
 }
 
 // LiveConnection represents an active bidirectional connection to a live model.
@@ -97,4 +104,9 @@ type LiveRequest struct {
 	// nil defaults to true (backwards compatible). Set to false when sending
 	// history turns that the model should absorb without responding.
 	TurnComplete *bool
+
+	// EnqueuedAt is stamped when the request enters the LiveRequestQueue.
+	EnqueuedAt time.Time
+	// SentAt is stamped just before the request is written to the connection.
+	SentAt time.Time
 }

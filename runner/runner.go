@@ -388,8 +388,9 @@ func (r *Runner) RunLive(
 			}
 		}
 
-		// Transcription buffers: accumulate chunks until Finished=true,
-		// then persist one aggregated event per transcription turn.
+		// Transcription buffers: accumulate chunks until Finished=true.
+		// For input, also flush on speaker boundary (model starts speaking/acting)
+		// or TurnComplete, then persist one aggregated event per turn.
 		var inputTranscriptBuf strings.Builder
 		var outputTranscriptBuf strings.Builder
 
@@ -461,6 +462,14 @@ func (r *Runner) RunLive(
 			// Check BEFORE transcription handling so that an event carrying both
 			// OutputTranscription and TurnComplete=true doesn't skip this flush
 			// due to the continue in the transcription block.
+			// Flush input buffer first (user speech before model response),
+			// then output buffer.
+			if event.TurnComplete && inputTranscriptBuf.Len() > 0 {
+				if err := persistTranscript(ctx, &inputTranscriptBuf, "user", "user"); err != nil {
+					yield(nil, fmt.Errorf("failed to persist input transcript on turn complete: %w", err))
+					return
+				}
+			}
 			if event.TurnComplete && outputTranscriptBuf.Len() > 0 {
 				if err := persistTranscript(ctx, &outputTranscriptBuf, invCtx.Agent().Name(), "model"); err != nil {
 					yield(nil, fmt.Errorf("failed to persist output transcript on turn complete: %w", err))
@@ -480,6 +489,14 @@ func (r *Runner) RunLive(
 				continue
 			}
 
+			// Cross-speaker boundary: model starts speaking → flush user input first.
+			if event.OutputTranscription != nil && inputTranscriptBuf.Len() > 0 {
+				if err := persistTranscript(ctx, &inputTranscriptBuf, "user", "user"); err != nil {
+					yield(nil, fmt.Errorf("failed to persist input transcript before output: %w", err))
+					return
+				}
+			}
+
 			// Handle output transcription: buffer chunks, persist on Finished.
 			if event.OutputTranscription != nil {
 				if err := bufferTranscript(ctx, &outputTranscriptBuf, event.OutputTranscription.Text, event.OutputTranscription.Finished, invCtx.Agent().Name(), "model"); err != nil {
@@ -493,6 +510,10 @@ func (r *Runner) RunLive(
 			}
 
 			// Persist non-partial, non-audio, non-transcript events with actual content.
+			// Use a shallow copy so that the original event retains LiveDiagnostics
+			// for the caller, while the persisted copy has it nil. Without the copy,
+			// AppendEvent stores the same pointer in the session's event list,
+			// leaking the ephemeral field into ctx.Session().Events().
 			isAudio := false
 			if meta := event.CustomMetadata; meta != nil {
 				if v, ok := meta["is_audio"].(bool); ok {
@@ -500,8 +521,17 @@ func (r *Runner) RunLive(
 				}
 			}
 			hasContent := event.Content != nil && len(event.Content.Parts) > 0
+			// Cross-speaker boundary: model sends content (e.g. tool call) → flush user input first.
+			if !event.Partial && !isAudio && hasContent && inputTranscriptBuf.Len() > 0 {
+				if err := persistTranscript(ctx, &inputTranscriptBuf, "user", "user"); err != nil {
+					yield(nil, fmt.Errorf("failed to persist input transcript before content: %w", err))
+					return
+				}
+			}
 			if !event.Partial && !isAudio && hasContent {
-				if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
+				persistEvent := *event
+				persistEvent.LiveDiagnostics = nil
+				if err := r.sessionService.AppendEvent(ctx, storedSession, &persistEvent); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return
 				}
