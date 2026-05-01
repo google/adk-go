@@ -15,7 +15,10 @@
 package toolregistry
 
 import (
+	"fmt"
+
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
 
@@ -99,6 +102,35 @@ func (t *Toolset) Tools(rctx agent.ReadonlyContext) ([]tool.Tool, error) {
 		out = append(out, tt)
 	}
 	return out, nil
+}
+
+// ProcessRequest implements the structural RequestProcessor contract
+// the LlmAgent flow uses to wire toolsets into the LLM request. Without
+// this method, base_flow.toolsetPreprocess silently skips this toolset
+// and the dynamically-loaded tools never reach req.Tools — the LLM
+// then sees the load succeed but the tool itself never declared.
+//
+// The method calls Tools(ctx) to get the currently-loaded set, then
+// delegates ProcessRequest to each tool that implements it (every
+// functiontool.New tool does).
+func (t *Toolset) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+	tools, err := t.Tools(ctx)
+	if err != nil {
+		return fmt.Errorf("toolregistry: enumerating tools: %w", err)
+	}
+	type processor interface {
+		ProcessRequest(ctx tool.Context, req *model.LLMRequest) error
+	}
+	for _, tt := range tools {
+		rp, ok := tt.(processor)
+		if !ok {
+			return fmt.Errorf("toolregistry: tool %q does not implement ProcessRequest", tt.Name())
+		}
+		if err := rp.ProcessRequest(ctx, req); err != nil {
+			return fmt.Errorf("toolregistry: tool %q ProcessRequest: %w", tt.Name(), err)
+		}
+	}
+	return nil
 }
 
 // coerceLoadedNames converts a session state value into a string slice.
