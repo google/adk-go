@@ -1,29 +1,35 @@
 # travel_concierge
 
-Coordinator agent delegates flight + hotel research to specialist
-sub-agents and composes the itinerary. Demonstrates the **Task API
-mesh runtime**:
+Real Gemini coordinator agent that delegates flight + hotel research to
+two specialist sub-agents via the **Task API**.
 
-- The coordinator's tools include `task.NewRequestTaskTool(flightAgent)`
-  and `task.NewRequestTaskTool(hotelAgent)`.
-- When the LLM calls `flight_agent(...)`, `RequestTaskTool.Run` writes
-  a `session.TaskRequest` into `ctx.Actions().RequestTask` keyed by the
-  function-call ID.
-- `internal/llminternal/base_flow.runTaskRequests` (Phase 6D) sees the
-  `RequestTask` entry, locates the named agent in the agent tree,
-  invokes it with the rendered task input, and waits for the agent to
-  call `task.NewFinishTaskTool` which writes a `session.TaskResult`.
-- The runtime synthesizes a `FunctionResponse` for the coordinator
-  carrying the task's output. The coordinator's next turn observes the
-  result through standard contents-builder paths.
+## Run
 
-This example uses a deterministic stub LLM that scripts the
-coordinator's three turns:
+```
+export GOOGLE_API_KEY=...
+go run ./examples/v2/travel_concierge/             # console
+go run ./examples/v2/travel_concierge/ web         # adk-web
+```
 
-1. Call `flight_agent({"origin":"SFO","dest":"NRT"})`.
-2. Call `hotel_agent({"city":"Tokyo","nights":3})`.
-3. Compose an itinerary text from the two results.
+## Try it
 
-The flight + hotel agents themselves use their own stub LLMs that
-return canned `finish_task` payloads. Replace the stubs with a real
-model when adapting the pattern.
+> Plan a 7-day trip from SFO to Tokyo for Sept 12-19, 2026, two
+> travelers, budget $1500 for flights and $250/night for hotel.
+
+What happens:
+
+1. The coordinator calls the `flight_agent` tool with structured input.
+   `RequestTaskTool` writes a `session.TaskRequest` into
+   `Actions.RequestTask[<call_id>]`.
+2. The Phase 6D mesh runtime (`internal/llminternal/runTaskRequests`)
+   sees the entry, locates `flight_agent` in the agent tree, and runs
+   it with the rendered task input.
+3. `flight_agent` calls its `search_flights` tool, picks one, and calls
+   its `finish_task` tool with the chosen flight.
+4. The mesh runtime synthesizes a `FunctionResponse` keyed by the
+   coordinator's original call id and feeds it back.
+5. Coordinator does the same for `hotel_agent`, then composes the
+   itinerary.
+
+Replace `search_flights` / `search_hotels` with your real APIs to wire
+this up for production.

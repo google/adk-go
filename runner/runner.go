@@ -168,6 +168,11 @@ type Runner struct {
 	appCfg *app.App
 }
 
+// ErrNotResumable is returned by Run/Resume when no new message is
+// provided and the app does not have a resumable ResumabilityConfig.
+// Mirrors adk-python runners.py:884 ValueError.
+var ErrNotResumable = errors.New("runner: running an agent requires a new_message or a resumable app")
+
 // Resume re-enters an existing session without appending a new user
 // message. The root agent (typically a workflow) gets a chance to
 // rehydrate from prior session events and continue from the first
@@ -176,8 +181,22 @@ type Runner struct {
 // Phase 4: workflow agents skip already-completed direct children based on
 // session events whose Actions.NodeInfo.Output is set. WAITING nodes (HITL
 // interrupts) and dynamic-node rehydration land in Phase 5.
+//
+// Returns ErrNotResumable if the runner was not constructed with an App
+// whose ResumabilityConfig.IsResumable is true.
 func (r *Runner) Resume(ctx context.Context, userID, sessionID string, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
+	if !r.isResumable() {
+		return func(yield func(*session.Event, error) bool) {
+			yield(nil, ErrNotResumable)
+		}
+	}
 	return r.Run(ctx, userID, sessionID, nil, cfg, opts...)
+}
+
+// isResumable reports whether the runner's App is configured to permit
+// resume invocations (msg=nil).
+func (r *Runner) isResumable() bool {
+	return r.appCfg != nil && r.appCfg.ResumabilityConfig != nil && r.appCfg.ResumabilityConfig.IsResumable
 }
 
 // Run runs the agent for the given user input, yielding events from agents.

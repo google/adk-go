@@ -23,6 +23,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/app"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/workflow"
@@ -73,8 +74,11 @@ func TestWorkflow_Resume_SkipsCompletedNodes(t *testing.T) {
 
 	sessSvc := session.InMemoryService()
 	r, err := runner.New(runner.Config{
-		AppName:           "test",
-		Agent:             wfAgent,
+		App: &app.App{
+			Name:               "test",
+			RootAgent:          wfAgent,
+			ResumabilityConfig: &app.ResumabilityConfig{IsResumable: true},
+		},
 		SessionService:    sessSvc,
 		AutoCreateSession: true,
 	})
@@ -137,8 +141,11 @@ func TestWorkflow_Resume_RerunOnResumeForcesRerun(t *testing.T) {
 	}
 	wfAgent, _ := wf.AsAgent()
 	r, _ := runner.New(runner.Config{
-		AppName:           "t",
-		Agent:             wfAgent,
+		App: &app.App{
+			Name:               "t",
+			RootAgent:          wfAgent,
+			ResumabilityConfig: &app.ResumabilityConfig{IsResumable: true},
+		},
 		SessionService:    session.InMemoryService(),
 		AutoCreateSession: true,
 	})

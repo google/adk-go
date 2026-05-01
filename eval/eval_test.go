@@ -64,6 +64,38 @@ func TestContainsScorer(t *testing.T) {
 	}
 }
 
+func TestContainsScorer_IgnoreCase(t *testing.T) {
+	s := eval.ContainsScorer{IgnoreCase: true}
+	c := eval.Case{ExpectedOutput: "Alpha\nBETA"}
+	score, _, _ := s.Score(context.Background(), c, "the alpha and beta words")
+	if score != 1.0 {
+		t.Errorf("IgnoreCase=true score = %v, want 1.0", score)
+	}
+	// Default (case-sensitive) must NOT match.
+	score, _, _ = eval.ContainsScorer{}.Score(context.Background(), c, "the alpha and beta words")
+	if score != 0.0 {
+		t.Errorf("IgnoreCase=false score = %v, want 0.0", score)
+	}
+}
+
+func TestContainsScorer_EmptyExpectedReturnsZero(t *testing.T) {
+	// Empty / whitespace-only ExpectedOutput is malformed; previously
+	// scored 1.0 vacuously. New behavior: explicit 0 with reason.
+	for _, expected := range []string{"", "   \n\t\n"} {
+		score, reason, err := eval.ContainsScorer{}.Score(context.Background(),
+			eval.Case{ExpectedOutput: expected}, "anything")
+		if err != nil {
+			t.Errorf("err = %v", err)
+		}
+		if score != 0.0 {
+			t.Errorf("expected 0.0 for empty ExpectedOutput=%q, got %v", expected, score)
+		}
+		if !strings.Contains(reason, "no expected substrings") {
+			t.Errorf("reason = %q, want explicit empty reason", reason)
+		}
+	}
+}
+
 func TestRunner_Run_AggregatesPassFail(t *testing.T) {
 	set := &eval.Set{
 		Name: "test_set",

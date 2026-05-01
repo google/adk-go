@@ -29,11 +29,14 @@ type SaveFilesAsArtifactsConfig struct {
 	// Name overrides the default plugin name.
 	Name string
 
-	// AttachFileReference, when true, replaces inline-data parts in the
-	// user message with a textual placeholder that names the saved
-	// artifact ("Uploaded file: <name>. Saved as artifact."). When
-	// false, files are saved silently without modifying the message.
-	AttachFileReference bool
+	// DontAttachFileReference, when true, saves files silently without
+	// replacing inline-data parts in the user message. Default zero
+	// value (false) preserves the upstream behavior: the plugin
+	// substitutes a textual placeholder ("Uploaded file: <name>. Saved
+	// as artifact.") so the model knows where to find each file.
+	// Inverted from attach_file_reference in adk-python so the Go zero
+	// value matches Python's default of True.
+	DontAttachFileReference bool
 
 	// Logger is used for warnings (e.g. when artifact service isn't
 	// configured). Defaults to slog.Default().
@@ -60,11 +63,8 @@ func NewSaveFilesAsArtifacts(cfg SaveFilesAsArtifactsConfig) (*plugin.Plugin, er
 	if logger == nil {
 		logger = slog.Default()
 	}
-	attach := cfg.AttachFileReference
-	if !cfg.AttachFileReference && cfg.Name == "" && cfg.Logger == nil {
-		// Default behavior: attach references unless explicitly disabled.
-		attach = true
-	}
+	// Match adk-python default: attach is on unless caller opts out.
+	attach := !cfg.DontAttachFileReference
 
 	return plugin.New(plugin.Config{
 		Name: name,

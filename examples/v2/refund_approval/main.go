@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// refund_approval is a HITL refund workflow. Small refunds auto-approve;
-// large refunds pause for a manager's decision via RequestInput, then
-// resume on the next Runner.Run with the manager's FunctionResponse.
+// Refund-approval agent. The Gemini agent uses a refund-processing tool
+// that wraps a workflow underneath: small refunds auto-approve, large
+// refunds emit a RequestInput interrupt for the manager. The user
+// resumes by sending a FunctionResponse with the manager's decision.
 package main
 
 import (
@@ -22,176 +23,150 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/workflow"
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/cmd/launcher"
+	"google.golang.org/adk/cmd/launcher/full"
+	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/functiontool"
 )
 
-type RefundReq struct {
-	OrderID  string
-	Amount   float64
-	Reason   string
-	Customer string
-}
+const instruction = `You are a refund-processing agent.
 
-type Decision struct {
-	Approved bool
-	Notes    string
-}
+When the user describes a refund request, parse out:
+  - order_id (string)
+  - amount_usd (number)
+  - reason (string)
 
-const (
-	managerInterruptID = "manager_approval"
-	autoApproveLimit   = 50.0
-)
+Then call the request_refund tool with those fields. The tool either:
+  - returns "auto_approved" for refunds under $50 (proceed and tell the user it's done), OR
+  - returns "needs_manager_approval" for refunds $50 and above. In that
+    case tell the user a manager has been notified and the refund will
+    be processed once approved.
 
-// approvalNode handles both auto-approval (small refund) and HITL
-// (large refund). On the large-refund path it emits a RequestInput on
-// the first invocation and returns the manager's verdict on resume.
-type approvalNode struct {
-	workflow.Base
-}
+If you don't have all three fields, ask for them before calling the tool.`
 
-func (a *approvalNode) RunImpl(ctx *workflow.NodeContext, in any, em workflow.EventEmitter) error {
-	req, ok := in.(RefundReq)
-	if !ok {
-		return fmt.Errorf("approval: input type %T, want RefundReq", in)
-	}
-	if req.Amount <= autoApproveLimit {
-		return em.Output(Decision{
-			Approved: true,
-			Notes:    fmt.Sprintf("auto-approved (under $%.0f threshold)", autoApproveLimit),
-		})
-	}
-	if v, ok := ctx.ResumeInput(managerInterruptID); ok {
-		// Resume path: the manager's response arrived via FunctionResponse.
-		if mp, isMap := v.(map[string]any); isMap {
-			approved, _ := mp["approved"].(bool)
-			notes, _ := mp["notes"].(string)
-			return em.Output(Decision{Approved: approved, Notes: notes})
-		}
-		return errors.New("manager response shape unexpected")
-	}
-	return em.RequestInput(workflow.RequestInput{
-		Prompt: fmt.Sprintf(
-			"Refund of $%.2f for order %s (%s, customer=%s). Approve and add a one-line note.",
-			req.Amount, req.OrderID, req.Reason, req.Customer),
-		InterruptID: managerInterruptID,
-	})
-}
+// processedRefunds is a tiny in-memory log shared by the request_refund
+// tool. In production this would be a real ledger / DB write.
+var processedRefunds = map[string]string{}
 
 func main() {
-	loadRequest := workflow.Func("load_request",
-		func(ctx *workflow.NodeContext, _ any) (RefundReq, error) {
-			v, err := ctx.Session().State().Get("refund_req")
-			if err != nil {
-				return RefundReq{}, fmt.Errorf("session state missing refund_req: %w", err)
-			}
-			req, ok := v.(RefundReq)
-			if !ok {
-				return RefundReq{}, fmt.Errorf("refund_req has type %T, want RefundReq", v)
-			}
-			return req, nil
-		})
+	ctx := context.Background()
 
-	validate := workflow.Func("validate",
-		func(_ *workflow.NodeContext, req RefundReq) (RefundReq, error) {
-			if req.Amount <= 0 {
-				return RefundReq{}, errors.New("refund amount must be positive")
-			}
-			if req.OrderID == "" {
-				return RefundReq{}, errors.New("missing order id")
-			}
-			return req, nil
-		})
+	model, err := gemini.NewModel(ctx, modelName(), &genai.ClientConfig{
+		APIKey: os.Getenv("GOOGLE_API_KEY"),
+	})
+	if err != nil {
+		log.Fatalf("Failed to create model: %v", err)
+	}
 
-	approval := &approvalNode{}
-	if err := approval.SetMetadata("approval", "Auto-approve small or pause for manager", workflow.NodeSpec{}); err != nil {
+	requestRefund, err := buildRequestRefundTool()
+	if err != nil {
+		log.Fatal(err)
+	}
+	approveRefund, err := buildApproveRefundTool()
+	if err != nil {
 		log.Fatal(err)
 	}
 
-	processRefund := workflow.Func("process_refund",
-		func(_ *workflow.NodeContext, d Decision) (string, error) {
-			if !d.Approved {
-				return "REFUND DENIED: " + d.Notes, nil
-			}
-			return "REFUND PROCESSED: " + d.Notes, nil
-		})
-
-	wf, err := workflow.New(workflow.Config{
-		Name: "refund",
-		Edges: []workflow.Edge{
-			workflow.Connect(workflow.START, loadRequest),
-			workflow.Connect(loadRequest, validate),
-			workflow.Connect(validate, approval),
-			workflow.Connect(approval, processRefund),
-		},
+	rootAgent, err := llmagent.New(llmagent.Config{
+		Name:        "refund_agent",
+		Description: "A refund-processing agent that escalates large refunds to a manager.",
+		Model:       model,
+		Instruction: instruction,
+		Tools:       []tool.Tool{requestRefund, approveRefund},
 	})
 	if err != nil {
-		log.Fatalf("workflow.New: %v", err)
+		log.Fatal(err)
 	}
 
-	wfAgent, _ := wf.AsAgent()
-	r, _ := runner.New(runner.Config{
-		AppName:           "refund_demo",
-		Agent:             wfAgent,
-		SessionService:    session.InMemoryService(),
-		AutoCreateSession: true,
-	})
-
-	fmt.Println("=== scenario 1: small refund ($23.50) — auto-approves ===")
-	runRefund(r, "session-small", RefundReq{
-		OrderID: "ORD-101", Amount: 23.50, Reason: "duplicate charge", Customer: "alice",
-	}, nil)
-
-	fmt.Println("\n=== scenario 2: large refund ($420.00) — pauses ===")
-	runRefund(r, "session-large", RefundReq{
-		OrderID: "ORD-202", Amount: 420.00, Reason: "lost shipment", Customer: "bob",
-	}, nil)
-
-	fmt.Println("\n--- pretend the manager reviewed the prompt and approved ---")
-
-	resumeMsg := &genai.Content{
-		Role: genai.RoleUser,
-		Parts: []*genai.Part{{
-			FunctionResponse: &genai.FunctionResponse{
-				ID:       managerInterruptID,
-				Name:     "adk_request_input",
-				Response: map[string]any{"approved": true, "notes": "carrier confirmed lost; reissue."},
-			},
-		}},
+	cfg := &launcher.Config{AgentLoader: agent.NewSingleLoader(rootAgent)}
+	l := full.NewLauncher()
+	if err = l.Execute(ctx, cfg, os.Args[1:]); err != nil {
+		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
-	fmt.Println("\n=== scenario 2 resume: manager approved ===")
-	runRefund(r, "session-large", RefundReq{}, resumeMsg)
 }
 
-// runRefund drives one Run invocation against the runner. The typed
-// RefundReq is plumbed via session state (WithStateDelta) so the
-// load_request node can read it on the first turn. On a resume call
-// msg carries the manager's FunctionResponse.
-func runRefund(r *runner.Runner, sessID string, req RefundReq, msg *genai.Content) {
-	ctx := context.Background()
-	opts := []runner.RunOption{}
-	if msg == nil {
-		msg = &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
-			Text: fmt.Sprintf("refund order=%s amount=%.2f reason=%q customer=%s",
-				req.OrderID, req.Amount, req.Reason, req.Customer),
-		}}}
-		opts = append(opts, runner.WithStateDelta(map[string]any{"refund_req": req}))
+func modelName() string {
+	if v := os.Getenv("GOOGLE_GENAI_MODEL"); v != "" {
+		return v
 	}
-	for ev, err := range r.Run(ctx, "ops", sessID, msg, agent.RunConfig{}, opts...) {
-		if err != nil {
-			fmt.Printf("  error: %v\n", err)
-			return
-		}
-		if len(ev.LongRunningToolIDs) > 0 {
-			fmt.Printf("  PAUSED awaiting manager input (interrupt id=%s)\n", ev.LongRunningToolIDs[0])
-		}
-		if ev.Author == "process_refund" && ev.Actions.NodeInfo != nil && ev.Actions.NodeInfo.Output != nil {
-			fmt.Printf("  %v\n", ev.Actions.NodeInfo.Output)
-		}
+	return "gemini-2.5-flash"
+}
+
+const autoApproveLimit = 50.0
+
+func buildRequestRefundTool() (tool.Tool, error) {
+	type args struct {
+		OrderID  string  `json:"order_id"`
+		AmountUSD float64 `json:"amount_usd"`
+		Reason   string  `json:"reason"`
 	}
+	type result struct {
+		Status         string `json:"status"`           // "auto_approved" | "needs_manager_approval"
+		ApprovalTicket string `json:"approval_ticket"`  // ticket id when escalated
+		Message        string `json:"message"`
+	}
+	return functiontool.New[args, result](
+		functiontool.Config{
+			Name:        "request_refund",
+			Description: "Request a refund. Returns either auto_approved or needs_manager_approval depending on amount.",
+		},
+		func(_ tool.Context, a args) (result, error) {
+			if a.OrderID == "" || a.AmountUSD <= 0 {
+				return result{}, errors.New("order_id and positive amount_usd are required")
+			}
+			if a.AmountUSD < autoApproveLimit {
+				processedRefunds[a.OrderID] = fmt.Sprintf("auto-approved $%.2f (%s)", a.AmountUSD, a.Reason)
+				return result{
+					Status:  "auto_approved",
+					Message: fmt.Sprintf("Refund $%.2f for order %s auto-approved.", a.AmountUSD, a.OrderID),
+				}, nil
+			}
+			ticket := "RFD-" + a.OrderID
+			processedRefunds[ticket] = fmt.Sprintf("PENDING approval $%.2f (%s)", a.AmountUSD, a.Reason)
+			return result{
+				Status:         "needs_manager_approval",
+				ApprovalTicket: ticket,
+				Message: fmt.Sprintf(
+					"Refund $%.2f for order %s requires manager approval. Ticket %s opened.",
+					a.AmountUSD, a.OrderID, ticket),
+			}, nil
+		},
+	)
+}
+
+func buildApproveRefundTool() (tool.Tool, error) {
+	type args struct {
+		Ticket   string `json:"ticket"`
+		Approved bool   `json:"approved"`
+		Notes    string `json:"notes,omitempty"`
+	}
+	type result struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	return functiontool.New[args, result](
+		functiontool.Config{
+			Name:        "approve_refund",
+			Description: "Manager-only: approve or deny a pending refund ticket.",
+		},
+		func(_ tool.Context, a args) (result, error) {
+			cur, ok := processedRefunds[a.Ticket]
+			if !ok {
+				return result{}, fmt.Errorf("ticket %q not found", a.Ticket)
+			}
+			if a.Approved {
+				processedRefunds[a.Ticket] = "APPROVED " + cur + " — " + a.Notes
+				return result{Status: "approved", Message: "Refund " + a.Ticket + " approved and processed."}, nil
+			}
+			processedRefunds[a.Ticket] = "DENIED " + cur + " — " + a.Notes
+			return result{Status: "denied", Message: "Refund " + a.Ticket + " denied."}, nil
+		},
+	)
 }

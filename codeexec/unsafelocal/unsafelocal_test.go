@@ -33,10 +33,14 @@ func haveBinary(name string) bool {
 func TestExecutor_Capabilities(t *testing.T) {
 	e := &unsafelocal.Executor{}
 	c := e.Capabilities()
-	if !c.FileIO {
-		// File IO is reported true even though current impl doesn't write
-		// files; future enhancement. We assert what the Capabilities
-		// claims so a regression is caught.
+	if c.FileIO {
+		// FileIO must be reported false: Input.Files is not materialized
+		// to disk and Chunk.Files is never populated by this executor.
+		// Mismatch would mislead callers that gate behavior on capability.
+		t.Error("Capabilities.FileIO must be false (executor does not honor file IO)")
+	}
+	if c.MaxMemoryBytes != 0 {
+		t.Errorf("Capabilities.MaxMemoryBytes = %d, want 0 (no cap enforced)", c.MaxMemoryBytes)
 	}
 	if len(c.Languages) == 0 {
 		t.Error("Capabilities.Languages should not be empty")

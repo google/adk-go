@@ -12,86 +12,72 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// support_with_compaction simulates a long customer-support session
-// whose older turns auto-summarize via EventsCompactionConfig.
+// Customer-support agent whose long sessions auto-summarize via
+// EventsCompactionConfig. The summarizer is itself a Gemini-backed
+// LlmEventSummarizer.
+//
+// Note: the launcher's Config does not yet surface app.App, so this
+// example wires a runner directly and demonstrates the compaction path
+// via an interactive console loop. To use the standard launcher,
+// supply the same plugins through cmd.Config.PluginConfig instead.
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
-	"iter"
 	"log"
-	"time"
+	"os"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
 	adkapp "google.golang.org/adk/app"
+	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/skill" // unused; package import keeps imports tidy when extending
 )
 
-// counterSummarizer is a deterministic stand-in for an LLM summarizer.
-// Each invocation produces a text summary numbered by call count so we
-// can read what compaction is doing without an LLM in the loop.
-type counterSummarizer struct {
-	calls int
-}
+const supportInstruction = `You are a customer-support agent for an
+e-commerce store. Be concise and friendly. If you do not have the
+order details the user is asking about, ask them for the order id.`
 
-func (s *counterSummarizer) MaybeSummarize(_ context.Context, events []*session.Event) (*session.Event, error) {
-	if len(events) == 0 {
-		return nil, nil
-	}
-	s.calls++
-	first := events[0].Timestamp
-	last := events[len(events)-1].Timestamp
-	body := fmt.Sprintf("Compacted %d events from %s to %s (call #%d).",
-		len(events), first.Format("15:04:05"), last.Format("15:04:05"), s.calls)
-	out := session.NewEvent(fmt.Sprintf("compact-%d", s.calls))
-	out.Author = "user"
-	out.Timestamp = time.Now()
-	out.Actions.Compaction = &session.EventCompaction{
-		StartTimestamp:   first,
-		EndTimestamp:     last,
-		CompactedContent: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: body}}},
-	}
-	return out, nil
-}
+func main() {
+	ctx := context.Background()
 
-// supportAgent is the simplest possible agent that produces one canned
-// response per invocation. Replace with a real LlmAgent in production.
-func supportAgent() agent.Agent {
-	a, err := agent.New(agent.Config{
+	model, err := gemini.NewModel(ctx, modelName(), &genai.ClientConfig{
+		APIKey: os.Getenv("GOOGLE_API_KEY"),
+	})
+	if err != nil {
+		log.Fatalf("Failed to create model: %v", err)
+	}
+
+	// The summarizer model can be the same model or a cheaper one.
+	summarizerModel, _ := gemini.NewModel(ctx, modelName(), &genai.ClientConfig{
+		APIKey: os.Getenv("GOOGLE_API_KEY"),
+	})
+
+	supportAgent, err := llmagent.New(llmagent.Config{
 		Name:        "support_agent",
-		Description: "Pretends to answer customer questions.",
-		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return func(yield func(*session.Event, error) bool) {
-				ev := session.NewEvent(ic.InvocationID())
-				ev.Author = "support_agent"
-				ev.LLMResponse.Content = &genai.Content{
-					Role: "model",
-					Parts: []*genai.Part{{Text: "ack: " + textOf(ic.UserContent())}},
-				}
-				yield(ev, nil)
-			}
-		},
+		Description: "A customer support agent.",
+		Model:       model,
+		Instruction: supportInstruction,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	return a
-}
 
-func main() {
-	root := supportAgent()
 	app, err := adkapp.New(adkapp.App{
-		Name:      "support_demo",
-		RootAgent: root,
+		Name:      "support_app",
+		RootAgent: supportAgent,
 		EventsCompactionConfig: &adkapp.EventsCompactionConfig{
-			Summarizer:         &counterSummarizer{},
-			CompactionInterval: 2, // compact every 2 new user invocations
-			OverlapSize:        1, // overlap 1 invocation for context continuity
+			// Real Gemini-backed summarizer. Compacts older turns into a
+			// single synthetic event; the contents-builder folds it in
+			// place of the subsumed raw events on the next LLM call.
+			Summarizer:         adkapp.NewLlmEventSummarizer(summarizerModel),
+			CompactionInterval: 3, // compact every 3 user invocations
+			OverlapSize:        1, // keep 1 prior invocation for continuity
 		},
 	})
 	if err != nil {
@@ -108,68 +94,45 @@ func main() {
 		log.Fatal(err)
 	}
 
-	turns := []string{
-		"My order #4521 hasn't shipped yet.",
-		"Can you give me an estimated arrival date?",
-		"I noticed a $25 charge I don't recognize.",
-		"It says PENDING from yesterday.",
-		"Also can I change my shipping address?",
-		"Sure, here's the new address: 100 Market St, SF.",
-	}
-
-	ctx := context.Background()
-	for i, q := range turns {
-		fmt.Printf("=== turn %d (user) ===\n%s\n", i+1, q)
-		msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: q}}}
+	fmt.Println("=== support session (compaction every 3 turns) ===")
+	fmt.Println("type your message, blank line to quit")
+	fmt.Println()
+	in := bufio.NewScanner(os.Stdin)
+	for {
+		fmt.Print("you> ")
+		if !in.Scan() {
+			return
+		}
+		text := in.Text()
+		if text == "" {
+			return
+		}
+		msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: text}}}
 		for ev, err := range r.Run(ctx, "alice", "case-77", msg, agent.RunConfig{}) {
 			if err != nil {
-				log.Fatal(err)
+				fmt.Println("error:", err)
+				return
 			}
-			if ev.Author == "support_agent" {
-				fmt.Printf("→ %s\n", textOf(ev.LLMResponse.Content))
+			if ev.Author == "support_agent" && ev.Content != nil {
+				for _, p := range ev.Content.Parts {
+					if p.Text != "" {
+						fmt.Print(p.Text)
+					}
+				}
+				fmt.Println()
+			}
+			if ev.Actions.Compaction != nil {
+				fmt.Printf("[compacted older turns: %s -> %s]\n",
+					ev.Actions.Compaction.StartTimestamp.Format("15:04:05"),
+					ev.Actions.Compaction.EndTimestamp.Format("15:04:05"))
 			}
 		}
-		// Compaction runs after the agent loop in runner.Run and appends
-		// to the session. Read the session to inspect what landed.
-		printCompactions(ctx, sessSvc)
-		fmt.Println()
 	}
 }
 
-func printCompactions(ctx context.Context, svc session.Service) {
-	resp, err := svc.Get(ctx, &session.GetRequest{
-		AppName: "support_demo", UserID: "alice", SessionID: "case-77",
-	})
-	if err != nil {
-		return
+func modelName() string {
+	if v := os.Getenv("GOOGLE_GENAI_MODEL"); v != "" {
+		return v
 	}
-	for ev := range resp.Session.Events().All() {
-		if ev.Actions.Compaction == nil {
-			continue
-		}
-		// Only print compactions whose Compaction summary we haven't shown yet.
-		if marked[ev.ID] {
-			continue
-		}
-		marked[ev.ID] = true
-		fmt.Printf("[compaction event %s] %s\n",
-			ev.ID[:8], textOf(ev.Actions.Compaction.CompactedContent))
-	}
+	return "gemini-2.5-flash"
 }
-
-var marked = map[string]bool{}
-
-func textOf(c *genai.Content) string {
-	if c == nil {
-		return ""
-	}
-	out := ""
-	for _, p := range c.Parts {
-		if p != nil && p.Text != "" {
-			out += p.Text
-		}
-	}
-	return out
-}
-
-var _ = skill.Skill{} // keep import silent until we extend example

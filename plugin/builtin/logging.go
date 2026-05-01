@@ -15,7 +15,6 @@
 package builtin
 
 import (
-	"errors"
 	"log/slog"
 	"os"
 
@@ -211,9 +210,6 @@ func NewLogging(cfg LoggingConfig) (*plugin.Plugin, error) {
 		},
 	}
 
-	if logger == nil {
-		return nil, errors.New("logging plugin: nil logger")
-	}
 	if os.Getenv("ADK_LOGGING_DISABLED") != "" {
 		return plugin.New(plugin.Config{Name: name})
 	}

@@ -456,6 +456,58 @@ func TestDebugTelemetryLRU(t *testing.T) {
 	}
 }
 
+// TestSpanOrdering_StartSeqTieBreaker locks down the (StartTime, startSeq)
+// secondary sort key. On macOS time.Now() resolution is microsecond-level,
+// so back-to-back tracer.Start calls can record identical UnixNano values.
+// Without the startSeq tie-breaker, sort order would track end-time
+// instead of start-time, breaking nested span ordering. Mirrors the
+// regression that motivated the seq counter in OnStart.
+func TestSpanOrdering_StartSeqTieBreaker(t *testing.T) {
+	store, err := newSpanStore(64)
+	if err != nil {
+		t.Fatalf("newSpanStore: %v", err)
+	}
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(store))
+	tracer := tp.Tracer("test-tieBreak")
+
+	const N = 8
+	spans := make([]trace.Span, N)
+	ctx := context.Background()
+	// Start all spans first, then end them in reverse. If only StartTime
+	// is used as the sort key and the clock collides, the sort comparator
+	// is a no-op for ties; SortStableFunc preserves *insertion* order
+	// (which is end-time order, since records persist on OnEnd). With
+	// startSeq, we recover the actual start order.
+	for i := range spans {
+		_, spans[i] = tracer.Start(ctx, "span") // identical name, same conversation
+	}
+	for i := len(spans) - 1; i >= 0; i-- {
+		spans[i].End()
+	}
+	_ = tp.ForceFlush(ctx)
+
+	// Pull all records, sort via the production code path.
+	store.mu.RLock()
+	records := make([]*spanRecord, 0, len(store.recordsBySpanID))
+	for _, r := range store.recordsBySpanID {
+		records = append(records, r)
+	}
+	store.mu.RUnlock()
+	sorted := filterUnclosedAndSort(records)
+	if len(sorted) != N {
+		t.Fatalf("got %d sorted records, want %d", len(sorted), N)
+	}
+
+	// startSeq is monotonic across OnStart, so ascending startSeq = real
+	// start order. Verify the sort respects it.
+	for i := 1; i < len(sorted); i++ {
+		if sorted[i].startSeq <= sorted[i-1].startSeq {
+			t.Errorf("sorted[%d].startSeq=%d not strictly greater than sorted[%d].startSeq=%d "+
+				"(sort tie-breaker broken)", i, sorted[i].startSeq, i-1, sorted[i-1].startSeq)
+		}
+	}
+}
+
 func setupWithConfig(t *testing.T, cfg *DebugTelemetryConfig) (*DebugTelemetry, *sdktrace.TracerProvider, *sdklog.LoggerProvider) {
 	debugTelemetry, err := NewDebugTelemetryWithConfig(cfg)
 	if err != nil {

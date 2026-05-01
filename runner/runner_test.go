@@ -17,6 +17,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
@@ -528,6 +529,74 @@ func TestRunner_New_AppConfig(t *testing.T) {
 		}
 		if r.appName != "explicit" {
 			t.Errorf("appName = %q, want explicit (top-level wins when set)", r.appName)
+		}
+	})
+}
+
+// TestRunner_Resume_RequiresResumableApp mirrors adk-python runners.py:884:
+// invoking with no new message on a non-resumable runner is an error.
+func TestRunner_Resume_RequiresResumableApp(t *testing.T) {
+	t.Parallel()
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "a",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	}))
+
+	t.Run("v1 (Agent only) Resume returns ErrNotResumable", func(t *testing.T) {
+		r, err := New(Config{
+			AppName:           "t",
+			Agent:             testAgent,
+			SessionService:    session.InMemoryService(),
+			AutoCreateSession: true,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		var got error
+		for _, e := range r.Resume(context.Background(), "u", "s", agent.RunConfig{}) {
+			got = e
+			break
+		}
+		if !errors.Is(got, ErrNotResumable) {
+			t.Errorf("Resume err = %v, want ErrNotResumable", got)
+		}
+	})
+
+	t.Run("App without IsResumable Resume returns ErrNotResumable", func(t *testing.T) {
+		appCfg, _ := adkapp.New(adkapp.App{Name: "t", RootAgent: testAgent})
+		r, _ := New(Config{
+			App:               appCfg,
+			SessionService:    session.InMemoryService(),
+			AutoCreateSession: true,
+		})
+		var got error
+		for _, e := range r.Resume(context.Background(), "u", "s", agent.RunConfig{}) {
+			got = e
+			break
+		}
+		if !errors.Is(got, ErrNotResumable) {
+			t.Errorf("Resume err = %v, want ErrNotResumable", got)
+		}
+	})
+
+	t.Run("App with IsResumable=true Resume succeeds", func(t *testing.T) {
+		appCfg, _ := adkapp.New(adkapp.App{
+			Name:               "t",
+			RootAgent:          testAgent,
+			ResumabilityConfig: &adkapp.ResumabilityConfig{IsResumable: true},
+		})
+		r, _ := New(Config{
+			App:               appCfg,
+			SessionService:    session.InMemoryService(),
+			AutoCreateSession: true,
+		})
+		for _, err := range r.Resume(context.Background(), "u", "s", agent.RunConfig{}) {
+			if errors.Is(err, ErrNotResumable) {
+				t.Errorf("unexpected ErrNotResumable on resumable app: %v", err)
+			}
 		}
 	})
 }

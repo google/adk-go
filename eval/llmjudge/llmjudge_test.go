@@ -79,29 +79,25 @@ func TestScore_StripsCodeFences(t *testing.T) {
 	}
 }
 
-func TestScore_RegexFallback(t *testing.T) {
-	// Some models prepend prose before the JSON object. The regex
-	// fallback handles "score: 0.7" / "reason: ..." patterns.
-	llm := &stubLLM{name: "stub", response: `My evaluation: score: 0.7, reason: "partial overlap"`}
+func TestScore_ErrorOnNonJSONProse(t *testing.T) {
+	// Mirrors adk-python's strict-or-fail posture: prose like
+	// "score: 0.7" without a JSON envelope must NOT silently pass.
+	llm := &stubLLM{name: "stub", response: `My evaluation: score: 0.7, reason: partial overlap`}
 	s, _ := llmjudge.New(llmjudge.Config{LLM: llm})
-	score, reason, err := s.Score(context.Background(), eval.Case{}, "")
-	if err != nil {
-		t.Fatalf("Score: %v", err)
-	}
-	if score != 0.7 {
-		t.Errorf("score = %v", score)
-	}
-	if reason == "" {
-		t.Error("expected reason from regex fallback")
+	_, _, err := s.Score(context.Background(), eval.Case{}, "")
+	if err == nil {
+		t.Error("expected error for non-JSON prose response")
 	}
 }
 
-func TestScore_ClampsToRange(t *testing.T) {
+func TestScore_ErrorOnOutOfRange(t *testing.T) {
+	// Score outside [0,1] is treated as a malformed response, not
+	// silently clamped.
 	llm := &stubLLM{name: "stub", response: `{"score": 1.5, "reason": "x"}`}
 	s, _ := llmjudge.New(llmjudge.Config{LLM: llm})
-	score, _, _ := s.Score(context.Background(), eval.Case{}, "")
-	if score != 1.0 {
-		t.Errorf("score = %v, want 1.0 (clamped)", score)
+	_, _, err := s.Score(context.Background(), eval.Case{}, "")
+	if err == nil {
+		t.Error("expected out-of-range error, got nil")
 	}
 }
 

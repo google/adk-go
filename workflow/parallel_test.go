@@ -204,6 +204,55 @@ func TestWorkflow_NodeTimeout(t *testing.T) {
 	}
 }
 
+// TestWorkflow_NodeTimeoutWrapsBothSentinels verifies that a per-attempt
+// timeout produces an error chain matching BOTH ErrNodeTimeout (workflow
+// sentinel) and context.DeadlineExceeded (root cause). Mirrors
+// adk-python NodeTimeoutError(asyncio.TimeoutError).
+func TestWorkflow_NodeTimeoutWrapsBothSentinels(t *testing.T) {
+	slow := workflow.Func("slow",
+		func(ctx *workflow.NodeContext, _ any) (int, error) {
+			select {
+			case <-time.After(2 * time.Second):
+				return 0, nil
+			case <-ctx.InvocationContext.Done():
+				return 0, ctx.InvocationContext.Err()
+			}
+		},
+		workflow.WithTimeout(20*time.Millisecond),
+	)
+	wf, err := workflow.New(workflow.Config{
+		Name:  "twrap",
+		Edges: []workflow.Edge{workflow.Connect(workflow.START, slow)},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	wfAgent, _ := wf.AsAgent()
+	r, _ := runner.New(runner.Config{
+		AppName:           "t",
+		Agent:             wfAgent,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "go"}}}
+	var firstErr error
+	for _, e := range r.Run(context.Background(), "u", "s", msg, agent.RunConfig{}) {
+		if e != nil {
+			firstErr = e
+			break
+		}
+	}
+	if firstErr == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !errors.Is(firstErr, workflow.ErrNodeTimeout) {
+		t.Errorf("err = %v, want errors.Is(_, ErrNodeTimeout)", firstErr)
+	}
+	if !errors.Is(firstErr, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want errors.Is(_, context.DeadlineExceeded)", firstErr)
+	}
+}
+
 func TestWorkflow_ParallelWorker_FansOutAndCollects(t *testing.T) {
 	var seen sync.Map
 	seed := workflow.Func("seed",

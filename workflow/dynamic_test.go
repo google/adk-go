@@ -16,12 +16,14 @@ package workflow_test
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/app"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/workflow"
@@ -108,8 +110,11 @@ func TestWorkflow_DynamicNode_DedupsAcrossResumes(t *testing.T) {
 	}
 	wfAgent, _ := wf.AsAgent()
 	r, _ := runner.New(runner.Config{
-		AppName:           "test",
-		Agent:             wfAgent,
+		App: &app.App{
+			Name:               "test",
+			RootAgent:          wfAgent,
+			ResumabilityConfig: &app.ResumabilityConfig{IsResumable: true},
+		},
 		SessionService:    session.InMemoryService(),
 		AutoCreateSession: true,
 	})
@@ -130,6 +135,111 @@ func TestWorkflow_DynamicNode_DedupsAcrossResumes(t *testing.T) {
 		t.Errorf("after resume: childCalls = %d, want 1 (cached output)", got)
 	}
 }
+
+// TestWorkflow_HITL_ParallelBranchWaiting verifies that when one branch
+// of a parallel fan-out pauses on RequestInput, the JoinNode does not
+// fire until that branch is resumed. Mirrors adk-python's WAITING
+// semantics on parallel predecessors.
+func TestWorkflow_HITL_ParallelBranchWaiting(t *testing.T) {
+	var aRuns, cRuns, joinRuns atomic.Int32
+
+	a := workflow.Func("a",
+		func(_ *workflow.NodeContext, _ any) (string, error) {
+			aRuns.Add(1)
+			return "a_done", nil
+		})
+	c := workflow.Func("c",
+		func(_ *workflow.NodeContext, _ any) (string, error) {
+			cRuns.Add(1)
+			return "c_done", nil
+		})
+	hitlB := &hitlNode{interruptID: "p_intr", prompt: "ok?"}
+	if err := hitlB.SetMetadata("hitl_b", "", workflow.NodeSpec{}); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	join := workflow.Join("j")
+	consumer := workflow.Func("consumer",
+		func(_ *workflow.NodeContext, in map[string]any) (int, error) {
+			joinRuns.Add(1)
+			// Sanity: all three predecessors must be present.
+			if _, ok := in["a"]; !ok {
+				return 0, errInvalidInput
+			}
+			if _, ok := in["hitl_b"]; !ok {
+				return 0, errInvalidInput
+			}
+			if _, ok := in["c"]; !ok {
+				return 0, errInvalidInput
+			}
+			return len(in), nil
+		})
+
+	wf, err := workflow.New(workflow.Config{
+		Name: "parWaitWf",
+		Edges: []workflow.Edge{
+			workflow.Connect(workflow.START, a),
+			workflow.Connect(workflow.START, hitlB),
+			workflow.Connect(workflow.START, c),
+			workflow.Connect(a, join),
+			workflow.Connect(hitlB, join),
+			workflow.Connect(c, join),
+			workflow.Connect(join, consumer),
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	wfAgent, _ := wf.AsAgent()
+	r, _ := runner.New(runner.Config{
+		App: &app.App{
+			Name:               "t",
+			RootAgent:          wfAgent,
+			ResumabilityConfig: &app.ResumabilityConfig{IsResumable: true},
+		},
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "go"}}}
+	for range r.Run(context.Background(), "u", "s", msg, agent.RunConfig{}) {
+	}
+	// First run: a and c complete, hitl_b pauses, join must NOT fire.
+	if aRuns.Load() != 1 {
+		t.Errorf("aRuns after first run = %d, want 1", aRuns.Load())
+	}
+	if cRuns.Load() != 1 {
+		t.Errorf("cRuns after first run = %d, want 1", cRuns.Load())
+	}
+	if joinRuns.Load() != 0 {
+		t.Errorf("joinRuns after first run = %d, want 0 (parallel WAITING must block join)", joinRuns.Load())
+	}
+
+	// Resume with hitl_b's answer.
+	resp := &genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       "p_intr",
+				Name:     "adk_request_input",
+				Response: map[string]any{"ok": true},
+			},
+		}},
+	}
+	for range r.Run(context.Background(), "u", "s", resp, agent.RunConfig{}) {
+	}
+	if joinRuns.Load() != 1 {
+		t.Errorf("joinRuns after resume = %d, want 1 (join should fire after all preds complete)", joinRuns.Load())
+	}
+	if aRuns.Load() != 1 {
+		t.Errorf("aRuns after resume = %d, want 1 (cached output)", aRuns.Load())
+	}
+	if cRuns.Load() != 1 {
+		t.Errorf("cRuns after resume = %d, want 1 (cached output)", cRuns.Load())
+	}
+}
+
+var errInvalidInput = errors.New("missing predecessor in join input")
 
 // TestWorkflow_HITL_RequestInputEmitsLongRunningTool verifies that a node
 // emitting RequestInput produces an event with a FunctionCall named

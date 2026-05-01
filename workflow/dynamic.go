@@ -140,6 +140,11 @@ func (c *NodeContext) RunNode(node Node, input any, opts ...RunNodeOpts) (any, e
 			StateDelta:    map[string]any{},
 			ArtifactDelta: map[string]int64{},
 		},
+		// Inherit resume inputs so HITL interrupts raised inside a
+		// dynamic child can see the user's matching response on resume.
+		// Mirrors adk-python _create_child_context propagating
+		// resume_inputs.
+		resumeInputs: c.resumeInputs,
 	}
 	em.ctx = child
 	err := node.RunImpl(child, input, em)

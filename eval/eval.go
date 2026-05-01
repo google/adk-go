@@ -204,21 +204,43 @@ func (ExactMatchScorer) Score(_ context.Context, c Case, output string) (float64
 
 // ContainsScorer scores 1.0 when output contains every substring listed
 // in Case.ExpectedOutput (split on newlines), 0.0 otherwise.
-type ContainsScorer struct{}
+//
+// Comparison is case-sensitive by default; set IgnoreCase to true for a
+// case-insensitive match. An empty (or whitespace-only) ExpectedOutput is
+// treated as a malformed case and returns score 0 with an explicit
+// reason — silently scoring 1.0 against no constraints would mask bad
+// eval data.
+type ContainsScorer struct {
+	// IgnoreCase makes substring matching case-insensitive.
+	IgnoreCase bool
+}
 
 // Name implements Scorer.
 func (ContainsScorer) Name() string { return "contains" }
 
 // Score implements Scorer.
-func (ContainsScorer) Score(_ context.Context, c Case, output string) (float64, string, error) {
+func (s ContainsScorer) Score(_ context.Context, c Case, output string) (float64, string, error) {
+	hay := output
+	if s.IgnoreCase {
+		hay = strings.ToLower(output)
+	}
+	any := false
 	for _, want := range strings.Split(c.ExpectedOutput, "\n") {
 		w := strings.TrimSpace(want)
 		if w == "" {
 			continue
 		}
-		if !strings.Contains(output, w) {
+		any = true
+		needle := w
+		if s.IgnoreCase {
+			needle = strings.ToLower(w)
+		}
+		if !strings.Contains(hay, needle) {
 			return 0.0, fmt.Sprintf("missing substring: %q", w), nil
 		}
+	}
+	if !any {
+		return 0.0, "no expected substrings (ExpectedOutput empty or whitespace-only)", nil
 	}
 	return 1.0, "all substrings present", nil
 }

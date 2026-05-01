@@ -85,8 +85,12 @@ func (e *Executor) Capabilities() codeexec.Capabilities {
 		Stateful:        false,
 		NetworkAccess:   true, // host process retains network
 		InstallPackages: false,
-		FileIO:          true,
-		MaxRuntime:      e.MaxRuntime,
+		// FileIO is false: Input.Files is not materialized to disk and
+		// Chunk.Files is never populated by this executor. Truthful
+		// reporting prevents callers from assuming file plumbing they'd
+		// only get from a sandboxed backend.
+		FileIO:     false,
+		MaxRuntime: e.MaxRuntime,
 	}
 }
 

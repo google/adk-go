@@ -1,14 +1,41 @@
 # production_llm_agent
 
-The shape of an LLM agent ready for production traffic:
+Real Gemini agent wired with the production-grade plumbing: retry on
+429/5xx model errors, structured logging at every callback, and an
+app-wide safety instruction.
 
-- `model/retry` wraps the model so transient 429 / 5xx errors are
-  retried with exponential backoff + jitter.
-- `plugin/builtin/Logging` emits structured slog records at every
-  callback hook.
-- `plugin/builtin/GlobalInstruction` prepends an app-wide safety
-  instruction to every LLM request.
+## Run
 
-This example assembles those pieces against a deterministic stub LLM
-that fails twice with a 503 before succeeding — so you can read the
-retry log and the structured records the deployment would emit.
+```
+export GOOGLE_API_KEY=...
+go run ./examples/v2/production_llm_agent/             # console
+go run ./examples/v2/production_llm_agent/ web         # adk-web
+```
+
+## Try it
+
+> What's the status of ORD-202?
+
+You'll see in stdout:
+- a `before_model` slog record (model = gemini-2.5-flash, agent =
+  support_agent)
+- the agent's `lookup_order` tool call → `before_tool` / `after_tool`
+  records
+- if Gemini returns a transient 503, `model_retry` warnings with the
+  attempt count and backoff delay
+
+The `GlobalInstruction` plugin prepends the safety string to every
+LLM request, so refund/PII/medical guards apply uniformly.
+
+## Wiring breakdown
+
+```go
+gemini, _ := gemini.NewModel(...)
+wrapped := retry.Wrap(gemini, retry.Config{MaxAttempts: 4, ...})
+agent, _ := llmagent.New(llmagent.Config{Model: wrapped, ...})
+plugins := []*plugin.Plugin{loggingPlugin, globalInstructionPlugin}
+launcher.Execute(ctx, &launcher.Config{
+    AgentLoader: agent.NewSingleLoader(agent),
+    PluginConfig: runner.PluginConfig{Plugins: plugins},
+}, os.Args[1:])
+```

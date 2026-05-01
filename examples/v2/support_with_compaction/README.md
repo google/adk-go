@@ -1,22 +1,24 @@
 # support_with_compaction
 
-A long-running customer-support session that auto-summarizes older
-turns so the model context window doesn't blow up.
+Real Gemini-backed customer-support agent whose long session auto-
+summarizes older turns via `app.EventsCompactionConfig` and a
+Gemini-driven `app.LlmEventSummarizer`.
 
-This is the realistic pattern adk-python's `App.events_compaction_config`
-addresses: on a typical support thread the customer asks 8-12 follow-up
-questions, by which point the raw event history is too large to send
-to the LLM verbatim. The runner periodically replaces older turns with
-a single "compacted" event whose `Actions.Compaction` carries a
-synthesized summary; the contents-builder transparently folds the
-summary in place of the subsumed events.
+## Run
 
-This demo uses an `EventsCompactionConfig` with:
+```
+export GOOGLE_API_KEY=...
+go run ./examples/v2/support_with_compaction/
+```
 
-- `CompactionInterval=2` — compact after every 2 new user invocations.
-- `OverlapSize=1` — keep the previous turn for context continuity.
-- A fake `EventsSummarizer` that produces a deterministic summary so
-  you can read what the model would normally compose.
+This example uses an interactive console loop directly (rather than the
+standard launcher) so it can wire `runner.Config.App` and the
+compaction config in one place. After every 3 user turns the runner
+appends a compaction event whose `Actions.Compaction.CompactedContent`
+holds a Gemini-generated summary; the contents-builder folds the
+summary in place of the subsumed raw events on the next LLM call,
+keeping the prompt size flat as the conversation grows.
 
-After 6 user turns you see 3 compaction events appended to the
-session, each wrapping a window of older raw events.
+To go from this pattern to a launcher-driven agent, lift the
+`runner.Config.App` field onto `cmd/launcher.Config` and wire the same
+`adkapp.App` value through the standard `launcher.Execute` path.

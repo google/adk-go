@@ -31,8 +31,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 
 	"google.golang.org/genai"
@@ -132,35 +130,32 @@ func (s *Scorer) Score(ctx context.Context, c eval.Case, output string) (float64
 	if err != nil {
 		return 0, "", fmt.Errorf("llmjudge: parse response %q: %w", body, err)
 	}
-	return clamp01(score), reason, nil
+	if score < 0 || score > 1 {
+		return 0, "", fmt.Errorf("llmjudge: score %v out of range [0,1] in response %q", score, body)
+	}
+	return score, reason, nil
 }
 
 // parseJudgeResponse extracts {score, reason} from the model's body.
-// The strict JSON shape from DefaultPromptTemplate is preferred; a
-// fallback regex pattern handles models that wrap their JSON in code
-// fences or add explanatory prose despite the instruction.
+// Strict JSON shape from DefaultPromptTemplate is required; the only
+// tolerance is for fenced JSON blocks (```json ... ```) since some
+// models emit those despite the instruction. Mirrors adk-python's
+// final_response_match_v2 strict-or-fail posture.
 func parseJudgeResponse(body string) (float64, string, error) {
 	type judge struct {
 		Score  float64 `json:"score"`
 		Reason string  `json:"reason"`
 	}
-	// Direct JSON parse.
 	var j judge
 	if err := json.Unmarshal([]byte(body), &j); err == nil {
 		return j.Score, j.Reason, nil
 	}
-	// Strip code fences.
 	if stripped := stripCodeFences(body); stripped != body {
 		if err := json.Unmarshal([]byte(stripped), &j); err == nil {
 			return j.Score, j.Reason, nil
 		}
 	}
-	// Last-ditch regex.
-	if score, ok := extractScoreRegex(body); ok {
-		reason := extractReasonRegex(body)
-		return score, reason, nil
-	}
-	return 0, "", errors.New("could not parse JSON or extract score")
+	return 0, "", errors.New("response is not valid JSON of shape {score, reason}")
 }
 
 func stripCodeFences(s string) string {
@@ -172,39 +167,4 @@ func stripCodeFences(s string) string {
 		s = strings.TrimSuffix(s, "```")
 	}
 	return strings.TrimSpace(s)
-}
-
-var (
-	scoreRe  = regexp.MustCompile(`(?i)"?score"?\s*[:=]\s*([0-9]*\.?[0-9]+)`)
-	reasonRe = regexp.MustCompile(`(?i)"?reason"?\s*[:=]\s*"?([^"\n]+)"?`)
-)
-
-func extractScoreRegex(s string) (float64, bool) {
-	m := scoreRe.FindStringSubmatch(s)
-	if len(m) < 2 {
-		return 0, false
-	}
-	v, err := strconv.ParseFloat(m[1], 64)
-	if err != nil {
-		return 0, false
-	}
-	return v, true
-}
-
-func extractReasonRegex(s string) string {
-	m := reasonRe.FindStringSubmatch(s)
-	if len(m) < 2 {
-		return ""
-	}
-	return strings.TrimSpace(m[1])
-}
-
-func clamp01(v float64) float64 {
-	if v < 0 {
-		return 0
-	}
-	if v > 1 {
-		return 1
-	}
-	return v
 }

@@ -333,13 +333,18 @@ func runNodeOnce(
 		// promptly so retry can kick in. The leaked goroutine ends when the
 		// node naturally returns.
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return ErrNodeTimeout
+			// Wrap so callers can match either ErrNodeTimeout (workflow
+			// sentinel) or context.DeadlineExceeded (root cause). Mirrors
+			// adk-python NodeTimeoutError(asyncio.TimeoutError) chain.
+			return fmt.Errorf("%w: %w", ErrNodeTimeout, ctx.Err())
 		}
 		return ctx.Err()
 	}
 }
 
 // ErrNodeTimeout is returned when a node's per-attempt timeout fires.
+// It wraps context.DeadlineExceeded so both sentinels are matchable via
+// errors.Is.
 var ErrNodeTimeout = errors.New("workflow: node timed out")
 
 // shouldRetry reports whether err is retryable under cfg.

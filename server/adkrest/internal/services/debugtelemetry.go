@@ -148,13 +148,12 @@ type spanStore struct {
 	// recordsByEventID stores spans indexed by event id for easy lookup.
 	recordsByEventID map[string][]*spanRecord
 
-	// startSeqCounter is incremented atomically in OnStart and assigned
-	// to spanRecord.startSeq so we have a stable secondary sort key.
+	// startSeqCounter is incremented atomically in OnStart and stamped
+	// directly onto a stub spanRecord so we have a stable secondary
+	// sort key. No separate per-span tracking map: an abandoned span
+	// (started but never ended) leaves a stub in recordsBySpanID, which
+	// is bounded by the LRU eviction path.
 	startSeqCounter atomic.Uint64
-	// startSeqByID maps span ID to the sequence assigned at OnStart time
-	// so OnEnd can transfer it onto the persisted spanRecord. Cleaned up
-	// in OnEnd.
-	startSeqByID map[string]uint64
 }
 
 func newSpanStore(capacity int) (*spanStore, error) {
@@ -162,7 +161,6 @@ func newSpanStore(capacity int) (*spanStore, error) {
 		recordsBySpanID:     make(map[string]*spanRecord),
 		traceIDsBySessionID: make(map[string]map[string]struct{}),
 		recordsByEventID:    make(map[string][]*spanRecord),
-		startSeqByID:        make(map[string]uint64),
 	}
 	var err error
 	store.recordsByTraceID, err = lru.NewWithEvict(capacity, store.evict)
@@ -273,19 +271,26 @@ func (s *spanStore) Export(ctx context.Context, logRecords []sdklog.Record) erro
 	return nil
 }
 
-// OnStart implements [sdktrace.SpanProcessor]. Assigns a monotonic
-// sequence number to the span so OnEnd can use it as a tie-breaker for
-// the chronological ordering returned by the debug-telemetry endpoints.
+// OnStart implements [sdktrace.SpanProcessor]. Stamps the per-store
+// monotonic sequence number directly onto a stub spanRecord. Subsequent
+// OnEnd / Export calls find the stub and fill in the remaining fields.
+// This avoids a side map that could leak entries for abandoned spans.
 func (s *spanStore) OnStart(_ context.Context, span sdktrace.ReadWriteSpan) {
 	seq := s.startSeqCounter.Add(1)
 	spanID := span.SpanContext().SpanID().String()
 	s.mu.Lock()
-	s.startSeqByID[spanID] = seq
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	if existing, ok := s.recordsBySpanID[spanID]; ok {
+		// Already created by an Export call (logs arrive before the span
+		// is closed). Just stamp the seq.
+		existing.startSeq = seq
+		return
+	}
+	s.recordsBySpanID[spanID] = &spanRecord{startSeq: seq}
 }
 
-// OnEnd implements [sdktrace.SpanProcessor]. Persists the span and its
-// pre-assigned startSeq to the store.
+// OnEnd implements [sdktrace.SpanProcessor]. Persists the span fields
+// onto the stub created in OnStart.
 func (s *spanStore) OnEnd(span sdktrace.ReadOnlySpan) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -303,11 +308,6 @@ func (s *spanStore) OnEnd(span sdktrace.ReadOnlySpan) {
 	record.Context = span.SpanContext()
 	record.ParentSpanID = span.Parent().SpanID()
 	record.Attributes = attrs
-
-	if seq, ok := s.startSeqByID[spanID]; ok {
-		record.startSeq = seq
-		delete(s.startSeqByID, spanID)
-	}
 
 	s.updateSpanIndexes(record)
 }
