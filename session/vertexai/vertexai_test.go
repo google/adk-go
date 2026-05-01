@@ -32,15 +32,15 @@ func TestAiplatformToGenaiContent_FunctionCallMapping(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		input        *aiplatformpb.SessionEvent
-		wantID       string
-		wantName     string
-		wantArgKey   string
-		wantArgVal   string
-		isResponse   bool
-		wantRespKey  string
-		wantRespVal  string
+		name        string
+		input       *aiplatformpb.SessionEvent
+		wantID      string
+		wantName    string
+		wantArgKey  string
+		wantArgVal  string
+		isResponse  bool
+		wantRespKey string
+		wantRespVal string
 	}{
 		{
 			name: "FunctionCall preserves ID, Name, and Args",
