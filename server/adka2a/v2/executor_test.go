@@ -22,10 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
-	"github.com/a2aproject/a2a-go/a2asrv"
-	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
@@ -38,19 +37,9 @@ import (
 	"google.golang.org/adk/session"
 )
 
-type testQueue struct {
-	eventqueue.Queue
-	events   []a2a.Event
-	writeErr *eventIndex
-}
+// No testQueue needed anymore.
 
-func (q *testQueue) Write(_ context.Context, e a2a.Event) error {
-	if q.writeErr != nil && q.writeErr.i == len(q.events) {
-		return fmt.Errorf("queue write failed")
-	}
-	q.events = append(q.events, e)
-	return nil
-}
+// testQueue removed.
 
 type testSessionService struct {
 	session.Service
@@ -82,26 +71,16 @@ func newEventReplayAgent(events []*session.Event, failWith error) (agent.Agent, 
 	})
 }
 
-func newInMemoryQueue(t *testing.T) eventqueue.Queue {
-	t.Helper()
-	qm := eventqueue.NewInMemoryManager()
-	q, err := qm.GetOrCreate(t.Context(), "test")
-	if err != nil {
-		t.Fatalf("qm.GetOrCreate() error = %v", err)
-	}
-	return q
-}
-
 type eventIndex struct{ i int }
 
 func TestExecutor_Execute(t *testing.T) {
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
-	hiMsg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "hi"})
-	hiMsgForTask := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
+	hiMsg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))
+	hiMsgForTask := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.NewTextPart("hi"))
 
 	testCases := []struct {
 		name               string
-		request            *a2a.MessageSendParams
+		request            *a2a.SendMessageRequest
 		events             []*session.Event
 		wantEvents         []a2a.Event
 		createSessionFails bool
@@ -111,30 +90,34 @@ func TestExecutor_Execute(t *testing.T) {
 	}{
 		{
 			name:    "no message",
-			request: &a2a.MessageSendParams{},
+			request: &a2a.SendMessageRequest{},
 			wantErr: true,
 		},
 		{
 			name: "malformed data",
-			request: &a2a.MessageSendParams{Message: a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.FilePart{
-				File: a2a.FileBytes{Bytes: "(*_*)"}, // malformed base64
-			})},
+			request: &a2a.SendMessageRequest{
+				Message: a2a.NewMessageForTask(a2a.MessageRoleUser, task, func() *a2a.Part {
+					p := a2a.NewDataPart(make(chan int))
+					p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeFunctionCall)
+					return p
+				}()),
+			},
 			wantErr: true,
 		},
 		{
 			name:               "session setup fails",
-			request:            &a2a.MessageSendParams{Message: hiMsgForTask},
+			request:            &a2a.SendMessageRequest{Message: hiMsgForTask},
 			createSessionFails: true,
 			wantEvents: []a2a.Event{
 				newFinalStatusUpdate(
 					task, a2a.TaskStateFailed,
-					a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.TextPart{Text: "failed to create a session: session creation failed"}),
+					a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.NewTextPart("failed to create a session: session creation failed")),
 				),
 			},
 		},
 		{
 			name:    "success for a new task",
-			request: &a2a.MessageSendParams{Message: hiMsg},
+			request: &a2a.SendMessageRequest{Message: hiMsg},
 			events: []*session.Event{
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
@@ -142,34 +125,34 @@ func TestExecutor_Execute(t *testing.T) {
 			wantEvents: []a2a.Event{
 				a2a.NewSubmittedTask(task, hiMsg),
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
-				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
-				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}),
+				a2a.NewArtifactEvent(task, a2a.NewTextPart("Hello")),
+				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.NewTextPart(", world!")),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
 			},
 		},
 		{
 			name:    "success for existing task",
-			request: &a2a.MessageSendParams{Message: hiMsgForTask},
+			request: &a2a.SendMessageRequest{Message: hiMsgForTask},
 			events: []*session.Event{
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
 			},
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
-				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
-				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}),
+				a2a.NewArtifactEvent(task, a2a.NewTextPart("Hello")),
+				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.NewTextPart(", world!")),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
 			},
 		},
 		{
 			name:            "queue write fails",
-			request:         &a2a.MessageSendParams{Message: hiMsgForTask},
+			request:         &a2a.SendMessageRequest{Message: hiMsgForTask},
 			queueWriteFails: &eventIndex{0},
 			wantErr:         true,
 		},
 		{
 			name:    "llm fails",
-			request: &a2a.MessageSendParams{Message: hiMsgForTask},
+			request: &a2a.SendMessageRequest{Message: hiMsgForTask},
 			events: []*session.Event{
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
 				{LLMResponse: model.LLMResponse{ErrorCode: "418", ErrorMessage: "I'm a teapot"}},
@@ -177,8 +160,8 @@ func TestExecutor_Execute(t *testing.T) {
 			},
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
-				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
-				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}),
+				a2a.NewArtifactEvent(task, a2a.NewTextPart("Hello")),
+				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.NewTextPart(", world!")),
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "418", ErrorMessage: "I'm a teapot"}),
 					map[string]any{ToA2AMetaKey("error_code"): "418"},
@@ -187,23 +170,23 @@ func TestExecutor_Execute(t *testing.T) {
 		},
 		{
 			name:    "agent run fails",
-			request: &a2a.MessageSendParams{Message: hiMsgForTask},
+			request: &a2a.SendMessageRequest{Message: hiMsgForTask},
 			events: []*session.Event{
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
 			},
 			agentRunFails: fmt.Errorf("OOF"),
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
-				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
+				a2a.NewArtifactEvent(task, a2a.NewTextPart("Hello")),
 				newFinalStatusUpdate(
 					task, a2a.TaskStateFailed,
-					a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.TextPart{Text: "agent run failed: OOF"}),
+					a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.NewTextPart("agent run failed: OOF")),
 				),
 			},
 		},
 		{
 			name:    "agent run and queue write fail",
-			request: &a2a.MessageSendParams{Message: hiMsgForTask},
+			request: &a2a.SendMessageRequest{Message: hiMsgForTask},
 			events: []*session.Event{
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
 			},
@@ -212,13 +195,13 @@ func TestExecutor_Execute(t *testing.T) {
 			wantErr:         true,
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
-				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
+				a2a.NewArtifactEvent(task, a2a.NewTextPart("Hello")),
 			},
 		},
 	}
 
 	for _, tc := range testCases {
-		ignoreFields := []cmp.Option{
+		ignoreOptions := []cmp.Option{
 			cmpopts.IgnoreFields(a2a.Message{}, "ID"),
 			cmpopts.IgnoreFields(a2a.Artifact{}, "ID"),
 			cmpopts.IgnoreFields(a2a.TaskStatus{}, "Timestamp"),
@@ -234,23 +217,35 @@ func TestExecutor_Execute(t *testing.T) {
 			sessionService := &testSessionService{Service: session.InMemoryService(), createErr: tc.createSessionFails}
 			runnerConfig := runner.Config{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
 			executor := NewExecutor(ExecutorConfig{RunnerConfig: runnerConfig})
-			queue := &testQueue{Queue: newInMemoryQueue(t), writeErr: tc.queueWriteFails}
-			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: tc.request.Message}
+			var gotEvents []a2a.Event
+			reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID, Message: tc.request.Message}
 			if tc.request.Message != nil && tc.request.Message.TaskID == task.ID {
 				reqCtx.StoredTask = task
 			}
 
-			err = executor.Execute(t.Context(), reqCtx, queue)
-			if err != nil && !tc.wantErr {
-				t.Fatalf("executor.Execute() error = %v, want nil", err)
-			}
-			if err == nil && tc.wantErr {
-				t.Fatalf("executor.Execute() produced %d events, want error", len(queue.events))
-			}
-			if tc.wantEvents != nil {
-				if diff := cmp.Diff(tc.wantEvents, queue.events, ignoreFields...); diff != "" {
-					t.Fatalf("executor.Execute() wrong events (+got,-want):\ngot = %v\nwant = %v\ndiff = %s", queue.events, tc.wantEvents, diff)
+			var executeErr error
+			for event, err := range executor.Execute(t.Context(), reqCtx) {
+				if err != nil {
+					executeErr = err
+					break
 				}
+				if tc.queueWriteFails != nil && tc.queueWriteFails.i == len(gotEvents) {
+					executeErr = fmt.Errorf("queue write failed")
+					break
+				}
+				gotEvents = append(gotEvents, event)
+			}
+			if executeErr != nil {
+				if !tc.wantErr {
+					t.Fatalf("executor.Execute() error = %v, want nil", executeErr)
+				}
+				return
+			}
+			if tc.wantErr {
+				t.Fatalf("executor.Execute() error = nil, want error")
+			}
+			if diff := cmp.Diff(tc.wantEvents, gotEvents, ignoreOptions...); diff != "" {
+				t.Errorf("executor.Execute() produced wrong events (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -259,19 +254,21 @@ func TestExecutor_Execute(t *testing.T) {
 func TestExecutor_Cancel(t *testing.T) {
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
 	executor := NewExecutor(ExecutorConfig{})
-	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
+	reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID}
 
-	queue := &testQueue{Queue: newInMemoryQueue(t)}
+	var gotEvents []a2a.Event
 
 	reqCtx.StoredTask = task
-	err := executor.Cancel(t.Context(), reqCtx, queue)
-	if err != nil {
-		t.Fatalf("executor.Cancel() error = %v, want nil", err)
+	for event, err := range executor.Cancel(t.Context(), reqCtx) {
+		if err != nil {
+			t.Fatalf("executor.Cancel() error = %v, want nil", err)
+		}
+		gotEvents = append(gotEvents, event)
 	}
-	if len(queue.events) != 1 {
-		t.Fatalf("executor.Cancel() produced %d events, want 1", queue.events)
+	if len(gotEvents) != 1 {
+		t.Fatalf("executor.Cancel() produced %d events, want 1", len(gotEvents))
 	}
-	event := queue.events[0].(*a2a.TaskStatusUpdateEvent)
+	event := gotEvents[0].(*a2a.TaskStatusUpdateEvent)
 	if event.Status.State != a2a.TaskStateCanceled {
 		t.Fatalf("executor.Cancel() = %v, want a single TaskStateCanceled update", event)
 	}
@@ -286,20 +283,24 @@ func TestExecutor_SessionReuse(t *testing.T) {
 
 	sessionService := session.InMemoryService()
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
-	req := &a2a.MessageSendParams{Message: a2a.NewMessageForTask(a2a.MessageRoleUser, task)}
-	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: req.Message}
+	req := &a2a.SendMessageRequest{Message: a2a.NewMessageForTask(a2a.MessageRoleUser, task)}
+	reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID, Message: req.Message}
 	runnerConfig := runner.Config{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
 	config := ExecutorConfig{RunnerConfig: runnerConfig}
 	executor := NewExecutor(config)
-	queue := newInMemoryQueue(t)
+	var gotEvents []a2a.Event
 
-	err = executor.Execute(ctx, reqCtx, queue)
-	if err != nil {
-		t.Fatalf("executor.Execute() error = %v, want nil", err)
+	for event, err := range executor.Execute(ctx, reqCtx) {
+		if err != nil {
+			t.Fatalf("executor.Execute() error = %v, want nil", err)
+		}
+		gotEvents = append(gotEvents, event)
 	}
-	err = executor.Execute(ctx, reqCtx, queue)
-	if err != nil {
-		t.Fatalf("executor.Execute() error = %v, want nil", err)
+	for event, err := range executor.Execute(ctx, reqCtx) {
+		if err != nil {
+			t.Fatalf("executor.Execute() error = %v, want nil", err)
+		}
+		gotEvents = append(gotEvents, event)
 	}
 
 	meta := toInvocationMeta(ctx, toInternalRunnerConfig(config.RunnerConfig), reqCtx)
@@ -321,7 +322,7 @@ func TestExecutor_SessionReuse(t *testing.T) {
 func TestExecutor_Callbacks(t *testing.T) {
 	type contextKeyType struct{}
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
-	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
+	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.NewTextPart("hi"))
 
 	testCases := []struct {
 		name               string
@@ -335,24 +336,24 @@ func TestExecutor_Callbacks(t *testing.T) {
 	}{
 		{
 			name: "abort execution",
-			beforeExecution: func(ctx context.Context, reqCtx *a2asrv.RequestContext) (context.Context, error) {
+			beforeExecution: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) (context.Context, error) {
 				return nil, fmt.Errorf("aborted")
 			},
 			wantErr: fmt.Errorf("aborted"),
 		},
 		{
 			name: "instrument context",
-			beforeExecution: func(ctx context.Context, reqCtx *a2asrv.RequestContext) (context.Context, error) {
+			beforeExecution: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) (context.Context, error) {
 				return context.WithValue(ctx, contextKeyType{}, "bar"), nil
 			},
 			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
 				text, _ := ctx.Value(contextKeyType{}).(string)
-				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: text})
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(text))
 				return nil
 			},
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
-				newFinalStatusUpdate(task, a2a.TaskStateCompleted, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "bar"})),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("bar"))),
 			},
 		},
 		{
@@ -364,12 +365,12 @@ func TestExecutor_Callbacks(t *testing.T) {
 				return fmt.Errorf("fail!")
 			},
 			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
-				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "bar"})
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("bar"))
 				return nil
 			},
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
-				newFinalStatusUpdate(task, a2a.TaskStateFailed, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "bar"})),
+				newFinalStatusUpdate(task, a2a.TaskStateFailed, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("bar"))),
 			},
 		},
 		{
@@ -380,10 +381,10 @@ func TestExecutor_Callbacks(t *testing.T) {
 				for range ctx.ReadonlyState().All() {
 					eventCount++
 				}
-				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: fmt.Sprintf("%d events", eventCount)})
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(fmt.Sprintf("%d events", eventCount)))
 				return nil
 			},
-			wantEvents: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateFailed, a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "0 events"}))},
+			wantEvents: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateFailed, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("0 events")))},
 		},
 		{
 			name: "enrich event",
@@ -392,13 +393,13 @@ func TestExecutor_Callbacks(t *testing.T) {
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText(", world!"))},
 			},
 			afterEvent: func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
-				processed.Artifact.Parts = append(processed.Artifact.Parts, a2a.TextPart{Text: " (enriched)"})
+				processed.Artifact.Parts = append(processed.Artifact.Parts, a2a.NewTextPart(" (enriched)"))
 				return nil
 			},
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
-				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}, a2a.TextPart{Text: " (enriched)"}),
-				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}, a2a.TextPart{Text: " (enriched)"}),
+				a2a.NewArtifactEvent(task, a2a.NewTextPart("Hello"), a2a.NewTextPart(" (enriched)")),
+				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.NewTextPart(", world!"), a2a.NewTextPart(" (enriched)")),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
 			},
 		},
@@ -410,15 +411,15 @@ func TestExecutor_Callbacks(t *testing.T) {
 			},
 			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
 				eventCount := ctx.Events().Len()
-				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: fmt.Sprintf("event count = %d", eventCount)})
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(fmt.Sprintf("event count = %d", eventCount)))
 				return nil
 			},
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
-				a2a.NewArtifactEvent(task, a2a.TextPart{Text: "Hello"}),
-				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.TextPart{Text: ", world!"}),
+				a2a.NewArtifactEvent(task, a2a.NewTextPart("Hello")),
+				a2a.NewArtifactUpdateEvent(task, a2a.NewArtifactID(), a2a.NewTextPart(", world!")),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted,
-					a2a.NewMessage(a2a.MessageRoleAgent, a2a.TextPart{Text: "event count = 3"}),
+					a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("event count = 3")),
 				),
 			},
 		},
@@ -439,7 +440,7 @@ func TestExecutor_Callbacks(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		ignoreFields := []cmp.Option{
+		ignoreOptions := []cmp.Option{
 			cmpopts.IgnoreFields(a2a.Message{}, "ID"),
 			cmpopts.IgnoreFields(a2a.Artifact{}, "ID"),
 			cmpopts.IgnoreFields(a2a.TaskStatus{}, "Timestamp"),
@@ -460,19 +461,29 @@ func TestExecutor_Callbacks(t *testing.T) {
 				AfterEventCallback:    tc.afterEvent,
 				AfterExecuteCallback:  tc.afterExecution,
 			})
-			queue := &testQueue{Queue: newInMemoryQueue(t)}
-			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			var gotEvents []a2a.Event
+			reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
 
-			err = executor.Execute(t.Context(), reqCtx, queue)
-			if err != nil && tc.wantErr == nil {
-				t.Fatalf("executor.Execute() error = %v, want nil", err)
+			var executeErr error
+			for event, err := range executor.Execute(t.Context(), reqCtx) {
+				if err != nil {
+					executeErr = err
+					break
+				}
+				gotEvents = append(gotEvents, event)
 			}
-			if err == nil && tc.wantErr != nil {
+			if executeErr != nil {
+				if tc.wantErr == nil {
+					t.Fatalf("executor.Execute() error = %v, want nil", executeErr)
+				}
+				return
+			}
+			if tc.wantErr != nil {
 				t.Fatalf("executor.Execute() error = nil, want %v", tc.wantErr)
 			}
 			if tc.wantEvents != nil {
-				if diff := cmp.Diff(tc.wantEvents, queue.events, ignoreFields...); diff != "" {
-					t.Fatalf("executor.Execute() wrong events (+got,-want):\ngot = %v\nwant = %v\ndiff = %s", queue.events, tc.wantEvents, diff)
+				if diff := cmp.Diff(tc.wantEvents, gotEvents, ignoreOptions...); diff != "" {
+					t.Errorf("executor.Execute() produced wrong events (-want +got):\n%s", diff)
 				}
 			}
 		})
@@ -514,9 +525,9 @@ func TestExecutor_Cancel_AfterEvent(t *testing.T) {
 	defer server.Close()
 
 	card := &a2a.AgentCard{
-		Name:               "test",
-		URL:                server.URL,
-		PreferredTransport: a2a.TransportProtocolJSONRPC,
+		SupportedInterfaces: []*a2a.AgentInterface{
+			a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC),
+		},
 	}
 
 	client, err := a2aclient.NewFromCard(t.Context(), card)
@@ -525,11 +536,9 @@ func TestExecutor_Cancel_AfterEvent(t *testing.T) {
 	}
 
 	msgId := a2a.NewMessageID()
-	blocking := false
-
-	result, sendErr := client.SendMessage(t.Context(), &a2a.MessageSendParams{
-		Message: &a2a.Message{ID: string(msgId), Parts: []a2a.Part{a2a.TextPart{Text: "TEST"}}, Role: a2a.MessageRoleUser},
-		Config:  &a2a.MessageSendConfig{Blocking: &blocking},
+	result, sendErr := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+		Message: &a2a.Message{ID: string(msgId), Parts: a2a.ContentParts{a2a.NewTextPart("TEST")}, Role: a2a.MessageRoleUser},
+		Config:  &a2a.SendMessageConfig{ReturnImmediately: true},
 	})
 
 	if sendErr != nil {
@@ -538,7 +547,7 @@ func TestExecutor_Cancel_AfterEvent(t *testing.T) {
 
 	taskID := result.TaskInfo().TaskID
 
-	task, err := client.CancelTask(t.Context(), &a2a.TaskIDParams{ID: taskID})
+	task, err := client.CancelTask(t.Context(), &a2a.CancelTaskRequest{ID: taskID})
 	if err != nil {
 		t.Fatalf("client.CancelTask() error = %v, want nil", err)
 	}
@@ -558,7 +567,7 @@ func TestExecutor_Cancel_AfterEvent(t *testing.T) {
 
 func TestExecutor_Converters(t *testing.T) {
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
-	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
+	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.NewTextPart("hi"))
 
 	t.Run("A2APartConverter", func(t *testing.T) {
 		t.Run("modify input", func(t *testing.T) {
@@ -578,17 +587,20 @@ func TestExecutor_Converters(t *testing.T) {
 
 			executor := NewExecutor(ExecutorConfig{
 				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
-				A2APartConverter: func(ctx context.Context, evt a2a.Event, part a2a.Part) (*genai.Part, error) {
-					if p, ok := part.(a2a.TextPart); ok && p.Text == "hi" {
+				A2APartConverter: func(ctx context.Context, evt a2a.Event, part *a2a.Part) (*genai.Part, error) {
+					if part.Text() == "hi" {
 						return genai.NewPartFromText("HELLO"), nil
 					}
 					return nil, nil
 				},
 			})
 
-			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
-			if err := executor.Execute(t.Context(), reqCtx, newInMemoryQueue(t)); err != nil {
-				t.Fatalf("executor.Execute() error = %v", err)
+			reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			for event, err := range executor.Execute(t.Context(), reqCtx) {
+				if err != nil {
+					t.Fatalf("executor.Execute() error = %v", err)
+				}
+				_ = event // ignored
 			}
 
 			if receivedText != "HELLO" {
@@ -611,14 +623,17 @@ func TestExecutor_Converters(t *testing.T) {
 
 			executor := NewExecutor(ExecutorConfig{
 				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
-				A2APartConverter: func(ctx context.Context, evt a2a.Event, part a2a.Part) (*genai.Part, error) {
+				A2APartConverter: func(ctx context.Context, evt a2a.Event, part *a2a.Part) (*genai.Part, error) {
 					return nil, nil
 				},
 			})
 
-			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
-			if err := executor.Execute(t.Context(), reqCtx, newInMemoryQueue(t)); err != nil {
-				t.Fatalf("executor.Execute() error = %v", err)
+			reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			for event, err := range executor.Execute(t.Context(), reqCtx) {
+				if err != nil {
+					t.Fatalf("executor.Execute() error = %v", err)
+				}
+				_ = event // ignored
 			}
 
 			if receivedParts != 0 {
@@ -642,32 +657,35 @@ func TestExecutor_Converters(t *testing.T) {
 
 			executor := NewExecutor(ExecutorConfig{
 				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
-				GenAIPartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (a2a.Part, error) {
+				GenAIPartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (*a2a.Part, error) {
 					if part.Text == "world" {
-						return a2a.TextPart{Text: "WORLD"}, nil
+						return a2a.NewTextPart("WORLD"), nil
 					}
-					return a2a.TextPart{Text: part.Text}, nil
+					return a2a.NewTextPart(part.Text), nil
 				},
 			})
 
-			queue := &testQueue{Queue: newInMemoryQueue(t)}
-			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
-			if err := executor.Execute(t.Context(), reqCtx, queue); err != nil {
-				t.Fatalf("executor.Execute() error = %v", err)
+			var gotEvents []a2a.Event
+			reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			for event, err := range executor.Execute(t.Context(), reqCtx) {
+				if err != nil {
+					t.Fatalf("executor.Execute() error = %v", err)
+				}
+				gotEvents = append(gotEvents, event)
 			}
 
 			found := false
-			for _, e := range queue.events {
+			for _, e := range gotEvents {
 				if ae, ok := e.(*a2a.TaskArtifactUpdateEvent); ok {
 					for _, p := range ae.Artifact.Parts {
-						if tp, ok := p.(a2a.TextPart); ok && tp.Text == "WORLD" {
+						if p.Text() == "WORLD" {
 							found = true
 						}
 					}
 				}
 			}
 			if !found {
-				t.Errorf("did not find 'WORLD' in events: %v", queue.events)
+				t.Errorf("did not find 'WORLD' in events: %v", gotEvents)
 			}
 		})
 
@@ -679,18 +697,21 @@ func TestExecutor_Converters(t *testing.T) {
 
 			executor := NewExecutor(ExecutorConfig{
 				RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: session.InMemoryService()},
-				GenAIPartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (a2a.Part, error) {
+				GenAIPartConverter: func(ctx context.Context, evt *session.Event, part *genai.Part) (*a2a.Part, error) {
 					return nil, nil
 				},
 			})
 
-			queue := &testQueue{Queue: newInMemoryQueue(t)}
-			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
-			if err := executor.Execute(t.Context(), reqCtx, queue); err != nil {
-				t.Fatalf("executor.Execute() error = %v", err)
+			var gotEvents []a2a.Event
+			reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			for event, err := range executor.Execute(t.Context(), reqCtx) {
+				if err != nil {
+					t.Fatalf("executor.Execute() error = %v", err)
+				}
+				gotEvents = append(gotEvents, event)
 			}
 
-			for _, e := range queue.events {
+			for _, e := range gotEvents {
 				if ae, ok := e.(*a2a.TaskArtifactUpdateEvent); ok {
 					if len(ae.Artifact.Parts) != 0 {
 						t.Errorf("found %d parts but expected 0", len(ae.Artifact.Parts))
@@ -703,7 +724,7 @@ func TestExecutor_Converters(t *testing.T) {
 
 func TestExecutor_OutputArtifactPerEvent(t *testing.T) {
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
-	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
+	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.NewTextPart("hi"))
 
 	testCases := []struct {
 		name             string
@@ -721,15 +742,15 @@ func TestExecutor_OutputArtifactPerEvent(t *testing.T) {
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 				&a2a.TaskArtifactUpdateEvent{
-					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Hello, "}}},
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.NewTextPart("Hello, ")}},
 					Append:   false, LastChunk: false,
 				},
 				&a2a.TaskArtifactUpdateEvent{
-					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "world!"}}},
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.NewTextPart("world!")}},
 					Append:   true, LastChunk: false,
 				},
 				&a2a.TaskArtifactUpdateEvent{
-					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Hello, world!"}}},
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.NewTextPart("Hello, world!")}},
 					Append:   false, LastChunk: true,
 				},
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
@@ -746,19 +767,19 @@ func TestExecutor_OutputArtifactPerEvent(t *testing.T) {
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 				&a2a.TaskArtifactUpdateEvent{
-					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Agent1: H"}}},
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.NewTextPart("Agent1: H")}},
 					Append:   false, LastChunk: false,
 				},
 				&a2a.TaskArtifactUpdateEvent{
-					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Agent2: W"}}},
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.NewTextPart("Agent2: W")}},
 					Append:   false, LastChunk: false,
 				},
 				&a2a.TaskArtifactUpdateEvent{
-					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Agent1: Hello"}}},
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.NewTextPart("Agent1: Hello")}},
 					Append:   false, LastChunk: true,
 				},
 				&a2a.TaskArtifactUpdateEvent{
-					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "Agent2: World"}}},
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.NewTextPart("Agent2: World")}},
 					Append:   false, LastChunk: true,
 				},
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
@@ -782,16 +803,19 @@ func TestExecutor_OutputArtifactPerEvent(t *testing.T) {
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 				&a2a.TaskArtifactUpdateEvent{
 					Artifact: &a2a.Artifact{
-						Parts: a2a.ContentParts{a2a.TextPart{
-							Text:     "Thinking...",
-							Metadata: map[string]any{ToA2AMetaKey("thought"): true},
-						}},
+						Parts: a2a.ContentParts{
+							func() *a2a.Part {
+								p := a2a.NewTextPart("Thinking...")
+								p.SetMeta(ToA2AMetaKey("thought"), true)
+								return p
+							}(),
+						},
 					},
 					Append: false, LastChunk: false,
 				},
 				&a2a.TaskArtifactUpdateEvent{
 					Artifact: &a2a.Artifact{
-						Parts: a2a.ContentParts{a2a.TextPart{Text: "Done"}},
+						Parts: a2a.ContentParts{a2a.NewTextPart("Done")},
 					},
 					Append: false, LastChunk: true,
 				},
@@ -818,11 +842,12 @@ func TestExecutor_OutputArtifactPerEvent(t *testing.T) {
 				&a2a.TaskArtifactUpdateEvent{
 					Artifact: &a2a.Artifact{
 						Parts: a2a.ContentParts{
-							a2a.TextPart{
-								Text:     "Thought part",
-								Metadata: map[string]any{ToA2AMetaKey("thought"): true},
-							},
-							a2a.TextPart{Text: "Text part"},
+							func() *a2a.Part {
+								p := a2a.NewTextPart("Thought part")
+								p.SetMeta(ToA2AMetaKey("thought"), true)
+								return p
+							}(),
+							a2a.NewTextPart("Text part"),
 						},
 					},
 					Append: false, LastChunk: true,
@@ -841,19 +866,19 @@ func TestExecutor_OutputArtifactPerEvent(t *testing.T) {
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
 				&a2a.TaskArtifactUpdateEvent{
-					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "1.a"}}},
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.NewTextPart("1.a")}},
 					Append:   false, LastChunk: false,
 				},
 				&a2a.TaskArtifactUpdateEvent{
-					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "1.final"}}},
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.NewTextPart("1.final")}},
 					Append:   false, LastChunk: true,
 				},
 				&a2a.TaskArtifactUpdateEvent{
-					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "2.a"}}},
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.NewTextPart("2.a")}},
 					Append:   false, LastChunk: false,
 				},
 				&a2a.TaskArtifactUpdateEvent{
-					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.TextPart{Text: "2.final"}}},
+					Artifact: &a2a.Artifact{Parts: a2a.ContentParts{a2a.NewTextPart("2.final")}},
 					Append:   false, LastChunk: true,
 				},
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
@@ -869,11 +894,14 @@ func TestExecutor_OutputArtifactPerEvent(t *testing.T) {
 				OutputMode:   OutputArtifactPerEvent,
 			})
 
-			queue := &testQueue{Queue: newInMemoryQueue(t)}
-			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+			var gotEvents []a2a.Event
+			reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
 
-			if err := executor.Execute(t.Context(), reqCtx, queue); err != nil {
-				t.Fatalf("executor.Execute() error = %v", err)
+			for event, err := range executor.Execute(t.Context(), reqCtx) {
+				if err != nil {
+					t.Fatalf("executor.Execute() error = %v", err)
+				}
+				gotEvents = append(gotEvents, event)
 			}
 
 			ignoreOptions := []cmp.Option{
@@ -883,15 +911,15 @@ func TestExecutor_OutputArtifactPerEvent(t *testing.T) {
 				cmpopts.IgnoreFields(a2a.TaskStatusUpdateEvent{}, "Metadata", "TaskID", "ContextID"),
 				cmpopts.IgnoreFields(a2a.TaskArtifactUpdateEvent{}, "Metadata", "TaskID", "ContextID"),
 			}
-			if len(queue.events) != len(tc.wantEvents) {
-				t.Fatalf("got %d events, want %d", len(queue.events), len(tc.wantEvents))
+			if len(gotEvents) != len(tc.wantEvents) {
+				t.Fatalf("got %d events, want %d", len(gotEvents), len(tc.wantEvents))
 			}
 
 			authorToID, lastFinishedID := make(map[string]a2a.ArtifactID), make(map[string]a2a.ArtifactID)
 			artifactCount := 0
 
-			for i := range queue.events {
-				got := queue.events[i]
+			for i := range gotEvents {
+				got := gotEvents[i]
 				want := tc.wantEvents[i]
 
 				if diff := cmp.Diff(want, got, ignoreOptions...); diff != "" {
@@ -942,8 +970,8 @@ func TestExecutor_RunnerProvider(t *testing.T) {
 	wantText := "Hello"
 	ctx := t.Context()
 	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
-	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.TextPart{Text: "hi"})
-	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
+	hiMsg := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.NewTextPart("hi"))
+	reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID, Message: hiMsg, StoredTask: task}
 
 	runnerConfig := runner.Config{
 		AppName:        "test",
@@ -952,7 +980,7 @@ func TestExecutor_RunnerProvider(t *testing.T) {
 	}
 	executor := NewExecutor(ExecutorConfig{
 		RunnerConfig: runnerConfig,
-		RunnerProvider: func(pCtx context.Context, pReqCtx *a2asrv.RequestContext, plugin *plugin.Plugin) (RunnerConfig, Runner, error) {
+		RunnerProvider: func(pCtx context.Context, pReqCtx *a2asrv.ExecutorContext, plugin *plugin.Plugin) (RunnerConfig, Runner, error) {
 			return toInternalRunnerConfig(runnerConfig), &testRunner{
 				runFunc: func(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
 					return func(yield func(*session.Event, error) bool) {
@@ -963,16 +991,22 @@ func TestExecutor_RunnerProvider(t *testing.T) {
 		},
 	})
 
-	queue := &testQueue{Queue: newInMemoryQueue(t)}
-	if err := executor.Execute(ctx, reqCtx, queue); err != nil {
-		t.Fatalf("executor.Execute() error = %v", err)
+	var events []a2a.Event
+	for event, err := range executor.Execute(ctx, reqCtx) {
+		if err != nil {
+			t.Fatalf("executor.Execute() error = %v", err)
+		}
+		events = append(events, event)
 	}
-	ta, ok := queue.events[1].(*a2a.TaskArtifactUpdateEvent)
+	if len(events) < 2 {
+		t.Fatalf("executor.Execute() produced %d events, want at least 2", len(events))
+	}
+	ta, ok := events[1].(*a2a.TaskArtifactUpdateEvent)
 	if !ok {
-		t.Fatalf("queue.events[1] = %T, want a2a.TaskArtifactUpdateEvent", queue.events[1])
+		t.Fatalf("queue.events[1] = %T, want a2a.TaskArtifactUpdateEvent", events[1])
 	}
-	if tp, ok := ta.Artifact.Parts[0].(a2a.TextPart); !ok || tp.Text != wantText {
-		t.Fatalf("ta.Artifact.Parts[0] = %v, want text part with text = %q", tp, wantText)
+	if ta.Artifact.Parts[0].Text() != wantText {
+		t.Fatalf("ta.Artifact.Parts[0] = %v, want text part with text = %q", ta.Artifact.Parts[0], wantText)
 	}
 }
 

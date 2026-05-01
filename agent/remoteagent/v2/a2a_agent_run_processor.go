@@ -19,13 +19,13 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/converters"
-	"google.golang.org/adk/server/adka2a"
+	"google.golang.org/adk/server/adka2a/v2"
 	"google.golang.org/adk/session"
 )
 
@@ -40,7 +40,7 @@ type artifactAggregation struct {
 type a2aAgentRunProcessor struct {
 	config        A2AConfig
 	partConverter adka2a.A2APartConverter
-	request       *a2a.MessageSendParams
+	request       *a2a.SendMessageRequest
 
 	// partial event contents emitted before the terminal event
 	aggregations map[a2a.ArtifactID]*artifactAggregation
@@ -48,7 +48,7 @@ type a2aAgentRunProcessor struct {
 	aggregationOrder []a2a.ArtifactID
 }
 
-func newRunProcessor(config A2AConfig, request *a2a.MessageSendParams) *a2aAgentRunProcessor {
+func newRunProcessor(config A2AConfig, request *a2a.SendMessageRequest) *a2aAgentRunProcessor {
 	return &a2aAgentRunProcessor{
 		config:        config,
 		request:       request,
@@ -68,7 +68,7 @@ func (p *a2aAgentRunProcessor) aggregatePartial(ctx agent.InvocationContext, a2a
 	}
 
 	// RemoteAgent event stream finished, emit any aggregated events data we have before the final event
-	if statusUpdate, ok := a2aEvent.(*a2a.TaskStatusUpdateEvent); ok && statusUpdate.Final {
+	if statusUpdate, ok := a2aEvent.(*a2a.TaskStatusUpdateEvent); ok && statusUpdate.Status.State.Terminal() {
 		var events []*session.Event
 		for _, aid := range p.aggregationOrder {
 			if agg, ok := p.aggregations[aid]; ok {
@@ -216,6 +216,9 @@ func (p *a2aAgentRunProcessor) runBeforeA2ARequestCallbacks(ctx agent.Invocation
 }
 
 func (p *a2aAgentRunProcessor) runAfterA2ARequestCallbacks(ctx agent.InvocationContext, resp *session.Event, err error) (*session.Event, error) {
+	if resp == nil && err == nil {
+		return nil, nil
+	}
 	cctx := icontext.NewCallbackContext(ctx)
 	for _, callback := range p.config.AfterRequestCallbacks {
 		if cbEvent, cbErr := callback(cctx, p.request, resp, err); cbEvent != nil || cbErr != nil {

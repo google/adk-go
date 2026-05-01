@@ -17,7 +17,7 @@ package remoteagent
 import (
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
@@ -26,7 +26,7 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/server/adka2a"
+	"google.golang.org/adk/server/adka2a/v2"
 	"google.golang.org/adk/session"
 )
 
@@ -40,7 +40,7 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 		return &a2a.TaskArtifactUpdateEvent{
 			TaskID:    task.ID,
 			ContextID: task.ContextID,
-			Artifact:  &a2a.Artifact{ID: aid, Parts: a2a.ContentParts{a2a.TextPart{Text: text}}},
+			Artifact:  &a2a.Artifact{ID: aid, Parts: a2a.ContentParts{a2a.NewTextPart(text)}},
 			LastChunk: flags.lastChunk,
 			Append:    flags.append,
 		}
@@ -80,9 +80,9 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 		{
 			name: "do not aggregate when ADK events",
 			events: []a2a.Event{
-				withADKPartial(a2a.NewArtifactUpdateEvent(task, aid1, a2a.TextPart{Text: "Hel"}), true),
-				withADKPartial(a2a.NewArtifactUpdateEvent(task, aid1, a2a.TextPart{Text: "lo"}), true),
-				withADKPartial(a2a.NewArtifactUpdateEvent(task, aid1, a2a.TextPart{Text: "Hello"}), false),
+				withADKPartial(a2a.NewArtifactUpdateEvent(task, aid1, a2a.NewTextPart("Hel")), true),
+				withADKPartial(a2a.NewArtifactUpdateEvent(task, aid1, a2a.NewTextPart("lo")), true),
+				withADKPartial(a2a.NewArtifactUpdateEvent(task, aid1, a2a.NewTextPart("Hello")), false),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
 			},
 			wantEvents: []*session.Event{
@@ -95,10 +95,10 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 		{
 			name: "aggregation reset by final snapshot",
 			events: []a2a.Event{
-				a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{Text: "ignore me"}),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("ignore me")),
 				&a2a.Task{
 					ID:        task.ID,
-					Artifacts: []*a2a.Artifact{{Parts: a2a.ContentParts{a2a.TextPart{Text: "done"}}}},
+					Artifacts: []*a2a.Artifact{{Parts: a2a.ContentParts{a2a.NewTextPart("done")}}},
 					Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
 				},
 			},
@@ -110,9 +110,9 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 		{
 			name: "aggregation reset by non-final snapshot",
 			events: []a2a.Event{
-				a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{Text: "foo"}),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("foo")),
 				&a2a.Task{ID: task.ID},
-				a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{Text: "bar"}),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("bar")),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
 			},
 			wantEvents: []*session.Event{
@@ -232,11 +232,12 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 		{
 			name: "thoughts aggregation",
 			events: []a2a.Event{
-				a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{
-					Text:     "thinking...",
-					Metadata: map[string]any{adka2a.ToA2AMetaKey("thought"): true},
-				}),
-				a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{Text: "done"}),
+				func() *a2a.TaskArtifactUpdateEvent {
+					p := a2a.NewTextPart("thinking...")
+					p.SetMeta(adka2a.ToA2AMetaKey("thought"), true)
+					return a2a.NewArtifactUpdateEvent(task, "a1", p)
+				}(),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("done")),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
 			},
 			wantEvents: []*session.Event{
@@ -255,16 +256,16 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 		{
 			name: "interleaved thought and text",
 			events: []a2a.Event{
-				a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{
-					Text:     "thinking1",
+				a2a.NewArtifactUpdateEvent(task, "a1", &a2a.Part{
+					Content:  a2a.Text("thinking1"),
 					Metadata: map[string]any{adka2a.ToA2AMetaKey("thought"): true},
 				}),
-				a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{Text: "text1"}),
-				a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{
-					Text:     "thinking2",
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("text1")),
+				a2a.NewArtifactUpdateEvent(task, "a1", &a2a.Part{
+					Content:  a2a.Text("thinking2"),
 					Metadata: map[string]any{adka2a.ToA2AMetaKey("thought"): true},
 				}),
-				a2a.NewArtifactUpdateEvent(task, "a1", a2a.TextPart{Text: "text2"}),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("text2")),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
 			},
 			wantEvents: []*session.Event{
