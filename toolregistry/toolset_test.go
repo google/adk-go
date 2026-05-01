@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/toolregistry"
 )
@@ -156,6 +157,72 @@ func TestToolset_NoDuplicateAlwaysOnIfReloadedByName(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("list_tools count = %d, want 1", count)
+	}
+}
+
+// TestToolset_ProcessRequest_NoDuplicateOnRepeatPack guards against the
+// regression where ProcessRequest re-packed alwaysOn tools that
+// toolPreprocess had already packed via the f.Tools path, causing
+// PackTool's duplicate check to fire on turn 1 with
+// `toolregistry: tool "list_tools" ProcessRequest: duplicate tool: "list_tools"`.
+func TestToolset_ProcessRequest_NoDuplicateOnRepeatPack(t *testing.T) {
+	reg := toolregistry.New()
+	ts := toolregistry.NewToolset(reg)
+
+	// Simulate the state after toolPreprocess has already packed the
+	// alwaysOn tools: req.Tools already contains list_tools + load_tool.
+	req := &model.LLMRequest{Tools: map[string]any{}}
+	preTools, err := ts.Tools(nil)
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	for _, tt := range preTools {
+		req.Tools[tt.Name()] = tt
+	}
+	wantSize := len(req.Tools)
+	if wantSize == 0 {
+		t.Fatalf("expected pre-packed alwaysOn tools, got 0")
+	}
+
+	if err := ts.ProcessRequest(nil, req); err != nil {
+		t.Fatalf("ProcessRequest: %v", err)
+	}
+	if len(req.Tools) != wantSize {
+		t.Errorf("req.Tools size = %d, want %d (no new packs expected)", len(req.Tools), wantSize)
+	}
+}
+
+// TestToolset_ProcessRequest_PacksMissingTools guards the original
+// 2031e50 behavior: tools the agent's cached f.Tools never picked up
+// (in production: dynamically loaded via load_tool; here: simulated by
+// pre-packing only one alwaysOn) must still reach req.Tools through
+// Toolset.ProcessRequest. The dedup-skip path and the pack path go
+// through the same code, so this also proves the load_tool flow.
+func TestToolset_ProcessRequest_PacksMissingTools(t *testing.T) {
+	reg := toolregistry.New()
+	ts := toolregistry.NewToolset(reg)
+
+	preTools, err := ts.Tools(nil)
+	if err != nil {
+		t.Fatalf("Tools: %v", err)
+	}
+	if len(preTools) < 2 {
+		t.Fatalf("expected >=2 alwaysOn tools, got %d", len(preTools))
+	}
+
+	// Pre-pack only the first alwaysOn tool, leaving the second to be
+	// added by ProcessRequest.
+	first, second := preTools[0], preTools[1]
+	req := &model.LLMRequest{Tools: map[string]any{first.Name(): first}}
+
+	if err := ts.ProcessRequest(nil, req); err != nil {
+		t.Fatalf("ProcessRequest: %v", err)
+	}
+	if _, ok := req.Tools[first.Name()]; !ok {
+		t.Errorf("first tool %q dropped from req.Tools", first.Name())
+	}
+	if _, ok := req.Tools[second.Name()]; !ok {
+		t.Errorf("second tool %q not packed by ProcessRequest", second.Name())
 	}
 }
 

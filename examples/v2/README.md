@@ -37,6 +37,7 @@ The launcher recognizes the same subcommands as `examples/quickstart/`.
 | [`production_llm_agent`](production_llm_agent) | Production-shape Gemini agent: retry + structured logging + global safety instruction | `model/retry`, `plugin/builtin/Logging`, `GlobalInstruction` |
 | [`research_planner`](research_planner) | Planner-driven research agent — model emits Plan/Reasoning/Final-Answer sections | `planner.PlanReAct` |
 | [`qa_evaluator`](qa_evaluator) | Standalone evaluator that runs a Gemini agent against an eval set | `eval.Runner`, `eval/llmjudge` LLM-as-judge scorer |
+| [`content_pipeline`](content_pipeline) | Multi-agent workflow graph: researcher → parallel(drafter, fact-checker) → join → editor | `workflow.New`, `workflow.FromAgent`, `JoinNode`, fan-out/fan-in DAG |
 
 ## Conventions (matching adk-python samples)
 

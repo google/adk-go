@@ -113,6 +113,15 @@ func (t *Toolset) Tools(rctx agent.ReadonlyContext) ([]tool.Tool, error) {
 // The method calls Tools(ctx) to get the currently-loaded set, then
 // delegates ProcessRequest to each tool that implements it (every
 // functiontool.New tool does).
+//
+// Skips tools already present in req.Tools. base_flow runs
+// toolPreprocess (which packs the agent's cached f.Tools) before
+// toolsetPreprocess, so the alwaysOn discovery tools are normally
+// already packed by the time we get here. Without this guard,
+// PackTool's duplicate check fires on the second pack. The dedup is
+// what lets dynamically-loaded tools (absent from cached f.Tools but
+// present in a fresh Tools(ctx) call) still reach req.Tools while the
+// repeat-packs of alwaysOn tools become no-ops.
 func (t *Toolset) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	tools, err := t.Tools(ctx)
 	if err != nil {
@@ -122,6 +131,9 @@ func (t *Toolset) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error 
 		ProcessRequest(ctx tool.Context, req *model.LLMRequest) error
 	}
 	for _, tt := range tools {
+		if _, already := req.Tools[tt.Name()]; already {
+			continue
+		}
 		rp, ok := tt.(processor)
 		if !ok {
 			return fmt.Errorf("toolregistry: tool %q does not implement ProcessRequest", tt.Name())
