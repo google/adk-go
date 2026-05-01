@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -39,8 +39,11 @@ func EventToMessage(event *session.Event) (*a2a.Message, error) {
 	if event == nil {
 		return nil, nil
 	}
-
-	parts, err := ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
+	var eventParts []*genai.Part
+	if event.Content != nil {
+		eventParts = event.Content.Parts
+	}
+	parts, err := ToA2AParts(eventParts, event.LongRunningToolIDs)
 	if err != nil {
 		return nil, fmt.Errorf("part conversion failed: %w", err)
 	}
@@ -58,7 +61,13 @@ func EventToMessage(event *session.Event) (*a2a.Message, error) {
 
 	msg := a2a.NewMessage(role, parts...)
 	msg.Metadata = setActionsMeta(msg.Metadata, event.Actions)
-	maps.Copy(msg.Metadata, eventMeta)
+	if len(eventMeta) > 0 {
+		if msg.Metadata == nil {
+			msg.Metadata = maps.Clone(eventMeta)
+		} else {
+			maps.Copy(msg.Metadata, eventMeta)
+		}
+	}
 	return msg, nil
 }
 
@@ -70,7 +79,7 @@ func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Even
 // ToSessionEventWithParts converts the provided a2a event to session event with custom part converter.
 func ToSessionEventWithParts(ctx agent.InvocationContext, event a2a.Event, partConverter A2APartConverter) (*session.Event, error) {
 	if partConverter == nil {
-		partConverter = func(ctx context.Context, a2aEvent a2a.Event, part a2a.Part) (*genai.Part, error) {
+		partConverter = func(ctx context.Context, a2aEvent a2a.Event, part *a2a.Part) (*genai.Part, error) {
 			return ToGenAIPart(part)
 		}
 	}
@@ -96,7 +105,6 @@ func ToSessionEventWithParts(ctx agent.InvocationContext, event a2a.Event, partC
 		if len(event.Content.Parts) == 0 {
 			return nil, nil
 		}
-		event.LongRunningToolIDs = getLongRunningToolIDs(v.Artifact.Parts, event.Content.Parts)
 		if err := processA2AMeta(v, event); err != nil {
 			return nil, fmt.Errorf("metadata processing failed: %w", err)
 		}
@@ -112,25 +120,30 @@ func ToSessionEventWithParts(ctx agent.InvocationContext, event a2a.Event, partC
 		return event, nil
 
 	case *a2a.TaskStatusUpdateEvent:
-		if v.Final {
+		if v.Status.State.Terminal() || v.Status.State == a2a.TaskStateInputRequired {
 			return finalTaskStatusUpdateToEvent(ctx, v, partConverter)
 		}
 		if v.Status.Message == nil {
 			return nil, nil
 		}
 		event, err := messageToEvent(ctx, v.Status.Message, partConverter)
-		event.TurnComplete = false
 		if err != nil {
 			return nil, fmt.Errorf("custom metadata conversion failed: %w", err)
 		}
+		if event == nil {
+			return nil, nil
+		}
+		event.TurnComplete = false
 		if len(event.Content.Parts) == 0 {
 			return nil, nil
 		}
 		if err := processA2AMeta(v, event); err != nil {
 			return nil, fmt.Errorf("metadata processing failed: %w", err)
 		}
-		for _, part := range event.Content.Parts {
-			part.Thought = true
+		for _, p := range event.Content.Parts {
+			if p.Text != "" {
+				p.Thought = true
+			}
 		}
 		event.Partial = true
 		return event, nil
@@ -209,13 +222,14 @@ func artifactUpdateEventToEvent(ctx agent.InvocationContext, update *a2a.TaskArt
 		return nil, nil
 	}
 
-	parts, err := convertParts(ctx, update, update.Artifact.Parts, partConverter)
+	allParts, err := convertParts(ctx, update, update.Artifact.Parts, partConverter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert artifact parts: %w", err)
 	}
 
 	event := NewRemoteAgentEvent(ctx)
-	event.Content = genai.NewContentFromParts(parts, genai.RoleModel)
+	event.Content = genai.NewContentFromParts(filterNilParts(allParts), genai.RoleModel)
+	event.LongRunningToolIDs = getLongRunningToolIDs(update.Artifact.Parts, allParts)
 	return event, nil
 }
 
@@ -227,25 +241,26 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task, partConverter A2AP
 	var parts []*genai.Part
 	var longRunningToolIDs []string
 	for _, artifact := range task.Artifacts {
-		artifactParts, err := convertParts(ctx, task, artifact.Parts, partConverter)
+		allParts, err := convertParts(ctx, task, artifact.Parts, partConverter)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert artifact parts: %w", err)
 		}
 
-		lrtIDs := getLongRunningToolIDs(artifact.Parts, artifactParts)
+		lrtIDs := getLongRunningToolIDs(artifact.Parts, allParts)
 
-		parts = append(parts, artifactParts...)
+		parts = append(parts, filterNilParts(allParts)...)
 		longRunningToolIDs = append(longRunningToolIDs, lrtIDs...)
 	}
 
 	event := NewRemoteAgentEvent(ctx)
 
 	if task.Status.Message != nil {
-		msgParts, err := convertParts(ctx, task, task.Status.Message.Parts, partConverter)
+		allMsgParts, err := convertParts(ctx, task, task.Status.Message.Parts, partConverter)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert status message parts: %w", err)
 		}
-		lrtIDs := getLongRunningToolIDs(task.Status.Message.Parts, msgParts)
+		lrtIDs := getLongRunningToolIDs(task.Status.Message.Parts, allMsgParts)
+		msgParts := filterNilParts(allMsgParts)
 
 		if task.Status.State == a2a.TaskStateFailed && len(msgParts) == 1 && msgParts[0].Text != "" {
 			event.ErrorMessage = msgParts[0].Text
@@ -279,14 +294,15 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 
 	event := NewRemoteAgentEvent(ctx)
 
-	var parts []*genai.Part
+	var allParts []*genai.Part
 	var err error
 	if update.Status.Message != nil {
-		parts, err = convertParts(ctx, update, update.Status.Message.Parts, partConverter)
+		allParts, err = convertParts(ctx, update, update.Status.Message.Parts, partConverter)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert status message parts: %w", err)
 		}
 	}
+	parts := filterNilParts(allParts)
 	if update.Status.State == a2a.TaskStateFailed && len(parts) == 1 && parts[0].Text != "" {
 		event.ErrorMessage = parts[0].Text
 	} else if len(parts) > 0 {
@@ -296,20 +312,22 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 		return nil, fmt.Errorf("metadata processing failed: %w", err)
 	}
 	if update.Status.Message != nil {
-		event.LongRunningToolIDs = getLongRunningToolIDs(update.Status.Message.Parts, parts)
+		event.LongRunningToolIDs = getLongRunningToolIDs(update.Status.Message.Parts, allParts)
 	}
 	event.TurnComplete = true
 	return event, nil
 }
 
-func getLongRunningToolIDs(parts []a2a.Part, converted []*genai.Part) []string {
+func getLongRunningToolIDs(parts []*a2a.Part, converted []*genai.Part) []string {
 	var ids []string
 	for i, part := range parts {
-		dp, ok := part.(a2a.DataPart)
-		if !ok {
+		if part.Data() == nil {
 			continue
 		}
-		if longRunning, ok := dp.Metadata[a2aDataPartMetaLongRunningKey].(bool); ok && longRunning {
+		if longRunning, ok := part.Meta()[a2aDataPartMetaLongRunningKey].(bool); ok && longRunning {
+			if i >= len(converted) || converted[i] == nil {
+				continue
+			}
 			fnCall := converted[i]
 			if fnCall.FunctionCall == nil {
 				// TODO(yarolegovich): log a warning
@@ -339,16 +357,28 @@ func toEventActions(meta map[string]any) session.EventActions {
 	return result
 }
 
-func convertParts(ctx agent.InvocationContext, event a2a.Event, parts []a2a.Part, partConverter A2APartConverter) ([]*genai.Part, error) {
-	var genaiParts []*genai.Part
-	for _, part := range parts {
+// convertParts converts A2A parts to GenAI parts using the provided converter.
+// The returned slice preserves index alignment with the input: parts for which
+// the converter returns nil are kept as nil entries. Use filterNilParts to get a
+// dense slice suitable for content creation.
+func convertParts(ctx agent.InvocationContext, event a2a.Event, parts []*a2a.Part, partConverter A2APartConverter) ([]*genai.Part, error) {
+	genaiParts := make([]*genai.Part, len(parts))
+	for i, part := range parts {
 		genaiPart, err := partConverter(ctx, event, part)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert part: %w", err)
 		}
-		if genaiPart != nil {
-			genaiParts = append(genaiParts, genaiPart)
-		}
+		genaiParts[i] = genaiPart
 	}
 	return genaiParts, nil
+}
+
+func filterNilParts(parts []*genai.Part) []*genai.Part {
+	var result []*genai.Part
+	for _, p := range parts {
+		if p != nil {
+			result = append(result, p)
+		}
+	}
+	return result
 }

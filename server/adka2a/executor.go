@@ -12,27 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package adka2a allows exposing ADK agents via A2A.
+//
+// Deprecated: Use google.golang.org/adk/server/adka2a/v2 instead.
 package adka2a
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"iter"
-	"slices"
+	"maps"
 
 	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2asrv"
 	"github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	"github.com/a2aproject/a2a-go/log"
-
+	a2av2 "github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
+	a2asrvv2 "github.com/a2aproject/a2a-go/v2/a2asrv"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	iremoteagent "google.golang.org/adk/internal/agent/remoteagent"
-	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
+	v2 "google.golang.org/adk/server/adka2a/v2"
 	"google.golang.org/adk/session"
 )
 
@@ -55,31 +57,28 @@ type A2APartConverter func(ctx context.Context, a2aEvent a2a.Event, part a2a.Par
 // nil returns are considered intentionally dropped parts.
 type GenAIPartConverter func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (a2a.Part, error)
 
-// A2AExecutionCleanupCallback is a callback which will be called after an execution or cancellatio has completed or failed.
+// A2AExecutionCleanupCallback is a callback which will be called after an execution or cancellation has completed or failed.
 type A2AExecutionCleanupCallback func(ctx context.Context, reqCtx *a2asrv.RequestContext, subAgentCards []*a2a.AgentCard, result a2a.SendMessageResult, cause error)
 
 // OutputMode controls how artifacts are produced.
-type OutputMode string
+type OutputMode = v2.OutputMode
 
 // Runner is an interface matching [runner.Runner] API.
 // It exists to let users use custom runner implementations with A2A agent executor.
-type Runner interface {
-	// Run runs the agent for the given user input, yielding events from agents.
-	Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error]
-}
+type Runner = v2.Runner
 
 // RunnerProvider is a [Runner] factory function. The provided plugin must be installed in the returned [Runner] for
 // callbacks taking [ExecutorContext] to work correctly.
-type RunnerProvider func(ctx context.Context, reqCtx *a2asrv.RequestContext, plugin *plugin.Plugin) (RunnerConfig, Runner, error)
+type RunnerProvider = v2.RunnerProvider
 
 const (
 	// OutputArtifactPerRun produces a single artifact per [runner.Runner.Run].
-	OutputArtifactPerRun OutputMode = "artifact-per-run"
+	OutputArtifactPerRun OutputMode = v2.OutputArtifactPerRun
 	// OutputArtifactPerEvent produces an artifact per non-partial [session.Event].
 	// While agent is emitting events an artifact is build incrementally (parts are append to it).
 	// The next partial event replaces accumulated contents and seals the artifact, meaning
 	// the next event from this agent will create a new artifact.
-	OutputArtifactPerEvent OutputMode = "artifact-per-event"
+	OutputArtifactPerEvent OutputMode = v2.OutputArtifactPerEvent
 )
 
 // RunnerConfig is part of the runner configuration executor code depends on.
@@ -87,7 +86,7 @@ const (
 type RunnerConfig struct {
 	// AppName is the name of the application used in [session.Service] keys and A2A event metadata.
 	AppName string
-	// Agent is the root agent. It isued
+	// Agent is the root agent.
 	Agent agent.Agent
 	// SessionService is the session service to use.
 	SessionService session.Service
@@ -139,311 +138,242 @@ type ExecutorConfig struct {
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
 
-// Executor invokes an ADK agent and translates [session.Event]-s to [a2a.Event]-s according to the following rules:
-//   - If the input doesn't reference any a2a.Task, produce a Task with TaskStateSubmitted state.
-//   - Right before runner.Runner invocation, produce TaskStatusUpdateEvent with TaskStateWorking.
-//   - For every session.Event produce a TaskArtifactUpdateEvent{Append=true} with transformed parts.
-//   - After the last session.Event is processed produce an empty TaskArtifactUpdateEvent{Append=true} with LastChunk=true,
-//     if at least one artifact update was produced during the run.
-//   - If there was an LLMResponse with non-zero error code, produce a TaskStatusUpdateEvent with TaskStateFailed.
-//     Else if there was an LLMResponse with long-running tool invocation, produce a TaskStatusUpdateEvent with TaskStateInputRequired.
-//     Else produce a TaskStatusUpdateEvent with TaskStateCompleted.
+// Executor is the legacy AgentExecutor implementation which delegates to [v2.Executor].
 type Executor struct {
-	config ExecutorConfig
+	impl *v2.Executor
 }
 
 // NewExecutor creates an initialized [Executor] instance.
 func NewExecutor(config ExecutorConfig) *Executor {
-	if config.RunnerProvider == nil {
-		config.RunnerProvider = newDefaultRunnerProvider(config.RunnerConfig)
+	v1Config := v2.ExecutorConfig{
+		RunnerConfig:   config.RunnerConfig,
+		RunnerProvider: config.RunnerProvider,
+		RunConfig:      config.RunConfig,
+		OutputMode:     v2.OutputMode(config.OutputMode),
 	}
-	return &Executor{config: config}
+
+	if config.BeforeExecuteCallback != nil {
+		v1Config.BeforeExecuteCallback = func(ctx context.Context, execCtx *a2asrvv2.ExecutorContext) (context.Context, error) {
+			legacyReqCtx := toRequestContext(execCtx)
+			newCtx, err := config.BeforeExecuteCallback(ctx, legacyReqCtx)
+			if err != nil {
+				return nil, err
+			}
+			v1ExecCtx, err := toExecutorContext(newCtx, legacyReqCtx)
+			if err != nil {
+				return nil, err
+			}
+			*execCtx = *v1ExecCtx
+			return newCtx, nil
+		}
+	}
+
+	if config.AfterEventCallback != nil {
+		v1Config.AfterEventCallback = func(ctx v2.ExecutorContext, adkEvent *session.Event, a2aEvent *a2av2.TaskArtifactUpdateEvent) error {
+			legacyEvent := a2av0.FromV1TaskArtifactUpdateEvent(a2aEvent)
+			if err := config.AfterEventCallback(executorContextWrapper{ctx}, adkEvent, legacyEvent); err != nil {
+				return err
+			}
+			newV1Event, err := a2av0.ToV1Event(legacyEvent)
+			if err != nil {
+				return err
+			}
+			if converted, ok := newV1Event.(*a2av2.TaskArtifactUpdateEvent); ok {
+				*a2aEvent = *converted
+			}
+			return nil
+		}
+	}
+
+	if config.AfterExecuteCallback != nil {
+		v1Config.AfterExecuteCallback = func(ctx v2.ExecutorContext, finalEvent *a2av2.TaskStatusUpdateEvent, err error) error {
+			legacyEvent := a2av0.FromV1TaskStatusUpdateEvent(finalEvent)
+			if cbErr := config.AfterExecuteCallback(executorContextWrapper{ctx}, legacyEvent, err); cbErr != nil {
+				return cbErr
+			}
+			newV1Event, convErr := a2av0.ToV1Event(legacyEvent)
+			if convErr != nil {
+				return convErr
+			}
+			if converted, ok := newV1Event.(*a2av2.TaskStatusUpdateEvent); ok {
+				*finalEvent = *converted
+			}
+			return nil
+		}
+	}
+
+	if config.A2APartConverter != nil {
+		v1Config.A2APartConverter = func(ctx context.Context, a2aEvent a2av2.Event, part *a2av2.Part) (*genai.Part, error) {
+			legacyEvent, err := a2av0.FromV1Event(a2aEvent)
+			if err != nil {
+				return nil, fmt.Errorf("a2a event conversion failed: %w", err)
+			}
+			return config.A2APartConverter(ctx, legacyEvent, a2av0.FromV1Part(part))
+		}
+	}
+
+	if config.GenAIPartConverter != nil {
+		v1Config.GenAIPartConverter = func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (*a2av2.Part, error) {
+			legacyPart, err := config.GenAIPartConverter(ctx, adkEvent, part)
+			if err != nil {
+				return nil, err
+			}
+			return a2av0.ToV1Part(legacyPart), nil
+		}
+	}
+
+	if config.A2AExecutionCleanupCallback != nil {
+		v1Config.A2AExecutionCleanupCallback = func(ctx context.Context, execCtx *a2asrvv2.ExecutorContext, subAgentCards []*a2av2.AgentCard, result a2av2.SendMessageResult, cause error) {
+			legacyReqCtx := toRequestContext(execCtx)
+			legacySubAgentCards := make([]*a2a.AgentCard, len(subAgentCards))
+			for i, card := range subAgentCards {
+				legacySubAgentCards[i] = a2av0.FromV1AgentCard(card)
+			}
+			legacyEvent, err := a2av0.FromV1Event(result)
+			if err != nil {
+				log.Warn(ctx, "failed to convert SendMessageResult to legacy format", "error", err)
+				config.A2AExecutionCleanupCallback(ctx, legacyReqCtx, legacySubAgentCards, nil, errors.Join(cause, fmt.Errorf("SendMessageResult conversion failed: %w", err)))
+				return
+			}
+			legacyResult, ok := legacyEvent.(a2a.SendMessageResult)
+			if !ok {
+				log.Warn(ctx, "conversion result is not a2a.SendMessageResult", "type", fmt.Sprintf("%T", legacyResult))
+				config.A2AExecutionCleanupCallback(ctx, legacyReqCtx, legacySubAgentCards, nil, errors.Join(cause, fmt.Errorf("conversion result is not a2a.SendMessageResult: %T", legacyEvent)))
+				return
+			}
+			config.A2AExecutionCleanupCallback(ctx, legacyReqCtx, legacySubAgentCards, legacyResult, cause)
+		}
+	}
+
+	return &Executor{impl: v2.NewExecutor(v1Config)}
 }
 
 func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
-	msg := reqCtx.Message
-	if msg == nil {
-		return fmt.Errorf("message not provided")
-	}
-	content, err := toGenAIContent(ctx, msg, e.config.A2APartConverter)
+	execCtx, err := toExecutorContext(ctx, reqCtx)
 	if err != nil {
-		return fmt.Errorf("a2a message conversion failed: %w", err)
-	}
-
-	executorPlugin, err := newExecutorPlugin()
-	if err != nil {
-		return fmt.Errorf("failed to create a2a-executor plugin: %w", err)
-	}
-
-	cfg, r, err := e.config.RunnerProvider(ctx, reqCtx, executorPlugin.plugin)
-	if err != nil {
-		return fmt.Errorf("failed to create a runner: %w", err)
-	}
-
-	if e.config.BeforeExecuteCallback != nil {
-		ctx, err = e.config.BeforeExecuteCallback(ctx, reqCtx)
-		if err != nil {
-			return fmt.Errorf("before execute: %w", err)
-		}
-	}
-
-	if event, err := handleInputRequired(reqCtx, content); event != nil || err != nil {
-		if err != nil {
-			return err
-		}
-		return queue.Write(ctx, event)
-	}
-
-	if reqCtx.StoredTask == nil {
-		event := a2a.NewSubmittedTask(reqCtx, msg)
-		if err := queue.Write(ctx, event); err != nil {
-			return fmt.Errorf("failed to submit a task: %w", err)
-		}
-	}
-
-	invocationMeta := toInvocationMeta(ctx, cfg, reqCtx)
-
-	err = e.prepareSession(ctx, cfg, invocationMeta)
-	if err != nil {
-		event := toTaskFailedUpdateEvent(reqCtx, err, invocationMeta.eventMeta)
-		execCtx := newExecutorContext(ctx, invocationMeta, executorPlugin, content)
-		return e.writeFinalTaskStatus(execCtx, queue, nil, event, err)
-	}
-
-	event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateWorking, nil)
-	event.Metadata = invocationMeta.eventMeta
-	if err := queue.Write(ctx, event); err != nil {
 		return err
 	}
 
-	var artifactTransform eventToArtifactTransform
-	if e.config.OutputMode == OutputArtifactPerEvent {
-		artifactTransform = newArtifactMaker(reqCtx)
-	} else {
-		artifactTransform = newLegacyArtifactMaker(reqCtx)
+	for event, err := range e.impl.Execute(ctx, execCtx) {
+		if err != nil {
+			return err
+		}
+		legacyEvent, lErr := a2av0.FromV1Event(event)
+		if lErr != nil {
+			return lErr
+		}
+		if err := queue.Write(ctx, legacyEvent); err != nil {
+			return err
+		}
 	}
 
-	processor := newEventProcessor(reqCtx, invocationMeta, e.config.GenAIPartConverter, artifactTransform)
-	executorContext := newExecutorContext(ctx, invocationMeta, executorPlugin, content)
-	return e.process(executorContext, r, processor, queue)
+	return nil
 }
 
 func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, queue eventqueue.Queue) error {
-	event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil)
-	event.Final = true
-	return queue.Write(ctx, event)
-}
-
-func (e *Executor) Cleanup(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error) {
-	cfg, err := e.createRunnerConfig(ctx, reqCtx)
+	v2ReqCtx, err := toExecutorContext(ctx, reqCtx)
 	if err != nil {
-		log.Error(ctx, "failed to create runner config", err)
-		return
+		return err
 	}
 
-	remoteSubagents := findRemoteSubagents(cfg.Agent)
-
-	// If task was in input-required and got successfully cancelled - run the cleanup logic
-	if reqCtx.StoredTask != nil && reqCtx.StoredTask.Status.State == a2a.TaskStateInputRequired {
-		if task, ok := result.(*a2a.Task); ok && task.Status.State == a2a.TaskStateCanceled && reqCtx.Message == nil {
-			if err := e.cancelChildInputRequiredTasks(ctx, reqCtx, reqCtx.StoredTask.Status, remoteSubagents); err != nil {
-				log.Warn(ctx, "failed to cancel subagent tasks waiting for input", "cause", err)
-			}
-		}
-	}
-
-	if e.config.A2AExecutionCleanupCallback != nil {
-		subAgentCards := make([]*a2a.AgentCard, len(remoteSubagents))
-		for i, subagent := range remoteSubagents {
-			subAgentCards[i] = subagent.config.AgentCard
-		}
-		e.config.A2AExecutionCleanupCallback(ctx, reqCtx, subAgentCards, result, cause)
-	} else if cause != nil {
-		if reqCtx.Message != nil {
-			log.Warn(ctx, "execution failed", "error", cause)
-		} else {
-			log.Warn(ctx, "cancellation failed", "error", cause)
-		}
-	}
-}
-
-func (e *Executor) cancelChildInputRequiredTasks(ctx context.Context, reqCtx *a2asrv.RequestContext, status a2a.TaskStatus, subagents []remoteAgent) error {
-	if len(subagents) == 0 {
-		return nil
-	}
-
-	cfg, err := e.createRunnerConfig(ctx, reqCtx)
-	if err != nil {
-		return fmt.Errorf("failed to create runner config: %w", err)
-	}
-
-	meta := toInvocationMeta(ctx, cfg, reqCtx)
-	getSessionResponse, err := cfg.SessionService.Get(ctx, &session.GetRequest{
-		AppName:   cfg.AppName,
-		UserID:    meta.userID,
-		SessionID: meta.sessionID,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to get a session: %w", err)
-	}
-
-	tasksToCancel, err := getSubagentTasksToCancel(ctx, status, getSessionResponse.Session)
-	if err != nil {
-		return fmt.Errorf("subtask search failed: %w", err)
-	}
-	if len(tasksToCancel) == 0 {
-		return nil
-	}
-
-	var failures []error
-	clientCache := map[string]*a2aclient.Client{}
-	for _, task := range tasksToCancel { // TODO(yarolegovich): run in parallel (how to limit?)
-		remoteSubagentIdx := slices.IndexFunc(subagents, func(a remoteAgent) bool { return a.agent.Name() == task.agentName })
-		if remoteSubagentIdx < 0 {
-			continue
-		}
-		remoteSubagent := subagents[remoteSubagentIdx]
-		client, ok := clientCache[task.agentName]
-		if !ok {
-			_, newClient, err := iremoteagent.CreateA2AClient(ctx, remoteSubagent.config)
-			if err != nil {
-				failures = append(failures, fmt.Errorf("failed to create A2A client: %w", err))
-				continue
-			}
-			clientCache[task.agentName] = newClient
-			client = newClient
-		}
-		_, err = client.CancelTask(ctx, &a2a.TaskIDParams{ID: task.taskID})
+	for event, err := range e.impl.Cancel(ctx, v2ReqCtx) {
 		if err != nil {
-			failures = append(failures, fmt.Errorf("failed to cancel task: %w", err))
-			continue
+			return err
 		}
-	}
-	for _, client := range clientCache {
-		if err := client.Destroy(); err != nil {
-			failures = append(failures, fmt.Errorf("client destroy failed: %w", err))
+		legacyEvent, lErr := a2av0.FromV1Event(event)
+		if lErr != nil {
+			return lErr
 		}
-	}
-	return errors.Join(failures...)
-}
-
-// Processing failures should be delivered as Task failed events. An error is returned from this method if an event write fails.
-func (e *Executor) process(ctx ExecutorContext, r Runner, processor *eventProcessor, q eventqueue.Queue) error {
-	meta := processor.meta
-	for adkEvent, adkErr := range r.Run(ctx, meta.userID, meta.sessionID, ctx.UserContent(), e.config.RunConfig) {
-		if adkErr != nil {
-			event := processor.makeTaskFailedEvent(fmt.Errorf("agent run failed: %w", adkErr), nil)
-			return e.writeFinalTaskStatus(ctx, q, processor.makeFinalArtifactUpdate(), event, adkErr)
+		if err := queue.Write(ctx, legacyEvent); err != nil {
+			return err
 		}
-
-		a2aEvent, pErr := processor.process(ctx, adkEvent)
-		if pErr == nil && a2aEvent != nil && e.config.AfterEventCallback != nil {
-			pErr = e.config.AfterEventCallback(ctx, adkEvent, a2aEvent)
-		}
-
-		if pErr != nil {
-			event := processor.makeTaskFailedEvent(fmt.Errorf("processor failed: %w", pErr), adkEvent)
-			return e.writeFinalTaskStatus(ctx, q, processor.makeFinalArtifactUpdate(), event, pErr)
-		}
-
-		if a2aEvent != nil {
-			if err := q.Write(ctx, a2aEvent); err != nil {
-				return fmt.Errorf("event write failed: %w", err)
-			}
-		}
-	}
-
-	finalStatus := processor.makeFinalStatusUpdate()
-	return e.writeFinalTaskStatus(ctx, q, processor.makeFinalArtifactUpdate(), finalStatus, nil)
-}
-
-func (e *Executor) writeFinalTaskStatus(
-	ctx ExecutorContext,
-	queue eventqueue.Queue,
-	partialReset *a2a.TaskArtifactUpdateEvent,
-	status *a2a.TaskStatusUpdateEvent,
-	err error,
-) error {
-	if e.config.AfterExecuteCallback != nil {
-		if err = e.config.AfterExecuteCallback(ctx, status, err); err != nil {
-			return fmt.Errorf("after execute: %w", err)
-		}
-	}
-	if partialReset != nil {
-		if err := queue.Write(ctx, partialReset); err != nil {
-			return fmt.Errorf("partial artifact update write failed: %w", err)
-		}
-	}
-	if err := queue.Write(ctx, status); err != nil {
-		return fmt.Errorf("%q state update event write failed: %w", status.Status.State, err)
-	}
-	return nil
-}
-
-func (e *Executor) prepareSession(ctx context.Context, cfg RunnerConfig, meta invocationMeta) error {
-	service := cfg.SessionService
-
-	_, err := service.Get(ctx, &session.GetRequest{
-		AppName:   cfg.AppName,
-		UserID:    meta.userID,
-		SessionID: meta.sessionID,
-	})
-	if err == nil {
-		return nil
-	}
-
-	_, err = service.Create(ctx, &session.CreateRequest{
-		AppName:   cfg.AppName,
-		UserID:    meta.userID,
-		SessionID: meta.sessionID,
-		State:     make(map[string]any),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create a session: %w", err)
 	}
 
 	return nil
 }
 
-func (e *Executor) createRunnerConfig(ctx context.Context, reqCtx *a2asrv.RequestContext) (RunnerConfig, error) {
-	executorPlugin, err := newExecutorPlugin()
-	if err != nil {
-		return RunnerConfig{}, fmt.Errorf("failed to create a2a-plugin: %w", err)
-	}
-	cfg, _, err := e.config.RunnerProvider(ctx, reqCtx, executorPlugin.plugin)
-	if err != nil {
-		return RunnerConfig{}, fmt.Errorf("runner provider failed: %w", err)
-	}
-	return cfg, nil
+// ExecutorContext provides read-only information about the context of an A2A agent execution.
+// An execution starts with a user message and ends with a task in a terminal or input-required state.
+type ExecutorContext interface {
+	context.Context
+
+	// SessionID is ID of the session. It is passed as contextID in A2A request.
+	SessionID() string
+	// UserID is ID of the user who made the request. The information is either extracted from [a2asrv.CallContext]
+	// or derived from session ID for unauthenticated requests.
+	UserID() string
+	// AgentName is the name of the root agent.
+	AgentName() string
+	// ReadonlyState provides a view of the current session state.
+	ReadonlyState() session.ReadonlyState
+	// Events provides a readonly view of the current session events.
+	Events() session.Events
+	// UserContent is a converted A2A message which is passed to runner.Run.
+	UserContent() *genai.Content
+	// RequestContext contains information about the original A2A Request, the current task and related tasks.
+	RequestContext() *a2asrv.RequestContext
 }
 
-func newDefaultRunnerProvider(baseConfig runner.Config) RunnerProvider {
-	return func(ctx context.Context, reqCtx *a2asrv.RequestContext, plugin *plugin.Plugin) (RunnerConfig, Runner, error) {
-		if baseConfig.Agent == nil {
-			return RunnerConfig{}, nil, fmt.Errorf("runner.Config.Agent is not provided")
-		}
-		if baseConfig.Agent == nil {
-			return RunnerConfig{}, nil, fmt.Errorf("runner.Config.SessionService is not provided")
-		}
+type executorContextWrapper struct {
+	v2.ExecutorContext
+}
 
-		cfg := baseConfig
-		cfg.PluginConfig.Plugins = append(slices.Clone(cfg.PluginConfig.Plugins), plugin)
-		r, err := runner.New(cfg)
+func (w executorContextWrapper) RequestContext() *a2asrv.RequestContext {
+	v1Ctx := w.ExecutorContext.RequestContext()
+	return toRequestContext(v1Ctx)
+}
+
+func toRequestContext(ctx *a2asrvv2.ExecutorContext) *a2asrv.RequestContext {
+	var relatedTasks []*a2a.Task
+	for _, t := range ctx.RelatedTasks {
+		relatedTasks = append(relatedTasks, a2av0.FromV1Task(t))
+	}
+
+	return &a2asrv.RequestContext{
+		ContextID:    ctx.ContextID,
+		Message:      a2av0.FromV1Message(ctx.Message),
+		StoredTask:   a2av0.FromV1Task(ctx.StoredTask),
+		TaskID:       a2a.TaskID(ctx.TaskID),
+		Metadata:     ctx.Metadata,
+		RelatedTasks: relatedTasks,
+	}
+}
+
+func toExecutorContext(ctx context.Context, reqCtx *a2asrv.RequestContext) (*a2asrvv2.ExecutorContext, error) {
+	var user *a2asrvv2.User
+	reqMeta := make(map[string][]string)
+	if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
+		user = &a2asrvv2.User{Name: callCtx.User.Name(), Authenticated: callCtx.User.Authenticated()}
+		maps.Insert(reqMeta, callCtx.RequestMeta().List())
+	}
+
+	storedTask, err := a2av0.ToV1Task(reqCtx.StoredTask)
+	if err != nil {
+		return nil, err
+	}
+
+	var relatedTasks []*a2av2.Task
+	for _, t := range reqCtx.RelatedTasks {
+		v1Task, err := a2av0.ToV1Task(t)
 		if err != nil {
-			return RunnerConfig{}, nil, err
+			return nil, err
 		}
-		return toInternalRunnerConfig(cfg), &defaultRunner{runner: r}, nil
+		relatedTasks = append(relatedTasks, v1Task)
 	}
-}
 
-type defaultRunner struct {
-	runner *runner.Runner
-}
+	v1Msg, err := a2av0.ToV1Message(reqCtx.Message)
+	if err != nil {
+		return nil, err
+	}
 
-func (r *defaultRunner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
-	return r.runner.Run(ctx, userID, sessionID, msg, cfg)
-}
-
-func toInternalRunnerConfig(cfg runner.Config) RunnerConfig {
-	return RunnerConfig{Agent: cfg.Agent, AppName: cfg.AppName, SessionService: cfg.SessionService}
+	return &a2asrvv2.ExecutorContext{
+		ContextID:     reqCtx.ContextID,
+		Message:       v1Msg,
+		TaskID:        a2av2.TaskID(reqCtx.TaskID),
+		StoredTask:    storedTask,
+		RelatedTasks:  relatedTasks,
+		Metadata:      reqCtx.Metadata,
+		User:          user,
+		ServiceParams: a2asrvv2.NewServiceParams(reqMeta),
+	}, nil
 }

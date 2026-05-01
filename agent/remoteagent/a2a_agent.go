@@ -12,22 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package remoteagent allows using a remote ADK agents.
+//
+// Deprecated: Use google.golang.org/adk/agent/remoteagent/v2 instead.
 package remoteagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
-	"log"
-	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
+	"github.com/a2aproject/a2a-go/log"
+	v2a2a "github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	agentinternal "google.golang.org/adk/internal/agent"
-	iremoteagent "google.golang.org/adk/internal/agent/remoteagent"
+	v2 "google.golang.org/adk/agent/remoteagent/v2"
 	"google.golang.org/adk/server/adka2a"
 	"google.golang.org/adk/session"
 )
@@ -125,236 +131,201 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 		return nil, fmt.Errorf("either AgentCard or AgentCardSource must be provided")
 	}
 
-	remoteAgent := &a2aAgent{
-		serverConfig: &iremoteagent.A2AServerConfig{
-			AgentCard:          cfg.AgentCard,
-			AgentCardSource:    cfg.AgentCardSource,
-			CardResolveOptions: cfg.CardResolveOptions,
-			ClientFactory:      cfg.ClientFactory,
-		},
-	}
-	agent, err := agent.New(agent.Config{
+	v1Cfg := v2.A2AConfig{
 		Name:                 cfg.Name,
 		Description:          cfg.Description,
 		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
-		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return remoteAgent.run(ic, cfg)
-		},
-	})
+	}
+
+	if cfg.AgentCard != nil {
+		v1Cfg.AgentCard = a2av0.ToV1AgentCard(cfg.AgentCard)
+	} else if cfg.AgentCardSource != "" {
+		source := cfg.AgentCardSource
+		resolveOpts := cfg.CardResolveOptions
+		v1Cfg.AgentCardProvider = func(ctx context.Context) (*v2a2a.AgentCard, error) {
+			v0Card, err := agentcard.DefaultResolver.Resolve(ctx, source, resolveOpts...)
+			if err != nil {
+				return nil, err
+			}
+			return a2av0.ToV1AgentCard(v0Card), nil
+		}
+	}
+
+	if cfg.MessageSendConfig != nil {
+		req, err := a2av0.ToV1SendMessageRequest(&a2a.MessageSendParams{Config: cfg.MessageSendConfig})
+		if err != nil {
+			return nil, fmt.Errorf("MessageSendConfig conversion failed: %w", err)
+		}
+		v1Cfg.MessageSendConfig = req.Config
+	}
+
+	if cfg.ClientFactory != nil {
+		v1Cfg.ClientProvider = func(ctx context.Context, card *v2a2a.AgentCard) (v2.A2AClient, error) {
+			legacyCard := a2av0.FromV1AgentCard(card)
+			client, err := cfg.ClientFactory.CreateFromCard(ctx, legacyCard)
+			if err != nil {
+				return nil, err
+			}
+			return &compatClient{client: client}, nil
+		}
+	}
+
+	if cfg.Converter != nil {
+		v1Cfg.Converter = func(ctx agent.InvocationContext, req *v2a2a.SendMessageRequest, event v2a2a.Event, err error) (*session.Event, error) {
+			legacyReq := a2av0.FromV1SendMessageRequest(req)
+			var legacyEvent a2a.Event
+			if event != nil {
+				var convErr error
+				legacyEvent, convErr = a2av0.FromV1Event(event)
+				if convErr != nil {
+					return nil, errors.Join(fmt.Errorf("a2a event conversion failed: %w", convErr), err)
+				}
+			}
+			return cfg.Converter(ctx, legacyReq, legacyEvent, err)
+		}
+	}
+
+	if cfg.BeforeRequestCallbacks != nil {
+		v1Cfg.BeforeRequestCallbacks = make([]v2.BeforeA2ARequestCallback, 0, len(cfg.BeforeRequestCallbacks))
+		for _, cb := range cfg.BeforeRequestCallbacks {
+			v1Cfg.BeforeRequestCallbacks = append(v1Cfg.BeforeRequestCallbacks, func(ctx agent.CallbackContext, req *v2a2a.SendMessageRequest) (*session.Event, error) {
+				legacyReq := a2av0.FromV1SendMessageRequest(req)
+				resp, err := cb(ctx, legacyReq)
+				if resp != nil || err != nil { // short-circuit, no need to convert the request back
+					return resp, err
+				}
+				// callback pass-through request modifications
+				v1Req, convErr := a2av0.ToV1SendMessageRequest(legacyReq)
+				if convErr != nil {
+					return nil, convErr
+				}
+				*req = *v1Req
+				return nil, nil
+			})
+		}
+	}
+
+	if cfg.AfterRequestCallbacks != nil {
+		v1Cfg.AfterRequestCallbacks = make([]v2.AfterA2ARequestCallback, 0, len(cfg.AfterRequestCallbacks))
+		for _, cb := range cfg.AfterRequestCallbacks {
+			v1Cfg.AfterRequestCallbacks = append(v1Cfg.AfterRequestCallbacks, func(ctx agent.CallbackContext, req *v2a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error) {
+				legacyReq := a2av0.FromV1SendMessageRequest(req)
+				newResp, newErr := cb(ctx, legacyReq, resp, err)
+				if newResp != nil || newErr != nil { // short-circuit, no need to convert the request back
+					return newResp, newErr
+				}
+				// callback pass-through request modifications
+				v1Req, convErr := a2av0.ToV1SendMessageRequest(legacyReq)
+				if convErr != nil {
+					return nil, convErr
+				}
+				*req = *v1Req
+				return nil, nil
+			})
+		}
+	}
+
+	if cfg.A2APartConverter != nil {
+		v1Cfg.A2APartConverter = func(ctx context.Context, a2aEvent v2a2a.Event, part *v2a2a.Part) (*genai.Part, error) {
+			legacyEvent, convErr := a2av0.FromV1Event(a2aEvent)
+			if convErr != nil {
+				return nil, convErr
+			}
+			return cfg.A2APartConverter(ctx, legacyEvent, a2av0.FromV1Part(part))
+		}
+	}
+
+	if cfg.GenAIPartConverter != nil {
+		v1Cfg.GenAIPartConverter = func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (*v2a2a.Part, error) {
+			legacyPart, err := cfg.GenAIPartConverter(ctx, adkEvent, part)
+			if err != nil {
+				return nil, err
+			}
+			return a2av0.ToV1Part(legacyPart), nil
+		}
+	}
+
+	if cfg.RemoteTaskCleanupCallback != nil {
+		v1Cfg.RemoteTaskCleanupCallback = func(ctx context.Context, card *v2a2a.AgentCard, client v2.A2AClient, taskInfo v2a2a.TaskInfo, cause error) {
+			legacyCard := a2av0.FromV1AgentCard(card)
+			legacyTaskInfo := a2a.TaskInfo{TaskID: a2a.TaskID(taskInfo.TaskID), ContextID: taskInfo.ContextID}
+
+			if cc, ok := client.(*compatClient); ok {
+				cfg.RemoteTaskCleanupCallback(ctx, legacyCard, cc.client, legacyTaskInfo, cause)
+				return
+			}
+
+			log.Warn(ctx, "client is not an instance of compatClient, fallback to creating a new client", "type", fmt.Sprintf("%T", client))
+
+			factory := cfg.ClientFactory
+			if factory == nil {
+				factory = a2aclient.NewFactory()
+			}
+			legacyClient, err := factory.CreateFromCard(ctx, legacyCard)
+			if err != nil {
+				log.Warn(ctx, "RemoteTaskCleanupCallback: failed to create legacy client", "error", err)
+				return
+			}
+			defer func() {
+				if err := legacyClient.Destroy(); err != nil {
+					log.Warn(ctx, "RemoteTaskCleanupCallback: failed to destroy a legacy client", "error", err)
+				}
+			}()
+			cfg.RemoteTaskCleanupCallback(ctx, legacyCard, legacyClient, legacyTaskInfo, cause)
+		}
+	}
+
+	return v2.NewA2A(v1Cfg)
+}
+
+type compatClient struct {
+	client *a2aclient.Client
+}
+
+func (s *compatClient) SendMessage(ctx context.Context, req *v2a2a.SendMessageRequest) (v2a2a.SendMessageResult, error) {
+	legacyResp, err := s.client.SendMessage(ctx, a2av0.FromV1SendMessageRequest(req))
 	if err != nil {
 		return nil, err
 	}
-
-	internalAgent, ok := agent.(agentinternal.Agent)
-	if !ok {
-		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
+	v1Event, err := a2av0.ToV1Event(legacyResp)
+	if err != nil {
+		return nil, err
 	}
-	state := agentinternal.Reveal(internalAgent)
-	state.AgentType = agentinternal.TypeRemoteAgent
-	state.Config = iremoteagent.RemoteAgentState{A2A: remoteAgent.serverConfig}
-
-	return agent, nil
+	res, ok := v1Event.(v2a2a.SendMessageResult)
+	if !ok {
+		return nil, fmt.Errorf("converted event does not implement SendMessageResult: %T", v1Event)
+	}
+	return res, nil
 }
 
-type a2aAgent struct {
-	serverConfig *iremoteagent.A2AServerConfig
-}
-
-func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		agentCard, client, err := iremoteagent.CreateA2AClient(ctx, a.serverConfig)
-		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("client creation failed: %w", err)), nil)
-			return
-		}
-		defer destroy(client)
-
-		msg, err := newMessage(ctx, cfg)
-		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("message creation failed: %w", err)), nil)
-			return
-		}
-
-		req := &a2a.MessageSendParams{Message: msg, Config: cfg.MessageSendConfig}
-
-		processor := newRunProcessor(cfg, req)
-
-		if bcbResp, bcbErr := processor.runBeforeA2ARequestCallbacks(ctx); bcbResp != nil || bcbErr != nil {
-			if acbResp, acbErr := processor.runAfterA2ARequestCallbacks(ctx, bcbResp, bcbErr); acbResp != nil || acbErr != nil {
-				yield(acbResp, acbErr)
-			} else {
-				yield(bcbResp, bcbErr)
-			}
-			return
-		}
-
-		if len(msg.Parts) == 0 {
-			resp := adka2a.NewRemoteAgentEvent(ctx)
-			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, resp, err); cbResp != nil || cbErr != nil {
-				yield(cbResp, cbErr)
-			} else {
-				yield(resp, nil)
-			}
-			return
-		}
-
-		var lastErr error
-		yieldErr := func(err error) bool {
-			lastErr = err
-			return yield(nil, err)
-		}
-
-		var lastEvent a2a.Event
-		defer func() {
-			err := lastErr
-			if err == nil && ctx.Err() != nil {
-				err = context.Cause(ctx)
-			}
-			cleanupRemoteTask(ctx, cfg, agentCard, client, lastEvent, err)
-		}()
-
-		processEvent := func(a2aEvent a2a.Event, a2aErr error) bool {
-			if a2aEvent != nil {
-				lastEvent = a2aEvent
-			}
-
-			var err error
-			var event *session.Event
-			if cfg.Converter != nil {
-				event, err = cfg.Converter(ctx, req, a2aEvent, a2aErr)
-			} else {
-				event, err = processor.convertToSessionEvent(ctx, a2aEvent, a2aErr)
-			}
-
-			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, event, err); cbResp != nil || cbErr != nil {
-				if cbErr != nil {
-					return yieldErr(cbErr)
-				}
-				event = cbResp
-				err = nil
-			}
-
+func (s *compatClient) SendStreamingMessage(ctx context.Context, req *v2a2a.SendMessageRequest) iter.Seq2[v2a2a.Event, error] {
+	return func(yield func(v2a2a.Event, error) bool) {
+		for legacyEvent, err := range s.client.SendStreamingMessage(ctx, a2av0.FromV1SendMessageRequest(req)) {
 			if err != nil {
-				return yieldErr(err)
+				yield(nil, err)
+				return
 			}
-
-			if event != nil { // an event might be skipped
-				for _, toEmit := range processor.aggregatePartial(ctx, a2aEvent, event) {
-					if !yield(toEmit, nil) {
-						return false
-					}
-				}
+			v1Event, convErr := a2av0.ToV1Event(legacyEvent)
+			if convErr != nil {
+				yield(nil, convErr)
+				return
 			}
-			return true
-		}
-
-		if ctx.RunConfig().StreamingMode == agent.StreamingModeNone {
-			a2aEvent, a2aErr := client.SendMessage(ctx, req)
-			processEvent(a2aEvent, a2aErr)
-			return
-		}
-
-		for a2aEvent, a2aErr := range client.SendStreamingMessage(ctx, req) {
-			if !processEvent(a2aEvent, a2aErr) {
+			if !yield(v1Event, nil) {
 				return
 			}
 		}
 	}
 }
 
-func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, client *a2aclient.Client, lastEvent a2a.Event, cause error) {
-	if lastEvent == nil {
-		return
-	}
-	taskID := lastEvent.TaskInfo().TaskID
-	if taskID == "" {
-		return
-	}
-	if _, ok := lastEvent.(*a2a.Message); ok {
-		return
-	}
-	var state a2a.TaskState
-	if tu, ok := lastEvent.(*a2a.TaskStatusUpdateEvent); ok {
-		state = tu.Status.State
-	}
-	if t, ok := lastEvent.(*a2a.Task); ok {
-		state = t.Status.State
-	}
-	if state.Terminal() {
-		return
-	}
-
-	ctx = context.WithoutCancel(ctx)
-
-	if cfg.RemoteTaskCleanupCallback != nil {
-		cfg.RemoteTaskCleanupCallback(ctx, card, client, lastEvent.TaskInfo(), cause)
-		return
-	}
-
-	if state == a2a.TaskStateInputRequired && cause == nil {
-		return
-	}
-	cancelCtx, cancelTimeout := context.WithTimeout(ctx, 5*time.Second)
-	defer cancelTimeout()
-	_, err := client.CancelTask(cancelCtx, &a2a.TaskIDParams{ID: taskID})
+func (s *compatClient) CancelTask(ctx context.Context, req *v2a2a.CancelTaskRequest) (*v2a2a.Task, error) {
+	legacyResp, err := s.client.CancelTask(ctx, a2av0.FromV1CancelTaskRequest(req))
 	if err != nil {
-		log.Printf("failed to cancel task %s: %v", taskID, err)
+		return nil, err
 	}
+	return a2av0.ToV1Task(legacyResp)
 }
 
-func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error) {
-	events := ctx.Session().Events()
-	if userFnCall := getUserFunctionCallAt(events, events.Len()-1); userFnCall != nil {
-		event := userFnCall.response
-		parts, err := convertParts(ctx, cfg, event)
-		if err != nil {
-			return nil, err
-		}
-		msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
-		msg.TaskID = userFnCall.taskID
-		msg.ContextID = userFnCall.contextID
-		return msg, nil
-	}
-
-	parts, contextID := toMissingRemoteSessionParts(ctx, events, cfg)
-	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
-	msg.ContextID = contextID
-	return msg, nil
-}
-
-func toErrorEvent(ctx agent.InvocationContext, err error) *session.Event {
-	event := adka2a.NewRemoteAgentEvent(ctx)
-	event.ErrorMessage = err.Error()
-	event.CustomMetadata = map[string]any{adka2a.ToADKMetaKey("error"): err.Error()}
-	event.TurnComplete = true
-	return event
-}
-
-func convertParts(ctx agent.InvocationContext, cfg A2AConfig, event *session.Event) ([]a2a.Part, error) {
-	parts := make([]a2a.Part, 0, len(event.Content.Parts))
-	if cfg.GenAIPartConverter != nil {
-		for _, part := range event.Content.Parts {
-			cp, err := cfg.GenAIPartConverter(ctx, event, part)
-			if err != nil {
-				return nil, err
-			}
-			if cp != nil {
-				parts = append(parts, cp)
-			}
-		}
-	} else {
-		var err error
-		parts, err = adka2a.ToA2AParts(event.Content.Parts, event.LongRunningToolIDs)
-		if err != nil {
-			return nil, fmt.Errorf("event part conversion failed: %w", err)
-		}
-	}
-	return parts, nil
-}
-
-func destroy(client *a2aclient.Client) {
-	if err := client.Destroy(); err != nil {
-		log.Printf("failed to destroy client: %v", err)
-	}
+func (s *compatClient) Destroy() error {
+	return s.client.Destroy()
 }
