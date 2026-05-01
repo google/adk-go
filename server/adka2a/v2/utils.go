@@ -15,7 +15,7 @@
 package adka2a
 
 import (
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 
 	"google.golang.org/adk/agent"
 	iagent "google.golang.org/adk/internal/agent"

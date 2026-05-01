@@ -17,7 +17,7 @@ package adka2a
 import (
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 )
@@ -25,51 +25,59 @@ import (
 func TestPartsTwoWayConversion(t *testing.T) {
 	testCases := []struct {
 		name                   string
-		a2aPart                a2a.Part
+		a2aPart                *a2a.Part
 		genaiPart              *genai.Part
 		longRunningFunctionIDs []string
 	}{
 		{
 			name:      "text",
-			a2aPart:   a2a.TextPart{Text: "Hello"},
+			a2aPart:   a2a.NewTextPart("Hello"),
 			genaiPart: &genai.Part{Text: "Hello"},
 		},
 		{
-			name:      "thought",
-			a2aPart:   a2a.TextPart{Text: "Hello", Metadata: map[string]any{ToA2AMetaKey("thought"): true}},
+			name: "thought",
+			a2aPart: func() *a2a.Part {
+				p := a2a.NewTextPart("Hello")
+				p.SetMeta(ToA2AMetaKey("thought"), true)
+				return p
+			}(),
 			genaiPart: &genai.Part{Text: "Hello", Thought: true},
 		},
 		{
 			name: "file uri",
-			a2aPart: a2a.FilePart{
-				File: a2a.FileURI{URI: "ftp://cat.com", FileMeta: a2a.FileMeta{MimeType: "image/jpeg", Name: "cat.jpeg"}},
-			},
+			a2aPart: func() *a2a.Part {
+				p := a2a.NewFileURLPart("ftp://cat.com", "image/jpeg")
+				p.Filename = "cat.jpeg"
+				return p
+			}(),
 			genaiPart: &genai.Part{
 				FileData: &genai.FileData{FileURI: "ftp://cat.com", MIMEType: "image/jpeg", DisplayName: "cat.jpeg"},
 			},
 		},
 		{
 			name: "file bytes",
-			a2aPart: a2a.FilePart{
-				File: a2a.FileBytes{Bytes: "/w==", FileMeta: a2a.FileMeta{MimeType: "image/jpeg", Name: "cat.jpeg"}},
-			},
+			a2aPart: func() *a2a.Part {
+				p := a2a.NewRawPart([]byte{0xfF})
+				p.MediaType = "image/jpeg"
+				p.Filename = "cat.jpeg"
+				return p
+			}(),
 			genaiPart: &genai.Part{
 				InlineData: &genai.Blob{Data: []byte{0xfF}, MIMEType: "image/jpeg", DisplayName: "cat.jpeg"},
 			},
 		},
 		{
 			name: "function call",
-			a2aPart: a2a.DataPart{
-				Data: map[string]any{
+			a2aPart: func() *a2a.Part {
+				p := a2a.NewDataPart(map[string]any{
 					"id":   "get_weather",
 					"args": map[string]any{"city": "Warsaw"},
 					"name": "GetWeather",
-				},
-				Metadata: map[string]any{
-					a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
-					a2aDataPartMetaLongRunningKey: false,
-				},
-			},
+				})
+				p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeFunctionCall)
+				p.SetMeta(a2aDataPartMetaLongRunningKey, false)
+				return p
+			}(),
 			genaiPart: &genai.Part{
 				FunctionCall: &genai.FunctionCall{
 					ID:   "get_weather",
@@ -80,17 +88,16 @@ func TestPartsTwoWayConversion(t *testing.T) {
 		},
 		{
 			name: "long running function call",
-			a2aPart: a2a.DataPart{
-				Data: map[string]any{
+			a2aPart: func() *a2a.Part {
+				p := a2a.NewDataPart(map[string]any{
 					"id":   "get_weather",
 					"args": map[string]any{"city": "Warsaw"},
 					"name": "GetWeather",
-				},
-				Metadata: map[string]any{
-					a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
-					a2aDataPartMetaLongRunningKey: true,
-				},
-			},
+				})
+				p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeFunctionCall)
+				p.SetMeta(a2aDataPartMetaLongRunningKey, true)
+				return p
+			}(),
 			genaiPart: &genai.Part{
 				FunctionCall: &genai.FunctionCall{
 					ID:   "get_weather",
@@ -102,15 +109,16 @@ func TestPartsTwoWayConversion(t *testing.T) {
 		},
 		{
 			name: "function response",
-			a2aPart: a2a.DataPart{
-				Data: map[string]any{
+			a2aPart: func() *a2a.Part {
+				p := a2a.NewDataPart(map[string]any{
 					"id":         "get_weather",
 					"scheduling": string(genai.FunctionResponseSchedulingInterrupt),
 					"response":   map[string]any{"temperature": "7C"},
 					"name":       "GetWeather",
-				},
-				Metadata: map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionResponse},
-			},
+				})
+				p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeFunctionResponse)
+				return p
+			}(),
 			genaiPart: &genai.Part{
 				FunctionResponse: &genai.FunctionResponse{
 					ID:         "get_weather",
@@ -122,10 +130,11 @@ func TestPartsTwoWayConversion(t *testing.T) {
 		},
 		{
 			name: "code execution result",
-			a2aPart: a2a.DataPart{
-				Data:     map[string]any{"outcome": string(genai.OutcomeOK), "output": "4"},
-				Metadata: map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeCodeExecResult},
-			},
+			a2aPart: func() *a2a.Part {
+				p := a2a.NewDataPart(map[string]any{"outcome": string(genai.OutcomeOK), "output": "4"})
+				p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeCodeExecResult)
+				return p
+			}(),
 			genaiPart: &genai.Part{
 				CodeExecutionResult: &genai.CodeExecutionResult{
 					Outcome: genai.OutcomeOK,
@@ -135,10 +144,11 @@ func TestPartsTwoWayConversion(t *testing.T) {
 		},
 		{
 			name: "code execution result",
-			a2aPart: a2a.DataPart{
-				Data:     map[string]any{"code": "print(2+2)", "language": string(genai.LanguagePython)},
-				Metadata: map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeCodeExecutableCode},
-			},
+			a2aPart: func() *a2a.Part {
+				p := a2a.NewDataPart(map[string]any{"code": "print(2+2)", "language": string(genai.LanguagePython)})
+				p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeCodeExecutableCode)
+				return p
+			}(),
 			genaiPart: &genai.Part{
 				ExecutableCode: &genai.ExecutableCode{
 					Code:     "print(2+2)",
@@ -154,11 +164,11 @@ func TestPartsTwoWayConversion(t *testing.T) {
 			if err != nil {
 				t.Errorf("toA2AParts() error = %v, want nil", err)
 			}
-			if diff := cmp.Diff([]a2a.Part{tc.a2aPart}, toA2A); diff != "" {
+			if diff := cmp.Diff([]*a2a.Part{tc.a2aPart}, toA2A); diff != "" {
 				t.Errorf("toA2AParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", toA2A, tc.a2aPart, diff)
 			}
 
-			toGenAI, err := ToGenAIParts([]a2a.Part{tc.a2aPart})
+			toGenAI, err := ToGenAIParts([]*a2a.Part{tc.a2aPart})
 			if err != nil {
 				t.Errorf("toGenAIParts() error = %v, want nil", err)
 			}
@@ -170,10 +180,10 @@ func TestPartsTwoWayConversion(t *testing.T) {
 }
 
 func TestPartsDataPartConversionRoundTrip(t *testing.T) {
-	a2aPart := a2a.DataPart{Data: map[string]any{"arbitrary": "data"}}
+	a2aPart := a2a.NewDataPart(map[string]any{"arbitrary": "data"})
 	wantGenAI := &genai.Part{InlineData: &genai.Blob{Data: []byte("<a2a_datapart_json>{\"arbitrary\":\"data\"}</a2a_datapart_json>"), MIMEType: "text/plain"}}
 
-	gotGenAI, err := ToGenAIParts([]a2a.Part{a2aPart})
+	gotGenAI, err := ToGenAIParts([]*a2a.Part{a2aPart})
 	if err != nil {
 		t.Fatalf("toGenAI() error = %v, want nil", err)
 	}
@@ -185,7 +195,7 @@ func TestPartsDataPartConversionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("toA2AParts() error = %v, want nil", err)
 	}
-	if diff := cmp.Diff([]a2a.Part{a2aPart}, gotbackA2A); diff != "" {
+	if diff := cmp.Diff([]*a2a.Part{a2aPart}, gotbackA2A); diff != "" {
 		t.Fatalf("toA2AParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotbackA2A, a2aPart, diff)
 	}
 }

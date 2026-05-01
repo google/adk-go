@@ -53,6 +53,7 @@ linters:
         # Changes to the default config:
         - -QF1001 # Exclude "Apply De Morgan's law"
         - -QF1008 # Exclude "Omit embedded fields from selector expression"
+        - -SA1019 # Exclude to keep the old a2a compatibility, can remove for ADK v2
   
   exclusions:
     rules:

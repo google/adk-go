@@ -12,5 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package remoteagent allows to use a remote ADK agents.
-package remoteagent
+// Package adka2a allows exposing ADK agents via A2A.
+package adka2a
