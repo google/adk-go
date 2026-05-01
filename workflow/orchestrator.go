@@ -109,6 +109,13 @@ func (w *Workflow) runSequential(
 					cancel()
 					goto drain
 				}
+				if c.waiting {
+					// Node paused awaiting external input. Skip
+					// successor scheduling. Phase 4 resume re-enters the
+					// node with ResumeInputs populated.
+					spawn()
+					continue
+				}
 				state.complete(c.nodeName, c.outputs, c.route)
 				spawn()
 			case <-ctx.Done():
@@ -157,6 +164,14 @@ type nodeCompletion struct {
 	outputs  []any
 	route    *Route
 	err      error
+
+	// waiting reports whether the node is paused awaiting external
+	// input (it emitted a RequestInput but produced no Output). When
+	// true, the orchestrator skips queueing successors so downstream
+	// nodes don't run with stale or zero inputs. Resume re-runs the
+	// node with ResumeInputs populated, at which point it can yield
+	// its real output.
+	waiting bool
 }
 
 // eventOrErr is the value type of the events channel.
@@ -269,11 +284,25 @@ func (w *Workflow) runNode(
 		}
 	}
 
+	// A node that emitted a RequestInput interrupt without producing an
+	// Output is WAITING — successors must not run until resume injects
+	// the user's response. Mirrors adk-python's NodeStatus.WAITING.
+	waiting := false
+	for _, ev := range emitted {
+		if ev != nil && ev.Actions.NodeInfo != nil && ev.Actions.NodeInfo.Interrupt {
+			if len(outputs) == 0 {
+				waiting = true
+			}
+			break
+		}
+	}
+
 	completions <- nodeCompletion{
 		nodeName: ref.name,
 		outputs:  outputs,
 		route:    gotRoute,
 		err:      err,
+		waiting:  waiting,
 	}
 }
 

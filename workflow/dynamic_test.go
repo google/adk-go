@@ -185,7 +185,9 @@ func TestWorkflow_HITL_RequestInputEmitsLongRunningTool(t *testing.T) {
 	}
 }
 
-// hitlNode is a minimal node that invokes em.RequestInput then returns.
+// hitlNode demonstrates the real-world HITL pattern: emit RequestInput
+// on the first invocation; on resume read the user's response via
+// ResumeInput and emit it as the node's Output so successors can run.
 type hitlNode struct {
 	workflow.Base
 	interruptID string
@@ -193,6 +195,9 @@ type hitlNode struct {
 }
 
 func (h *hitlNode) RunImpl(ctx *workflow.NodeContext, _ any, em workflow.EventEmitter) error {
+	if v, ok := ctx.ResumeInput(h.interruptID); ok {
+		return em.Output(v)
+	}
 	return em.RequestInput(workflow.RequestInput{
 		Prompt:      h.prompt,
 		InterruptID: h.interruptID,
