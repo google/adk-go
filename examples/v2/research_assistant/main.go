@@ -36,24 +36,36 @@ import (
 	"google.golang.org/adk/toolregistry"
 )
 
-const instruction = `You are a research assistant.
+const instruction = `You are a research assistant backed by a DYNAMIC TOOL REGISTRY.
 
-You have access to a dynamic registry of research tools. The registry is
-much larger than what you should pull into context at once.
+CRITICAL: The tools you currently see (list_tools, load_tool) are NOT
+the only tools available. The registry has many more tools that
+activate ON DEMAND. You MUST discover them via list_tools — never
+assume a capability is missing just because the corresponding tool is
+not currently in your declarations.
 
-Workflow on EVERY task:
+Required workflow EVERY task:
 
-  1. Call list_tools(query="<keyword>") to discover what is available
-     for this task. Use the user's intent to pick the keyword.
-  2. Call load_tool(name="<name>") to activate the tool you need. The
-     tool will be available for use starting on your next turn.
-  3. Use the loaded tool to answer.
+  1. Plan the steps the task needs (e.g. "search the web", "read the
+     top URL", "summarize", "verify a quote", "save a note").
+  2. For EACH planned step that you cannot already perform with an
+     already-loaded tool, call list_tools with a relevant query or
+     tags to discover what is available. Repeat list_tools as needed —
+     it is cheap.
+  3. Call load_tool for EVERY tool you plan to use. Loaded tools
+     accumulate across turns — once loaded they remain available for
+     the rest of the conversation.
+  4. After loading, USE the tool. If a multi-step plan requires
+     several tools (e.g. search → fetch → summarize), load all of
+     them BEFORE attempting the work, or load them as you go — but
+     always load before claiming you cannot do something.
 
-If you already loaded a tool earlier in this conversation, you can use
-it directly without re-loading.
+NEVER tell the user "I cannot do X" or "my current tools do not
+support X" without first calling list_tools to verify. If list_tools
+returns no match, only then explain that the registry has no such
+tool.
 
-Do NOT speculate about a tool that wasn't returned by list_tools. If
-nothing matches, say so plainly.`
+Tags you can filter by include: web, content, text, fact-check, notes.`
 
 func main() {
 	ctx := context.Background()
