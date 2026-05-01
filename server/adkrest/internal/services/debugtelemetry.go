@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -65,8 +66,11 @@ func NewDebugTelemetryWithConfig(cfg *DebugTelemetryConfig) (*DebugTelemetry, er
 }
 
 func (d *DebugTelemetry) SpanProcessor() sdktrace.SpanProcessor {
-	// Use simple processor to avoid the lag between ending the span and it appearing in adk-web.
-	return sdktrace.NewSimpleSpanProcessor(d.store)
+	// The store implements sdktrace.SpanProcessor directly so it can hook
+	// OnStart and assign a monotonic startSeq used as a tie-breaker when
+	// wall-clock StartTime collides (Darwin's microsecond-resolution
+	// time.Now() makes this routine on adjacent tracer.Start calls).
+	return d.store
 }
 
 func (d *DebugTelemetry) LogProcessor() sdklog.Processor {
@@ -122,6 +126,14 @@ type spanRecord struct {
 	ParentSpanID trace.SpanID
 	Attributes   map[string]string
 	Logs         []DebugLog
+
+	// startSeq is a monotonic sequence number assigned in OnStart. It
+	// breaks ties when StartTime.UnixNano() collides — which happens on
+	// platforms (e.g. some Darwin versions) where time.Now() has only
+	// microsecond resolution and back-to-back tracer.Start calls return
+	// identical wall-clock timestamps. Sorting by (StartTime, startSeq)
+	// preserves the actual call order regardless of wall-clock granularity.
+	startSeq uint64
 }
 
 // spanStore stores spans and logs in memory for debug telemetry.
@@ -135,6 +147,14 @@ type spanStore struct {
 	traceIDsBySessionID map[string]map[string]struct{}
 	// recordsByEventID stores spans indexed by event id for easy lookup.
 	recordsByEventID map[string][]*spanRecord
+
+	// startSeqCounter is incremented atomically in OnStart and assigned
+	// to spanRecord.startSeq so we have a stable secondary sort key.
+	startSeqCounter atomic.Uint64
+	// startSeqByID maps span ID to the sequence assigned at OnStart time
+	// so OnEnd can transfer it onto the persisted spanRecord. Cleaned up
+	// in OnEnd.
+	startSeqByID map[string]uint64
 }
 
 func newSpanStore(capacity int) (*spanStore, error) {
@@ -142,6 +162,7 @@ func newSpanStore(capacity int) (*spanStore, error) {
 		recordsBySpanID:     make(map[string]*spanRecord),
 		traceIDsBySessionID: make(map[string]map[string]struct{}),
 		recordsByEventID:    make(map[string][]*spanRecord),
+		startSeqByID:        make(map[string]uint64),
 	}
 	var err error
 	store.recordsByTraceID, err = lru.NewWithEvict(capacity, store.evict)
@@ -214,7 +235,14 @@ func filterUnclosedAndSort(records []*spanRecord) []*spanRecord {
 		return s == nil || !s.Context.TraceID().IsValid()
 	})
 	slices.SortStableFunc(filtered, func(a, b *spanRecord) int {
-		return cmp.Compare(a.StartTime.UnixNano(), b.StartTime.UnixNano())
+		// Primary key: wall-clock start time. Tie-broken by startSeq
+		// (assigned monotonically in OnStart) to preserve actual call
+		// order on platforms whose time.Now() resolution is too coarse
+		// to distinguish back-to-back tracer.Start calls.
+		if c := cmp.Compare(a.StartTime.UnixNano(), b.StartTime.UnixNano()); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.startSeq, b.startSeq)
 	})
 	return filtered
 }
@@ -245,29 +273,43 @@ func (s *spanStore) Export(ctx context.Context, logRecords []sdklog.Record) erro
 	return nil
 }
 
-// ExportSpans implements [sdktrace.SpanExporter].
-func (s *spanStore) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+// OnStart implements [sdktrace.SpanProcessor]. Assigns a monotonic
+// sequence number to the span so OnEnd can use it as a tie-breaker for
+// the chronological ordering returned by the debug-telemetry endpoints.
+func (s *spanStore) OnStart(_ context.Context, span sdktrace.ReadWriteSpan) {
+	seq := s.startSeqCounter.Add(1)
+	spanID := span.SpanContext().SpanID().String()
+	s.mu.Lock()
+	s.startSeqByID[spanID] = seq
+	s.mu.Unlock()
+}
+
+// OnEnd implements [sdktrace.SpanProcessor]. Persists the span and its
+// pre-assigned startSeq to the store.
+func (s *spanStore) OnEnd(span sdktrace.ReadOnlySpan) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, span := range spans {
-		attrs := convertAttrs(span.Attributes())
-		spanID := span.SpanContext().SpanID().String()
-		record, ok := s.recordsBySpanID[spanID]
-		if !ok {
-			record = &spanRecord{}
-			s.recordsBySpanID[spanID] = record
-		}
-
-		record.Name = span.Name()
-		record.StartTime = span.StartTime()
-		record.EndTime = span.EndTime()
-		record.Context = span.SpanContext()
-		record.ParentSpanID = span.Parent().SpanID()
-		record.Attributes = attrs
-
-		s.updateSpanIndexes(record)
+	attrs := convertAttrs(span.Attributes())
+	spanID := span.SpanContext().SpanID().String()
+	record, ok := s.recordsBySpanID[spanID]
+	if !ok {
+		record = &spanRecord{}
+		s.recordsBySpanID[spanID] = record
 	}
-	return nil
+
+	record.Name = span.Name()
+	record.StartTime = span.StartTime()
+	record.EndTime = span.EndTime()
+	record.Context = span.SpanContext()
+	record.ParentSpanID = span.Parent().SpanID()
+	record.Attributes = attrs
+
+	if seq, ok := s.startSeqByID[spanID]; ok {
+		record.startSeq = seq
+		delete(s.startSeqByID, spanID)
+	}
+
+	s.updateSpanIndexes(record)
 }
 
 func (s *spanStore) updateSpanIndexes(span *spanRecord) {
