@@ -19,23 +19,24 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
-	"github.com/a2aproject/a2a-go/log"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/log"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/session"
 )
 
 type inputRequiredProcessor struct {
-	reqCtx        *a2asrv.RequestContext
+	reqCtx        *a2asrv.ExecutorContext
 	event         *a2a.TaskStatusUpdateEvent
 	partConverter GenAIPartConverter
 	// handles possible duplication in partial and non-partial events
 	addedParts []*genai.Part
 }
 
-func newInputRequiredProcessor(reqCtx *a2asrv.RequestContext, partConverter GenAIPartConverter) *inputRequiredProcessor {
+func newInputRequiredProcessor(reqCtx *a2asrv.ExecutorContext, partConverter GenAIPartConverter) *inputRequiredProcessor {
 	return &inputRequiredProcessor{reqCtx: reqCtx, partConverter: partConverter}
 }
 
@@ -88,7 +89,6 @@ func (p *inputRequiredProcessor) process(ctx context.Context, event *session.Eve
 		} else {
 			msg := a2a.NewMessage(a2a.MessageRoleAgent, a2aParts...)
 			ev := a2a.NewStatusUpdateEvent(p.reqCtx, a2a.TaskStateInputRequired, msg)
-			ev.Final = true
 			p.event = ev
 		}
 	}
@@ -105,11 +105,11 @@ func (p *inputRequiredProcessor) process(ctx context.Context, event *session.Eve
 	return &modifiedEvent, nil
 }
 
-func (p *inputRequiredProcessor) convertParts(ctx context.Context, event *session.Event, parts []*genai.Part, longRunningCallIDs []string) ([]a2a.Part, error) {
+func (p *inputRequiredProcessor) convertParts(ctx context.Context, event *session.Event, parts []*genai.Part, longRunningCallIDs []string) ([]*a2a.Part, error) {
 	if p.partConverter == nil {
 		return ToA2AParts(parts, longRunningCallIDs)
 	}
-	converted := make([]a2a.Part, 0, len(parts))
+	converted := make([]*a2a.Part, 0, len(parts))
 	for _, part := range parts {
 		cp, err := p.partConverter(ctx, event, part)
 		if err != nil {
@@ -135,9 +135,9 @@ func (p *inputRequiredProcessor) isLongRunningResponse(event *session.Event, par
 		return false
 	}
 	for _, part := range p.event.Status.Message.Parts {
-		if dp, ok := part.(a2a.DataPart); ok {
-			if typeVal, ok := dp.Metadata[a2aDataPartMetaTypeKey]; ok && typeVal == a2aDataPartTypeFunctionCall {
-				if callID, ok := dp.Data["id"].(string); ok && callID == id {
+		if data, ok := part.Data().(map[string]any); ok {
+			if typeVal, ok := part.Meta()[a2aDataPartMetaTypeKey]; ok && typeVal == a2aDataPartTypeFunctionCall {
+				if callID, ok := data["id"].(string); ok && callID == id {
 					return true
 				}
 			}
@@ -146,10 +146,10 @@ func (p *inputRequiredProcessor) isLongRunningResponse(event *session.Event, par
 	return false
 }
 
-// handleInputRequired checks if the input message contains responses to all function calls
+// HandleInputRequired checks if the input message contains responses to all function calls
 // that happened during the previous invocation and were recorded in the Task input-required state message.
 // If a non-nil event is returned the invoking code needs to use the event as the result of the execution
-func handleInputRequired(reqCtx *a2asrv.RequestContext, content *genai.Content) (*a2a.TaskStatusUpdateEvent, error) {
+func HandleInputRequired(reqCtx *a2asrv.ExecutorContext, content *genai.Content) (*a2a.TaskStatusUpdateEvent, error) {
 	if reqCtx.StoredTask == nil {
 		return nil, nil
 	}
@@ -174,7 +174,6 @@ func handleInputRequired(reqCtx *a2asrv.RequestContext, content *genai.Content) 
 			parts := makeInputMissingErrorMessage(statusMsg.Parts, statusPart.FunctionCall.ID)
 			msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, reqCtx.StoredTask, parts...)
 			event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateInputRequired, msg)
-			event.Final = true
 			return event, nil
 		}
 	}
@@ -190,28 +189,36 @@ func getSubagentTasksToCancel(ctx context.Context, status a2a.TaskStatus, sessio
 		return nil, nil
 	}
 
-	foundCalls := 0
+	foundCalls, foundTaskIDs := map[string]bool{}, 0
 	var tasksToCancel []subagentTask
 	events := session.Events()
 	for i := events.Len() - 1; i >= 0; i-- {
 		event := events.At(i)
-		if event.Content != nil {
-			if slices.ContainsFunc(event.Content.Parts, func(p *genai.Part) bool {
-				return p.FunctionCall != nil && slices.Contains(pendingCallIDs, p.FunctionCall.ID)
-			}) {
-				foundCalls++
-				if taskID, _ := GetA2ATaskInfo(event); taskID != "" {
-					tasksToCancel = append(tasksToCancel, subagentTask{agentName: event.Author, taskID: a2a.TaskID(taskID)})
-				}
+		for _, call := range utils.FunctionCalls(event.Content) {
+			if !slices.Contains(pendingCallIDs, call.ID) {
+				continue
+			}
+			if foundCalls[call.ID] {
+				log.Warn(ctx, "duplicate function call id", "id", call.ID)
+				continue
+			}
+			foundCalls[call.ID] = true
+			if taskID, _ := GetA2ATaskInfo(event); taskID != "" {
+				tasksToCancel = append(tasksToCancel, subagentTask{agentName: event.Author, taskID: a2a.TaskID(taskID)})
+				foundTaskIDs++
 			}
 		}
-		if foundCalls == len(pendingCallIDs) {
+		if len(foundCalls) == len(pendingCallIDs) {
 			break
 		}
 	}
 
-	if foundCalls < len(pendingCallIDs) {
-		log.Warn(ctx, "could not find all function calls from status message", "found", foundCalls, "total", len(pendingCallIDs))
+	if len(foundCalls) < len(pendingCallIDs) {
+		log.Warn(ctx, "could not find all function calls from status message", "found", len(foundCalls), "total", len(pendingCallIDs))
+	}
+
+	if foundTaskIDs < len(foundCalls) {
+		log.Warn(ctx, "not all function calls had a taskID", "found_calls", len(foundCalls), "found_ids", foundTaskIDs)
 	}
 
 	return tasksToCancel, nil
@@ -235,12 +242,11 @@ func getPendingLongRunningCallIDs(status a2a.TaskStatus) ([]string, error) {
 	return callIDs, nil
 }
 
-func makeInputMissingErrorMessage(inputRequiredParts []a2a.Part, callID string) []a2a.Part {
-	errPart := a2a.TextPart{
-		Text:     fmt.Sprintf("no input provided for function call ID %q", callID),
-		Metadata: map[string]any{"validation_error": true},
-	}
-	var preservedParts []a2a.Part
+func makeInputMissingErrorMessage(inputRequiredParts []*a2a.Part, callID string) []*a2a.Part {
+	errPart := a2a.NewTextPart(fmt.Sprintf("no input provided for function call ID %q", callID))
+	errPart.SetMeta("validation_error", true)
+
+	var preservedParts []*a2a.Part
 	for _, p := range inputRequiredParts {
 		if meta := p.Meta(); meta != nil {
 			if v, ok := meta["validation_error"].(bool); ok && v {

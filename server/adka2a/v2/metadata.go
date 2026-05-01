@@ -18,8 +18,8 @@ import (
 	"context"
 	"maps"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
 	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/session"
@@ -39,12 +39,12 @@ var (
 	metadataPartialKey         = ToA2AMetaKey("partial")
 )
 
-// ToA2AMetaKey adds a prefix used to differentiage ADK-related values stored in Metadata an A2A event.
+// ToA2AMetaKey adds a prefix used to differentiate ADK-related values stored in Metadata an A2A event.
 func ToA2AMetaKey(key string) string {
 	return "adk_" + key
 }
 
-// ToADKMetaKey adds a prefix used to differentiage A2A-related values stored in custom metadata of an ADK session event.
+// ToADKMetaKey adds a prefix used to differentiate A2A-related values stored in custom metadata of an ADK session event.
 func ToADKMetaKey(key string) string {
 	return "a2a:" + key
 }
@@ -53,17 +53,17 @@ type invocationMeta struct {
 	userID    string
 	sessionID string
 	agentName string
-	reqCtx    *a2asrv.RequestContext
+	reqCtx    *a2asrv.ExecutorContext
 	eventMeta map[string]any
 }
 
-func toInvocationMeta(ctx context.Context, config RunnerConfig, reqCtx *a2asrv.RequestContext) invocationMeta {
+func toInvocationMeta(ctx context.Context, config RunnerConfig, reqCtx *a2asrv.ExecutorContext) invocationMeta {
 	userID, sessionID := "A2A_USER_"+reqCtx.ContextID, reqCtx.ContextID
 
 	// a2a sdk attaches authn info to the call context, use it when provided
 	if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
-		if callCtx.User != nil && callCtx.User.Name() != "" {
-			userID = callCtx.User.Name()
+		if callCtx.User != nil && callCtx.User.Name != "" {
+			userID = callCtx.User.Name
 		}
 	}
 

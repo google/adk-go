@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
@@ -26,7 +26,7 @@ import (
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/server/adka2a"
+	"google.golang.org/adk/server/adka2a/v2"
 	"google.golang.org/adk/session"
 )
 
@@ -157,7 +157,7 @@ func TestToMissingRemoteSessionParts(t *testing.T) {
 	testCases := []struct {
 		name          string
 		events        []*session.Event
-		wantParts     []a2a.Part
+		wantParts     []*a2a.Part
 		wantContextID string
 	}{
 		{
@@ -166,10 +166,10 @@ func TestToMissingRemoteSessionParts(t *testing.T) {
 				newEventFromParts("user", &genai.Part{Text: "hello"}),
 				newEventFromParts("user", &genai.Part{Text: "foo"}, &genai.Part{Text: "bar"}),
 			},
-			wantParts: []a2a.Part{
-				a2a.TextPart{Text: "hello"},
-				a2a.TextPart{Text: "foo"},
-				a2a.TextPart{Text: "bar"},
+			wantParts: []*a2a.Part{
+				a2a.NewTextPart("hello"),
+				a2a.NewTextPart("foo"),
+				a2a.NewTextPart("bar"),
 			},
 		},
 		{
@@ -178,10 +178,10 @@ func TestToMissingRemoteSessionParts(t *testing.T) {
 				newEventFromParts("another-agent", &genai.Part{Text: "foo"}),
 				newEventFromParts("user", &genai.Part{Text: "bar"}),
 			},
-			wantParts: []a2a.Part{
-				a2a.TextPart{Text: "For context:"},
-				a2a.TextPart{Text: "[another-agent] said: foo"},
-				a2a.TextPart{Text: "bar"},
+			wantParts: []*a2a.Part{
+				a2a.NewTextPart("For context:"),
+				a2a.NewTextPart("[another-agent] said: foo"),
+				a2a.NewTextPart("bar"),
 			},
 		},
 		{
@@ -190,8 +190,8 @@ func TestToMissingRemoteSessionParts(t *testing.T) {
 				newEventFromParts("another-agent", &genai.Part{Text: "foo", Thought: true}),
 				newEventFromParts("user", &genai.Part{Text: "bar"}),
 			},
-			wantParts: []a2a.Part{
-				a2a.TextPart{Text: "bar"},
+			wantParts: []*a2a.Part{
+				a2a.NewTextPart("bar"),
 			},
 		},
 		{
@@ -202,9 +202,9 @@ func TestToMissingRemoteSessionParts(t *testing.T) {
 				newEventFromParts("user", &genai.Part{Text: "foo"}),
 				newEventFromParts("user", &genai.Part{Text: "bar"}),
 			},
-			wantParts: []a2a.Part{
-				a2a.TextPart{Text: "foo"},
-				a2a.TextPart{Text: "bar"},
+			wantParts: []*a2a.Part{
+				a2a.NewTextPart("foo"),
+				a2a.NewTextPart("bar"),
 			},
 		},
 		{
@@ -218,7 +218,7 @@ func TestToMissingRemoteSessionParts(t *testing.T) {
 					},
 				},
 			},
-			wantParts:     []a2a.Part{},
+			wantParts:     []*a2a.Part{},
 			wantContextID: "ctxID-123",
 		},
 	}
