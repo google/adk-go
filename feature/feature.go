@@ -120,7 +120,11 @@ func ClearOverride(name Name) {
 //	defer feature.WithOverride(MyFeature, true)()
 func WithOverride(name Name, enabled bool) (restore func()) {
 	mu.Lock()
-	had, prev := overrides[name], overrides[name]
+	// Two-value lookup: distinguish a missing key from a key that
+	// happens to be set to false. Without this, restoring an explicit
+	// override of `false` would incorrectly delete the entry instead of
+	// putting the false value back.
+	prev, had := overrides[name]
 	if _, ok := registry[name]; !ok {
 		mu.Unlock()
 		// Match Python: invalid feature name is a programmer error.

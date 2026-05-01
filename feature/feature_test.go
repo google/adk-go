@@ -99,6 +99,29 @@ func TestWithOverrideRestoresPrior(t *testing.T) {
 	}
 }
 
+// TestWithOverrideRestoresPriorFalse_NotDefault distinguishes "key
+// existed in overrides with value false" from "key did not exist". A
+// previous bug used the bool value as the existence flag, which made
+// restoring an explicit-false override identical to deleting the entry
+// (and therefore falling through to the registry default). This test
+// would fail under that bug because the registry default is true.
+func TestWithOverrideRestoresPriorFalse_NotDefault(t *testing.T) {
+	reset()
+	MustRegister("FOO", Config{Stage: Stable, DefaultOn: true})
+	if err := Override("FOO", false); err != nil {
+		t.Fatalf("Override: %v", err)
+	}
+	restore := WithOverride("FOO", true)
+	if !IsEnabled("FOO") {
+		t.Fatal("inner override (true) should take effect")
+	}
+	restore()
+	if IsEnabled("FOO") {
+		t.Errorf("restore should put back the explicit-false override; " +
+			"got true (looks like the override was deleted and the registry default leaked through)")
+	}
+}
+
 func TestCheck(t *testing.T) {
 	reset()
 	MustRegister("FOO", Config{Stage: Stable, DefaultOn: true})

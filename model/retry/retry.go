@@ -49,8 +49,13 @@ type Config struct {
 	BackoffFactor float64
 
 	// Jitter is a multiplicative jitter window applied to each delay,
-	// uniformly random in [1-jitter, 1+jitter]. Default: 0.5.
-	// Set to 0 for no jitter.
+	// uniformly random in [1-jitter, 1+jitter].
+	//
+	// Resolution rules (the zero value triggers the default; an
+	// explicit negative value disables jitter):
+	//   0  → use the default of 0.5 (the natural Go zero value)
+	//   <0 → no jitter (deterministic delays — useful in tests)
+	//   >0 → use that value as the window
 	Jitter float64
 
 	// RetryOn classifies an error as retriable. If nil, IsTransient is used.
