@@ -225,6 +225,18 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 					return
 				}
 			}
+			// Phase 6D mesh runtime: route any session.TaskRequest entries
+			// the coordinator produced to the named task agents and emit
+			// FunctionResponse events with their FinishTask payloads.
+			// Tasks are sub-calls — ownership stays with the coordinator,
+			// so we continue the loop after handling them rather than
+			// returning like the transfer path below.
+			if len(ev.Actions.RequestTask) > 0 {
+				if !f.runTaskRequests(ctx, ev, yield) {
+					return
+				}
+			}
+
 			// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
 			// We are following python's execution flow which is
 			//   BaseLlmFlow._postprocess_async
