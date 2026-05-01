@@ -18,6 +18,7 @@ package agentengine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,9 +32,11 @@ import (
 	"cloud.google.com/go/aiplatform/apiv1/aiplatformpb"
 	"github.com/spf13/cobra"
 	"google.golang.org/api/option"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	"google.golang.org/adk/cmd/adkgo/internal/deploy"
 	"google.golang.org/adk/internal/cli/util"
+	"google.golang.org/adk/server/agentengine"
 )
 
 type gCloudFlags struct {
@@ -42,10 +45,10 @@ type gCloudFlags struct {
 }
 
 type agentEngineServiceFlags struct {
-	name        string
-	displayName string
-	serverPort  int
-	api         bool // enable api or not
+	name          string
+	displayName   string
+	serverPort    int
+	agentEngineID string
 }
 
 type buildFlags struct {
@@ -93,7 +96,7 @@ func init() {
 	agentEngineCmd.PersistentFlags().IntVar(&flags.agentEngine.serverPort, "server_port", 8080, "agentEngine server port")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.sourceDir, "source_dir", "d", "", "Directory to archive, defaults to current working directory")
-	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.api, "api", true, "Enable API")
+	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.agentEngineID, "agent_engine_id", "", "ID of the Agent Engine instance to update if it exists (default: \"\", which means a new instance will be created).")
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -168,7 +171,7 @@ func (f *deployAgentEngineFlags) prepareDockerfile() error {
 FROM golang:1.25 as builder
 WORKDIR /app
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ` + f.build.execFile + ` ` + f.source.origEntryPointPath + `
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o ` + f.build.execFile + ` ` + f.source.origEntryPointPath + `
 
 FROM gcr.io/distroless/static-debian11
 
@@ -177,9 +180,7 @@ EXPOSE ` + strconv.Itoa(flags.agentEngine.serverPort) + `
 # Command to run the executable when the container starts
 CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.agentEngine.serverPort) + `"`)
 
-			if flags.agentEngine.api {
-				b.WriteString(`, "api"`)
-			}
+			b.WriteString(`, "agentengine"`)
 
 			b.WriteString(`]`)
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
@@ -228,6 +229,16 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 				return fmt.Errorf("cannot read archive file: %w", err)
 			}
 
+			methods, err := agentengine.ListClassMethods()
+			if err != nil {
+				return fmt.Errorf("cannot list class methods: %w", err)
+			}
+			methodsJSON, err := json.Marshal(methods)
+			if err != nil {
+				return fmt.Errorf("cannot marshal methods: %w", err)
+			}
+			p("Methods:", string(methodsJSON))
+
 			req := &aiplatformpb.CreateReasoningEngineRequest{
 				Parent: parent,
 				ReasoningEngine: &aiplatformpb.ReasoningEngine{
@@ -257,6 +268,7 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 								{Name: "GOOGLE_API_KEY", SecretRef: &aiplatformpb.SecretRef{Secret: "GOOGLE_API_KEY", Version: "latest"}},
 							},
 						},
+						ClassMethods: methods,
 					},
 				},
 			}
@@ -279,6 +291,78 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 		})
 }
 
+// gcloudUpdateAgentEngine invokes gcloud to update source on agentEngine
+func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
+	return util.LogStartStop("Updating Agent Engine",
+		func(p util.Printer) error {
+			ctx := context.Background()
+			name := fmt.Sprintf("projects/%s/locations/%s/reasoningEngines/%s", f.gcloud.projectName, f.gcloud.region, f.agentEngine.agentEngineID)
+			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
+			client, err := aiplatform.NewReasoningEngineClient(ctx, option.WithEndpoint(endpoint))
+			if err != nil {
+				return fmt.Errorf("cannot create ReasoningEngineClient: %w", err)
+			}
+			defer func() {
+				if err := client.Close(); err != nil {
+					p("Warning: failed to close ReasoningEngineClient: %v", err)
+				}
+			}()
+
+			archiveContent, err := os.ReadFile(f.build.archivePath)
+			if err != nil {
+				return fmt.Errorf("cannot read archive file: %w", err)
+			}
+
+			methods, err := agentengine.ListClassMethods()
+			if err != nil {
+				return fmt.Errorf("cannot list class methods: %w", err)
+			}
+			methodsJSON, err := json.Marshal(methods)
+			if err != nil {
+				return fmt.Errorf("cannot marshal methods: %w", err)
+			}
+			p("Methods:", string(methodsJSON))
+
+			req := &aiplatformpb.UpdateReasoningEngineRequest{
+				ReasoningEngine: &aiplatformpb.ReasoningEngine{
+					Name: name,
+					Spec: &aiplatformpb.ReasoningEngineSpec{
+						DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
+							SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
+								Source: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource_{
+									InlineSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource{
+										SourceArchive: archiveContent,
+									},
+								},
+								LanguageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec_{
+									ImageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec{},
+								},
+							},
+						},
+						ClassMethods: methods,
+					},
+				},
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.source_code_spec", "spec.class_methods"}},
+			}
+			p("Sending UpdateReasoningEngine request...")
+			op, err := client.UpdateReasoningEngine(ctx, req)
+			if err != nil {
+				return fmt.Errorf("UpdateReasoningEngine failed: %w", err)
+			}
+
+			p("Waiting for operation to complete...")
+			re, err := op.Wait(ctx)
+			if err != nil {
+				return fmt.Errorf("operation failed: %w", err)
+			}
+
+			p("Updated Reasoning Engine:", re.Name)
+			p("Display Name:", re.DisplayName)
+
+			return nil
+		})
+}
+
 // deployOnagentEngine executes the sequence of actions preparing and deploying the agent to agentEngine
 func (f *deployAgentEngineFlags) deployOnagentEngine() error {
 	fmt.Println(flags)
@@ -295,7 +379,11 @@ func (f *deployAgentEngineFlags) deployOnagentEngine() error {
 	if err != nil {
 		return err
 	}
-	err = f.gcloudDeployToAgentEngine()
+	if f.agentEngine.agentEngineID != "" {
+		err = f.gcloudUpdateAgentEngine()
+	} else {
+		err = f.gcloudDeployToAgentEngine()
+	}
 	if err != nil {
 		return err
 	}

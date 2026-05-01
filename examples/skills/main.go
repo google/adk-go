@@ -54,9 +54,13 @@ func main() {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
-	skillToolset, err := skilltoolset.New(ctx, skilltoolset.Config{
-		Source: skill.NewFileSystemSource(os.DirFS("./skills")),
-	})
+	source := skill.NewFileSystemSource(os.DirFS("./skills"))
+	source, _, err = skill.WithCompletePreloadSource(ctx, source)
+	if err != nil {
+		log.Fatalf("Failed to preload skills: %v", err)
+	}
+
+	skillToolset, err := skilltoolset.New(ctx, skilltoolset.Config{Source: source})
 	if err != nil {
 		log.Fatalf("Failed to create skill toolset: %v", err)
 	}

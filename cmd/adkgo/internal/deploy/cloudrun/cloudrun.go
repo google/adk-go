@@ -219,17 +219,17 @@ CMD ["/app/` + f.build.execFile + `", "web", "-port", "` + strconv.Itoa(flags.cl
 			}
 			if flags.cloudRun.pubsub {
 				b.WriteString(`, "pubsub"`)
-				b.WriteString(fmt.Sprintf(`, "--trigger_max_retries", "%d"`, flags.cloudRun.pubsubTrigger.maxRetries))
-				b.WriteString(fmt.Sprintf(`, "--trigger_base_delay", "%s"`, flags.cloudRun.pubsubTrigger.baseDelay.String()))
-				b.WriteString(fmt.Sprintf(`, "--trigger_max_delay", "%s"`, flags.cloudRun.pubsubTrigger.maxDelay.String()))
-				b.WriteString(fmt.Sprintf(`, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.pubsubTrigger.maxRuns))
+				fmt.Fprintf(&b, `, "--trigger_max_retries", "%d"`, flags.cloudRun.pubsubTrigger.maxRetries)
+				fmt.Fprintf(&b, `, "--trigger_base_delay", "%s"`, flags.cloudRun.pubsubTrigger.baseDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_delay", "%s"`, flags.cloudRun.pubsubTrigger.maxDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.pubsubTrigger.maxRuns)
 			}
 			if flags.cloudRun.eventarc {
 				b.WriteString(`, "eventarc"`)
-				b.WriteString(fmt.Sprintf(`, "--trigger_max_retries", "%d"`, flags.cloudRun.eventarcTrigger.maxRetries))
-				b.WriteString(fmt.Sprintf(`, "--trigger_base_delay", "%s"`, flags.cloudRun.eventarcTrigger.baseDelay.String()))
-				b.WriteString(fmt.Sprintf(`, "--trigger_max_delay", "%s"`, flags.cloudRun.eventarcTrigger.maxDelay.String()))
-				b.WriteString(fmt.Sprintf(`, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.eventarcTrigger.maxRuns))
+				fmt.Fprintf(&b, `, "--trigger_max_retries", "%d"`, flags.cloudRun.eventarcTrigger.maxRetries)
+				fmt.Fprintf(&b, `, "--trigger_base_delay", "%s"`, flags.cloudRun.eventarcTrigger.baseDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_delay", "%s"`, flags.cloudRun.eventarcTrigger.maxDelay.String())
+				fmt.Fprintf(&b, `, "--trigger_max_concurrent_runs", "%d"`, flags.cloudRun.eventarcTrigger.maxRuns)
 			}
 			b.WriteString(`]`)
 			return os.WriteFile(f.build.dockerfileBuildPath, []byte(b.String()), 0o600)
