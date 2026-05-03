@@ -230,7 +230,7 @@ func TestGenerateContent(t *testing.T) {
 				semconv.GenAIOperationNameKey:         "generate_content",
 				semconv.GenAIRequestModelKey:          "test-model",
 				semconv.GenAIUsageInputTokensKey:      "10",
-				semconv.GenAIUsageOutputTokensKey:     "20",
+				semconv.GenAIUsageOutputTokensKey:     "35",
 				genAIUsageCacheReadInputTokens:        "5",
 				genAIUsageReasoningOutputTokens:       "15",
 				semconv.GenAIResponseFinishReasonsKey: "[\"STOP\"]",
