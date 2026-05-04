@@ -94,6 +94,12 @@ type InvocationContext interface {
 	// Returns nil if not in live mode.
 	LiveRequestQueue() *LiveRequestQueue
 
+	// SetLiveSessionResumptionHandle stores the latest session resumption
+	// handle received from the server for use during reconnection.
+	SetLiveSessionResumptionHandle(handle string)
+	// LiveSessionResumptionHandle returns the current session resumption handle.
+	LiveSessionResumptionHandle() string
+
 	// EndInvocation ends the current invocation. This stops any planned agent
 	// calls.
 	EndInvocation()

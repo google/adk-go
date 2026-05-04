@@ -458,9 +458,12 @@ func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event
 	}
 	req.LiveConfig.Tools = buildLiveTools(a.Tools)
 
-	conn, err := liveLLM.ConnectLive(ctx, req)
-	if err != nil {
-		return llminternal.ErrIter(fmt.Errorf("failed to connect live: %w", err))
+	connectFn := func(handle string) (model.LiveConnection, error) {
+		cfgCopy := *req.LiveConfig
+		cfgCopy.SessionResumption = withResumptionHandle(cfgCopy.SessionResumption, handle)
+		reqCopy := *req
+		reqCopy.LiveConfig = &cfgCopy
+		return liveLLM.ConnectLive(ctx, &reqCopy)
 	}
 
 	coalesceWindow := time.Duration(0)
@@ -480,7 +483,42 @@ func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event
 		CoalesceWindow:       coalesceWindow,
 	}
 
-	return lf.RunLive(ctx, conn, queue)
+	return lf.RunLive(ctx, connectFn, queue)
+}
+
+// withResumptionHandle returns a SessionResumptionConfig whose Handle is set
+// to handle, deep-copying src when non-nil so per-attempt mutations do not
+// leak back into the caller's request struct. A shallow `*req.LiveConfig`
+// copy keeps the same pointer in `cfgCopy.SessionResumption`; without this
+// deep copy, writing the handle would mutate the shared struct, and a stale
+// handle from a prior attempt could leak into a later attempt that intended
+// to send an empty handle.
+//
+// When src is nil, the helper synthesizes a fresh config only if a handle
+// is supplied — preserving the caller's "no session resumption" intent
+// when the handle is empty.
+//
+// On resume (handle != ""), Transparent is set to true so the server keeps
+// session state across the new connection. This overrides any caller-set
+// Transparent value: resuming with Transparent=false would defeat the
+// purpose of resuming via GoAway. On the initial connect (handle == ""),
+// Transparent is left untouched.
+func withResumptionHandle(src *genai.SessionResumptionConfig, handle string) *genai.SessionResumptionConfig {
+	if src == nil {
+		if handle == "" {
+			return nil
+		}
+		return &genai.SessionResumptionConfig{
+			Handle:      handle,
+			Transparent: true,
+		}
+	}
+	cp := *src
+	cp.Handle = handle
+	if handle != "" {
+		cp.Transparent = true
+	}
+	return &cp
 }
 
 func liveConfigFromRunConfig(rc *agent.RunConfig) *genai.LiveConnectConfig {
@@ -499,6 +537,9 @@ func liveConfigFromRunConfig(rc *agent.RunConfig) *genai.LiveConnectConfig {
 	}
 	if rc.OutputAudioTranscription {
 		cfg.OutputAudioTranscription = &genai.AudioTranscriptionConfig{}
+	}
+	if rc.SessionResumption != nil {
+		cfg.SessionResumption = rc.SessionResumption
 	}
 	if rc.ThinkingConfig != nil {
 		cfg.ThinkingConfig = rc.ThinkingConfig

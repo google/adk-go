@@ -178,3 +178,97 @@ func TestLiveConfigFromRunConfig(t *testing.T) {
 		}
 	})
 }
+
+// TestWithResumptionHandle pins the deep-copy + Transparent-on-resume
+// contract for the helper used inside RunLive's connectFn closure.
+func TestWithResumptionHandle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		src         *genai.SessionResumptionConfig
+		handle      string
+		wantNil     bool
+		wantHandle  string
+		wantTransOK bool // expected value of cp.Transparent when wantNil is false
+	}{
+		{
+			name:    "nil src + empty handle returns nil",
+			src:     nil,
+			handle:  "",
+			wantNil: true,
+		},
+		{
+			name:        "nil src + non-empty handle synthesizes config with Transparent=true",
+			src:         nil,
+			handle:      "h",
+			wantHandle:  "h",
+			wantTransOK: true,
+		},
+		{
+			name:        "non-nil src + empty handle preserves Transparent=false",
+			src:         &genai.SessionResumptionConfig{Transparent: false},
+			handle:      "",
+			wantHandle:  "",
+			wantTransOK: false,
+		},
+		{
+			name:        "non-nil src + non-empty handle overwrites to Transparent=true",
+			src:         &genai.SessionResumptionConfig{Transparent: false},
+			handle:      "h",
+			wantHandle:  "h",
+			wantTransOK: true,
+		},
+		{
+			name:        "non-nil src with Transparent=true + non-empty handle keeps Transparent=true",
+			src:         &genai.SessionResumptionConfig{Transparent: true},
+			handle:      "h",
+			wantHandle:  "h",
+			wantTransOK: true,
+		},
+		{
+			name:        "non-nil src with pre-set handle is overwritten",
+			src:         &genai.SessionResumptionConfig{Handle: "old"},
+			handle:      "new",
+			wantHandle:  "new",
+			wantTransOK: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Snapshot the input so we can confirm it isn't mutated.
+			var srcSnapshot *genai.SessionResumptionConfig
+			if tt.src != nil {
+				cp := *tt.src
+				srcSnapshot = &cp
+			}
+
+			got := withResumptionHandle(tt.src, tt.handle)
+
+			if tt.wantNil {
+				if got != nil {
+					t.Fatalf("got = %#v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("got = nil, want non-nil")
+			}
+			if got.Handle != tt.wantHandle {
+				t.Errorf("Handle = %q, want %q", got.Handle, tt.wantHandle)
+			}
+			if got.Transparent != tt.wantTransOK {
+				t.Errorf("Transparent = %v, want %v", got.Transparent, tt.wantTransOK)
+			}
+			if tt.src != nil && got == tt.src {
+				t.Error("expected returned pointer to differ from input src (deep-copy contract)")
+			}
+			if tt.src != nil && srcSnapshot != nil {
+				if diff := cmp.Diff(srcSnapshot, tt.src); diff != "" {
+					t.Errorf("input src was mutated (-want +got):\n%s", diff)
+				}
+			}
+		})
+	}
+}

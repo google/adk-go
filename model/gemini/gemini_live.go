@@ -177,6 +177,7 @@ func mapGoAway(msg *genai.LiveServerMessage, resp *model.LLMResponse) {
 	if msg.GoAway == nil {
 		return
 	}
+	resp.GoAway = msg.GoAway
 	resp.CustomMetadata["go_away"] = true
 	if msg.GoAway.TimeLeft > 0 {
 		resp.CustomMetadata["go_away_time_left_ms"] = float64(msg.GoAway.TimeLeft.Milliseconds())
@@ -187,6 +188,7 @@ func mapSessionResumptionUpdate(msg *genai.LiveServerMessage, resp *model.LLMRes
 	if msg.SessionResumptionUpdate == nil {
 		return
 	}
+	resp.SessionResumptionUpdate = msg.SessionResumptionUpdate
 	resp.CustomMetadata["session_resumption"] = true
 	if msg.SessionResumptionUpdate.NewHandle != "" {
 		resp.CustomMetadata["session_resumption_handle"] = msg.SessionResumptionUpdate.NewHandle

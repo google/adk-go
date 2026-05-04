@@ -53,6 +53,9 @@ type RunConfig struct {
 	OutputAudioTranscription bool
 	ToolCoalesceWindow       time.Duration // default 150ms if zero
 	LiveBufferSize           int           // default 100 if zero
+	// SessionResumption configures session resumption for live sessions,
+	// allowing reconnection with preserved state.
+	SessionResumption *genai.SessionResumptionConfig
 	// Generation parameters — applied to the live session config when set.
 	ThinkingConfig  *genai.ThinkingConfig
 	Temperature     *float32
@@ -65,5 +68,4 @@ type RunConfig struct {
 	Proactivity              *genai.ProactivityConfig
 	EnableAffectiveDialog    *bool
 	ContextWindowCompression *genai.ContextWindowCompressionConfig
-	SessionResumption        *genai.SessionResumptionConfig
 }

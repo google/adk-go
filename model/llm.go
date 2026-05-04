@@ -67,6 +67,11 @@ type LLMResponse struct {
 	InputTranscription  *genai.Transcription
 	OutputTranscription *genai.Transcription
 
+	// Live-only: session resumption state update from the server.
+	SessionResumptionUpdate *genai.LiveServerSessionResumptionUpdate
+	// Live-only: GoAway signal indicating the server wants the client to reconnect.
+	GoAway *genai.LiveServerGoAway
+
 	ErrorCode    string
 	ErrorMessage string
 	FinishReason genai.FinishReason
