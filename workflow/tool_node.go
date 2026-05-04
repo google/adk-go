@@ -37,6 +37,10 @@ type toolNode struct {
 	outputSchema *jsonschema.Resolved
 }
 
+type runnableTool interface {
+	Run(ctx tool.Context, args any) (map[string]any, error)
+}
+
 // newToolNodeWithSchemasTyped creates a new node wrapping a tool with explicitly provided schemas.
 // If a schema is nil, it will be inferred from the corresponding generic type Input or Output.
 func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, outputSchema *jsonschema.Schema) (Node, error) {
@@ -56,6 +60,10 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 	}
 	if oschema == nil {
 		return nil, fmt.Errorf("resolved output schema for tool %q is nil", t.Name())
+	}
+
+	if _, ok := t.(runnableTool); !ok {
+		return nil, fmt.Errorf("tool %q (type %T) is not directly runnable in workflow node", t.Name(), t)
 	}
 
 	return &toolNode{
@@ -85,13 +93,7 @@ func NewToolNode(t tool.Tool) (Node, error) {
 }
 
 func (n *toolNode) runTool(toolCtx tool.Context, input any) (any, error) {
-	runnable, ok := n.tool.(interface {
-		Run(ctx tool.Context, args any) (map[string]any, error)
-	})
-	if !ok {
-		return nil, fmt.Errorf("tool %q (type %T) is not directly runnable in workflow node", n.tool.Name(), n.tool)
-	}
-
+	runnable := n.tool.(runnableTool)
 	toolInput, err := typeutil.ConvertToWithJSONSchema[any, any](input, n.inputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("converting input for tool %q: %w", n.tool.Name(), err)
