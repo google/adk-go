@@ -42,7 +42,7 @@ const (
 )
 
 var (
-	gcpVertexAgentToolCallArgsName   = attribute.Key("gcp.vertex.agent.tool_call_args")
+	gcpVertexAgentToolCallArgsName  = attribute.Key("gcp.vertex.agent.tool_call_args")
 	gcpVertexAgentEventID           = attribute.Key("gcp.vertex.agent.event_id")
 	gcpVertexAgentToolResponseName  = attribute.Key("gcp.vertex.agent.tool_response")
 	gcpVertexAgentInvocationID      = attribute.Key("gcp.vertex.agent.invocation_id")
@@ -126,7 +126,7 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 	if params.Response.UsageMetadata != nil {
 		span.SetAttributes(
 			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),
-			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount + params.Response.UsageMetadata.ThoughtsTokenCount)),
+			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount+params.Response.UsageMetadata.ThoughtsTokenCount)),
 			genAIUsageCacheReadInputTokens.Int(int(params.Response.UsageMetadata.CachedContentTokenCount)),
 			genAIUsageReasoningOutputTokens.Int(int(params.Response.UsageMetadata.ThoughtsTokenCount)),
 		)
