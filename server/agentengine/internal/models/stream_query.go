@@ -31,11 +31,6 @@ type StreamQueryInput struct {
 	UserID    string        `json:"user_id"`
 	SessionID string        `json:"session_id"`
 	Message   genai.Content `json:"message"`
-	// RequestJSON is used by Gemini Enterprise / AgentSpace compatibility.
-	// streaming_agent_run_with_events wraps the actual request payload as a JSON
-	// string in input.request_json instead of sending message, session_id, and
-	// user_id as direct input fields.
-	RequestJSON string `json:"request_json"`
 }
 
 // StreamQueryTextRequest is a struct representing JSON-encoded payload to async_stream_query method with dedicated Input with simple text as the content.
@@ -55,11 +50,3 @@ type StreamQueryTextInput struct {
 // It is returned as one line with JSON-encoded StreamQuerySSEResponse
 // Please mind that errors are also returned by this method
 type StreamQuerySSEResponse session.Event
-
-// StreamingAgentRunWithEventsResponse is the response envelope expected by
-// AgentSpace / Gemini Enterprise for streaming_agent_run_with_events.
-type StreamingAgentRunWithEventsResponse struct {
-	Events    []*session.Event `json:"events,omitempty"`
-	Artifacts []any            `json:"artifacts,omitempty"`
-	SessionID string           `json:"session_id,omitempty"`
-}

@@ -93,7 +93,7 @@ func listNonStreamHandlers(config *launcher.Config, agentEngineID string) []meth
 func listStreamHandlers(config *launcher.Config, agentEngineID string) []method.MethodHandler {
 	return []method.MethodHandler{
 		method.NewStreamQueryHandler(config, agentEngineID, "async_stream_query", "async_stream"),
-		method.NewStreamQueryHandler(config, agentEngineID, "streaming_agent_run_with_events", "stream"),
+		method.NewStreamingAgentRunWithEventsHandler(config, agentEngineID, "streaming_agent_run_with_events", "stream"),
 	}
 }
 
