@@ -283,7 +283,42 @@ func TestWorkflowRouting(t *testing.T) {
 					{From: c, To: d},
 				}
 			},
-			expectErrorMsg: "no outgoing edge matches the event with routes",
+		},
+		{
+			name:        "fallback to default route when no concrete route matches",
+			startRoutes: []string{"unmatched"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b, Route: (Default)},
+				}
+			},
+			expectedExec: []string{"B"},
+		},
+		{
+			name:        "default route is suppressed by concrete route match",
+			startRoutes: []string{"branchA"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b, Route: Default},
+				}
+			},
+			expectedExec: []string{"A"},
+		},
+		{
+			name:        "unconditional edge does not suppress default route",
+			startRoutes: []string{"unmatched"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a},
+					{From: x, To: b, Route: (Default)},
+				}
+			},
+			expectedExec: []string{"A", "B"},
 		},
 	}
 
