@@ -15,6 +15,8 @@
 package workflow
 
 import (
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -44,8 +46,14 @@ func TestToolNode_New(t *testing.T) {
 		t.Fatalf("failed to create tool: %v", err)
 	}
 
-	ischema, _ := jsonschema.For[Input](nil)
-	oschema, _ := jsonschema.For[Output](nil)
+	ischema, err := jsonschema.For[Input](nil)
+	if err != nil {
+		t.Fatalf("jsonschema.For[Input] failed: %v", err)
+	}
+	oschema, err := jsonschema.For[Output](nil)
+	if err != nil {
+		t.Fatalf("jsonschema.For[Output] failed: %v", err)
+	}
 
 	tests := []struct {
 		name    string
@@ -62,12 +70,6 @@ func TestToolNode_New(t *testing.T) {
 			name: "NewToolNodeWithSchemas",
 			creator: func() (Node, error) {
 				return NewToolNodeWithSchemas(myTool, ischema, oschema)
-			},
-		},
-		{
-			name: "NewToolNodeWithSchemasTyped",
-			creator: func() (Node, error) {
-				return NewToolNodeWithSchemasTyped[Input, Output](myTool, nil, nil)
 			},
 		},
 		{
@@ -96,10 +98,10 @@ func TestToolNode_New(t *testing.T) {
 			// We use any, any for constructors that don't preserve types in the struct.
 			var inputResolved, outputResolved *jsonschema.Resolved
 			switch tn := node.(type) {
-			case *toolNode[Input, Output]:
+			case *toolNode:
 				inputResolved, outputResolved = tn.inputSchema, tn.outputSchema
-			case *toolNode[any, any]:
-				inputResolved, outputResolved = tn.inputSchema, tn.outputSchema
+			default:
+				t.Errorf("unknown node type: %T", tn)
 			}
 
 			if inputResolved == nil || outputResolved == nil {
@@ -116,13 +118,16 @@ func TestToolNode_Run(t *testing.T) {
 	type Output struct {
 		Greeting string `json:"greeting"`
 	}
+	type ErrorOutput struct {
+		Result int `json:"result"`
+	}
 
 	tests := []struct {
 		name      string
 		tool      func() (tool.Tool, error)
 		nodeInput any
 		node      func(tool.Tool) (Node, error)
-		extract   func(any) string
+		extract   func(t *testing.T, out any) string
 		want      string
 		wantErr   string
 	}{
@@ -139,8 +144,16 @@ func TestToolNode_Run(t *testing.T) {
 			node: func(t tool.Tool) (Node, error) {
 				return NewToolNodeTyped[Input, Output](t)
 			},
-			extract: func(out any) string {
-				return out.(Output).Greeting
+			extract: func(t *testing.T, out any) string {
+				bytes, err := json.Marshal(out)
+				if err != nil {
+					t.Fatalf("json marshal output: %v", err)
+				}
+				var output Output
+				if err := json.Unmarshal(bytes, &output); err != nil {
+					t.Fatalf("json unmarsal output: %v", err)
+				}
+				return output.Greeting
 			},
 			want: "Hello World",
 		},
@@ -157,7 +170,7 @@ func TestToolNode_Run(t *testing.T) {
 			node: func(t tool.Tool) (Node, error) {
 				return NewToolNodeTyped[Input, string](t)
 			},
-			extract: func(out any) string {
+			extract: func(t *testing.T, out any) string {
 				return out.(string)
 			},
 			want: "HELLO WORLD",
@@ -173,12 +186,24 @@ func TestToolNode_Run(t *testing.T) {
 			},
 			nodeInput: map[string]any{},
 			node: func(t tool.Tool) (Node, error) {
-				type ErrorOutput struct {
-					Result int `json:"result"`
-				}
 				return NewToolNodeTyped[map[string]any, ErrorOutput](t)
 			},
 			wantErr: "converting tool \"test_tool\" output",
+		},
+		{
+			name: "tool_execution_error",
+			tool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name: "fail_tool",
+				}, func(ctx tool.Context, in Input) (*Output, error) {
+					return nil, errors.New("something went wrong")
+				})
+			},
+			nodeInput: Input{Name: "World"},
+			node: func(t tool.Tool) (Node, error) {
+				return NewToolNodeTyped[Input, Output](t)
+			},
+			wantErr: "tool \"fail_tool\" execution failed: something went wrong",
 		},
 	}
 
@@ -220,7 +245,7 @@ func TestToolNode_Run(t *testing.T) {
 					t.Fatal("expected output in state delta")
 				}
 
-				got = tc.extract(output)
+				got = tc.extract(t, output)
 			}
 
 			if tc.wantErr != "" {
@@ -274,42 +299,40 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 				t.Fatalf("failed to create tool: %v", err)
 			}
 
-			nodeA, err := NewToolNodeTyped[*Input, Output](doubleTool)
+			nodeA, err := NewToolNodeTyped[*Input, *Output](doubleTool)
 			if err != nil {
 				t.Fatalf("NewToolNodeTyped failed: %v", err)
 			}
 
 			// Connect to a function node.
-			nodeB := NewFunctionNode("plus_one", func(ctx agent.InvocationContext, in *Output) (int, error) {
+			nodeB := NewFunctionNode[Output, int]("plus_one", func(ctx agent.InvocationContext, in Output) (int, error) {
 				return in.Result + 1, nil
 			})
 
 			mockCtx := &MockInvocationContext{sess: nil}
 
-			t.Run("DirectChainExecution", func(t *testing.T) {
-				// Test direct chain execution.
-				eventsA := nodeA.Run(mockCtx, &Input{Val: tc.input})
-				var outA any
-				for ev, err := range eventsA {
-					if err != nil {
-						t.Fatalf("nodeA.Run failed: %v", err)
-					}
-					outA = ev.Actions.StateDelta["output"]
-				}
+			t.Run("WorkflowExecution", func(t *testing.T) {
+				// Use a seed node to pass the struct input to nodeA,
+				// since Workflow.Run currently only passes strings from UserContent.
+				seedNode := NewFunctionNode("seed", func(ctx agent.InvocationContext, input any) (*Input, error) {
+					return &Input{Val: tc.input}, nil
+				})
 
-				// outA should be Output struct.
-				typedOutA, ok := outA.(Output)
-				if !ok {
-					t.Fatalf("unexpected output type from nodeA: %T, want Output", outA)
-				}
+				edges := Chain(Start, seedNode, nodeA, nodeB)
+				w := New(edges)
 
-				eventsB := nodeB.Run(mockCtx, &typedOutA)
+				events := w.Run(mockCtx)
+
 				var outB any
-				for ev, err := range eventsB {
+				for ev, err := range events {
 					if err != nil {
-						t.Fatalf("nodeB.Run failed: %v", err)
+						t.Fatalf("workflow failed: %v", err)
 					}
-					outB = ev.Actions.StateDelta["output"]
+					if ev.Actions.StateDelta != nil {
+						if out, ok := ev.Actions.StateDelta["output"]; ok {
+							outB = out
+						}
+					}
 				}
 
 				if diff := cmp.Diff(tc.want, outB); diff != "" {

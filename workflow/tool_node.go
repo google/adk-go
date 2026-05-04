@@ -30,16 +30,16 @@ import (
 )
 
 // toolNode wraps a tool from the tool package.
-type toolNode[Input, Output any] struct {
+type toolNode struct {
 	baseNode
 	tool         tool.Tool
 	inputSchema  *jsonschema.Resolved
 	outputSchema *jsonschema.Resolved
 }
 
-// NewToolNodeWithSchemasTyped creates a new node wrapping a tool with explicitly provided schemas.
+// newToolNodeWithSchemasTyped creates a new node wrapping a tool with explicitly provided schemas.
 // If a schema is nil, it will be inferred from the corresponding generic type Input or Output.
-func NewToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, outputSchema *jsonschema.Schema) (Node, error) {
+func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, outputSchema *jsonschema.Schema) (Node, error) {
 	if t == nil {
 		return nil, fmt.Errorf("tool cannot be nil")
 	}
@@ -47,12 +47,18 @@ func NewToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 	if err != nil {
 		return nil, fmt.Errorf("resolving input schema for tool %q: %w", t.Name(), err)
 	}
+	if ischema == nil {
+		return nil, fmt.Errorf("resolved input schema for tool %q is nil", t.Name())
+	}
 	oschema, err := resolvedSchema[Output](outputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("resolving output schema for tool %q: %w", t.Name(), err)
 	}
+	if oschema == nil {
+		return nil, fmt.Errorf("resolved output schema for tool %q is nil", t.Name())
+	}
 
-	return &toolNode[Input, Output]{
+	return &toolNode{
 		baseNode:     baseNode{name: t.Name(), description: t.Description()},
 		tool:         t,
 		inputSchema:  ischema,
@@ -63,13 +69,13 @@ func NewToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 // NewToolNodeWithSchemas is a convenience wrapper for NewToolNodeWithSchemasTyped[any, any].
 // It uses explicitly provided schemas for both input and output.
 func NewToolNodeWithSchemas(t tool.Tool, inputSchema, outputSchema *jsonschema.Schema) (Node, error) {
-	return NewToolNodeWithSchemasTyped[any, any](t, inputSchema, outputSchema)
+	return newToolNodeWithSchemasTyped[any, any](t, inputSchema, outputSchema)
 }
 
 // NewToolNodeTyped creates a new node wrapping a tool using generics to
 // automatically infer input and output schemas from the provided types.
 func NewToolNodeTyped[Input, Output any](t tool.Tool) (Node, error) {
-	return NewToolNodeWithSchemasTyped[Input, Output](t, nil, nil)
+	return newToolNodeWithSchemasTyped[Input, Output](t, nil, nil)
 }
 
 // NewToolNode creates a new node wrapping a tool. Input and output schemas
@@ -78,59 +84,59 @@ func NewToolNode(t tool.Tool) (Node, error) {
 	return NewToolNodeTyped[any, any](t)
 }
 
-func (n *toolNode[Input, Output]) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *toolNode) runTool(toolCtx tool.Context, input any) (any, error) {
+	runnable, ok := n.tool.(interface {
+		Run(ctx tool.Context, args any) (map[string]any, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("tool %q (type %T) is not directly runnable in workflow node", n.tool.Name(), n.tool)
+	}
+
+	toolInput, err := typeutil.ConvertToWithJSONSchema[any, any](input, n.inputSchema)
+	if err != nil {
+		return nil, fmt.Errorf("converting input for tool %q: %w", n.tool.Name(), err)
+	}
+
+	output, err := runnable.Run(toolCtx, toolInput)
+	if err != nil {
+		return nil, fmt.Errorf("tool %q execution failed: %w", n.tool.Name(), err)
+	}
+
+	var toolOutput any = output
+
+	// Validate
+	if err := n.outputSchema.Validate(output); err != nil {
+		if val, ok := output["result"]; ok {
+			if err := n.outputSchema.Validate(val); err != nil {
+				return nil, fmt.Errorf("converting tool %q output: validation failed for result key: %w", n.tool.Name(), err)
+			}
+			toolOutput = val
+		} else {
+			return nil, fmt.Errorf("converting tool %q output: validation failed: %w", n.tool.Name(), err)
+		}
+	}
+
+	return toolOutput, nil
+}
+
+// Run implements the Node interface and executes the tool.
+func (n *toolNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		runnable, ok := n.tool.(interface {
-			Run(ctx tool.Context, args any) (map[string]any, error)
-		})
-		if !ok {
-			yield(nil, fmt.Errorf("tool %q (type %T) is not directly runnable in workflow node", n.tool.Name(), n.tool))
-			return
-		}
-
-		toolInput, err := typeutil.ConvertToWithJSONSchema[any, any](input, n.inputSchema)
-		if err != nil {
-			yield(nil, fmt.Errorf("converting input for tool %q: %w", n.tool.Name(), err))
-			return
-		}
-
 		eventActions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
 		toolCtx := toolinternal.NewToolContext(ctx, uuid.NewString(), eventActions, nil)
 
-		output, err := runnable.Run(toolCtx, toolInput)
+		toolOutput, err := n.runTool(toolCtx, input)
 		if err != nil {
-			yield(nil, fmt.Errorf("tool %q execution failed: %w", n.tool.Name(), err))
+			yield(nil, err)
 			return
-		}
-
-		typedOutput, err := typeutil.ConvertToWithJSONSchema[any, Output](output, n.outputSchema)
-		if err != nil {
-			// If outputSchema is not set or direct conversion failed, functiontool might have wrapped
-			// the result in a "result" key (common for basic types).
-			if val, ok := output["result"]; ok {
-				// If we have a "result" key but it can't be converted
-				typedOutput, err = typeutil.ConvertToWithJSONSchema[any, Output](val, n.outputSchema)
-				if err != nil {
-					// Try to convert to the type directly if that's some basic type.
-					if v, ok := val.(Output); ok {
-						typedOutput = v
-					} else {
-						yield(nil, fmt.Errorf("converting tool %q output to %T (from \"result\" key): %w", n.tool.Name(), *new(Output), err))
-						return
-					}
-				}
-			} else {
-				yield(nil, fmt.Errorf("converting tool %q output to %T: %w", n.tool.Name(), *new(Output), err))
-				return
-			}
 		}
 
 		event := session.NewEvent(ctx.InvocationID())
 		event.Actions = *eventActions
-		event.Actions.StateDelta["output"] = typedOutput
+		event.Actions.StateDelta["output"] = toolOutput
 
 		// If output is a string, set it as content for convenience (similar to FunctionNode).
-		if s, ok := any(typedOutput).(string); ok {
+		if s, ok := toolOutput.(string); ok {
 			event.Content = &genai.Content{
 				Parts: []*genai.Part{{Text: s}},
 			}
