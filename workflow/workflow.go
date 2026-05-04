@@ -64,6 +64,18 @@ func (r BoolRoute) Matches(event *session.Event) bool {
 	return matchRoute(fmt.Sprint(r), event)
 }
 
+// MultiRoute matches any value within a specified list of allowed routes.
+type MultiRoute[T comparable] []T
+
+func (r MultiRoute[T]) Matches(event *session.Event) bool {
+	for _, route := range r {
+		if matchRoute(fmt.Sprint(route), event) {
+			return true
+		}
+	}
+	return false
+}
+
 // baseNode provides common fields for all nodes.
 type baseNode struct {
 	name        string
@@ -182,6 +194,15 @@ type nodeInput struct {
 	input any
 }
 
+// findNextNodes determines the set of nodes to execute next based on the outgoing edges of the currentNode.
+// It evaluates routes attached to edges against the provided session.Event.
+// 
+// Behavior:
+// - Edges with no route condition always match.
+// - Edges with a route condition match only if the route matches the event.
+// - Duplicate target nodes are excluded to avoid queuing the same node multiple times.
+// - If there are outgoing edges but none of them match (neither by route nor by being unrouted),
+//   it falls back to the default route (TODO: hanorik - add default route support).
 func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Event) ([]nodeInput, error) {
 	if len(w.edges[currentNode]) == 0 {
 		return nil, nil
