@@ -28,6 +28,10 @@ import (
 	"google.golang.org/adk/workflow"
 )
 
+var defaultNodeConfig = workflow.NodeConfig{
+	RetryConfig: workflow.NewRetryConfig(),
+}
+
 // MockSession is a minimal implementation of session.Session for testing.
 type MockSession struct {
 	session.Session
@@ -106,8 +110,8 @@ func TestWorkflowAgent(t *testing.T) {
 		return input + " done", nil
 	}
 
-	nodeA := workflow.NewFunctionNode("upper", upperFn)
-	nodeB := workflow.NewFunctionNode("suffix", suffixFn)
+	nodeA := workflow.NewFunctionNode("upper", upperFn, defaultNodeConfig)
+	nodeB := workflow.NewFunctionNode("suffix", suffixFn, defaultNodeConfig)
 
 	edges := workflow.Chain(workflow.Start, nodeA, nodeB)
 

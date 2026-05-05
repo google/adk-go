@@ -286,7 +286,7 @@ func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 }
 func (s *startNode) Config() NodeConfig { return NodeConfig{} }
 
-const defaultRoute = "__DEFAULT__"
+const DEFAULT_ROUTE = "__DEFAULT__"
 
 // Workflow manages the workflow graph execution.
 type Workflow struct {
@@ -392,7 +392,7 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			}
 
 			if len(eventsWithRoutes) > 1 {
-				yield(nil, fmt.Errorf("node %s produced multiple events with route tags. Only one event per execution can specify routes.", currentNode.Name()))
+				yield(nil, fmt.Errorf("node %s produced multiple events with route tags. Only one event per execution can specify routes", currentNode.Name()))
 				return
 			}
 			var event *session.Event

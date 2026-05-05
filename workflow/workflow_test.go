@@ -322,7 +322,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "all edges don't have routing",
 			startRoutes: []string{"branchA", "branchB"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a},
@@ -336,7 +336,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "only one edge has correct routing and the rest have no routing",
 			startRoutes: []string{"branchA"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: StringRoute("branchA")},
@@ -350,7 +350,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "one edge has no routing and the rest have a correct routing",
 			startRoutes: []string{"branchA", "branchB"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: StringRoute("branchA")},
@@ -364,7 +364,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "any edge has incorrect routing",
 			startRoutes: []string{"invalid"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: StringRoute("branchA")},
@@ -378,7 +378,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "correct MultiRoute",
 			startRoutes: []string{"branchA"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: MultiRoute[string]{"branchX", "branchA"}},
@@ -392,7 +392,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "no MultiRoute matches event routes",
 			startRoutes: []string{"invalid"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: MultiRoute[string]{"branchX", "branchY"}},
@@ -404,7 +404,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "duplicate edges to same node",
 			startRoutes: []string{"branchA"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a},
