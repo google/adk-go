@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/session"
 )
 
@@ -92,7 +93,7 @@ type FunctionNode struct {
 }
 
 // NewFunctionNode creates a new node wrapping a custom function using generics to automatically infer input and output types.
-func NewFunctionNode[IN any, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error)) *FunctionNode {
+func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error)) *FunctionNode {
 	wrappedFn := func(ctx agent.InvocationContext, input any) (any, error) {
 		if input == nil {
 			var zero IN
@@ -100,7 +101,13 @@ func NewFunctionNode[IN any, OUT any](name string, fn func(ctx agent.InvocationC
 		}
 		typedInput, ok := input.(IN)
 		if !ok {
-			return nil, fmt.Errorf("invalid input type, expected %T", new(IN))
+			// Fallback to the json-like input types that cannot be converted by the standard type assertion.
+			// E.g. tool nodes return map[string]any as input and user may define a struct as the target type.
+			var err error
+			typedInput, err = typeutil.ConvertToWithJSONSchema[any, IN](input, nil)
+			if err != nil {
+				return nil, fmt.Errorf("new function node: invalid input type, expected %T: %v", new(IN), err)
+			}
 		}
 		return fn(ctx, typedInput)
 	}
