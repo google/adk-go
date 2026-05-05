@@ -18,7 +18,10 @@
 package loadmemorytool
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -102,9 +105,9 @@ func (t *loadMemoryTool) Run(toolCtx tool.Context, args any) (map[string]any, er
 	}
 
 	if searchResponse == nil || searchResponse.Memories == nil {
-		return map[string]any{"memories": []memory.Entry{}}, nil
+		return map[string]any{"memories": []any{}}, nil
 	}
-	return map[string]any{"memories": searchResponse.Memories}, nil
+	return map[string]any{"memories": formatMemoryEntries(searchResponse.Memories)}, nil
 }
 
 // ProcessRequest processes the LLM request by packing the tool and appending
@@ -115,4 +118,83 @@ func (t *loadMemoryTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest)
 	}
 	utils.AppendInstructions(req, memoryInstructions)
 	return nil
+}
+
+// formatMemoryEntries converts ADK memory entries into the plain data shape
+// returned by the load_memory tool.
+//
+// Tool responses are written back into the session as function responses. Some
+// session backends, including Vertex AI sessions, persist those responses as a
+// protobuf Struct. A protobuf Struct can only contain JSON-like values such as
+// strings, numbers, booleans, maps, and slices. Returning memory.Entry directly
+// would leak Go structs like genai.Content into the response and fail when the
+// session service tries to store the event.
+func formatMemoryEntries(memories []memory.Entry) []any {
+	formatted := make([]any, 0, len(memories))
+	for _, mem := range memories {
+		entry := map[string]any{}
+		if mem.ID != "" {
+			entry["id"] = mem.ID
+		}
+		if mem.Author != "" {
+			entry["author"] = mem.Author
+		}
+		if !mem.Timestamp.IsZero() {
+			entry["timestamp"] = mem.Timestamp.Format(time.RFC3339)
+		}
+		if content := extractText(mem); content != "" {
+			entry["content"] = content
+		}
+		if metadata := jsonCompatibleMap(mem.CustomMetadata); metadata != nil {
+			entry["custom_metadata"] = metadata
+		}
+		formatted = append(formatted, entry)
+	}
+	return formatted
+}
+
+// extractText joins the text parts from a memory entry into one string that can
+// be safely returned to the model.
+//
+// memory.Entry.Content can contain richer GenAI parts, but the memory-loading
+// tool only needs readable text. Non-text parts are skipped because they cannot
+// be represented cleanly in the simple function response shape.
+func extractText(mem memory.Entry) string {
+	if mem.Content == nil || len(mem.Content.Parts) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	for _, part := range mem.Content.Parts {
+		if part == nil || part.Text == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(part.Text)
+	}
+	return b.String()
+}
+
+// jsonCompatibleMap returns metadata only when it can be represented as plain
+// JSON-like values.
+//
+// Custom metadata is user supplied and may contain Go values that protobuf
+// Struct cannot encode. The JSON round trip keeps compatible metadata and drops
+// incompatible metadata instead of failing the whole memory load.
+func jsonCompatibleMap(value map[string]any) map[string]any {
+	if len(value) == 0 {
+		return nil
+	}
+
+	b, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil
+	}
+	return out
 }

@@ -105,6 +105,7 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 		AppName:         appName,
 		Agent:           rootAgent,
 		SessionService:  sessionService,
+		MemoryService:   config.MemoryService,
 		ArtifactService: config.ArtifactService,
 		PluginConfig:    config.PluginConfig,
 	})

@@ -104,6 +104,7 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 			AppName:         agent.Name(),
 			Agent:           agent,
 			SessionService:  config.SessionService,
+			MemoryService:   config.MemoryService,
 			ArtifactService: config.ArtifactService,
 			PluginConfig:    config.PluginConfig,
 		},

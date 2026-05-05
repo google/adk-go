@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"google.golang.org/genai"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
@@ -70,6 +71,7 @@ func TestLoadMemoryTool_Run(t *testing.T) {
 		memories []memory.Entry
 		wantLen  int
 		wantErr  bool
+		wantText string
 	}{
 		{
 			name:     "empty memories",
@@ -87,7 +89,8 @@ func TestLoadMemoryTool_Run(t *testing.T) {
 					Content:   genai.NewContentFromText("Hello world", genai.RoleUser),
 				},
 			},
-			wantLen: 1,
+			wantLen:  1,
+			wantText: "Hello world",
 		},
 		{
 			name: "multiple memory entries",
@@ -104,7 +107,8 @@ func TestLoadMemoryTool_Run(t *testing.T) {
 					Content:   genai.NewContentFromText("Second memory", genai.RoleModel),
 				},
 			},
-			wantLen: 2,
+			wantLen:  2,
+			wantText: "First memory",
 		},
 		{
 			name:    "missing query parameter",
@@ -130,12 +134,24 @@ func TestLoadMemoryTool_Run(t *testing.T) {
 				return
 			}
 
-			memories, ok := result["memories"].([]memory.Entry)
+			memories, ok := result["memories"].([]any)
 			if !ok {
-				t.Fatalf("result['memories'] is not []memory.Entry, got %T", result["memories"])
+				t.Fatalf("result['memories'] is not []any, got %T", result["memories"])
 			}
 			if len(memories) != tt.wantLen {
 				t.Errorf("Run() returned %d memories, want %d", len(memories), tt.wantLen)
+			}
+			if _, err := structpb.NewStruct(result); err != nil {
+				t.Fatalf("Run() returned a response that cannot be converted to structpb: %v", err)
+			}
+			if tt.wantText != "" {
+				first, ok := memories[0].(map[string]any)
+				if !ok {
+					t.Fatalf("first memory is not map[string]any, got %T", memories[0])
+				}
+				if got := first["content"]; got != tt.wantText {
+					t.Errorf("first memory content = %v, want %q", got, tt.wantText)
+				}
 			}
 		})
 	}
