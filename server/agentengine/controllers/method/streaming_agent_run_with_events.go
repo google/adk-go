@@ -228,6 +228,7 @@ func (s *streamingAgentRunWithEventsHandler) run(ctx context.Context, req *model
 		Agent:             rootAgent,
 		SessionService:    config.SessionService,
 		ArtifactService:   config.ArtifactService,
+		MemoryService:     config.MemoryService,
 		PluginConfig:      config.PluginConfig,
 		AutoCreateSession: true,
 	})
