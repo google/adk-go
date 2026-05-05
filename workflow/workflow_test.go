@@ -20,12 +20,17 @@ import (
 	"iter"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
+
+var defaultNodeConfig = NodeConfig{
+	RetryConfig: NewRetryConfig(),
+}
 
 // MockInvocationContext is a minimal implementation of agent.InvocationContext for testing.
 type MockInvocationContext struct {
@@ -53,7 +58,7 @@ func TestFunctionNode(t *testing.T) {
 		return strings.ToUpper(input), nil
 	}
 
-	node := NewFunctionNode("upper", upperFn)
+	node := NewFunctionNode("upper", upperFn, defaultNodeConfig)
 
 	// Create a mock context
 	mockCtx := &MockInvocationContext{sess: nil}
@@ -95,8 +100,8 @@ func TestSequentialWorkflow(t *testing.T) {
 		return input + " done", nil
 	}
 
-	nodeA := NewFunctionNode("upper", upperFn)
-	nodeB := NewFunctionNode("suffix", suffixFn)
+	nodeA := NewFunctionNode("upper", upperFn, defaultNodeConfig)
+	nodeB := NewFunctionNode("suffix", suffixFn, defaultNodeConfig)
 
 	edges := Chain(Start, nodeA, nodeB)
 
@@ -204,6 +209,58 @@ func TestMultiRouteInt(t *testing.T) {
 	}
 }
 
+func TestNewRetryConfig(t *testing.T) {
+	// Test defaults
+	cfg := NewRetryConfig()
+	if cfg.MaxAttempts != 5 {
+		t.Errorf("expected MaxAttempts 5, got %d", cfg.MaxAttempts)
+	}
+	if cfg.InitialDelay != 1*time.Second {
+		t.Errorf("expected InitialDelay 1s, got %v", cfg.InitialDelay)
+	}
+	if cfg.MaxDelay != 60*time.Second {
+		t.Errorf("expected MaxDelay 60s, got %v", cfg.MaxDelay)
+	}
+	if cfg.BackoffFactor != 2.0 {
+		t.Errorf("expected BackoffFactor 2.0, got %f", cfg.BackoffFactor)
+	}
+	if cfg.Jitter != 1.0 {
+		t.Errorf("expected Jitter 1.0, got %f", cfg.Jitter)
+	}
+	if cfg.ShouldRetry == nil || !cfg.ShouldRetry(nil) {
+		t.Errorf("expected ShouldRetry to be non-nil and return true")
+	}
+
+	// Test options
+	cfg = NewRetryConfig(
+		WithMaxAttempts(10),
+		WithInitialDelay(2*time.Second),
+		WithMaxDelay(20*time.Second),
+		WithBackoffFactor(3.0),
+		WithJitter(0.0),
+		WithShouldRetry(func(err error) bool { return false }),
+	)
+
+	if cfg.MaxAttempts != 10 {
+		t.Errorf("expected MaxAttempts 10, got %d", cfg.MaxAttempts)
+	}
+	if cfg.InitialDelay != 2*time.Second {
+		t.Errorf("expected InitialDelay 2s, got %v", cfg.InitialDelay)
+	}
+	if cfg.MaxDelay != 20*time.Second {
+		t.Errorf("expected MaxDelay 20s, got %v", cfg.MaxDelay)
+	}
+	if cfg.BackoffFactor != 3.0 {
+		t.Errorf("expected BackoffFactor 3.0, got %f", cfg.BackoffFactor)
+	}
+	if cfg.Jitter != 0.0 {
+		t.Errorf("expected Jitter 0.0, got %f", cfg.Jitter)
+	}
+	if cfg.ShouldRetry == nil || cfg.ShouldRetry(nil) {
+		t.Errorf("expected ShouldRetry to return false")
+	}
+}
+
 type CustomRouteNode struct {
 	baseNode
 	route []string
@@ -242,11 +299,11 @@ func TestWorkflowRouting(t *testing.T) {
 		nodeA := NewFunctionNode("A", func(ctx agent.InvocationContext, input any) (string, error) {
 			tracker.executed = append(tracker.executed, "A")
 			return "pathA", nil
-		})
+		}, defaultNodeConfig)
 		nodeB := NewFunctionNode("B", func(ctx agent.InvocationContext, input any) (string, error) {
 			tracker.executed = append(tracker.executed, "B")
 			return "pathB", nil
-		})
+		}, defaultNodeConfig)
 		nodeC := &CustomRouteNode{
 			baseNode: baseNode{name: "C"},
 			route:    []string{"branchD"},
@@ -257,7 +314,7 @@ func TestWorkflowRouting(t *testing.T) {
 		nodeD := NewFunctionNode("D", func(ctx agent.InvocationContext, input any) (string, error) {
 			tracker.executed = append(tracker.executed, "D")
 			return "pathD", nil
-		})
+		}, defaultNodeConfig)
 		return nodeX, nodeA, nodeB, nodeC, nodeD, tracker
 	}
 
