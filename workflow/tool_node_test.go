@@ -299,26 +299,26 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 				t.Fatalf("failed to create tool: %v", err)
 			}
 
-			nodeA, err := NewToolNodeTyped[*Input, *Output](doubleTool)
+			toolNode, err := NewToolNodeTyped[*Input, *Output](doubleTool)
 			if err != nil {
 				t.Fatalf("NewToolNodeTyped failed: %v", err)
 			}
 
 			// Connect to a function node.
-			nodeB := NewFunctionNode[Output, int]("plus_one", func(ctx agent.InvocationContext, in Output) (int, error) {
+			functionNode := NewFunctionNode[Output, int]("plus_one", func(ctx agent.InvocationContext, in Output) (int, error) {
 				return in.Result + 1, nil
 			})
 
 			mockCtx := &MockInvocationContext{sess: nil}
 
 			t.Run("WorkflowExecution", func(t *testing.T) {
-				// Use a seed node to pass the struct input to nodeA,
+				// Use a seed node to pass the struct input to toolNode,
 				// since Workflow.Run currently only passes strings from UserContent.
 				seedNode := NewFunctionNode("seed", func(ctx agent.InvocationContext, input any) (*Input, error) {
 					return &Input{Val: tc.input}, nil
 				})
 
-				edges := Chain(Start, seedNode, nodeA, nodeB)
+				edges := Chain(Start, seedNode, toolNode, functionNode)
 				w := New(edges)
 
 				events := w.Run(mockCtx)
