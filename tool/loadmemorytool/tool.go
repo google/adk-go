@@ -19,13 +19,12 @@ package loadmemorytool
 
 import (
 	"fmt"
-
+	"encoding/json"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
@@ -101,10 +100,16 @@ func (t *loadMemoryTool) Run(toolCtx tool.Context, args any) (map[string]any, er
 		return nil, fmt.Errorf("failed to search memory: %w", err)
 	}
 
-	if searchResponse == nil || searchResponse.Memories == nil {
-		return map[string]any{"memories": []memory.Entry{}}, nil
+	var result map[string]any
+	searchResponseJSON, err := json.Marshal(searchResponse)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal search response to JSON: %w", err)
+	}	
+	if err := json.Unmarshal(searchResponseJSON, &result); err != nil{
+		return nil, fmt.Errorf("failed to unmarshal search response from JSON to map[string]any: %w", err)
 	}
-	return map[string]any{"memories": searchResponse.Memories}, nil
+
+	return result, nil
 }
 
 // ProcessRequest processes the LLM request by packing the tool and appending
