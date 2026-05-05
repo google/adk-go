@@ -96,8 +96,11 @@ func TestSequentialWorkflow(t *testing.T) {
 	nodeB := NewFunctionNode("suffix", suffixFn)
 
 	edges := Chain(Start, nodeA, nodeB)
-
-	w := New(edges)
+	
+	w, err := New(edges)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	mockCtx := &MockInvocationContext{
 		sess: nil,
@@ -364,10 +367,13 @@ func TestWorkflowRouting(t *testing.T) {
 			start.route = tc.startRoutes
 			edges := tc.edges(start, a, b, c, d)
 
-			w := New(edges)
+			w, err := New(edges)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
 			mockCtx := &MockInvocationContext{sess: nil}
 
-			var err error
 			for _, testErr := range w.Run(mockCtx) {
 				if testErr != nil {
 					err = testErr

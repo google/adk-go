@@ -181,12 +181,15 @@ type Workflow struct {
 }
 
 // New creates a new Workflow engine with the given edges.
-func New(edges []Edge) *Workflow {
+func New(edges []Edge) (*Workflow, error) {
+	if err := validateUniqueNames(edges); err != nil {
+		return nil, err
+	}
 	adj := make(map[Node][]Edge)
 	for _, edge := range edges {
 		adj[edge.From] = append(adj[edge.From], edge)
 	}
-	return &Workflow{edges: adj}
+	return &Workflow{edges: adj}, nil
 }
 
 type nodeInput struct {
