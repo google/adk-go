@@ -174,6 +174,36 @@ func TestBoolRoute(t *testing.T) {
 	}
 }
 
+func TestMultiRouteString(t *testing.T) {
+	event := &session.Event{
+		Routes: []string{"hello", "42", "true"},
+	}
+
+	strMulti := MultiRoute[string]{"world", "hello"}
+	if !strMulti.Matches(event) {
+		t.Errorf("MultiRoute[string] should match")
+	}
+	strMultiNoMatch := MultiRoute[string]{"world", "golang"}
+	if strMultiNoMatch.Matches(event) {
+		t.Errorf("MultiRoute[string] should not match")
+	}
+}
+
+func TestMultiRouteInt(t *testing.T) {
+	event := &session.Event{
+		Routes: []string{"hello", "42", "true"},
+	}
+
+	intMulti := MultiRoute[int]{10, 42}
+	if !intMulti.Matches(event) {
+		t.Errorf("MultiRoute[int] should match")
+	}
+	intMultiNoMatch := MultiRoute[int]{10, 20}
+	if intMultiNoMatch.Matches(event) {
+		t.Errorf("MultiRoute[int] should not match")
+	}
+}
+
 type CustomRouteNode struct {
 	baseNode
 	route []string
@@ -287,6 +317,47 @@ func TestWorkflowRouting(t *testing.T) {
 				}
 			},
 			expectErrorMsg: "no outgoing edge matches the event with routes",
+		},
+		{
+			name:        "correct MultiRoute",
+			startRoutes: []string{"branchA"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a, Route: MultiRoute[string]{"branchX", "branchA"}},
+					{From: x, To: b},
+					{From: x, To: c},
+					{From: c, To: d},
+				}
+			},
+			expectedExec: []string{"A", "B", "C", "D"},
+		},
+		{
+			name:        "no MultiRoute matches event routes",
+			startRoutes: []string{"invalid"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a, Route: MultiRoute[string]{"branchX", "branchY"}},
+					{From: x, To: b, Route: MultiRoute[string]{"branchZ"}},
+				}
+			},
+			expectErrorMsg: "no outgoing edge matches the event with routes",
+		},
+		{
+			name:        "duplicate edges to same node",
+			startRoutes: []string{"branchA"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b},
+					{From: x, To: c},
+					{From: c, To: d},
+				}
+			},
+			expectedExec: []string{"A", "B", "C", "D"},
 		},
 	}
 
