@@ -58,6 +58,16 @@ type coalesceState struct {
 	timer          *time.Timer
 	inFlightCancel map[string]context.CancelFunc
 	flushCh        chan struct{} // signaled by timer; consumed by receiver loop
+	// nonThoughtIDs holds the set of buffered FunctionCall IDs that came
+	// from non-thought parts. Maintained in lockstep with `buffer`:
+	//   - bufferToolCalls inserts on buffer-add (skipping thought parts)
+	//   - handleToolCancellation removes when a cancelled call is dropped
+	//   - collectBufferedCalls reads len() and clears on drain
+	// flushToolCalls uses len(nonThoughtIDs) to decide whether to reset
+	// the turn-cycle guard at the FunctionResponse boundary. Tracking IDs
+	// (rather than a bool) keeps the gate accurate when a real call is
+	// cancelled before flush and only thought calls remain.
+	nonThoughtIDs map[string]struct{}
 }
 
 type recvResult struct {
@@ -85,6 +95,13 @@ func (g *turnCycleGuard) onTurnComplete() {
 	if g.contentDelivered {
 		g.suppressActive = true
 	}
+}
+
+// markContentDelivered records that model content was emitted in the current
+// turn. Used by the Interrupted bypass path so a subsequent onTurnComplete
+// arms suppression for any post-Interrupted duplicates that may follow.
+func (g *turnCycleGuard) markContentDelivered() {
+	g.contentDelivered = true
 }
 
 func (g *turnCycleGuard) reset() {
@@ -390,6 +407,7 @@ func (lf *LiveFlow) startSessionLoops(
 		dedup:          make(map[string]string),
 		inFlightCancel: make(map[string]context.CancelFunc),
 		flushCh:        make(chan struct{}, 1),
+		nonThoughtIDs:  make(map[string]struct{}),
 	}
 	turnResetCh := make(chan struct{}, 1)
 
@@ -621,7 +639,7 @@ func (lf *LiveFlow) receiverLoop(
 				return
 			}
 		case <-cs.flushCh:
-			lf.flushToolCalls(ctx, invCtx, conn, cs, toolsFuncMap, ts, queue, eventCh)
+			lf.flushToolCalls(ctx, invCtx, conn, cs, toolsFuncMap, ts, queue, eventCh, guard)
 		case <-turnResetCh:
 			guard.reset()
 		case <-ctx.Done():
@@ -690,12 +708,15 @@ func (lf *LiveFlow) processMessage(
 	}
 
 	if hasFunctionCallParts(resp) {
-		guard.reset() // model-initiated tool call = new conversational context
+		// FC-arrival no longer resets the guard; the FunctionResponse
+		// boundary owns the reset (see flushToolCalls), gated on the
+		// presence of at least one non-thought call. Thought-only
+		// emissions therefore never end the turn cycle on their own.
 		lf.bufferToolCalls(cs, resp)
 		return
 	}
 
-	lf.flushCoalesceBuffer(ctx, invCtx, conn, cs, toolsFuncMap, ts, queue, eventCh)
+	lf.flushCoalesceBuffer(ctx, invCtx, conn, cs, toolsFuncMap, ts, queue, eventCh, guard)
 
 	isAudio := false
 	if resp.CustomMetadata != nil {
@@ -738,21 +759,52 @@ func (lf *LiveFlow) processMessage(
 	sendEvent(ctx, eventCh, eventOrError{event: ev})
 }
 
-// applyTurnCycleGuard evaluates the guard for the given response.
-// Returns nil if the message should be fully suppressed.
-// Returns a (possibly modified) response otherwise.
+// applyTurnCycleGuard evaluates the guard for the given response and returns
+// the response to forward downstream, or nil when the message should be
+// fully suppressed.
+//
+// Suppression matrix (when the guard is armed and the message is model-
+// content-bearing — i.e. Content!=nil with role=="model" and !isAudio):
+//
+//	Content+OT only       → nil (fully suppressed)
+//	Content+OT+IT         → Content/OT stripped, IT preserved
+//	Content+IT (no OT)    → Content stripped, IT preserved
+//
+// OT-stripping nuance: OutputTranscription is stripped only when the
+// response is model-content-bearing AND the guard suppresses. An OT-only
+// message (Content==nil) is a documented bypass case — isModelContent is
+// false, the guard is not consulted, and OT is forwarded untouched. Audio
+// model content also bypasses the guard via the !isAudio carve-out, so
+// audio frames are never stripped here.
+//
+// InputTranscription (user input) is never stripped: it is not a model
+// duplicate. The Interrupted branch bypasses the suppress check for the
+// current message (it carries the truncated model output, which the
+// caller must observe) and arms the guard so post-Interrupted duplicates
+// that arrive before user activity are suppressed.
 func applyTurnCycleGuard(resp *model.LLMResponse, guard *turnCycleGuard, isAudio bool) *model.LLMResponse {
 	isModelContent := resp.Content != nil && resp.Content.Role == "model" && !isAudio
-	hasTranscription := resp.InputTranscription != nil || resp.OutputTranscription != nil
 
-	// Check guard INDEPENDENTLY of transcription.
+	// Interrupted: the truncated model output IS this message — deliver it
+	// (bypass suppression). Arm the guard so any subsequent duplicates that
+	// arrive before user activity are suppressed.
+	if resp.Interrupted {
+		if isModelContent {
+			guard.markContentDelivered()
+		}
+		guard.onTurnComplete()
+		return resp
+	}
+
 	suppressModelContent := false
 	if isModelContent {
 		suppressModelContent = guard.onModelContent()
 	}
 
-	// Track TurnComplete in guard regardless of suppress decision.
-	if resp.TurnComplete || resp.Interrupted {
+	// Arm only on a non-partial TurnComplete. Partial events fire before
+	// the aggregate that carries the real content; arming on them would
+	// strip the aggregate's content.
+	if resp.TurnComplete && !resp.Partial {
 		guard.onTurnComplete()
 	}
 
@@ -760,13 +812,16 @@ func applyTurnCycleGuard(resp *model.LLMResponse, guard *turnCycleGuard, isAudio
 		return resp
 	}
 
-	if !hasTranscription {
-		return nil // pure model content, fully suppressed
-	}
-
-	// Mixed message: strip model content, keep transcription.
+	// Suppression: strip model output (Content + OutputTranscription).
+	// InputTranscription (user input) is preserved since it is not a
+	// model duplicate. With no IT remaining, the message is fully
+	// suppressed (return nil).
 	stripped := *resp
 	stripped.Content = nil
+	stripped.OutputTranscription = nil
+	if stripped.InputTranscription == nil {
+		return nil
+	}
 	return &stripped
 }
 
@@ -819,6 +874,9 @@ func (lf *LiveFlow) bufferToolCalls(
 			continue
 		}
 		fc := part.FunctionCall
+		if !part.Thought {
+			cs.nonThoughtIDs[fc.ID] = struct{}{}
+		}
 		hash := hashCall(fc.Name, fc.Args)
 		if _, ok := cs.dedup[hash]; !ok {
 			cs.dedup[hash] = fc.ID
@@ -859,6 +917,7 @@ func (lf *LiveFlow) flushCoalesceBuffer(
 	ts *liveTimingState,
 	queue *agent.LiveRequestQueue,
 	eventCh chan<- eventOrError,
+	guard *turnCycleGuard,
 ) {
 	cs.mu.Lock()
 	if cs.timer != nil {
@@ -876,7 +935,7 @@ func (lf *LiveFlow) flushCoalesceBuffer(
 	if empty {
 		return
 	}
-	lf.flushToolCalls(ctx, invCtx, conn, cs, toolsFuncMap, ts, queue, eventCh)
+	lf.flushToolCalls(ctx, invCtx, conn, cs, toolsFuncMap, ts, queue, eventCh, guard)
 }
 
 func (lf *LiveFlow) flushToolCalls(
@@ -888,8 +947,9 @@ func (lf *LiveFlow) flushToolCalls(
 	ts *liveTimingState,
 	queue *agent.LiveRequestQueue,
 	eventCh chan<- eventOrError,
+	guard *turnCycleGuard,
 ) {
-	calls := lf.collectBufferedCalls(cs)
+	calls, hasNonThought := lf.collectBufferedCalls(cs)
 	if len(calls) == 0 {
 		return
 	}
@@ -911,9 +971,27 @@ func (lf *LiveFlow) flushToolCalls(
 		return
 	}
 	lf.emitFunctionResponseEvent(ctx, invCtx, responses, queue, ts, toolExecTime, eventCh)
+
+	// Reset the turn-cycle guard only after the FunctionResponse was
+	// successfully emitted, and only if the batch contained at least one
+	// non-thought call. Thought-only batches must preserve guard state so
+	// post-thought duplicates remain suppressed. A failed trackedSend
+	// returns above without resetting — the cycle didn't close, so the
+	// guard must stay armed.
+	if hasNonThought {
+		guard.reset()
+	}
 }
 
-func (lf *LiveFlow) collectBufferedCalls(cs *coalesceState) map[string]*genai.FunctionCall {
+// collectBufferedCalls drains the buffered FunctionCalls together with a
+// snapshot of whether any non-thought call was present in the batch.
+// Returning the flag alongside the calls keeps the drain atomic — the
+// post-flushToolCalls reset gating in flushToolCalls observes the same
+// batch boundary as the buffer it just emptied. Cancellations between
+// buffer-add and drain are already reflected in nonThoughtIDs (see
+// handleToolCancellation), so a real call cancelled before flush does
+// not falsely arm the reset.
+func (lf *LiveFlow) collectBufferedCalls(cs *coalesceState) (map[string]*genai.FunctionCall, bool) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -922,14 +1000,20 @@ func (lf *LiveFlow) collectBufferedCalls(cs *coalesceState) map[string]*genai.Fu
 		cs.timer = nil
 	}
 	if len(cs.buffer) == 0 {
-		return nil
+		// Clear the set even on empty drains so a stale entry can't
+		// bleed into the next batch (defence in depth — handlers
+		// already keep the set in sync with the buffer).
+		cs.nonThoughtIDs = make(map[string]struct{})
+		return nil, false
 	}
 
 	calls := make(map[string]*genai.FunctionCall, len(cs.buffer))
 	maps.Copy(calls, cs.buffer)
 	cs.buffer = make(map[string]*genai.FunctionCall)
 	cs.dedup = make(map[string]string)
-	return calls
+	hasNonThought := len(cs.nonThoughtIDs) > 0
+	cs.nonThoughtIDs = make(map[string]struct{})
+	return calls, hasNonThought
 }
 
 type callGroup struct {
@@ -1144,6 +1228,10 @@ func handleToolCancellation(cs *coalesceState, cancelledIDs []string) {
 	defer cs.mu.Unlock()
 	for _, id := range cancelledIDs {
 		delete(cs.buffer, id)
+		// Keep the non-thought set in sync with the buffer. If a real
+		// (non-thought) call is cancelled before flush, the post-flush
+		// reset must NOT fire when only thought calls remain.
+		delete(cs.nonThoughtIDs, id)
 		if cancelFn, ok := cs.inFlightCancel[id]; ok {
 			cancelFn()
 			delete(cs.inFlightCancel, id)

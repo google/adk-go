@@ -397,6 +397,32 @@ func mixedResponse(text, transcriptionText string) *model.LLMResponse {
 	}
 }
 
+// thoughtFunctionCallResponse creates a model response containing a
+// thought-only FunctionCall part (Thought=true). Used to verify the guard
+// is preserved across model "thinking" emissions.
+func thoughtFunctionCallResponse(id, name string, args map[string]any) *model.LLMResponse {
+	return &model.LLMResponse{
+		Content: &genai.Content{
+			Role: "model",
+			Parts: []*genai.Part{{
+				Thought:      true,
+				FunctionCall: &genai.FunctionCall{ID: id, Name: name, Args: args},
+			}},
+		},
+	}
+}
+
+// partialTurnCompleteResponse creates a Partial=true + TurnComplete=true
+// model response carrying text. Mirrors the streaming aggregator's partial
+// emission that precedes the aggregate.
+func partialTurnCompleteResponse(text string) *model.LLMResponse {
+	return &model.LLMResponse{
+		Content:      genai.NewContentFromText(text, "model"),
+		Partial:      true,
+		TurnComplete: true,
+	}
+}
+
 // modelContentTexts extracts text from model-content events.
 func modelContentTexts(events []*session.Event) []string {
 	var texts []string
@@ -1168,20 +1194,41 @@ func persistedTexts(events []*session.Event) []string {
 // ---------------------------------------------------------------------------
 
 func TestScenario14_TurnCompleteBoundaryFlush(t *testing.T) {
+	// Two distinct speaking segments separated by a real turn boundary.
+	// User activity between segments resets the turn-cycle guard via
+	// turnResetCh; without that reset, fix #5 would treat segment two as
+	// a post-TurnComplete duplicate and strip its model output (Content
+	// AND OutputTranscription), preventing the OT aggregator from
+	// flushing the second persisted transcript.
 	conn := newMockLiveConnection()
-	conn.recvResponses = []*model.LLMResponse{
-		// First speaking segment: two output chunks, then TurnComplete.
-		transcriptResponse("Hello, ", "output", false),
-		transcriptResponse("how are you?", "output", false),
-		turnCompleteResponse(),
-		// Second speaking segment: one chunk, then TurnComplete.
-		transcriptResponse("I found the patient.", "output", false),
-		turnCompleteResponse(),
-	}
+	conn.recvCh = make(chan *model.LLMResponse, 10)
 
 	r, svc, _ := setupRunner(t, conn, nil, nil)
 	queue := agent.NewLiveRequestQueue(100)
-	queue.Close()
+
+	go func() {
+		// First speaking segment: two output chunks, then TurnComplete.
+		conn.recvCh <- transcriptResponse("Hello, ", "output", false)
+		conn.recvCh <- transcriptResponse("how are you?", "output", false)
+		conn.recvCh <- turnCompleteResponse()
+
+		// Allow receiverLoop to process the segment + arm the guard.
+		time.Sleep(50 * time.Millisecond)
+
+		// User activity — senderLoop signals turnResetCh, resetting the
+		// guard so the next speaking segment is not suppressed.
+		_ = queue.Send(context.Background(), &model.LiveRequest{
+			Content: genai.NewContentFromText("ack", "user"),
+		})
+		time.Sleep(50 * time.Millisecond)
+
+		// Second speaking segment: one chunk, then TurnComplete.
+		conn.recvCh <- transcriptResponse("I found the patient.", "output", false)
+		conn.recvCh <- turnCompleteResponse()
+
+		time.Sleep(50 * time.Millisecond)
+		queue.Close()
+	}()
 
 	events, errs := collectEvents(t, r, queue)
 	if len(errs) > 0 {
@@ -1642,10 +1689,15 @@ func TestScenario22_SuppressedTurnCompleteDrivesSetModelSpeaking(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 23: Mixed transcription+content — content suppressed, transcription emitted
+// Scenario 23: Mixed message during armed guard — fully suppressed
 // ---------------------------------------------------------------------------
 
-func TestScenario23_MixedMessageContentSuppressedTranscriptionEmitted(t *testing.T) {
+func TestScenario23_MixedMessageFullySuppressedDuringArmedGuard(t *testing.T) {
+	// Under fix #5, a mixed model-content + OutputTranscription message
+	// during armed state has BOTH Content and OutputTranscription stripped.
+	// With no InputTranscription remaining, the message is fully
+	// suppressed (no event emitted at all) — preserving previous behavior
+	// for the model-content side and adding OT-strip parity.
 	conn := newMockLiveConnection()
 	conn.recvResponses = []*model.LLMResponse{
 		textResponse("A"),
@@ -1662,34 +1714,37 @@ func TestScenario23_MixedMessageContentSuppressedTranscriptionEmitted(t *testing
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 
+	if len(events) != 2 {
+		t.Fatalf("expected 2 yielded events (mixed message fully suppressed), got %d", len(events))
+	}
+
 	// Model content "A" should appear only once.
 	texts := modelContentTexts(events)
 	if len(texts) != 1 || texts[0] != "A" {
 		t.Errorf("expected [A], got %v", texts)
 	}
 
-	// The mixed message event should have Content==nil but transcription intact.
-	lastEv := events[len(events)-1]
-	if lastEv.Content != nil {
-		t.Error("mixed message event should have Content stripped (nil)")
-	}
-	if lastEv.OutputTranscription == nil || lastEv.OutputTranscription.Text != "hello" {
-		t.Error("mixed message event should preserve output transcription")
+	// Defence in depth: no event must carry the duplicate OT.
+	for i, ev := range events {
+		if ev.OutputTranscription != nil && ev.OutputTranscription.Text == "hello" {
+			t.Errorf("event[%d] leaked OutputTranscription %q (must be stripped on suppress)", i, ev.OutputTranscription.Text)
+		}
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 24: Post-Interrupted known limitation — out of scope for #34
+// Scenario 24: Interrupted bypasses suppression and arms the guard
 // ---------------------------------------------------------------------------
 
-func TestScenario24_PostInterruptedKnownLimitation(t *testing.T) {
-	// Documents known false positive — out of scope for issue #34.
-	// If the model is Interrupted and immediately sends new content
-	// before turnResetCh fires, the guard may suppress it.
+func TestScenario24_InterruptedBypassesSuppressionAndArms(t *testing.T) {
+	// Under fix #1, an Interrupted message bypasses the guard's suppress
+	// check (the truncated model output IS this message — it must be
+	// observed) AND arms the guard so any post-Interrupted duplicates
+	// that arrive before user activity are suppressed.
 	conn := newMockLiveConnection()
 	conn.recvResponses = []*model.LLMResponse{
-		textResponseWithTurnComplete("A"),
-		textResponseInterrupted("B"),
+		textResponseWithTurnComplete("A"), // arms guard
+		textResponseInterrupted("B"),      // bypasses suppression
 	}
 
 	r, _, _ := setupRunner(t, conn, nil, nil)
@@ -1698,10 +1753,10 @@ func TestScenario24_PostInterruptedKnownLimitation(t *testing.T) {
 
 	events, _ := collectEvents(t, r, queue)
 
-	// "A" is emitted. "B" is suppressed (known false positive).
+	// Both A and B emitted: Interrupted message bypasses the armed guard.
 	texts := modelContentTexts(events)
-	if len(texts) != 1 || texts[0] != "A" {
-		t.Errorf("expected only [A] emitted (B suppressed as known limitation), got %v", texts)
+	if len(texts) != 2 || texts[0] != "A" || texts[1] != "B" {
+		t.Errorf("expected [A B] (Interrupted bypasses suppression), got %v", texts)
 	}
 
 	// SetModelSpeaking(false) must still fire for Interrupted.
@@ -2057,6 +2112,320 @@ func TestScenario30_InputFlushedBeforeTextContent(t *testing.T) {
 	}
 	if persisted[1].Author == "user" {
 		t.Error("second persisted event should not have Author=user")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: Partial TurnComplete does not arm suppression
+// ---------------------------------------------------------------------------
+
+func TestScenario_PartialTurnCompleteDoesNotArm(t *testing.T) {
+	// Under fix #3, the guard arms only on a non-partial TurnComplete.
+	// Partial TurnComplete events fire before the aggregate that carries
+	// the real content; arming on them would strip the aggregate's content.
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		partialTurnCompleteResponse("A"), // partial — must not arm
+		textResponse("A"),                // would be a duplicate IF armed
+		turnCompleteResponse(),
+	}
+
+	r, _, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, _ := collectEvents(t, r, queue)
+
+	texts := modelContentTexts(events)
+	// Both partial and aggregate emit "A"; the second is NOT suppressed
+	// because partial TurnComplete didn't arm the guard.
+	if len(texts) != 2 {
+		t.Errorf("expected 2 model-content events (partial did not arm), got %v", texts)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: Thought-only FunctionCall does not reset the guard
+// ---------------------------------------------------------------------------
+
+func TestScenario_ThoughtOnlyFunctionCallDoesNotResetGuard(t *testing.T) {
+	// Under fix #4 the FC-arrival path no longer resets the guard, and
+	// under fix #2 the FunctionResponse boundary reset is gated on the
+	// presence of at least one non-thought call. So a thought-only batch
+	// preserves the armed guard, and the duplicate that follows remains
+	// suppressed.
+	thoughtTool := &mockTool{name: "thought", result: map[string]any{}}
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		textResponse("Hello"),
+		turnCompleteResponse(), // arms guard
+		thoughtFunctionCallResponse("fc1", "thought", nil),
+		textResponse("Hello"), // duplicate — must remain suppressed
+		turnCompleteResponse(),
+	}
+
+	r, _, _ := setupRunner(t, conn, []tool.Tool{thoughtTool}, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, _ := collectEvents(t, r, queue)
+
+	texts := modelContentTexts(events)
+	if len(texts) != 1 || texts[0] != "Hello" {
+		t.Errorf("expected [Hello] (duplicate suppressed across thought call), got %v", texts)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: OutputTranscription is stripped when the guard suppresses
+// ---------------------------------------------------------------------------
+
+func TestScenario_OutputTranscriptionStrippedOnSuppress(t *testing.T) {
+	// transcriptResponse(text, "output", true) sets BOTH Content
+	// (role=model, text=text) AND OutputTranscription{Text:text,
+	// Finished:true} — that is the Gemini Live invariant the suppress
+	// path is meant to handle. Under fix #5, suppression strips Content
+	// and OT both; with no InputTranscription the message is fully
+	// suppressed (no event emitted at all).
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		textResponse("Greeting"),
+		turnCompleteResponse(), // arms guard
+		transcriptResponse("Greeting", "output", true),
+	}
+
+	r, _, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, _ := collectEvents(t, r, queue)
+
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events (third fully suppressed), got %d", len(events))
+	}
+
+	// Defence in depth: even if a future change kept the event in the
+	// stream, OT must not leak through.
+	for i, ev := range events {
+		if ev.OutputTranscription != nil && ev.OutputTranscription.Text == "Greeting" {
+			t.Errorf("event[%d] leaked OutputTranscription %q (must be stripped on suppress)", i, ev.OutputTranscription.Text)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: Mixed-content suppress preserves InputTranscription
+// ---------------------------------------------------------------------------
+
+func TestScenario_SuppressedMixedContentPreservesInputTranscription(t *testing.T) {
+	// Validates the IT-preserved branch of the strip matrix: when a
+	// suppressed message carries an InputTranscription alongside model
+	// Content + OutputTranscription, only the model output is stripped.
+	// IT survives because it represents user input, not a model duplicate.
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		textResponse("Hello"),
+		turnCompleteResponse(), // arms guard
+		{
+			Content:             genai.NewContentFromText("Hello", "model"),
+			OutputTranscription: &genai.Transcription{Text: "Hello", Finished: true},
+			InputTranscription:  &genai.Transcription{Text: "User said hi", Finished: true},
+		},
+	}
+
+	r, _, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, _ := collectEvents(t, r, queue)
+
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+	last := events[len(events)-1]
+	if last.Content != nil {
+		t.Error("Content must be stripped on suppress")
+	}
+	if last.OutputTranscription != nil {
+		t.Error("OutputTranscription must be stripped on suppress")
+	}
+	if last.InputTranscription == nil || last.InputTranscription.Text != "User said hi" {
+		t.Errorf("InputTranscription must be preserved; got %+v", last.InputTranscription)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: FunctionResponse boundary resets the guard (fix #2)
+// ---------------------------------------------------------------------------
+
+// This is the negative-control for fix #2. With fix #4 removing the
+// FC-arrival reset, the only thing that lets the second "A" through is
+// the post-flushToolCalls reset. Removing that reset breaks this test.
+func TestScenario_FunctionResponseBoundaryResets(t *testing.T) {
+	greet := &mockTool{name: "greet", result: map[string]any{"msg": "hi"}}
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		textResponse("A"),
+		turnCompleteResponse(), // arms guard
+		functionCallResponse("fc1", "greet", nil),
+		// Under fix #4 the FC-arrival path no longer resets the guard,
+		// so this duplicate would still be suppressed if fix #2 is
+		// missing.
+		textResponse("A"),
+		turnCompleteResponse(),
+	}
+
+	r, _, _ := setupRunner(t, conn, []tool.Tool{greet}, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, _ := collectEvents(t, r, queue)
+
+	texts := modelContentTexts(events)
+	// Both "A" emitted: the second comes after the FunctionResponse
+	// boundary reset (fix #2). Without that reset the guard stays armed
+	// across the FC cycle and the second A is suppressed.
+	if len(texts) != 2 || texts[0] != "A" || texts[1] != "A" {
+		t.Errorf("expected [A A] (FR boundary reset enabled second A), got %v", texts)
+	}
+	if greet.CallCount() != 1 {
+		t.Errorf("expected greet called once, got %d", greet.CallCount())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: Non-thought cancelled before flush — thought-only batch must not reset guard
+// ---------------------------------------------------------------------------
+
+// Negative control: if a non-thought FunctionCall is buffered and then
+// cancelled before the coalesce timer fires, only the thought call
+// remains at flush time. The post-flushToolCalls reset must NOT fire
+// (cycle did not actually cross a real-FR boundary), and a duplicate
+// model emission that arrives after the thought-only flush must remain
+// suppressed by the still-armed guard.
+//
+// Without the cancellation hook into nonThoughtIDs, this test fails:
+// the stale "had a non-thought call" flag drives an incorrect reset and
+// the duplicate "Hello" leaks through.
+func TestScenario_NonThoughtCancelledThoughtOnlyDoesNotReset(t *testing.T) {
+	realTool := &mockTool{name: "real_tool", result: map[string]any{"ok": true}}
+	thoughtTool := &mockTool{name: "thought", result: map[string]any{}}
+
+	conn := newMockLiveConnection()
+	conn.recvCh = make(chan *model.LLMResponse, 20)
+
+	llm := &mockLiveLLM{conn: conn}
+	a, _ := llmagent.New(llmagent.Config{
+		Name:  "test_agent",
+		Model: llm,
+		Tools: []tool.Tool{realTool, thoughtTool},
+	})
+
+	svc := &mockSessionService{Service: session.InMemoryService()}
+	_, _ = svc.Service.Create(context.Background(), &session.CreateRequest{
+		AppName: "test", UserID: "user1", SessionID: "sess1",
+	})
+
+	r, _ := New(Config{
+		AppName:        "test",
+		Agent:          a,
+		SessionService: svc,
+	})
+
+	queue := agent.NewLiveRequestQueue(100)
+
+	go func() {
+		// Arm the guard on a genuine turn.
+		conn.recvCh <- textResponse("Hello")
+		conn.recvCh <- turnCompleteResponse()
+		// Allow receiverLoop to process the arming pair before the FC
+		// burst lands — keeps the suppression-active state observable
+		// when the duplicate "Hello" arrives later.
+		time.Sleep(50 * time.Millisecond)
+
+		// Buffer one non-thought FC and one thought FC together.
+		conn.recvCh <- functionCallResponse("fc_real", "real_tool", nil)
+		conn.recvCh <- thoughtFunctionCallResponse("fc_thought", "thought", nil)
+		// Wait for both to be buffered. Coalesce window is 500ms below,
+		// so the timer has not fired yet.
+		time.Sleep(50 * time.Millisecond)
+
+		// Cancel ONLY the non-thought call — must arrive before flush.
+		conn.recvCh <- toolCancellationResponse([]string{"fc_real"})
+		// Wait for: cancellation processing, coalesce window expiry,
+		// thought-tool execution, FunctionResponse send.
+		time.Sleep(700 * time.Millisecond)
+
+		// Duplicate model emission — must be suppressed by the still-
+		// armed guard if the thought-only flush did NOT reset it.
+		conn.recvCh <- textResponse("Hello")
+		conn.recvCh <- turnCompleteResponse()
+
+		time.Sleep(50 * time.Millisecond)
+		queue.Close()
+	}()
+
+	cfg := agent.RunConfig{ToolCoalesceWindow: 500 * time.Millisecond}
+	var events []*session.Event
+	for ev, err := range r.RunLive(context.Background(), "user1", "sess1", queue, cfg) {
+		if err != nil {
+			break
+		}
+		if ev != nil {
+			events = append(events, ev)
+		}
+	}
+
+	texts := modelContentTexts(events)
+	if len(texts) != 1 || texts[0] != "Hello" {
+		t.Errorf("expected only [Hello] (duplicate must remain suppressed; thought-only flush must not reset guard), got %v", texts)
+	}
+
+	// The cancelled non-thought call must NOT have been executed.
+	if realTool.CallCount() != 0 {
+		t.Errorf("expected real_tool not called (cancelled before flush), got %d", realTool.CallCount())
+	}
+	// The thought call must have been executed (still in the buffer).
+	if thoughtTool.CallCount() != 1 {
+		t.Errorf("expected thought tool called once, got %d", thoughtTool.CallCount())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scenario: Audio model content bypasses the turn-cycle guard
+// ---------------------------------------------------------------------------
+
+func TestScenario_AudioBypassesGuard(t *testing.T) {
+	// Audio model content must bypass the guard regardless of armed
+	// state — applyTurnCycleGuard's !isAudio carve-out preserves audio
+	// frames even after a TurnComplete arms suppression.
+	conn := newMockLiveConnection()
+	conn.recvResponses = []*model.LLMResponse{
+		textResponse("A"),
+		turnCompleteResponse(),      // arms guard
+		audioResponse([]byte{0x01}), // would be suppressed if !isAudio carve-out broke
+		audioResponse([]byte{0x02}),
+	}
+
+	r, _, _ := setupRunner(t, conn, nil, nil)
+	queue := agent.NewLiveRequestQueue(100)
+	queue.Close()
+
+	events, _ := collectEvents(t, r, queue)
+
+	audioCount := 0
+	for _, ev := range events {
+		if ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p.InlineData != nil && p.InlineData.MIMEType == "audio/pcm" {
+				audioCount++
+			}
+		}
+	}
+	if audioCount != 2 {
+		t.Errorf("expected 2 audio events (audio bypasses guard), got %d", audioCount)
 	}
 }
 
