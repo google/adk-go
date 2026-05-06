@@ -77,6 +77,15 @@ func (r MultiRoute[T]) Matches(event *session.Event) bool {
 	return false
 }
 
+// DefaultRoute is a special route that matches when no other concrete routes match.
+var Default = &defaultRoute{}
+
+type defaultRoute struct{}
+
+func (r *defaultRoute) Matches(event *session.Event) bool {
+	return false
+}
+
 // baseNode provides common fields for all nodes.
 type baseNode struct {
 	name        string
@@ -180,8 +189,6 @@ func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 	return func(yield func(*session.Event, error) bool) {}
 }
 
-const DEFAULT_ROUTE = "__DEFAULT__"
-
 // Workflow manages the workflow graph execution.
 type Workflow struct {
 	edges map[Node][]Edge
@@ -203,20 +210,21 @@ type nodeInput struct {
 
 // findNextNodes determines the set of nodes to execute next based on the outgoing edges of the currentNode.
 // It evaluates routes attached to edges against the provided session.Event.
-// 
+//
 // Behavior:
-// - Edges with no route condition always match.
-// - Edges with a route condition match only if the route matches the event.
-// - Duplicate target nodes are excluded to avoid queuing the same node multiple times.
-// - If there are outgoing edges but none of them match (neither by route nor by being unrouted),
-//   it falls back to the default route (TODO: hanorik - add default route support).
-func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Event) ([]nodeInput, error) {
+//   - Edges with no route condition always match.
+//   - Edges with a route condition match only if the route matches the event.
+//   - Duplicate target nodes are excluded to avoid queuing the same node multiple times.
+//   - If there are outgoing edges but none of them match (neither by route nor by being unrouted),
+//     it falls back to the default route (TODO: hanorik - add default route support).
+func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Event) []nodeInput {
 	if len(w.edges[currentNode]) == 0 {
-		return nil, nil
+		return nil
 	}
 	matched := false
 	queue := []nodeInput{}
 	added := make(map[Node]struct{})
+	var defaultRouteNode Node
 	for _, edge := range w.edges[currentNode] {
 		if _, ok := added[edge.To]; ok {
 			continue
@@ -224,20 +232,23 @@ func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Eve
 		if edge.Route == nil {
 			queue = append(queue, nodeInput{node: edge.To, input: input})
 			added[edge.To] = struct{}{}
-			matched = true
 			continue
 		}
-
+		if edge.Route == Default {
+			defaultRouteNode = edge.To
+			continue
+		}
 		if edge.Route.Matches(event) {
 			queue = append(queue, nodeInput{node: edge.To, input: input})
 			added[edge.To] = struct{}{}
 			matched = true
 		}
 	}
-	if !matched {
-		return nil, fmt.Errorf("no outgoing edge matches the event with routes %v emitted by node %s", event.Routes, currentNode.Name())
+	if !matched && defaultRouteNode != nil {
+		queue = append(queue, nodeInput{node: defaultRouteNode, input: input})
 	}
-	return queue, nil
+
+	return queue
 }
 
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -295,11 +306,7 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			if currentNode != Start {
 				input = outputData
 			}
-			nextNodes, err := w.findNextNodes(currentNode, input, event)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
+			nextNodes := w.findNextNodes(currentNode, input, event)
 			queue = append(queue, nextNodes...)
 		}
 	}
