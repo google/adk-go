@@ -17,26 +17,27 @@ package workflow
 import (
 	"testing"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 func TestApplyDefaults(t *testing.T) {
 	tests := []struct {
-		name              string
-		input             *RetryConfig
-		wantMaxAttempts   int
-		wantInitialDelay  time.Duration
-		wantMaxDelay      time.Duration
-		wantBackoffFactor float64
-		wantJitter        float64
+		name  string
+		input *RetryConfig
+		want  *RetryConfig
 	}{
 		{
-			name:              "all_fields_nil",
-			input:             &RetryConfig{},
-			wantMaxAttempts:   5,
-			wantInitialDelay:  1 * time.Second,
-			wantMaxDelay:      60 * time.Second,
-			wantBackoffFactor: 2.0,
-			wantJitter:        1.0,
+			name:  "all_fields_nil",
+			input: &RetryConfig{},
+			want: &RetryConfig{
+				MaxAttempts:   ptr(5),
+				InitialDelay:  ptr(1 * time.Second),
+				MaxDelay:      ptr(60 * time.Second),
+				BackoffFactor: ptr(2.0),
+				Jitter:        ptr(1.0),
+			},
 		},
 		{
 			name: "some_fields_set",
@@ -44,11 +45,13 @@ func TestApplyDefaults(t *testing.T) {
 				MaxAttempts: ptr(10),
 				Jitter:      ptr(0.0),
 			},
-			wantMaxAttempts:   10,
-			wantInitialDelay:  1 * time.Second,
-			wantMaxDelay:      60 * time.Second,
-			wantBackoffFactor: 2.0,
-			wantJitter:        0.0,
+			want: &RetryConfig{
+				MaxAttempts:   ptr(10),
+				InitialDelay:  ptr(1 * time.Second),
+				MaxDelay:      ptr(60 * time.Second),
+				BackoffFactor: ptr(2.0),
+				Jitter:        ptr(0.0),
+			},
 		},
 	}
 
@@ -56,25 +59,16 @@ func TestApplyDefaults(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.input.applyDefaults()
 
-			if *tc.input.MaxAttempts != tc.wantMaxAttempts {
-				t.Errorf("MaxAttempts = %d, want %d", *tc.input.MaxAttempts, tc.wantMaxAttempts)
+			if diff := cmp.Diff(tc.want, tc.input, cmpopts.IgnoreFields(RetryConfig{}, "ShouldRetry")); diff != "" {
+				t.Errorf("applyDefaults() mismatch (-want +got):\n%s", diff)
 			}
-			if *tc.input.InitialDelay != tc.wantInitialDelay {
-				t.Errorf("InitialDelay = %v, want %v", *tc.input.InitialDelay, tc.wantInitialDelay)
-			}
-			if *tc.input.MaxDelay != tc.wantMaxDelay {
-				t.Errorf("MaxDelay = %v, want %v", *tc.input.MaxDelay, tc.wantMaxDelay)
-			}
-			if *tc.input.BackoffFactor != tc.wantBackoffFactor {
-				t.Errorf("BackoffFactor = %f, want %f", *tc.input.BackoffFactor, tc.wantBackoffFactor)
-			}
-			if *tc.input.Jitter != tc.wantJitter {
-				t.Errorf("Jitter = %f, want %f", *tc.input.Jitter, tc.wantJitter)
-			}
+
+			// Check ShouldRetry separately
 			if tc.input.ShouldRetry == nil || !tc.input.ShouldRetry(nil) {
 				t.Errorf("ShouldRetry is nil or returns false")
 			}
 		})
 	}
 }
+
 
