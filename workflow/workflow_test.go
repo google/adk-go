@@ -20,7 +20,6 @@ import (
 	"iter"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/genai"
 
@@ -29,7 +28,7 @@ import (
 )
 
 var defaultNodeConfig = NodeConfig{
-	RetryConfig: NewRetryConfig(),
+	RetryConfig: DefaultRetryConfig(),
 }
 
 // MockInvocationContext is a minimal implementation of agent.InvocationContext for testing.
@@ -206,58 +205,6 @@ func TestMultiRouteInt(t *testing.T) {
 	intMultiNoMatch := MultiRoute[int]{10, 20}
 	if intMultiNoMatch.Matches(event) {
 		t.Errorf("MultiRoute[int] should not match")
-	}
-}
-
-func TestNewRetryConfig(t *testing.T) {
-	// Test defaults
-	cfg := NewRetryConfig()
-	if cfg.MaxAttempts != 5 {
-		t.Errorf("expected MaxAttempts 5, got %d", cfg.MaxAttempts)
-	}
-	if cfg.InitialDelay != 1*time.Second {
-		t.Errorf("expected InitialDelay 1s, got %v", cfg.InitialDelay)
-	}
-	if cfg.MaxDelay != 60*time.Second {
-		t.Errorf("expected MaxDelay 60s, got %v", cfg.MaxDelay)
-	}
-	if cfg.BackoffFactor != 2.0 {
-		t.Errorf("expected BackoffFactor 2.0, got %f", cfg.BackoffFactor)
-	}
-	if cfg.Jitter != 1.0 {
-		t.Errorf("expected Jitter 1.0, got %f", cfg.Jitter)
-	}
-	if cfg.ShouldRetry == nil || !cfg.ShouldRetry(nil) {
-		t.Errorf("expected ShouldRetry to be non-nil and return true")
-	}
-
-	// Test options
-	cfg = NewRetryConfig(
-		WithMaxAttempts(10),
-		WithInitialDelay(2*time.Second),
-		WithMaxDelay(20*time.Second),
-		WithBackoffFactor(3.0),
-		WithJitter(0.0),
-		WithShouldRetry(func(err error) bool { return false }),
-	)
-
-	if cfg.MaxAttempts != 10 {
-		t.Errorf("expected MaxAttempts 10, got %d", cfg.MaxAttempts)
-	}
-	if cfg.InitialDelay != 2*time.Second {
-		t.Errorf("expected InitialDelay 2s, got %v", cfg.InitialDelay)
-	}
-	if cfg.MaxDelay != 20*time.Second {
-		t.Errorf("expected MaxDelay 20s, got %v", cfg.MaxDelay)
-	}
-	if cfg.BackoffFactor != 3.0 {
-		t.Errorf("expected BackoffFactor 3.0, got %f", cfg.BackoffFactor)
-	}
-	if cfg.Jitter != 0.0 {
-		t.Errorf("expected Jitter 0.0, got %f", cfg.Jitter)
-	}
-	if cfg.ShouldRetry == nil || cfg.ShouldRetry(nil) {
-		t.Errorf("expected ShouldRetry to return false")
 	}
 }
 

@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"iter"
 	"strings"
-	"time"
 
 	"google.golang.org/genai"
 
@@ -27,108 +26,12 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// defaultRetryConfig is the default retry configuration for a node.
-var defaultRetryConfig = RetryConfig{
-	MaxAttempts:   5,
-	InitialDelay:  time.Second,
-	MaxDelay:      60 * time.Second,
-	BackoffFactor: 2.0,
-	Jitter:        1.0,
-	ShouldRetry: func(err error) bool {
-		return true
-	},
-}
-
 // Node is the interface for all nodes in a workflow.
 type Node interface {
 	Name() string
 	Description() string
 	Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
 	Config() NodeConfig
-}
-
-// NodeConfig defines the configuration for a node.
-type NodeConfig struct {
-	// Enables data parallelism (runs node concurrently for each item in input collection)
-	ParallelWorker bool
-	// Re-runs node on resume. Defaults to true for AgentNode
-	RerunOnResume *bool
-	// Wait for output before triggering edges. Defaults to true for Task agents
-	WaitForOutput *bool
-	// Retry configuration on failure
-	RetryConfig *RetryConfig
-	// Max duration for node to complete. Optional for global defaults
-	Timeout *time.Duration
-}
-
-// RetryConfig defines the parameters for retrying a failed node.
-type RetryConfig struct {
-	// Maximum number of attempts, including the original request. If 0 or 1, it means no retries. If not specified, default to 5.
-	MaxAttempts int
-	// Initial delay before the first retry, in fractions of a second. If not specified, default to 1 second.
-	InitialDelay time.Duration
-	// Maximum delay between retries, in fractions of a second. If not specified, default to 60 seconds.
-	MaxDelay time.Duration
-	// Multiplier by which the delay increases after each attempt. If not specified, default to 2.0.
-	BackoffFactor float64
-	// Randomness factor for the delay. Use 0.0 to remove randomness. If not specified, default to 1.0.
-	Jitter float64
-	// Predicate that defines when to retry (true means retry). If not specified, default to true.
-	ShouldRetry func(error) bool
-}
-
-// RetryOption defines a function that configures a RetryConfig.
-type RetryOption func(*RetryConfig)
-
-// NewRetryConfig creates a RetryConfig with sensible defaults and applies the provided options.
-func NewRetryConfig(opts ...RetryOption) *RetryConfig {
-	cfg := defaultRetryConfig
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-	return &cfg
-}
-
-// WithMaxAttempts sets the maximum number of attempts.
-func WithMaxAttempts(attempts int) RetryOption {
-	return func(c *RetryConfig) {
-		c.MaxAttempts = attempts
-	}
-}
-
-// WithInitialDelay sets the initial delay before the first retry.
-func WithInitialDelay(delay time.Duration) RetryOption {
-	return func(c *RetryConfig) {
-		c.InitialDelay = delay
-	}
-}
-
-// WithMaxDelay sets the maximum delay between retries.
-func WithMaxDelay(delay time.Duration) RetryOption {
-	return func(c *RetryConfig) {
-		c.MaxDelay = delay
-	}
-}
-
-// WithBackoffFactor sets the multiplier by which the delay increases.
-func WithBackoffFactor(factor float64) RetryOption {
-	return func(c *RetryConfig) {
-		c.BackoffFactor = factor
-	}
-}
-
-// WithJitter sets the randomness factor for the delay.
-func WithJitter(jitter float64) RetryOption {
-	return func(c *RetryConfig) {
-		c.Jitter = jitter
-	}
-}
-
-// WithShouldRetry sets the predicate that defines when to retry.
-func WithShouldRetry(fn func(error) bool) RetryOption {
-	return func(c *RetryConfig) {
-		c.ShouldRetry = fn
-	}
 }
 
 // Route defines the interface for matching execution results to edges.
@@ -192,8 +95,7 @@ func (b *baseNode) Config() NodeConfig  { return b.config }
 // FunctionNode wraps a custom function.
 type FunctionNode struct {
 	baseNode
-	fn     func(ctx agent.InvocationContext, input any) (any, error)
-	config NodeConfig
+	fn func(ctx agent.InvocationContext, input any) (any, error)
 }
 
 // NewFunctionNode creates a new node wrapping a custom function using generics to automatically infer input and output types.
@@ -215,10 +117,14 @@ func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.InvocationConte
 		}
 		return fn(ctx, typedInput)
 	}
+
+	if cfg.RetryConfig != nil {
+		cfg.RetryConfig.applyDefaults()
+	}
+
 	return &FunctionNode{
-		baseNode: baseNode{name: name},
+		baseNode: baseNode{name: name, config: cfg},
 		fn:       wrappedFn,
-		config:   cfg,
 	}
 }
 

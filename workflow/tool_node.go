@@ -67,6 +67,10 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 		return nil, fmt.Errorf("tool %q (type %T) is not directly runnable in workflow node", t.Name(), t)
 	}
 
+	if cfg.RetryConfig != nil {
+		cfg.RetryConfig.applyDefaults()
+	}
+
 	return &toolNode{
 		baseNode:     baseNode{name: t.Name(), description: t.Description(), config: cfg},
 		tool:         t,

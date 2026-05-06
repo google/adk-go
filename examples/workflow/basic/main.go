@@ -45,7 +45,7 @@ func main() {
 
 	// 2. Create Nodes
 	nodeConfig := workflow.NodeConfig{
-		RetryConfig: workflow.NewRetryConfig(),
+		RetryConfig: workflow.DefaultRetryConfig(),
 	}
 	nodeA := workflow.NewFunctionNode("upper", upperFn, nodeConfig)
 	nodeB := workflow.NewFunctionNode("suffix", suffixFn, nodeConfig)

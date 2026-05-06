@@ -29,7 +29,7 @@ import (
 )
 
 var defaultNodeConfig = workflow.NodeConfig{
-	RetryConfig: workflow.NewRetryConfig(),
+	RetryConfig: workflow.DefaultRetryConfig(),
 }
 
 // MockSession is a minimal implementation of session.Session for testing.
