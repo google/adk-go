@@ -16,7 +16,7 @@ package adka2a
 
 import (
 	"testing"
-
+	"errors"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/go-cmp/cmp"
@@ -127,7 +127,10 @@ func TestEventProcessor_Process(t *testing.T) {
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
-					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					map[string]any{
+						ToA2AMetaKey("error_code"): "1",
+						"error": `llm error response: "failed"`,
+					},
 				),
 			},
 		},
@@ -139,8 +142,12 @@ func TestEventProcessor_Process(t *testing.T) {
 			},
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
-					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed 1"}),
-					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					task, 
+					errors.New("llm error response: \"failed 1\"\nllm error response: \"failed 2\""),
+					map[string]any{
+						ToA2AMetaKey("error_code"): "2",
+						"error": "llm error response: \"failed 1\"\nllm error response: \"failed 2\"",
+					},
 				),
 			},
 		},
@@ -158,7 +165,10 @@ func TestEventProcessor_Process(t *testing.T) {
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
-					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					map[string]any{
+						ToA2AMetaKey("error_code"): "1",
+						"error": `llm error response: "failed"`,
+					},
 				),
 			},
 		},
@@ -176,7 +186,10 @@ func TestEventProcessor_Process(t *testing.T) {
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
-					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					map[string]any{
+						ToA2AMetaKey("error_code"): "1",
+						"error": `llm error response: "failed"`,
+					},
 				),
 			},
 		},
@@ -332,10 +345,16 @@ func TestEventProcessor_Process(t *testing.T) {
 			},
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
-					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
-					map[string]any{ToA2AMetaKey("error_code"): "1", metadataEscalateKey: true, metadataTransferToAgentKey: "a-2"},
+					task, 
+					errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
+					map[string]any{
+						ToA2AMetaKey("error_code"): "1",
+						"error":                    `llm error response: "failed"`,
+						metadataEscalateKey:        true,
+						metadataTransferToAgentKey: "a-2",
+					},
 				),
-			},
+			},		
 		},
 		{
 			name: "partial events parts marked",
@@ -398,6 +417,23 @@ func TestEventProcessor_Process(t *testing.T) {
 			},
 			terminal: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil)},
 		},
+		{
+			name: "concatenate multiple failures",
+			events: []*session.Event{
+				{LLMResponse: model.LLMResponse{ErrorCode: "1", ErrorMessage: "first error"}},
+				{LLMResponse: model.LLMResponse{ErrorCode: "2", ErrorMessage: "second error"}},
+			},			
+			terminal: []a2a.Event{
+				toTaskFailedUpdateEvent(
+					task,
+					errors.New("llm error response: \"first error\"\nllm error response: \"second error\""),
+					map[string]any{
+						ToA2AMetaKey("error_code"): "2", 
+						"error": `llm error response: "first error"` + "\n" + `llm error response: "second error"`,
+					},
+				),
+			},
+		},		
 	}
 
 	for _, tc := range testCases {
