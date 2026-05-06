@@ -27,9 +27,7 @@ import (
 	"google.golang.org/adk/session"
 )
 
-var defaultNodeConfig = NodeConfig{
-	RetryConfig: DefaultRetryConfig(),
-}
+var defaultNodeConfig = NodeConfig{}
 
 // MockInvocationContext is a minimal implementation of agent.InvocationContext for testing.
 type MockInvocationContext struct {
