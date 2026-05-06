@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"strings"
@@ -33,16 +34,18 @@ type MockInvocationContext struct {
 	userContent *genai.Content
 }
 
-func (m *MockInvocationContext) Session() session.Session {
-	return m.sess
-}
-
-func (m *MockInvocationContext) InvocationID() string {
-	return "test-invocation-id"
-}
-
-func (m *MockInvocationContext) UserContent() *genai.Content {
-	return m.userContent
+func (m *MockInvocationContext) Session() session.Session    { return m.sess }
+func (m *MockInvocationContext) InvocationID() string        { return "test-invocation-id" }
+func (m *MockInvocationContext) UserContent() *genai.Content { return m.userContent }
+func (m *MockInvocationContext) Artifacts() agent.Artifacts  { return nil }
+func (m *MockInvocationContext) Memory() agent.Memory        { return nil }
+func (m *MockInvocationContext) Agent() agent.Agent          { return nil }
+func (m *MockInvocationContext) Branch() string              { return "" }
+func (m *MockInvocationContext) RunConfig() *agent.RunConfig { return nil }
+func (m *MockInvocationContext) EndInvocation()              {}
+func (m *MockInvocationContext) Ended() bool                 { return false }
+func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
+	return m
 }
 
 func TestFunctionNode(t *testing.T) {
@@ -64,7 +67,7 @@ func TestFunctionNode(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		count++
-		
+
 		output, ok := ev.Actions.StateDelta["output"]
 		if !ok {
 			t.Errorf("expected output in state delta")
@@ -171,6 +174,36 @@ func TestBoolRoute(t *testing.T) {
 	}
 }
 
+func TestMultiRouteString(t *testing.T) {
+	event := &session.Event{
+		Routes: []string{"hello", "42", "true"},
+	}
+
+	strMulti := MultiRoute[string]{"world", "hello"}
+	if !strMulti.Matches(event) {
+		t.Errorf("MultiRoute[string] should match")
+	}
+	strMultiNoMatch := MultiRoute[string]{"world", "golang"}
+	if strMultiNoMatch.Matches(event) {
+		t.Errorf("MultiRoute[string] should not match")
+	}
+}
+
+func TestMultiRouteInt(t *testing.T) {
+	event := &session.Event{
+		Routes: []string{"hello", "42", "true"},
+	}
+
+	intMulti := MultiRoute[int]{10, 42}
+	if !intMulti.Matches(event) {
+		t.Errorf("MultiRoute[int] should match")
+	}
+	intMultiNoMatch := MultiRoute[int]{10, 20}
+	if intMultiNoMatch.Matches(event) {
+		t.Errorf("MultiRoute[int] should not match")
+	}
+}
+
 type CustomRouteNode struct {
 	baseNode
 	route []string
@@ -198,7 +231,6 @@ func TestWorkflowRouting(t *testing.T) {
 		startRoutes    []string
 		edges          func(nodeStart *CustomRouteNode, nodeA, nodeB *FunctionNode, nodeC *CustomRouteNode, nodeD *FunctionNode) []Edge
 		expectedExec   []string
-		expectErrorMsg string
 	}
 
 	createNodes := func() (*CustomRouteNode, *FunctionNode, *FunctionNode, *CustomRouteNode, *FunctionNode, *testTracker) {
@@ -320,6 +352,47 @@ func TestWorkflowRouting(t *testing.T) {
 			},
 			expectedExec: []string{"A", "B"},
 		},
+		{
+			name:        "correct MultiRoute",
+			startRoutes: []string{"branchA"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a, Route: MultiRoute[string]{"branchX", "branchA"}},
+					{From: x, To: b},
+					{From: x, To: c},
+					{From: c, To: d},
+				}
+			},
+			expectedExec: []string{"A", "B", "C", "D"},
+		},
+		{
+			name:        "no MultiRoute matches event routes",
+			startRoutes: []string{"invalid"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a, Route: MultiRoute[string]{"branchX", "branchY"}},
+					{From: x, To: b, Route: MultiRoute[string]{"branchZ"}},
+				}
+			},
+			expectedExec: nil,
+		},
+		{
+			name:        "duplicate edges to same node",
+			startRoutes: []string{"branchA"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b},
+					{From: x, To: c},
+					{From: c, To: d},
+				}
+			},
+			expectedExec: []string{"A", "B", "C", "D"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -337,15 +410,6 @@ func TestWorkflowRouting(t *testing.T) {
 					err = testErr
 					break
 				}
-			}
-
-			if tc.expectErrorMsg != "" {
-				if err == nil {
-					t.Errorf("expected error matching %q, got none", tc.expectErrorMsg)
-				} else if !strings.Contains(err.Error(), tc.expectErrorMsg) {
-					t.Errorf("expected error containing %q, got %v", tc.expectErrorMsg, err)
-				}
-				return
 			}
 
 			if err != nil {

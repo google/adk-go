@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/session"
 )
 
@@ -64,6 +65,18 @@ func (r BoolRoute) Matches(event *session.Event) bool {
 	return matchRoute(fmt.Sprint(r), event)
 }
 
+// MultiRoute matches any value within a specified list of allowed routes.
+type MultiRoute[T comparable] []T
+
+func (r MultiRoute[T]) Matches(event *session.Event) bool {
+	for _, route := range r {
+		if matchRoute(fmt.Sprint(route), event) {
+			return true
+		}
+	}
+	return false
+}
+
 // DefaultRoute is a special route that matches when no other concrete routes match.
 var Default = &defaultRoute{}
 
@@ -89,7 +102,7 @@ type FunctionNode struct {
 }
 
 // NewFunctionNode creates a new node wrapping a custom function using generics to automatically infer input and output types.
-func NewFunctionNode[IN any, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error)) *FunctionNode {
+func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error)) *FunctionNode {
 	wrappedFn := func(ctx agent.InvocationContext, input any) (any, error) {
 		if input == nil {
 			var zero IN
@@ -97,7 +110,13 @@ func NewFunctionNode[IN any, OUT any](name string, fn func(ctx agent.InvocationC
 		}
 		typedInput, ok := input.(IN)
 		if !ok {
-			return nil, fmt.Errorf("invalid input type, expected %T", new(IN))
+			// Fallback to the json-like input types that cannot be converted by the standard type assertion.
+			// E.g. tool nodes return map[string]any as input and user may define a struct as the target type.
+			var err error
+			typedInput, err = typeutil.ConvertToWithJSONSchema[any, IN](input, nil)
+			if err != nil {
+				return nil, fmt.Errorf("new function node: invalid input type, expected %T: %v", new(IN), err)
+			}
 		}
 		return fn(ctx, typedInput)
 	}
@@ -189,6 +208,15 @@ type nodeInput struct {
 	input any
 }
 
+// findNextNodes determines the set of nodes to execute next based on the outgoing edges of the currentNode.
+// It evaluates routes attached to edges against the provided session.Event.
+//
+// Behavior:
+//   - Edges with no route condition always match.
+//   - Edges with a route condition match only if the route matches the event.
+//   - Duplicate target nodes are excluded to avoid queuing the same node multiple times.
+//   - If there are outgoing edges but none of them match (neither by route nor by being unrouted),
+//     it falls back to the default route (TODO: hanorik - add default route support).
 func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Event) []nodeInput {
 	if len(w.edges[currentNode]) == 0 {
 		return nil
