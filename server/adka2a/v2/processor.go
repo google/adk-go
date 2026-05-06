@@ -16,9 +16,9 @@ package adka2a
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
-	"errors"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -94,7 +94,7 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		}
 
 		terminalEventMeta := maps.Clone(eventMeta)
-		terminalEventMeta["error"] = mergedErr.Error() 
+		terminalEventMeta["error"] = mergedErr.Error()
 		p.failedEvent = toTaskFailedUpdateEvent(p.reqCtx, mergedErr, terminalEventMeta)
 	}
 
