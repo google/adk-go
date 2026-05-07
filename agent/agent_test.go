@@ -121,11 +121,7 @@ func TestAgentCallbacks(t *testing.T) {
 				t.Fatalf("failed to create agent: %v", err)
 			}
 
-			ctx := &invocationContext{
-				Context: t.Context(),
-				agent:   testAgent,
-				session: &mockSession{sessionID: "test-session"},
-			}
+			ctx := newMockInvocationContext(t)
 			var gotEvents []*session.Event
 			for event, err := range testAgent.Run(ctx) {
 				if err != nil {
@@ -168,12 +164,8 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	ctx := &invocationContext{
-		Context:       t.Context(),
-		agent:         testAgent,
-		endInvocation: true,
-		session:       &mockSession{sessionID: "test-session"},
-	}
+	ctx := newMockInvocationContext(t)
+	ctx.EndInvocation()
 	for _, err := range testAgent.Run(ctx) {
 		if err != nil {
 			t.Fatalf("unexpected error from the agent: %v", err)
@@ -203,11 +195,7 @@ func TestEndInvocation_EndsAfterMainCall(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	ctx := &invocationContext{
-		Context: t.Context(),
-		agent:   testAgent,
-		session: &mockSession{sessionID: "test-session"},
-	}
+	ctx := newMockInvocationContext(t)
 	var gotEvents []*session.Event
 	for event, err := range testAgent.Run(ctx) {
 		if err != nil {
@@ -254,28 +242,6 @@ func (a *customAgent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error
 				Content: genai.NewContentFromText("hello", genai.RoleModel),
 			},
 		}, nil)
-	}
-}
-
-type testKey struct{}
-
-func TestWithContext(t *testing.T) {
-	baseCtx := t.Context()
-	inv := &invocationContext{
-		Context:      baseCtx,
-		invocationID: "test",
-		branch:       "branch",
-	}
-
-	key := testKey{}
-	val := "val"
-	got := inv.WithContext(context.WithValue(baseCtx, key, val))
-
-	if got.Value(key) != val {
-		t.Errorf("WithContext() did not update context")
-	}
-	if diff := cmp.Diff(inv, got, cmp.AllowUnexported(invocationContext{}), cmpopts.IgnoreFields(invocationContext{}, "Context")); diff != "" {
-		t.Errorf("WithContext() params mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -351,3 +317,48 @@ func TestFindAgent(t *testing.T) {
 		})
 	}
 }
+
+// mockInvocationContext is a minimal InvocationContext for driving
+// (*agent).Run in tests. Most methods return zero values; only the
+// fields the agent actually inspects (agent, session, lifecycle)
+// carry real state. (*agent).Run injects itself via WithAgent before
+// any callback fires, so the agent field is populated then.
+type mockInvocationContext struct {
+	context.Context
+	agent         Agent
+	session       session.Session
+	endInvocation bool
+}
+
+func newMockInvocationContext(t *testing.T) *mockInvocationContext {
+	t.Helper()
+	return &mockInvocationContext{
+		Context: t.Context(),
+		session: &mockSession{sessionID: "test-session"},
+	}
+}
+
+func (m *mockInvocationContext) Agent() Agent                { return m.agent }
+func (m *mockInvocationContext) Artifacts() Artifacts        { return nil }
+func (m *mockInvocationContext) Memory() Memory              { return nil }
+func (m *mockInvocationContext) Session() session.Session    { return m.session }
+func (m *mockInvocationContext) InvocationID() string        { return "test-invocation" }
+func (m *mockInvocationContext) Branch() string              { return "" }
+func (m *mockInvocationContext) UserContent() *genai.Content { return nil }
+func (m *mockInvocationContext) RunConfig() *RunConfig       { return nil }
+func (m *mockInvocationContext) EndInvocation()              { m.endInvocation = true }
+func (m *mockInvocationContext) Ended() bool                 { return m.endInvocation }
+
+func (m *mockInvocationContext) WithContext(ctx context.Context) InvocationContext {
+	c := *m
+	c.Context = ctx
+	return &c
+}
+
+func (m *mockInvocationContext) WithAgent(a Agent) InvocationContext {
+	c := *m
+	c.agent = a
+	return &c
+}
+
+var _ InvocationContext = (*mockInvocationContext)(nil)

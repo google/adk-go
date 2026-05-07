@@ -170,19 +170,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		})
 		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
-		ctx := &invocationContext{
-			Context:   ctx.WithContext(spanCtx),
-			agent:     a,
-			artifacts: ctx.Artifacts(),
-			memory:    ctx.Memory(),
-			session:   ctx.Session(),
-
-			invocationID:  ctx.InvocationID(),
-			branch:        ctx.Branch(),
-			userContent:   ctx.UserContent(),
-			runConfig:     ctx.RunConfig(),
-			endInvocation: ctx.Ended(),
-		}
+		ctx := ctx.WithContext(spanCtx).WithAgent(a)
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
 			if !yield(event, err) {
@@ -443,80 +431,6 @@ func (c *callbackContextState) All() iter.Seq2[string, any] {
 	return c.ctx.invocationContext.Session().State().All()
 }
 
-type invocationContext struct {
-	context.Context
-
-	agent     Agent
-	artifacts Artifacts
-	memory    Memory
-	session   session.Session
-
-	invocationID  string
-	branch        string
-	userContent   *genai.Content
-	runConfig     *RunConfig
-	endInvocation bool
-}
-
-func (c *invocationContext) Agent() Agent {
-	return c.agent
-}
-
-func (c *invocationContext) Artifacts() Artifacts {
-	return c.artifacts
-}
-
-func (c *invocationContext) Memory() Memory {
-	return c.memory
-}
-
-func (c *invocationContext) Session() session.Session {
-	return c.session
-}
-
-func (c *invocationContext) InvocationID() string {
-	return c.invocationID
-}
-
-func (c *invocationContext) Branch() string {
-	return c.branch
-}
-
-func (c *invocationContext) UserContent() *genai.Content {
-	return c.userContent
-}
-
-func (c *invocationContext) RunConfig() *RunConfig {
-	return c.runConfig
-}
-
-func (c *invocationContext) EndInvocation() {
-	c.endInvocation = true
-}
-
-func (c *invocationContext) Ended() bool {
-	return c.endInvocation
-}
-
-func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
-	newCtx := *c
-	newCtx.Context = ctx
-	return &newCtx
-}
-
-// WithAgent returns a copy of c with the Agent overridden. See
-// InvocationContext.WithAgent for the contract.
-//
-// TODO: this duplicate impl will be removed once (*agent).Run is
-// rewritten to use ctx.WithContext(...).WithAgent(a) on its received
-// InvocationContext instead of constructing a new invocationContext
-// literal. See docs-internal/proposals/context_unification.md.
-func (c *invocationContext) WithAgent(a Agent) InvocationContext {
-	newCtx := *c
-	newCtx.agent = a
-	return &newCtx
-}
-
 func pluginManagerFromContext(ctx context.Context) pluginManager {
 	a := ctx.Value(plugincontext.PluginManagerCtxKey)
 	m, ok := a.(pluginManager)
@@ -530,5 +444,3 @@ type pluginManager interface {
 	RunBeforeAgentCallback(cctx CallbackContext) (*genai.Content, error)
 	RunAfterAgentCallback(cctx CallbackContext) (*genai.Content, error)
 }
-
-var _ InvocationContext = (*invocationContext)(nil)

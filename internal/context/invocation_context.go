@@ -102,7 +102,7 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 
 // WithAgent returns a copy of c with the Agent param overridden. The
 // embedded context.Context and all other params are shared with the
-// receiver. See agent.InvocationContext.WithAgent for the contract.
+// receiver.
 func (c *InvocationContext) WithAgent(a agent.Agent) agent.InvocationContext {
 	newCtx := *c
 	newCtx.params.Agent = a
