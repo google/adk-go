@@ -152,32 +152,6 @@ type Edge struct {
 	Route Route // Routing condition
 }
 
-// Chain generates a slice of Edges to form a chain of nodes.
-func Chain(nodes ...Node) []Edge {
-	if len(nodes) < 2 {
-		return nil
-	}
-	edges := make([]Edge, len(nodes)-1)
-	for i := 0; i < len(nodes)-1; i++ {
-		edges[i] = Edge{From: nodes[i], To: nodes[i+1]}
-	}
-	return edges
-}
-
-// Concat combines Edges and []Edge slices into a single slice of edges.
-func Concat(items ...any) []Edge {
-	var edges []Edge
-	for _, item := range items {
-		switch v := item.(type) {
-		case Edge:
-			edges = append(edges, v)
-		case []Edge:
-			edges = append(edges, v...)
-		}
-	}
-	return edges
-}
-
 // Start is a sentinel node used to indicate the entry point of the workflow.
 var Start Node = &startNode{}
 
