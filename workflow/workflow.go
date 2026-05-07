@@ -178,7 +178,7 @@ type Workflow struct {
 
 // New creates a new Workflow engine with the given edges.
 func New(edges []Edge) (*Workflow, error) {
-	if err := validateUniqueNames(edges); err != nil {
+	if err := validateNodes(edges); err != nil {
 		return nil, err
 	}
 	adj := make(map[Node][]Edge)
