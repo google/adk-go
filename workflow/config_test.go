@@ -70,5 +70,3 @@ func TestApplyDefaults(t *testing.T) {
 		})
 	}
 }
-
-
