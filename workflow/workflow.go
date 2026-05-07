@@ -31,6 +31,7 @@ type Node interface {
 	Name() string
 	Description() string
 	Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
+	Config() NodeConfig
 }
 
 // Route defines the interface for matching execution results to edges.
@@ -47,18 +48,21 @@ func matchRoute(routeValue string, event *session.Event) bool {
 	return false
 }
 
+// StringRoute is a route defined by a string value.
 type StringRoute string
 
 func (r StringRoute) Matches(event *session.Event) bool {
 	return matchRoute(string(r), event)
 }
 
+// IntRoute is a route defined by an integer value.
 type IntRoute int
 
 func (r IntRoute) Matches(event *session.Event) bool {
 	return matchRoute(fmt.Sprint(r), event)
 }
 
+// BoolRoute is a route defined by a boolean value.
 type BoolRoute bool
 
 func (r BoolRoute) Matches(event *session.Event) bool {
@@ -90,10 +94,12 @@ func (r *defaultRoute) Matches(event *session.Event) bool {
 type baseNode struct {
 	name        string
 	description string
+	config      NodeConfig
 }
 
 func (b *baseNode) Name() string        { return b.name }
 func (b *baseNode) Description() string { return b.description }
+func (b *baseNode) Config() NodeConfig  { return b.config }
 
 // FunctionNode wraps a custom function.
 type FunctionNode struct {
@@ -102,7 +108,7 @@ type FunctionNode struct {
 }
 
 // NewFunctionNode creates a new node wrapping a custom function using generics to automatically infer input and output types.
-func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error)) *FunctionNode {
+func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error), cfg NodeConfig) *FunctionNode {
 	wrappedFn := func(ctx agent.InvocationContext, input any) (any, error) {
 		if input == nil {
 			var zero IN
@@ -120,8 +126,9 @@ func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.InvocationConte
 		}
 		return fn(ctx, typedInput)
 	}
+
 	return &FunctionNode{
-		baseNode: baseNode{name: name},
+		baseNode: baseNode{name: name, config: cfg},
 		fn:       wrappedFn,
 	}
 }
@@ -162,6 +169,7 @@ func (s *startNode) Description() string { return "Start node" }
 func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
+func (s *startNode) Config() NodeConfig { return NodeConfig{} }
 
 // Workflow manages the workflow graph execution.
 type Workflow struct {
@@ -225,6 +233,7 @@ func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Eve
 	return queue
 }
 
+// Run executes the workflow.
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		var input any
@@ -270,7 +279,7 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			}
 
 			if len(eventsWithRoutes) > 1 {
-				yield(nil, fmt.Errorf("node %s produced multiple events with route tags. Only one event per execution can specify routes.", currentNode.Name()))
+				yield(nil, fmt.Errorf("node %s produced multiple events with route tags. Only one event per execution can specify routes", currentNode.Name()))
 				return
 			}
 			var event *session.Event

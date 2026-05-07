@@ -63,19 +63,19 @@ func TestToolNode_New(t *testing.T) {
 		{
 			name: "NewToolNodeTyped",
 			creator: func() (Node, error) {
-				return NewToolNodeTyped[Input, Output](myTool)
+				return NewToolNodeTyped[Input, Output](myTool, defaultNodeConfig)
 			},
 		},
 		{
 			name: "NewToolNodeWithSchemas",
 			creator: func() (Node, error) {
-				return NewToolNodeWithSchemas(myTool, ischema, oschema)
+				return NewToolNodeWithSchemas(myTool, ischema, oschema, defaultNodeConfig)
 			},
 		},
 		{
 			name: "NewToolNode",
 			creator: func() (Node, error) {
-				return NewToolNode(myTool)
+				return NewToolNode(myTool, defaultNodeConfig)
 			},
 		},
 	}
@@ -142,7 +142,7 @@ func TestToolNode_Run(t *testing.T) {
 			},
 			nodeInput: Input{Name: "World"},
 			node: func(t tool.Tool) (Node, error) {
-				return NewToolNodeTyped[Input, Output](t)
+				return NewToolNodeTyped[Input, Output](t, defaultNodeConfig)
 			},
 			extract: func(t *testing.T, out any) string {
 				bytes, err := json.Marshal(out)
@@ -168,7 +168,7 @@ func TestToolNode_Run(t *testing.T) {
 			},
 			nodeInput: Input{Name: "world"},
 			node: func(t tool.Tool) (Node, error) {
-				return NewToolNodeTyped[Input, string](t)
+				return NewToolNodeTyped[Input, string](t, defaultNodeConfig)
 			},
 			extract: func(t *testing.T, out any) string {
 				return out.(string)
@@ -186,7 +186,7 @@ func TestToolNode_Run(t *testing.T) {
 			},
 			nodeInput: map[string]any{},
 			node: func(t tool.Tool) (Node, error) {
-				return NewToolNodeTyped[map[string]any, ErrorOutput](t)
+				return NewToolNodeTyped[map[string]any, ErrorOutput](t, defaultNodeConfig)
 			},
 			wantErr: "converting tool \"test_tool\" output",
 		},
@@ -201,7 +201,7 @@ func TestToolNode_Run(t *testing.T) {
 			},
 			nodeInput: Input{Name: "World"},
 			node: func(t tool.Tool) (Node, error) {
-				return NewToolNodeTyped[Input, Output](t)
+				return NewToolNodeTyped[Input, Output](t, defaultNodeConfig)
 			},
 			wantErr: "tool \"fail_tool\" execution failed: something went wrong",
 		},
@@ -299,7 +299,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 				t.Fatalf("failed to create tool: %v", err)
 			}
 
-			toolNode, err := NewToolNodeTyped[*Input, *Output](doubleTool)
+			toolNode, err := NewToolNodeTyped[*Input, *Output](doubleTool, defaultNodeConfig)
 			if err != nil {
 				t.Fatalf("NewToolNodeTyped failed: %v", err)
 			}
@@ -307,7 +307,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 			// Connect to a function node.
 			functionNode := NewFunctionNode[Output, int]("plus_one", func(ctx agent.InvocationContext, in Output) (int, error) {
 				return in.Result + 1, nil
-			})
+			}, defaultNodeConfig)
 
 			mockCtx := &MockInvocationContext{sess: nil}
 
@@ -316,7 +316,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 				// since Workflow.Run currently only passes strings from UserContent.
 				seedNode := NewFunctionNode("seed", func(ctx agent.InvocationContext, input any) (*Input, error) {
 					return &Input{Val: tc.input}, nil
-				})
+				}, defaultNodeConfig)
 
 				edges := Chain(Start, seedNode, toolNode, functionNode)
 				w := New(edges)

@@ -43,7 +43,7 @@ type runnableTool interface {
 
 // newToolNodeWithSchemasTyped creates a new node wrapping a tool with explicitly provided schemas.
 // If a schema is nil, it will be inferred from the corresponding generic type Input or Output.
-func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, outputSchema *jsonschema.Schema) (Node, error) {
+func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (Node, error) {
 	if t == nil {
 		return nil, fmt.Errorf("tool cannot be nil")
 	}
@@ -67,7 +67,7 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 	}
 
 	return &toolNode{
-		baseNode:     baseNode{name: t.Name(), description: t.Description()},
+		baseNode:     baseNode{name: t.Name(), description: t.Description(), config: cfg},
 		tool:         t,
 		inputSchema:  ischema,
 		outputSchema: oschema,
@@ -76,20 +76,20 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 
 // NewToolNodeWithSchemas is a convenience wrapper for NewToolNodeWithSchemasTyped[any, any].
 // It uses explicitly provided schemas for both input and output.
-func NewToolNodeWithSchemas(t tool.Tool, inputSchema, outputSchema *jsonschema.Schema) (Node, error) {
-	return newToolNodeWithSchemasTyped[any, any](t, inputSchema, outputSchema)
+func NewToolNodeWithSchemas(t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (Node, error) {
+	return newToolNodeWithSchemasTyped[any, any](t, inputSchema, outputSchema, cfg)
 }
 
 // NewToolNodeTyped creates a new node wrapping a tool using generics to
 // automatically infer input and output schemas from the provided types.
-func NewToolNodeTyped[Input, Output any](t tool.Tool) (Node, error) {
-	return newToolNodeWithSchemasTyped[Input, Output](t, nil, nil)
+func NewToolNodeTyped[Input, Output any](t tool.Tool, cfg NodeConfig) (Node, error) {
+	return newToolNodeWithSchemasTyped[Input, Output](t, nil, nil, cfg)
 }
 
 // NewToolNode creates a new node wrapping a tool. Input and output schemas
 // are inferred as 'any'.
-func NewToolNode(t tool.Tool) (Node, error) {
-	return NewToolNodeTyped[any, any](t)
+func NewToolNode(t tool.Tool, cfg NodeConfig) (Node, error) {
+	return NewToolNodeTyped[any, any](t, cfg)
 }
 
 func (n *toolNode) runTool(toolCtx tool.Context, input any) (any, error) {
