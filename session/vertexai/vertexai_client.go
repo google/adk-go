@@ -49,12 +49,12 @@ func newVertexAiClient(ctx context.Context, location, projectID, reasoningEngine
 		return nil, fmt.Errorf("could not establish connection to the aiplatform server: %w", err)
 	}
 	return &vertexAiClient{
-		&vertexaiutil.AgentEngineData{
+		agentEngineData: &vertexaiutil.AgentEngineData{
 			Location:        location,
 			ProjectID:       projectID,
 			ReasoningEngine: reasoningEngine,
 		},
-		rpcClient,
+		rpcClient: rpcClient,
 	}, nil
 }
 

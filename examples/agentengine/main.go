@@ -59,7 +59,7 @@ func memorySearchToolFunc(tctx tool.Context, args Args) (Result, error) {
 	searchResults, err := tctx.SearchMemory(context.Background(), args.Query)
 	if err != nil {
 		log.Printf("Error searching memory: %v", err)
-		return Result{}, fmt.Errorf("failed memory search")
+		return Result{}, fmt.Errorf("failed memory search: %w", err)
 	}
 
 	var results []string
