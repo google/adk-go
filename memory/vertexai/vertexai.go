@@ -83,7 +83,6 @@ func (v *vertexAIService) AddSessionToMemory(ctx context.Context, s session.Sess
 	}
 	err = v.client.addEventsNewerThan(ctx, s, tm)
 	if err != nil {
-		fmt.Printf("Err: %v\n", err)
 		return fmt.Errorf("v.client.addEventsNewerThan failed: %w", err)
 	}
 
