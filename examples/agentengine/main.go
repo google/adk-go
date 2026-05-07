@@ -56,7 +56,7 @@ const (
 // This function demonstrates accessing memory via tool.Context.
 func memorySearchToolFunc(tctx tool.Context, args Args) (Result, error) {
 	// The SearchMemory function is available on the context.
-	searchResults, err := tctx.SearchMemory(context.Background(), args.Query)
+	searchResults, err := tctx.SearchMemory(tctx, args.Query)
 	if err != nil {
 		log.Printf("Error searching memory: %v", err)
 		return Result{}, fmt.Errorf("failed memory search: %w", err)
