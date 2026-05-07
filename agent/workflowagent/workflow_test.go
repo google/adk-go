@@ -28,9 +28,7 @@ import (
 	"google.golang.org/adk/workflow"
 )
 
-var defaultNodeConfig = workflow.NodeConfig{
-	RetryConfig: workflow.DefaultRetryConfig(),
-}
+var defaultNodeConfig = workflow.NodeConfig{}
 
 // MockSession is a minimal implementation of session.Session for testing.
 type MockSession struct {

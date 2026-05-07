@@ -22,51 +22,21 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
-func TestApplyDefaults(t *testing.T) {
-	tests := []struct {
-		name  string
-		input *RetryConfig
-		want  *RetryConfig
-	}{
-		{
-			name:  "all_fields_nil",
-			input: &RetryConfig{},
-			want: &RetryConfig{
-				MaxAttempts:   ptr(5),
-				InitialDelay:  ptr(1 * time.Second),
-				MaxDelay:      ptr(60 * time.Second),
-				BackoffFactor: ptr(2.0),
-				Jitter:        ptr(1.0),
-			},
-		},
-		{
-			name: "some_fields_set",
-			input: &RetryConfig{
-				MaxAttempts: ptr(10),
-				Jitter:      ptr(0.0),
-			},
-			want: &RetryConfig{
-				MaxAttempts:   ptr(10),
-				InitialDelay:  ptr(1 * time.Second),
-				MaxDelay:      ptr(60 * time.Second),
-				BackoffFactor: ptr(2.0),
-				Jitter:        ptr(0.0),
-			},
-		},
+func TestDefaultRetryConfig(t *testing.T) {
+	want := &RetryConfig{
+		MaxAttempts:   5,
+		InitialDelay:  time.Second,
+		MaxDelay:      60 * time.Second,
+		BackoffFactor: 2.0,
+		Jitter:        1.0,
+	}
+	got := DefaultRetryConfig()
+
+	if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(RetryConfig{}, "ShouldRetry")); diff != "" {
+		t.Errorf("DefaultRetryConfig() mismatch (-want +got):\n%s", diff)
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.input.applyDefaults()
-
-			if diff := cmp.Diff(tc.want, tc.input, cmpopts.IgnoreFields(RetryConfig{}, "ShouldRetry")); diff != "" {
-				t.Errorf("applyDefaults() mismatch (-want +got):\n%s", diff)
-			}
-
-			// Check ShouldRetry separately
-			if tc.input.ShouldRetry == nil || !tc.input.ShouldRetry(nil) {
-				t.Errorf("ShouldRetry is nil or returns false")
-			}
-		})
+	if got.ShouldRetry == nil || !got.ShouldRetry(nil) {
+		t.Errorf("ShouldRetry is nil or returns false")
 	}
 }

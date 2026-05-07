@@ -16,18 +16,13 @@ package workflow
 
 import "time"
 
-// ptr returns a pointer to the value passed in.
-func ptr[T any](v T) *T {
-	return &v
-}
-
 // defaultRetryConfig is the default retry configuration for a node.
 var defaultRetryConfig = RetryConfig{
-	MaxAttempts:   ptr(5),
-	InitialDelay:  ptr(time.Second),
-	MaxDelay:      ptr(60 * time.Second),
-	BackoffFactor: ptr(2.0),
-	Jitter:        ptr(1.0),
+	MaxAttempts:   5,
+	InitialDelay:  time.Second,
+	MaxDelay:      60 * time.Second,
+	BackoffFactor: 2.0,
+	Jitter:        1.0,
 	ShouldRetry: func(error) bool {
 		return true
 	},
@@ -53,39 +48,28 @@ type NodeConfig struct {
 }
 
 // RetryConfig defines the parameters for retrying a failed node.
+// Recommended construction is via DefaultRetryConfig and override
+// the fields you want to customize:
+//
+//	rc := workflow.DefaultRetryConfig()
+//	rc.MaxAttempts = 10
+//	cfg := workflow.NodeConfig{RetryConfig: rc}
+//
+// Constructing via struct literal (RetryConfig{...}) is permitted
+// but discouraged: any unset field defaults to its zero value, not
+// to DefaultRetryConfig's value. The zero RetryConfig is a valid
+// "no retry, no backoff, no jitter" policy.
 type RetryConfig struct {
 	// Maximum number of attempts, including the original request. If 0 or 1, it means no retries. If not specified, default to 5.
-	MaxAttempts *int
+	MaxAttempts int
 	// Initial delay before the first retry, in fractions of a second. If not specified, default to 1 second.
-	InitialDelay *time.Duration
+	InitialDelay time.Duration
 	// Maximum delay between retries, in fractions of a second. If not specified, default to 60 seconds.
-	MaxDelay *time.Duration
+	MaxDelay time.Duration
 	// Multiplier by which the delay increases after each attempt. If not specified, default to 2.0.
-	BackoffFactor *float64
+	BackoffFactor float64
 	// Randomness factor for the delay. Use 0.0 to remove randomness. If not specified, default to 1.0.
-	Jitter *float64
+	Jitter float64
 	// Predicate that defines when to retry (true means retry). If not specified, default to true.
 	ShouldRetry func(error) bool
-}
-
-func (r *RetryConfig) applyDefaults() {
-	defaults := DefaultRetryConfig()
-	if r.MaxAttempts == nil {
-		r.MaxAttempts = defaults.MaxAttempts
-	}
-	if r.InitialDelay == nil {
-		r.InitialDelay = defaults.InitialDelay
-	}
-	if r.MaxDelay == nil {
-		r.MaxDelay = defaults.MaxDelay
-	}
-	if r.BackoffFactor == nil {
-		r.BackoffFactor = defaults.BackoffFactor
-	}
-	if r.Jitter == nil {
-		r.Jitter = defaults.Jitter
-	}
-	if r.ShouldRetry == nil {
-		r.ShouldRetry = defaults.ShouldRetry
-	}
 }
