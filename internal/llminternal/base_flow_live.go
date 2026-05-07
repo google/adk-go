@@ -27,9 +27,12 @@ import (
 	"sync"
 	"time"
 
+	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -44,6 +47,20 @@ type LiveFlow struct {
 	AfterToolCallbacks   []AfterToolCallback
 	OnToolErrorCallbacks []OnToolErrorCallback
 	CoalesceWindow       time.Duration
+}
+
+// modelName returns the model's name for span labels, falling back to
+// "unknown" when the model is unset (e.g., bare-LiveFlow tests) or returns
+// an empty string. Avoids producing span names with trailing whitespace
+// like "generate_content " that would break filtering by name.
+func (lf *LiveFlow) modelName() string {
+	if lf.Model == nil {
+		return "unknown"
+	}
+	if name := lf.Model.Name(); name != "" {
+		return name
+	}
+	return "unknown"
 }
 
 type eventOrError struct {
@@ -187,8 +204,27 @@ func (lf *LiveFlow) RunLive(
 	queue *agent.LiveRequestQueue,
 ) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		// live_session wraps the entire iterator lifetime, including all
+		// reconnect attempts. Reconnects appear as sibling generate_content
+		// children — the diagnostic shape needed for "how often did this
+		// session reconnect?".
+		spanCtx, span := telemetry.StartLiveSessionSpan(ctx, telemetry.StartLiveSessionSpanParams{
+			AgentName:    ctx.Agent().Name(),
+			SessionID:    ctx.Session().ID(),
+			InvocationID: ctx.InvocationID(),
+		})
+		ctx = ctx.WithContext(spanCtx)
+		yield, endSpan := telemetry.WrapYield(span, yield, func(s trace.Span, ev *session.Event, err error) {
+			telemetry.TraceLiveSessionResult(s, telemetry.TraceLiveSessionResultParams{
+				ResponseEvent: ev,
+				Error:         err,
+			})
+		})
+		defer endSpan()
+
 		toolsFuncMap := buildToolsFuncMap(lf.Tools)
 		ts := &liveTimingState{}
+		attempt := 0
 
 		// Outer loop owns the reconnect lifecycle; it terminates only via an
 		// explicit return (clean shutdown, no GoAway, fatal error, or context
@@ -207,10 +243,11 @@ func (lf *LiveFlow) RunLive(
 				return
 			}
 
-			shouldReconnect, terminated := lf.runSession(ctx, conn, queue, toolsFuncMap, ts, handle, yield)
+			shouldReconnect, terminated := lf.runSession(ctx, conn, queue, toolsFuncMap, ts, handle, attempt, yield)
 			if terminated || !shouldReconnect {
 				return
 			}
+			attempt++
 
 			// Brief backoff before reconnecting; bail promptly on cancel so
 			// callers see context.Canceled instead of waiting out the timer.
@@ -339,15 +376,42 @@ func (lf *LiveFlow) runSession(
 	toolsFuncMap map[string]toolinternal.FunctionTool,
 	ts *liveTimingState,
 	handle string,
+	attempt int,
 	yield func(*session.Event, error) bool,
 ) (shouldReconnect, terminated bool) {
 	cancelCtx, cancel := context.WithCancel(ctx)
+
+	// generate_content covers one WebSocket attempt. On GoAway-driven
+	// reconnects, the outer RunLive loop calls runSession again, producing
+	// sibling generate_content spans under the same live_session.
+	spanCtx, span := telemetry.StartGenerateContentSpan(cancelCtx, telemetry.StartGenerateContentSpanParams{
+		ModelName:    lf.modelName(),
+		InvocationID: ctx.InvocationID(),
+	})
+	span.SetAttributes(
+		semconv.GenAIConversationID(ctx.Session().ID()),
+		telemetry.GCPVertexAgentReconnectAttemptKey.Int(attempt),
+	)
+	var sessionErr error
+	defer func() {
+		telemetry.TraceGenerateContentResult(span, telemetry.TraceGenerateContentResultParams{
+			Error: sessionErr,
+		})
+		span.End()
+	}()
+	// cancelCtx now carries the generate_content span. Downstream goroutines
+	// (startSessionLoops, receiverLoop, executeToolGroups) inherit the span
+	// via cancelCtx — invCtx (`ctx`) is intentionally NOT rebound, so that
+	// applySessionResumptionUpdate's mutations to the resumption handle
+	// propagate back to RunLive's outer loop.
+	cancelCtx = spanCtx
 
 	if handle == "" {
 		if err := lf.sendHistory(cancelCtx, ctx, conn, ts); err != nil {
 			cancel()
 			_ = conn.Close()
-			yield(nil, fmt.Errorf("history handoff failed: %w", err))
+			sessionErr = fmt.Errorf("history handoff failed: %w", err)
+			yield(nil, sessionErr)
 			return false, true
 		}
 	}
@@ -955,6 +1019,21 @@ func (lf *LiveFlow) flushToolCalls(
 	}
 
 	groups := deduplicateCalls(calls)
+
+	// Mirror non-Live (base_flow.go:589-596): merged span only when more
+	// than one tool call. A single-tool flush goes straight to the per-call
+	// execute_tool span — no extra layer.
+	var mergedEvent *session.Event
+	var mergedErr error
+	if len(groups) > 1 {
+		mergedCtx, mergedSpan := telemetry.StartTrace(ctx, "execute_tool (merged)")
+		ctx = mergedCtx
+		defer func() {
+			telemetry.TraceMergedToolCallsResult(mergedSpan, mergedEvent, mergedErr)
+			mergedSpan.End()
+		}()
+	}
+
 	lf.emitFunctionCallEvent(ctx, invCtx, calls, queue, ts, eventCh)
 
 	toolStart := time.Now()
@@ -967,10 +1046,11 @@ func (lf *LiveFlow) flushToolCalls(
 
 	req := &model.LiveRequest{ToolResponse: responses}
 	if err := trackedSend(ctx, conn, req, ts); err != nil {
-		eventCh <- eventOrError{err: fmt.Errorf("failed to send tool response: %w", err)}
+		mergedErr = fmt.Errorf("failed to send tool response: %w", err)
+		eventCh <- eventOrError{err: mergedErr}
 		return
 	}
-	lf.emitFunctionResponseEvent(ctx, invCtx, responses, queue, ts, toolExecTime, eventCh)
+	mergedEvent = lf.emitFunctionResponseEvent(ctx, invCtx, responses, queue, ts, toolExecTime, eventCh)
 
 	// Reset the turn-cycle guard only after the FunctionResponse was
 	// successfully emitted, and only if the batch contained at least one
@@ -1070,12 +1150,22 @@ func (lf *LiveFlow) executeToolGroups(
 		fc := g.fc
 		primaryID := g.ids[0]
 
-		toolCtx, toolCancel := context.WithCancel(ctx)
+		// execute_tool span wraps a single tool dispatch. The span context
+		// (sctx) becomes the parent of toolCtx so cancellation and tracing
+		// are layered cleanly: cancellation is governed by toolCancel,
+		// tracing by sctx — and both reach the tool implementation when
+		// callToolLive rebinds invCtx onto toolCtx.
+		sctx, span := telemetry.StartExecuteToolSpan(ctx, telemetry.StartExecuteToolSpanParams{
+			ToolName: fc.Name,
+			Args:     fc.Args,
+		})
+
+		toolCtx, toolCancel := context.WithCancel(sctx)
 		cs.mu.Lock()
 		cs.inFlightCancel[primaryID] = toolCancel
 		cs.mu.Unlock()
 
-		result := lf.callToolLive(toolCtx, invCtx, fc, toolsFuncMap)
+		result, toolErr := lf.callToolLive(toolCtx, invCtx, fc, toolsFuncMap)
 
 		// Check for external cancellation BEFORE calling toolCancel(),
 		// otherwise toolCtx.Err() is always non-nil after our own cleanup cancel.
@@ -1086,8 +1176,29 @@ func (lf *LiveFlow) executeToolGroups(
 		cs.mu.Unlock()
 
 		if wasCancelled {
+			// Model-initiated cancellation is not a failure — leave span at
+			// codes.Unset and skip TraceToolResult so we do not record a
+			// `<elided>` response payload for a tool that never produced one.
+			span.SetAttributes(telemetry.GCPVertexAgentToolCallCancelledKey.Bool(true))
+			span.End()
 			continue
 		}
+
+		// Mirror non-Live (base_flow.go:661-674): if the tool returned a Go
+		// error, callToolLive packed it into result["error"] AND surfaced it
+		// as toolErr. Pass toolErr to TraceToolResult so the span ends with
+		// codes.Error, matching non-Live span semantics.
+		perCallEv := buildToolTraceEvent(invCtx, fc, primaryID, result)
+		desc := ""
+		if funcTool, ok := toolsFuncMap[fc.Name]; ok {
+			desc = funcTool.Description()
+		}
+		telemetry.TraceToolResult(span, telemetry.TraceToolResultParams{
+			Description:   desc,
+			ResponseEvent: perCallEv,
+			Error:         toolErr,
+		})
+		span.End()
 
 		for _, id := range g.ids {
 			responses = append(responses, &genai.FunctionResponse{
@@ -1098,6 +1209,28 @@ func (lf *LiveFlow) executeToolGroups(
 	return responses
 }
 
+// buildToolTraceEvent constructs the minimal *session.Event needed by
+// TraceToolResult to extract the FunctionResponse's ID and (gated) response
+// payload. Kept separate from emitFunctionResponseEvent since the trace event
+// is per-call, while the emitted event is per-batch.
+func buildToolTraceEvent(invCtx agent.InvocationContext, fc *genai.FunctionCall, id string, result map[string]any) *session.Event {
+	ev := session.NewEvent(invCtx.InvocationID())
+	ev.Author = invCtx.Agent().Name()
+	ev.Branch = invCtx.Branch()
+	ev.LLMResponse = model.LLMResponse{
+		Content: &genai.Content{
+			Role: "user",
+			Parts: []*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: id, Name: fc.Name, Response: result}},
+			},
+		},
+	}
+	return ev
+}
+
+// emitFunctionResponseEvent builds and sends the FunctionResponse event,
+// returning the event so callers (e.g., flushToolCalls's merged span) can
+// pass it to TraceMergedToolCallsResult.
 func (lf *LiveFlow) emitFunctionResponseEvent(
 	ctx context.Context,
 	invCtx agent.InvocationContext,
@@ -1106,7 +1239,7 @@ func (lf *LiveFlow) emitFunctionResponseEvent(
 	ts *liveTimingState,
 	toolExecTime time.Duration,
 	eventCh chan<- eventOrError,
-) {
+) *session.Event {
 	frParts := make([]*genai.Part, 0, len(responses))
 	for _, fr := range responses {
 		frParts = append(frParts, &genai.Part{FunctionResponse: fr})
@@ -1121,27 +1254,41 @@ func (lf *LiveFlow) emitFunctionResponseEvent(
 	diag.ToolExecutionTime = toolExecTime
 	ev.LiveDiagnostics = diag
 	sendEvent(ctx, eventCh, eventOrError{event: ev})
+	return ev
 }
 
+// callToolLive runs the tool and returns its response map. The Go error
+// (when the tool failed) is returned alongside the map so the caller can pass
+// it to telemetry.TraceToolResult — mirroring the non-Live path's
+// `result["error"]` extraction at base_flow.go:661-674.
 func (lf *LiveFlow) callToolLive(
 	ctx context.Context,
 	invCtx agent.InvocationContext,
 	fc *genai.FunctionCall,
 	toolsFuncMap map[string]toolinternal.FunctionTool,
-) map[string]any {
+) (map[string]any, error) {
 	funcTool, ok := toolsFuncMap[fc.Name]
 	if !ok {
-		return map[string]any{"error": fmt.Sprintf("tool %q not found", fc.Name)}
+		err := fmt.Errorf("tool %q not found", fc.Name)
+		return map[string]any{"error": err.Error()}, err
 	}
+
+	// Rebind invCtx onto ctx so toolinternal.NewToolContext produces a
+	// tool.Context whose Value() chain reaches the execute_tool span.
+	// Without this, a tool implementation that calls
+	// trace.SpanFromContext(toolCtx) would observe the generate_content
+	// or live_session span instead and would parent any sub-spans
+	// incorrectly.
+	invCtx = invCtx.WithContext(ctx)
 
 	toolCtx := toolinternal.NewToolContext(invCtx, fc.ID, &session.EventActions{StateDelta: make(map[string]any)}, nil)
 	wrappedCtx := &cancelableToolContext{Context: toolCtx, cancelCtx: ctx}
 
 	response, err := lf.runToolWithCallbacks(wrappedCtx, invCtx, funcTool, fc.Args)
 	if err != nil {
-		return map[string]any{"error": err.Error()}
+		return map[string]any{"error": err.Error()}, err
 	}
-	return response
+	return response, nil
 }
 
 func (lf *LiveFlow) runToolWithCallbacks(

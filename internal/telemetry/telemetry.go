@@ -48,6 +48,17 @@ var (
 	gcpVertexAgentInvocationID            = attribute.Key("gcp.vertex.agent.invocation_id")
 	genAIUsageCacheReadInputTokens        = attribute.Key("gen_ai.usage.cache_read.input_tokens")
 	genAIUsageExperimentalReasoningTokens = attribute.Key("gen_ai.usage.experimental.reasoning_tokens")
+
+	// GCPVertexAgentOperationKey identifies the operation name for vendor-extension spans
+	// where no semconv operation is appropriate (e.g., live_session).
+	GCPVertexAgentOperationKey = attribute.Key("gcp.vertex.agent.operation")
+	// GCPVertexAgentToolCallCancelledKey marks an execute_tool span whose tool was
+	// cancelled mid-flight via a model-issued tool_cancellation_ids signal.
+	GCPVertexAgentToolCallCancelledKey = attribute.Key("gcp.vertex.agent.tool_call.cancelled")
+	// GCPVertexAgentReconnectAttemptKey is the zero-based reconnect index for the
+	// generate_content span within a live_session — 0 for the first WebSocket
+	// attempt, N for the Nth GoAway-driven reconnect.
+	GCPVertexAgentReconnectAttemptKey = attribute.Key("gcp.vertex.agent.reconnect_attempt")
 )
 
 // tracer is the tracer instance for ADK go.
@@ -84,6 +95,50 @@ type TraceAgentResultParams struct {
 
 // TraceAgentResult records the result of the agent invocation, including status and error.
 func TraceAgentResult(span trace.Span, params TraceAgentResultParams) {
+	recordErrorAndStatus(span, params.Error)
+}
+
+// StartLiveSessionSpanParams contains parameters for [StartLiveSessionSpan].
+type StartLiveSessionSpanParams struct {
+	// AgentName is the name of the agent driving the live session.
+	AgentName string
+	// SessionID is the conversation/session ID; emitted as gen_ai.conversation.id
+	// so live spans share the filtering key with invoke_agent.
+	SessionID string
+	// InvocationID identifies the invocation; emitted for parity with
+	// invoke_agent / generate_content (used by adk-web).
+	InvocationID string
+}
+
+// StartLiveSessionSpan starts a vendor-extension span that wraps a Live
+// (bidirectional streaming) iterator. It is the parent of all
+// generate_content attempts within one RunLive call, including those that
+// occur on reconnect.
+//
+// live_session is not a semconv operation; the gcp.vertex.agent.operation
+// attribute disambiguates it from semconv-defined gen_ai operations.
+func StartLiveSessionSpan(ctx context.Context, params StartLiveSessionSpanParams) (context.Context, trace.Span) {
+	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("live_session %s", params.AgentName), trace.WithAttributes(
+		gcpVertexAgentInvocationID.String(params.InvocationID),
+		semconv.GenAIConversationID(params.SessionID),
+		GCPVertexAgentOperationKey.String("live_session"),
+	))
+	return spanCtx, span
+}
+
+type TraceLiveSessionResultParams struct {
+	// ResponseEvent is the last event yielded before the iterator returned.
+	// May be nil for sessions that ended without yielding (e.g., connect failure).
+	ResponseEvent *session.Event
+	// Error is the terminal error, if any. Nil indicates a clean iterator close.
+	Error error
+}
+
+// TraceLiveSessionResult records the result of a live session, including
+// status and terminal error. Mirrors TraceAgentResult: a nil error leaves
+// the span at codes.Unset (the default), and a non-nil error sets
+// codes.Error with the error string as the description.
+func TraceLiveSessionResult(span trace.Span, params TraceLiveSessionResultParams) {
 	recordErrorAndStatus(span, params.Error)
 }
 
@@ -142,12 +197,19 @@ type StartExecuteToolSpanParams struct {
 }
 
 // StartExecuteToolSpan starts a new semconv execute_tool span.
+//
+// The serialized tool args attribute is gated on getGenAICaptureMessageContent
+// (defaults to false / elided) to keep PHI out of span attributes by default.
 func StartExecuteToolSpan(ctx context.Context, params StartExecuteToolSpanParams) (context.Context, trace.Span) {
 	toolName := params.ToolName
+	argsAttr := elidedContent
+	if getGenAICaptureMessageContent() {
+		argsAttr = safeSerialize(params.Args)
+	}
 	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("execute_tool %s", toolName), trace.WithAttributes(
 		semconv.GenAIOperationNameExecuteTool,
 		semconv.GenAIToolName(toolName),
-		gcpVertexAgentToolCallArgsName.String(safeSerialize(params.Args))))
+		gcpVertexAgentToolCallArgsName.String(argsAttr)))
 	return spanCtx, span
 }
 
@@ -159,6 +221,9 @@ type TraceToolResultParams struct {
 }
 
 // TraceToolResult records the tool execution events.
+//
+// The serialized tool response attribute is gated on getGenAICaptureMessageContent
+// (defaults to false / elided) to keep PHI out of span attributes by default.
 func TraceToolResult(span trace.Span, params TraceToolResultParams) {
 	recordErrorAndStatus(span, params.Error)
 
@@ -167,32 +232,43 @@ func TraceToolResult(span trace.Span, params TraceToolResultParams) {
 		semconv.GenAIToolDescriptionKey.String(params.Description),
 	}
 
-	toolCallID := "<not specified>"
-	toolResponse := "<not specified>"
-
+	toolCallID, toolResponse := extractToolCallIDAndResponse(params.ResponseEvent)
 	if params.ResponseEvent != nil {
 		attributes = append(attributes, gcpVertexAgentEventID.String(params.ResponseEvent.ID))
-		if params.ResponseEvent.LLMResponse.Content != nil {
-			responseParts := params.ResponseEvent.LLMResponse.Content.Parts
-
-			if len(responseParts) > 0 {
-				functionResponse := responseParts[0].FunctionResponse
-				if functionResponse != nil {
-					if functionResponse.ID != "" {
-						toolCallID = functionResponse.ID
-					}
-					if functionResponse.Response != nil {
-						toolResponse = safeSerialize(functionResponse.Response)
-					}
-				}
-			}
-		}
 	}
-
 	attributes = append(attributes, semconv.GenAIToolCallIDKey.String(toolCallID))
 	attributes = append(attributes, gcpVertexAgentToolResponseName.String(toolResponse))
 
 	span.SetAttributes(attributes...)
+}
+
+// extractToolCallIDAndResponse pulls the call ID and a serializable response
+// payload out of the FunctionResponse carried by the tool result event. The
+// response payload is gated on getGenAICaptureMessageContent so PHI in tool
+// outputs does not leak into span attributes by default.
+func extractToolCallIDAndResponse(ev *session.Event) (callID, response string) {
+	callID = "<not specified>"
+	response = "<not specified>"
+	if ev == nil || ev.Content == nil {
+		return callID, response
+	}
+	parts := ev.Content.Parts
+	if len(parts) == 0 || parts[0].FunctionResponse == nil {
+		return callID, response
+	}
+	fr := parts[0].FunctionResponse
+	if fr.ID != "" {
+		callID = fr.ID
+	}
+	if fr.Response == nil {
+		return callID, response
+	}
+	if getGenAICaptureMessageContent() {
+		response = safeSerialize(fr.Response)
+	} else {
+		response = elidedContent
+	}
+	return callID, response
 }
 
 func recordErrorAndStatus(span trace.Span, err error) {
@@ -238,14 +314,21 @@ func StartTrace(ctx context.Context, traceName string) (context.Context, trace.S
 }
 
 // TraceMergedToolCallsResult records the result of the merged tool calls, including status and tool execution events.
+//
+// The serialized response payload is gated on getGenAICaptureMessageContent so
+// PHI in tool outputs does not leak into the merged span by default.
 func TraceMergedToolCallsResult(span trace.Span, fnResponseEvent *session.Event, err error) {
 	recordErrorAndStatus(span, err)
+	responseAttr := elidedContent
+	if getGenAICaptureMessageContent() {
+		responseAttr = safeSerialize(fnResponseEvent)
+	}
 	attributes := []attribute.KeyValue{
 		semconv.GenAIOperationNameKey.String(executeToolName),
 		semconv.GenAIToolNameKey.String(mergeToolName),
 		semconv.GenAIToolDescriptionKey.String(mergeToolName),
 		gcpVertexAgentToolCallArgsName.String("N/A"),
-		gcpVertexAgentToolResponseName.String(safeSerialize(fnResponseEvent)),
+		gcpVertexAgentToolResponseName.String(responseAttr),
 	}
 	if fnResponseEvent != nil {
 		attributes = append(attributes, gcpVertexAgentEventID.String(fnResponseEvent.ID))
