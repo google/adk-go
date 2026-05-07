@@ -12,101 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package context provides backward-compatibility aliases for context
+// constructors that have moved to the agent package.
+//
+// New code should import google.golang.org/adk/agent and use
+// agent.NewInvocationContext / agent.InvocationContextParams directly.
+// These aliases exist to keep existing call sites compiling during the
+// migration; they will be removed in a future release.
 package context
 
-import (
-	"context"
+import "google.golang.org/adk/agent"
 
-	"github.com/google/uuid"
-	"google.golang.org/genai"
+// InvocationContextParams aliases agent.InvocationContextParams.
+//
+// Deprecated: import google.golang.org/adk/agent and use
+// agent.InvocationContextParams instead.
+type InvocationContextParams = agent.InvocationContextParams
 
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
-)
-
-type InvocationContextParams struct {
-	Artifacts agent.Artifacts
-	Memory    agent.Memory
-	Session   session.Session
-
-	Branch string
-	Agent  agent.Agent
-
-	UserContent   *genai.Content
-	RunConfig     *agent.RunConfig
-	EndInvocation bool
-	InvocationID  string
-}
-
-func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
-	if params.InvocationID == "" {
-		params.InvocationID = "e-" + uuid.NewString()
-	}
-	return &InvocationContext{
-		Context: ctx,
-		params:  params,
-	}
-}
-
-type InvocationContext struct {
-	context.Context
-
-	params InvocationContextParams
-}
-
-func (c *InvocationContext) Artifacts() agent.Artifacts {
-	return c.params.Artifacts
-}
-
-func (c *InvocationContext) Agent() agent.Agent {
-	return c.params.Agent
-}
-
-func (c *InvocationContext) Branch() string {
-	return c.params.Branch
-}
-
-func (c *InvocationContext) InvocationID() string {
-	return c.params.InvocationID
-}
-
-func (c *InvocationContext) Memory() agent.Memory {
-	return c.params.Memory
-}
-
-func (c *InvocationContext) Session() session.Session {
-	return c.params.Session
-}
-
-func (c *InvocationContext) UserContent() *genai.Content {
-	return c.params.UserContent
-}
-
-func (c *InvocationContext) RunConfig() *agent.RunConfig {
-	return c.params.RunConfig
-}
-
-func (c *InvocationContext) EndInvocation() {
-	c.params.EndInvocation = true
-}
-
-func (c *InvocationContext) Ended() bool {
-	return c.params.EndInvocation
-}
-
-func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
-	newCtx := *c
-	newCtx.Context = ctx
-	return &newCtx
-}
-
-// WithAgent returns a copy of c with the Agent param overridden. The
-// embedded context.Context and all other params are shared with the
-// receiver.
-func (c *InvocationContext) WithAgent(a agent.Agent) agent.InvocationContext {
-	newCtx := *c
-	newCtx.params.Agent = a
-	return &newCtx
-}
-
-var _ agent.InvocationContext = (*InvocationContext)(nil)
+// NewInvocationContext is an alias for agent.NewInvocationContext.
+//
+// Deprecated: import google.golang.org/adk/agent and call
+// agent.NewInvocationContext directly.
+var NewInvocationContext = agent.NewInvocationContext
