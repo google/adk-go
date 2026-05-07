@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package aiplatform provides utils for aiplatform.googleapis.com
 package aiplatform
 
 // HostURL returns aiplatform host url for a given region
