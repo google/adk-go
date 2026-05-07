@@ -33,6 +33,24 @@ func NewReadonlyContext(ctx InvocationContext) ReadonlyContext {
 	}
 }
 
+// InvocationOf returns the InvocationContext that backs the given
+// ReadonlyContext, or nil if ctx was not produced by
+// NewReadonlyContext (or by a wrapper that exposes the same backing
+// type).
+//
+// This helper exists for the small number of internal call sites that
+// need to escape the read-only narrowing — typically because they
+// pass the context to a lower-level API that requires the full
+// invocation surface (e.g., template injection that walks session
+// state mutations). Prefer keeping ReadonlyContext on the narrower
+// API where possible.
+func InvocationOf(ctx ReadonlyContext) InvocationContext {
+	if r, ok := ctx.(*readonlyContextImpl); ok {
+		return r.invocationContext
+	}
+	return nil
+}
+
 // readonlyContextImpl is the canonical, in-process implementation of
 // ReadonlyContext. It is unexported because callers should depend on
 // the ReadonlyContext interface and construct values via

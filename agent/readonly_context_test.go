@@ -51,3 +51,36 @@ func TestNewReadonlyContext_DelegatesReads(t *testing.T) {
 		t.Errorf("ReadonlyContext.InvocationID() = %q, want %q", got, "test-id")
 	}
 }
+
+// TestInvocationOf_ReturnsBackingContext verifies that InvocationOf
+// recovers the original InvocationContext from a ReadonlyContext
+// produced by NewReadonlyContext.
+func TestInvocationOf_ReturnsBackingContext(t *testing.T) {
+	inv := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
+		Branch: "test-branch",
+	})
+	readonly := agent.NewReadonlyContext(inv)
+
+	got := agent.InvocationOf(readonly)
+	if got == nil {
+		t.Fatal("InvocationOf returned nil for a context produced by NewReadonlyContext")
+	}
+	if got != inv {
+		t.Errorf("InvocationOf returned a different InvocationContext: got %p, want %p", got, inv)
+	}
+}
+
+// TestInvocationOf_ReturnsNilForUnknown verifies that InvocationOf
+// returns nil for a ReadonlyContext that is not backed by the
+// canonical implementation (i.e., a custom user implementation).
+func TestInvocationOf_ReturnsNilForUnknown(t *testing.T) {
+	if got := agent.InvocationOf(unknownReadonly{}); got != nil {
+		t.Errorf("InvocationOf(custom impl) = %v, want nil", got)
+	}
+}
+
+// unknownReadonly is a stand-in for a user-supplied ReadonlyContext
+// implementation that does not embed the canonical readonlyContextImpl.
+type unknownReadonly struct {
+	agent.ReadonlyContext
+}
