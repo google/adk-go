@@ -84,3 +84,19 @@ func TestInvocationOf_ReturnsNilForUnknown(t *testing.T) {
 type unknownReadonly struct {
 	agent.ReadonlyContext
 }
+
+// TestNewCallbackContext_IsReadonlyButNotInvocation verifies the
+// canonical CallbackContext satisfies the narrower ReadonlyContext
+// interface (so it may be passed where a ReadonlyContext is required)
+// but does not accidentally satisfy the wider InvocationContext.
+func TestNewCallbackContext_IsReadonlyButNotInvocation(t *testing.T) {
+	inv := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{})
+	callback := agent.NewCallbackContext(inv)
+
+	if _, ok := callback.(agent.ReadonlyContext); !ok {
+		t.Errorf("CallbackContext(%+T) is unexpectedly not a ReadonlyContext", callback)
+	}
+	if got, ok := callback.(agent.InvocationContext); ok {
+		t.Errorf("CallbackContext(%+T) is unexpectedly an InvocationContext", got)
+	}
+}
