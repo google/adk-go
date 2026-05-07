@@ -15,12 +15,8 @@
 package workflow
 
 import (
-	"iter"
 	"strings"
 	"testing"
-
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
 )
 
 func TestUniqueNames(t *testing.T) {
@@ -67,15 +63,4 @@ func TestUniqueNames(t *testing.T) {
 			}
 		})
 	}
-}
-
-// dummyNode is a minimal implementation of Node for testing purposes.
-type dummyNode struct {
-	name string
-}
-
-func (n *dummyNode) Name() string        { return n.name }
-func (n *dummyNode) Description() string { return "" }
-func (n *dummyNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {}
 }

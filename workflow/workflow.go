@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/session"
 )
 
@@ -76,6 +77,15 @@ func (r MultiRoute[T]) Matches(event *session.Event) bool {
 	return false
 }
 
+// DefaultRoute is a special route that matches when no other concrete routes match.
+var Default = &defaultRoute{}
+
+type defaultRoute struct{}
+
+func (r *defaultRoute) Matches(event *session.Event) bool {
+	return false
+}
+
 // baseNode provides common fields for all nodes.
 type baseNode struct {
 	name        string
@@ -92,7 +102,7 @@ type FunctionNode struct {
 }
 
 // NewFunctionNode creates a new node wrapping a custom function using generics to automatically infer input and output types.
-func NewFunctionNode[IN any, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error)) *FunctionNode {
+func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error)) *FunctionNode {
 	wrappedFn := func(ctx agent.InvocationContext, input any) (any, error) {
 		if input == nil {
 			var zero IN
@@ -100,7 +110,13 @@ func NewFunctionNode[IN any, OUT any](name string, fn func(ctx agent.InvocationC
 		}
 		typedInput, ok := input.(IN)
 		if !ok {
-			return nil, fmt.Errorf("invalid input type, expected %T", new(IN))
+			// Fallback to the json-like input types that cannot be converted by the standard type assertion.
+			// E.g. tool nodes return map[string]any as input and user may define a struct as the target type.
+			var err error
+			typedInput, err = typeutil.ConvertToWithJSONSchema[any, IN](input, nil)
+			if err != nil {
+				return nil, fmt.Errorf("new function node: invalid input type, expected %T: %v", new(IN), err)
+			}
 		}
 		return fn(ctx, typedInput)
 	}
@@ -136,32 +152,6 @@ type Edge struct {
 	Route Route // Routing condition
 }
 
-// Chain generates a slice of Edges to form a chain of nodes.
-func Chain(nodes ...Node) []Edge {
-	if len(nodes) < 2 {
-		return nil
-	}
-	edges := make([]Edge, len(nodes)-1)
-	for i := 0; i < len(nodes)-1; i++ {
-		edges[i] = Edge{From: nodes[i], To: nodes[i+1]}
-	}
-	return edges
-}
-
-// Concat combines Edges and []Edge slices into a single slice of edges.
-func Concat(items ...any) []Edge {
-	var edges []Edge
-	for _, item := range items {
-		switch v := item.(type) {
-		case Edge:
-			edges = append(edges, v)
-		case []Edge:
-			edges = append(edges, v...)
-		}
-	}
-	return edges
-}
-
 // Start is a sentinel node used to indicate the entry point of the workflow.
 var Start Node = &startNode{}
 
@@ -172,8 +162,6 @@ func (s *startNode) Description() string { return "Start node" }
 func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
-
-const DEFAULT_ROUTE = "__DEFAULT__"
 
 // Workflow manages the workflow graph execution.
 type Workflow struct {
@@ -199,20 +187,21 @@ type nodeInput struct {
 
 // findNextNodes determines the set of nodes to execute next based on the outgoing edges of the currentNode.
 // It evaluates routes attached to edges against the provided session.Event.
-// 
+//
 // Behavior:
-// - Edges with no route condition always match.
-// - Edges with a route condition match only if the route matches the event.
-// - Duplicate target nodes are excluded to avoid queuing the same node multiple times.
-// - If there are outgoing edges but none of them match (neither by route nor by being unrouted),
-//   it falls back to the default route (TODO: hanorik - add default route support).
-func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Event) ([]nodeInput, error) {
+//   - Edges with no route condition always match.
+//   - Edges with a route condition match only if the route matches the event.
+//   - Duplicate target nodes are excluded to avoid queuing the same node multiple times.
+//   - If there are outgoing edges but none of them match (neither by route nor by being unrouted),
+//     it falls back to the default route (TODO: hanorik - add default route support).
+func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Event) []nodeInput {
 	if len(w.edges[currentNode]) == 0 {
-		return nil, nil
+		return nil
 	}
 	matched := false
 	queue := []nodeInput{}
 	added := make(map[Node]struct{})
+	var defaultRouteNode Node
 	for _, edge := range w.edges[currentNode] {
 		if _, ok := added[edge.To]; ok {
 			continue
@@ -220,20 +209,23 @@ func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Eve
 		if edge.Route == nil {
 			queue = append(queue, nodeInput{node: edge.To, input: input})
 			added[edge.To] = struct{}{}
-			matched = true
 			continue
 		}
-
+		if edge.Route == Default {
+			defaultRouteNode = edge.To
+			continue
+		}
 		if edge.Route.Matches(event) {
 			queue = append(queue, nodeInput{node: edge.To, input: input})
 			added[edge.To] = struct{}{}
 			matched = true
 		}
 	}
-	if !matched {
-		return nil, fmt.Errorf("no outgoing edge matches the event with routes %v emitted by node %s", event.Routes, currentNode.Name())
+	if !matched && defaultRouteNode != nil {
+		queue = append(queue, nodeInput{node: defaultRouteNode, input: input})
 	}
-	return queue, nil
+
+	return queue
 }
 
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -291,11 +283,7 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			if currentNode != Start {
 				input = outputData
 			}
-			nextNodes, err := w.findNextNodes(currentNode, input, event)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
+			nextNodes := w.findNextNodes(currentNode, input, event)
 			queue = append(queue, nextNodes...)
 		}
 	}

@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"strings"
@@ -33,16 +34,18 @@ type MockInvocationContext struct {
 	userContent *genai.Content
 }
 
-func (m *MockInvocationContext) Session() session.Session {
-	return m.sess
-}
-
-func (m *MockInvocationContext) InvocationID() string {
-	return "test-invocation-id"
-}
-
-func (m *MockInvocationContext) UserContent() *genai.Content {
-	return m.userContent
+func (m *MockInvocationContext) Session() session.Session    { return m.sess }
+func (m *MockInvocationContext) InvocationID() string        { return "test-invocation-id" }
+func (m *MockInvocationContext) UserContent() *genai.Content { return m.userContent }
+func (m *MockInvocationContext) Artifacts() agent.Artifacts  { return nil }
+func (m *MockInvocationContext) Memory() agent.Memory        { return nil }
+func (m *MockInvocationContext) Agent() agent.Agent          { return nil }
+func (m *MockInvocationContext) Branch() string              { return "" }
+func (m *MockInvocationContext) RunConfig() *agent.RunConfig { return nil }
+func (m *MockInvocationContext) EndInvocation()              {}
+func (m *MockInvocationContext) Ended() bool                 { return false }
+func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
+	return m
 }
 
 func TestFunctionNode(t *testing.T) {
@@ -231,7 +234,6 @@ func TestWorkflowRouting(t *testing.T) {
 		startRoutes    []string
 		edges          func(nodeStart *CustomRouteNode, nodeA, nodeB *FunctionNode, nodeC *CustomRouteNode, nodeD *FunctionNode) []Edge
 		expectedExec   []string
-		expectErrorMsg string
 	}
 
 	createNodes := func() (*CustomRouteNode, *FunctionNode, *FunctionNode, *CustomRouteNode, *FunctionNode, *testTracker) {
@@ -316,7 +318,42 @@ func TestWorkflowRouting(t *testing.T) {
 					{From: c, To: d},
 				}
 			},
-			expectErrorMsg: "no outgoing edge matches the event with routes",
+		},
+		{
+			name:        "fallback to default route when no concrete route matches",
+			startRoutes: []string{"unmatched"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b, Route: (Default)},
+				}
+			},
+			expectedExec: []string{"B"},
+		},
+		{
+			name:        "default route is suppressed by concrete route match",
+			startRoutes: []string{"branchA"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a, Route: StringRoute("branchA")},
+					{From: x, To: b, Route: Default},
+				}
+			},
+			expectedExec: []string{"A"},
+		},
+		{
+			name:        "unconditional edge does not suppress default route",
+			startRoutes: []string{"unmatched"},
+			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+				return []Edge{
+					{From: Start, To: x},
+					{From: x, To: a},
+					{From: x, To: b, Route: (Default)},
+				}
+			},
+			expectedExec: []string{"A", "B"},
 		},
 		{
 			name:        "correct MultiRoute",
@@ -342,7 +379,7 @@ func TestWorkflowRouting(t *testing.T) {
 					{From: x, To: b, Route: MultiRoute[string]{"branchZ"}},
 				}
 			},
-			expectErrorMsg: "no outgoing edge matches the event with routes",
+			expectedExec: nil,
 		},
 		{
 			name:        "duplicate edges to same node",
@@ -379,15 +416,6 @@ func TestWorkflowRouting(t *testing.T) {
 					err = testErr
 					break
 				}
-			}
-
-			if tc.expectErrorMsg != "" {
-				if err == nil {
-					t.Errorf("expected error matching %q, got none", tc.expectErrorMsg)
-				} else if !strings.Contains(err.Error(), tc.expectErrorMsg) {
-					t.Errorf("expected error containing %q, got %v", tc.expectErrorMsg, err)
-				}
-				return
 			}
 
 			if err != nil {
