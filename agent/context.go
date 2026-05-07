@@ -100,6 +100,13 @@ type InvocationContext interface {
 	// NOTE: This is a temporary solution and will be removed later. The proper solution
 	// we plan is to stop embedding go context in adk context types and split it.
 	WithContext(ctx context.Context) InvocationContext
+
+	// WithAgent returns a new instance of the context with the Agent overridden.
+	// Used by Agent.Run wrappers (e.g. telemetry-wrapped runs, sub-agent
+	// dispatch) that need to swap the active agent without otherwise changing
+	// the invocation. Like WithContext, this returns a copy and does not
+	// mutate the receiver.
+	WithAgent(a Agent) InvocationContext
 }
 
 // ReadonlyContext provides read-only access to invocation context data.

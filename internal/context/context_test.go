@@ -64,3 +64,38 @@ func TestWithContext(t *testing.T) {
 		t.Errorf("WithContext() mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestWithAgent(t *testing.T) {
+	parent, err := agent.New(agent.Config{Name: "parent"})
+	if err != nil {
+		t.Fatalf("agent.New(parent): %v", err)
+	}
+	child, err := agent.New(agent.Config{Name: "child"})
+	if err != nil {
+		t.Fatalf("agent.New(child): %v", err)
+	}
+
+	inv := NewInvocationContext(t.Context(), InvocationContextParams{
+		Agent:  parent,
+		Branch: "test-branch",
+	})
+
+	got := inv.WithAgent(child)
+
+	if got.Agent() != child {
+		t.Errorf("WithAgent() Agent = %v, want %v", got.Agent(), child)
+	}
+	if got.Branch() != "test-branch" {
+		t.Errorf("WithAgent() lost Branch param: got %q, want %q", got.Branch(), "test-branch")
+	}
+	// Receiver must not be mutated.
+	if inv.Agent() != parent {
+		t.Errorf("WithAgent() mutated receiver: Agent = %v, want %v (parent)", inv.Agent(), parent)
+	}
+	// EndInvocation on the derived context must not bleed into the
+	// receiver — sub-agent dispatch relies on this isolation.
+	got.EndInvocation()
+	if inv.Ended() {
+		t.Error("WithAgent() did not isolate lifecycle: parent.Ended() = true after child.EndInvocation()")
+	}
+}

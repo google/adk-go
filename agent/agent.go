@@ -504,6 +504,19 @@ func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
 	return &newCtx
 }
 
+// WithAgent returns a copy of c with the Agent overridden. See
+// InvocationContext.WithAgent for the contract.
+//
+// TODO: this duplicate impl will be removed once (*agent).Run is
+// rewritten to use ctx.WithContext(...).WithAgent(a) on its received
+// InvocationContext instead of constructing a new invocationContext
+// literal. See docs-internal/proposals/context_unification.md.
+func (c *invocationContext) WithAgent(a Agent) InvocationContext {
+	newCtx := *c
+	newCtx.agent = a
+	return &newCtx
+}
+
 func pluginManagerFromContext(ctx context.Context) pluginManager {
 	a := ctx.Value(plugincontext.PluginManagerCtxKey)
 	m, ok := a.(pluginManager)
