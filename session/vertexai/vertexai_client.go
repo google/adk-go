@@ -32,20 +32,14 @@ import (
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	vertexaiutil "google.golang.org/adk/util/vertexai"
 
 	aiplatform "cloud.google.com/go/aiplatform/apiv1beta1"
 	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 )
 
-const (
-	engineResourceTemplate  = "projects/%s/locations/%s/reasoningEngines/%s"
-	sessionResourceTemplate = engineResourceTemplate + "/sessions/%s"
-)
-
 type vertexAiClient struct {
-	location        string
-	projectID       string
-	reasoningEngine string
+	agentEngineData *vertexaiutil.AgentEngineData
 	rpcClient       *aiplatform.SessionClient
 }
 
@@ -54,7 +48,14 @@ func newVertexAiClient(ctx context.Context, location, projectID, reasoningEngine
 	if err != nil {
 		return nil, fmt.Errorf("could not establish connection to the aiplatform server: %w", err)
 	}
-	return &vertexAiClient{location, projectID, reasoningEngine, rpcClient}, nil
+	return &vertexAiClient{
+		&vertexaiutil.AgentEngineData{
+			Location:        location,
+			ProjectID:       projectID,
+			ReasoningEngine: reasoningEngine,
+		},
+		rpcClient,
+	}, nil
 }
 
 // Ensure you close it when your application shuts down
@@ -79,8 +80,13 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 	if err != nil {
 		return nil, err
 	}
+	aeData := &vertexaiutil.AgentEngineData{
+		Location:        c.agentEngineData.Location,
+		ProjectID:       c.agentEngineData.ProjectID,
+		ReasoningEngine: reasoningEngine,
+	}
 	rpcReq := &aiplatformpb.CreateSessionRequest{
-		Parent:  fmt.Sprintf(engineResourceTemplate, c.projectID, c.location, reasoningEngine),
+		Parent:  vertexaiutil.AgentEngineResource(aeData),
 		Session: pbSession,
 	}
 	lro, err := c.rpcClient.CreateSession(ctx, rpcReq)
@@ -168,8 +174,15 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequ
 	if err != nil {
 		return nil, err
 	}
+
+	aeData := vertexaiutil.AgentEngineData{
+		Location:        c.agentEngineData.Location,
+		ProjectID:       c.agentEngineData.ProjectID,
+		ReasoningEngine: reasoningEngine,
+	}
+
 	rpcReq := &aiplatformpb.ListSessionsRequest{
-		Parent: fmt.Sprintf(engineResourceTemplate, c.projectID, c.location, reasoningEngine),
+		Parent: vertexaiutil.AgentEngineResource(&aeData),
 	}
 	if req.UserID != "" {
 		rpcReq.Filter = fmt.Sprintf("userId=\"%s\"", req.UserID)
@@ -392,7 +405,12 @@ func sessionIDByOperationName(on string) (string, error) {
 }
 
 func sessionNameByID(id string, c *vertexAiClient, reasoningEngine string) string {
-	return fmt.Sprintf(sessionResourceTemplate, c.projectID, c.location, reasoningEngine, id)
+	aeData := &vertexaiutil.AgentEngineData{
+		Location:        c.agentEngineData.Location,
+		ProjectID:       c.agentEngineData.ProjectID,
+		ReasoningEngine: reasoningEngine,
+	}
+	return vertexaiutil.SessionResource(aeData, id)
 }
 
 // (?:...) tells Go "match this, but don't save it in the results array".
@@ -400,8 +418,8 @@ func sessionNameByID(id string, c *vertexAiClient, reasoningEngine string) strin
 var reasoningEnginePattern = regexp.MustCompile(`^projects/(?:[a-zA-Z0-9-_]+)/locations/(?:[a-zA-Z0-9-_]+)/reasoningEngines/(\d+)$`)
 
 func (c *vertexAiClient) getReasoningEngineID(appName string) (string, error) {
-	if c.reasoningEngine != "" {
-		return c.reasoningEngine, nil
+	if c.agentEngineData.ReasoningEngine != "" {
+		return c.agentEngineData.ReasoningEngine, nil
 	}
 
 	// Check if appName consists only of digits

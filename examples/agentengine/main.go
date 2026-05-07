@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/rand/v2"
 	"os"
@@ -27,11 +28,50 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/agentengine"
+	vertexaiMem "google.golang.org/adk/memory/vertexai"
 	"google.golang.org/adk/model/gemini"
+	"google.golang.org/adk/plugin"
+	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session/vertexai"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
+	vertexaiutil "google.golang.org/adk/util/vertexai"
 )
+
+// Args defines the input structure for the memory search tool.
+type Args struct {
+	Query string `json:"query" jsonschema:"The query to search for in the memory."`
+}
+
+// Result defines the output structure for the memory search tool.
+type Result struct {
+	Results []string `json:"results"`
+}
+
+const (
+	stateKeySessionLastUpdateTime = "sessionLastUpdateTime"
+)
+
+// memorySearchToolFunc is the implementation of the memory search tool.
+// This function demonstrates accessing memory via tool.Context.
+func memorySearchToolFunc(tctx tool.Context, args Args) (Result, error) {
+	// The SearchMemory function is available on the context.
+	searchResults, err := tctx.SearchMemory(context.Background(), args.Query)
+	if err != nil {
+		log.Printf("Error searching memory: %v", err)
+		return Result{}, fmt.Errorf("failed memory search")
+	}
+
+	var results []string
+	for _, res := range searchResults.Memories {
+		if res.Content != nil {
+			for _, part := range res.Content.Parts {
+				results = append(results, part.Text)
+			}
+		}
+	}
+	return Result{Results: results}, nil
+}
 
 func main() {
 	ctx := context.Background()
@@ -71,13 +111,26 @@ func main() {
 		log.Fatalf("Failed to create tool: %v", err)
 	}
 
+	// Define a tool that can search memory.
+	memorySearchTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "search_past_conversations",
+			Description: "Searches past conversations for relevant information.",
+		},
+		memorySearchToolFunc,
+	)
+	if err != nil {
+		log.Fatalf("Failed to create tool: %v", err)
+	}
+
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "ae_agent",
 		Model:       model,
 		Description: "General helpful agent",
-		Instruction: "You are a helpful agent, you should answer any questions you are given. Use 'random' tool to provide random numbers.",
+		Instruction: "You are a helpful agent, you should answer any questions you are given. Use 'random' tool to provide random numbers. Use search_past_conversations tool to get the facts about the user",
 		Tools: []tool.Tool{
 			randomTool,
+			memorySearchTool,
 		},
 	})
 	if err != nil {
@@ -94,9 +147,55 @@ func main() {
 		log.Fatalf("Failed to create session service: %v", err)
 	}
 
+	memService, err := vertexaiMem.NewService(ctx,
+		&vertexaiMem.ServiceConfig{
+			AgentEngineData: vertexaiutil.AgentEngineData{
+				ProjectID:       projectID,
+				Location:        location,
+				ReasoningEngine: agentEngineID,
+			},
+			StateKeySessionLastUpdateTime: stateKeySessionLastUpdateTime,
+		})
+	if err != nil {
+		log.Fatalf("Failed to create memory service: %v", err)
+	}
+
+	memPlugin, err := plugin.New(plugin.Config{
+		Name: "Memory generator",
+		BeforeRunCallback: func(ic agent.InvocationContext) (*genai.Content, error) {
+			state := ic.Session().State()
+			err := state.Set(stateKeySessionLastUpdateTime, ic.Session().LastUpdateTime())
+			if err != nil {
+				log.Printf("state.Set failed: %v\n", err)
+				return nil, err
+			}
+			return nil, nil
+		},
+		AfterRunCallback: func(ic agent.InvocationContext) {
+			m := ic.Memory()
+			if m == nil {
+				log.Printf("ic.Memory() is nil\n")
+				return
+			}
+			err := m.AddSessionToMemory(ic, ic.Session())
+			if err != nil {
+				log.Printf("ic.Memory().AddSessionToMemory failed: %v\n", err)
+			}
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create plugin: %v", err)
+	}
+
 	config := &launcher.Config{
 		SessionService: sessionService,
 		AgentLoader:    agent.NewSingleLoader(a),
+		MemoryService:  memService,
+		PluginConfig: runner.PluginConfig{
+			Plugins: []*plugin.Plugin{
+				memPlugin,
+			},
+		},
 	}
 
 	l := agentengine.NewLauncher(agentEngineID)
