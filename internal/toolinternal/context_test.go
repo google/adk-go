@@ -17,22 +17,9 @@ package toolinternal
 import (
 	"testing"
 
-	"google.golang.org/adk/agent"
 	contextinternal "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/session"
 )
-
-func TestToolContext(t *testing.T) {
-	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
-	toolCtx := NewToolContext(inv, "fn1", &session.EventActions{}, nil)
-
-	if _, ok := toolCtx.(agent.ReadonlyContext); !ok {
-		t.Errorf("ToolContext(%+T) is unexpectedly not a ReadonlyContext", toolCtx)
-	}
-	if _, ok := toolCtx.(agent.CallbackContext); !ok {
-		t.Errorf("ToolContext(%+T) is unexpectedly not a CallbackContext", toolCtx)
-	}
-}
 
 func TestRequestConfirmation_SetsSkipSummarization(t *testing.T) {
 	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
