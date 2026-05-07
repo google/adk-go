@@ -118,10 +118,6 @@ func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.InvocationConte
 		return fn(ctx, typedInput)
 	}
 
-	if cfg.RetryConfig != nil {
-		cfg.RetryConfig.applyDefaults()
-	}
-
 	return &FunctionNode{
 		baseNode: baseNode{name: name, config: cfg},
 		fn:       wrappedFn,
