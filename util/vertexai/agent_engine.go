@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// package vertexai provides utilities for Agent Engine deployments
+// Package vertexai provides utilities for Agent Engine deployments
 package vertexai
 
 import "fmt"
 
 const (
-	agentEngineTemplate         = "projects/%s/locations/%s/reasoningEngines/%s"
-	agentEngineSessionbTemplate = agentEngineTemplate + "/sessions/%s"
+	agentEngineTemplate        = "projects/%s/locations/%s/reasoningEngines/%s"
+	agentEngineSessionTemplate = agentEngineTemplate + "/sessions/%s"
 )
 
 type AgentEngineData struct {
@@ -34,8 +34,8 @@ func AgentEngineResource(data *AgentEngineData) string {
 	return fmt.Sprintf(agentEngineTemplate, data.ProjectID, data.Location, data.ReasoningEngine)
 }
 
-// AgentEngineResource returns a formatted string indicating specific session for an agent engine instance
+// SessionResource returns a formatted string indicating specific session for an agent engine instance
 // (template `projects/%s/locations/%s/reasoningEngines/%s/sessions/%s`)
 func SessionResource(data *AgentEngineData, sessionID string) string {
-	return fmt.Sprintf(agentEngineSessionbTemplate, data.ProjectID, data.Location, data.ReasoningEngine, sessionID)
+	return fmt.Sprintf(agentEngineSessionTemplate, data.ProjectID, data.Location, data.ReasoningEngine, sessionID)
 }
