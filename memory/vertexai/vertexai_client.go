@@ -48,7 +48,7 @@ func newVertexAIClient(ctx context.Context, config *vertexAIClientConfig) (*vert
 	if config == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
-	c, err := aiplatform.NewMemoryBankClient(ctx, option.WithEndpoint(aiplatformutil.HostPortUrl(config.Location)))
+	c, err := aiplatform.NewMemoryBankClient(ctx, option.WithEndpoint(aiplatformutil.HostPortURL(config.Location)))
 	if err != nil {
 		return nil, fmt.Errorf("aiplatform.NewMemoryBankClient failed: %w", err)
 	}

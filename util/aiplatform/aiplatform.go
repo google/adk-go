@@ -14,17 +14,17 @@
 
 package aiplatform
 
-// HostUrl returns aiplatform host url for a given region
+// HostURL returns aiplatform host url for a given region
 // Example: "us-central1-aiplatform.googleapis.com"
-func HostUrl(region string) string {
+func HostURL(region string) string {
 	if region == "" || region == "global" {
 		return "aiplatform.googleapis.com"
 	}
 	return region + "-aiplatform.googleapis.com"
 }
 
-// HostUrl returns aiplatform host url for a given region with port number
+// HostPortUrl returns aiplatform host url for a given region with port number
 // Example: "us-central1-aiplatform.googleapis.com:443"
-func HostPortUrl(region string) string {
-	return HostUrl(region) + ":443"
+func HostPortURL(region string) string {
+	return HostURL(region) + ":443"
 }
