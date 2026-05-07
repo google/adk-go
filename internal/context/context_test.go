@@ -20,15 +20,6 @@ import (
 	"google.golang.org/adk/agent"
 )
 
-func TestReadonlyContext(t *testing.T) {
-	inv := NewInvocationContext(t.Context(), InvocationContextParams{})
-	readonly := NewReadonlyContext(inv)
-
-	if got, ok := readonly.(agent.InvocationContext); ok {
-		t.Errorf("ReadonlyContext(%+T) is unexpectedly an InvocationContext", got)
-	}
-}
-
 func TestCallbackContext(t *testing.T) {
 	inv := NewInvocationContext(t.Context(), InvocationContextParams{})
 	callback := NewCallbackContext(inv)
@@ -41,6 +32,7 @@ func TestCallbackContext(t *testing.T) {
 	}
 }
 
-// TestWithContext for InvocationContext lives in
-// agent/invocation_context_test.go now that the canonical
-// implementation has moved into the agent package.
+// Tests for InvocationContext and ReadonlyContext live in the agent
+// package now that their canonical implementations have moved there:
+//   - agent/invocation_context_test.go
+//   - agent/readonly_context_test.go
