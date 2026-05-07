@@ -31,7 +31,10 @@ type Config struct {
 
 // New creates a new Workflow agent.
 func New(cfg Config) (agent.Agent, error) {
-	w := workflow.New(cfg.Edges)
+	w, err := workflow.New(cfg.Edges)
+	if err != nil {
+		return nil, err
+	}
 
 	return agent.New(agent.Config{
 		Name:                 cfg.Name,
