@@ -45,23 +45,36 @@ func NewCallbackContextWithDelta(ctx InvocationContext, stateDelta map[string]an
 func newCallbackContext(ctx InvocationContext, stateDelta map[string]any, artifactDelta map[string]int64) *callbackContextImpl {
 	rCtx := NewReadonlyContext(ctx)
 	eventActions := &session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta}
+	// Preserve the underlying Artifacts == nil semantics: callers
+	// (e.g. instruction template renderer) inspect Artifacts() == nil
+	// to detect a missing artifact service. Wrapping nil in a
+	// non-nil deltaTrackingArtifacts wrapper would defeat that check.
+	var wrappedArtifacts Artifacts
+	if a := ctx.Artifacts(); a != nil {
+		wrappedArtifacts = &deltaTrackingArtifacts{
+			Artifacts:    a,
+			eventActions: eventActions,
+		}
+	}
 	return &callbackContextImpl{
 		ReadonlyContext: rCtx,
 		invocationCtx:   ctx,
 		eventActions:    eventActions,
-		artifacts: &deltaTrackingArtifacts{
-			Artifacts:    ctx.Artifacts(),
-			eventActions: eventActions,
-		},
+		artifacts:       wrappedArtifacts,
 	}
 }
 
 // callbackContextImpl is the canonical, in-process implementation of
 // CallbackContext. It embeds a ReadonlyContext for the read surface
 // and adds a writable State + a delta-tracking Artifacts wrapper.
+//
+// artifacts is typed as the Artifacts interface (not the concrete
+// wrapper) so that a nil underlying artifact service propagates as a
+// nil interface value out of Artifacts() — letting callers detect
+// "no artifact service" via a simple == nil check.
 type callbackContextImpl struct {
 	ReadonlyContext
-	artifacts     *deltaTrackingArtifacts
+	artifacts     Artifacts
 	invocationCtx InvocationContext
 	eventActions  *session.EventActions
 }

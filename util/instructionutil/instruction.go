@@ -36,11 +36,14 @@ import (
 // variable name as in {var?}.
 //
 // This method is intended to be used in InstructionProvider based Instruction
-// and GlobalInstruction which are called with ReadonlyContext.
+// and GlobalInstruction which are called with ReadonlyContext supplied by ADK.
+// Custom ReadonlyContext implementations are not supported because the
+// resolver needs the artifact service, which the read-only API does not
+// expose.
 func InjectSessionState(ctx agent.ReadonlyContext, template string) (string, error) {
 	ic := agent.InvocationOf(ctx)
 	if ic == nil {
-		return "", fmt.Errorf("unexpected context type: %T", ctx)
+		return "", fmt.Errorf("InjectSessionState requires a ReadonlyContext supplied by ADK to InstructionProvider; got custom implementation %T", ctx)
 	}
-	return llminternal.InjectSessionState(ic, template)
+	return llminternal.InjectSessionState(agent.NewCallbackContext(ic), template)
 }

@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"regexp"
@@ -69,6 +70,23 @@ func instructionsRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 // The regex to find placeholders like {variable} or {artifact.file_name}.
 var placeholderRegex = regexp.MustCompile(`{+[^{}]*}+`)
 
+// TemplateContext is the minimum surface InjectSessionState reads from
+// a context to resolve {var_name} and {artifact.name} placeholders:
+//
+//   - the embedded context.Context, passed to Artifacts.Load
+//   - ReadonlyState, used to look up state values by key
+//   - Artifacts, used to fetch artifact text for {artifact.X}
+//
+// All access is read-only — InjectSessionState never writes state or
+// saves artifacts. agent.CallbackContext satisfies this interface and
+// is the canonical caller-side type today; tests may supply a
+// narrower mock.
+type TemplateContext interface {
+	context.Context
+	ReadonlyState() session.ReadonlyState
+	Artifacts() agent.Artifacts
+}
+
 func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agentState *State) error {
 	if agentState.InstructionProvider != nil {
 		instruction, err := agentState.InstructionProvider(icontext.NewReadonlyContext(ctx))
@@ -84,7 +102,7 @@ func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agen
 		return nil
 	}
 
-	inst, err := InjectSessionState(ctx, agentState.Instruction)
+	inst, err := InjectSessionState(icontext.NewCallbackContext(ctx), agentState.Instruction)
 	if err != nil {
 		return fmt.Errorf("failed to inject session state into instruction: %w", err)
 	}
@@ -108,7 +126,7 @@ func appendGlobalInstructions(ctx agent.InvocationContext, req *model.LLMRequest
 		return nil
 	}
 
-	inst, err := InjectSessionState(ctx, agentState.GlobalInstruction)
+	inst, err := InjectSessionState(icontext.NewCallbackContext(ctx), agentState.GlobalInstruction)
 	if err != nil {
 		return fmt.Errorf("failed to inject session state into global instruction: %w", err)
 	}
@@ -118,7 +136,7 @@ func appendGlobalInstructions(ctx agent.InvocationContext, req *model.LLMRequest
 }
 
 // replaceMatch is the Go equivalent of the _replace_match async function in the Python code.
-func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
+func replaceMatch(ctx TemplateContext, match string) (string, error) {
 	// Trim curly braces: "{var_name}" -> "var_name"
 	varName := strings.TrimSpace(strings.Trim(match, "{}"))
 	optional := false
@@ -147,7 +165,7 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 		return match, nil // Return the original string if not a valid name
 	}
 
-	value, err := ctx.Session().State().Get(varName)
+	value, err := ctx.ReadonlyState().Get(varName)
 	if err != nil {
 		if optional {
 			// TODO: log error when !errors.Is(err, session.ErrStateKeyNotExist)
@@ -201,7 +219,12 @@ func isValidStateName(varName string) bool {
 }
 
 // InjectSessionState populates values in an instruction template from a context.
-func InjectSessionState(ctx agent.InvocationContext, template string) (string, error) {
+//
+// The accepted ctx is the narrow TemplateContext (read-only state +
+// artifact reads + an embedded context.Context). agent.CallbackContext
+// satisfies it; callers holding an InvocationContext should wrap it
+// with icontext.NewCallbackContext first.
+func InjectSessionState(ctx TemplateContext, template string) (string, error) {
 	// Find all matches, then iterate through them, building the result string.
 	var result strings.Builder
 	lastIndex := 0

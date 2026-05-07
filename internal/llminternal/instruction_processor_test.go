@@ -194,14 +194,15 @@ And another optional artifact:
 					t.Fatalf("Failed to save artifact: %v", err)
 				}
 			}
-			// Create invocation context
+			// Create invocation context, then wrap as CallbackContext
+			// to satisfy InjectSessionState's TemplateContext interface.
 			ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
 				Artifacts: artifacts,
 				Session:   createResp.Session,
 			})
 
 			// --- Execution ---
-			got, err := InjectSessionState(ctx, tc.template)
+			got, err := InjectSessionState(agent.NewCallbackContext(ctx), tc.template)
 
 			// --- Assertion ---
 			if tc.wantErr {
