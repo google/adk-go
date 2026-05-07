@@ -79,7 +79,7 @@ type storageEvent struct {
 	// equivalent. Unpickling would require a custom library or service.
 	Actions                []byte
 	LongRunningToolIDsJSON dynamicJSON
-	RoutesJSON              dynamicJSON
+	RoutesJSON             dynamicJSON
 	Branch                 *string
 	Timestamp              time.Time `gorm:"precision:6"`
 
