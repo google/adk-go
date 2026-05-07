@@ -319,8 +319,10 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 				}, defaultNodeConfig)
 
 				edges := Chain(Start, seedNode, toolNode, functionNode)
-				w := New(edges)
-
+				w, err := New(edges)
+				if err != nil {
+					t.Fatalf("unexpexted error: %v", err)
+				}
 				events := w.Run(mockCtx)
 
 				var outB any
