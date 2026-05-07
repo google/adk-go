@@ -267,6 +267,10 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	}
 }
 
+type liveAgent interface {
+	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+}
+
 // RunLive runs a live session for the agent, supporting bidirectional streaming.
 type runnerLiveSession struct {
 	sess          agent.LiveSession
@@ -355,6 +359,11 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	if err != nil {
 		return nil, nil, err
 	}
+	
+	lAgent, ok := agentToRun.(liveAgent)
+	if !ok {
+		return nil, nil, fmt.Errorf("agent %s does not support Live Run", agentToRun.Name())
+	}
 
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
@@ -413,7 +422,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		}
 	}
 
-	agentSess, innerIter, err := agentToRun.RunLive(iCtx)
+	agentSess, innerIter, err := lAgent.RunLive(iCtx)
 	if err != nil {
 		return nil, nil, err
 	}

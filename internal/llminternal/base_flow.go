@@ -256,156 +256,217 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			OutputAudioTranscription: liveCfg.OutputAudioTranscription,
 		}
 
-		if iCtx, ok := ctx.(*icontext.InvocationContext); ok {
-			handle := iCtx.LiveSessionResumptionHandle()
-			if handle != "" {
-				if liveConnectConfig.SessionResumption == nil {
-					liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
-				}
-				fmt.Printf("DEBUG: Resuming with handle: %s\n", handle)
-				liveConnectConfig.SessionResumption.Handle = handle
+		isResumable := func(err error) bool {
+			if err == nil {
+				return false
 			}
+			if err == io.EOF {
+				return true
+			}
+			errStr := err.Error()
+			fmt.Printf("DEBUG: isResumable checking error: %s\n", errStr)
+			return strings.Contains(errStr, "broken pipe") ||
+				strings.Contains(errStr, "connection reset") ||
+				strings.Contains(errStr, "EOF") ||
+				strings.Contains(errStr, "1008") ||
+				strings.Contains(errStr, "GoAway")
 		}
-
-		liveSession, err := client.Live.Connect(ctx, f.Model.Name(), liveConnectConfig)
-		if err != nil {
-			sess.pushError(fmt.Errorf("failed to connect live session: %w", err))
-			return
-		}
-
-		liveConn := googlellm.NewLiveConnection(liveSession)
-		defer liveConn.Close()
-
-		eventsChan := make(chan *session.Event)
-		errChan := make(chan error)
-
-		fmt.Printf("sending preprocessed content %d\n", len(nreq.Contents))
-		// genai seems to be missing initial_history_in_client_content flag
-		// Send preprocessed content directly to model if any exists after early preprocessing
-		/*if len(nreq.Contents) > 0 {
-			if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
-				fmt.Printf("failed to send history: %v\n", err)
-				sess.pushError(err)
-				return
-			}
-		}*/
-
-		// Reading from model loop
-		go func() {
-			for {
-				resp, err := liveConn.Recv(ctx)
-				if err != nil {
-					errChan <- err
-					return
-				}
-				if resp != nil {
-					if resp.SessionResumptionHandle != "" {
-						if iCtx, ok := ctx.(*icontext.InvocationContext); ok {
-							fmt.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
-							iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
-						}
-					}
-					if liveCfg.SaveLiveBlob && resp.Content != nil {
-						for _, part := range resp.Content.Parts {
-							if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
-								sess.audioMgr.CacheOutput(part.InlineData.Data, part.InlineData.MIMEType)
-							}
-						}
-					}
-					ev := session.NewEvent(ctx.InvocationID())
-					ev.Author = ctx.Agent().Name()
-					ev.LLMResponse = *resp
-					eventsChan <- ev
-				}
-			}
-		}()
-
-		// Sending to model loop
-		go func() {
-			for {
-				req, err := sess.recvRequest()
-				if err != nil {
-					if err != io.EOF {
-						errChan <- err
-					}
-					return
-				}
-				if req.Content != nil {
-					if err := liveConn.SendContent(ctx, req.Content); err != nil {
-						errChan <- err
-						return
-					}
-				}
-				if req.RealtimeInput != nil {
-					if blob, ok := req.RealtimeInput.(*genai.Blob); ok {
-						sess.audioMgr.CacheInput(blob.Data, blob.MIMEType)
-					}
-					if err := liveConn.SendRealtime(ctx, req.RealtimeInput); err != nil {
-						errChan <- err
-						return
-					}
-				}
-			}
-		}()
 
 		for {
-			select {
-			case ev := <-eventsChan:
-				if !sess.pushEvent(ev) {
+			if iCtx, ok := ctx.(*icontext.InvocationContext); ok {
+				handle := iCtx.LiveSessionResumptionHandle()
+				if handle != "" {
+					if liveConnectConfig.SessionResumption == nil {
+						liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
+					}
+					fmt.Printf("DEBUG: Resuming with handle: %s\n", handle)
+					liveConnectConfig.SessionResumption.Handle = handle
+					if googlellm.GetGoogleLLMVariant(f.Model) == genai.BackendVertexAI {
+						liveConnectConfig.SessionResumption.Transparent = true
+					}
+				}
+			}
+
+			connCtx, cancelConn := context.WithCancel(ctx)
+
+			if liveConnectConfig.SessionResumption != nil {
+				fmt.Printf("connecting with %s\n", liveConnectConfig.SessionResumption.Handle)
+			}
+			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
+			if err != nil {
+				cancelConn()
+				fmt.Printf("failed to connect live session: %v\n", err)
+				sess.pushError(fmt.Errorf("failed to connect live session: %w", err))
+				return
+			}
+
+			liveConn := googlellm.NewLiveConnection(liveSession)
+
+			cleanup := func() {
+				cancelConn()
+				liveConn.Close()
+			}
+
+			eventsChan := make(chan *session.Event)
+			errChan := make(chan error)
+
+			fmt.Printf("sending preprocessed content %d(disabled)\n", len(nreq.Contents))
+			// genai seems to be missing initial_history_in_client_content flag
+			// Send preprocessed content directly to model if any exists after early preprocessing
+			/*if len(nreq.Contents) > 0 {
+				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
+					fmt.Printf("failed to send history: %v\n", err)
+					sess.pushError(err)
 					return
 				}
-				// Flush caches if needed
-				if liveCfg.SaveLiveBlob {
-					var flushUser, flushModel bool
-					if ev.LLMResponse.Interrupted {
-						flushModel = true
+			}*/
+
+			// Reading from model loop
+			go func() {
+				for {
+					resp, err := liveConn.Recv(connCtx)
+					if err != nil {
+						errChan <- err
+						return
 					}
-					if ev.LLMResponse.TurnComplete {
-						flushUser = true
-						flushModel = true
-					}
-					if flushUser || flushModel {
-						flushedEvents, err := sess.audioMgr.FlushCaches(ctx, flushUser, flushModel)
-						if err != nil {
-							sess.pushError(err)
+					if resp != nil {
+						if resp.SessionResumptionHandle != "" {
+							if iCtx, ok := ctx.(*icontext.InvocationContext); ok {
+								fmt.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
+								iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
+							}
+						}
+						if liveCfg.SaveLiveBlob && resp.Content != nil {
+							for _, part := range resp.Content.Parts {
+								if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
+									sess.audioMgr.CacheOutput(part.InlineData.Data, part.InlineData.MIMEType)
+								}
+							}
+						}
+						ev := session.NewEvent(ctx.InvocationID())
+						ev.Author = ctx.Agent().Name()
+						ev.LLMResponse = *resp
+						select {
+						case eventsChan <- ev:
+						case <-connCtx.Done():
 							return
 						}
-						for _, fev := range flushedEvents {
-							if !sess.pushEvent(fev) {
+					}
+				}
+			}()
+
+			// Sending to model loop
+			go func() {
+				for {
+					select {
+					case <-connCtx.Done():
+						return
+					case req, ok := <-sess.inputCh:
+						if !ok {
+							return
+						}
+						if req.Content != nil {
+							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
+								errChan <- err
+								return
+							}
+						}
+						if req.RealtimeInput != nil {
+							if blob, ok := req.RealtimeInput.(*genai.Blob); ok {
+								sess.audioMgr.CacheInput(blob.Data, blob.MIMEType)
+							}
+							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
+								errChan <- err
 								return
 							}
 						}
 					}
 				}
-				// Handle function calls if present in the event
-				fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
-				if len(fnCalls) > 0 {
-					tools := make(map[string]tool.Tool)
-					for _, t := range f.Tools {
-						tools[t.Name()] = t
-					}
-					respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil)
-					if err != nil {
-						sess.pushError(err)
+			}()
+
+			reconnect := false
+			for !reconnect {
+				select {
+				case ev := <-eventsChan:
+					if !sess.pushEvent(ev) {
+						cleanup()
 						return
 					}
-					if respEv != nil {
-						if !sess.pushEvent(respEv) {
-							return
+					// Flush caches if needed
+					if liveCfg.SaveLiveBlob {
+						var flushUser, flushModel bool
+						if ev.LLMResponse.Interrupted {
+							flushModel = true
 						}
-						// Send function response back to model
-						if err := liveConn.SendContent(ctx, respEv.LLMResponse.Content); err != nil {
-							sess.pushError(err)
-							return
+						if ev.LLMResponse.TurnComplete {
+							flushUser = true
+							flushModel = true
+						}
+						if flushUser || flushModel {
+							flushedEvents, err := sess.audioMgr.FlushCaches(ctx, flushUser, flushModel)
+							if err != nil {
+								sess.pushError(err)
+								cleanup()
+								return
+							}
+							for _, fev := range flushedEvents {
+								if !sess.pushEvent(fev) {
+									cleanup()
+									return
+								}
+							}
 						}
 					}
+					// Handle function calls if present in the event
+					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
+					if len(fnCalls) > 0 {
+						tools := make(map[string]tool.Tool)
+						for _, t := range f.Tools {
+							tools[t.Name()] = t
+						}
+						respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil)
+						if err != nil {
+							sess.pushError(err)
+							cleanup()
+							return
+						}
+						if respEv != nil {
+							if !sess.pushEvent(respEv) {
+								cleanup()
+								return
+							}
+							// Send function response back to model
+							if err := liveConn.SendContent(connCtx, respEv.LLMResponse.Content); err != nil {
+								sess.pushError(err)
+								cleanup()
+								return
+							}
+						}
+					}
+				case err := <-errChan:
+					if isResumable(err) {
+						fmt.Printf("Connection error, attempting to resume: %v\n", err)
+						reconnect = true
+						break // Break the select
+					}
+					sess.pushError(err)
+					cleanup()
+					return
+				case <-ctx.Done():
+					sess.pushError(ctx.Err())
+					cleanup()
+					return
 				}
-			case err := <-errChan:
-				sess.pushError(err)
-				return
-			case <-ctx.Done():
-				sess.pushError(ctx.Err())
-				return
+				if reconnect {
+					break // Break the for loop
+				}
+			}
+
+			// Cleanup before reconnecting
+			cleanup()
+
+			if !reconnect {
+				break
 			}
 		}
 	}()

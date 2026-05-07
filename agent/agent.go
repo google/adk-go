@@ -44,7 +44,6 @@ type Agent interface {
 	Name() string
 	Description() string
 	Run(InvocationContext) iter.Seq2[*session.Event, error]
-	RunLive(InvocationContext) (LiveSession, iter.Seq2[*session.Event, error], error)
 	SubAgents() []Agent
 
 	internal() *agent
@@ -65,7 +64,6 @@ func New(cfg Config) (Agent, error) {
 		subAgents:            cfg.SubAgents,
 		beforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		run:                  cfg.Run,
-		runLive:              cfg.RunLive,
 		afterAgentCallbacks:  cfg.AfterAgentCallbacks,
 		State: agentinternal.State{
 			AgentType: agentinternal.TypeCustomAgent,
@@ -97,8 +95,6 @@ type Config struct {
 	BeforeAgentCallbacks []BeforeAgentCallback
 	// Run is the function that defines the agent's behavior.
 	Run func(InvocationContext) iter.Seq2[*session.Event, error]
-	// RunLive is the function that defines the agent's behavior in a live session.
-	RunLive func(InvocationContext) (LiveSession, iter.Seq2[*session.Event, error], error)
 	// AfterAgentCallbacks is a list of callbacks that are called sequentially
 	// after the agent has completed its run.
 	//
@@ -146,7 +142,6 @@ type agent struct {
 
 	beforeAgentCallbacks []BeforeAgentCallback
 	run                  func(InvocationContext) iter.Seq2[*session.Event, error]
-	runLive              func(InvocationContext) (LiveSession, iter.Seq2[*session.Event, error], error)
 	afterAgentCallbacks  []AfterAgentCallback
 }
 
@@ -216,14 +211,6 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		}
 	}
 }
-
-func (a *agent) RunLive(ctx InvocationContext) (LiveSession, iter.Seq2[*session.Event, error], error) {
-	if a.runLive == nil {
-		return nil, nil, fmt.Errorf("RunLive not implemented for agent %s", a.name)
-	}
-	return a.runLive(ctx)
-}
-
 
 func (a *agent) internal() *agent {
 	return a
