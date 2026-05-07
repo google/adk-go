@@ -44,8 +44,11 @@ func main() {
 	}
 
 	// 2. Create Nodes
-	nodeA := workflow.NewFunctionNode("upper", upperFn)
-	nodeB := workflow.NewFunctionNode("suffix", suffixFn)
+	nodeConfig := workflow.NodeConfig{
+		RetryConfig: workflow.DefaultRetryConfig(),
+	}
+	nodeA := workflow.NewFunctionNode("upper", upperFn, nodeConfig)
+	nodeB := workflow.NewFunctionNode("suffix", suffixFn, nodeConfig)
 
 	// 3. Define flow (Edges)
 	edges := workflow.Chain(workflow.Start, nodeA, nodeB)
