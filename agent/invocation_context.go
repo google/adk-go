@@ -16,12 +16,25 @@ package agent
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
+
+// ErrOutsideToolCall is returned by the action methods on a Context
+// when invoked from a non-tool call site (e.g. an agent callback or
+// instruction provider). Pollable accessors return zero values in
+// the same situation; only mutating actions surface the misuse as
+// an error.
+//
+// Callers that want to handle this case explicitly can match with
+// errors.Is(err, agent.ErrOutsideToolCall).
+var ErrOutsideToolCall = errors.New("operation requires a tool-call context; called from a non-tool site")
 
 // InvocationContextParams holds the data used to construct a new
 // InvocationContext via NewInvocationContext.
@@ -110,11 +123,89 @@ func (c *invocationContextImpl) WithContext(ctx context.Context) InvocationConte
 
 // WithAgent returns a copy of c with the Agent param overridden. The
 // embedded context.Context and all other params are shared with the
-// receiver. See InvocationContext.WithAgent for the contract.
-func (c *invocationContextImpl) WithAgent(a Agent) InvocationContext {
+// receiver. See Context.WithAgent for the contract.
+func (c *invocationContextImpl) WithAgent(a Agent) Context {
 	newCtx := *c
 	newCtx.params.Agent = a
 	return &newCtx
 }
 
-var _ InvocationContext = (*invocationContextImpl)(nil)
+// AgentName returns the name of the active agent, or "" if no agent is set.
+func (c *invocationContextImpl) AgentName() string {
+	if c.params.Agent == nil {
+		return ""
+	}
+	return c.params.Agent.Name()
+}
+
+// UserID returns the session's user ID, or "" if no session is set.
+func (c *invocationContextImpl) UserID() string {
+	if c.params.Session == nil {
+		return ""
+	}
+	return c.params.Session.UserID()
+}
+
+// AppName returns the session's app name, or "" if no session is set.
+func (c *invocationContextImpl) AppName() string {
+	if c.params.Session == nil {
+		return ""
+	}
+	return c.params.Session.AppName()
+}
+
+// SessionID returns the session ID, or "" if no session is set.
+func (c *invocationContextImpl) SessionID() string {
+	if c.params.Session == nil {
+		return ""
+	}
+	return c.params.Session.ID()
+}
+
+// State returns the session's read-write state. Returns nil when no
+// session is set on the context.
+func (c *invocationContextImpl) State() session.State {
+	if c.params.Session == nil {
+		return nil
+	}
+	return c.params.Session.State()
+}
+
+// ReadonlyState returns a read-only view of the session state.
+// Returns nil when no session is set.
+func (c *invocationContextImpl) ReadonlyState() session.ReadonlyState {
+	if c.params.Session == nil {
+		return nil
+	}
+	return c.params.Session.State()
+}
+
+// SearchMemory delegates to the configured Memory service. Returns an
+// error when no Memory service is configured.
+func (c *invocationContextImpl) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	if c.params.Memory == nil {
+		return nil, errors.New("no Memory service configured on this Context")
+	}
+	return c.params.Memory.SearchMemory(ctx, query)
+}
+
+// FunctionCallID returns "" because a bare InvocationContext is not a
+// tool-call site. A wrapping tool.Context overrides this.
+func (c *invocationContextImpl) FunctionCallID() string { return "" }
+
+// Actions returns nil because a bare InvocationContext is not a
+// tool-call site. A wrapping tool.Context overrides this.
+func (c *invocationContextImpl) Actions() *session.EventActions { return nil }
+
+// ToolConfirmation returns nil because a bare InvocationContext is not
+// a tool-call site. A wrapping tool.Context overrides this.
+func (c *invocationContextImpl) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+
+// RequestConfirmation returns ErrOutsideToolCall because
+// human-in-the-loop confirmation is meaningful only inside a tool
+// call. A wrapping tool.Context overrides this.
+func (c *invocationContextImpl) RequestConfirmation(_ string, _ any) error {
+	return ErrOutsideToolCall
+}
+
+var _ Context = (*invocationContextImpl)(nil)

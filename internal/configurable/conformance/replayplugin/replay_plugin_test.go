@@ -389,22 +389,47 @@ type MockInvocationContext struct {
 	invocationID string
 }
 
-func (m *MockInvocationContext) Session() session.Session                                { return m.session }
-func (m *MockInvocationContext) InvocationID() string                                    { return m.invocationID }
-func (m *MockInvocationContext) Agent() agent.Agent                                      { return nil }
-func (m *MockInvocationContext) Artifacts() agent.Artifacts                              { return nil }
-func (m *MockInvocationContext) Memory() agent.Memory                                    { return nil }
-func (m *MockInvocationContext) Branch() string                                          { return "" }
-func (m *MockInvocationContext) UserContent() *genai.Content                             { return nil }
-func (m *MockInvocationContext) RunConfig() *agent.RunConfig                             { return nil } // Use context? No, RunConfig struct.
-func (m *MockInvocationContext) EndInvocation()                                          {}
-func (m *MockInvocationContext) Ended() bool                                             { return false }
+func (m *MockInvocationContext) Session() session.Session    { return m.session }
+func (m *MockInvocationContext) InvocationID() string        { return m.invocationID }
+func (m *MockInvocationContext) Agent() agent.Agent          { return nil }
+func (m *MockInvocationContext) Artifacts() agent.Artifacts  { return nil }
+func (m *MockInvocationContext) Memory() agent.Memory        { return nil }
+func (m *MockInvocationContext) Branch() string              { return "" }
+func (m *MockInvocationContext) UserContent() *genai.Content { return nil }
+func (m *MockInvocationContext) RunConfig() *agent.RunConfig { return nil } // Use context? No, RunConfig struct.
+func (m *MockInvocationContext) EndInvocation()              {}
+func (m *MockInvocationContext) Ended() bool                 { return false }
+
+// WithContext and WithAgent return the receiver. The contract on
+// agent.Context says they should return a copy, but this mock has
+// no fields backing the supplied values, so a copy adds nothing the
+// replay plugin tests inspect.
 func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
 func (m *MockInvocationContext) WithAgent(a agent.Agent) agent.InvocationContext         { return m }
-func (m *MockInvocationContext) Value(key any) any                                       { return nil }
-func (m *MockInvocationContext) Deadline() (deadline time.Time, ok bool)                 { return time.Time{}, false }
-func (m *MockInvocationContext) Done() <-chan struct{}                                   { return nil }
-func (m *MockInvocationContext) Err() error                                              { return nil }
+
+// Methods below were added when InvocationContext became an alias of
+// the unified agent.Context. The replay plugin tests don't read any
+// of them, so they return zero values / errors.
+func (m *MockInvocationContext) AgentName() string                                    { return "" }
+func (m *MockInvocationContext) UserID() string                                       { return "" }
+func (m *MockInvocationContext) AppName() string                                      { return "" }
+func (m *MockInvocationContext) SessionID() string                                    { return "" }
+func (m *MockInvocationContext) State() session.State                                 { return nil }
+func (m *MockInvocationContext) ReadonlyState() session.ReadonlyState                 { return nil }
+func (m *MockInvocationContext) FunctionCallID() string                               { return "" }
+func (m *MockInvocationContext) Actions() *session.EventActions                       { return nil }
+func (m *MockInvocationContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+func (m *MockInvocationContext) RequestConfirmation(string, any) error {
+	return agent.ErrOutsideToolCall
+}
+func (m *MockInvocationContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
+	return nil, nil
+}
+
+func (m *MockInvocationContext) Value(key any) any                       { return nil }
+func (m *MockInvocationContext) Deadline() (deadline time.Time, ok bool) { return time.Time{}, false }
+func (m *MockInvocationContext) Done() <-chan struct{}                   { return nil }
+func (m *MockInvocationContext) Err() error                              { return nil }
 
 // MockCallbackContext
 type MockCallbackContext struct {
@@ -427,6 +452,27 @@ func (m *MockCallbackContext) Value(key any) any                       { return 
 func (m *MockCallbackContext) Deadline() (deadline time.Time, ok bool) { return time.Time{}, false }
 func (m *MockCallbackContext) Done() <-chan struct{}                   { return nil }
 func (m *MockCallbackContext) Err() error                              { return nil }
+
+// Methods below were added when CallbackContext became an alias of
+// the unified agent.Context. The replay plugin tests don't read them,
+// so they return zero values / errors. WithContext/WithAgent return
+// the receiver: the mock has no fields backing the supplied values
+// so a copy would add nothing observable.
+func (m *MockCallbackContext) Agent() agent.Agent                                   { return nil }
+func (m *MockCallbackContext) Memory() agent.Memory                                 { return nil }
+func (m *MockCallbackContext) Session() session.Session                             { return nil }
+func (m *MockCallbackContext) RunConfig() *agent.RunConfig                          { return nil }
+func (m *MockCallbackContext) EndInvocation()                                       {}
+func (m *MockCallbackContext) Ended() bool                                          { return false }
+func (m *MockCallbackContext) WithContext(context.Context) agent.Context            { return m }
+func (m *MockCallbackContext) WithAgent(agent.Agent) agent.Context                  { return m }
+func (m *MockCallbackContext) FunctionCallID() string                               { return "" }
+func (m *MockCallbackContext) Actions() *session.EventActions                       { return nil }
+func (m *MockCallbackContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+func (m *MockCallbackContext) RequestConfirmation(string, any) error                { return agent.ErrOutsideToolCall }
+func (m *MockCallbackContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
+	return nil, nil
+}
 
 // MockToolContext
 type MockToolContext struct {
@@ -456,6 +502,19 @@ func (m *MockToolContext) Value(key any) any                                    
 func (m *MockToolContext) Deadline() (deadline time.Time, ok bool)              { return time.Time{}, false }
 func (m *MockToolContext) Done() <-chan struct{}                                { return nil }
 func (m *MockToolContext) Err() error                                           { return nil }
+
+// Methods below were added when tool.Context became an alias of the
+// unified agent.Context. The replay plugin tests don't read them.
+// WithContext/WithAgent return the receiver: the mock has no fields
+// backing the supplied values so a copy would add nothing observable.
+func (m *MockToolContext) Agent() agent.Agent                        { return nil }
+func (m *MockToolContext) Memory() agent.Memory                      { return nil }
+func (m *MockToolContext) Session() session.Session                  { return nil }
+func (m *MockToolContext) RunConfig() *agent.RunConfig               { return nil }
+func (m *MockToolContext) EndInvocation()                            {}
+func (m *MockToolContext) Ended() bool                               { return false }
+func (m *MockToolContext) WithContext(context.Context) agent.Context { return m }
+func (m *MockToolContext) WithAgent(agent.Agent) agent.Context       { return m }
 
 // MockTool
 type MockTool struct {

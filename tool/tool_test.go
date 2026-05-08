@@ -149,6 +149,22 @@ func (c *testContext) Branch() string                       { return "test-branc
 func (c *testContext) SessionID() string                    { return "test-session-id" }
 func (c *testContext) UserID() string                       { return "test-user-id" }
 
+// Methods below were added when tool.Context became an alias of the
+// unified agent.Context. The tool tests don't read any of them, so
+// they return zero values.
+func (c *testContext) Agent() agent.Agent          { return nil }
+func (c *testContext) Memory() agent.Memory        { return nil }
+func (c *testContext) Session() session.Session    { return nil }
+func (c *testContext) RunConfig() *agent.RunConfig { return nil }
+func (c *testContext) EndInvocation()              {}
+func (c *testContext) Ended() bool                 { return false }
+func (c *testContext) WithContext(ctx context.Context) agent.Context {
+	cc := *c
+	cc.Context = ctx
+	return &cc
+}
+func (c *testContext) WithAgent(_ agent.Agent) agent.Context { return c }
+
 type testToolset struct {
 	tools []tool.Tool
 }

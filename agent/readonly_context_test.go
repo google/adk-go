@@ -15,24 +15,11 @@
 package agent_test
 
 import (
+	"errors"
 	"testing"
 
 	"google.golang.org/adk/agent"
 )
-
-// TestNewReadonlyContext_NotAnInvocationContext verifies that the
-// ReadonlyContext returned by NewReadonlyContext does not accidentally
-// satisfy the wider InvocationContext interface — clients holding a
-// ReadonlyContext should not be able to type-assert their way to
-// methods like EndInvocation, Memory, or WithContext.
-func TestNewReadonlyContext_NotAnInvocationContext(t *testing.T) {
-	inv := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{})
-	readonly := agent.NewReadonlyContext(inv)
-
-	if got, ok := readonly.(agent.InvocationContext); ok {
-		t.Errorf("ReadonlyContext(%+T) is unexpectedly an InvocationContext", got)
-	}
-}
 
 // TestNewReadonlyContext_DelegatesReads verifies that the
 // ReadonlyContext's read methods delegate to the wrapped
@@ -52,51 +39,43 @@ func TestNewReadonlyContext_DelegatesReads(t *testing.T) {
 	}
 }
 
-// TestInvocationOf_ReturnsBackingContext verifies that InvocationOf
-// recovers the original InvocationContext from a ReadonlyContext
-// produced by NewReadonlyContext.
-func TestInvocationOf_ReturnsBackingContext(t *testing.T) {
-	inv := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
-		Branch: "test-branch",
-	})
+// TestNewReadonlyContext_ToolMethodsReturnZero verifies the "mix"
+// policy from the unified Context API: when a tool-only capability is
+// invoked from a non-tool context, pollable accessors return zero
+// values and mutating actions return ErrOutsideToolCall.
+func TestNewReadonlyContext_ToolMethodsReturnZero(t *testing.T) {
+	inv := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{})
 	readonly := agent.NewReadonlyContext(inv)
 
-	got := agent.InvocationOf(readonly)
-	if got == nil {
-		t.Fatal("InvocationOf returned nil for a context produced by NewReadonlyContext")
+	if got := readonly.FunctionCallID(); got != "" {
+		t.Errorf("ReadonlyContext.FunctionCallID() = %q, want empty", got)
 	}
-	if got != inv {
-		t.Errorf("InvocationOf returned a different InvocationContext: got %p, want %p", got, inv)
+	if got := readonly.Actions(); got != nil {
+		t.Errorf("ReadonlyContext.Actions() = %v, want nil", got)
 	}
-}
-
-// TestInvocationOf_ReturnsNilForUnknown verifies that InvocationOf
-// returns nil for a ReadonlyContext that is not backed by the
-// canonical implementation (i.e., a custom user implementation).
-func TestInvocationOf_ReturnsNilForUnknown(t *testing.T) {
-	if got := agent.InvocationOf(unknownReadonly{}); got != nil {
-		t.Errorf("InvocationOf(custom impl) = %v, want nil", got)
+	if got := readonly.ToolConfirmation(); got != nil {
+		t.Errorf("ReadonlyContext.ToolConfirmation() = %v, want nil", got)
+	}
+	if err := readonly.RequestConfirmation("hint", nil); !errors.Is(err, agent.ErrOutsideToolCall) {
+		t.Errorf("ReadonlyContext.RequestConfirmation() = %v, want %v", err, agent.ErrOutsideToolCall)
 	}
 }
 
-// unknownReadonly is a stand-in for a user-supplied ReadonlyContext
-// implementation that does not embed the canonical readonlyContextImpl.
-type unknownReadonly struct {
-	agent.ReadonlyContext
-}
-
-// TestNewCallbackContext_IsReadonlyButNotInvocation verifies the
-// canonical CallbackContext satisfies the narrower ReadonlyContext
-// interface (so it may be passed where a ReadonlyContext is required)
-// but does not accidentally satisfy the wider InvocationContext.
-func TestNewCallbackContext_IsReadonlyButNotInvocation(t *testing.T) {
+// TestNewCallbackContext_ToolMethodsReturnZero verifies the same mix
+// policy on a CallbackContext-flavoured Context. Callbacks have access
+// to the writable State and Artifacts surface but are not a tool-call
+// site, so tool-only capabilities still return zero values / errors.
+func TestNewCallbackContext_ToolMethodsReturnZero(t *testing.T) {
 	inv := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{})
-	callback := agent.NewCallbackContext(inv)
+	cb := agent.NewCallbackContext(inv)
 
-	if _, ok := callback.(agent.ReadonlyContext); !ok {
-		t.Errorf("CallbackContext(%+T) is unexpectedly not a ReadonlyContext", callback)
+	if got := cb.FunctionCallID(); got != "" {
+		t.Errorf("CallbackContext.FunctionCallID() = %q, want empty", got)
 	}
-	if got, ok := callback.(agent.InvocationContext); ok {
-		t.Errorf("CallbackContext(%+T) is unexpectedly an InvocationContext", got)
+	if got := cb.ToolConfirmation(); got != nil {
+		t.Errorf("CallbackContext.ToolConfirmation() = %v, want nil", got)
+	}
+	if err := cb.RequestConfirmation("hint", nil); !errors.Is(err, agent.ErrOutsideToolCall) {
+		t.Errorf("CallbackContext.RequestConfirmation() = %v, want %v", err, agent.ErrOutsideToolCall)
 	}
 }

@@ -62,6 +62,22 @@ func (m *mockToolContext) Branch() string                                       
 func (m *mockToolContext) SessionID() string                                    { return "mock_session" }
 func (m *mockToolContext) UserID() string                                       { return "mock_user" }
 
+// Methods below were added when tool.Context became an alias of the
+// unified agent.Context. The example tool tests don't read any of
+// them, so they return zero values.
+func (m *mockToolContext) Agent() agent.Agent          { return nil }
+func (m *mockToolContext) Memory() agent.Memory        { return nil }
+func (m *mockToolContext) Session() session.Session    { return nil }
+func (m *mockToolContext) RunConfig() *agent.RunConfig { return nil }
+func (m *mockToolContext) EndInvocation()              {}
+func (m *mockToolContext) Ended() bool                 { return false }
+func (m *mockToolContext) WithContext(ctx context.Context) agent.Context {
+	c := *m
+	c.Context = ctx
+	return &c
+}
+func (m *mockToolContext) WithAgent(_ agent.Agent) agent.Context { return m }
+
 // --- Tests ---
 
 func TestExampleTool_ProcessRequest(t *testing.T) {

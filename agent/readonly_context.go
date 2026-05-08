@@ -19,7 +19,9 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 // NewReadonlyContext returns a ReadonlyContext that delegates every
@@ -31,24 +33,6 @@ func NewReadonlyContext(ctx InvocationContext) ReadonlyContext {
 		Context:           ctx,
 		invocationContext: ctx,
 	}
-}
-
-// InvocationOf returns the InvocationContext that backs the given
-// ReadonlyContext, or nil if ctx was not produced by
-// NewReadonlyContext (or by a wrapper that exposes the same backing
-// type).
-//
-// This helper exists for the small number of internal call sites that
-// need to escape the read-only narrowing — typically because they
-// pass the context to a lower-level API that requires the full
-// invocation surface (e.g., template injection that walks session
-// state mutations). Prefer keeping ReadonlyContext on the narrower
-// API where possible.
-func InvocationOf(ctx ReadonlyContext) InvocationContext {
-	if r, ok := ctx.(*readonlyContextImpl); ok {
-		return r.invocationContext
-	}
-	return nil
 }
 
 // readonlyContextImpl is the canonical, in-process implementation of
@@ -93,4 +77,58 @@ func (c *readonlyContextImpl) UserContent() *genai.Content {
 	return c.invocationContext.UserContent()
 }
 
-var _ ReadonlyContext = (*readonlyContextImpl)(nil)
+// The methods below were added when ReadonlyContext became an alias
+// of the unified Context. They delegate to the wrapped invocation,
+// preserving the read/poll-only contract — mutating actions return
+// ErrOutsideToolCall, pollable accessors return zero values when not
+// applicable.
+
+func (c *readonlyContextImpl) Agent() Agent { return c.invocationContext.Agent() }
+
+func (c *readonlyContextImpl) Memory() Memory { return c.invocationContext.Memory() }
+
+func (c *readonlyContextImpl) Session() session.Session { return c.invocationContext.Session() }
+
+func (c *readonlyContextImpl) State() session.State {
+	if s := c.invocationContext.Session(); s != nil {
+		return s.State()
+	}
+	return nil
+}
+
+func (c *readonlyContextImpl) Artifacts() Artifacts { return c.invocationContext.Artifacts() }
+
+func (c *readonlyContextImpl) RunConfig() *RunConfig { return c.invocationContext.RunConfig() }
+
+func (c *readonlyContextImpl) EndInvocation() { c.invocationContext.EndInvocation() }
+
+func (c *readonlyContextImpl) Ended() bool { return c.invocationContext.Ended() }
+
+func (c *readonlyContextImpl) WithContext(ctx context.Context) Context {
+	return c.invocationContext.WithContext(ctx)
+}
+
+func (c *readonlyContextImpl) WithAgent(a Agent) Context {
+	return c.invocationContext.WithAgent(a)
+}
+
+func (c *readonlyContextImpl) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	return c.invocationContext.SearchMemory(ctx, query)
+}
+
+// FunctionCallID returns "" — a ReadonlyContext is never a tool-call site.
+func (c *readonlyContextImpl) FunctionCallID() string { return "" }
+
+// Actions returns nil — a ReadonlyContext is never a tool-call site.
+func (c *readonlyContextImpl) Actions() *session.EventActions { return nil }
+
+// ToolConfirmation returns nil — a ReadonlyContext is never a tool-call site.
+func (c *readonlyContextImpl) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+
+// RequestConfirmation returns ErrOutsideToolCall — a ReadonlyContext
+// is never a tool-call site.
+func (c *readonlyContextImpl) RequestConfirmation(_ string, _ any) error {
+	return ErrOutsideToolCall
+}
+
+var _ Context = (*readonlyContextImpl)(nil)

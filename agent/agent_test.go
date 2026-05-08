@@ -23,8 +23,10 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 func TestAgentCallbacks(t *testing.T) {
@@ -359,6 +361,28 @@ func (m *mockInvocationContext) WithAgent(a Agent) InvocationContext {
 	c := *m
 	c.agent = a
 	return &c
+}
+
+// Methods below were added when InvocationContext became an alias of
+// the unified Context. The agent flow doesn't read them in these
+// tests, so they return zero values / errors.
+func (m *mockInvocationContext) AgentName() string {
+	if m.agent == nil {
+		return ""
+	}
+	return m.agent.Name()
+}
+func (m *mockInvocationContext) UserID() string                                       { return "" }
+func (m *mockInvocationContext) AppName() string                                      { return "" }
+func (m *mockInvocationContext) SessionID() string                                    { return "" }
+func (m *mockInvocationContext) State() session.State                                 { return nil }
+func (m *mockInvocationContext) ReadonlyState() session.ReadonlyState                 { return nil }
+func (m *mockInvocationContext) FunctionCallID() string                               { return "" }
+func (m *mockInvocationContext) Actions() *session.EventActions                       { return nil }
+func (m *mockInvocationContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+func (m *mockInvocationContext) RequestConfirmation(string, any) error                { return ErrOutsideToolCall }
+func (m *mockInvocationContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
+	return nil, nil
 }
 
 var _ InvocationContext = (*mockInvocationContext)(nil)

@@ -19,11 +19,81 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+// Context is the unified context type that ADK passes to user code:
+// agents, tools, callbacks, and workflow nodes all receive a Context.
+// It is the single name a developer needs to learn for the ADK API.
+//
+// Context exposes every capability ADK ever offers a user:
+//   - invocation lifecycle (Agent, Memory, Session, EndInvocation, …),
+//   - read and write access to session state and artifacts,
+//   - tool-call metadata (FunctionCallID, Actions, ToolConfirmation, …),
+//   - Human-in-the-Loop hooks (RequestConfirmation).
+//
+// Capabilities that only make sense inside a particular call site (for
+// example, a tool callback's FunctionCallID) follow a "mix" policy:
+//   - pollable accessors return zero values when called outside their
+//     mode (e.g. FunctionCallID() returns "" inside an agent callback);
+//   - mutating actions return a non-nil error in the same situation
+//     (e.g. RequestConfirmation outside a tool returns an error).
+//
+// The historical sub-interfaces ReadonlyContext, CallbackContext, and
+// InvocationContext are declared as type aliases of Context below.
+// Existing code using those names continues to compile and gets the
+// same widened capability set; new code should prefer Context.
+type Context interface {
+	context.Context
+
+	// Identity and provenance.
+	Agent() Agent
+	AgentName() string
+	InvocationID() string
+	Branch() string
+	UserContent() *genai.Content
+	UserID() string
+	AppName() string
+	SessionID() string
+
+	// Session, state, artifacts, memory.
+	Session() session.Session
+	State() session.State
+	ReadonlyState() session.ReadonlyState
+	Artifacts() Artifacts
+	Memory() Memory
+	SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error)
+
+	// Lifecycle.
+	RunConfig() *RunConfig
+	EndInvocation()
+	Ended() bool
+
+	// WithContext returns a new instance of the context with overridden
+	// embedded context.Context. NOTE: this is a temporary shim and will
+	// be removed once ADK stops embedding context.Context in its own
+	// context types.
+	WithContext(ctx context.Context) Context
+	// WithAgent returns a copy of the context with Agent overridden.
+	// Used by Agent.Run wrappers (telemetry, sub-agent dispatch).
+	WithAgent(a Agent) Context
+
+	// Tool-call site capabilities. Outside of a tool call:
+	//   - FunctionCallID returns "".
+	//   - Actions returns nil.
+	//   - ToolConfirmation returns nil.
+	//   - RequestConfirmation returns a non-nil error.
+	FunctionCallID() string
+	Actions() *session.EventActions
+	ToolConfirmation() *toolconfirmation.ToolConfirmation
+	RequestConfirmation(hint string, payload any) error
+}
+
 /*
-InvocationContext represents the context of an agent invocation.
+InvocationContext is a backward-compatibility alias for the unified
+Context type. Use Context in new code.
 
 An invocation:
  1. Starts with a user message and ends with a final response.
@@ -57,79 +127,17 @@ called by invocation context at any time.
 	┌──── step_1 ────────┐ ┌───── step_2 ──────┐
 	[call_llm] [call_tool] [call_llm] [transfer]
 */
-type InvocationContext interface {
-	context.Context
+type InvocationContext = Context
 
-	// Agent of this invocation context.
-	Agent() Agent
+// ReadonlyContext is a backward-compatibility alias for the unified
+// Context type. Use Context in new code.
+//
+// Historically ReadonlyContext exposed only a read-only subset of the
+// invocation surface. Under the unified Context API the full surface
+// is available; ADK 2.0 trades compile-time capability narrowing for
+// a single type to learn.
+type ReadonlyContext = Context
 
-	// Artifacts of the current session.
-	Artifacts() Artifacts
-
-	// Memory is scoped to sessions of the current user_id.
-	Memory() Memory
-
-	// Session of the current invocation context.
-	Session() session.Session
-
-	InvocationID() string
-
-	// Branch of the invocation context.
-	// The format is like agent_1.agent_2.agent_3, where agent_1 is the parent
-	// of agent_2, and agent_2 is the parent of agent_3.
-	//
-	// Branch is used when multiple sub-agents shouldn't see their peer agents'
-	// conversation history.
-	//
-	// Applicable to parallel agent because its sub-agents run concurrently.
-	Branch() string
-
-	// UserContent that started this invocation.
-	UserContent() *genai.Content
-
-	// RunConfig stores the runtime configuration used during this invocation.
-	RunConfig() *RunConfig
-
-	// EndInvocation ends the current invocation. This stops any planned agent
-	// calls.
-	EndInvocation()
-	// Ended returns whether the invocation has ended.
-	Ended() bool
-
-	// WithContext returns a new instance of the context with overridden embedded context.
-	// NOTE: This is a temporary solution and will be removed later. The proper solution
-	// we plan is to stop embedding go context in adk context types and split it.
-	WithContext(ctx context.Context) InvocationContext
-
-	// WithAgent returns a new instance of the context with the Agent overridden.
-	// Used by Agent.Run wrappers (e.g. telemetry-wrapped runs, sub-agent
-	// dispatch) that need to swap the active agent without otherwise changing
-	// the invocation. Like WithContext, this returns a copy and does not
-	// mutate the receiver.
-	WithAgent(a Agent) InvocationContext
-}
-
-// ReadonlyContext provides read-only access to invocation context data.
-type ReadonlyContext interface {
-	context.Context
-
-	// UserContent that started this invocation.
-	UserContent() *genai.Content
-	InvocationID() string
-	AgentName() string
-	ReadonlyState() session.ReadonlyState
-
-	UserID() string
-	AppName() string
-	SessionID() string
-	// Branch of the current invocation.
-	Branch() string
-}
-
-// CallbackContext is passed to user callbacks during agent execution.
-type CallbackContext interface {
-	ReadonlyContext
-
-	Artifacts() Artifacts
-	State() session.State
-}
+// CallbackContext is a backward-compatibility alias for the unified
+// Context type. Use Context in new code.
+type CallbackContext = Context

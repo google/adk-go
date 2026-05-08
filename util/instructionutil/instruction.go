@@ -16,8 +16,6 @@
 package instructionutil
 
 import (
-	"fmt"
-
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/llminternal"
 )
@@ -35,15 +33,9 @@ import (
 // error. If you want to ignore the error, you can append a ? to the
 // variable name as in {var?}.
 //
-// This method is intended to be used in InstructionProvider based Instruction
-// and GlobalInstruction which are called with ReadonlyContext supplied by ADK.
-// Custom ReadonlyContext implementations are not supported because the
-// resolver needs the artifact service, which the read-only API does not
-// expose.
+// Intended for InstructionProvider-based Instruction and GlobalInstruction
+// callbacks. Under the unified Context API, ReadonlyContext is an alias of
+// Context, so the supplied ctx already exposes the full invocation surface.
 func InjectSessionState(ctx agent.ReadonlyContext, template string) (string, error) {
-	ic := agent.InvocationOf(ctx)
-	if ic == nil {
-		return "", fmt.Errorf("InjectSessionState requires a ReadonlyContext supplied by ADK to InstructionProvider; got custom implementation %T", ctx)
-	}
-	return llminternal.InjectSessionState(agent.NewCallbackContext(ic), template)
+	return llminternal.InjectSessionState(agent.NewCallbackContext(ctx), template)
 }
