@@ -64,3 +64,108 @@ func TestUniqueNames(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCycles(t *testing.T) {
+	tests := []struct {
+		name      string
+		edges     func() []Edge
+		expectErr bool
+	}{
+		{
+			name: "no cycles",
+			edges: func() []Edge {
+				nodeA := &dummyNode{name: "A"}
+				nodeB := &dummyNode{name: "B"}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+				}
+			},
+			expectErr: false,
+		},
+		{
+			name: "no cycles diamond graph",
+			edges: func() []Edge {
+				nodeA := &dummyNode{name: "A"}
+				nodeB := &dummyNode{name: "B"}
+				nodeC := &dummyNode{name: "C"}
+				nodeD := &dummyNode{name: "D"}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+					{From: nodeA, To: nodeC},
+					{From: nodeB, To: nodeD},
+					{From: nodeC, To: nodeD},
+				}
+			},
+			expectErr: false,
+		},
+		{
+			name: "only conditional cycle",
+			edges: func() []Edge {
+				nodeA := &dummyNode{name: "A"}
+				nodeB := &dummyNode{name: "B"}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+					{From: nodeB, To: nodeA, Route: StringRoute("back")},
+				}
+			},
+			expectErr: false,
+		},
+		{
+			name: "both conditional and unconditional cycles",
+			edges: func() []Edge {
+				nodeA := &dummyNode{name: "A"}
+				nodeB := &dummyNode{name: "B"}
+				nodeC := &dummyNode{name: "C"}
+				nodeD := &dummyNode{name: "D"}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+					{From: nodeB, To: nodeA, Route: StringRoute("back")},
+					{From: Start, To: nodeC},
+					{From: nodeC, To: nodeD},
+					{From: nodeD, To: nodeC}, // Unconditional
+				}
+			},
+			expectErr: true,
+		},
+		{
+			name: "cycle with default route",
+			edges: func() []Edge {
+				nodeA := &dummyNode{name: "A"}
+				nodeB := &dummyNode{name: "B"}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+					{From: nodeB, To: nodeA, Route: Default},
+				}
+			},
+			expectErr: false,
+		},
+		{
+			name:      "empty graph",
+			edges:     func() []Edge { return []Edge{} },
+			expectErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			edges := tc.edges()
+			adj := make(map[Node][]Edge)
+			for _, edge := range edges {
+				adj[edge.From] = append(adj[edge.From], edge)
+			}
+			w := &Workflow{edges: adj}
+
+			err := validateCycles(w)
+			if tc.expectErr && err == nil {
+				t.Errorf("expected error, got none")
+			} else if !tc.expectErr && err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+		})
+	}
+}

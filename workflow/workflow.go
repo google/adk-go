@@ -201,7 +201,7 @@ type nodeInput struct {
 //   - Edges with a route condition match only if the route matches the event.
 //   - Duplicate target nodes are excluded to avoid queuing the same node multiple times.
 //   - If there are outgoing edges but none of them match (neither by route nor by being unrouted),
-//     it falls back to the default route (TODO: hanorik - add default route support).
+//     it falls back to the default route.
 func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Event) []nodeInput {
 	if len(w.edges[currentNode]) == 0 {
 		return nil
