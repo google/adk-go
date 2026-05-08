@@ -35,7 +35,6 @@ type toolNode struct {
 	tool         tool.Tool
 	inputSchema  *jsonschema.Resolved
 	outputSchema *jsonschema.Resolved
-	config       NodeConfig
 }
 
 type runnableTool interface {
@@ -66,7 +65,6 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 	if _, ok := t.(runnableTool); !ok {
 		return nil, fmt.Errorf("tool %q (type %T) is not directly runnable in workflow node", t.Name(), t)
 	}
-
 
 	return &toolNode{
 		baseNode:     baseNode{name: t.Name(), description: t.Description(), config: cfg},
