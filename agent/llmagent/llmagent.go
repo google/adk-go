@@ -110,10 +110,11 @@ func New(cfg Config) (agent.Agent, error) {
 	a.AgentType = agentinternal.TypeLLMAgent
 	a.Config = cfg
 
-	// TODO: temporary hack to set the LLMAgent type field correctly. Currently, beforeAgentCallback for LLMAgent only
-	// sees basic *agent.agent type: http://google3/third_party/golang/adk/agent/agent.go;l=177-201;rcl=869633263
+	// TODO: temporary hack to set the LLMAgent type field correctly.
+	// Currently, beforeAgentCallback for LLMAgent only sees the basic
+	// *agent.agent type (see runBeforeAgentCallbacks in agent/agent.go).
 	// So in BeforeAgentCallback, we cannot access llmAgent.State fields.
-	// We should remote llminternal.State in favor of agentinternal.State.
+	// We should remove llminternal.State in favor of agentinternal.State.
 
 	internalAgent, ok := baseAgent.(agentinternal.Agent)
 	if !ok {
