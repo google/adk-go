@@ -185,7 +185,11 @@ func New(edges []Edge) (*Workflow, error) {
 	for _, edge := range edges {
 		adj[edge.From] = append(adj[edge.From], edge)
 	}
-	return &Workflow{edges: adj}, nil
+	wf := &Workflow{edges: adj}
+	if err := validateWorkflow(wf); err != nil {
+		return nil, err
+	}
+	return wf, nil
 }
 
 type nodeInput struct {

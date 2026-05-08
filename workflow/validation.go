@@ -17,11 +17,16 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // ErrDuplicateNodeName is returned when an edge set contains two
 // distinct Node instances that share the same Name.
 var ErrDuplicateNodeName = errors.New("duplicate node name")
+
+// ErrNodesNotReachable is returned when some nodes are not reachable from the start node.
+var ErrNodesNotReachable = errors.New("nodes not reachable from start node")
 
 // validateUniqueNames checks that all nodes in the edge set have unique names.
 // If duplicate node names are found, it returns an error. The equality between
@@ -46,5 +51,55 @@ func validateUniqueNames(edges []Edge) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// validateWorkflow executes a set of workflow validation checks.
+func validateWorkflow(workflow *Workflow) error {
+	if err := validateConnectivity(workflow); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateConnectivity checks that all nodes in the edge set are reachable from the start node.
+func validateConnectivity(workflow *Workflow) error {
+	if len(workflow.edges) == 0 {
+		return nil
+	}
+
+	visited := make(map[Node]bool)
+	var traverse func(n Node)
+	traverse = func(n Node) {
+		visited[n] = true
+		for _, neighbor := range workflow.edges[n] {
+			if !visited[neighbor.To] {
+				traverse(neighbor.To)
+			}
+		}
+	}
+
+	traverse(Start)
+
+	allNodes := make(map[Node]bool)
+	for node, edges := range workflow.edges {
+		allNodes[node] = true
+		for _, edge := range edges {
+			allNodes[edge.To] = true
+		}
+	}
+
+	var unreachable []string
+	for node := range allNodes {
+		if !visited[node] {
+			unreachable = append(unreachable, node.Name())
+		}
+	}
+	slices.Sort(unreachable)
+
+	if len(unreachable) > 0 {
+		return fmt.Errorf("%w: %q", ErrNodesNotReachable, strings.Join(unreachable, ", "))
+	}
+
 	return nil
 }
