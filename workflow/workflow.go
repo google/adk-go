@@ -185,7 +185,11 @@ func New(edges []Edge) (*Workflow, error) {
 	for _, edge := range edges {
 		adj[edge.From] = append(adj[edge.From], edge)
 	}
-	return &Workflow{edges: adj}, nil
+	wf := &Workflow{edges: adj}
+	if err := validateWorkflow(wf); err != nil {
+		return nil, err
+	}
+	return wf, nil
 }
 
 type nodeInput struct {
@@ -199,7 +203,6 @@ type nodeInput struct {
 // Behavior:
 //   - Edges with no route condition always match.
 //   - Edges with a route condition match only if the route matches the event.
-//   - Duplicate target nodes are excluded to avoid queuing the same node multiple times.
 //   - If there are outgoing edges but none of them match (neither by route nor by being unrouted),
 //     it falls back to the default route (TODO: hanorik - add default route support).
 func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Event) []nodeInput {
@@ -208,15 +211,10 @@ func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Eve
 	}
 	matched := false
 	queue := []nodeInput{}
-	added := make(map[Node]struct{})
 	var defaultRouteNode Node
 	for _, edge := range w.edges[currentNode] {
-		if _, ok := added[edge.To]; ok {
-			continue
-		}
 		if edge.Route == nil {
 			queue = append(queue, nodeInput{node: edge.To, input: input})
-			added[edge.To] = struct{}{}
 			continue
 		}
 		if edge.Route == Default {
@@ -225,7 +223,6 @@ func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Eve
 		}
 		if edge.Route.Matches(event) {
 			queue = append(queue, nodeInput{node: edge.To, input: input})
-			added[edge.To] = struct{}{}
 			matched = true
 		}
 	}

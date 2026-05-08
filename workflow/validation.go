@@ -23,6 +23,11 @@ import (
 // distinct Node instances that share the same Name.
 var ErrDuplicateNodeName = errors.New("duplicate node name")
 
+// ErrDuplicateEdge is returned when an edge set contains two identical edges.
+// Two edges with the same (From, To) are rejected regardless of Route; use
+// MultiRoute to express alternatives to the same target.
+var ErrDuplicateEdge = errors.New("duplicate edge")
+
 // validateUniqueNames checks that all nodes in the edge set have unique names.
 // If duplicate node names are found, it returns an error. The equality between
 // nodes is checked by comparing the nodes directly.
@@ -44,6 +49,30 @@ func validateUniqueNames(edges []Edge) error {
 		}
 		if err := checkNode(edge.To); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateWorkflow executes a set of workflow validation checks.
+func validateWorkflow(workflow *Workflow) error {
+	if err := validateUniqueEdges(workflow); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateUniqueEdges checks that there are no duplicate edges in the workflow.
+// Two edges with the same (From, To) are rejected regardless of Route; use
+// MultiRoute to express alternatives to the same target.
+func validateUniqueEdges(workflow *Workflow) error {
+	for node, edges := range workflow.edges {
+		uniqueEdges := make(map[Node]struct{})
+		for _, edge := range edges {
+			if _, ok := uniqueEdges[edge.To]; ok {
+				return fmt.Errorf("%w: from %q to %q", ErrDuplicateEdge, node.Name(), edge.To.Name())
+			}
+			uniqueEdges[edge.To] = struct{}{}
 		}
 	}
 	return nil

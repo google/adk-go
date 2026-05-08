@@ -64,3 +64,47 @@ func TestUniqueNames(t *testing.T) {
 		})
 	}
 }
+
+func TestDuplicateEdges(t *testing.T) {
+	nodeA := &dummyNode{name: "A"}
+	nodeB := &dummyNode{name: "B"}
+	tests := []struct {
+		name      string
+		edges     []Edge
+		expectErr bool
+	}{
+		{
+			name:  "no duplicate edges",
+			edges: []Edge{{From: nodeA, To: nodeB}},
+		},
+		{
+			name:      "duplicate edges",
+			edges:     []Edge{{From: nodeA, To: nodeB}, {From: nodeA, To: nodeB}},
+			expectErr: true,
+		},
+		{
+			name:      "duplicate edges with different routes",
+			edges:     []Edge{{From: nodeA, To: nodeB, Route: StringRoute("test1")}, {From: nodeA, To: nodeB, Route: StringRoute("test2")}},
+			expectErr: true,
+		},
+		{
+			name:      "duplicate edges one without route",
+			edges:     []Edge{{From: nodeA, To: nodeB, Route: StringRoute("test1")}, {From: nodeA, To: nodeB}},
+			expectErr: true,
+		},
+		{
+			name:  "empty edges",
+			edges: []Edge{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateUniqueEdges(&Workflow{edges: map[Node][]Edge{nodeA: tc.edges}}); err != nil && !tc.expectErr {
+				t.Errorf("got an error %v, expected none", err)
+			} else if err == nil && tc.expectErr {
+				t.Errorf("expected an error, got none")
+			}
+		})
+	}
+}
