@@ -31,7 +31,7 @@ import (
 
 // toolNode wraps a tool from the tool package.
 type toolNode struct {
-	baseNode
+	BaseNode
 	tool         tool.Tool
 	inputSchema  *jsonschema.Resolved
 	outputSchema *jsonschema.Resolved
@@ -67,7 +67,7 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 	}
 
 	return &toolNode{
-		baseNode:     baseNode{name: t.Name(), description: t.Description(), config: cfg},
+		BaseNode:     NewBaseNode(t.Name(), t.Description(), cfg),
 		tool:         t,
 		inputSchema:  ischema,
 		outputSchema: oschema,
