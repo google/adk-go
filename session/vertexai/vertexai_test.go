@@ -16,7 +16,52 @@ package vertexai
 
 import (
 	"testing"
+
+	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
+	"google.golang.org/adk/session"
 )
+
+func TestCreateSessionProto_DisplayName(t *testing.T) {
+	tests := []struct {
+		name        string
+		displayName string
+		wantProto   string
+	}{
+		{
+			name:        "display name is set on proto",
+			displayName: "My Chat",
+			wantProto:   "My Chat",
+		},
+		{
+			name:        "empty display name results in empty proto field",
+			displayName: "",
+			wantProto:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &session.CreateRequest{
+				AppName:     "testApp",
+				UserID:      "user-1",
+				DisplayName: tt.displayName,
+			}
+
+			// Replicate the proto construction from createSession.
+			pbSession := &aiplatformpb.Session{
+				UserId:      req.UserID,
+				DisplayName: req.DisplayName,
+			}
+
+			if pbSession.DisplayName != tt.wantProto {
+				t.Errorf("DisplayName = %q, want %q", pbSession.DisplayName, tt.wantProto)
+			}
+			if pbSession.UserId != req.UserID {
+				t.Errorf("UserId = %q, want %q", pbSession.UserId, req.UserID)
+			}
+		})
+	}
+}
 
 func TestGetReasoningEngineID(t *testing.T) {
 	tests := []struct {

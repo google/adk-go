@@ -131,6 +131,23 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 		})
 
+		t.Run("with_display_name", func(t *testing.T) {
+			s := setup(t)
+			req := &session.CreateRequest{
+				AppName:     testAppName,
+				UserID:      "testUserID",
+				DisplayName: "My Chat Session",
+			}
+
+			got, err := s.Create(t.Context(), req)
+			if err != nil {
+				t.Fatalf("Create() with DisplayName error = %v", err)
+			}
+			if got.Session.ID() == "" {
+				t.Errorf("Expected generated SessionID, got empty")
+			}
+		})
+
 		t.Run("when_already_exists,_it_fails", func(t *testing.T) {
 			s := setup(t)
 			req := &session.CreateRequest{
