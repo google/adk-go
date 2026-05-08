@@ -73,7 +73,7 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 			var err error
 			typedInput, err = typeutil.ConvertToWithJSONSchema[any, IN](input, inputSchema)
 			if err != nil {
-				return nil, fmt.Errorf("new function node: invalid input type, expected %T: %v", new(IN), err)
+				return nil, fmt.Errorf("new function node: invalid input type, expected %T: %w", new(IN), err)
 			}
 		}
 		output, err := fn(ctx, typedInput)
@@ -84,16 +84,13 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 		if outputSchema != nil {
 			validateErr := outputSchema.Validate(output)
 			if validateErr != nil {
-				return nil, fmt.Errorf("function node %s: validation failed for output %T: %v", name, new(OUT), validateErr)
+				return nil, fmt.Errorf("function node %s: validation failed for output %T: %w", name, new(OUT), validateErr)
 			}
 		}
 
 		return output, nil
 	}
 
-	if cfg.RetryConfig != nil {
-		cfg.RetryConfig.applyDefaults()
-	}
 
 	return &FunctionNode{
 		baseNode: baseNode{name: name, config: cfg},
@@ -101,6 +98,7 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 	}
 }
 
+// Run executes the function node with the given input and returns an iterator over events.
 func (n *FunctionNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		output, err := n.fn(ctx, input)

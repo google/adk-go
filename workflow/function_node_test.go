@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/adk/agent"
 )
@@ -29,87 +30,110 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 	type Output struct {
 		Result string `json:"result"`
 	}
-
-	upperFn := func(ctx agent.InvocationContext, input Input) (map[string]any, error) {
-		return map[string]any{"result": strings.ToUpper(input.Value)}, nil
-	}
-
-	ischema, err := jsonschema.For[Input](nil)
-	if err != nil {
-		t.Fatalf("jsonschema.For[Input] failed: %v", err)
-	}
-	oschema, err := jsonschema.For[Output](nil)
-	if err != nil {
-		t.Fatalf("jsonschema.For[Output] failed: %v", err)
-	}
-
-	node, err := NewFunctionNodeWithSchema[Input, map[string]any]("upper", upperFn, ischema, oschema, defaultNodeConfig)
-	if err != nil {
-		t.Fatalf("NewFunctionNodeWithSchema failed: %v", err)
-	}
-
-	if node.Name() != "upper" {
-		t.Errorf("expected name 'upper', got %s", node.Name())
-	}
-
-	// Test execution with valid input
-	mockCtx := &MockInvocationContext{sess: nil}
-	events := node.Run(mockCtx, Input{Value: "hello"})
-
-	count := 0
-	for ev, err := range events {
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		count++
-		output, ok := ev.Actions.StateDelta["output"]
-		if !ok {
-			t.Fatal("expected output in state delta")
-		}
-		typedOutput, ok := output.(map[string]any)
-		if !ok {
-			t.Fatalf("expected map[string]any type, got %T", output)
-		}
-		if typedOutput["result"] != "HELLO" {
-			t.Errorf("expected 'HELLO', got %s", typedOutput["result"])
-		}
-	}
-	if count != 1 {
-		t.Errorf("expected 1 event, got %d", count)
-	}
-}
-
-func TestNewFunctionNodeWithSchema_ValidationError(t *testing.T) {
-	type Input struct {
-		Value string `json:"value"`
-	}
 	type TargetOutput struct {
 		Result int `json:"result"`
 	}
 
-	fn := func(ctx agent.InvocationContext, input Input) (map[string]any, error) {
-		return map[string]any{"result": "not-an-int"}, nil
+	tests := []struct {
+		name         string
+		nodeName     string
+		fn           func(ctx agent.InvocationContext, input Input) (map[string]any, error)
+		inputSchema  *jsonschema.Schema
+		outputSchema *jsonschema.Schema
+		input        any
+		wantOutput   map[string]any
+		wantErr      bool
+		errSubstr    string
+	}{
+		{
+			name:     "Success",
+			nodeName: "upper",
+			fn: func(ctx agent.InvocationContext, input Input) (map[string]any, error) {
+				return map[string]any{"result": strings.ToUpper(input.Value)}, nil
+			},
+			inputSchema:  mustSchema[Input](t),
+			outputSchema: mustSchema[Output](t),
+			input:        Input{Value: "hello"},
+			wantOutput:   map[string]any{"result": "HELLO"},
+			wantErr:      false,
+		},
+		{
+			name:     "NilInput",
+			nodeName: "nil_test",
+			fn: func(ctx agent.InvocationContext, input Input) (map[string]any, error) {
+				if input.Value == "" {
+					return map[string]any{"result": "zero"}, nil
+				}
+				return map[string]any{"result": "not-zero"}, nil
+			},
+			inputSchema:  mustSchema[Input](t),
+			outputSchema: mustSchema[Output](t),
+			input:        nil,
+			wantOutput:   map[string]any{"result": "zero"},
+			wantErr:      false,
+		},
+		{
+			name:     "ValidationError",
+			nodeName: "test",
+			fn: func(ctx agent.InvocationContext, input Input) (map[string]any, error) {
+				return map[string]any{"result": "not-an-int"}, nil
+			},
+			inputSchema:  mustSchema[Input](t),
+			outputSchema: mustSchema[TargetOutput](t),
+			input:        Input{Value: "hello"},
+			wantErr:      true,
+			errSubstr:    "validation failed for output",
+		},
 	}
 
-	ischema, _ := jsonschema.For[Input](nil)
-	oschema, _ := jsonschema.For[TargetOutput](nil)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node, err := NewFunctionNodeWithSchema[Input, map[string]any](tc.nodeName, tc.fn, tc.inputSchema, tc.outputSchema, defaultNodeConfig)
+			if err != nil {
+				t.Fatalf("NewFunctionNodeWithSchema failed: %v", err)
+			}
 
-	node, err := NewFunctionNodeWithSchema[Input, map[string]any]("test", fn, ischema, oschema, defaultNodeConfig)
+			mockCtx := &MockInvocationContext{sess: nil}
+			events := node.Run(mockCtx, tc.input)
+
+			count := 0
+			for ev, err := range events {
+				if err != nil {
+					if !tc.wantErr {
+						t.Fatalf("unexpected error: %v", err)
+					}
+					if tc.errSubstr != "" && !strings.Contains(err.Error(), tc.errSubstr) {
+						t.Errorf("expected error containing %q, got %v", tc.errSubstr, err)
+					}
+					return // Expected error handled
+				}
+				count++
+				if tc.wantErr {
+					t.Fatal("expected error, got nil")
+				}
+
+				output, ok := ev.Actions.StateDelta["output"]
+				if !ok {
+					t.Fatal("expected output in state delta")
+				}
+
+				if diff := cmp.Diff(tc.wantOutput, output); diff != "" {
+					t.Errorf("output mismatch (-want +got):\n%s", diff)
+				}
+			}
+
+			if !tc.wantErr && count != 1 {
+				t.Errorf("expected 1 event, got %d", count)
+			}
+		})
+	}
+}
+
+func mustSchema[T any](t *testing.T) *jsonschema.Schema {
+	t.Helper()
+	s, err := jsonschema.For[T](nil)
 	if err != nil {
-		t.Fatalf("NewFunctionNodeWithSchema failed: %v", err)
+		t.Fatalf("jsonschema.For failed: %v", err)
 	}
-
-	mockCtx := &MockInvocationContext{sess: nil}
-	events := node.Run(mockCtx, Input{Value: "hello"})
-
-	for _, err := range events {
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if !strings.Contains(err.Error(), "validation failed for output") {
-			t.Errorf("expected validation error, got: %v", err)
-		}
-		return // We expect error on first event/iteration
-	}
-	t.Error("expected at least one event/error")
+	return s
 }

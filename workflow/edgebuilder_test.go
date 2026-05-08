@@ -123,3 +123,4 @@ func (n *dummyNode) Description() string { return "" }
 func (n *dummyNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
+func (n *dummyNode) Config() NodeConfig { return NodeConfig{} }

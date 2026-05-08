@@ -98,56 +98,6 @@ func (b *baseNode) Name() string        { return b.name }
 func (b *baseNode) Description() string { return b.description }
 func (b *baseNode) Config() NodeConfig  { return b.config }
 
-// FunctionNode wraps a custom function.
-type FunctionNode struct {
-	baseNode
-	fn func(ctx agent.InvocationContext, input any) (any, error)
-}
-
-// NewFunctionNode creates a new node wrapping a custom function using generics to automatically infer input and output types.
-func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error), cfg NodeConfig) *FunctionNode {
-	wrappedFn := func(ctx agent.InvocationContext, input any) (any, error) {
-		if input == nil {
-			var zero IN
-			return fn(ctx, zero)
-		}
-		typedInput, ok := input.(IN)
-		if !ok {
-			// Fallback to the json-like input types that cannot be converted by the standard type assertion.
-			// E.g. tool nodes return map[string]any as input and user may define a struct as the target type.
-			var err error
-			typedInput, err = typeutil.ConvertToWithJSONSchema[any, IN](input, nil)
-			if err != nil {
-				return nil, fmt.Errorf("new function node: invalid input type, expected %T: %v", new(IN), err)
-			}
-		}
-		return fn(ctx, typedInput)
-	}
-
-	return &FunctionNode{
-		baseNode: baseNode{name: name, config: cfg},
-		fn:       wrappedFn,
-	}
-}
-
-func (n *FunctionNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		output, err := n.fn(ctx, input)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-
-		event := session.NewEvent(ctx.InvocationID())
-		event.Actions.StateDelta["output"] = output
-		if s, ok := output.(string); ok {
-			event.Content = &genai.Content{
-				Parts: []*genai.Part{{Text: s}},
-			}
-		}
-		yield(event, nil)
-	}
-}
 
 // Edge defines a directed connection between nodes in the workflow graph.
 type Edge struct {
