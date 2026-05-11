@@ -28,10 +28,11 @@ import (
 	"strings"
 	"time"
 
-	aiplatform "cloud.google.com/go/aiplatform/apiv1"
-	"cloud.google.com/go/aiplatform/apiv1/aiplatformpb"
+	aiplatform "cloud.google.com/go/aiplatform/apiv1beta1"
+	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 	"github.com/spf13/cobra"
 	"google.golang.org/api/option"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	"google.golang.org/adk/cmd/adkgo/internal/deploy"
@@ -44,11 +45,18 @@ type gCloudFlags struct {
 	projectName string
 }
 
+type memoryBankFlags struct {
+	deploy bool
+	model  string
+	ttl    time.Duration
+}
+
 type agentEngineServiceFlags struct {
 	name          string
 	displayName   string
 	serverPort    int
 	agentEngineID string
+	memoryBank    memoryBankFlags
 }
 
 type buildFlags struct {
@@ -81,7 +89,7 @@ var agentEngineCmd = &cobra.Command{
 	Short: "Deploys the application to Agent Engine.",
 	Long:  `Deploys the application to Agent Engine. It creates a source archive, uploads it to create a Reasoning Engine, and cleans up temporary files.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return flags.deployOnagentEngine()
+		return flags.deployOnAgentEngine()
 	},
 }
 
@@ -97,6 +105,11 @@ func init() {
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.entryPointPath, "entry_point_path", "e", "", "Path to an entry point (go 'main')")
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.sourceDir, "source_dir", "d", "", "Directory to archive, defaults to current working directory")
 	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.agentEngineID, "agent_engine_id", "", "ID of the Agent Engine instance to update if it exists (default: \"\", which means a new instance will be created).")
+	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.memoryBank.deploy, "mem_deploy", false, "If set to true then memory bank will be deployed too")
+	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.memoryBank.model, "mem_model", "publishers/google/models/gemini-2.5-flash", "Name of the model to be used for memory generation - for list you can GET"+
+		" https://${LOCATION_ID}-aiplatform.googleapis.com/v1beta1/publishers/google/models. It will be prefixed with projects/<project_name>/locations/<region> forming for instance full model name like "+
+		" 'projects/project_name/locations/us-central1/publishers/google/models/gemini-2.5-flash'")
+	agentEngineCmd.PersistentFlags().DurationVar(&flags.agentEngine.memoryBank.ttl, "mem_ttl", time.Hour*24*365, "Time-To-Live for memories")
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -143,6 +156,9 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 			if f.agentEngine.displayName == "" {
 				f.agentEngine.displayName = "ADK Agent: " + dateTimeString
 			}
+
+			// add provided model as suffix
+			f.agentEngine.memoryBank.model = fmt.Sprintf("projects/%s/locations/%s/%s", f.gcloud.projectName, f.gcloud.region, f.agentEngine.memoryBank.model)
 
 			return nil
 		})
@@ -272,6 +288,22 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 					},
 				},
 			}
+
+			if f.agentEngine.memoryBank.deploy {
+				req.ReasoningEngine.ContextSpec = &aiplatformpb.ReasoningEngineContextSpec{
+					MemoryBankConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig{
+						GenerationConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_GenerationConfig{
+							Model: f.agentEngine.memoryBank.model,
+						},
+						TtlConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig{
+							Ttl: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig_DefaultTtl{
+								DefaultTtl: durationpb.New(f.agentEngine.memoryBank.ttl),
+							},
+						},
+					},
+				}
+			}
+
 			p("Sending CreateReasoningEngine request...")
 			op, err := client.CreateReasoningEngine(ctx, req)
 			if err != nil {
@@ -344,6 +376,23 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 				},
 				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.source_code_spec", "spec.class_methods"}},
 			}
+
+			if f.agentEngine.memoryBank.deploy {
+				req.ReasoningEngine.ContextSpec = &aiplatformpb.ReasoningEngineContextSpec{
+					MemoryBankConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig{
+						GenerationConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_GenerationConfig{
+							Model: f.agentEngine.memoryBank.model,
+						},
+						TtlConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig{
+							Ttl: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig_DefaultTtl{
+								DefaultTtl: durationpb.New(f.agentEngine.memoryBank.ttl),
+							},
+						},
+					},
+				}
+				req.UpdateMask.Paths = append(req.UpdateMask.Paths, "spec.context_spec")
+			}
+
 			p("Sending UpdateReasoningEngine request...")
 			op, err := client.UpdateReasoningEngine(ctx, req)
 			if err != nil {
@@ -363,8 +412,8 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 		})
 }
 
-// deployOnagentEngine executes the sequence of actions preparing and deploying the agent to agentEngine
-func (f *deployAgentEngineFlags) deployOnagentEngine() error {
+// deployOnAgentEngine executes the sequence of actions preparing and deploying the agent to agentEngine
+func (f *deployAgentEngineFlags) deployOnAgentEngine() error {
 	fmt.Println(flags)
 
 	err := f.computeFlags()
