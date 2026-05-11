@@ -424,7 +424,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						for _, t := range f.Tools {
 							tools[t.Name()] = t
 						}
-						respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil)
+						respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil, sess)
 						if err != nil {
 							sess.pushError(err)
 							cleanup()
@@ -544,7 +544,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 			// Handle function calls.
 
-			ev, err := f.handleFunctionCalls(ctx, tools, resp.LLMResponse, nil)
+			ev, err := f.handleFunctionCalls(ctx, tools, resp.LLMResponse, nil, nil)
 			if err != nil {
 				yield(nil, err)
 				return
@@ -912,7 +912,7 @@ Suggested fixes:
 //
 // TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
-func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation) (mergedEvent *session.Event, err error) {
+func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation, liveSess agent.LiveSession) (mergedEvent *session.Event, err error) {
 	fnCalls := utils.FunctionCalls(resp.Content)
 	toolNames := slices.Collect(maps.Keys(toolsDict))
 
@@ -953,6 +953,42 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
 				if err != nil {
 					result = map[string]any{"error": err.Error()}
+				}
+			} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
+				if liveSess != nil {
+					result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
+					go func() {
+						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
+							if err != nil {
+								fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err)
+								return
+							}
+							updatedContent := &genai.Content{
+								Role: "user",
+								Parts: []*genai.Part{
+									{
+										Text: fmt.Sprintf("Function %s returned: %s", streamTool.Name(), chunk),
+									},
+								},
+							}
+							if err := liveSess.Send(agent.LiveRequest{Content: updatedContent}); err != nil {
+								fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err)
+								return
+							}
+						}
+					}()
+				} else {
+					var sb strings.Builder
+					for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
+						if err != nil {
+							result = map[string]any{"error": err.Error()}
+							break
+						}
+						sb.WriteString(chunk)
+					}
+					if result == nil {
+						result = map[string]any{"result": sb.String()}
+					}
 				}
 			} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
 				err := newToolNotFoundError(fnCall.Name, toolNames)

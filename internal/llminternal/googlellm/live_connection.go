@@ -98,6 +98,7 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 		if err != nil {
 			return fmt.Errorf("failed to send tool response: %w", err)
 		}
+		fmt.Printf("sending tool response\n")
 	} else {
 		if len(content.Parts) == 1 && content.Parts[0].Text != "" {
 			fmt.Printf("Attempting to send text via SendRealtimeInput\n")
@@ -119,8 +120,6 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 			return fmt.Errorf("failed to send content: %w", err)
 		}
 	}
-
-	fmt.Printf("sending message\n")
 
 	return nil
 }
