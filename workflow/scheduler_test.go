@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -259,6 +260,159 @@ func TestScheduler_ProgressEventsThenSingleOutputSucceed(t *testing.T) {
 	}
 }
 
+// TestScheduler_MultiActivation_NonJoinNode_RunsTwice verifies that
+// when a non-Join node has two incoming edges from separately-firing
+// upstreams (Start→A, Start→B, A→C, B→C), C is activated twice —
+// once per upstream completion. This matches adk-python: there is no
+// automatic merge for ordinary nodes, only for JoinNode (see
+// _trigger_processor.py:_process_triggers and _node_runner.py:
+// _check_and_schedule_nodes).
+func TestScheduler_MultiActivation_NonJoinNode_RunsTwice(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	var cActivations atomic.Int32
+	var cInputs sync.Mutex
+	var cInputSlice []string
+
+	a := NewFunctionNode("A", func(ctx agent.InvocationContext, input string) (string, error) {
+		return "outA", nil
+	}, defaultNodeConfig)
+	b := NewFunctionNode("B", func(ctx agent.InvocationContext, input string) (string, error) {
+		return "outB", nil
+	}, defaultNodeConfig)
+	c := NewFunctionNode("C", func(ctx agent.InvocationContext, input string) (string, error) {
+		cActivations.Add(1)
+		cInputs.Lock()
+		cInputSlice = append(cInputSlice, input)
+		cInputs.Unlock()
+		return "outC", nil
+	}, defaultNodeConfig)
+
+	w := mustNew(t, []Edge{
+		{From: Start, To: a},
+		{From: Start, To: b},
+		{From: a, To: c},
+		{From: b, To: c},
+	})
+
+	drain(t, w.Run(mockCtx))
+
+	if got, want := cActivations.Load(), int32(2); got != want {
+		t.Errorf("C activation count = %d, want %d (Python-parity multi-activation)", got, want)
+	}
+
+	cInputs.Lock()
+	defer cInputs.Unlock()
+	sort.Strings(cInputSlice)
+	wantInputs := []string{"outA", "outB"}
+	if diff := cmp.Diff(wantInputs, cInputSlice); diff != "" {
+		t.Errorf("C inputs across activations (-want +got):\n%s", diff)
+	}
+}
+
+// TestScheduler_WaitForOutput_StaysWaitingWithoutOutput verifies
+// that a node whose Config().WaitForOutput=true and which yields no
+// "output" event lands in NodeWaiting and does NOT schedule any
+// successors. This is the foundation JoinNode builds on.
+func TestScheduler_WaitForOutput_StaysWaitingWithoutOutput(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	var dRan atomic.Bool
+
+	wait := newNoOutputNode("W", true /*waitForOutput*/)
+	d := NewFunctionNode("D", func(ctx agent.InvocationContext, input any) (string, error) {
+		dRan.Store(true)
+		return "outD", nil
+	}, defaultNodeConfig)
+
+	w := mustNew(t, []Edge{
+		{From: Start, To: wait},
+		{From: wait, To: d},
+	})
+
+	drain(t, w.Run(mockCtx))
+
+	if dRan.Load() {
+		t.Error("downstream node D ran; WaitForOutput=true with no output should suppress successor scheduling")
+	}
+	// Node lifecycle should reflect Waiting, not Completed.
+	// (We rely on the scheduler's RunState being correct; we cannot
+	// observe it externally here without exposing internals, but
+	// the absence of D firing is the engine-visible contract.)
+}
+
+// TestScheduler_WaitForOutput_EmittingOutputSchedulesSuccessors
+// verifies that the same node, when it eventually does emit an
+// output event, schedules its successors normally — i.e. WaitForOutput
+// only delays, never suppresses outright.
+func TestScheduler_WaitForOutput_EmittingOutputSchedulesSuccessors(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	var dInput any
+	var dRan atomic.Bool
+
+	emit := newOutputOnlyOnceNode("E", true /*waitForOutput*/, "the-output")
+	d := NewFunctionNode("D", func(ctx agent.InvocationContext, input any) (any, error) {
+		dInput = input
+		dRan.Store(true)
+		return "outD", nil
+	}, defaultNodeConfig)
+
+	w := mustNew(t, []Edge{
+		{From: Start, To: emit},
+		{From: emit, To: d},
+	})
+
+	drain(t, w.Run(mockCtx))
+
+	if !dRan.Load() {
+		t.Fatal("downstream node D did not run; WaitForOutput should still allow successor scheduling once an output is emitted")
+	}
+	if got, want := fmt.Sprint(dInput), "the-output"; got != want {
+		t.Errorf("D input = %q, want %q (the WaitForOutput node's emitted value)", got, want)
+	}
+}
+
+// TestScheduler_TriggerBuffer_SerialisesSameNameActivations verifies
+// that two triggers landing on the same node name during the same
+// run are dispatched one at a time (FIFO), not concurrently. This
+// is the per-name serialisation contract that JoinNode relies on
+// to safely accumulate across activations.
+func TestScheduler_TriggerBuffer_SerialisesSameNameActivations(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	var concurrent atomic.Int32
+	var peakConcurrent atomic.Int32
+	var totalRuns atomic.Int32
+
+	// 'serialised' takes a brief pause inside Run so that overlapping
+	// would manifest as concurrent>1.
+	serialised := newSerialisedRecorder("S", &concurrent, &peakConcurrent, &totalRuns)
+
+	a := NewFunctionNode("A", func(ctx agent.InvocationContext, input string) (string, error) {
+		return "outA", nil
+	}, defaultNodeConfig)
+	b := NewFunctionNode("B", func(ctx agent.InvocationContext, input string) (string, error) {
+		return "outB", nil
+	}, defaultNodeConfig)
+
+	w := mustNew(t, []Edge{
+		{From: Start, To: a},
+		{From: Start, To: b},
+		{From: a, To: serialised},
+		{From: b, To: serialised},
+	})
+
+	drain(t, w.Run(mockCtx))
+
+	if got, want := totalRuns.Load(), int32(2); got != want {
+		t.Errorf("S total activations = %d, want %d", got, want)
+	}
+	if got := peakConcurrent.Load(); got > 1 {
+		t.Errorf("S peak concurrent activations = %d, want <= 1 (per-name serialisation broken)", got)
+	}
+}
+
 // --- test fixtures: helper nodes and drain helpers below this line ---
 
 // drain consumes all events from an iter.Seq2 and returns the
@@ -456,5 +610,94 @@ func (n *progressThenOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Se
 		final := session.NewEvent(ctx.InvocationID())
 		final.Actions.StateDelta["output"] = n.finalOutput
 		yield(final, nil)
+	}
+}
+
+// noOutputNode yields zero events on every activation. Combined
+// with WaitForOutput=true it exercises the scheduler's "stay in
+// NodeWaiting, do not schedule successors" path.
+type noOutputNode struct {
+	BaseNode
+}
+
+func newNoOutputNode(name string, waitForOutput bool) *noOutputNode {
+	cfg := NodeConfig{}
+	if waitForOutput {
+		t := true
+		cfg.WaitForOutput = &t
+	}
+	return &noOutputNode{BaseNode: NewBaseNode(name, "", cfg)}
+}
+
+func (n *noOutputNode) Run(_ agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		// yields nothing
+	}
+}
+
+// outputOnlyOnceNode yields exactly one event carrying the supplied
+// output. With WaitForOutput=true this verifies that successors do
+// fire once the output finally lands.
+type outputOnlyOnceNode struct {
+	BaseNode
+	output string
+}
+
+func newOutputOnlyOnceNode(name string, waitForOutput bool, output string) *outputOnlyOnceNode {
+	cfg := NodeConfig{}
+	if waitForOutput {
+		t := true
+		cfg.WaitForOutput = &t
+	}
+	return &outputOnlyOnceNode{
+		BaseNode: NewBaseNode(name, "", cfg),
+		output:   output,
+	}
+}
+
+func (n *outputOnlyOnceNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Actions.StateDelta["output"] = n.output
+		yield(ev, nil)
+	}
+}
+
+// serialisedRecorder bumps a per-test counter on entry and decrements
+// on exit, tracking the peak concurrency observed across activations.
+// Used to verify the per-name serialisation contract.
+type serialisedRecorder struct {
+	BaseNode
+	concurrent     *atomic.Int32
+	peakConcurrent *atomic.Int32
+	totalRuns      *atomic.Int32
+}
+
+func newSerialisedRecorder(name string, concurrent, peak, total *atomic.Int32) *serialisedRecorder {
+	return &serialisedRecorder{
+		BaseNode:       NewBaseNode(name, "", NodeConfig{}),
+		concurrent:     concurrent,
+		peakConcurrent: peak,
+		totalRuns:      total,
+	}
+}
+
+func (n *serialisedRecorder) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		now := n.concurrent.Add(1)
+		for {
+			peak := n.peakConcurrent.Load()
+			if now <= peak || n.peakConcurrent.CompareAndSwap(peak, now) {
+				break
+			}
+		}
+		// Brief pause to widen any concurrency window the scheduler
+		// might erroneously create.
+		time.Sleep(5 * time.Millisecond)
+		n.totalRuns.Add(1)
+		n.concurrent.Add(-1)
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Actions.StateDelta["output"] = "ok"
+		yield(ev, nil)
 	}
 }

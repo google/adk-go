@@ -33,12 +33,61 @@ func TestNewNodeContext_TriggeredByRoundTrip(t *testing.T) {
 	parent := newMockCtx(t)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := newNodeContext(parent, tt.triggeredBy)
+			c := newNodeContext(parent, tt.triggeredBy, nil, nil)
 			if got := c.TriggeredBy(); got != tt.triggeredBy {
 				t.Errorf("TriggeredBy() = %q, want %q", got, tt.triggeredBy)
 			}
 		})
 	}
+}
+
+func TestNewNodeContext_InNodes(t *testing.T) {
+	parent := newMockCtx(t)
+
+	t.Run("nil predecessor set returns nil", func(t *testing.T) {
+		c := newNodeContext(parent, "", nil, nil)
+		if got := c.InNodes(); got != nil {
+			t.Errorf("InNodes() = %v, want nil for empty predecessor set", got)
+		}
+	})
+
+	t.Run("empty predecessor set returns nil", func(t *testing.T) {
+		c := newNodeContext(parent, "", map[string]struct{}{}, nil)
+		if got := c.InNodes(); got != nil {
+			t.Errorf("InNodes() = %v, want nil for empty predecessor set", got)
+		}
+	})
+
+	t.Run("populated set returns names", func(t *testing.T) {
+		c := newNodeContext(parent, "A", map[string]struct{}{
+			"A": {},
+			"B": {},
+			"C": {},
+		}, nil)
+		got := c.InNodes()
+		if len(got) != 3 {
+			t.Fatalf("InNodes() length = %d, want 3 (got %v)", len(got), got)
+		}
+		want := map[string]bool{"A": true, "B": true, "C": true}
+		for _, name := range got {
+			if !want[name] {
+				t.Errorf("unexpected predecessor name %q in InNodes() = %v", name, got)
+			}
+		}
+	})
+
+	t.Run("returned slice is independent of internal set", func(t *testing.T) {
+		// Mutating the returned slice must not affect a subsequent call.
+		c := newNodeContext(parent, "", map[string]struct{}{"A": {}, "B": {}}, nil)
+		first := c.InNodes()
+		first[0] = "MUTATED"
+		second := c.InNodes()
+		for _, name := range second {
+			if name == "MUTATED" {
+				t.Errorf("InNodes() returned slice must be a defensive copy; got mutation leaked: %v", second)
+			}
+		}
+	})
 }
 
 // Compile-time assertion: *nodeContext satisfies agent.InvocationContext.

@@ -201,10 +201,15 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		input := userInput(ctx)
 
 		s := newScheduler(ctx, w.graph)
-		// Seed: schedule START with the user-supplied input.
+		// Seed: activate START with the user-supplied input. We
+		// call activate (not trigger) directly because START is
+		// the very first activation — there is nothing in flight
+		// to serialise behind, and the engine expects START's
+		// NodeState.Input to carry the seed for handleCompletion
+		// to forward downstream.
 		startState := s.state.EnsureNode(Start.Name())
 		startState.Input = input
-		s.scheduleNode(Start, input, "")
+		s.activate(Start, input, "")
 
 		s.run(yield)
 

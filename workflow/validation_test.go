@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -107,6 +108,85 @@ func TestStartNodePresent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestValidateJoinNodesHaveIncoming verifies the build-time check
+// that every JoinNode in the edge set has at least one incoming
+// edge. adk-python catches this at runtime via a ValueError; we
+// surface it earlier so misconstructed graphs fail to build.
+func TestValidateJoinNodesHaveIncoming(t *testing.T) {
+	t.Run("JoinNode with one incoming edge is OK", func(t *testing.T) {
+		jn := NewJoinNode("J", NodeConfig{})
+		nodeA := &dummyNode{name: "A"}
+		edges := []Edge{
+			{From: Start, To: nodeA},
+			{From: nodeA, To: jn},
+		}
+		if err := validateJoinNodesHaveIncoming(edges); err != nil {
+			t.Errorf("validateJoinNodesHaveIncoming returned %v, want nil", err)
+		}
+	})
+
+	t.Run("JoinNode with multiple incoming edges is OK", func(t *testing.T) {
+		jn := NewJoinNode("J", NodeConfig{})
+		nodeA := &dummyNode{name: "A"}
+		nodeB := &dummyNode{name: "B"}
+		edges := []Edge{
+			{From: Start, To: nodeA},
+			{From: Start, To: nodeB},
+			{From: nodeA, To: jn},
+			{From: nodeB, To: jn},
+		}
+		if err := validateJoinNodesHaveIncoming(edges); err != nil {
+			t.Errorf("validateJoinNodesHaveIncoming returned %v, want nil", err)
+		}
+	})
+
+	t.Run("JoinNode that only appears as edge source fails", func(t *testing.T) {
+		// JoinNode with no incoming edges — only a successor edge
+		// exists. This is the misconfiguration the validator catches.
+		jn := NewJoinNode("J", NodeConfig{})
+		nodeD := &dummyNode{name: "D"}
+		edges := []Edge{
+			{From: Start, To: jn}, // illegal anyway (Start has no JoinNode predecessors), but the check we exercise here is the JoinNode rule
+			{From: jn, To: nodeD},
+		}
+		// Trim the Start→J edge so we isolate the JoinNode check.
+		edges = []Edge{{From: jn, To: nodeD}}
+		err := validateJoinNodesHaveIncoming(edges)
+		if !errors.Is(err, ErrJoinNodeNoIncoming) {
+			t.Errorf("validateJoinNodesHaveIncoming returned %v, want ErrJoinNodeNoIncoming", err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "J") {
+			t.Errorf("error message %q does not include the offending node name", err.Error())
+		}
+	})
+
+	t.Run("graph with no JoinNode passes", func(t *testing.T) {
+		nodeA := &dummyNode{name: "A"}
+		nodeB := &dummyNode{name: "B"}
+		edges := []Edge{
+			{From: Start, To: nodeA},
+			{From: nodeA, To: nodeB},
+		}
+		if err := validateJoinNodesHaveIncoming(edges); err != nil {
+			t.Errorf("validateJoinNodesHaveIncoming returned %v, want nil for JoinNode-free graph", err)
+		}
+	})
+
+	t.Run("New() rejects JoinNode without incoming via full validation pipeline", func(t *testing.T) {
+		// Belt-and-braces: the same condition surfaced through
+		// New() (the constructor users actually call).
+		jn := NewJoinNode("J", NodeConfig{})
+		nodeD := &dummyNode{name: "D"}
+		_, err := New([]Edge{
+			{From: Start, To: nodeD},
+			{From: jn, To: nodeD},
+		})
+		if !errors.Is(err, ErrJoinNodeNoIncoming) {
+			t.Errorf("New returned %v, want it to wrap ErrJoinNodeNoIncoming", err)
+		}
+	})
 }
 
 func TestStartNodeNoIncomingEdges(t *testing.T) {

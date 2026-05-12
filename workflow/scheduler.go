@@ -42,36 +42,85 @@ var (
 )
 
 // scheduler drives a single Workflow.Run invocation. It owns the
-// per-node task table, the event channel, lifecycle counters, and
-// the parent invocation context — none of which survive across
+// per-activation task table, the event channel, lifecycle counters,
+// and the parent invocation context — none of which survive across
 // processes. The persistable view of the same run (node statuses,
 // inputs, triggers) lives on the embedded *RunState.
 //
 // Concurrency model: producer-consumer over eventQueue.
 //
-//   - Producers are the per-node goroutines started by scheduleNode.
-//     They only send to eventQueue (events and a final completion);
-//     they never read from it and never touch any other scheduler
-//     field.
+//   - Producers are the per-activation goroutines started by
+//     activate. They only send to eventQueue (events and a final
+//     completion); they never read from it and never touch any
+//     other scheduler field.
 //   - The consumer is the single goroutine running scheduler.run
 //     (the caller of Workflow.Run). It is the only reader of
-//     eventQueue and the only mutator of runsByName, runCancels,
-//     state.Nodes, and per-node accumulators.
+//     eventQueue and the only mutator of runsByActivation,
+//     activationCancels, runningByName, triggerBuffer, joinState,
+//     and state.Nodes.
 //
 // Because producers and the consumer share only eventQueue (a
 // channel — already safe for concurrent use), the consumer-only
 // fields below need no mutex.
+//
+// # Multiple concurrent activations of the same node
+//
+// A node identified by its Name may be activated multiple times
+// during a single workflow run — once per upstream completion that
+// triggers it (Python parity: there is no automatic merge for
+// non-Join nodes). To keep each activation's bookkeeping
+// independent, the scheduler keys per-task state by a monotonically
+// increasing activationID rather than by node name.
+//
+// To preserve the ordering required by stateful fan-in nodes
+// (JoinNode and any custom WaitForOutput=true node that accumulates
+// across activations), the scheduler serialises activations of the
+// same name: a second trigger arriving while the first is still
+// running is buffered in triggerBuffer[name] and dispatched after
+// the first activation completes. This guarantees that a JoinNode
+// observes upstream activations one at a time and does not race on
+// its own accumulator.
 type scheduler struct {
 	state       *RunState       // persisted lifecycle state
-	graph       *graph          // adjacency, terminal lookup
+	graph       *graph          // adjacency, terminal lookup, predecessors
 	nodesByName map[string]Node // built once at construction; lets handleCompletion resolve a completion's name back to its Node in O(1)
 
-	// Per-node accumulators, created when a node is scheduled and
-	// deleted on its completion. Owned by the consumer goroutine.
-	runsByName map[string]*nodeRun
+	// Monotonic per-scheduler counter; the next id handed out by
+	// activate. Owned by the consumer goroutine (only mutated
+	// there).
+	nextActivationID uint64
 
-	// Per-node cancel funcs. Owned by the consumer goroutine.
-	runCancels map[string]context.CancelFunc
+	// runsByActivation holds the consumer-side accumulator for
+	// every in-flight activation. Created on activate, deleted on
+	// the activation's completion. Owned by the consumer.
+	runsByActivation map[uint64]*nodeRun
+
+	// activationCancels holds the cancel func for every in-flight
+	// activation. Owned by the consumer.
+	activationCancels map[uint64]context.CancelFunc
+
+	// runningByName tracks how many in-flight activations exist
+	// per node name. Used to decide whether a new trigger should
+	// run immediately or be queued in triggerBuffer. Owned by the
+	// consumer.
+	runningByName map[string]int
+
+	// triggerBuffer queues pending activations per node name, FIFO.
+	// A trigger landing on a node that is already running is
+	// pushed here and consumed by the consumer when the running
+	// activation (or, for WaitForOutput nodes, the activation that
+	// produced the output) completes. Owned by the consumer.
+	triggerBuffer map[string][]pendingTrigger
+
+	// joinAccumulators holds the per-node fan-in accumulator used
+	// by JoinNode (and any custom node that accumulates inputs
+	// across per-predecessor activations). Keyed by node Name. The
+	// scheduler creates an entry lazily on first activation of a
+	// fan-in node and clears it once the node emits its terminal
+	// output (see handleCompletion). Owned by the consumer; node
+	// implementations read/write it via the *joinAccumulator
+	// reference handed in through the per-node context.
+	joinAccumulators map[string]*joinAccumulator
 
 	// eventQueue carries events and completions from producer
 	// goroutines to the consumer.
@@ -81,16 +130,25 @@ type scheduler struct {
 	parentCtx agent.InvocationContext
 }
 
-// nodeRun is the per-node consumer-side accumulator. It buffers the
-// node's routing event (if any) and its single output between the
-// time those events arrive and the time the node's completion
-// arrives, at which point successors are scheduled.
+// pendingTrigger is one buffered activation request waiting for the
+// node to be free.
+type pendingTrigger struct {
+	input       any
+	triggeredBy string
+}
+
+// nodeRun is the per-activation consumer-side accumulator. It
+// buffers the activation's routing event (if any) and its single
+// output between the time those events arrive and the time the
+// activation's completion arrives, at which point successors are
+// scheduled.
 //
 // The single-output and single-routing-event constraints are
 // enforced here: a second event carrying either kind sets err
 // without overwriting the first value, and the consumer surfaces
 // the error at completion.
 type nodeRun struct {
+	nodeName     string         // the activated node's Name; needed at completion to dispatch successors
 	routingEvent *session.Event // at most one; multiple is an error
 	output       any            // single StateDelta["output"]; nil if hasOutput is false
 	hasOutput    bool           // distinguishes "no output yet" from "output was nil"
@@ -106,21 +164,22 @@ func (nr *nodeRun) recordErr(err error) {
 	}
 }
 
-// setRoutingEvent stores ev as the node's single routing event. A
-// second call records ErrMultipleRoutingEvents instead of overwriting.
-func (nr *nodeRun) setRoutingEvent(ev *session.Event, nodeName string) {
+// setRoutingEvent stores ev as the activation's single routing
+// event. A second call records ErrMultipleRoutingEvents instead of
+// overwriting.
+func (nr *nodeRun) setRoutingEvent(ev *session.Event) {
 	if nr.routingEvent != nil {
-		nr.recordErr(fmt.Errorf("%w: node %q", ErrMultipleRoutingEvents, nodeName))
+		nr.recordErr(fmt.Errorf("%w: node %q", ErrMultipleRoutingEvents, nr.nodeName))
 		return
 	}
 	nr.routingEvent = ev
 }
 
-// setOutput stores out as the node's single output value. A second
-// call records ErrMultipleOutputs instead of overwriting.
-func (nr *nodeRun) setOutput(out any, nodeName string) {
+// setOutput stores out as the activation's single output value. A
+// second call records ErrMultipleOutputs instead of overwriting.
+func (nr *nodeRun) setOutput(out any) {
 	if nr.hasOutput {
-		nr.recordErr(fmt.Errorf("%w: node %q", ErrMultipleOutputs, nodeName))
+		nr.recordErr(fmt.Errorf("%w: node %q", ErrMultipleOutputs, nr.nodeName))
 		return
 	}
 	nr.output = out
@@ -132,12 +191,12 @@ func (nr *nodeRun) setOutput(out any, nodeName string) {
 type queueItem interface{ isQueueItem() }
 
 // eventItem carries one event from a node-runner goroutine to the
-// consumer. nodeName is required so the consumer can correlate the
-// event with the right nodeRun without relying on channel-FIFO-
+// consumer. activationID is required so the consumer can correlate
+// the event with the right nodeRun without relying on channel-FIFO-
 // per-task semantics (which Go channels do not provide).
 type eventItem struct {
-	nodeName string
-	ev       *session.Event
+	activationID uint64
+	ev           *session.Event
 }
 
 func (eventItem) isQueueItem() {}
@@ -147,8 +206,8 @@ func (eventItem) isQueueItem() {}
 // consumer via errors.Is (currently: context.Canceled,
 // context.DeadlineExceeded, anything else → NodeFailed).
 type completionItem struct {
-	nodeName string
-	err      error
+	activationID uint64
+	err          error
 }
 
 func (completionItem) isQueueItem() {}
@@ -158,13 +217,16 @@ func (completionItem) isQueueItem() {}
 // initial trigger (typically Start with the user input).
 func newScheduler(parent agent.InvocationContext, g *graph) *scheduler {
 	return &scheduler{
-		state:       NewRunState(),
-		graph:       g,
-		nodesByName: buildNodesByName(g),
-		runsByName:  map[string]*nodeRun{},
-		runCancels:  map[string]context.CancelFunc{},
-		eventQueue:  make(chan queueItem, defaultEventQueueCapacity),
-		parentCtx:   parent,
+		state:             NewRunState(),
+		graph:             g,
+		nodesByName:       buildNodesByName(g),
+		runsByActivation:  map[uint64]*nodeRun{},
+		activationCancels: map[uint64]context.CancelFunc{},
+		runningByName:     map[string]int{},
+		triggerBuffer:     map[string][]pendingTrigger{},
+		joinAccumulators:  map[string]*joinAccumulator{},
+		eventQueue:        make(chan queueItem, defaultEventQueueCapacity),
+		parentCtx:         parent,
 	}
 }
 
@@ -182,17 +244,36 @@ func buildNodesByName(g *graph) map[string]Node {
 	return nodesByName
 }
 
-// scheduleNode launches a per-node goroutine for n with the given
-// input. The node's lifecycle status transitions to NodeRunning, and
-// the node is registered in runsByName and runCancels. The goroutine
-// wrapper is responsible for pushing exactly one completionItem when
-// it returns (success, error, panic, or cancellation).
+// trigger schedules n with the given input. If n already has an
+// in-flight activation, the trigger is buffered and dispatched when
+// the current activation completes. This per-name FIFO serialisation
+// is what stateful fan-in nodes (JoinNode, custom WaitForOutput
+// nodes) rely on to safely accumulate across per-predecessor
+// activations.
 //
-// scheduleNode runs only on the consumer goroutine.
-func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
+// trigger runs only on the consumer goroutine.
+func (s *scheduler) trigger(n Node, input any, triggeredBy string) {
+	name := n.Name()
+	if s.runningByName[name] > 0 {
+		s.triggerBuffer[name] = append(s.triggerBuffer[name], pendingTrigger{input: input, triggeredBy: triggeredBy})
+		return
+	}
+	s.activate(n, input, triggeredBy)
+}
+
+// activate launches a per-activation goroutine for n with the given
+// input. The activation's lifecycle status transitions to
+// NodeRunning, and the activation is registered in
+// runsByActivation, activationCancels, and runningByName. The
+// goroutine wrapper is responsible for pushing exactly one
+// completionItem when it returns (success, error, panic, or
+// cancellation).
+//
+// activate runs only on the consumer goroutine.
+func (s *scheduler) activate(n Node, input any, triggeredBy string) {
 	name := n.Name()
 
-	// Per-node context: WithTimeout when Config().Timeout > 0,
+	// Per-activation context: WithTimeout when Config().Timeout > 0,
 	// WithCancel otherwise. Either way it inherits from parentCtx,
 	// so an ambient deadline on the workflow invocation still
 	// applies.
@@ -206,35 +287,49 @@ func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
 	} else {
 		nodeCtx, cancel = context.WithCancel(s.parentCtx)
 	}
-	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), triggeredBy)
+	// Hand the activation a stable per-name fan-in accumulator so
+	// JoinNode (and any custom in-package fan-in node) can merge
+	// across per-predecessor activations. The same *joinAccumulator
+	// is reused on every activation of the same node name until
+	// the node emits its terminal output, at which point
+	// handleCompletion clears the entry.
+	acc, ok := s.joinAccumulators[name]
+	if !ok {
+		acc = &joinAccumulator{}
+		s.joinAccumulators[name] = acc
+	}
+	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), triggeredBy, s.graph.inNodeNamesOf(n), acc)
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
 	ns.Input = input
 	ns.TriggeredBy = triggeredBy
-	s.runsByName[name] = &nodeRun{}
 
-	s.runCancels[name] = cancel
+	s.nextActivationID++
+	id := s.nextActivationID
+	s.runsByActivation[id] = &nodeRun{nodeName: name}
+	s.activationCancels[id] = cancel
+	s.runningByName[name]++
 	s.wg.Add(1)
 
-	go runNode(s.eventQueue, &s.wg, name, n, perNodeCtx, input)
+	go runNode(s.eventQueue, &s.wg, id, n, perNodeCtx, input)
 }
 
-// runNode is the per-node goroutine wrapper. It drives the node's
-// iter.Seq2, pushes events into the queue, and ends with exactly
-// one completionItem. A panic in the node body is recovered and
-// reported as a completion error so the consumer never deadlocks
-// waiting for a vanished goroutine.
+// runNode is the per-activation goroutine wrapper. It drives the
+// node's iter.Seq2, pushes events into the queue, and ends with
+// exactly one completionItem. A panic in the node body is recovered
+// and reported as a completion error so the consumer never
+// deadlocks waiting for a vanished goroutine.
 //
 // Event sends select on ctx.Done(): if the scheduler has cancelled
-// this node, an in-progress send to a full eventQueue does not
-// deadlock — the goroutine drops the pending event and proceeds to
-// completion. The completion send is unconditional because the
-// consumer's runsByName bookkeeping relies on it.
+// this activation, an in-progress send to a full eventQueue does
+// not deadlock — the goroutine drops the pending event and proceeds
+// to completion. The completion send is unconditional because the
+// consumer's runsByActivation bookkeeping relies on it.
 func runNode(
 	out chan<- queueItem,
 	wg *sync.WaitGroup,
-	name string,
+	activationID uint64,
 	n Node,
 	ctx agent.InvocationContext,
 	input any,
@@ -244,10 +339,10 @@ func runNode(
 	// completion holds the final completionItem. It is sent in the
 	// outer defer so panic recovery, normal exit, and cancellation
 	// all funnel through the same send path.
-	completion := completionItem{nodeName: name}
+	completion := completionItem{activationID: activationID}
 	defer func() {
 		if r := recover(); r != nil {
-			completion.err = fmt.Errorf("node %q panicked: %v", name, r)
+			completion.err = fmt.Errorf("node %q panicked: %v", n.Name(), r)
 		}
 		out <- completion
 	}()
@@ -258,7 +353,7 @@ func runNode(
 			return
 		}
 		select {
-		case out <- eventItem{nodeName: name, ev: ev}:
+		case out <- eventItem{activationID: activationID, ev: ev}:
 		case <-ctx.Done():
 			completion.err = ctx.Err()
 			return
@@ -273,36 +368,37 @@ func runNode(
 	}
 }
 
-// cancelAll cancels every running task. Idempotent: cancelled
-// goroutines may still push events that already left the producer
-// before observing ctx.Done(); the consumer continues draining
-// until runsByName is empty.
+// cancelAll cancels every in-flight activation. Idempotent:
+// cancelled goroutines may still push events that already left the
+// producer before observing ctx.Done(); the consumer continues
+// draining until runsByActivation is empty.
 //
 // cancelAll runs only on the consumer goroutine.
 func (s *scheduler) cancelAll() {
-	for _, cancel := range s.runCancels {
+	for _, cancel := range s.activationCancels {
 		cancel()
 	}
 }
 
 // run is the single-consumer loop. It drains the eventQueue, applies
 // state-side effects, yields events to the caller, and schedules
-// successor nodes when a node completes. Returns when all running
-// tasks have signalled completion.
+// successor nodes when an activation completes. Returns when all
+// in-flight activations have signalled completion.
 //
 // On non-nil yield-return-false (caller broke from the range loop)
 // or on a non-retryable node error, run cancels all in-flight
-// tasks and continues draining until runsByName is empty, then
-// surfaces the original error (if any) via yield.
+// tasks and continues draining until runsByActivation is empty,
+// then surfaces the original error (if any) via yield.
 //
 // run runs on the caller's goroutine (the goroutine that called
-// Workflow.Run); it is the only mutator of state.Nodes and the
-// node-side accumulators.
+// Workflow.Run); it is the only mutator of state.Nodes,
+// runsByActivation, runningByName, triggerBuffer, joinState, and
+// the per-activation accumulators.
 func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	var pendingErr error // first non-nil node error; surfaced after drain
-	draining := false    // true once cancelAll has run; remaining queue items are drained without yielding or scheduling new successors
+	draining := false    // true once cancelAll has run; remaining queue items are drained without yielding or scheduling new activations
 
-	for len(s.runsByName) > 0 {
+	for len(s.runsByActivation) > 0 {
 		item := <-s.eventQueue
 		switch it := item.(type) {
 		case eventItem:
@@ -333,75 +429,123 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	}
 }
 
-// handleEvent updates the per-node accumulator and is called once
-// per event. The event itself has already been read from the queue
-// and will be yielded to the caller by the consumer loop.
+// handleEvent updates the per-activation accumulator and is called
+// once per event. The event itself has already been read from the
+// queue and will be yielded to the caller by the consumer loop.
 func (s *scheduler) handleEvent(it eventItem) {
-	nr := s.runsByName[it.nodeName]
+	nr := s.runsByActivation[it.activationID]
 	if nr == nil {
-		// Defensive: completion already processed for this node;
-		// shouldn't happen if producer goroutines preserve send order.
+		// Defensive: completion already processed for this
+		// activation; shouldn't happen if producer goroutines
+		// preserve send order.
 		return
 	}
 	if it.ev == nil {
 		return
 	}
 	if it.ev.Routes != nil {
-		nr.setRoutingEvent(it.ev, it.nodeName)
+		nr.setRoutingEvent(it.ev)
 	}
 	if it.ev.Actions.StateDelta != nil {
 		if out, ok := it.ev.Actions.StateDelta["output"]; ok {
-			nr.setOutput(out, it.nodeName)
+			nr.setOutput(out)
 		}
 	}
 }
 
-// handleCompletion finalises a node's run: transitions its lifecycle
-// status, removes the live task, and (if scheduleSuccessors is true)
-// schedules its successors. When the consumer is draining (caller
-// stopped or a node failed), pass scheduleSuccessors=false so the
-// workflow does not keep dispatching new nodes after cancellation.
+// handleCompletion finalises an activation: transitions the node's
+// lifecycle status, removes the live task, and (if
+// scheduleSuccessors is true) schedules its successors. When the
+// consumer is draining (caller stopped or a node failed), pass
+// scheduleSuccessors=false so the workflow does not keep
+// dispatching new activations after cancellation.
 //
-// The returned error is the node's own error (NodeFailed); nil on
-// clean success or sibling cancellation.
+// The returned error is the activation's own error (NodeFailed); nil
+// on clean success or sibling cancellation.
+//
+// # WaitForOutput / fan-in semantics
+//
+// When the completed node has Config().WaitForOutput=true and its
+// activation produced no output (hasOutput=false), the node moves
+// to NodeWaiting instead of NodeCompleted and successors are not
+// scheduled. This is what JoinNode (and any custom fan-in node)
+// uses to swallow per-predecessor activations until it has
+// accumulated enough state to emit its merged output. The next
+// buffered trigger for the same node, if any, is still drained
+// after this completion — that is what ultimately drives the
+// JoinNode forward to its terminal "all predecessors arrived"
+// activation.
 func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool) error {
-	ns := s.state.EnsureNode(it.nodeName)
-	nr := s.runsByName[it.nodeName]
-	delete(s.runsByName, it.nodeName)
-	delete(s.runCancels, it.nodeName)
+	nr := s.runsByActivation[it.activationID]
+	delete(s.runsByActivation, it.activationID)
+	delete(s.activationCancels, it.activationID)
+
+	if nr == nil {
+		// Defensive: shouldn't happen, but if it does, we cannot
+		// resolve the node name to dispatch successors.
+		return nil
+	}
+	name := nr.nodeName
+	s.runningByName[name]--
+	if s.runningByName[name] <= 0 {
+		delete(s.runningByName, name)
+	}
+
+	ns := s.state.EnsureNode(name)
+	currentNode := s.nodesByName[name]
 
 	switch {
 	case it.err == nil:
-		ns.Status = NodeCompleted
+		// fall through — final status is decided below by the
+		// WaitForOutput branch.
 	case errors.Is(it.err, context.Canceled):
 		ns.Status = NodeCancelled
+		s.drainBufferedTriggersIfFree(name, scheduleSuccessors)
 		return nil // sibling cancellation; not the original error
 	default:
 		ns.Status = NodeFailed
+		// Drop any buffered triggers for this node — the workflow
+		// is going to drain.
+		delete(s.triggerBuffer, name)
 		return it.err
 	}
 
-	if nr != nil && nr.err != nil {
+	if nr.err != nil {
 		ns.Status = NodeFailed
+		delete(s.triggerBuffer, name)
 		return nr.err
 	}
 
-	if !scheduleSuccessors {
+	// WaitForOutput: a completed activation that did not produce an
+	// output keeps the node in NodeWaiting and skips successor
+	// scheduling. This is the JoinNode / fan-in path.
+	cfg := NodeConfig{}
+	if currentNode != nil {
+		cfg = currentNode.Config()
+	}
+	waitForOutput := cfg.WaitForOutput != nil && *cfg.WaitForOutput
+	if waitForOutput && !nr.hasOutput {
+		ns.Status = NodeWaiting
+		s.drainBufferedTriggersIfFree(name, scheduleSuccessors)
 		return nil
 	}
 
-	// Schedule successors. Find them via the routing-aware helper,
-	// which reads any routing event off this completion's accumulator.
-	currentNode := s.nodesByName[it.nodeName]
-	if currentNode == nil {
+	ns.Status = NodeCompleted
+
+	if !scheduleSuccessors || currentNode == nil {
+		s.drainBufferedTriggersIfFree(name, scheduleSuccessors)
 		return nil
 	}
-	var input any
-	var routingEv *session.Event
-	if nr != nil {
-		input = nr.output
-		routingEv = nr.routingEvent
+
+	// Once a JoinNode actually emits its terminal output we can
+	// drop any leftover accumulator state — the join has fired
+	// and any future re-entry should start fresh.
+	if waitForOutput && nr.hasOutput {
+		delete(s.joinAccumulators, name)
 	}
+
+	input := nr.output
+	routingEv := nr.routingEvent
 	// START's own output is empty by definition; for START we
 	// propagate the workflow's seed input (carried as the START
 	// node's NodeState.Input).
@@ -410,9 +554,52 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 	}
 
 	for _, succ := range findSuccessors(s.graph, currentNode, input, routingEv) {
-		s.scheduleNode(succ.node, succ.input, succ.triggeredBy)
+		s.trigger(succ.node, succ.input, succ.triggeredBy)
 	}
+
+	// If a buffered trigger arrived for this same node while it
+	// was running, dispatch the next one now that the slot is
+	// free. (Successors of the just-finished activation may have
+	// re-buffered into the same name if the graph contains a
+	// cycle, but the contract is FIFO either way.)
+	s.drainBufferedTriggersIfFree(name, scheduleSuccessors)
 	return nil
+}
+
+// drainBufferedTriggersIfFree pops the next pending trigger for
+// name, if the node is now free of in-flight activations and
+// scheduling is still enabled. Called from every code path in
+// handleCompletion so a buffered trigger never gets stranded.
+//
+// Only the head of the buffer is dispatched; subsequent buffered
+// triggers will be dispatched one-by-one as each activation
+// completes. This preserves the per-name serialisation that
+// stateful fan-in nodes rely on.
+func (s *scheduler) drainBufferedTriggersIfFree(name string, scheduleSuccessors bool) {
+	if !scheduleSuccessors {
+		// Workflow is draining; drop pending triggers for this
+		// name. (They cannot escape into a cancelled engine.)
+		delete(s.triggerBuffer, name)
+		return
+	}
+	if s.runningByName[name] > 0 {
+		return
+	}
+	pending, ok := s.triggerBuffer[name]
+	if !ok || len(pending) == 0 {
+		return
+	}
+	next := pending[0]
+	if len(pending) == 1 {
+		delete(s.triggerBuffer, name)
+	} else {
+		s.triggerBuffer[name] = pending[1:]
+	}
+	node := s.nodesByName[name]
+	if node == nil {
+		return
+	}
+	s.activate(node, next.input, next.triggeredBy)
 }
 
 // successor is the per-target dispatch tuple produced by
