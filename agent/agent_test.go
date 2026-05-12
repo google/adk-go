@@ -121,11 +121,10 @@ func TestAgentCallbacks(t *testing.T) {
 				t.Fatalf("failed to create agent: %v", err)
 			}
 
-			ctx := &invocationContext{
-				Context: t.Context(),
-				agent:   testAgent,
-				session: &mockSession{sessionID: "test-session"},
-			}
+			ctx := NewInvocationContext(t.Context(), InvocationContextParams{
+				Agent:   testAgent,
+				Session: &mockSession{sessionID: "test-session"},
+			})
 			var gotEvents []*session.Event
 			for event, err := range testAgent.Run(ctx) {
 				if err != nil {
@@ -168,12 +167,11 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	ctx := &invocationContext{
-		Context:       t.Context(),
-		agent:         testAgent,
-		endInvocation: true,
-		session:       &mockSession{sessionID: "test-session"},
-	}
+	ctx := NewInvocationContext(t.Context(), InvocationContextParams{
+		Agent:         testAgent,
+		Session:       &mockSession{sessionID: "test-session"},
+		EndInvocation: true,
+	})
 	for _, err := range testAgent.Run(ctx) {
 		if err != nil {
 			t.Fatalf("unexpected error from the agent: %v", err)
@@ -203,11 +201,10 @@ func TestEndInvocation_EndsAfterMainCall(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	ctx := &invocationContext{
-		Context: t.Context(),
-		agent:   testAgent,
-		session: &mockSession{sessionID: "test-session"},
-	}
+	ctx := NewInvocationContext(t.Context(), InvocationContextParams{
+		Agent:   testAgent,
+		Session: &mockSession{sessionID: "test-session"},
+	})
 	var gotEvents []*session.Event
 	for event, err := range testAgent.Run(ctx) {
 		if err != nil {
@@ -261,11 +258,10 @@ type testKey struct{}
 
 func TestWithContext(t *testing.T) {
 	baseCtx := t.Context()
-	inv := &invocationContext{
-		Context:      baseCtx,
-		invocationID: "test",
-		branch:       "branch",
-	}
+	inv := NewInvocationContext(baseCtx, InvocationContextParams{
+		InvocationID: "test",
+		Branch:       "branch",
+	})
 
 	key := testKey{}
 	val := "val"
@@ -274,8 +270,11 @@ func TestWithContext(t *testing.T) {
 	if got.Value(key) != val {
 		t.Errorf("WithContext() did not update context")
 	}
-	if diff := cmp.Diff(inv, got, cmp.AllowUnexported(invocationContext{}), cmpopts.IgnoreFields(invocationContext{}, "Context")); diff != "" {
-		t.Errorf("WithContext() params mismatch (-want +got):\n%s", diff)
+	if got.InvocationID() != inv.InvocationID() {
+		t.Errorf("WithContext() lost InvocationID")
+	}
+	if got.Branch() != inv.Branch() {
+		t.Errorf("WithContext() lost Branch")
 	}
 }
 

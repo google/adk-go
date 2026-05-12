@@ -170,19 +170,17 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		})
 		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
-		ctx := &invocationContext{
-			Context:   ctx.WithContext(spanCtx),
-			agent:     a,
-			artifacts: ctx.Artifacts(),
-			memory:    ctx.Memory(),
-			session:   ctx.Session(),
-
-			invocationID:  ctx.InvocationID(),
-			branch:        ctx.Branch(),
-			userContent:   ctx.UserContent(),
-			runConfig:     ctx.RunConfig(),
-			endInvocation: ctx.Ended(),
-		}
+		ctx := NewInvocationContext(ctx.WithContext(spanCtx), InvocationContextParams{
+			Agent:         a,
+			Artifacts:     ctx.Artifacts(),
+			Memory:        ctx.Memory(),
+			Session:       ctx.Session(),
+			InvocationID:  ctx.InvocationID(),
+			Branch:        ctx.Branch(),
+			UserContent:   ctx.UserContent(),
+			RunConfig:     ctx.RunConfig(),
+			EndInvocation: ctx.Ended(),
+		})
 		event, err := runBeforeAgentCallbacks(ctx)
 		if event != nil || err != nil {
 			if !yield(event, err) {
@@ -248,11 +246,10 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
 	pluginManager := pluginManagerFromContext(ctx)
 
-	callbackCtx := &callbackContext{
-		Context:           ctx,
-		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
-	}
+	stateDelta := make(map[string]any)
+	artifactDelta := make(map[string]int64)
+	actions := &session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta}
+	callbackCtx := NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunBeforeAgentCallback(callbackCtx)
@@ -266,7 +263,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			}
 			event.Author = agent.Name()
 			event.Branch = ctx.Branch()
-			event.Actions = *callbackCtx.actions
+			event.Actions = *actions
 			ctx.EndInvocation()
 			return event, nil
 		}
@@ -287,17 +284,17 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		}
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *callbackCtx.actions
+		event.Actions = *actions
 		ctx.EndInvocation()
 		return event, nil
 	}
 
 	// check if has delta create event with it
-	if len(callbackCtx.actions.StateDelta) > 0 {
+	if len(actions.StateDelta) > 0 {
 		event := session.NewEvent(ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *callbackCtx.actions
+		event.Actions = *actions
 		return event, nil
 	}
 
@@ -310,11 +307,10 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
 	pluginManager := pluginManagerFromContext(ctx)
 
-	callbackCtx := &callbackContext{
-		Context:           ctx,
-		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
-	}
+	stateDelta := make(map[string]any)
+	artifactDelta := make(map[string]int64)
+	actions := &session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta}
+	callbackCtx := NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunAfterAgentCallback(callbackCtx)
@@ -328,7 +324,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			}
 			event.Author = agent.Name()
 			event.Branch = ctx.Branch()
-			event.Actions = *callbackCtx.actions
+			event.Actions = *actions
 			return event, nil
 		}
 	}
@@ -348,160 +344,21 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		}
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *callbackCtx.actions
+		event.Actions = *actions
 		// TODO set context invocation ended
 		// ctx.invocationEnded = true
 		return event, nil
 	}
 
 	// check if has delta create event with it
-	if len(callbackCtx.actions.StateDelta) > 0 {
+	if len(actions.StateDelta) > 0 {
 		event := session.NewEvent(ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *callbackCtx.actions
+		event.Actions = *actions
 		return event, nil
 	}
 	return nil, nil
-}
-
-// TODO: unify with internal/context.callbackContext
-
-type callbackContext struct {
-	context.Context
-	invocationContext InvocationContext
-	actions           *session.EventActions
-}
-
-func (c *callbackContext) AgentName() string {
-	return c.invocationContext.Agent().Name()
-}
-
-func (c *callbackContext) ReadonlyState() session.ReadonlyState {
-	return c.invocationContext.Session().State()
-}
-
-func (c *callbackContext) State() session.State {
-	return &callbackContextState{ctx: c}
-}
-
-func (c *callbackContext) Artifacts() Artifacts {
-	return c.invocationContext.Artifacts()
-}
-
-func (c *callbackContext) InvocationID() string {
-	return c.invocationContext.InvocationID()
-}
-
-func (c *callbackContext) UserContent() *genai.Content {
-	return c.invocationContext.UserContent()
-}
-
-// AppName implements CallbackContext.
-func (c *callbackContext) AppName() string {
-	return c.invocationContext.Session().AppName()
-}
-
-// Branch implements CallbackContext.
-func (c *callbackContext) Branch() string {
-	return c.invocationContext.Branch()
-}
-
-// SessionID implements CallbackContext.
-func (c *callbackContext) SessionID() string {
-	return c.invocationContext.Session().ID()
-}
-
-// UserID implements CallbackContext.
-func (c *callbackContext) UserID() string {
-	return c.invocationContext.Session().UserID()
-}
-
-var _ CallbackContext = (*callbackContext)(nil)
-
-type callbackContextState struct {
-	ctx *callbackContext
-}
-
-func (c *callbackContextState) Get(key string) (any, error) {
-	if c.ctx.actions != nil && c.ctx.actions.StateDelta != nil {
-		if val, ok := c.ctx.actions.StateDelta[key]; ok {
-			return val, nil
-		}
-	}
-	return c.ctx.invocationContext.Session().State().Get(key)
-}
-
-func (c *callbackContextState) Set(key string, val any) error {
-	if c.ctx.actions != nil && c.ctx.actions.StateDelta != nil {
-		c.ctx.actions.StateDelta[key] = val
-	}
-	return c.ctx.invocationContext.Session().State().Set(key, val)
-}
-
-func (c *callbackContextState) All() iter.Seq2[string, any] {
-	return c.ctx.invocationContext.Session().State().All()
-}
-
-type invocationContext struct {
-	context.Context
-
-	agent     Agent
-	artifacts Artifacts
-	memory    Memory
-	session   session.Session
-
-	invocationID  string
-	branch        string
-	userContent   *genai.Content
-	runConfig     *RunConfig
-	endInvocation bool
-}
-
-func (c *invocationContext) Agent() Agent {
-	return c.agent
-}
-
-func (c *invocationContext) Artifacts() Artifacts {
-	return c.artifacts
-}
-
-func (c *invocationContext) Memory() Memory {
-	return c.memory
-}
-
-func (c *invocationContext) Session() session.Session {
-	return c.session
-}
-
-func (c *invocationContext) InvocationID() string {
-	return c.invocationID
-}
-
-func (c *invocationContext) Branch() string {
-	return c.branch
-}
-
-func (c *invocationContext) UserContent() *genai.Content {
-	return c.userContent
-}
-
-func (c *invocationContext) RunConfig() *RunConfig {
-	return c.runConfig
-}
-
-func (c *invocationContext) EndInvocation() {
-	c.endInvocation = true
-}
-
-func (c *invocationContext) Ended() bool {
-	return c.endInvocation
-}
-
-func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
-	newCtx := *c
-	newCtx.Context = ctx
-	return &newCtx
 }
 
 func pluginManagerFromContext(ctx context.Context) pluginManager {
@@ -517,5 +374,3 @@ type pluginManager interface {
 	RunBeforeAgentCallback(cctx CallbackContext) (*genai.Content, error)
 	RunAfterAgentCallback(cctx CallbackContext) (*genai.Content, error)
 }
-
-var _ InvocationContext = (*invocationContext)(nil)
