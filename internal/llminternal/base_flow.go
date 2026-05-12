@@ -488,6 +488,21 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								cleanup()
 								return
 							}
+							// Check if task_completed was invoked.
+							var isTaskCompleted bool
+							if respEv.LLMResponse.Content != nil {
+								for _, part := range respEv.LLMResponse.Content.Parts {
+									if part.FunctionResponse != nil && part.FunctionResponse.Name == "task_completed" {
+										isTaskCompleted = true
+										break
+									}
+								}
+							}
+							if isTaskCompleted {
+								time.Sleep(100 * time.Millisecond)
+								cleanup()
+								return
+							}
 							// Send function response back to model
 							if err := liveConn.SendContent(connCtx, respEv.LLMResponse.Content); err != nil {
 								sess.pushError(err)
