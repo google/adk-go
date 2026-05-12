@@ -101,7 +101,7 @@ func TestSequentialWorkflow(t *testing.T) {
 	nodeB := NewFunctionNode("suffix", suffixFn, defaultNodeConfig)
 
 	edges := Chain(Start, nodeA, nodeB)
-	
+
 	w, err := New(edges)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -232,10 +232,10 @@ func TestWorkflowRouting(t *testing.T) {
 	}
 
 	type testCase struct {
-		name           string
-		startRoutes    []string
-		edges          func(nodeStart *CustomRouteNode, nodeA, nodeB *FunctionNode, nodeC *CustomRouteNode, nodeD *FunctionNode) []Edge
-		expectedExec   []string
+		name         string
+		startRoutes  []string
+		edges        func(nodeStart *CustomRouteNode, nodeA, nodeB *FunctionNode, nodeC *CustomRouteNode, nodeD *FunctionNode) []Edge
+		expectedExec []string
 	}
 
 	createNodes := func() (*CustomRouteNode, *FunctionNode, *FunctionNode, *CustomRouteNode, *FunctionNode, *testTracker) {

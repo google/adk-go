@@ -64,3 +64,92 @@ func TestUniqueNames(t *testing.T) {
 		})
 	}
 }
+
+func TestStartNodePresent(t *testing.T) {
+	tests := []struct {
+		name           string
+		edges          []Edge
+		expectErrorMsg string
+	}{
+		{
+			name: "with start node",
+			edges: func() []Edge {
+				nodeA := &dummyNode{name: "A"}
+				nodeB := &dummyNode{name: "B"}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+				}
+			}(),
+		},
+		{
+			name: "no start node",
+			edges: func() []Edge {
+				nodeA := &dummyNode{name: "A"}
+				nodeB := &dummyNode{name: "B"}
+				return []Edge{
+					{From: nodeA, To: nodeB},
+				}
+			}(),
+			expectErrorMsg: "no start node found",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateStartNodePresent(tc.edges)
+			if tc.expectErrorMsg != "" {
+				if err == nil {
+					t.Errorf("expected error matching %q, got none", tc.expectErrorMsg)
+				} else if !strings.Contains(err.Error(), tc.expectErrorMsg) {
+					t.Errorf("expected error containing %q, got %v", tc.expectErrorMsg, err)
+				}
+			}
+		})
+	}
+}
+
+func TestStartNodeNoIncomingEdges(t *testing.T) {
+	tests := []struct {
+		name           string
+		edges          []Edge
+		expectErrorMsg string
+	}{
+		{
+			name: "start node with no incoming edges",
+			edges: func() []Edge {
+				nodeA := &dummyNode{name: "A"}
+				nodeB := &dummyNode{name: "B"}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+				}
+			}(),
+		},
+		{
+			name: "start node has incoming edges",
+			edges: func() []Edge {
+				nodeA := &dummyNode{name: "A"}
+				nodeB := &dummyNode{name: "B"}
+				return []Edge{
+					{From: nodeA, To: Start},
+					{From: Start, To: nodeB},
+				}
+			}(),
+			expectErrorMsg: "node points to start node: A",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateStartNodeNoIncoming(tc.edges)
+			if tc.expectErrorMsg != "" {
+				if err == nil {
+					t.Errorf("expected error matching %q, got none", tc.expectErrorMsg)
+				} else if !strings.Contains(err.Error(), tc.expectErrorMsg) {
+					t.Errorf("expected error containing %q, got %v", tc.expectErrorMsg, err)
+				}
+			}
+		})
+	}
+}
