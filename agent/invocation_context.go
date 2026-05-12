@@ -16,11 +16,14 @@ package agent
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 // InvocationContextParams gathers everything NewInvocationContext needs.
@@ -99,10 +102,70 @@ func (c *invocationContext) Ended() bool {
 	return c.params.EndInvocation
 }
 
-func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
+func (c *invocationContext) WithContext(ctx context.Context) Context {
 	newCtx := *c
 	newCtx.Context = ctx
 	return &newCtx
 }
 
-var _ InvocationContext = (*invocationContext)(nil)
+// --- ReadonlyContext methods (delegated to params.Session / params.Agent) ---
+
+func (c *invocationContext) AgentName() string {
+	if c.params.Agent == nil {
+		return ""
+	}
+	return c.params.Agent.Name()
+}
+
+func (c *invocationContext) ReadonlyState() session.ReadonlyState {
+	if c.params.Session == nil {
+		return nil
+	}
+	return c.params.Session.State()
+}
+
+func (c *invocationContext) UserID() string {
+	if c.params.Session == nil {
+		return ""
+	}
+	return c.params.Session.UserID()
+}
+
+func (c *invocationContext) AppName() string {
+	if c.params.Session == nil {
+		return ""
+	}
+	return c.params.Session.AppName()
+}
+
+func (c *invocationContext) SessionID() string {
+	if c.params.Session == nil {
+		return ""
+	}
+	return c.params.Session.ID()
+}
+
+// --- Context-only methods ---
+
+func (c *invocationContext) State() session.State {
+	if c.params.Session == nil {
+		return nil
+	}
+	return c.params.Session.State()
+}
+
+func (c *invocationContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	if c.params.Memory == nil {
+		return nil, fmt.Errorf("memory service is not set")
+	}
+	return c.params.Memory.SearchMemory(ctx, query)
+}
+
+// --- Tool-call site methods (zero/error outside a tool call) ---
+
+func (c *invocationContext) FunctionCallID() string                               { return "" }
+func (c *invocationContext) Actions() *session.EventActions                       { return nil }
+func (c *invocationContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+func (c *invocationContext) RequestConfirmation(string, any) error                { return ErrOutsideToolCall }
+
+var _ Context = (*invocationContext)(nil)

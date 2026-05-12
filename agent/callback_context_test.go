@@ -18,14 +18,23 @@ import (
 	"testing"
 )
 
-func TestCallbackContext_IsReadonlyButNotInvocation(t *testing.T) {
+// TestCallbackContext_OutOfToolCallReturnsZero verifies the
+// runtime-check pattern for tool-call-only methods on a CallbackContext
+// (which is now an alias of Context).
+func TestCallbackContext_OutOfToolCallReturnsZero(t *testing.T) {
 	inv := NewInvocationContext(t.Context(), InvocationContextParams{})
 	callback := NewCallbackContext(inv)
 
-	if _, ok := callback.(ReadonlyContext); !ok {
-		t.Errorf("CallbackContext(%+T) is unexpectedly not a ReadonlyContext", callback)
+	if got := callback.FunctionCallID(); got != "" {
+		t.Errorf("FunctionCallID() = %q, want empty (callback is not a tool call)", got)
 	}
-	if got, ok := callback.(InvocationContext); ok {
-		t.Errorf("CallbackContext(%+T) is unexpectedly an InvocationContext", got)
+	if got := callback.Actions(); got != nil {
+		t.Errorf("Actions() = %v, want nil (callback is not a tool call)", got)
+	}
+	if got := callback.ToolConfirmation(); got != nil {
+		t.Errorf("ToolConfirmation() = %v, want nil (callback is not a tool call)", got)
+	}
+	if got := callback.RequestConfirmation("hint", nil); got != ErrOutsideToolCall {
+		t.Errorf("RequestConfirmation() error = %v, want ErrOutsideToolCall", got)
 	}
 }

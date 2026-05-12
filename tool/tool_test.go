@@ -148,6 +148,17 @@ func (c *testContext) AppName() string                      { return "test-app" 
 func (c *testContext) Branch() string                       { return "test-branch" }
 func (c *testContext) SessionID() string                    { return "test-session-id" }
 func (c *testContext) UserID() string                       { return "test-user-id" }
+func (c *testContext) Agent() agent.Agent                   { return nil }
+func (c *testContext) Session() session.Session             { return nil }
+func (c *testContext) Memory() agent.Memory                 { return nil }
+func (c *testContext) RunConfig() *agent.RunConfig          { return nil }
+func (c *testContext) EndInvocation()                       {}
+func (c *testContext) Ended() bool                          { return false }
+func (c *testContext) WithContext(ctx context.Context) agent.Context {
+	cp := *c
+	cp.Context = ctx
+	return &cp
+}
 
 type testToolset struct {
 	tools []tool.Tool

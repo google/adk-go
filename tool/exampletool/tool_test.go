@@ -61,6 +61,17 @@ func (m *mockToolContext) AppName() string                                      
 func (m *mockToolContext) Branch() string                                       { return "mock_branch" }
 func (m *mockToolContext) SessionID() string                                    { return "mock_session" }
 func (m *mockToolContext) UserID() string                                       { return "mock_user" }
+func (m *mockToolContext) Agent() agent.Agent                                   { return nil }
+func (m *mockToolContext) Session() session.Session                             { return nil }
+func (m *mockToolContext) Memory() agent.Memory                                 { return nil }
+func (m *mockToolContext) RunConfig() *agent.RunConfig                          { return nil }
+func (m *mockToolContext) EndInvocation()                                       {}
+func (m *mockToolContext) Ended() bool                                          { return false }
+func (m *mockToolContext) WithContext(ctx context.Context) agent.Context {
+	cp := *m
+	cp.Context = ctx
+	return &cp
+}
 
 // --- Tests ---
 

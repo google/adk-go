@@ -16,93 +16,30 @@ package agent
 
 import (
 	"context"
+	"errors"
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
-/*
-InvocationContext represents the context of an agent invocation.
-
-An invocation:
- 1. Starts with a user message and ends with a final response.
- 2. Can contain one or multiple agent calls.
- 3. Is handled by runner.Run().
-
-An invocation runs an agent until it does not request to transfer to another
-agent.
-
-An agent call:
- 1. Is handled by agent.Run().
- 2. Ends when agent.Run() ends.
-
-An agent call can contain one or multiple steps.
-For example, LLM agent runs steps in a loop until:
- 1. A final response is generated.
- 2. The agent transfers to another agent.
- 3. EndInvocation() was called by the invocation context.
-
-A step:
- 1. Calls the LLM only once and yields its response.
- 2. Calls the tools and yields their responses if requested.
-
-The summarization of the function response is considered another step, since
-it is another LLM call.
-A step ends when it's done calling LLM and tools, or if the EndInvocation() was
-called by invocation context at any time.
-
-	┌─────────────────────── invocation ──────────────────────────┐
-	┌──────────── llm_agent_call_1 ────────────┐ ┌─ agent_call_2 ─┐
-	┌──── step_1 ────────┐ ┌───── step_2 ──────┐
-	[call_llm] [call_tool] [call_llm] [transfer]
-*/
-type InvocationContext interface {
-	context.Context
-
-	// Agent of this invocation context.
-	Agent() Agent
-
-	// Artifacts of the current session.
-	Artifacts() Artifacts
-
-	// Memory is scoped to sessions of the current user_id.
-	Memory() Memory
-
-	// Session of the current invocation context.
-	Session() session.Session
-
-	InvocationID() string
-
-	// Branch of the invocation context.
-	// The format is like agent_1.agent_2.agent_3, where agent_1 is the parent
-	// of agent_2, and agent_2 is the parent of agent_3.
-	//
-	// Branch is used when multiple sub-agents shouldn't see their peer agents'
-	// conversation history.
-	//
-	// Applicable to parallel agent because its sub-agents run concurrently.
-	Branch() string
-
-	// UserContent that started this invocation.
-	UserContent() *genai.Content
-
-	// RunConfig stores the runtime configuration used during this invocation.
-	RunConfig() *RunConfig
-
-	// EndInvocation ends the current invocation. This stops any planned agent
-	// calls.
-	EndInvocation()
-	// Ended returns whether the invocation has ended.
-	Ended() bool
-
-	// WithContext returns a new instance of the context with overridden embedded context.
-	// NOTE: This is a temporary solution and will be removed later. The proper solution
-	// we plan is to stop embedding go context in adk context types and split it.
-	WithContext(ctx context.Context) InvocationContext
-}
+// ErrOutsideToolCall is returned by Context.RequestConfirmation (and
+// other tool-call-only mutating operations) when called on a Context
+// that wasn't produced by a tool dispatcher. Callbacks and agent-level
+// code can detect this to know they're not inside a tool call.
+var ErrOutsideToolCall = errors.New("agent: tool-only operation called outside a tool call")
 
 // ReadonlyContext provides read-only access to invocation context data.
+//
+// Used in narrow callsites where mutation must be impossible at compile
+// time (e.g. InstructionProvider, Predicate, Toolset.Tools). For the
+// common case, use Context (which embeds ReadonlyContext and adds the
+// full capability surface).
+//
+// Mirrors adk-python's `class ReadonlyContext` (kept as the parent
+// class of `Context` for the same compile-time read-only purpose).
 type ReadonlyContext interface {
 	context.Context
 
@@ -119,10 +56,102 @@ type ReadonlyContext interface {
 	Branch() string
 }
 
-// CallbackContext is passed to user callbacks during agent execution.
-type CallbackContext interface {
+/*
+Context is the unified user-facing context for ADK 2.0. Every callback,
+tool, and agent code path receives a value implementing this interface.
+The historical context types (InvocationContext, CallbackContext,
+tool.Context) are now type aliases of Context.
+
+Context embeds ReadonlyContext to expose its 8 read-only methods, then
+adds mutating session/state/artifact access, memory, lifecycle control,
+and tool-call-site capabilities. Tool-call-only methods (FunctionCallID,
+Actions, ToolConfirmation, RequestConfirmation) follow a runtime-check
+pattern: when called on a Context not produced by a tool dispatcher,
+pollable accessors return zero values and mutating operations return
+ErrOutsideToolCall.
+
+Mirrors adk-python's `class Context(ReadonlyContext)` model.
+
+An invocation:
+ 1. Starts with a user message and ends with a final response.
+ 2. Can contain one or multiple agent calls.
+ 3. Is handled by runner.Run().
+
+An invocation runs an agent until it does not request to transfer to
+another agent.
+
+An agent call:
+ 1. Is handled by agent.Run().
+ 2. Ends when agent.Run() ends.
+
+An agent call can contain one or multiple steps. For example, an LLM
+agent runs steps in a loop until:
+ 1. A final response is generated.
+ 2. The agent transfers to another agent.
+ 3. EndInvocation() was called by the invocation context.
+
+A step:
+ 1. Calls the LLM only once and yields its response.
+ 2. Calls the tools and yields their responses if requested.
+
+The summarization of the function response is considered another step,
+since it is another LLM call. A step ends when it's done calling the
+LLM and tools, or if EndInvocation() was called by the invocation
+context at any time.
+
+	┌─────────────────────── invocation ──────────────────────────┐
+	┌──────────── llm_agent_call_1 ────────────┐ ┌─ agent_call_2 ─┐
+	┌──── step_1 ────────┐ ┌───── step_2 ──────┐
+	[call_llm] [call_tool] [call_llm] [transfer]
+*/
+type Context interface {
 	ReadonlyContext
 
-	Artifacts() Artifacts
+	// Identity / framework objects.
+	Agent() Agent
+
+	// Session and state (mutable view).
+	Session() session.Session
 	State() session.State
+
+	// Artifacts service (Save records into Actions().ArtifactDelta when
+	// the Context was produced by a callback or tool dispatcher).
+	Artifacts() Artifacts
+
+	// Memory access.
+	Memory() Memory
+	SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error)
+
+	// Lifecycle.
+	RunConfig() *RunConfig
+	// EndInvocation ends the current invocation. This stops any planned
+	// agent calls.
+	EndInvocation()
+	// Ended reports whether the invocation has ended.
+	Ended() bool
+
+	// WithContext returns a new Context with the embedded
+	// context.Context replaced.
+	//
+	// NOTE: This is a temporary solution and will be removed later. The
+	// proper solution we plan is to stop embedding go context in adk
+	// context types and split it.
+	WithContext(ctx context.Context) Context
+
+	// Tool-call site capabilities. When called on a Context not
+	// produced by a tool dispatcher, FunctionCallID returns "", Actions
+	// and ToolConfirmation return nil, and RequestConfirmation returns
+	// ErrOutsideToolCall.
+	FunctionCallID() string
+	Actions() *session.EventActions
+	ToolConfirmation() *toolconfirmation.ToolConfirmation
+	RequestConfirmation(hint string, payload any) error
 }
+
+// InvocationContext is an alias for Context. Kept for backward
+// compatibility; new code should use Context directly.
+type InvocationContext = Context
+
+// CallbackContext is an alias for Context. Kept for backward
+// compatibility; new code should use Context directly.
+type CallbackContext = Context

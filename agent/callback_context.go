@@ -64,12 +64,10 @@ func NewCallbackContextWithDelta(ctx InvocationContext, stateDelta map[string]an
 }
 
 func newCallbackContext(ctx InvocationContext, stateDelta map[string]any, artifactDelta map[string]int64) *callbackContext {
-	rCtx := NewReadonlyContext(ctx)
 	eventActions := &session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta}
 	return &callbackContext{
-		ReadonlyContext: rCtx,
-		invocationCtx:   ctx,
-		eventActions:    eventActions,
+		InvocationContext: ctx,
+		eventActions:      eventActions,
 		artifacts: &internalArtifacts{
 			Artifacts:    ctx.Artifacts(),
 			eventActions: eventActions,
@@ -78,40 +76,32 @@ func newCallbackContext(ctx InvocationContext, stateDelta map[string]any, artifa
 }
 
 // callbackContext is the canonical implementation of CallbackContext.
-// Construct via NewCallbackContext or NewCallbackContextWithDelta.
+// Embeds the wrapped InvocationContext so all 17 Context methods are
+// promoted; only Artifacts and State are overridden to plug in
+// delta-tracking against the supplied EventActions. Construct via
+// NewCallbackContext or NewCallbackContextWithDelta.
 type callbackContext struct {
-	ReadonlyContext
-	artifacts     *internalArtifacts
-	invocationCtx InvocationContext
-	eventActions  *session.EventActions
+	InvocationContext
+	artifacts    *internalArtifacts
+	eventActions *session.EventActions
 }
 
+// Artifacts overrides InvocationContext.Artifacts to return a wrapper
+// that records Save() into eventActions.ArtifactDelta.
 func (c *callbackContext) Artifacts() Artifacts {
 	return c.artifacts
 }
 
-func (c *callbackContext) AgentName() string {
-	return c.invocationCtx.Agent().Name()
-}
-
-func (c *callbackContext) ReadonlyState() session.ReadonlyState {
-	return c.invocationCtx.Session().State()
-}
-
+// State overrides InvocationContext.State to return a wrapper that
+// records Set() into eventActions.StateDelta.
 func (c *callbackContext) State() session.State {
 	return &callbackContextState{ctx: c}
 }
 
-func (c *callbackContext) InvocationID() string {
-	return c.invocationCtx.InvocationID()
-}
+var _ Context = (*callbackContext)(nil)
 
-func (c *callbackContext) UserContent() *genai.Content {
-	return c.invocationCtx.UserContent()
-}
-
-var _ CallbackContext = (*callbackContext)(nil)
-
+// callbackContextState is a delta-tracking session.State wrapper used
+// by callbackContext.State.
 type callbackContextState struct {
 	ctx *callbackContext
 }
@@ -122,16 +112,16 @@ func (c *callbackContextState) Get(key string) (any, error) {
 			return val, nil
 		}
 	}
-	return c.ctx.invocationCtx.Session().State().Get(key)
+	return c.ctx.InvocationContext.Session().State().Get(key)
 }
 
 func (c *callbackContextState) Set(key string, val any) error {
 	if c.ctx.eventActions != nil && c.ctx.eventActions.StateDelta != nil {
 		c.ctx.eventActions.StateDelta[key] = val
 	}
-	return c.ctx.invocationCtx.Session().State().Set(key, val)
+	return c.ctx.InvocationContext.Session().State().Set(key, val)
 }
 
 func (c *callbackContextState) All() iter.Seq2[string, any] {
-	return c.ctx.invocationCtx.Session().State().All()
+	return c.ctx.InvocationContext.Session().State().All()
 }
