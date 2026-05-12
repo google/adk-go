@@ -70,7 +70,11 @@ func main() {
 		log.Fatalf("Failed to create streaming tool: %v", err)
 	}
 
-	// Define a standard tool to stop streaming (mock).
+	// Define a standard tool to stop streaming.
+	// Note: While defined here so that the model is aware of the tool declaration,
+	// during live bidirectional streaming the ADK Live Control Plane intercepts
+	// calls to "stop_streaming" dynamically. It will bulk-cancel the context for
+	// all running background goroutines executing that specific streaming tool name.
 	stopTool, err := functiontool.New(functiontool.Config{
 		Name:        "stop_streaming",
 		Description: "Stops a running streaming function.",
