@@ -19,36 +19,13 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/artifact"
-	contextinternal "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/toolconfirmation"
 )
-
-type internalArtifacts struct {
-	agent.Artifacts
-	eventActions *session.EventActions
-}
-
-func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
-	resp, err := ia.Artifacts.Save(ctx, name, data)
-	if err != nil {
-		return resp, err
-	}
-	if ia.eventActions != nil {
-		if ia.eventActions.ArtifactDelta == nil {
-			ia.eventActions.ArtifactDelta = make(map[string]int64)
-		}
-		// TODO: RWLock, check the version stored is newer in case multiple tools save the same file.
-		ia.eventActions.ArtifactDelta[name] = resp.Version
-	}
-	return resp, nil
-}
 
 func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) tool.Context {
 	if functionCallID == "" {
@@ -63,18 +40,17 @@ func NewToolContext(ctx agent.InvocationContext, functionCallID string, actions 
 	if actions.ArtifactDelta == nil {
 		actions.ArtifactDelta = make(map[string]int64)
 	}
-	cbCtx := contextinternal.NewCallbackContextWithDelta(ctx, actions.StateDelta, actions.ArtifactDelta)
+	// NewCallbackContextWithDelta already wraps Artifacts with delta
+	// tracking against the supplied EventActions, so toolContext just
+	// inherits Artifacts() from the embedded CallbackContext.
+	cbCtx := agent.NewCallbackContextWithDelta(ctx, actions.StateDelta, actions.ArtifactDelta)
 
 	return &toolContext{
 		CallbackContext:   cbCtx,
 		invocationContext: ctx,
 		functionCallID:    functionCallID,
 		eventActions:      actions,
-		artifacts: &internalArtifacts{
-			Artifacts:    ctx.Artifacts(),
-			eventActions: actions,
-		},
-		toolConfirmation: confirmation,
+		toolConfirmation:  confirmation,
 	}
 }
 
@@ -83,12 +59,7 @@ type toolContext struct {
 	invocationContext agent.InvocationContext
 	functionCallID    string
 	eventActions      *session.EventActions
-	artifacts         *internalArtifacts
 	toolConfirmation  *toolconfirmation.ToolConfirmation
-}
-
-func (c *toolContext) Artifacts() agent.Artifacts {
-	return c.artifacts
 }
 
 func (c *toolContext) FunctionCallID() string {

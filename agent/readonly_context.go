@@ -75,3 +75,15 @@ func (c *readonlyContext) UserContent() *genai.Content {
 }
 
 var _ ReadonlyContext = (*readonlyContext)(nil)
+
+// InvocationOf returns the underlying InvocationContext for ReadonlyContexts
+// produced by NewReadonlyContext. Returns nil for any other ReadonlyContext
+// implementation. Used by code that needs the wider invocation surface
+// (e.g. instruction template rendering).
+func InvocationOf(rc ReadonlyContext) InvocationContext {
+	impl, ok := rc.(*readonlyContext)
+	if !ok {
+		return nil
+	}
+	return impl.InvocationContext
+}
