@@ -65,7 +65,8 @@ type PluginConfig struct {
 type RunOption func(*runOptions)
 
 type runOptions struct {
-	stateDelta map[string]any
+	stateDelta          map[string]any
+	invocationID  string
 }
 
 // WithStateDelta sets a state delta for the run invocation.
@@ -73,6 +74,12 @@ func WithStateDelta(delta map[string]any) RunOption {
 	return func(o *runOptions) {
 		o.stateDelta = delta
 	}
+}
+
+// WithInvocationID sets the invocation ID for the run.
+// When omitted, a new ID is generated automatically.
+func WithInvocationID(id string) RunOption {
+	return func(o *runOptions) { o.invocationID = id }
 }
 
 // New creates a new [Runner].
@@ -196,12 +203,13 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 
 		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-			Artifacts:   artifacts,
-			Memory:      memoryImpl,
-			Session:     storedSession,
-			Agent:       agentToRun,
-			UserContent: msg,
-			RunConfig:   &cfg,
+			Artifacts:    artifacts,
+			Memory:       memoryImpl,
+			Session:      storedSession,
+			Agent:        agentToRun,
+			UserContent:  msg,
+			RunConfig:    &cfg,
+			InvocationID: options.invocationID,
 		})
 		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {

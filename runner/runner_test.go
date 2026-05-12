@@ -447,3 +447,61 @@ func TestRunner_AutoCreateSession(t *testing.T) {
 		})
 	}
 }
+
+func TestWithInvocationID(t *testing.T) {
+	t.Parallel()
+
+	const wantInvocationID = "e-test-invocation-id"
+
+	var gotInvocationID string
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx.InvocationID())
+				ev.Author = "test_agent"
+				ev.LLMResponse = model.LLMResponse{
+					Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "hello"}}},
+				}
+				yield(ev, nil)
+			}
+		},
+	}))
+
+	ctx := context.Background()
+	sessionService := session.InMemoryService()
+
+	_, err := sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "sess",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	r, err := New(Config{
+		AppName:           "app",
+		Agent:             testAgent,
+		SessionService:    sessionService,
+		AutoCreateSession: false,
+	})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+
+	for ev, err := range r.Run(ctx, "user", "sess", nil, agent.RunConfig{},
+		WithInvocationID(wantInvocationID),
+	) {
+		if err != nil {
+			t.Fatalf("run error: %v", err)
+		}
+		if ev != nil && gotInvocationID == "" {
+			gotInvocationID = ev.InvocationID
+		}
+	}
+
+	if gotInvocationID != wantInvocationID {
+		t.Errorf("invocation ID = %q, want %q", gotInvocationID, wantInvocationID)
+	}
+}
