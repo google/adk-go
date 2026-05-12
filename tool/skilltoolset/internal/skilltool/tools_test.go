@@ -22,7 +22,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/skilltoolset/internal/skilltool"
@@ -75,7 +75,7 @@ func (m *mockSource) LoadResource(ctx context.Context, name, resourcePath string
 }
 
 func createToolContext(t *testing.T) tool.Context {
-	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	invCtx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{})
 	return toolinternal.NewToolContext(invCtx, "", nil, nil)
 }
 

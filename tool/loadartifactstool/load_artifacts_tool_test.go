@@ -21,9 +21,9 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	artifactinternal "google.golang.org/adk/internal/artifact"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
@@ -287,7 +287,7 @@ func createToolContext(t *testing.T) tool.Context {
 		SessionID: "session",
 	}
 
-	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+	ctx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
 		Artifacts: artifacts,
 	})
 

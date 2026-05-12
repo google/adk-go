@@ -22,7 +22,7 @@ import (
 
 	"google.golang.org/genai"
 
-	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -173,7 +173,7 @@ func TestLoadMemoryTool_ProcessRequest(t *testing.T) {
 func createToolContext(t *testing.T, mem *mockMemory) tool.Context {
 	t.Helper()
 
-	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+	ctx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
 		Memory: mem,
 	})
 

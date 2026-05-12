@@ -26,7 +26,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
@@ -46,8 +45,8 @@ func okFunc(_ tool.Context, _ SimpleArgs) (string, error) {
 }
 
 func TestBeforeModelCallback(t *testing.T) {
-	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	ctx := icontext.NewCallbackContextWithDelta(invCtx, nil, nil)
+	invCtx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{})
+	ctx := agent.NewCallbackContextWithDelta(invCtx, nil, nil)
 
 	transferTool := &llminternal.TransferToAgentTool{}
 	transferToolDecl := transferTool.Declaration()
@@ -263,10 +262,10 @@ func TestAfterModelCallback(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to create session: %v", err)
 			}
-			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			invCtx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
 				Session: sesResp.Session,
 			})
-			ctx := icontext.NewCallbackContextWithDelta(invCtx, nil, nil)
+			ctx := agent.NewCallbackContextWithDelta(invCtx, nil, nil)
 
 			afterModelCallback := plugin.AfterModelCallback()
 			if _, err := afterModelCallback(ctx, &model.LLMResponse{Content: tc.content}, nil); err != nil {

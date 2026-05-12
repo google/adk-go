@@ -23,7 +23,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/server/adka2a/v2"
@@ -293,7 +292,7 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			agnt := utils.Must(agent.New(agent.Config{}))
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			ctx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
 				Agent: agnt,
 			})
 

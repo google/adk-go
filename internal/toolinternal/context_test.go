@@ -18,12 +18,11 @@ import (
 	"testing"
 
 	"google.golang.org/adk/agent"
-	contextinternal "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/session"
 )
 
 func TestToolContext(t *testing.T) {
-	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
+	inv := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{})
 	toolCtx := NewToolContext(inv, "fn1", &session.EventActions{}, nil)
 
 	if _, ok := toolCtx.(agent.ReadonlyContext); !ok {
@@ -35,7 +34,7 @@ func TestToolContext(t *testing.T) {
 }
 
 func TestRequestConfirmation_SetsSkipSummarization(t *testing.T) {
-	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
+	inv := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{})
 	actions := &session.EventActions{}
 	toolCtx := NewToolContext(inv, "fn1", actions, nil)
 
@@ -64,7 +63,7 @@ func TestRequestConfirmation_SetsSkipSummarization(t *testing.T) {
 }
 
 func TestRequestConfirmation_AutoGeneratesIDWhenEmpty(t *testing.T) {
-	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
+	inv := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{})
 	actions := &session.EventActions{}
 	// NewToolContext auto-generates a UUID when functionCallID is empty.
 	toolCtx := NewToolContext(inv, "", actions, nil)

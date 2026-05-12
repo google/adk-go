@@ -23,7 +23,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
@@ -360,7 +359,7 @@ func createToolContext(t *testing.T, testAgent agent.Agent) tool.Context {
 		t.Fatalf("Failed to create session: %v", err)
 	}
 
-	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+	ctx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
 		Session: createResponse.Session,
 	})
 

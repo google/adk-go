@@ -26,7 +26,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -222,7 +221,7 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 				IncludeContents: tc.includeContents,
 			}))
 
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			ctx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
 				Agent: testAgent,
 				Session: &fakeSession{
 					events: tc.events,
@@ -427,7 +426,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 				Model: testModel,
 			}))
 
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			ctx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
 				Agent:  testAgent,
 				Branch: tc.branch,
 				Session: &fakeSession{
@@ -562,7 +561,7 @@ func TestContentsRequestProcessor_NonLLMAgent(t *testing.T) {
 		Name: "test_agent",
 	}))
 
-	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+	ctx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
 		Agent: testAgent,
 	})
 
@@ -914,7 +913,7 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				Model: testModel,
 			}))
 
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			ctx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
 				Agent: testAgent,
 				Session: &fakeSession{
 					events: tc.events,

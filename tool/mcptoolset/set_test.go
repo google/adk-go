@@ -30,8 +30,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/httprr"
 	"google.golang.org/adk/internal/testutil"
 	"google.golang.org/adk/internal/toolinternal"
@@ -231,10 +231,10 @@ func TestToolFilter(t *testing.T) {
 		t.Fatalf("Failed to create MCP tool set: %v", err)
 	}
 
-	tools, err := ts.Tools(icontext.NewReadonlyContext(
-		icontext.NewInvocationContext(
+	tools, err := ts.Tools(agent.NewReadonlyContext(
+		agent.NewInvocationContext(
 			t.Context(),
-			icontext.InvocationContextParams{},
+			agent.InvocationContextParams{},
 		),
 	))
 	if err != nil {
@@ -266,7 +266,7 @@ func TestListToolsReconnection(t *testing.T) {
 		t.Fatalf("Failed to create MCP tool set: %v", err)
 	}
 
-	ctx := icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}))
+	ctx := agent.NewReadonlyContext(agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{}))
 
 	// First call to Tools should create a session.
 	_, err = ts.Tools(ctx)
@@ -305,8 +305,8 @@ func TestCallToolReconnection(t *testing.T) {
 		t.Fatalf("Failed to create MCP tool set: %v", err)
 	}
 
-	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	ctx := icontext.NewReadonlyContext(invCtx)
+	invCtx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{})
+	ctx := agent.NewReadonlyContext(invCtx)
 	toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
 
 	// Get tools first to establish a session.

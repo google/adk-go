@@ -30,7 +30,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
@@ -348,7 +347,7 @@ func TestCompat_RemoteTaskCleanupCallback(t *testing.T) {
 	if err := svc.AppendEvent(ctx, resp.Session, hello); err != nil {
 		t.Fatalf("AppendEvent() error = %v", err)
 	}
-	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+	ic := agent.NewInvocationContext(ctx, agent.InvocationContextParams{
 		Session:   resp.Session,
 		RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
 	})
@@ -448,7 +447,7 @@ func newInvocationContext(t *testing.T, events []*session.Event) agent.Invocatio
 		}
 	}
 
-	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+	ic := agent.NewInvocationContext(ctx, agent.InvocationContextParams{
 		Session: resp.Session,
 		RunConfig: &agent.RunConfig{
 			StreamingMode: agent.StreamingModeSSE,

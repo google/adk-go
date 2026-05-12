@@ -24,7 +24,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -82,7 +81,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -122,7 +121,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -148,7 +147,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -180,7 +179,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		}
 
 		req := &model.LLMRequest{}
-		ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+		ctx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{
 			Agent: mockAgent,
 		})
 
@@ -198,7 +197,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 func TestCreateFinalModelResponseEvent(t *testing.T) {
 	// Setup context
 	a := utils.Must(agent.New(agent.Config{Name: "TestAgent"}))
-	invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+	invCtx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{
 		Agent: a,
 	})
 
@@ -314,7 +313,7 @@ func TestSetModelResponseTool(t *testing.T) {
 	}
 
 	t.Run("RunSuccess", func(t *testing.T) {
-		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+		invCtx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{})
 		toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": 10.0} // JSON numbers often come as float64
@@ -328,7 +327,7 @@ func TestSetModelResponseTool(t *testing.T) {
 	})
 
 	t.Run("RunValidationFailure_Type", func(t *testing.T) {
-		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+		invCtx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{})
 		toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": "not a number"}
@@ -339,7 +338,7 @@ func TestSetModelResponseTool(t *testing.T) {
 	})
 
 	t.Run("RunValidationFailure_MissingRequired", func(t *testing.T) {
-		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+		invCtx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{})
 		toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"other": 123}

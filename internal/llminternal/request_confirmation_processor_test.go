@@ -26,7 +26,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -73,7 +72,7 @@ func newMockLlmAgent() (agent.Agent, []tool.Tool, error) {
 
 func createInvocationContext(t *testing.T, agnt agent.Agent, sess session.Session) agent.InvocationContext {
 	t.Helper()
-	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{
+	ctx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{
 		Agent:   agnt,
 		Session: sess,
 	})

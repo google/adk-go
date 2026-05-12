@@ -32,7 +32,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
-	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
 )
 
@@ -119,7 +119,7 @@ func TestGenerateContentTracing(t *testing.T) {
 		},
 	}
 
-	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+	ctx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{})
 
 	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
 	}
@@ -178,7 +178,7 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 		},
 	}
 
-	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+	ctx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{})
 
 	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
 	}
@@ -238,7 +238,7 @@ func TestGenerateContentTracingError(t *testing.T) {
 		},
 	}
 
-	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+	ctx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{})
 
 	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
 	}
@@ -339,7 +339,7 @@ func TestLoggingSpanIDPropagation(t *testing.T) {
 		},
 	}
 
-	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
+	ctx := agent.NewInvocationContext(context.Background(), agent.InvocationContextParams{})
 	for range generateContent(ctx, modelMock, req, true) {
 	}
 

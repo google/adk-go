@@ -30,7 +30,6 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/agent/parentmap"
 	"google.golang.org/adk/internal/agent/runconfig"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal/googlellm"
 	"google.golang.org/adk/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/internal/telemetry"
@@ -317,7 +316,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 	return func(yield func(*responseWithEventID, error) bool) {
 		pluginManager := pluginManagerFromContext(ctx)
 		if pluginManager != nil {
-			cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+			cctx := agent.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 			callbackResponse, callbackErr := pluginManager.RunBeforeModelCallback(cctx, req)
 			if callbackResponse != nil || callbackErr != nil {
 				yield(newResponseWithEventID(callbackResponse), callbackErr)
@@ -326,7 +325,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		}
 
 		for _, callback := range f.BeforeModelCallbacks {
-			cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+			cctx := agent.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 			callbackResponse, callbackErr := callback(cctx, req)
 
 			if callbackResponse != nil || callbackErr != nil {
@@ -451,7 +450,7 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {
 	pluginManager := pluginManagerFromContext(ctx)
 	if pluginManager != nil {
-		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+		cctx := agent.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 		callbackResponse, callbackErr := pluginManager.RunAfterModelCallback(cctx, llmResp, llmErr)
 		if callbackResponse != nil || callbackErr != nil {
 			return callbackResponse, callbackErr
@@ -459,7 +458,7 @@ func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *mode
 	}
 
 	for _, callback := range f.AfterModelCallbacks {
-		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+		cctx := agent.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 		callbackResponse, callbackErr := callback(cctx, llmResp, llmErr)
 
 		if callbackResponse != nil || callbackErr != nil {
@@ -473,7 +472,7 @@ func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *mode
 func (f *Flow) runOnModelErrorCallbacks(ctx agent.InvocationContext, llmReq *model.LLMRequest, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {
 	pluginManager := pluginManagerFromContext(ctx)
 	if pluginManager != nil {
-		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+		cctx := agent.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 		callbackResponse, callbackErr := pluginManager.RunOnModelErrorCallback(cctx, llmReq, llmErr)
 		if callbackResponse != nil || callbackErr != nil {
 			return callbackResponse, callbackErr
@@ -481,7 +480,7 @@ func (f *Flow) runOnModelErrorCallbacks(ctx agent.InvocationContext, llmReq *mod
 	}
 
 	for _, callback := range f.OnModelErrorCallbacks {
-		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+		cctx := agent.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 		callbackResponse, callbackErr := callback(cctx, llmReq, llmErr)
 
 		if callbackResponse != nil || callbackErr != nil {

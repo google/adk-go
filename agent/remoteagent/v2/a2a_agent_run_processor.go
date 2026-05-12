@@ -23,7 +23,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/converters"
 	"google.golang.org/adk/server/adka2a/v2"
 	"google.golang.org/adk/session"
@@ -206,7 +205,7 @@ func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext
 }
 
 func (p *a2aAgentRunProcessor) runBeforeA2ARequestCallbacks(ctx agent.InvocationContext) (*session.Event, error) {
-	cctx := icontext.NewCallbackContext(ctx)
+	cctx := agent.NewCallbackContext(ctx)
 	for _, callback := range p.config.BeforeRequestCallbacks {
 		if cbResp, cbErr := callback(cctx, p.request); cbResp != nil || cbErr != nil {
 			return cbResp, cbErr
@@ -219,7 +218,7 @@ func (p *a2aAgentRunProcessor) runAfterA2ARequestCallbacks(ctx agent.InvocationC
 	if resp == nil && err == nil {
 		return nil, nil
 	}
-	cctx := icontext.NewCallbackContext(ctx)
+	cctx := agent.NewCallbackContext(ctx)
 	for _, callback := range p.config.AfterRequestCallbacks {
 		if cbEvent, cbErr := callback(cctx, p.request, resp, err); cbEvent != nil || cbErr != nil {
 			return cbEvent, cbErr

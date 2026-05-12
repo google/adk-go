@@ -34,7 +34,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
@@ -116,7 +115,7 @@ func newInvocationContextWithStreamingMode(t *testing.T, events []*session.Event
 	t.Helper()
 	ctx := t.Context()
 	session := prepareSession(t, ctx, events)
-	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+	ic := agent.NewInvocationContext(ctx, agent.InvocationContextParams{
 		Session: session,
 		RunConfig: &agent.RunConfig{
 			StreamingMode: streamingMode,
@@ -1349,7 +1348,7 @@ func TestRemoteAgent_CleanupCallback(t *testing.T) {
 			ictxCtx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			session := prepareSession(t, ictxCtx, []*session.Event{newUserHello()})
-			ictx := icontext.NewInvocationContext(ictxCtx, icontext.InvocationContextParams{
+			ictx := agent.NewInvocationContext(ictxCtx, agent.InvocationContextParams{
 				Session:   session,
 				RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
 			})

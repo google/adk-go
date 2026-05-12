@@ -19,7 +19,6 @@ import (
 	"iter"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
@@ -38,7 +37,7 @@ func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) 
 		}
 		tools := Reveal(llmAgent).Tools
 		for _, toolSet := range Reveal(llmAgent).Toolsets {
-			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
+			tsTools, err := toolSet.Tools(agent.NewReadonlyContext(ctx))
 			if err != nil {
 				yield(nil, fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err))
 				return

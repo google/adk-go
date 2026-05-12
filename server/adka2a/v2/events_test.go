@@ -24,7 +24,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
@@ -512,7 +511,7 @@ func TestToSessionEvent(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Branch: branch, Agent: a2aAgent})
+			ictx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{Branch: branch, Agent: a2aAgent})
 			got, err := ToSessionEvent(ictx, tc.input)
 			if err != nil {
 				t.Errorf("ToSessionEvent() error = %v, want nil", err)
@@ -582,7 +581,7 @@ func TestToSessionEventWithParts_NilResultFiltered(t *testing.T) {
 		},
 	}
 
-	ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Branch: branch, Agent: a2aAgent})
+	ictx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{Branch: branch, Agent: a2aAgent})
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

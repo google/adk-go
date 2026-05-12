@@ -22,7 +22,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -420,7 +419,7 @@ func TestCallTool(t *testing.T) {
 				AfterToolCallbacks:   tc.afterToolCallbacks,
 				OnToolErrorCallbacks: tc.onToolErrorCallbacks,
 			}
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			ctx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{})
 			got := f.callTool(toolinternal.NewToolContext(ctx, "", nil, nil), tc.tool, tc.args)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
@@ -662,7 +661,7 @@ func TestPreprocess_Toolset(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &Flow{}
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: tc.agent})
+			ctx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{Agent: tc.agent})
 			req := &model.LLMRequest{}
 
 			events := f.preprocess(ctx, req)

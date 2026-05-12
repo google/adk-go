@@ -21,7 +21,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 )
@@ -114,7 +113,7 @@ func TestIdentityRequestProcessor(t *testing.T) {
 				}
 			}
 
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			ctx := agent.NewInvocationContext(t.Context(), agent.InvocationContextParams{
 				Agent: tt.agent,
 			})
 
