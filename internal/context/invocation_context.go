@@ -12,92 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package context is a deprecated alias layer over canonical context
+// constructors that now live in package agent. New code should import
+// "google.golang.org/adk/agent" directly.
 package context
 
 import (
-	"context"
-
-	"github.com/google/uuid"
-	"google.golang.org/genai"
-
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
 )
 
-type InvocationContextParams struct {
-	Artifacts agent.Artifacts
-	Memory    agent.Memory
-	Session   session.Session
+// InvocationContextParams is an alias for agent.InvocationContextParams.
+//
+// Deprecated: use agent.InvocationContextParams.
+type InvocationContextParams = agent.InvocationContextParams
 
-	Branch string
-	Agent  agent.Agent
-
-	UserContent   *genai.Content
-	RunConfig     *agent.RunConfig
-	EndInvocation bool
-	InvocationID  string
-}
-
-func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
-	if params.InvocationID == "" {
-		params.InvocationID = "e-" + uuid.NewString()
-	}
-	return &InvocationContext{
-		Context: ctx,
-		params:  params,
-	}
-}
-
-type InvocationContext struct {
-	context.Context
-
-	params InvocationContextParams
-}
-
-func (c *InvocationContext) Artifacts() agent.Artifacts {
-	return c.params.Artifacts
-}
-
-func (c *InvocationContext) Agent() agent.Agent {
-	return c.params.Agent
-}
-
-func (c *InvocationContext) Branch() string {
-	return c.params.Branch
-}
-
-func (c *InvocationContext) InvocationID() string {
-	return c.params.InvocationID
-}
-
-func (c *InvocationContext) Memory() agent.Memory {
-	return c.params.Memory
-}
-
-func (c *InvocationContext) Session() session.Session {
-	return c.params.Session
-}
-
-func (c *InvocationContext) UserContent() *genai.Content {
-	return c.params.UserContent
-}
-
-func (c *InvocationContext) RunConfig() *agent.RunConfig {
-	return c.params.RunConfig
-}
-
-func (c *InvocationContext) EndInvocation() {
-	c.params.EndInvocation = true
-}
-
-func (c *InvocationContext) Ended() bool {
-	return c.params.EndInvocation
-}
-
-func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
-	newCtx := *c
-	newCtx.Context = ctx
-	return &newCtx
-}
-
-var _ agent.InvocationContext = (*InvocationContext)(nil)
+// NewInvocationContext is an alias for agent.NewInvocationContext.
+//
+// Deprecated: use agent.NewInvocationContext.
+var NewInvocationContext = agent.NewInvocationContext

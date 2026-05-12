@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
@@ -248,11 +249,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
 	pluginManager := pluginManagerFromContext(ctx)
 
-	callbackCtx := &callbackContext{
-		Context:           ctx,
-		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
-	}
+	callbackCtx := newCallbackContextImpl(ctx, make(map[string]any), make(map[string]int64))
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunBeforeAgentCallback(callbackCtx)
@@ -310,11 +307,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
 	pluginManager := pluginManagerFromContext(ctx)
 
-	callbackCtx := &callbackContext{
-		Context:           ctx,
-		invocationContext: ctx,
-		actions:           &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
-	}
+	callbackCtx := newCallbackContextImpl(ctx, make(map[string]any), make(map[string]int64))
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunAfterAgentCallback(callbackCtx)
@@ -371,6 +364,7 @@ type callbackContext struct {
 	context.Context
 	invocationContext InvocationContext
 	actions           *session.EventActions
+	artifacts         *internalArtifacts
 }
 
 func (c *callbackContext) AgentName() string {
@@ -386,7 +380,7 @@ func (c *callbackContext) State() session.State {
 }
 
 func (c *callbackContext) Artifacts() Artifacts {
-	return c.invocationContext.Artifacts()
+	return c.artifacts
 }
 
 func (c *callbackContext) InvocationID() string {
@@ -418,6 +412,58 @@ func (c *callbackContext) UserID() string {
 }
 
 var _ CallbackContext = (*callbackContext)(nil)
+
+// internalArtifacts wraps an Artifacts service so that Save also
+// records the new version into the supplied EventActions.ArtifactDelta.
+type internalArtifacts struct {
+	Artifacts
+	eventActions *session.EventActions
+}
+
+// Save persists the artifact and records its version in the event's
+// ArtifactDelta.
+func (ia *internalArtifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
+	resp, err := ia.Artifacts.Save(ctx, name, data)
+	if err != nil {
+		return resp, err
+	}
+	if ia.eventActions != nil {
+		if ia.eventActions.ArtifactDelta == nil {
+			ia.eventActions.ArtifactDelta = make(map[string]int64)
+		}
+		// TODO: RWLock, check the version stored is newer in case multiple tools save the same file.
+		ia.eventActions.ArtifactDelta[name] = resp.Version
+	}
+	return resp, nil
+}
+
+// NewCallbackContext returns a CallbackContext with fresh state and
+// artifact delta maps. Used by callback dispatchers in the agent
+// package.
+func NewCallbackContext(ctx InvocationContext) CallbackContext {
+	return newCallbackContextImpl(ctx, make(map[string]any), make(map[string]int64))
+}
+
+// NewCallbackContextWithDelta returns a CallbackContext that uses the
+// supplied delta maps directly (rather than allocating fresh ones).
+// Used when the caller already holds the delta maps and needs them
+// shared with downstream code.
+func NewCallbackContextWithDelta(ctx InvocationContext, stateDelta map[string]any, artifactDelta map[string]int64) CallbackContext {
+	return newCallbackContextImpl(ctx, stateDelta, artifactDelta)
+}
+
+func newCallbackContextImpl(ctx InvocationContext, stateDelta map[string]any, artifactDelta map[string]int64) *callbackContext {
+	eventActions := &session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta}
+	return &callbackContext{
+		Context:           ctx,
+		invocationContext: ctx,
+		actions:           eventActions,
+		artifacts: &internalArtifacts{
+			Artifacts:    ctx.Artifacts(),
+			eventActions: eventActions,
+		},
+	}
+}
 
 type callbackContextState struct {
 	ctx *callbackContext
@@ -519,3 +565,80 @@ type pluginManager interface {
 }
 
 var _ InvocationContext = (*invocationContext)(nil)
+
+// InvocationContextParams gathers everything NewInvocationContext needs.
+type InvocationContextParams struct {
+	Artifacts Artifacts
+	Memory    Memory
+	Session   session.Session
+
+	Branch string
+	Agent  Agent
+
+	UserContent   *genai.Content
+	RunConfig     *RunConfig
+	EndInvocation bool
+	InvocationID  string
+}
+
+// NewInvocationContext returns a fresh InvocationContext for one
+// agent invocation. Used by runner and any code constructing an
+// invocation outside the framework's own dispatch path.
+func NewInvocationContext(ctx context.Context, params InvocationContextParams) InvocationContext {
+	if params.InvocationID == "" {
+		params.InvocationID = "e-" + uuid.NewString()
+	}
+	return &invocationContext{
+		Context:       ctx,
+		agent:         params.Agent,
+		artifacts:     params.Artifacts,
+		memory:        params.Memory,
+		session:       params.Session,
+		invocationID:  params.InvocationID,
+		branch:        params.Branch,
+		userContent:   params.UserContent,
+		runConfig:     params.RunConfig,
+		endInvocation: params.EndInvocation,
+	}
+}
+
+// NewReadonlyContext returns a ReadonlyContext that delegates all
+// reads to the supplied InvocationContext.
+func NewReadonlyContext(ctx InvocationContext) ReadonlyContext {
+	return &readonlyContext{
+		Context:           ctx,
+		InvocationContext: ctx,
+	}
+}
+
+// readonlyContext is the canonical implementation of ReadonlyContext.
+// Construct via NewReadonlyContext.
+type readonlyContext struct {
+	context.Context
+	InvocationContext InvocationContext
+}
+
+func (c *readonlyContext) AppName() string   { return c.InvocationContext.Session().AppName() }
+func (c *readonlyContext) Branch() string    { return c.InvocationContext.Branch() }
+func (c *readonlyContext) SessionID() string { return c.InvocationContext.Session().ID() }
+func (c *readonlyContext) UserID() string    { return c.InvocationContext.Session().UserID() }
+func (c *readonlyContext) AgentName() string { return c.InvocationContext.Agent().Name() }
+func (c *readonlyContext) ReadonlyState() session.ReadonlyState {
+	return c.InvocationContext.Session().State()
+}
+func (c *readonlyContext) InvocationID() string        { return c.InvocationContext.InvocationID() }
+func (c *readonlyContext) UserContent() *genai.Content { return c.InvocationContext.UserContent() }
+
+var _ ReadonlyContext = (*readonlyContext)(nil)
+
+// InvocationOf returns the underlying InvocationContext for ReadonlyContexts
+// produced by NewReadonlyContext. Returns nil for any other ReadonlyContext
+// implementation. Used by code that needs the wider invocation surface
+// (e.g. instruction template rendering).
+func InvocationOf(rc ReadonlyContext) InvocationContext {
+	impl, ok := rc.(*readonlyContext)
+	if !ok {
+		return nil
+	}
+	return impl.InvocationContext
+}
