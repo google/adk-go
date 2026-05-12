@@ -203,9 +203,10 @@ func TestParallelFunctionCallsWithHITL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to extract original call: %v", err)
 		}
-		if origCall.ID == "secure_call_1" {
+		switch origCall.ID {
+		case "secure_call_1":
 			confirmCallID1 = p.FunctionCall.ID
-		} else if origCall.ID == "secure_call_2" {
+		case "secure_call_2":
 			confirmCallID2 = p.FunctionCall.ID
 		}
 	}
@@ -393,9 +394,10 @@ func TestParallelFunctionCallsWithPartialHITL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to extract original call: %v", err)
 		}
-		if origCall.ID == "secure_call_1" {
+		switch origCall.ID {
+		case "secure_call_1":
 			confirmCallID1 = p.FunctionCall.ID
-		} else if origCall.ID == "secure_call_2" {
+		case "secure_call_2":
 			confirmCallID2 = p.FunctionCall.ID
 		}
 	}
