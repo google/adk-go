@@ -19,10 +19,7 @@ import (
 	"iter"
 	"strings"
 
-	"google.golang.org/genai"
-
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/session"
 )
 
@@ -100,7 +97,6 @@ type baseNode struct {
 func (b *baseNode) Name() string        { return b.name }
 func (b *baseNode) Description() string { return b.description }
 func (b *baseNode) Config() NodeConfig  { return b.config }
-
 
 // Edge defines a directed connection between nodes in the workflow graph.
 type Edge struct {
