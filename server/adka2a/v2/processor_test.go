@@ -17,8 +17,8 @@ package adka2a
 import (
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
@@ -37,7 +37,7 @@ func modelPartialResponseFromParts(parts ...*genai.Part) model.LLMResponse {
 	return resp
 }
 
-func newNonPartialArtifactEvent(task *a2a.Task, parts ...a2a.Part) *a2a.TaskArtifactUpdateEvent {
+func newNonPartialArtifactEvent(task *a2a.Task, parts ...*a2a.Part) *a2a.TaskArtifactUpdateEvent {
 	ev := a2a.NewArtifactEvent(task, parts...)
 	// It is important for events to be explicitely marked as ADK partial or non-partial.
 	// This signals to consumers that the remote agent is running its own aggregation logic.
@@ -45,22 +45,20 @@ func newNonPartialArtifactEvent(task *a2a.Task, parts ...a2a.Part) *a2a.TaskArti
 	return ev
 }
 
-func newNonPartialArtifactUpdateEvent(task *a2a.Task, parts ...a2a.Part) *a2a.TaskArtifactUpdateEvent {
+func newNonPartialArtifactUpdateEvent(task *a2a.Task, parts ...*a2a.Part) *a2a.TaskArtifactUpdateEvent {
 	ev := newNonPartialArtifactEvent(task, parts...)
 	ev.Append = true
 	return ev
 }
 
 func newDiscardPartialArtifactUpdate(task *a2a.Task) *a2a.TaskArtifactUpdateEvent {
-	ev := newLegacyPartialArtifactUpdate(task, "", []a2a.Part{a2a.DataPart{Data: map[string]any{}}})
+	ev := newLegacyPartialArtifactUpdate(task, "", []*a2a.Part{a2a.NewDataPart(map[string]any{})})
 	ev.LastChunk = true
 	return ev
 }
 
 func newFinalStatusUpdate(task *a2a.Task, state a2a.TaskState, msg *a2a.Message) *a2a.TaskStatusUpdateEvent {
-	ev := a2a.NewStatusUpdateEvent(task, state, msg)
-	ev.Final = true
-	return ev
+	return a2a.NewStatusUpdateEvent(task, state, msg)
 }
 
 func TestEventProcessor_Process(t *testing.T) {
@@ -95,7 +93,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"), genai.NewPartFromText(", world!")),
 			}},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				newNonPartialArtifactEvent(task, a2a.TextPart{Text: "Hello"}, a2a.TextPart{Text: ", world!"}),
+				newNonPartialArtifactEvent(task, a2a.NewTextPart("Hello"), a2a.NewTextPart(", world!")),
 			},
 			terminal: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil)},
 		},
@@ -107,15 +105,17 @@ func TestEventProcessor_Process(t *testing.T) {
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("The answer is 42"))},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				newNonPartialArtifactEvent(task, a2a.DataPart{
-					Data:     map[string]any{"code": "get_the_answer()", "language": string(genai.LanguagePython)},
-					Metadata: map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeCodeExecutableCode},
-				}),
-				newNonPartialArtifactUpdateEvent(task, a2a.DataPart{
-					Data:     map[string]any{"outcome": string(genai.OutcomeOK), "output": "42"},
-					Metadata: map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeCodeExecResult},
-				}),
-				newNonPartialArtifactUpdateEvent(task, a2a.TextPart{Text: "The answer is 42"}),
+				newNonPartialArtifactEvent(task, func() *a2a.Part {
+					p := a2a.NewDataPart(map[string]any{"code": "get_the_answer()", "language": string(genai.LanguagePython)})
+					p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeCodeExecutableCode)
+					return p
+				}()),
+				newNonPartialArtifactUpdateEvent(task, func() *a2a.Part {
+					p := a2a.NewDataPart(map[string]any{"outcome": string(genai.OutcomeOK), "output": "42"})
+					p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeCodeExecResult)
+					return p
+				}()),
+				newNonPartialArtifactUpdateEvent(task, a2a.NewTextPart("The answer is 42")),
 			},
 			terminal: []a2a.Event{newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil)},
 		},
@@ -152,8 +152,8 @@ func TestEventProcessor_Process(t *testing.T) {
 				{LLMResponse: model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				newNonPartialArtifactEvent(task, a2a.TextPart{Text: "The answer is"}),
-				newNonPartialArtifactUpdateEvent(task, a2a.TextPart{Text: "42"}),
+				newNonPartialArtifactEvent(task, a2a.NewTextPart("The answer is")),
+				newNonPartialArtifactUpdateEvent(task, a2a.NewTextPart("42")),
 			},
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
@@ -170,8 +170,8 @@ func TestEventProcessor_Process(t *testing.T) {
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("42"))},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				newNonPartialArtifactEvent(task, a2a.TextPart{Text: "The answer is"}),
-				newNonPartialArtifactUpdateEvent(task, a2a.TextPart{Text: "42"}),
+				newNonPartialArtifactEvent(task, a2a.NewTextPart("The answer is")),
+				newNonPartialArtifactUpdateEvent(task, a2a.NewTextPart("42")),
 			},
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
@@ -186,13 +186,12 @@ func TestEventProcessor_Process(t *testing.T) {
 				{LLMResponse: modelResponseFromParts(genai.NewPartFromFunctionCall("get_weather", map[string]any{"city": "Warsaw"}))},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				newNonPartialArtifactEvent(task, a2a.DataPart{
-					Data: map[string]any{"name": "get_weather", "args": map[string]any{"city": "Warsaw"}},
-					Metadata: map[string]any{
-						a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
-						a2aDataPartMetaLongRunningKey: false,
-					},
-				}),
+				newNonPartialArtifactEvent(task, func() *a2a.Part {
+					p := a2a.NewDataPart(map[string]any{"name": "get_weather", "args": map[string]any{"city": "Warsaw"}})
+					p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeFunctionCall)
+					p.SetMeta(a2aDataPartMetaLongRunningKey, false)
+					return p
+				}()),
 			},
 			terminal: []a2a.Event{
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted, nil),
@@ -212,14 +211,13 @@ func TestEventProcessor_Process(t *testing.T) {
 			terminal: []a2a.Event{
 				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
 					Role: a2a.MessageRoleAgent,
-					Parts: []a2a.Part{
-						a2a.DataPart{
-							Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
-							Metadata: map[string]any{
-								a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
-								a2aDataPartMetaLongRunningKey: true,
-							},
-						},
+					Parts: []*a2a.Part{
+						func() *a2a.Part {
+							p := a2a.NewDataPart(map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}})
+							p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeFunctionCall)
+							p.SetMeta(a2aDataPartMetaLongRunningKey, true)
+							return p
+						}(),
 					},
 				}),
 			},
@@ -238,20 +236,19 @@ func TestEventProcessor_Process(t *testing.T) {
 				},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				newNonPartialArtifactEvent(task, a2a.TextPart{Text: "This will take a while"}),
+				newNonPartialArtifactEvent(task, a2a.NewTextPart("This will take a while")),
 			},
 
 			terminal: []a2a.Event{
 				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
 					Role: a2a.MessageRoleAgent,
-					Parts: []a2a.Part{
-						a2a.DataPart{
-							Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
-							Metadata: map[string]any{
-								a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
-								a2aDataPartMetaLongRunningKey: true,
-							},
-						},
+					Parts: []*a2a.Part{
+						func() *a2a.Part {
+							p := a2a.NewDataPart(map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}})
+							p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeFunctionCall)
+							p.SetMeta(a2aDataPartMetaLongRunningKey, true)
+							return p
+						}(),
 					},
 				}),
 			},
@@ -276,20 +273,18 @@ func TestEventProcessor_Process(t *testing.T) {
 			terminal: []a2a.Event{
 				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, &a2a.Message{
 					Role: a2a.MessageRoleAgent,
-					Parts: []a2a.Part{
-						a2a.DataPart{
-							Data: map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}},
-							Metadata: map[string]any{
-								a2aDataPartMetaTypeKey:        a2aDataPartTypeFunctionCall,
-								a2aDataPartMetaLongRunningKey: true,
-							},
-						},
-						a2a.DataPart{
-							Data: map[string]any{"id": "get_weather", "name": "weather", "response": map[string]any{"status": "pending"}},
-							Metadata: map[string]any{
-								a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionResponse,
-							},
-						},
+					Parts: []*a2a.Part{
+						func() *a2a.Part {
+							p := a2a.NewDataPart(map[string]any{"id": "get_weather", "name": "weather", "args": map[string]any{"city": "Warsaw"}})
+							p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeFunctionCall)
+							p.SetMeta(a2aDataPartMetaLongRunningKey, true)
+							return p
+						}(),
+						func() *a2a.Part {
+							p := a2a.NewDataPart(map[string]any{"id": "get_weather", "name": "weather", "response": map[string]any{"status": "pending"}})
+							p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeFunctionResponse)
+							return p
+						}(),
 					},
 				}),
 			},
@@ -305,7 +300,6 @@ func TestEventProcessor_Process(t *testing.T) {
 					ContextID: task.ContextID,
 					Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
 					Metadata:  map[string]any{metadataEscalateKey: true, metadataTransferToAgentKey: "a-2"},
-					Final:     true,
 				},
 			},
 		},
@@ -321,7 +315,6 @@ func TestEventProcessor_Process(t *testing.T) {
 					ContextID: task.ContextID,
 					Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
 					Metadata:  map[string]any{metadataTransferToAgentKey: "a-3"},
-					Final:     true,
 				},
 			},
 		},
@@ -335,7 +328,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				{LLMResponse: model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				newNonPartialArtifactEvent(task, a2a.TextPart{Text: "The answer is"}),
+				newNonPartialArtifactEvent(task, a2a.NewTextPart("The answer is")),
 			},
 			terminal: []a2a.Event{
 				toTaskFailedUpdateEvent(
@@ -358,25 +351,31 @@ func TestEventProcessor_Process(t *testing.T) {
 				)},
 			},
 			processed: []*a2a.TaskArtifactUpdateEvent{
-				newLegacyPartialArtifactUpdate(task, artifactIDPlaceholder, []a2a.Part{
-					a2a.TextPart{Text: "The answer is", Metadata: map[string]any{ToA2AMetaKey("partial"): true}},
-					a2a.DataPart{
-						Data: map[string]any{"code": "get_the_answer()", "language": string(genai.LanguagePython)},
-						Metadata: map[string]any{
-							a2aDataPartMetaTypeKey:  a2aDataPartTypeCodeExecutableCode,
-							ToA2AMetaKey("partial"): true,
-						},
-					},
+				newLegacyPartialArtifactUpdate(task, artifactIDPlaceholder, []*a2a.Part{
+					func() *a2a.Part {
+						p := a2a.NewTextPart("The answer is")
+						p.SetMeta(ToA2AMetaKey("partial"), true)
+						return p
+					}(),
+					func() *a2a.Part {
+						p := a2a.NewDataPart(map[string]any{"code": "get_the_answer()", "language": string(genai.LanguagePython)})
+						p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeCodeExecutableCode)
+						p.SetMeta(ToA2AMetaKey("partial"), true)
+						return p
+					}(),
 				}),
-				newLegacyPartialArtifactUpdate(task, artifactIDPlaceholder, []a2a.Part{
-					a2a.DataPart{
-						Data: map[string]any{"outcome": string(genai.OutcomeOK), "output": "42"},
-						Metadata: map[string]any{
-							a2aDataPartMetaTypeKey:  a2aDataPartTypeCodeExecResult,
-							ToA2AMetaKey("partial"): true,
-						},
-					},
-					a2a.TextPart{Text: "42", Metadata: map[string]any{ToA2AMetaKey("partial"): true}},
+				newLegacyPartialArtifactUpdate(task, artifactIDPlaceholder, []*a2a.Part{
+					func() *a2a.Part {
+						p := a2a.NewDataPart(map[string]any{"outcome": string(genai.OutcomeOK), "output": "42"})
+						p.SetMeta(a2aDataPartMetaTypeKey, a2aDataPartTypeCodeExecResult)
+						p.SetMeta(ToA2AMetaKey("partial"), true)
+						return p
+					}(),
+					func() *a2a.Part {
+						p := a2a.NewTextPart("42")
+						p.SetMeta(ToA2AMetaKey("partial"), true)
+						return p
+					}(),
 				}),
 			},
 			terminal: []a2a.Event{
@@ -392,7 +391,7 @@ func TestEventProcessor_Process(t *testing.T) {
 			}},
 			processed: []*a2a.TaskArtifactUpdateEvent{
 				func() *a2a.TaskArtifactUpdateEvent {
-					ev := newNonPartialArtifactEvent(task, a2a.TextPart{Text: "Hello"})
+					ev := newNonPartialArtifactEvent(task, a2a.NewTextPart("Hello"))
 					ev.Metadata[ToA2AMetaKey("invocation_id")] = "test-invocation-id"
 					return ev
 				}(),
@@ -408,7 +407,7 @@ func TestEventProcessor_Process(t *testing.T) {
 			cmpopts.IgnoreFields(a2a.TaskStatus{}, "Timestamp"),
 		}
 		t.Run(tc.name, func(t *testing.T) {
-			reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
+			reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID}
 			processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
 
 			var gotEvents []*a2a.TaskArtifactUpdateEvent
@@ -456,7 +455,7 @@ func TestEventProcessor_ArtifactUpdates(t *testing.T) {
 		},
 	}
 
-	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
+	reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID}
 	processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
 	got := make([]*a2a.TaskArtifactUpdateEvent, len(events))
 	for i, event := range events {
@@ -499,7 +498,7 @@ func TestEventProcessor_PartialEventsAreDiscardedAsAnArtifact(t *testing.T) {
 		{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello, world!"))},
 	}
 
-	reqCtx := &a2asrv.RequestContext{TaskID: task.ID, ContextID: task.ContextID}
+	reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID}
 	processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
 	got := make([]*a2a.TaskArtifactUpdateEvent, len(events))
 	for i, event := range events {
@@ -544,8 +543,12 @@ func TestEventProcessor_PartialEventsAreDiscardedAsAnArtifact(t *testing.T) {
 		TaskID:    task.ID,
 		ContextID: task.ContextID,
 		Artifact: &a2a.Artifact{
-			ID:       got[0].Artifact.ID,
-			Parts:    a2a.ContentParts{a2a.DataPart{Data: map[string]any{}, Metadata: map[string]any{metadataPartialKey: true}}},
+			ID: got[0].Artifact.ID,
+			Parts: a2a.ContentParts{func() *a2a.Part {
+				p := a2a.NewDataPart(map[string]any{})
+				p.SetMeta(metadataPartialKey, true)
+				return p
+			}()},
 			Metadata: map[string]any{metadataPartialKey: true},
 		},
 		Metadata:  map[string]any{metadataPartialKey: true},

@@ -17,7 +17,7 @@ package adka2a
 import (
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/go-cmp/cmp"
 
 	"google.golang.org/adk/agent"

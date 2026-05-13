@@ -102,7 +102,10 @@ func TestSequentialWorkflow(t *testing.T) {
 
 	edges := Chain(Start, nodeA, nodeB)
 
-	w := New(edges)
+	w, err := New(edges)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	mockCtx := &MockInvocationContext{
 		sess: nil,
@@ -229,10 +232,10 @@ func TestWorkflowRouting(t *testing.T) {
 	}
 
 	type testCase struct {
-		name           string
-		startRoutes    []string
-		edges          func(nodeStart *CustomRouteNode, nodeA, nodeB *FunctionNode, nodeC *CustomRouteNode, nodeD *FunctionNode) []Edge
-		expectedExec   []string
+		name         string
+		startRoutes  []string
+		edges        func(nodeStart *CustomRouteNode, nodeA, nodeB *FunctionNode, nodeC *CustomRouteNode, nodeD *FunctionNode) []Edge
+		expectedExec []string
 	}
 
 	createNodes := func() (*CustomRouteNode, *FunctionNode, *FunctionNode, *CustomRouteNode, *FunctionNode, *testTracker) {
@@ -403,10 +406,13 @@ func TestWorkflowRouting(t *testing.T) {
 			start.route = tc.startRoutes
 			edges := tc.edges(start, a, b, c, d)
 
-			w := New(edges)
+			w, err := New(edges)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
 			mockCtx := &MockInvocationContext{sess: nil}
 
-			var err error
 			for _, testErr := range w.Run(mockCtx) {
 				if testErr != nil {
 					err = testErr
