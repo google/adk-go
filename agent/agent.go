@@ -509,6 +509,11 @@ func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
 // that overrides the method when running inside a workflow.Node.
 func (c *invocationContext) TriggeredBy() string { return "" }
 
+// ResumedInput always returns (nil, false) for the base
+// invocation context. Implementations that carry a resume payload
+// override this method.
+func (c *invocationContext) ResumedInput(string) (any, bool) { return nil, false }
+
 func pluginManagerFromContext(ctx context.Context) pluginManager {
 	a := ctx.Value(plugincontext.PluginManagerCtxKey)
 	m, ok := a.(pluginManager)

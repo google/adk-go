@@ -111,21 +111,38 @@ func (w *Workflow) Resume(
 				continue
 			}
 
+			// Snapshot InterruptID before consuming PendingRequest;
+			// re-entry mode passes it through resumeInputs.
+			interruptID := ns.PendingRequest.InterruptID
+
 			// Consume PendingRequest before scheduling. A duplicate
 			// Resume with the same InterruptID will skip this node
 			// because PendingRequest is now nil.
 			ns.PendingRequest = nil
 			ns.Status = NodePending
 
-			// Handoff mode: schedule each successor with the
-			// response as its input, exactly as if the asker had
-			// emitted it as output. Reuses findSuccessors so
-			// routing, fan-out and fan-in invariants apply
-			// uniformly. (No routing event is supplied, so a
-			// router-style handoff target falls back to its
-			// Default route or dead-ends.)
-			for _, succ := range findSuccessors(s.graph, node, resp, nil) {
-				s.scheduleNode(succ.node, succ.input, succ.triggeredBy)
+			if r := node.Config().RerunOnResume; r != nil && *r {
+				// Re-entry mode: re-activate the asker with its
+				// original input; the response is delivered via
+				// ctx.ResumedInput(InterruptID), not via the
+				// input parameter. Successors fire only when the
+				// re-entry activation produces an output.
+				resumeInputs := map[string]any{interruptID: resp}
+				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, resumeInputs)
+			} else {
+				// Handoff mode: schedule each successor with the
+				// response as its input, exactly as if the asker
+				// had emitted it as output. Reuses findSuccessors
+				// so routing, fan-out and fan-in invariants apply
+				// uniformly. findSuccessors is called with
+				// event=nil, so successors reached only via a
+				// concrete Route (StringRoute etc.) do not fire —
+				// the response is opaque to the routing layer.
+				// Successors reached via an unconditional edge or
+				// via the Default route fire as usual.
+				for _, succ := range findSuccessors(s.graph, node, resp, nil) {
+					s.scheduleNode(succ.node, succ.input, succ.triggeredBy)
+				}
 			}
 			scheduled++
 		}
