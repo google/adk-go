@@ -294,3 +294,20 @@ func userInput(ctx agent.Context) any {
 	}
 	return sb.String()
 }
+
+// userInput extracts the workflow's seed input from the
+// InvocationContext's UserContent. Concatenates all text parts;
+// returns nil for an empty UserContent.
+func userInput(ctx agent.InvocationContext) any {
+	uc := ctx.UserContent()
+	if uc == nil {
+		return nil
+	}
+	var sb strings.Builder
+	for _, part := range uc.Parts {
+		if part.Text != "" {
+			sb.WriteString(part.Text)
+		}
+	}
+	return sb.String()
+}
