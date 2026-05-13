@@ -73,33 +73,40 @@ const (
 
 // NodeState is the per-node lifecycle record. A RunState holds one
 // of these for every node the engine has touched.
+//
+// JSON-marshallable: NodeState is persisted across pause/resume
+// turns via session.State (see persistence.go). The Input and
+// PendingRequest.Payload fields are typed any and must therefore
+// be JSON-encodable for the persisted state to round-trip. Nodes
+// that need to carry binary data across a pause should store the
+// bytes via agent.Artifacts and stash a URI string in place of
+// the bytes, mirroring how the Live API surfaces audio.
 type NodeState struct {
 	// Status is the current lifecycle position. See NodeStatus.
-	Status NodeStatus
+	Status NodeStatus `json:"status"`
 
 	// Input is the value most recently handed to the node's Run
 	// method. It is set when the node is scheduled.
-	Input any
+	Input any `json:"input,omitempty"`
 
 	// TriggeredBy is the name of the upstream node that produced
 	// the current Input. Empty for the initial START activation.
-	TriggeredBy string
+	TriggeredBy string `json:"triggeredBy,omitempty"`
 
 	// PendingRequest, when non-nil, carries the human-input request
 	// the node emitted before pausing. Non-nil iff Status ==
 	// NodeWaiting and the wait was caused by a human-input request
 	// (as opposed to a fan-in barrier).
-	PendingRequest *session.RequestInput
+	PendingRequest *session.RequestInput `json:"pendingRequest,omitempty"`
 }
 
 // RunState is the per-invocation lifecycle state for a workflow
-// run. It is intended to be embedded in (or referenced from) the
-// agent's session-persisted state so HITL pauses and crash
-// recovery can pick up where a previous invocation left off.
+// run. It rides in session.State across pause and resume turns so
+// the workflow can pick up where a previous invocation left off.
 type RunState struct {
 	// Nodes is the per-node lifecycle map. Absent entries are
 	// inactive.
-	Nodes map[string]*NodeState
+	Nodes map[string]*NodeState `json:"nodes,omitempty"`
 }
 
 // NewRunState returns an empty state with the Nodes map

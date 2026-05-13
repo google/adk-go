@@ -133,26 +133,31 @@ type Event struct {
 // by a workflow node. It travels on Event.RequestedInput from the
 // node, through the scheduler, out to the UI surface; the matching
 // response is routed back by InterruptID.
+//
+// JSON-marshallable: persisted in session.State across pause/resume
+// turns. Payload is typed any and must be JSON-encodable; for
+// binary data, stash the bytes via agent.Artifacts and put a URI
+// string in Payload.
 type RequestInput struct {
 	// InterruptID is the stable correlation key for this request.
 	// It identifies the intent of the prompt (e.g. "manager_approval",
 	// "human_review"). If empty when the node yields the event, the
 	// engine fills in a UUID so the downstream contract is always a
 	// non-empty string.
-	InterruptID string
+	InterruptID string `json:"interruptId"`
 
 	// Message is the human-readable description of what is being
 	// asked. Surfaced in UI as the prompt text. Optional.
-	Message string
+	Message string `json:"message,omitempty"`
 
 	// ResponseSchema, when non-nil, is the JSON schema the user's
 	// response payload must conform to.
-	ResponseSchema *jsonschema.Schema
+	ResponseSchema *jsonschema.Schema `json:"responseSchema,omitempty"`
 
 	// Payload is optional context the UI may render alongside the
 	// prompt (e.g. the document to approve, the proposed parameters).
 	// Carried through opaquely; the engine does not interpret it.
-	Payload any
+	Payload any `json:"payload,omitempty"`
 }
 
 // IsFinalResponse returns whether the event is the final response of an agent.
