@@ -96,8 +96,7 @@ type NodeConfig struct {
 // "no retry, no backoff, no jitter" policy.
 //
 // The struct shape is deliberately a flat set of plain values: no
-// dependency on cenkalti/backoff/v5. The scheduler's retry handler
-// implements the backoff math in workflow/retry.go.
+// dependency on cenkalti/backoff/v5.
 type RetryConfig struct {
 	// Maximum number of attempts, including the original request. If 0 or 1, it means no retries. If not specified, default to 5.
 	MaxAttempts int

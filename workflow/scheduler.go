@@ -173,11 +173,10 @@ func newScheduler(parent agent.InvocationContext, g *graph) *scheduler {
 // its instance in O(1) instead of scanning the full table.
 func buildNodesByName(g *graph) map[string]Node {
 	nodesByName := map[string]Node{}
-	add := func(n Node) { nodesByName[n.Name()] = n }
 	for n, edges := range g.successors {
-		add(n)
+		nodesByName[n.Name()] = n
 		for _, e := range edges {
-			add(e.To)
+			nodesByName[e.To.Name()] = e.To
 		}
 	}
 	return nodesByName
