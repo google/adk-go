@@ -44,30 +44,28 @@ func DefaultRetryConfig() *RetryConfig {
 // NodeConfig defines the configuration for a node.
 //
 // All fields are optional. The pointer-typed fields (RerunOnResume,
-// WaitForOutput) are tri-state: nil means "use the engine default for
-// this node kind", which mirrors Python's per-node-type defaults
-// (e.g. AgentNode in task mode defaults WaitForOutput to true while
-// other nodes default to false). Use the *Or accessor helpers to
-// read these values with an explicit per-call-site default.
+// WaitForOutput) are tri-state so node implementations can
+// distinguish "user explicitly opted out" (&false) from "user did
+// not configure" (nil).
 type NodeConfig struct {
 	// ParallelWorker, when true, runs the node concurrently for each
 	// item of a list-typed input. The engine collects per-item
 	// outputs and emits a single aggregate output event.
 	ParallelWorker bool
 
-	// RerunOnResume controls human-in-the-loop resume behaviour. When
-	// true, an interrupted node re-runs from scratch on resume; when
-	// false, the resume payload is treated as the node's output.
-	// nil means "use the engine default", which is true for AgentNode
-	// and false elsewhere.
+	// RerunOnResume controls human-in-the-loop resume behaviour:
+	// &true re-runs the interrupted node from scratch on resume
+	// (re-entry mode), &false routes the resume payload to the
+	// node's successor as input (handoff mode), and nil defers to
+	// the engine. The engine currently treats nil as handoff.
 	RerunOnResume *bool
 
 	// WaitForOutput, when true, keeps the node in NodeWaiting
-	// (re-triggerable) until it actually yields an event carrying an
-	// "output" key in Actions.StateDelta, instead of moving it to
-	// NodeCompleted on first return. JoinNode and any custom fan-in
-	// node sets this. nil means "use the engine default" — false for
-	// most node kinds.
+	// (re-triggerable) until it actually yields an event carrying
+	// an "output" key in Actions.StateDelta, instead of moving it
+	// to NodeCompleted on first return. JoinNode and any custom
+	// fan-in node sets this. nil defers to the engine; the
+	// engine currently treats nil as false.
 	WaitForOutput *bool
 
 	// RetryConfig, when non-nil, makes the scheduler retry this node

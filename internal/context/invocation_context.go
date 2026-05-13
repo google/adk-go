@@ -105,4 +105,9 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 // that overrides the method when running inside a workflow.Node.
 func (c *InvocationContext) TriggeredBy() string { return "" }
 
+// ResumedInput always returns (nil, false) for the base
+// invocation context. Implementations that carry a resume payload
+// override this method.
+func (c *InvocationContext) ResumedInput(string) (any, bool) { return nil, false }
+
 var _ agent.InvocationContext = (*InvocationContext)(nil)
