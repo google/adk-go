@@ -210,6 +210,18 @@ func buildNodesByName(g *graph) map[string]Node {
 //
 // scheduleNode runs only on the consumer goroutine.
 func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
+	s.scheduleResumedNode(n, input, triggeredBy, nil)
+}
+
+// scheduleResumedNode is like scheduleNode but additionally
+// injects resumeInputs into the per-node context, so re-entry
+// nodes can read the user-supplied response payload via
+// ctx.ResumedInput(interruptID). resumeInputs is keyed by
+// InterruptID; nil disables re-entry semantics and yields the same
+// behaviour as scheduleNode.
+//
+// scheduleResumedNode runs only on the consumer goroutine.
+func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy string, resumeInputs map[string]any) {
 	name := n.Name()
 
 	// Per-node context: WithTimeout when Config().Timeout > 0,
@@ -226,7 +238,7 @@ func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
 	} else {
 		nodeCtx, cancel = context.WithCancel(s.parentCtx)
 	}
-	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), triggeredBy)
+	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), triggeredBy, resumeInputs)
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
