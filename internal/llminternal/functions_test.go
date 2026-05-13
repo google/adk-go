@@ -60,6 +60,7 @@ func (m *mockInvocationContext) Deadline() (time.Time, bool) { return time.Time{
 func (m *mockInvocationContext) Done() <-chan struct{}       { return nil }
 func (m *mockInvocationContext) Err() error                  { return nil }
 func (m *mockInvocationContext) Value(any) any               { return nil }
+func (m *mockInvocationContext) TriggeredBy() string         { return "" }
 
 func TestGenerateRequestConfirmationEvent(t *testing.T) {
 	confirmingFunctionCall := &genai.FunctionCall{
