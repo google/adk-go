@@ -182,12 +182,21 @@ func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	}
 	log.Println()
 
+	// Enable both HTTP/1 and cleartext HTTP/2 on the same listener. Existing
+	// REST, Web UI, A2A, and trigger routes continue to work over HTTP/1.1,
+	// while custom web sublaunchers can register handlers that require h2c,
+	// such as native gRPC servers.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+
 	srv := http.Server{
 		Addr:         fmt.Sprintf(":%v", fmt.Sprint(w.config.port)),
 		WriteTimeout: w.config.writeTimeout,
 		ReadTimeout:  w.config.readTimeout,
 		IdleTimeout:  w.config.idleTimeout,
 		Handler:      router,
+		Protocols:    protocols,
 	}
 
 	errChan := make(chan error, 1)
