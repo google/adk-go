@@ -504,6 +504,11 @@ func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
 	return &newCtx
 }
 
+// TriggeredBy returns "" for non-workflow invocation contexts. The
+// workflow engine wraps this context in a private per-node context
+// that overrides the method when running inside a workflow.Node.
+func (c *invocationContext) TriggeredBy() string { return "" }
+
 func pluginManagerFromContext(ctx context.Context) pluginManager {
 	a := ctx.Value(plugincontext.PluginManagerCtxKey)
 	m, ok := a.(pluginManager)

@@ -22,6 +22,9 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
+// TestDefaultRetryConfig verifies the values returned by
+// DefaultRetryConfig (5 attempts, 1s initial delay, 60s cap, 2x
+// backoff, full jitter, retry-every-error predicate).
 func TestDefaultRetryConfig(t *testing.T) {
 	want := &RetryConfig{
 		MaxAttempts:   5,

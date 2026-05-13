@@ -94,6 +94,7 @@ func (m *MockInvocationContext) Branch() string              { return "" }
 func (m *MockInvocationContext) RunConfig() *agent.RunConfig { return nil }
 func (m *MockInvocationContext) Ended() bool                 { return false }
 func (m *MockInvocationContext) EndInvocation()              {}
+func (m *MockInvocationContext) TriggeredBy() string         { return "" }
 
 func TestWorkflowAgent(t *testing.T) {
 	upperFn := func(ctx agent.InvocationContext, input any) (string, error) {

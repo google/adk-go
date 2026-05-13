@@ -400,6 +400,7 @@ func (m *MockInvocationContext) RunConfig() *agent.RunConfig                    
 func (m *MockInvocationContext) EndInvocation()                                          {}
 func (m *MockInvocationContext) Ended() bool                                             { return false }
 func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
+func (m *MockInvocationContext) TriggeredBy() string                                     { return "" }
 func (m *MockInvocationContext) Value(key any) any                                       { return nil }
 func (m *MockInvocationContext) Deadline() (deadline time.Time, ok bool)                 { return time.Time{}, false }
 func (m *MockInvocationContext) Done() <-chan struct{}                                   { return nil }
