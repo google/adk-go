@@ -26,6 +26,7 @@ import (
 	agentinternal "google.golang.org/adk/internal/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/llminternal/liveflow"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -413,12 +414,12 @@ func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event
 
 	liveLLM, ok := a.model.(model.LiveCapableLLM)
 	if !ok {
-		return llminternal.ErrIter(fmt.Errorf("model %q does not support live connections", a.model.Name()))
+		return liveflow.ErrIter(fmt.Errorf("model %q does not support live connections", a.model.Name()))
 	}
 
 	queue := ctx.LiveRequestQueue()
 	if queue == nil {
-		return llminternal.ErrIter(fmt.Errorf("live mode requires a LiveRequestQueue"))
+		return liveflow.ErrIter(fmt.Errorf("live mode requires a LiveRequestQueue"))
 	}
 
 	req := &model.LLMRequest{Model: a.model.Name()}
@@ -444,7 +445,7 @@ func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event
 	if agentState.InstructionProvider != nil {
 		resolved, err := agentState.InstructionProvider(icontext.NewReadonlyContext(ctx))
 		if err != nil {
-			return llminternal.ErrIter(fmt.Errorf("failed to resolve live instruction: %w", err))
+			return liveflow.ErrIter(fmt.Errorf("failed to resolve live instruction: %w", err))
 		}
 		instruction = resolved
 	}
@@ -474,7 +475,7 @@ func (a *llmAgent) runLive(ctx agent.InvocationContext) iter.Seq2[*session.Event
 		coalesceWindow = 150 * time.Millisecond
 	}
 
-	lf := &llminternal.LiveFlow{
+	lf := &liveflow.LiveFlow{
 		Model:                a.model,
 		Tools:                a.Tools,
 		BeforeToolCallbacks:  a.beforeToolCallbacks,

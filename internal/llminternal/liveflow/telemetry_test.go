@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package llminternal
+package liveflow
 
 import (
 	"context"
@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -823,3 +824,30 @@ var (
 	_ model.LiveCapableLLM = (*mockLiveLLMTel)(nil)
 	_ tool.Tool            = (*telTool)(nil)
 )
+
+// testExporter / setupTestTracer mirror the package-level tracer fixture in
+// internal/llminternal/base_flow_telemetry_test.go. They are duplicated here
+// because the moved telemetry test now lives in package liveflow and can no
+// longer reach the private helper across the package boundary.
+var (
+	testExporter *tracetest.InMemoryExporter
+	initTracer   sync.Once
+)
+
+func setupTestTracer(t *testing.T) {
+	t.Helper()
+	initTracer.Do(func() {
+		// internal/telemetry initializes the global tracer provider once at startup.
+		// Subsequent calls to otel.SetTracerProvider don't update existing tracer providers, so we can override only once.
+		testExporter = tracetest.NewInMemoryExporter()
+		tp := sdktrace.NewTracerProvider(
+			sdktrace.WithSyncer(testExporter),
+		)
+		otel.SetTracerProvider(tp)
+	})
+	// Reset the exporter before each test to avoid flakiness.
+	testExporter.Reset()
+	t.Cleanup(func() {
+		testExporter.Reset()
+	})
+}
