@@ -103,7 +103,7 @@ type TransferToAgentTool struct {
 }
 
 // NewTransferToAgentTool creates a new TransferToAgentTool.
-func NewTransferToAgentTool(agent agent.Agent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
+func NewTransferToAgentTool(agent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
 	t := &TransferToAgentTool{
 		supportedAgents: targets,
 	}
