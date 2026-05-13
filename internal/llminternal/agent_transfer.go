@@ -65,6 +65,7 @@ import (
 //
 // TODO: implement it in the runners package and update this doc.
 
+// AgentTransferRequestProcessor processes agent transfer requests.
 func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: support agent types other than LLMAgent, that have parent/subagents?
@@ -82,13 +83,12 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 
 		// TODO(hyangah): why do we set this up in request processor
 		// instead of registering this as a normal function tool of the Agent?
-		transferToAgentTool := &TransferToAgentTool{}
-		si, err := instructionsForTransferToAgent(agent, parents[agent.Name()], targets, transferToAgentTool)
+		transferToAgentTool, err := NewTransferToAgentTool(agent, parents[agent.Name()], targets)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
-		utils.AppendInstructions(req, si)
+		utils.AppendInstructions(req, transferToAgentTool.instructions)
 		err = appendTools(req, transferToAgentTool)
 		if err != nil {
 			yield(nil, err)
@@ -96,7 +96,24 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 	}
 }
 
-type TransferToAgentTool struct{}
+// TransferToAgentTool is a tool that handles transferring control to another agent.
+type TransferToAgentTool struct {
+	instructions    string
+	supportedAgents []agent.Agent
+}
+
+// NewTransferToAgentTool creates a new TransferToAgentTool.
+func NewTransferToAgentTool(agent agent.Agent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
+	t := &TransferToAgentTool{
+		supportedAgents: targets,
+	}
+	si, err := t.instructionsForTransferToAgent(agent, parent, targets)
+	if err != nil {
+		return nil, err
+	}
+	t.instructions = si
+	return t, nil
+}
 
 // Description implements tool.Tool.
 func (t *TransferToAgentTool) Description() string {
@@ -115,20 +132,30 @@ func (t *TransferToAgentTool) IsLongRunning() bool {
 }
 
 func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{
+	declaration := &genai.FunctionDeclaration{
 		Name:        t.Name(),
 		Description: t.Description(),
 		Parameters: &genai.Schema{
-			Type: "object",
+			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
 				"agent_name": {
-					Type:        "string",
+					Type:        genai.TypeString,
 					Description: "the agent name to transfer to",
+					Enum:        t.enums(),
 				},
 			},
 			Required: []string{"agent_name"},
 		},
 	}
+	return declaration
+}
+
+func (t *TransferToAgentTool) enums() []string {
+	var agentNames []string
+	for _, a := range t.supportedAgents {
+		agentNames = append(agentNames, a.Name())
+	}
+	return agentNames
 }
 
 // ProcessRequest implements types.Tool.
@@ -201,7 +228,7 @@ func shouldUseAutoFlow(agent agent.Agent) bool {
 	return len(agent.SubAgents()) != 0 || !a.internal().DisallowTransferToParent || !a.internal().DisallowTransferToPeers
 }
 
-// AppendTools appends the tools to the request.
+// appendTools appends the tools to the request.
 // Appending duplicate tools or nameless tools is an error.
 func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 	if r.Tools == nil {
@@ -254,7 +281,7 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
-func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent, transferTool tool.Tool) (string, error) {
+func (t *TransferToAgentTool) instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent) (string, error) {
 	if asLLMAgent(curAgent).internal().DisallowTransferToParent {
 		parent = nil
 	}
@@ -270,7 +297,7 @@ func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agen
 		AgentName:        curAgent.Name(),
 		Parent:           parent,
 		Targets:          targets,
-		ToolName:         transferTool.Name(),
+		ToolName:         t.Name(),
 		FormattedTargets: formatTargets(targets),
 	}); err != nil {
 		return "", err
