@@ -132,7 +132,7 @@ func (t *TransferToAgentTool) IsLongRunning() bool {
 }
 
 func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
-	declaration := &genai.FunctionDeclaration{
+	return &genai.FunctionDeclaration{
 		Name:        t.Name(),
 		Description: t.Description(),
 		Parameters: &genai.Schema{
@@ -147,7 +147,6 @@ func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
 			Required: []string{"agent_name"},
 		},
 	}
-	return declaration
 }
 
 func (t *TransferToAgentTool) enums() []string {
