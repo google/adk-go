@@ -55,6 +55,8 @@ func (m *mockInvocationContext) Branch() string {
 	return m.branch
 }
 
+func (m *mockInvocationContext) TriggeredBy() string { return "" }
+
 func TestGenerateRequestConfirmationEvent(t *testing.T) {
 	confirmingFunctionCall := &genai.FunctionCall{
 		ID:   "call_1",
