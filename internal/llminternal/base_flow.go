@@ -18,11 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"maps"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/genai"
@@ -121,6 +123,318 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 			}
 		}
 	}
+}
+
+type activeTask struct {
+	callID string
+	cancel context.CancelFunc
+}
+
+type liveSessionImpl struct {
+	inputCh   chan agent.LiveRequest
+	outputCh  chan eventOrError
+	done      chan struct{}
+	closeOnce sync.Once
+	mu        sync.Mutex
+}
+
+type eventOrError struct {
+	event *session.Event
+	err   error
+}
+
+func newLiveSessionImpl() *liveSessionImpl {
+	return &liveSessionImpl{
+		inputCh:  make(chan agent.LiveRequest),
+		outputCh: make(chan eventOrError),
+		done:     make(chan struct{}),
+	}
+}
+
+func (s *liveSessionImpl) Send(req agent.LiveRequest) error {
+	select {
+	case s.inputCh <- req:
+		return nil
+	case <-s.done:
+		return io.EOF
+	}
+}
+
+func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		for {
+			select {
+			case res := <-s.outputCh:
+				if !yield(res.event, res.err) {
+					return
+				}
+			case <-s.done:
+				return
+			}
+		}
+	}
+}
+
+func (s *liveSessionImpl) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.done)
+	})
+	return nil
+}
+
+func (s *liveSessionImpl) pushEvent(ev *session.Event) bool {
+	select {
+	case s.outputCh <- eventOrError{event: ev}:
+		return true
+	case <-s.done:
+		return false
+	}
+}
+
+func (s *liveSessionImpl) pushError(err error) bool {
+	select {
+	case s.outputCh <- eventOrError{err: err}:
+		return true
+	case <-s.done:
+		return false
+	}
+}
+
+func (s *liveSessionImpl) recvRequest() (agent.LiveRequest, error) {
+	select {
+	case req, ok := <-s.inputCh:
+		if !ok {
+			return agent.LiveRequest{}, io.EOF
+		}
+		return req, nil
+	case <-s.done:
+		return agent.LiveRequest{}, io.EOF
+	}
+}
+
+func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	clientProvider, ok := f.Model.(interface {
+		Client() *genai.Client
+	})
+	if !ok {
+		return nil, nil, fmt.Errorf("model does not support live connection")
+	}
+	client := clientProvider.Client()
+
+	runCfg := runconfig.FromContext(ctx)
+	if runCfg == nil || runCfg.Live == nil {
+		return nil, nil, fmt.Errorf("live run config not found")
+	}
+
+	liveCfg, ok := runCfg.Live.(*agent.LiveRunConfig)
+	if !ok {
+		return nil, nil, fmt.Errorf("invalid live run config type")
+	}
+
+	sess := newLiveSessionImpl()
+
+	go func() {
+		defer sess.Close()
+
+		nreq := &model.LLMRequest{
+			Model: f.Model.Name(),
+		}
+		for ev, err := range f.preprocess(ctx, nreq) {
+			if err != nil {
+				sess.pushError(err)
+				return
+			}
+			if ev != nil {
+				if !sess.pushEvent(ev) {
+					return
+				}
+			}
+		}
+
+		liveConnectConfig := &genai.LiveConnectConfig{
+			ResponseModalities:       liveCfg.ResponseModalities,
+			SpeechConfig:             liveCfg.SpeechConfig,
+			SystemInstruction:        nreq.Config.SystemInstruction,
+			Tools:                    nreq.Config.Tools,
+			SessionResumption:        liveCfg.SessionResumption,
+			InputAudioTranscription:  liveCfg.InputAudioTranscription,
+			OutputAudioTranscription: liveCfg.OutputAudioTranscription,
+		}
+
+		isResumable := func(err error) bool {
+			if err == nil {
+				return false
+			}
+			if err == io.EOF {
+				return true
+			}
+			errStr := err.Error()
+			fmt.Printf("DEBUG: isResumable checking error: %s\n", errStr)
+			return strings.Contains(errStr, "broken pipe") ||
+				strings.Contains(errStr, "connection reset") ||
+				strings.Contains(errStr, "EOF") ||
+				strings.Contains(errStr, "1008") ||
+				strings.Contains(errStr, "GoAway")
+		}
+
+		for {
+			connCtx, cancelConn := context.WithCancel(ctx)
+
+			if liveConnectConfig.SessionResumption != nil {
+				fmt.Printf("connecting with %s\n", liveConnectConfig.SessionResumption.Handle)
+			}
+			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
+			if err != nil {
+				cancelConn()
+				fmt.Printf("failed to connect live session: %v\n", err)
+				sess.pushError(fmt.Errorf("failed to connect live session: %w", err))
+				return
+			}
+
+			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name(), googlellm.GetGoogleLLMVariant(f.Model))
+
+			cleanup := func() {
+				cancelConn()
+				liveConn.Close()
+			}
+
+			eventsChan := make(chan *session.Event)
+			errChan := make(chan error)
+
+			// Send preprocessed content directly to model if any exists after early preprocessing
+			if len(nreq.Contents) > 0 {
+				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
+					fmt.Printf("failed to send history: %v\n", err)
+					sess.pushError(err)
+					return
+				}
+			}
+
+			// Reading from model loop
+			go func() {
+				for {
+					resp, err := liveConn.Recv(connCtx)
+					if err != nil {
+						errChan <- err
+						return
+					}
+					if resp != nil {
+						ev := session.NewEvent(ctx.InvocationID())
+						ev.Author = ctx.Agent().Name()
+						ev.LLMResponse = *resp
+						select {
+						case eventsChan <- ev:
+						case <-connCtx.Done():
+							return
+						}
+					}
+				}
+			}()
+
+			// Sending to model loop
+			go func() {
+				for {
+					select {
+					case <-connCtx.Done():
+						return
+					case req, ok := <-sess.inputCh:
+						if !ok {
+							return
+						}
+						if req.Content != nil {
+							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
+								errChan <- err
+								return
+							}
+						}
+						if req.RealtimeInput != nil {
+							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
+								errChan <- err
+								return
+							}
+						}
+					}
+				}
+			}()
+
+			reconnect := false
+			for !reconnect {
+				select {
+				case ev := <-eventsChan:
+					if !sess.pushEvent(ev) {
+						cleanup()
+						return
+					}
+					// Handle function calls if present in the event
+					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
+					if len(fnCalls) > 0 {
+						tools := make(map[string]tool.Tool)
+						for _, t := range f.Tools {
+							tools[t.Name()] = t
+						}
+						respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil)
+						if err != nil {
+							sess.pushError(err)
+							cleanup()
+							return
+						}
+						if respEv != nil {
+							if !sess.pushEvent(respEv) {
+								cleanup()
+								return
+							}
+							// Check if task_completed was invoked.
+							var isTaskCompleted bool
+							if respEv.LLMResponse.Content != nil {
+								for _, part := range respEv.LLMResponse.Content.Parts {
+									if part.FunctionResponse != nil && part.FunctionResponse.Name == "task_completed" {
+										isTaskCompleted = true
+										break
+									}
+								}
+							}
+							if isTaskCompleted {
+								time.Sleep(100 * time.Millisecond)
+								cleanup()
+								return
+							}
+							// Send function response back to model
+							if err := liveConn.SendContent(connCtx, respEv.LLMResponse.Content); err != nil {
+								sess.pushError(err)
+								cleanup()
+								return
+							}
+						}
+					}
+				case err := <-errChan:
+					if isResumable(err) {
+						fmt.Printf("Connection error, attempting to resume: %v\n", err)
+						reconnect = true
+						break // Break the select
+					}
+					sess.pushError(err)
+					cleanup()
+					return
+				case <-ctx.Done():
+					sess.pushError(ctx.Err())
+					cleanup()
+					return
+				}
+				if reconnect {
+					break // Break the for loop
+				}
+			}
+
+			// Cleanup before reconnecting
+			cleanup()
+
+			if !reconnect {
+				break
+			}
+		}
+	}()
+
+	return sess, sess.recvIter(), nil
 }
 
 func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -578,6 +892,27 @@ Suggested fixes:
   - Check for typos in function name`, toolName, joinedTools)
 }
 
+type cancelledToolContext struct {
+	tool.Context
+	cancelCtx context.Context
+}
+
+func (c *cancelledToolContext) Done() <-chan struct{} {
+	return c.cancelCtx.Done()
+}
+
+func (c *cancelledToolContext) Err() error {
+	return c.cancelCtx.Err()
+}
+
+func (c *cancelledToolContext) Deadline() (deadline time.Time, ok bool) {
+	return c.cancelCtx.Deadline()
+}
+
+func (c *cancelledToolContext) Value(key any) any {
+	return c.cancelCtx.Value(key)
+}
+
 // handleFunctionCalls calls the functions and returns the function response event.
 //
 // TODO: accept filters to include/exclude function calls.
@@ -617,7 +952,9 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			toolCtx := toolinternal.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
 
 			var result map[string]any
-			curTool, found := toolsDict[fnCall.Name]
+			var curTool tool.Tool
+			var found bool
+			curTool, found = toolsDict[fnCall.Name]
 			if !found {
 				err := newToolNotFoundError(fnCall.Name, toolNames)
 				result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)

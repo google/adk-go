@@ -46,6 +46,8 @@ type LLMResponse struct {
 	UsageMetadata     *genai.GenerateContentResponseUsageMetadata
 	CustomMetadata    map[string]any
 	LogprobsResult    *genai.LogprobsResult
+	InputTranscription  *genai.Transcription
+	OutputTranscription *genai.Transcription
 	ModelVersion      string
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
@@ -58,6 +60,7 @@ type LLMResponse struct {
 	// Flag indicating that LLM was interrupted when generating the content.
 	// Usually it is due to user interruption during a bidi streaming.
 	Interrupted  bool
+	SessionResumptionHandle string
 	ErrorCode    string
 	ErrorMessage string
 	FinishReason genai.FinishReason

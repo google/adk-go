@@ -22,6 +22,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gorilla/websocket"
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/memory"
@@ -32,17 +35,18 @@ import (
 
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
-	sseTimeout      time.Duration
-	sessionService  session.Service
-	memoryService   memory.Service
-	artifactService artifact.Service
-	agentLoader     agent.Loader
-	pluginConfig    runner.PluginConfig
+	sseTimeout        time.Duration
+	sessionService    session.Service
+	memoryService     memory.Service
+	artifactService   artifact.Service
+	agentLoader       agent.Loader
+	pluginConfig      runner.PluginConfig
+	autoCreateSession bool
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
-func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig) *RuntimeAPIController {
-	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig}
+func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig, autoCreateSession bool) *RuntimeAPIController {
+	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig, autoCreateSession: autoCreateSession}
 }
 
 // RunAgent executes a non-streaming agent run for a given session and message.
@@ -204,12 +208,13 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 	}
 
 	r, err := runner.New(runner.Config{
-		AppName:         req.AppName,
-		Agent:           curAgent,
-		SessionService:  c.sessionService,
-		MemoryService:   c.memoryService,
-		ArtifactService: c.artifactService,
-		PluginConfig:    c.pluginConfig,
+		AppName:           req.AppName,
+		Agent:             curAgent,
+		SessionService:    c.sessionService,
+		MemoryService:     c.memoryService,
+		ArtifactService:   c.artifactService,
+		PluginConfig:      c.pluginConfig,
+		AutoCreateSession: c.autoCreateSession,
 	},
 	)
 	if err != nil {
@@ -236,4 +241,134 @@ func decodeRequestBody(req *http.Request) (decodedReq models.RunAgentRequest, er
 		return runAgentRequest, newStatusError(fmt.Errorf("failed to decode request: %w", err), http.StatusBadRequest)
 	}
 	return runAgentRequest, nil
+}
+
+func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.Request) error {
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     func(r *http.Request) bool { return true },
+	}
+
+	q := req.URL.Query()
+	appName := q.Get("appName")
+	if appName == "" {
+		appName = q.Get("app_name")
+	}
+	userID := q.Get("userId")
+	if userID == "" {
+		userID = q.Get("user_id")
+	}
+	sessionID := q.Get("sessionId")
+	if sessionID == "" {
+		sessionID = q.Get("session_id")
+	}
+
+	if appName == "" || userID == "" || sessionID == "" {
+		return fmt.Errorf("appName, userId, and sessionId are required")
+	}
+
+	ws, err := upgrader.Upgrade(rw, req, nil)
+	if err != nil {
+		return fmt.Errorf("failed to upgrade to websocket: %w", err)
+	}
+	defer ws.Close()
+
+	sendClose := func(code int, reason string) {
+		ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+		ws.SetReadDeadline(time.Now().Add(time.Second))
+		for {
+			if _, _, err := ws.ReadMessage(); err != nil {
+				break
+			}
+		}
+	}
+
+	r, _, err := c.getRunner(models.RunAgentRequest{AppName: appName, UserId: userID, SessionId: sessionID})
+	if err != nil {
+		closeReason := err.Error()
+		if _, loadErr := c.agentLoader.LoadAgent(appName); loadErr != nil {
+			closeReason = fmt.Sprintf("agent %s not found", appName)
+		}
+		sendClose(websocket.CloseInternalServerErr, closeReason)
+		return nil
+	}
+
+	// Read from Runner and write back to client over the WebSocket
+	liveSession, eventIter, err := r.RunLive(req.Context(), userID, sessionID, agent.LiveRunConfig{
+		MaxLLMCalls:              100, // Reasonable default
+		ResponseModalities:       []genai.Modality{genai.ModalityAudio},
+		InputAudioTranscription:  &genai.AudioTranscriptionConfig{},
+		OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
+	})
+	if err != nil {
+		sendClose(websocket.CloseInternalServerErr, err.Error())
+		return nil
+	}
+	defer liveSession.Close()
+
+	// Spawning goroutine for reading from the client over WebSocket and pushing it to Runner
+	go func() {
+		for {
+			messageType, p, err := ws.ReadMessage()
+			if err != nil {
+				// WebSocket is closed or error occurred
+				break
+			}
+
+			if messageType == websocket.BinaryMessage {
+				if err := liveSession.Send(agent.LiveRequest{
+					RealtimeInput: &genai.Blob{
+						MIMEType: "audio/pcm;rate=16000",
+						Data:     p,
+					},
+				}); err != nil {
+					break
+				}
+			} else if messageType == websocket.TextMessage {
+				var apiReq models.LiveRequest
+				if err := json.Unmarshal(p, &apiReq); err != nil {
+					continue
+				}
+
+				if apiReq.Close {
+					break
+				}
+
+				liveReq := agent.LiveRequest{
+					Content: apiReq.Content,
+				}
+
+				if apiReq.ActivityStart != nil {
+					liveReq.RealtimeInput = apiReq.ActivityStart
+				} else if apiReq.ActivityEnd != nil {
+					liveReq.RealtimeInput = apiReq.ActivityEnd
+				} else if apiReq.Blob != nil {
+					liveReq.RealtimeInput = &genai.Blob{
+						MIMEType: apiReq.Blob.MIMEType,
+						Data:     apiReq.Blob.Data,
+					}
+				}
+
+				if err := liveSession.Send(liveReq); err != nil {
+					break
+				}
+			}
+		}
+	}()
+
+	for event, err := range eventIter {
+		if err != nil {
+			fmt.Printf("RunLive failed: %v\n", err)
+			ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
+			break
+		}
+
+		err = ws.WriteJSON(models.FromSessionEvent(*event))
+		if err != nil {
+			break
+		}
+	}
+
+	return nil
 }

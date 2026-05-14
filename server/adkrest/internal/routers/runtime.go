@@ -45,5 +45,11 @@ func (r *RuntimeAPIRouter) Routes() Routes {
 			Pattern:     "/run_sse",
 			HandlerFunc: r.runtimeController.RunSSEHandler,
 		},
+		Route{
+			Name:        "RunAgentLive",
+			Methods:     []string{http.MethodGet, http.MethodOptions},
+			Pattern:     "/run_live",
+			HandlerFunc: controllers.NewErrorHandler(r.runtimeController.RunLiveHandler),
+		},
 	}
 }
