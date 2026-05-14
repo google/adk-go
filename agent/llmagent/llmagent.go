@@ -403,7 +403,20 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
 		return
 	}
-	if a.OutputKey != "" && !event.Partial && event.Content != nil && len(event.Content.Parts) > 0 {
+	// Gate on IsFinalResponse() rather than just !Partial: in a
+	// multi-step agent loop (function call → function response →
+	// final text) every intermediate event is non-partial and may
+	// have text content, but only the final text response is the
+	// agent's actual output. Writing OutputKey on every such event
+	// produces multiple state writes per turn — visible to
+	// callers as duplicated state mutations and to the workflow
+	// engine as ErrMultipleOutputs (workflow scheduler treats
+	// StateDelta["output"] as the routing value and rejects more
+	// than one per node activation).
+	//
+	// Mirrors adk-python's gating in src/google/adk/agents/llm_agent.py
+	// (`if event.is_final_response() and event.content and event.content.parts`).
+	if a.OutputKey != "" && event.IsFinalResponse() && event.Content != nil && len(event.Content.Parts) > 0 {
 		var sb strings.Builder
 		for _, part := range event.Content.Parts {
 			if part.Text != "" && !part.Thought {
