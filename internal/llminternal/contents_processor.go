@@ -30,6 +30,7 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/adk/workflow"
 )
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
@@ -520,13 +521,17 @@ func shouldExcludeEvent(ev *session.Event) bool {
 	for _, p := range c.Parts {
 		if p.FunctionCall != nil {
 			switch p.FunctionCall.Name {
-			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
+			case requestEUCFunctionCallName,
+				toolconfirmation.FunctionCallName,
+				workflow.WorkflowInputFunctionCallName:
 				return true
 			}
 		}
 		if p.FunctionResponse != nil {
 			switch p.FunctionResponse.Name {
-			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
+			case requestEUCFunctionCallName,
+				toolconfirmation.FunctionCallName,
+				workflow.WorkflowInputFunctionCallName:
 				return true
 			}
 		}
