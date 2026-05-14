@@ -62,8 +62,13 @@ func New(cfg Config) (agent.Agent, error) {
 		onToolErrorCallback = append(onToolErrorCallback, llminternal.OnToolErrorCallback(c))
 	}
 
+	m := cfg.Model
+	if cfg.Retry != nil {
+		m = model.WithRetry(cfg.Model, cfg.Retry)
+	}
+
 	a := &llmAgent{
-		model:                 cfg.Model,
+		model:                 m,
 		beforeModelCallbacks:  beforeModelCallbacks,
 		afterModelCallbacks:   afterModelCallbacks,
 		onModelErrorCallbacks: onModelErrorCallbacks,
@@ -75,7 +80,7 @@ func New(cfg Config) (agent.Agent, error) {
 		outputSchema:          cfg.OutputSchema,
 
 		State: llminternal.State{
-			Model:                    cfg.Model,
+			Model:                    m,
 			GenerateContentConfig:    cfg.GenerateContentConfig,
 			Tools:                    cfg.Tools,
 			Toolsets:                 cfg.Toolsets,
@@ -176,6 +181,10 @@ type Config struct {
 	BeforeModelCallbacks []BeforeModelCallback
 	// Model that is used by the agent.
 	Model model.LLM
+	// Retry configures automatic retry with exponential backoff for LLM calls.
+	// When non-nil, the model is wrapped with model.WithRetry using this config.
+	// Leave nil to disable retry.
+	Retry *model.RetryConfig
 	// AfterModelCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil LLMResponse or error. Then
 	// actual LLM response is replaced with the returned response/error.
