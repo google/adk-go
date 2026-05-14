@@ -95,7 +95,7 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 	}
 
 	return &FunctionNode{
-		baseNode: baseNode{name: name, config: cfg},
+		BaseNode: BaseNode{name: name, config: cfg},
 		fn:       wrappedFn,
 	}
 }
