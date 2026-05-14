@@ -16,6 +16,8 @@ package runconfig
 
 import (
 	"context"
+
+	"google.golang.org/adk/agent"
 )
 
 type StreamingMode string
@@ -28,7 +30,7 @@ const (
 
 type RunConfig struct {
 	StreamingMode StreamingMode
-	Live any
+	Live *agent.LiveRunConfig
 }
 
 func ToContext(ctx context.Context, cfg *RunConfig) context.Context {
