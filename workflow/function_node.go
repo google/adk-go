@@ -28,7 +28,7 @@ import (
 
 // FunctionNode wraps a custom function.
 type FunctionNode struct {
-	baseNode
+	BaseNode
 	fn func(ctx agent.InvocationContext, input any) (any, error)
 }
 
