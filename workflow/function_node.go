@@ -62,21 +62,24 @@ func NewFunctionNodeWithSchema[IN, OUT any](name string, fn func(ctx agent.Invoc
 // newFunctionNodeWithResolvedSchemas is an internal constructor that consumes already resolved schemas.
 func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error), inputSchema, outputSchema *jsonschema.Resolved, cfg NodeConfig) *FunctionNode {
 	wrappedFn := func(ctx agent.InvocationContext, input any) (any, error) {
+		var output OUT
+		var err error
 		if input == nil {
 			var zero IN
-			return fn(ctx, zero)
-		}
-		typedInput, ok := input.(IN)
-		if !ok {
-			// Fallback to the json-like input types that cannot be converted by the standard type assertion.
-			// E.g. tool nodes return map[string]any as input and user may define a struct as the target type.
-			var err error
-			typedInput, err = typeutil.ConvertToWithJSONSchema[any, IN](input, inputSchema)
-			if err != nil {
-				return nil, fmt.Errorf("new function node: invalid input type, expected %T: %w", new(IN), err)
+			output, err = fn(ctx, zero)
+		} else {
+			typedInput, ok := input.(IN)
+			if !ok {
+				// Fallback to the json-like input types that cannot be converted by the standard type assertion.
+				// E.g. tool nodes return map[string]any as input and user may define a struct as the target type.
+				typedInput, err = typeutil.ConvertToWithJSONSchema[any, IN](input, inputSchema)
+				if err != nil {
+					return nil, fmt.Errorf("new function node: invalid input type, expected %T: %w", new(IN), err)
+				}
 			}
+			output, err = fn(ctx, typedInput)
 		}
-		output, err := fn(ctx, typedInput)
+
 		if err != nil {
 			return output, err
 		}
