@@ -23,42 +23,35 @@ const CONSTANT_VALUES = require('./constant');
  */
 module.exports = async ({ github, context }) => {
   const issue = context.payload.issue.html_url;
-  const baseUrl = CONSTANT_VALUES.MODULE.CSAT.BASE_URL;
+  
+  // Check if any label matches (case-insensitive) the supported CSAT labels.
+  const supportedLabels = Object.values(CONSTANT_VALUES.GLOBALS.LABELS);
+  const hasMatchingLabel = context.payload.issue.labels.some(label => {
+    const name = label.name.toLowerCase();
+    return supportedLabels.some(supportedLabel => name.includes(supportedLabel));
+  });
 
-  // Loop over all ths label present in issue and check if specific label is
-  // present for survey link.
-  for (const label of context.payload.issue.labels) {
-    if (label.name.includes(CONSTANT_VALUES.GLOBALS.LABELS.BUG) ||
-      label.name.includes(CONSTANT_VALUES.GLOBALS.LABELS.DOCUMENTATION) ||
-      label.name.includes(CONSTANT_VALUES.GLOBALS.LABELS.GOOD_FIRST_ISSUE) ||
-      label.name.includes(CONSTANT_VALUES.GLOBALS.LABELS.ENHANCEMENT) ||
-      label.name.includes(CONSTANT_VALUES.GLOBALS.LABELS.QUESTION) ||
-      label.name.includes(CONSTANT_VALUES.GLOBALS.LABELS.GO) ||
-      label.name.includes(CONSTANT_VALUES.GLOBALS.LABELS.API) ||
-      label.name.includes(CONSTANT_VALUES.GLOBALS.LABELS.BREAKING_CHANGE) ||
-      label.name.includes(CONSTANT_VALUES.GLOBALS.LABELS.DEPENDENCIES) ||
-      label.name.includes(CONSTANT_VALUES.GLOBALS.LABELS.DUPLICATE) ||
-      label.name.includes(CONSTANT_VALUES.GLOBALS.LABELS.V1_0_TRIAGE)) {
+  if (hasMatchingLabel) {
+    console.log(`Posting CSAT survey for issue =${issue}`);
+    const baseUrl = CONSTANT_VALUES.MODULE.CSAT.BASE_URL;
 
-      console.log(`label-${label.name}, posting CSAT survey for issue =${issue}`);
+    const yesCsat = `<a href="${baseUrl + CONSTANT_VALUES.MODULE.CSAT.SATISFACTION_PARAM +
+      CONSTANT_VALUES.MODULE.CSAT.YES +
+      CONSTANT_VALUES.MODULE.CSAT.ISSUEID_PARAM + encodeURIComponent(issue)}"> ${CONSTANT_VALUES.MODULE.CSAT.YES}</a>`;
 
-      const yesCsat = `<a href="${baseUrl + CONSTANT_VALUES.MODULE.CSAT.SATISFACTION_PARAM +
-        CONSTANT_VALUES.MODULE.CSAT.YES +
-        CONSTANT_VALUES.MODULE.CSAT.ISSUEID_PARAM + encodeURIComponent(issue)}"> ${CONSTANT_VALUES.MODULE.CSAT.YES}</a>`;
+    const noCsat = `<a href="${baseUrl + CONSTANT_VALUES.MODULE.CSAT.SATISFACTION_PARAM +
+      CONSTANT_VALUES.MODULE.CSAT.NO +
+      CONSTANT_VALUES.MODULE.CSAT.ISSUEID_PARAM + encodeURIComponent(issue)}"> ${CONSTANT_VALUES.MODULE.CSAT.NO}</a>`;
 
-      const noCsat = `<a href="${baseUrl + CONSTANT_VALUES.MODULE.CSAT.SATISFACTION_PARAM +
-        CONSTANT_VALUES.MODULE.CSAT.NO +
-        CONSTANT_VALUES.MODULE.CSAT.ISSUEID_PARAM + encodeURIComponent(issue)}"> ${CONSTANT_VALUES.MODULE.CSAT.NO}</a>`;
+    const comment = CONSTANT_VALUES.MODULE.CSAT.MSG + '\n' + yesCsat + '\n' +
+      noCsat + '\n';
+    const issueNumber = context.issue.number ?? context.payload.issue.number;
 
-      const comment = CONSTANT_VALUES.MODULE.CSAT.MSG + '\n' + yesCsat + '\n' + noCsat + '\n';
-      let issueNumber = context.issue.number ?? context.payload.issue.number;
-
-      await github.rest.issues.createComment({
-        issue_number: issueNumber,
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        body: comment
-      });
-    }
+    await github.rest.issues.createComment({
+      issue_number: issueNumber,
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      body: comment
+    });
   }
 };
