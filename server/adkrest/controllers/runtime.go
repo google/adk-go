@@ -307,7 +307,9 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		sendClose(websocket.CloseInternalServerErr, err.Error())
 		return nil
 	}
-	defer liveSession.Close()
+	defer func() {
+		_ = liveSession.Close()
+	}()
 
 	// Spawning goroutine for reading from the client over WebSocket and pushing it to Runner
 	go func() {

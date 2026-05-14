@@ -130,7 +130,6 @@ type liveSessionImpl struct {
 	outputCh  chan eventOrError
 	done      chan struct{}
 	closeOnce sync.Once
-	mu        sync.Mutex
 }
 
 type eventOrError struct {
@@ -192,18 +191,6 @@ func (s *liveSessionImpl) pushError(err error) bool {
 		return true
 	case <-s.done:
 		return false
-	}
-}
-
-func (s *liveSessionImpl) recvRequest() (agent.LiveRequest, error) {
-	select {
-	case req, ok := <-s.inputCh:
-		if !ok {
-			return agent.LiveRequest{}, io.EOF
-		}
-		return req, nil
-	case <-s.done:
-		return agent.LiveRequest{}, io.EOF
 	}
 }
 
