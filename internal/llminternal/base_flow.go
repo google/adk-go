@@ -130,6 +130,7 @@ type liveSessionImpl struct {
 	outputCh  chan eventOrError
 	done      chan struct{}
 	closeOnce sync.Once
+	audioMgr  *AudioCacheManager
 }
 
 type eventOrError struct {
@@ -142,6 +143,7 @@ func newLiveSessionImpl() *liveSessionImpl {
 		inputCh:  make(chan agent.LiveRequest),
 		outputCh: make(chan eventOrError),
 		done:     make(chan struct{}),
+		audioMgr: NewAudioCacheManager(),
 	}
 }
 
@@ -298,6 +300,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						return
 					}
 					if resp != nil {
+						if runCfg.Live.SaveLiveBlob && resp.Content != nil {
+							for _, part := range resp.Content.Parts {
+								if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
+									sess.audioMgr.CacheOutput(part.InlineData.Data, part.InlineData.MIMEType)
+								}
+							}
+						}
 						ev := session.NewEvent(ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
 						ev.LLMResponse = *resp
@@ -327,6 +336,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 							}
 						}
 						if req.RealtimeInput != nil {
+							if blob, ok := req.RealtimeInput.(*genai.Blob); ok {
+								sess.audioMgr.CacheInput(blob.Data, blob.MIMEType)
+							}
 							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
 								errChan <- err
 								return
@@ -343,6 +355,31 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if !sess.pushEvent(ev) {
 						cleanup()
 						return
+					}
+					// Flush caches if needed
+					if runCfg.Live.SaveLiveBlob {
+						var flushUser, flushModel bool
+						if ev.LLMResponse.Interrupted {
+							flushModel = true
+						}
+						if ev.LLMResponse.TurnComplete {
+							flushUser = true
+							flushModel = true
+						}
+						if flushUser || flushModel {
+							flushedEvents, err := sess.audioMgr.FlushCaches(ctx, flushUser, flushModel)
+							if err != nil {
+								sess.pushError(err)
+								cleanup()
+								return
+							}
+							for _, fev := range flushedEvents {
+								if !sess.pushEvent(fev) {
+									cleanup()
+									return
+								}
+							}
+						}
 					}
 					// Handle function calls if present in the event
 					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
