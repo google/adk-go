@@ -366,7 +366,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "fallback to default route when no concrete route matches",
 			startRoutes: []string{"unmatched"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: StringRoute("branchA")},
@@ -378,7 +378,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "default route is suppressed by concrete route match",
 			startRoutes: []string{"branchA"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: StringRoute("branchA")},
@@ -390,7 +390,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "unconditional edge does not suppress default route",
 			startRoutes: []string{"unmatched"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a},
