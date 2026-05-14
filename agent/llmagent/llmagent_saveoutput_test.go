@@ -105,6 +105,38 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			event:          createTestEvent("testagent", "Test response", true),
 			wantStateDelta: map[string]any{},
 		},
+		{
+			// Regression: an intermediate event in a multi-step
+			// agent loop (e.g. text + function call before the
+			// model's final answer) is non-partial but is NOT a
+			// final response. OutputKey must not fire on it,
+			// otherwise a multi-step turn produces multiple
+			// state writes (and the workflow scheduler treats
+			// that as ErrMultipleOutputs because it interprets
+			// StateDelta["output"] as the routing value).
+			name:        "skips when event has function call (non-final response)",
+			agentConfig: Config{Name: "test_agent", OutputKey: "result"},
+			event:       createTestEvent("test_agent", "calling tool", true),
+			customEventParts: []*genai.Part{
+				{Text: "calling tool"},
+				{FunctionCall: &genai.FunctionCall{ID: "fc1", Name: "some_tool"}},
+			},
+			wantStateDelta: map[string]any{},
+		},
+		{
+			// Regression companion: the matching function-response
+			// event (yielded by the engine after the tool runs)
+			// is also non-partial, also has text, but is not the
+			// final model response. Must not write OutputKey.
+			name:        "skips when event has function response (non-final)",
+			agentConfig: Config{Name: "test_agent", OutputKey: "result"},
+			event:       createTestEvent("test_agent", "tool result", true),
+			customEventParts: []*genai.Part{
+				{Text: "tool result"},
+				{FunctionResponse: &genai.FunctionResponse{ID: "fc1", Name: "some_tool"}},
+			},
+			wantStateDelta: map[string]any{},
+		},
 		// TODO tests with OutputSchema
 	}
 
