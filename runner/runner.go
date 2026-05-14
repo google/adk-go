@@ -20,9 +20,12 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
@@ -145,7 +148,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			SessionID: sessionID,
 		})
 		if err != nil {
-			if !r.autoCreateSession {
+			if !r.autoCreateSession || !isNotFoundError(err) {
 				yield(nil, err)
 				return
 			}
@@ -265,6 +268,15 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 	}
+}
+
+func isNotFoundError(err error) bool {
+	// 1. Check if it's a formal gRPC NotFound error
+	if status.Code(err) == codes.NotFound {
+		return true
+	}
+	// This fixes the test and supports the framework's built-in InMemoryService!
+	return strings.Contains(strings.ToLower(err.Error()), "not found")
 }
 
 func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.InvocationContext, error) {
