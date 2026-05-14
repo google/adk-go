@@ -125,11 +125,6 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 	}
 }
 
-type activeTask struct {
-	callID string
-	cancel context.CancelFunc
-}
-
 type liveSessionImpl struct {
 	inputCh   chan agent.LiveRequest
 	outputCh  chan eventOrError
@@ -229,7 +224,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 	sess := newLiveSessionImpl()
 
 	go func() {
-		defer sess.Close()
+		defer func() {
+			_ = sess.Close()
+		}()
 
 		nreq := &model.LLMRequest{
 			Model: f.Model.Name(),
@@ -290,7 +287,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 
 			cleanup := func() {
 				cancelConn()
-				liveConn.Close()
+				_ = liveConn.Close()
 			}
 
 			eventsChan := make(chan *session.Event)
@@ -885,27 +882,6 @@ Suggested fixes:
   - Review agent instruction to ensure tool usage is clear
   - Verify tool is included in agent.tools list
   - Check for typos in function name`, toolName, joinedTools)
-}
-
-type cancelledToolContext struct {
-	tool.Context
-	cancelCtx context.Context
-}
-
-func (c *cancelledToolContext) Done() <-chan struct{} {
-	return c.cancelCtx.Done()
-}
-
-func (c *cancelledToolContext) Err() error {
-	return c.cancelCtx.Err()
-}
-
-func (c *cancelledToolContext) Deadline() (deadline time.Time, ok bool) {
-	return c.cancelCtx.Deadline()
-}
-
-func (c *cancelledToolContext) Value(key any) any {
-	return c.cancelCtx.Value(key)
 }
 
 // handleFunctionCalls calls the functions and returns the function response event.

@@ -272,11 +272,13 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	if err != nil {
 		return fmt.Errorf("failed to upgrade to websocket: %w", err)
 	}
-	defer ws.Close()
+	defer func() {
+		_ = ws.Close()
+	}()
 
 	sendClose := func(code int, reason string) {
-		ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
-		ws.SetReadDeadline(time.Now().Add(time.Second))
+		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+		_ = ws.SetReadDeadline(time.Now().Add(time.Second))
 		for {
 			if _, _, err := ws.ReadMessage(); err != nil {
 				break
@@ -360,7 +362,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	for event, err := range eventIter {
 		if err != nil {
 			fmt.Printf("RunLive failed: %v\n", err)
-			ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
+			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
 			break
 		}
 

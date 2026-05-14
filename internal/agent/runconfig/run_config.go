@@ -30,7 +30,7 @@ const (
 
 type RunConfig struct {
 	StreamingMode StreamingMode
-	Live *agent.LiveRunConfig
+	Live          *agent.LiveRunConfig
 }
 
 func ToContext(ctx context.Context, cfg *RunConfig) context.Context {

@@ -40,15 +40,15 @@ type LLMRequest struct {
 // LLMResponse is the raw LLM response.
 // It provides the first candidate response from the model if available.
 type LLMResponse struct {
-	Content           *genai.Content
-	CitationMetadata  *genai.CitationMetadata
-	GroundingMetadata *genai.GroundingMetadata
-	UsageMetadata     *genai.GenerateContentResponseUsageMetadata
-	CustomMetadata    map[string]any
-	LogprobsResult    *genai.LogprobsResult
+	Content             *genai.Content
+	CitationMetadata    *genai.CitationMetadata
+	GroundingMetadata   *genai.GroundingMetadata
+	UsageMetadata       *genai.GenerateContentResponseUsageMetadata
+	CustomMetadata      map[string]any
+	LogprobsResult      *genai.LogprobsResult
 	InputTranscription  *genai.Transcription
 	OutputTranscription *genai.Transcription
-	ModelVersion      string
+	ModelVersion        string
 	// Partial indicates whether the content is part of a unfinished content stream.
 	// Only used for streaming mode and when the content is plain text.
 	// The Runner fully processes only the final non-partial event, partial
@@ -59,10 +59,10 @@ type LLMResponse struct {
 	TurnComplete bool
 	// Flag indicating that LLM was interrupted when generating the content.
 	// Usually it is due to user interruption during a bidi streaming.
-	Interrupted  bool
+	Interrupted             bool
 	SessionResumptionHandle string
-	ErrorCode    string
-	ErrorMessage string
-	FinishReason genai.FinishReason
-	AvgLogprobs  float64
+	ErrorCode               string
+	ErrorMessage            string
+	FinishReason            genai.FinishReason
+	AvgLogprobs             float64
 }

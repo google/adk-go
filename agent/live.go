@@ -40,10 +40,10 @@ type LiveRunConfig struct {
 	SpeechConfig             *genai.SpeechConfig
 	InputAudioTranscription  *genai.AudioTranscriptionConfig
 	OutputAudioTranscription *genai.AudioTranscriptionConfig
-	RealtimeInputConfig     *genai.RealtimeInputConfig
+	RealtimeInputConfig      *genai.RealtimeInputConfig
 	EnableAffectiveDialog    bool
-	Proactivity             *genai.ProactivityConfig
-	SessionResumption       *genai.SessionResumptionConfig
-	SaveLiveBlob            bool
-	MaxLLMCalls             int
+	Proactivity              *genai.ProactivityConfig
+	SessionResumption        *genai.SessionResumptionConfig
+	SaveLiveBlob             bool
+	MaxLLMCalls              int
 }
