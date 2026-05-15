@@ -19,6 +19,7 @@ import (
 	"iter"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 
 	"google.golang.org/adk/model"
@@ -117,6 +118,41 @@ type Event struct {
 	LongRunningToolIDs []string
 	// Routing information for workflow execution
 	Routes []string
+	// RequestedInput, when non-nil, signals that the workflow node
+	// emitting this event is asking for human input and is about to
+	// pause. The workflow scheduler observes this field at event
+	// dispatch time and transitions the corresponding node to
+	// NodeWaiting on the activation's completion. UI surfaces read
+	// the same field to render the prompt.
+	//
+	// At most one event per node activation may carry this field.
+	RequestedInput *RequestInput
+}
+
+// RequestInput describes a single human-in-the-loop prompt emitted
+// by a workflow node. It travels on Event.RequestedInput from the
+// node, through the scheduler, out to the UI surface; the matching
+// response is routed back by InterruptID.
+type RequestInput struct {
+	// InterruptID is the stable correlation key for this request.
+	// It identifies the intent of the prompt (e.g. "manager_approval",
+	// "human_review"). If empty when the node yields the event, the
+	// engine fills in a UUID so the downstream contract is always a
+	// non-empty string.
+	InterruptID string
+
+	// Message is the human-readable description of what is being
+	// asked. Surfaced in UI as the prompt text. Optional.
+	Message string
+
+	// ResponseSchema, when non-nil, is the JSON schema the user's
+	// response payload must conform to.
+	ResponseSchema *jsonschema.Schema
+
+	// Payload is optional context the UI may render alongside the
+	// prompt (e.g. the document to approve, the proposed parameters).
+	// Carried through opaquely; the engine does not interpret it.
+	Payload any
 }
 
 // IsFinalResponse returns whether the event is the final response of an agent.

@@ -39,6 +39,11 @@ var (
 	// than one event whose Routes field is set. A node activation
 	// may emit at most one routing decision.
 	ErrMultipleRoutingEvents = errors.New("workflow: node produced multiple events with route tags; only one event per execution can specify routes")
+
+	// ErrMultipleInputRequests is returned when a node yields more
+	// than one event whose RequestedInput field is set. A node
+	// activation may issue at most one human-input request.
+	ErrMultipleInputRequests = errors.New("workflow: node produced multiple events with RequestedInput; only one human-input request per execution is allowed")
 )
 
 // scheduler drives a single Workflow.Run invocation. It owns the
@@ -91,10 +96,11 @@ type scheduler struct {
 // without overwriting the first value, and the consumer surfaces
 // the error at completion.
 type nodeRun struct {
-	routingEvent *session.Event // at most one; multiple is an error
-	output       any            // single StateDelta["output"]; nil if hasOutput is false
-	hasOutput    bool           // distinguishes "no output yet" from "output was nil"
-	err          error          // set on duplicate output or duplicate routing event
+	routingEvent *session.Event        // at most one; multiple is an error
+	output       any                   // single StateDelta["output"]; nil if hasOutput is false
+	hasOutput    bool                  // distinguishes "no output yet" from "output was nil"
+	inputRequest *session.RequestInput // at most one human-input request; multiple is an error
+	err          error                 // set on duplicate output, duplicate routing event, or duplicate input request
 }
 
 // recordErr stores err as the accumulator's first error. Subsequent
@@ -114,6 +120,20 @@ func (nr *nodeRun) setRoutingEvent(ev *session.Event, nodeName string) {
 		return
 	}
 	nr.routingEvent = ev
+}
+
+// setInputRequest stores req as the node's single in-flight
+// human-input request. A second call records
+// ErrMultipleInputRequests instead of overwriting; the consumer
+// surfaces the error at completion and the node ends up
+// NodeFailed (the waiting branch is gated on nr.err == nil so a
+// node that requested twice does not silently park).
+func (nr *nodeRun) setInputRequest(req *session.RequestInput, nodeName string) {
+	if nr.inputRequest != nil {
+		nr.recordErr(fmt.Errorf("%w: node %q", ErrMultipleInputRequests, nodeName))
+		return
+	}
+	nr.inputRequest = req
 }
 
 // setOutput stores out as the node's single output value. A second
@@ -349,6 +369,9 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev.Routes != nil {
 		nr.setRoutingEvent(it.ev, it.nodeName)
 	}
+	if it.ev.RequestedInput != nil {
+		nr.setInputRequest(it.ev.RequestedInput, it.nodeName)
+	}
 	if it.ev.Actions.StateDelta != nil {
 		if out, ok := it.ev.Actions.StateDelta["output"]; ok {
 			nr.setOutput(out, it.nodeName)
@@ -364,27 +387,54 @@ func (s *scheduler) handleEvent(it eventItem) {
 //
 // The returned error is the node's own error (NodeFailed); nil on
 // clean success or sibling cancellation.
+//
+// # Human-input waiting branch
+//
+// When an activation completes cleanly and recorded a non-nil
+// inputRequest (via setInputRequest from handleEvent), the node
+// transitions to NodeWaiting instead of NodeCompleted, the request
+// is persisted on NodeState.PendingRequest, and successors are not
+// scheduled. The scheduler's main loop terminates naturally when
+// every live node has either completed or moved into NodeWaiting,
+// at which point Workflow.Run's iterator exhausts and the caller
+// observes the pause by inspecting RunState.
+//
+// The waiting branch is checked after the error/cancel branches,
+// so a node that fails for any reason (returned error, panic,
+// context cancel, multiple-output, multiple-routing-event,
+// multiple-input-request) does not silently park in NodeWaiting:
+// failures take precedence and surface as NodeFailed.
 func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool) error {
 	ns := s.state.EnsureNode(it.nodeName)
 	nr := s.runsByName[it.nodeName]
 	delete(s.runsByName, it.nodeName)
 	delete(s.runCancels, it.nodeName)
 
-	switch {
-	case it.err == nil:
-		ns.Status = NodeCompleted
-	case errors.Is(it.err, context.Canceled):
+	if errors.Is(it.err, context.Canceled) {
 		ns.Status = NodeCancelled
 		return nil // sibling cancellation; not the original error
-	default:
+	}
+	if it.err != nil {
 		ns.Status = NodeFailed
 		return it.err
 	}
-
 	if nr != nil && nr.err != nil {
 		ns.Status = NodeFailed
 		return nr.err
 	}
+
+	// Happy path: decide between NodeWaiting (a recorded human-
+	// input request) or NodeCompleted. The waiting branch fires
+	// regardless of the scheduleSuccessors flag — a request that
+	// survived the run must be observable in RunState even when
+	// the consumer is draining, so the caller can persist it.
+	if nr != nil && nr.inputRequest != nil {
+		ns.Status = NodeWaiting
+		ns.PendingRequest = nr.inputRequest
+		return nil
+	}
+
+	ns.Status = NodeCompleted
 
 	if !scheduleSuccessors {
 		return nil
