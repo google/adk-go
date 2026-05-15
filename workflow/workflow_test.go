@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"strings"
+	"sync"
 	"testing"
 
 	"google.golang.org/genai"
@@ -27,27 +28,64 @@ import (
 	"google.golang.org/adk/session"
 )
 
+// defaultNodeConfig is the explicit "use defaults" NodeConfig used
+// across this package's tests where no per-node knobs are exercised.
 var defaultNodeConfig = NodeConfig{}
 
-// MockInvocationContext is a minimal implementation of agent.InvocationContext for testing.
+// MockInvocationContext is a minimal implementation of
+// agent.InvocationContext for testing. It embeds a real
+// context.Context so child cancellation works.
 type MockInvocationContext struct {
-	agent.InvocationContext
+	context.Context
 	sess        session.Session
 	userContent *genai.Content
+}
+
+// newMockCtx returns a fresh MockInvocationContext backed by
+// t.Context(), which is automatically cancelled when the test ends
+// — preventing leaked scheduler goroutines from outliving the test.
+func newMockCtx(t *testing.T) *MockInvocationContext {
+	t.Helper()
+	return &MockInvocationContext{Context: t.Context()}
+}
+
+// newSeededMockCtx returns a mockCtx pre-loaded with a "seed" user
+// content part — the standard fixture for scheduler tests that need
+// an initial input flowing into Start.
+func newSeededMockCtx(t *testing.T) *MockInvocationContext {
+	t.Helper()
+	ctx := newMockCtx(t)
+	ctx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "seed"}}}
+	return ctx
+}
+
+// mustNew builds a workflow from edges and fails the test if
+// construction errors. The returned workflow is ready to Run.
+func mustNew(t *testing.T, edges []Edge) *Workflow {
+	t.Helper()
+	w, err := New(edges)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return w
 }
 
 func (m *MockInvocationContext) Session() session.Session    { return m.sess }
 func (m *MockInvocationContext) InvocationID() string        { return "test-invocation-id" }
 func (m *MockInvocationContext) UserContent() *genai.Content { return m.userContent }
+func (m *MockInvocationContext) TriggeredBy() string         { return "" }
+func (m *MockInvocationContext) Agent() agent.Agent          { return nil }
 func (m *MockInvocationContext) Artifacts() agent.Artifacts  { return nil }
 func (m *MockInvocationContext) Memory() agent.Memory        { return nil }
-func (m *MockInvocationContext) Agent() agent.Agent          { return nil }
 func (m *MockInvocationContext) Branch() string              { return "" }
 func (m *MockInvocationContext) RunConfig() *agent.RunConfig { return nil }
-func (m *MockInvocationContext) EndInvocation()              {}
 func (m *MockInvocationContext) Ended() bool                 { return false }
+func (m *MockInvocationContext) EndInvocation()              {}
+
 func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
-	return m
+	cp := *m
+	cp.Context = ctx
+	return &cp
 }
 
 func TestFunctionNode(t *testing.T) {
@@ -58,7 +96,7 @@ func TestFunctionNode(t *testing.T) {
 	node := NewFunctionNode("upper", upperFn, defaultNodeConfig)
 
 	// Create a mock context
-	mockCtx := &MockInvocationContext{sess: nil}
+	mockCtx := newMockCtx(t)
 
 	// Run the node
 	events := node.Run(mockCtx, "hello")
@@ -101,17 +139,12 @@ func TestSequentialWorkflow(t *testing.T) {
 	nodeB := NewFunctionNode("suffix", suffixFn, defaultNodeConfig)
 
 	edges := Chain(Start, nodeA, nodeB)
-	
-	w, err := New(edges)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 
-	mockCtx := &MockInvocationContext{
-		sess: nil,
-		userContent: &genai.Content{
-			Parts: []*genai.Part{{Text: "hello"}},
-		},
+	w := mustNew(t, edges)
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{
+		Parts: []*genai.Part{{Text: "hello"}},
 	}
 
 	events := w.Run(mockCtx)
@@ -210,7 +243,7 @@ func TestMultiRouteInt(t *testing.T) {
 }
 
 type CustomRouteNode struct {
-	baseNode
+	BaseNode
 	route []string
 	onRun func()
 }
@@ -227,39 +260,48 @@ func (n *CustomRouteNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[
 }
 
 func TestWorkflowRouting(t *testing.T) {
+	// testTracker collects the names of nodes that ran. The
+	// scheduler runs sibling nodes concurrently, so appends must be
+	// serialised.
 	type testTracker struct {
+		mu       sync.Mutex
 		executed []string
+	}
+	record := func(tracker *testTracker, name string) {
+		tracker.mu.Lock()
+		tracker.executed = append(tracker.executed, name)
+		tracker.mu.Unlock()
 	}
 
 	type testCase struct {
-		name           string
-		startRoutes    []string
-		edges          func(nodeStart *CustomRouteNode, nodeA, nodeB *FunctionNode, nodeC *CustomRouteNode, nodeD *FunctionNode) []Edge
-		expectedExec   []string
+		name         string
+		startRoutes  []string
+		edges        func(nodeStart *CustomRouteNode, nodeA, nodeB *FunctionNode, nodeC *CustomRouteNode, nodeD *FunctionNode) []Edge
+		expectedExec []string
 	}
 
 	createNodes := func() (*CustomRouteNode, *FunctionNode, *FunctionNode, *CustomRouteNode, *FunctionNode, *testTracker) {
 		tracker := &testTracker{}
 		nodeX := &CustomRouteNode{
-			baseNode: baseNode{name: "X"},
+			BaseNode: NewBaseNode("X", "", defaultNodeConfig),
 		}
 		nodeA := NewFunctionNode("A", func(ctx agent.InvocationContext, input any) (string, error) {
-			tracker.executed = append(tracker.executed, "A")
+			record(tracker, "A")
 			return "pathA", nil
 		}, defaultNodeConfig)
 		nodeB := NewFunctionNode("B", func(ctx agent.InvocationContext, input any) (string, error) {
-			tracker.executed = append(tracker.executed, "B")
+			record(tracker, "B")
 			return "pathB", nil
 		}, defaultNodeConfig)
 		nodeC := &CustomRouteNode{
-			baseNode: baseNode{name: "C"},
+			BaseNode: NewBaseNode("C", "", defaultNodeConfig),
 			route:    []string{"branchD"},
 			onRun: func() {
-				tracker.executed = append(tracker.executed, "C")
+				record(tracker, "C")
 			},
 		}
 		nodeD := NewFunctionNode("D", func(ctx agent.InvocationContext, input any) (string, error) {
-			tracker.executed = append(tracker.executed, "D")
+			record(tracker, "D")
 			return "pathD", nil
 		}, defaultNodeConfig)
 		return nodeX, nodeA, nodeB, nodeC, nodeD, tracker
@@ -324,7 +366,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "fallback to default route when no concrete route matches",
 			startRoutes: []string{"unmatched"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: StringRoute("branchA")},
@@ -336,7 +378,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "default route is suppressed by concrete route match",
 			startRoutes: []string{"branchA"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: StringRoute("branchA")},
@@ -348,7 +390,7 @@ func TestWorkflowRouting(t *testing.T) {
 		{
 			name:        "unconditional edge does not suppress default route",
 			startRoutes: []string{"unmatched"},
-			edges: func(x *CustomRouteNode, a *FunctionNode, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
+			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a},
@@ -384,19 +426,15 @@ func TestWorkflowRouting(t *testing.T) {
 			expectedExec: nil,
 		},
 		{
-			name:        "duplicate edges to same node",
-			startRoutes: []string{"branchA"},
+			name:        "MultiRoute with multiple matching routes",
+			startRoutes: []string{"branchA", "branchB"},
 			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
-					{From: x, To: a},
-					{From: x, To: a, Route: StringRoute("branchA")},
-					{From: x, To: b},
-					{From: x, To: c},
-					{From: c, To: d},
+					{From: x, To: a, Route: MultiRoute[string]{"branchA", "branchB"}},
 				}
 			},
-			expectedExec: []string{"A", "B", "C", "D"},
+			expectedExec: []string{"A"},
 		},
 	}
 
@@ -406,13 +444,10 @@ func TestWorkflowRouting(t *testing.T) {
 			start.route = tc.startRoutes
 			edges := tc.edges(start, a, b, c, d)
 
-			w, err := New(edges)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			w := mustNew(t, edges)
+			mockCtx := newMockCtx(t)
 
-			mockCtx := &MockInvocationContext{sess: nil}
-
+			var err error
 			for _, testErr := range w.Run(mockCtx) {
 				if testErr != nil {
 					err = testErr
