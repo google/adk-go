@@ -29,6 +29,9 @@ var ErrNoStartNode = errors.New("no start node found")
 // ErrNodePointsToStart is returned when a node points to the start node.
 var ErrNodePointsToStart = errors.New("node points to start node")
 
+// ErrMultipleDefaultRoutes is returned when a node has more than one default route.
+var ErrMultipleDefaultRoutes = errors.New("node has more than one default route")
+
 // validateNodes executes a set of edges validation checks.
 func validateNodes(edges []Edge) error {
 	if err := validateUniqueNames(edges); err != nil {
@@ -84,6 +87,29 @@ func validateStartNodeNoIncoming(edges []Edge) error {
 	for _, edge := range edges {
 		if edge.To == Start {
 			return fmt.Errorf("%w: %s", ErrNodePointsToStart, edge.From.Name())
+		}
+	}
+	return nil
+}
+
+// validateWorkflow executes a set of workflow validation checks.
+func validateWorkflow(workflow *Workflow) error {
+	if err := validateDefaultRoute(workflow); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateDefaultRoute checks that there are no multiple default routes for one node.
+func validateDefaultRoute(workflow *Workflow) error {
+	for node, edges := range workflow.graph.successors {
+		hasDefault := false
+		for _, edge := range edges {
+			if edge.Route == Default && !hasDefault {
+				hasDefault = true
+			} else if edge.Route == Default && hasDefault {
+				return fmt.Errorf("%w: %q", ErrMultipleDefaultRoutes, node.Name())
+			}
 		}
 	}
 	return nil
