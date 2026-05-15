@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"log"
 	"maps"
 	"slices"
 	"strings"
@@ -248,7 +249,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				return true
 			}
 			errStr := err.Error()
-			fmt.Printf("DEBUG: isResumable checking error: %s\n", errStr)
 			return strings.Contains(errStr, "broken pipe") ||
 				strings.Contains(errStr, "connection reset") ||
 				strings.Contains(errStr, "EOF") ||
@@ -260,12 +260,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			connCtx, cancelConn := context.WithCancel(ctx)
 
 			if liveConnectConfig.SessionResumption != nil {
-				fmt.Printf("connecting with %s\n", liveConnectConfig.SessionResumption.Handle)
+				log.Printf("connecting with %s\n", liveConnectConfig.SessionResumption.Handle)
 			}
 			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
 			if err != nil {
 				cancelConn()
-				fmt.Printf("failed to connect live session: %v\n", err)
+				log.Printf("failed to connect live session: %v\n", err)
 				sess.pushError(fmt.Errorf("failed to connect live session: %w", err))
 				return
 			}
@@ -283,7 +283,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			// Send preprocessed content directly to model if any exists after early preprocessing
 			if len(nreq.Contents) > 0 {
 				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
-					fmt.Printf("failed to send history: %v\n", err)
+					log.Printf("failed to send history: %v\n", err)
 					sess.pushError(err)
 					return
 				}
@@ -387,7 +387,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					}
 				case err := <-errChan:
 					if isResumable(err) {
-						fmt.Printf("Connection error, attempting to resume: %v\n", err)
+						log.Printf("Connection error, attempting to resume: %v\n", err)
 						reconnect = true
 						break // Break the select
 					}

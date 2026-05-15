@@ -372,7 +372,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 
 	for event, err := range eventIter {
 		if err != nil {
-			fmt.Printf("RunLive failed: %v\n", err)
+			log.Printf("RunLive failed: %v\n", err)
 			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
 			break
 		}

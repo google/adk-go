@@ -17,6 +17,7 @@ package googlellm
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"google.golang.org/genai"
@@ -50,10 +51,10 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 	// TODO: genai seems to be missing initial_history_in_client_content flag
 	isGemini31 := strings.Contains(c.modelName, "gemini-3.1")
 	if isGemini31 {
-		fmt.Printf("skipping sending history for gemini 3.1\n")
+		log.Printf("skipping sending history for gemini 3.1\n")
 		return nil
 	}
-	fmt.Printf("sending preprocessed content %d\n", len(history))
+	log.Printf("sending preprocessed content %d\n", len(history))
 
 	var filteredHistory []*genai.Content
 	for _, content := range history {
@@ -77,7 +78,7 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 			})
 		}
 	}
-	fmt.Printf("sending history: of size %d\n", len(filteredHistory))
+	log.Printf("sending history: of size %d\n", len(filteredHistory))
 	turnComplete := len(filteredHistory) > 0 && filteredHistory[len(filteredHistory)-1].Role == "user"
 	if len(filteredHistory) > 0 {
 		err := c.sdkSession.SendClientContent(genai.LiveClientContentInput{
@@ -111,12 +112,12 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 		if err != nil {
 			return fmt.Errorf("failed to send tool response: %w", err)
 		}
-		fmt.Printf("sending tool response\n")
+		log.Printf("sending tool response\n")
 	} else {
 		isGemini31 := strings.Contains(c.modelName, "gemini-3.1")
 		isGeminiAPI := c.backend == genai.BackendGeminiAPI
 		if isGemini31 && isGeminiAPI && len(content.Parts) == 1 && content.Parts[0].Text != "" {
-			fmt.Printf("Attempting to send text via SendRealtimeInput\n")
+			log.Printf("Attempting to send text via SendRealtimeInput\n")
 			err := c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 				Text: content.Parts[0].Text,
 			})
@@ -173,12 +174,12 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 			Media: v,
 		})
 	case *genai.ActivityStart:
-		fmt.Printf("sending activity start\n")
+		log.Printf("sending activity start\n")
 		return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 			ActivityStart: v,
 		})
 	case *genai.ActivityEnd:
-		fmt.Printf("sending activity end\n")
+		log.Printf("sending activity end\n")
 		return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 			ActivityEnd: v,
 		})
@@ -202,10 +203,6 @@ func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
 
 	if msg == nil {
 		return nil, nil
-	}
-
-	if msg.ServerContent != nil && msg.ServerContent.OutputTranscription != nil {
-		fmt.Printf("recieved message: %s\n", msg.ServerContent.OutputTranscription.Text)
 	}
 
 	resp := &model.LLMResponse{}
