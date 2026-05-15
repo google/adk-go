@@ -596,12 +596,23 @@ function connectWebsocket() {
               updateMessageBubble(currentInputTranscriptionElement, cleanedText, false);
             } else {
               // Partial transcription - append to existing text
-              const existingText = currentInputTranscriptionElement.querySelector(".bubble-text").textContent;
-              // Remove typing indicator if present
-              const cleanText = existingText.replace(/\.\.\.$/, '');
-              // Clean spaces between CJK characters before updating
-              const accumulatedText = cleanCJKSpaces(cleanText + transcriptionText);
-              updateMessageBubble(currentInputTranscriptionElement, accumulatedText, true);
+              if (currentInputTranscriptionElement) {
+                const existingText = currentInputTranscriptionElement.querySelector(".bubble-text").textContent;
+                // Remove typing indicator if present
+                const cleanText = existingText.replace(/\.\.\.$/, '');
+                // Clean spaces between CJK characters before updating
+                const accumulatedText = cleanCJKSpaces(cleanText + transcriptionText);
+                updateMessageBubble(currentInputTranscriptionElement, accumulatedText, true);
+              } else {
+                console.log("fixed: currentInputTranscriptionElement was null in transcription handler");
+                // Fallback: create a new bubble if it's null for some reason
+                currentInputTranscriptionId = Math.random().toString(36).substring(7);
+                const cleanedText = cleanCJKSpaces(transcriptionText);
+                currentInputTranscriptionElement = createMessageBubble(cleanedText, true, true);
+                currentInputTranscriptionElement.id = currentInputTranscriptionId;
+                currentInputTranscriptionElement.classList.add("transcription");
+                appendMessage(currentInputTranscriptionElement);
+              }
             }
           }
         }
@@ -627,10 +638,14 @@ function connectWebsocket() {
         // Finalize any active input transcription when server starts responding
         if (currentInputTranscriptionId != null && currentOutputTranscriptionId == null) {
           // This is the first output transcription - finalize input transcription
-          const textElement = currentInputTranscriptionElement.querySelector(".bubble-text");
-          const typingIndicator = textElement.querySelector(".typing-indicator");
-          if (typingIndicator) {
-            typingIndicator.remove();
+          if (currentInputTranscriptionElement) {
+            const textElement = currentInputTranscriptionElement.querySelector(".bubble-text");
+            const typingIndicator = textElement.querySelector(".typing-indicator");
+            if (typingIndicator) {
+              typingIndicator.remove();
+            }
+          } else {
+            console.log("fixed: currentInputTranscriptionElement was null in content handler");
           }
           // Reset input transcription state so next user input creates new balloon
           currentInputTranscriptionId = null;
@@ -680,10 +695,12 @@ function connectWebsocket() {
       // Finalize any active input transcription when server starts responding with content
       if (currentInputTranscriptionId != null && currentMessageId == null && currentOutputTranscriptionId == null) {
         // This is the first content event - finalize input transcription
-        const textElement = currentInputTranscriptionElement.querySelector(".bubble-text");
-        const typingIndicator = textElement.querySelector(".typing-indicator");
-        if (typingIndicator) {
-          typingIndicator.remove();
+        if (currentInputTranscriptionElement) {
+          const textElement = currentInputTranscriptionElement.querySelector(".bubble-text");
+          const typingIndicator = textElement.querySelector(".typing-indicator");
+          if (typingIndicator) {
+            typingIndicator.remove();
+          }
         }
         // Reset input transcription state so next user input creates new balloon
         currentInputTranscriptionId = null;

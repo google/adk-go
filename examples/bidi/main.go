@@ -21,6 +21,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 
 	"google.golang.org/genai"
 
@@ -68,7 +70,7 @@ func main() {
 		Name:        "bidi-demo",
 		Model:       model,
 		Description: "Agent optimized for real-time bidirectional streaming.",
-		Instruction: "You are a real-time voice assistant. Additionally whenever you see someone raising any number of fingers you should reply with how many fingers they are showing. If they keep changing the number of fingers you should note the changes, like first you showed x fingers and then you showed y fingers.",
+		Instruction: "You are a real-time voice assistant.",
 		Tools: []tool.Tool{
 			geminitool.GoogleSearch{},
 			cameraTool,
@@ -84,7 +86,12 @@ func main() {
 		// Create runner
 		ss := session.InMemoryService()
 
-		fs := http.FileServer(http.Dir("examples/bidi/static"))
+		_, filename, _, ok := runtime.Caller(0)
+		if !ok {
+			log.Fatal("No caller information")
+		}
+		staticDir := filepath.Join(filepath.Dir(filename), "static")
+		fs := http.FileServer(http.Dir(staticDir))
 		http.Handle("/", fs)
 		http.Handle("/static/", http.StripPrefix("/static/", fs))
 
