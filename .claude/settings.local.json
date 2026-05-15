@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep:*)",
+      "Bash(xargs wc:*)",
+      "Bash(go test:*)",
+      "Bash(go build:*)",
+      "Bash(SKIP_INTEGRATION=1 go test:*)",
+      "WebSearch",
+      "Bash(git stash pop 2>&1)",
+      "Bash(git stash drop 2>&1)"
+    ]
+  }
+}
