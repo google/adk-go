@@ -26,6 +26,26 @@ var ErrDuplicateNodeName = errors.New("duplicate node name")
 // ErrMultipleDefaultRoutes is returned when a node has more than one default route.
 var ErrMultipleDefaultRoutes = errors.New("node has more than one default route")
 
+// ErrNoStartNode is returned when no start node is found in the edge set.
+var ErrNoStartNode = errors.New("no start node found")
+
+// ErrNodePointsToStart is returned when a node points to the start node.
+var ErrNodePointsToStart = errors.New("node points to start node")
+
+// validateNodes executes a set of edges validation checks.
+func validateNodes(edges []Edge) error {
+	if err := validateUniqueNames(edges); err != nil {
+		return err
+	}
+	if err := validateStartNodePresent(edges); err != nil {
+		return err
+	}
+	if err := validateStartNodeNoIncoming(edges); err != nil {
+		return err
+	}
+	return nil
+}
+
 // validateUniqueNames checks that all nodes in the edge set have unique names.
 // If duplicate node names are found, it returns an error. The equality between
 // nodes is checked by comparing the nodes directly.
@@ -52,6 +72,26 @@ func validateUniqueNames(edges []Edge) error {
 	return nil
 }
 
+// validateStartNodePresent checks that there is at least one edge starting from the start node.
+func validateStartNodePresent(edges []Edge) error {
+	for _, edge := range edges {
+		if edge.From == Start {
+			return nil
+		}
+	}
+	return ErrNoStartNode
+}
+
+// validateStartNodeNoIncoming checks that no node points to the start node.
+func validateStartNodeNoIncoming(edges []Edge) error {
+	for _, edge := range edges {
+		if edge.To == Start {
+			return fmt.Errorf("%w: %s", ErrNodePointsToStart, edge.From.Name())
+		}
+	}
+	return nil
+}
+
 // validateWorkflow executes a set of workflow validation checks.
 func validateWorkflow(workflow *Workflow) error {
 	if err := validateDefaultRoute(workflow); err != nil {
@@ -62,7 +102,7 @@ func validateWorkflow(workflow *Workflow) error {
 
 // validateDefaultRoute checks that there are no multiple default routes for one node.
 func validateDefaultRoute(workflow *Workflow) error {
-	for node, edges := range workflow.edges {
+	for node, edges := range workflow.graph.successors {
 		hasDefault := false
 		for _, edge := range edges {
 			if edge.Route == Default && !hasDefault {
