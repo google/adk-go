@@ -393,6 +393,49 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 	}
 }
 
+func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:    ctx.Artifacts(),
+		Memory:       ctx.Memory(),
+		Session:      ctx.Session(),
+		Branch:       ctx.Branch(),
+		Agent:        a,
+		UserContent:  ctx.UserContent(),
+		RunConfig:    ctx.RunConfig(),
+		InvocationID: ctx.InvocationID(),
+	})
+
+	f := &llminternal.Flow{
+		Model:                 a.model,
+		RequestProcessors:     llminternal.DefaultRequestProcessors,
+		ResponseProcessors:    llminternal.DefaultResponseProcessors,
+		BeforeModelCallbacks:  a.beforeModelCallbacks,
+		AfterModelCallbacks:   a.afterModelCallbacks,
+		OnModelErrorCallbacks: a.onModelErrorCallbacks,
+		BeforeToolCallbacks:   a.beforeToolCallbacks,
+		AfterToolCallbacks:    a.afterToolCallbacks,
+		OnToolErrorCallbacks:  a.onToolErrorCallbacks,
+	}
+
+	sess, innerIter, err := f.RunLive(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	wrappedIter := func(yield func(*session.Event, error) bool) {
+		for ev, err := range innerIter {
+			if err == nil {
+				a.maybeSaveOutputToState(ev)
+			}
+			if !yield(ev, err) {
+				return
+			}
+		}
+	}
+
+	return sess, wrappedIter, nil
+}
+
 // maybeSaveOutputToState saves the model output to state if needed. skip if the event
 // was authored by some other agent (e.g. current agent transferred to another agent)
 func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
