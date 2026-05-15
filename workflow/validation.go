@@ -32,6 +32,10 @@ var ErrNodePointsToStart = errors.New("node points to start node")
 // ErrMultipleDefaultRoutes is returned when a node has more than one default route.
 var ErrMultipleDefaultRoutes = errors.New("node has more than one default route")
 
+// ErrUnconditionalCycle is returned when a cycle is detected that does not
+// contain any conditional edges.
+var ErrUnconditionalCycle = errors.New("unconditional cycle detected")
+
 // validateNodes executes a set of edges validation checks.
 func validateNodes(edges []Edge) error {
 	if err := validateUniqueNames(edges); err != nil {
@@ -97,6 +101,9 @@ func validateWorkflow(workflow *Workflow) error {
 	if err := validateDefaultRoute(workflow); err != nil {
 		return err
 	}
+	if err := validateCycles(workflow); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -112,5 +119,50 @@ func validateDefaultRoute(workflow *Workflow) error {
 			}
 		}
 	}
+	return nil
+}
+
+// validateCycles checks that there are no unconditional cycles in the workflow.
+// It performs a depth first search for every node in the workflow and checks
+// for cycles where all edges in the cycle have nil routes.
+// Default routes (where Route == Default) are treated as conditional edges
+// and are ignored during unconditional cycle detection.
+func validateCycles(workflow *Workflow) error {
+	visited := make(map[Node]struct{})
+
+	var traverse func(n Node, inStack map[Node]struct{}) error
+	traverse = func(n Node, inStack map[Node]struct{}) error {
+		if _, ok := inStack[n]; ok {
+			return fmt.Errorf("%w: %q", ErrUnconditionalCycle, n.Name())
+		}
+
+		if _, ok := visited[n]; ok {
+			return nil
+		}
+
+		inStack[n] = struct{}{}
+		visited[n] = struct{}{}
+
+		for _, edge := range workflow.graph.successors[n] {
+			if edge.Route == nil {
+				if err := traverse(edge.To, inStack); err != nil {
+					return err
+				}
+			}
+		}
+
+		delete(inStack, n)
+		return nil
+	}
+
+	for node := range workflow.graph.successors {
+		if _, ok := visited[node]; !ok {
+			inStack := make(map[Node]struct{})
+			if err := traverse(node, inStack); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
