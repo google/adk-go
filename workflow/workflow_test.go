@@ -74,7 +74,6 @@ func mustNew(t *testing.T, edges []Edge) *Workflow {
 func (m *MockInvocationContext) Session() session.Session        { return m.sess }
 func (m *MockInvocationContext) InvocationID() string            { return "test-invocation-id" }
 func (m *MockInvocationContext) UserContent() *genai.Content     { return m.userContent }
-func (m *MockInvocationContext) TriggeredBy() string             { return "" }
 func (m *MockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
 func (m *MockInvocationContext) Agent() agent.Agent              { return nil }
 func (m *MockInvocationContext) Artifacts() agent.Artifacts      { return nil }
