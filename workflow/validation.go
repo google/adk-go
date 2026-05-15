@@ -29,6 +29,11 @@ var ErrNoStartNode = errors.New("no start node found")
 // ErrNodePointsToStart is returned when a node points to the start node.
 var ErrNodePointsToStart = errors.New("node points to start node")
 
+// ErrDuplicateEdge is returned when an edge set contains two identical edges.
+// Two edges with the same (From, To) are rejected regardless of Route; use
+// MultiRoute to express alternatives to the same target.
+var ErrDuplicateEdge = errors.New("duplicate edge")
+
 // ErrMultipleDefaultRoutes is returned when a node has more than one default route.
 var ErrMultipleDefaultRoutes = errors.New("node has more than one default route")
 
@@ -97,7 +102,10 @@ func validateStartNodeNoIncoming(edges []Edge) error {
 }
 
 // validateWorkflow executes a set of workflow validation checks.
-func validateWorkflow(workflow *Workflow) error {
+func validateWorkflow(workflow *graph) error {
+	if err := validateUniqueEdges(workflow); err != nil {
+		return err
+	}
 	if err := validateDefaultRoute(workflow); err != nil {
 		return err
 	}
@@ -107,9 +115,25 @@ func validateWorkflow(workflow *Workflow) error {
 	return nil
 }
 
+// validateUniqueEdges checks that there are no duplicate edges in the workflow.
+// Two edges with the same (From, To) are rejected regardless of Route; use
+// MultiRoute to express alternatives to the same target.
+func validateUniqueEdges(workflow *graph) error {
+	for node, edges := range workflow.successors {
+		uniqueEdges := make(map[Node]struct{})
+		for _, edge := range edges {
+			if _, ok := uniqueEdges[edge.To]; ok {
+				return fmt.Errorf("%w: from %q to %q", ErrDuplicateEdge, node.Name(), edge.To.Name())
+			}
+			uniqueEdges[edge.To] = struct{}{}
+		}
+	}
+	return nil
+}
+
 // validateDefaultRoute checks that there are no multiple default routes for one node.
-func validateDefaultRoute(workflow *Workflow) error {
-	for node, edges := range workflow.graph.successors {
+func validateDefaultRoute(workflow *graph) error {
+	for node, edges := range workflow.successors {
 		hasDefault := false
 		for _, edge := range edges {
 			if edge.Route == Default && !hasDefault {
@@ -127,7 +151,7 @@ func validateDefaultRoute(workflow *Workflow) error {
 // for cycles where all edges in the cycle have nil routes.
 // Default routes (where Route == Default) are treated as conditional edges
 // and are ignored during unconditional cycle detection.
-func validateCycles(workflow *Workflow) error {
+func validateCycles(workflow *graph) error {
 	visited := make(map[Node]struct{})
 
 	var traverse func(n Node, inStack map[Node]struct{}) error
@@ -143,7 +167,7 @@ func validateCycles(workflow *Workflow) error {
 		inStack[n] = struct{}{}
 		visited[n] = struct{}{}
 
-		for _, edge := range workflow.graph.successors[n] {
+		for _, edge := range workflow.successors[n] {
 			if edge.Route == nil {
 				if err := traverse(edge.To, inStack); err != nil {
 					return err
@@ -155,7 +179,7 @@ func validateCycles(workflow *Workflow) error {
 		return nil
 	}
 
-	for node := range workflow.graph.successors {
+	for node := range workflow.successors {
 		if _, ok := visited[node]; !ok {
 			inStack := make(map[Node]struct{})
 			if err := traverse(node, inStack); err != nil {
