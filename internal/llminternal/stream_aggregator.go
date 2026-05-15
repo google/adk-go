@@ -303,12 +303,36 @@ func (s *streamingResponseAggregator) flushFunctionCallToSequence() {
 	}
 }
 
+// propagateThoughtSignature copies any available function-call thought
+// signature onto sibling function calls that are missing one. Gemini thinking
+// models can attach the signature to only one of several parallel function
+// calls in a streamed batch, but replay requires each function-call part to
+// carry one. Two-pass so the fix is independent of which sibling carries it.
+func (s *streamingResponseAggregator) propagateThoughtSignature() {
+	var thoughtSignature []byte
+	for _, part := range s.sequence {
+		if part.FunctionCall != nil && len(part.ThoughtSignature) > 0 {
+			thoughtSignature = part.ThoughtSignature
+			break
+		}
+	}
+	if thoughtSignature == nil {
+		return
+	}
+	for _, part := range s.sequence {
+		if part.FunctionCall != nil && len(part.ThoughtSignature) == 0 {
+			part.ThoughtSignature = thoughtSignature
+		}
+	}
+}
+
 // Close generates an aggregated response at the end, if needed,
 // this should be called after all the model responses are processed.
 func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 	if s.response != nil {
 		s.flushTextBufferToSequence()
 		s.flushFunctionCallToSequence()
+		s.propagateThoughtSignature()
 		errorCode := ""
 		errorMessage := ""
 		if s.finishReason != genai.FinishReasonStop {
