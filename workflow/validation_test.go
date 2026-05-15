@@ -155,6 +155,50 @@ func TestStartNodeNoIncomingEdges(t *testing.T) {
 	}
 }
 
+func TestDuplicateEdges(t *testing.T) {
+	nodeA := &dummyNode{name: "A"}
+	nodeB := &dummyNode{name: "B"}
+	tests := []struct {
+		name      string
+		edges     []Edge
+		expectErr bool
+	}{
+		{
+			name:  "no duplicate edges",
+			edges: []Edge{{From: nodeA, To: nodeB}},
+		},
+		{
+			name:      "duplicate edges",
+			edges:     []Edge{{From: nodeA, To: nodeB}, {From: nodeA, To: nodeB}},
+			expectErr: true,
+		},
+		{
+			name:      "duplicate edges with different routes",
+			edges:     []Edge{{From: nodeA, To: nodeB, Route: StringRoute("test1")}, {From: nodeA, To: nodeB, Route: StringRoute("test2")}},
+			expectErr: true,
+		},
+		{
+			name:      "duplicate edges one without route",
+			edges:     []Edge{{From: nodeA, To: nodeB, Route: StringRoute("test1")}, {From: nodeA, To: nodeB}},
+			expectErr: true,
+		},
+		{
+			name:  "empty edges",
+			edges: []Edge{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateUniqueEdges(newGraph(tc.edges)); err != nil && !tc.expectErr {
+				t.Errorf("got an error %v, expected none", err)
+			} else if err == nil && tc.expectErr {
+				t.Errorf("expected an error, got none")
+			}
+		})
+	}
+}
+
 func TestDefaultRoute(t *testing.T) {
 	nodeA := &dummyNode{name: "A"}
 	nodeB := &dummyNode{name: "B"}
@@ -177,7 +221,7 @@ func TestDefaultRoute(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := validateDefaultRoute(&Workflow{graph: newGraph(tc.edges)}); !errors.Is(err, tc.expectErr) {
+			if err := validateDefaultRoute(newGraph(tc.edges)); !errors.Is(err, tc.expectErr) {
 				t.Errorf("got %v, expected %v", err, tc.expectErr)
 			}
 		})
@@ -272,9 +316,7 @@ func TestValidateCycles(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			w := &Workflow{graph: newGraph(tc.edges())}
-
-			err := validateCycles(w)
+			err := validateCycles(newGraph(tc.edges()))
 			if tc.expectErr && err == nil {
 				t.Errorf("expected error, got none")
 			} else if !tc.expectErr && err != nil {

@@ -120,7 +120,11 @@ func New(edges []Edge) (*Workflow, error) {
 	if err := validateNodes(edges); err != nil {
 		return nil, err
 	}
-	return &Workflow{graph: newGraph(edges)}, nil
+	graph := newGraph(edges)
+	if err := validateWorkflow(graph); err != nil {
+		return nil, err
+	}
+	return &Workflow{graph: graph}, nil
 }
 
 // Run drives the workflow to completion (or to a graceful pause in
