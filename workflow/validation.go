@@ -17,6 +17,8 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // ErrDuplicateNodeName is returned when an edge set contains two
@@ -36,6 +38,9 @@ var ErrDuplicateEdge = errors.New("duplicate edge")
 
 // ErrMultipleDefaultRoutes is returned when a node has more than one default route.
 var ErrMultipleDefaultRoutes = errors.New("node has more than one default route")
+
+// ErrNodesNotReachable is returned when some nodes are not reachable from the start node.
+var ErrNodesNotReachable = errors.New("nodes not reachable from start node")
 
 // ErrUnconditionalCycle is returned when a cycle is detected that does not
 // contain any conditional edges.
@@ -109,6 +114,9 @@ func validateWorkflow(workflow *graph) error {
 	if err := validateDefaultRoute(workflow); err != nil {
 		return err
 	}
+	if err := validateConnectivity(workflow); err != nil {
+		return err
+	}
 	if err := validateCycles(workflow); err != nil {
 		return err
 	}
@@ -143,6 +151,48 @@ func validateDefaultRoute(workflow *graph) error {
 			}
 		}
 	}
+	return nil
+}
+
+// validateConnectivity checks that all nodes in the edge set are reachable from the start node.
+func validateConnectivity(workflow *graph) error {
+	if len(workflow.successors) == 0 {
+		return nil
+	}
+
+	visited := make(map[Node]bool)
+	var traverse func(n Node)
+	traverse = func(n Node) {
+		visited[n] = true
+		for _, neighbor := range workflow.successors[n] {
+			if !visited[neighbor.To] {
+				traverse(neighbor.To)
+			}
+		}
+	}
+
+	traverse(Start)
+
+	allNodes := make(map[Node]bool)
+	for node, edges := range workflow.successors {
+		allNodes[node] = true
+		for _, edge := range edges {
+			allNodes[edge.To] = true
+		}
+	}
+
+	var unreachable []string
+	for node := range allNodes {
+		if !visited[node] {
+			unreachable = append(unreachable, node.Name())
+		}
+	}
+	slices.Sort(unreachable)
+
+	if len(unreachable) > 0 {
+		return fmt.Errorf("%w: %q", ErrNodesNotReachable, strings.Join(unreachable, ", "))
+	}
+
 	return nil
 }
 
