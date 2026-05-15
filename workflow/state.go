@@ -14,6 +14,8 @@
 
 package workflow
 
+import "google.golang.org/adk/session"
+
 // NodeStatus is the lifecycle status of a node in the workflow graph.
 //
 // The status is the engine's single source of truth for what a node
@@ -82,6 +84,12 @@ type NodeState struct {
 	// TriggeredBy is the name of the upstream node that produced
 	// the current Input. Empty for the initial START activation.
 	TriggeredBy string
+
+	// PendingRequest, when non-nil, carries the human-input request
+	// the node emitted before pausing. Non-nil iff Status ==
+	// NodeWaiting and the wait was caused by a human-input request
+	// (as opposed to a fan-in barrier).
+	PendingRequest *session.RequestInput
 }
 
 // RunState is the per-invocation lifecycle state for a workflow
