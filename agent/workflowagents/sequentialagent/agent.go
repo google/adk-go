@@ -18,6 +18,7 @@ package sequentialagent
 import (
 	"fmt"
 	"iter"
+	"log"
 	"sync"
 
 	"google.golang.org/adk/agent"
@@ -188,11 +189,15 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 
 			for ev, err := range innerIter {
 				if !yield(ev, err) {
-					subSess.Close()
+					if err := subSess.Close(); err != nil {
+						log.Printf("error closing sub-session: %v\n", err)
+					}
 					return
 				}
 			}
-			subSess.Close()
+			if err := subSess.Close(); err != nil {
+				log.Printf("error closing sub-session: %v\n", err)
+			}
 		}
 	}
 
