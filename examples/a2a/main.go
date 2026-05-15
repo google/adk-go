@@ -42,7 +42,7 @@ import (
 
 // newWeatherAgent creates a simple LLM-agent as in the quickstart example.
 func newWeatherAgent(ctx context.Context) agent.Agent {
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-lite", &genai.ClientConfig{
 		APIKey: os.Getenv("GOOGLE_API_KEY"),
 	})
 	if err != nil {
