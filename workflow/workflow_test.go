@@ -426,19 +426,15 @@ func TestWorkflowRouting(t *testing.T) {
 			expectedExec: nil,
 		},
 		{
-			name:        "duplicate edges to same node",
-			startRoutes: []string{"branchA"},
+			name:        "MultiRoute with multiple matching routes",
+			startRoutes: []string{"branchA", "branchB"},
 			edges: func(x *CustomRouteNode, a, b *FunctionNode, c *CustomRouteNode, d *FunctionNode) []Edge {
 				return []Edge{
 					{From: Start, To: x},
-					{From: x, To: a},
-					{From: x, To: a, Route: StringRoute("branchA")},
-					{From: x, To: b},
-					{From: x, To: c},
-					{From: c, To: d},
+					{From: x, To: a, Route: MultiRoute[string]{"branchA", "branchB"}},
 				}
 			},
-			expectedExec: []string{"A", "B", "C", "D"},
+			expectedExec: []string{"A"},
 		},
 	}
 
