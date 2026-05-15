@@ -22,6 +22,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	"google.golang.org/genai"
@@ -123,7 +125,12 @@ func main() {
 		// Create runner
 		ss := session.InMemoryService()
 
-		fs := http.FileServer(http.Dir("examples/bidi/static"))
+		_, filename, _, ok := runtime.Caller(0)
+		if !ok {
+			log.Fatal("No caller information")
+		}
+		staticDir := filepath.Join(filepath.Dir(filename), "../static")
+		fs := http.FileServer(http.Dir(staticDir))
 		http.Handle("/", fs)
 		http.Handle("/static/", http.StripPrefix("/static/", fs))
 
