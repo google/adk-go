@@ -219,7 +219,7 @@ func TestToolNode_Run(t *testing.T) {
 				t.Fatalf("node creation failed: %v", err)
 			}
 
-			mockCtx := &MockInvocationContext{sess: nil}
+			mockCtx := newMockCtx(t)
 			events := node.Run(mockCtx, tc.nodeInput)
 
 			var got string
@@ -309,7 +309,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 				return in.Result + 1, nil
 			}, defaultNodeConfig)
 
-			mockCtx := &MockInvocationContext{sess: nil}
+			mockCtx := newMockCtx(t)
 
 			t.Run("WorkflowExecution", func(t *testing.T) {
 				// Use a seed node to pass the struct input to toolNode,
@@ -319,10 +319,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 				}, defaultNodeConfig)
 
 				edges := Chain(Start, seedNode, toolNode, functionNode)
-				w, err := New(edges)
-				if err != nil {
-					t.Fatalf("unexpexted error: %v", err)
-				}
+				w := mustNew(t, edges)
 				events := w.Run(mockCtx)
 
 				var outB any
