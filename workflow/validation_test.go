@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -149,6 +150,35 @@ func TestStartNodeNoIncomingEdges(t *testing.T) {
 				} else if !strings.Contains(err.Error(), tc.expectErrorMsg) {
 					t.Errorf("expected error containing %q, got %v", tc.expectErrorMsg, err)
 				}
+			}
+		})
+	}
+}
+
+func TestDefaultRoute(t *testing.T) {
+	nodeA := &dummyNode{name: "A"}
+	nodeB := &dummyNode{name: "B"}
+	nodeC := &dummyNode{name: "C"}
+	tests := []struct {
+		name      string
+		edges     []Edge
+		expectErr error
+	}{
+		{
+			name:  "single default route",
+			edges: []Edge{{From: nodeA, To: nodeB, Route: Default}},
+		},
+		{
+			name:      "multiple default routes",
+			edges:     []Edge{{From: nodeA, To: nodeB, Route: Default}, {From: nodeA, To: nodeC, Route: Default}},
+			expectErr: ErrMultipleDefaultRoutes,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateDefaultRoute(&Workflow{graph: newGraph(tc.edges)}); !errors.Is(err, tc.expectErr) {
+				t.Errorf("got %v, expected %v", err, tc.expectErr)
 			}
 		})
 	}
