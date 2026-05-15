@@ -228,6 +228,46 @@ func TestDefaultRoute(t *testing.T) {
 	}
 }
 
+func TestConnectivity(t *testing.T) {
+	nodeA := &dummyNode{name: "A"}
+	nodeB := &dummyNode{name: "B"}
+	nodeC := &dummyNode{name: "C"}
+	tests := []struct {
+		name           string
+		edges          []Edge
+		expectErrorMsg string
+	}{
+		{
+			name: "all nodes connected",
+			edges: []Edge{{From: Start, To: nodeA},
+				{From: nodeA, To: nodeB},
+				{From: nodeB, To: nodeC},
+			},
+		},
+		{
+			name: "disconnected nodes",
+			edges: []Edge{{From: Start, To: nodeA},
+				{From: nodeB, To: nodeC},
+			},
+			expectErrorMsg: "nodes not reachable from start node: \"B, C\"",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateConnectivity(newGraph(tc.edges))
+			if tc.expectErrorMsg != "" {
+				if err == nil {
+					t.Errorf("expected error matching %q, got none", tc.expectErrorMsg)
+				} else if !strings.Contains(err.Error(), tc.expectErrorMsg) {
+					t.Errorf("expected error containing %q, got %v", tc.expectErrorMsg, err)
+				}
+			} else if err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateCycles(t *testing.T) {
 	tests := []struct {
 		name      string
