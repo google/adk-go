@@ -247,7 +247,6 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
-		CheckOrigin:     func(r *http.Request) bool { return true },
 	}
 
 	q := req.URL.Query()
@@ -290,8 +289,9 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	if err != nil {
 		closeReason := err.Error()
 		if _, loadErr := c.agentLoader.LoadAgent(appName); loadErr != nil {
-			closeReason = fmt.Sprintf("agent %s not found", appName)
+			closeReason = fmt.Sprintf("agent %s not found for original error: %v", appName, err)
 		}
+		log.Printf("Failed to get runner for app %s: %v", appName, err)
 		sendClose(websocket.CloseInternalServerErr, closeReason)
 		return nil
 	}
@@ -304,6 +304,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
 	})
 	if err != nil {
+		log.Printf("RunLive failed for app %s: %v", appName, err)
 		sendClose(websocket.CloseInternalServerErr, err.Error())
 		return nil
 	}
@@ -313,10 +314,15 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 
 	// Spawning goroutine for reading from the client over WebSocket and pushing it to Runner
 	go func() {
+		defer func() {
+			_ = liveSession.Close()
+		}()
 		for {
 			messageType, p, err := ws.ReadMessage()
 			if err != nil {
-				// WebSocket is closed or error occurred
+				if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					log.Printf("WebSocket read error for app %s: %v", appName, err)
+				}
 				break
 			}
 
@@ -327,11 +333,13 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 						Data:     p,
 					},
 				}); err != nil {
+					log.Printf("Failed to send binary data to Gemini for app %s: %v", appName, err)
 					break
 				}
 			} else if messageType == websocket.TextMessage {
 				var apiReq models.LiveRequest
 				if err := json.Unmarshal(p, &apiReq); err != nil {
+					log.Printf("Failed to unmarshal client message for app %s: %v", appName, err)
 					continue
 				}
 
@@ -355,6 +363,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 				}
 
 				if err := liveSession.Send(liveReq); err != nil {
+					log.Printf("Failed to send message to Gemini for app %s: %v", appName, err)
 					break
 				}
 			}

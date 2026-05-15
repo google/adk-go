@@ -69,7 +69,6 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 				continue
 			}
 			filteredParts = append(filteredParts, part)
-			fmt.Printf("filtered part: %v\n", part.Text)
 		}
 		if len(filteredParts) > 0 {
 			filteredHistory = append(filteredHistory, &genai.Content{
