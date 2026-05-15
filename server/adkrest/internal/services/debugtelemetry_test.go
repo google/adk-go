@@ -16,6 +16,7 @@ package services
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -233,6 +234,20 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 
 			// Validate session spans
 			gotSessionSpans := debugTelemetry.GetSpansBySessionID(tt.querySessionID)
+
+			sortFunc := func(a, b DebugSpan) int {
+				if a.Name < b.Name {
+					return -1
+				}
+				if a.Name > b.Name {
+					return 1
+				}
+				return 0
+			}
+
+			slices.SortFunc(gotSessionSpans, sortFunc)
+			slices.SortFunc(tt.wantSessionSpans, sortFunc)
+
 			if diff := cmp.Diff(tt.wantSessionSpans, gotSessionSpans, cmpOpts...); diff != "" {
 				t.Errorf("GetSpansBySessionID() mismatch (-want +got):\n%s", diff)
 			}
@@ -370,6 +385,19 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 
 			// Validate event spans
 			gotEventSpans := debugTelemetry.GetSpansByEventID(tt.queryEventID)
+
+			sortFunc := func(a, b DebugSpan) int {
+				if a.Name < b.Name {
+					return -1
+				}
+				if a.Name > b.Name {
+					return 1
+				}
+				return 0
+			}
+			slices.SortFunc(gotEventSpans, sortFunc)
+			slices.SortFunc(tt.wantEventSpans, sortFunc)
+
 			if diff := cmp.Diff(tt.wantEventSpans, gotEventSpans, cmpOpts...); diff != "" {
 				t.Errorf("GetSpansByEventID() mismatch (-want +got):\n%s", diff)
 			}
