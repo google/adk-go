@@ -837,7 +837,16 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.StateDelta != nil {
 		base.StateDelta = deepMergeMap(base.StateDelta, other.StateDelta)
 	}
-	// TODO add similar logic for state
+	if other.ArtifactDelta != nil {
+		if base.ArtifactDelta == nil {
+			base.ArtifactDelta = make(map[string]int64)
+		}
+		for name, version := range other.ArtifactDelta {
+			if oldVersion, ok := base.ArtifactDelta[name]; !ok || version > oldVersion {
+				base.ArtifactDelta[name] = version
+			}
+		}
+	}
 	if other.RequestedToolConfirmations != nil {
 		if base.RequestedToolConfirmations == nil {
 			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
