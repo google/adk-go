@@ -116,3 +116,8 @@ func (t *loadMemoryTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest)
 	utils.AppendInstructions(req, memoryInstructions)
 	return nil
 }
+
+var (
+	_ toolinternal.FunctionTool     = (*loadMemoryTool)(nil)
+	_ toolinternal.RequestProcessor = (*loadMemoryTool)(nil)
+)

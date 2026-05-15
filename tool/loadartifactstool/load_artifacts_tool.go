@@ -26,6 +26,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -218,3 +219,8 @@ func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsSer
 		Role: genai.RoleUser,
 	}, nil
 }
+
+var (
+	_ toolinternal.FunctionTool     = (*artifactsTool)(nil)
+	_ toolinternal.RequestProcessor = (*artifactsTool)(nil)
+)
