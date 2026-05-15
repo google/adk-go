@@ -96,14 +96,6 @@ type InvocationContext interface {
 	// Ended returns whether the invocation has ended.
 	Ended() bool
 
-	// TriggeredBy returns the name of the upstream node whose output
-	// scheduled the current node activation, when this context is
-	// running inside a workflow.Node. Returns "" outside a workflow
-	// (e.g. in plain agent runs) and for the initial workflow START
-	// activation. The workflow engine populates this via an internal
-	// per-node context wrapper.
-	TriggeredBy() string
-
 	// ResumedInput returns the user-supplied response payload
 	// associated with the given InterruptID for the current
 	// activation, or (nil, false) if none. Implementations that
