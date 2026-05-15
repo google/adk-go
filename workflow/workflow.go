@@ -19,19 +19,20 @@ import (
 	"iter"
 	"strings"
 
-	"google.golang.org/genai"
-
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/session"
 )
 
 // Node is the interface for all nodes in a workflow.
+//
+// Custom nodes typically embed BaseNode (constructed via NewBaseNode)
+// to inherit Name, Description, and Config implementations, and
+// supply only Run.
 type Node interface {
 	Name() string
 	Description() string
-	Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
 	Config() NodeConfig
+	Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
 }
 
 // Route defines the interface for matching execution results to edges.
@@ -90,68 +91,6 @@ func (r *defaultRoute) Matches(event *session.Event) bool {
 	return false
 }
 
-// baseNode provides common fields for all nodes.
-type baseNode struct {
-	name        string
-	description string
-	config      NodeConfig
-}
-
-func (b *baseNode) Name() string        { return b.name }
-func (b *baseNode) Description() string { return b.description }
-func (b *baseNode) Config() NodeConfig  { return b.config }
-
-// FunctionNode wraps a custom function.
-type FunctionNode struct {
-	baseNode
-	fn func(ctx agent.InvocationContext, input any) (any, error)
-}
-
-// NewFunctionNode creates a new node wrapping a custom function using generics to automatically infer input and output types.
-func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.InvocationContext, input IN) (OUT, error), cfg NodeConfig) *FunctionNode {
-	wrappedFn := func(ctx agent.InvocationContext, input any) (any, error) {
-		if input == nil {
-			var zero IN
-			return fn(ctx, zero)
-		}
-		typedInput, ok := input.(IN)
-		if !ok {
-			// Fallback to the json-like input types that cannot be converted by the standard type assertion.
-			// E.g. tool nodes return map[string]any as input and user may define a struct as the target type.
-			var err error
-			typedInput, err = typeutil.ConvertToWithJSONSchema[any, IN](input, nil)
-			if err != nil {
-				return nil, fmt.Errorf("new function node: invalid input type, expected %T: %v", new(IN), err)
-			}
-		}
-		return fn(ctx, typedInput)
-	}
-
-	return &FunctionNode{
-		baseNode: baseNode{name: name, config: cfg},
-		fn:       wrappedFn,
-	}
-}
-
-func (n *FunctionNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		output, err := n.fn(ctx, input)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-
-		event := session.NewEvent(ctx.InvocationID())
-		event.Actions.StateDelta["output"] = output
-		if s, ok := output.(string); ok {
-			event.Content = &genai.Content{
-				Parts: []*genai.Part{{Text: s}},
-			}
-		}
-		yield(event, nil)
-	}
-}
-
 // Edge defines a directed connection between nodes in the workflow graph.
 type Edge struct {
 	From  Node  // The source node
@@ -166,131 +105,70 @@ type startNode struct{}
 
 func (s *startNode) Name() string        { return "START" }
 func (s *startNode) Description() string { return "Start node" }
+func (s *startNode) Config() NodeConfig  { return NodeConfig{} }
 func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
-func (s *startNode) Config() NodeConfig { return NodeConfig{} }
 
 // Workflow manages the workflow graph execution.
 type Workflow struct {
-	edges map[Node][]Edge
+	graph *graph
 }
 
 // New creates a new Workflow engine with the given edges.
 func New(edges []Edge) (*Workflow, error) {
-	if err := validateUniqueNames(edges); err != nil {
+	if err := validateNodes(edges); err != nil {
 		return nil, err
 	}
-	adj := make(map[Node][]Edge)
-	for _, edge := range edges {
-		adj[edge.From] = append(adj[edge.From], edge)
-	}
-	wf := &Workflow{edges: adj}
-	if err := validateWorkflow(wf); err != nil {
+	graph := newGraph(edges)
+	if err := validateWorkflow(graph); err != nil {
 		return nil, err
 	}
-	return wf, nil
+	return &Workflow{graph: graph}, nil
 }
 
-type nodeInput struct {
-	node  Node
-	input any
-}
-
-// findNextNodes determines the set of nodes to execute next based on the outgoing edges of the currentNode.
-// It evaluates routes attached to edges against the provided session.Event.
+// Run drives the workflow to completion (or to a graceful pause in
+// later milestones). It returns an iter.Seq2 that yields events
+// from per-node goroutines in arrival order; the caller may break
+// from the range loop at any point and the engine will cancel all
+// in-flight nodes before returning.
 //
-// Behavior:
-//   - Edges with no route condition always match.
-//   - Edges with a route condition match only if the route matches the event.
-//   - If there are outgoing edges but none of them match (neither by route nor by being unrouted),
-//     it falls back to the default route (TODO: hanorik - add default route support).
-func (w *Workflow) findNextNodes(currentNode Node, input any, event *session.Event) []nodeInput {
-	if len(w.edges[currentNode]) == 0 {
-		return nil
-	}
-	matched := false
-	queue := []nodeInput{}
-	var defaultRouteNode Node
-	for _, edge := range w.edges[currentNode] {
-		if edge.Route == nil {
-			queue = append(queue, nodeInput{node: edge.To, input: input})
-			continue
-		}
-		if edge.Route == Default {
-			defaultRouteNode = edge.To
-			continue
-		}
-		if edge.Route.Matches(event) {
-			queue = append(queue, nodeInput{node: edge.To, input: input})
-			matched = true
-		}
-	}
-	if !matched && defaultRouteNode != nil {
-		queue = append(queue, nodeInput{node: defaultRouteNode, input: input})
-	}
-
-	return queue
-}
-
-// Run executes the workflow.
+// The engine model: each scheduled node runs in its own goroutine
+// pushing events into a buffered channel. A single consumer
+// goroutine (this one) drains the channel, applies state-side
+// effects, yields events to the caller, and schedules successors
+// when nodes complete. The consumer is the only mutator of the
+// per-node lifecycle map and of session state.
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		var input any
-		userContent := ctx.UserContent()
-		if userContent != nil {
-			var sb strings.Builder
-			for _, part := range userContent.Parts {
-				if part.Text != "" {
-					sb.WriteString(part.Text)
-				}
-			}
-			input = sb.String()
-		}
+		input := userInput(ctx)
 
-		queue := []nodeInput{{Start, input}}
+		s := newScheduler(ctx, w.graph)
+		// Seed: schedule START with the user-supplied input.
+		startState := s.state.EnsureNode(Start.Name())
+		startState.Input = input
+		s.scheduleNode(Start, input, "")
 
-		for len(queue) > 0 {
-			currentNode := queue[0].node
-			input = queue[0].input
-			queue = queue[1:]
+		s.run(yield)
 
-			var eventsWithRoutes []*session.Event
-			var outputData any
-			for ev, err := range currentNode.Run(ctx, input) {
-				if err != nil {
-					yield(nil, err)
-					return
-				}
-				if !yield(ev, nil) {
-					return
-				}
+		// All goroutines have returned; ensure no leak.
+		s.wg.Wait()
+	}
+}
 
-				if ev.Routes != nil {
-					eventsWithRoutes = append(eventsWithRoutes, ev)
-				}
-
-				// Extract output for next node
-				if ev.Actions.StateDelta != nil {
-					if out, ok := ev.Actions.StateDelta["output"]; ok {
-						outputData = out
-					}
-				}
-			}
-
-			if len(eventsWithRoutes) > 1 {
-				yield(nil, fmt.Errorf("node %s produced multiple events with route tags. Only one event per execution can specify routes", currentNode.Name()))
-				return
-			}
-			var event *session.Event
-			if len(eventsWithRoutes) == 1 {
-				event = eventsWithRoutes[0]
-			}
-			if currentNode != Start {
-				input = outputData
-			}
-			nextNodes := w.findNextNodes(currentNode, input, event)
-			queue = append(queue, nextNodes...)
+// userInput extracts the workflow's seed input from the
+// InvocationContext's UserContent. Concatenates all text parts;
+// returns nil for an empty UserContent.
+func userInput(ctx agent.InvocationContext) any {
+	uc := ctx.UserContent()
+	if uc == nil {
+		return nil
+	}
+	var sb strings.Builder
+	for _, part := range uc.Parts {
+		if part.Text != "" {
+			sb.WriteString(part.Text)
 		}
 	}
+	return sb.String()
 }
