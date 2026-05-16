@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 type testModel struct {
@@ -745,6 +746,70 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		Response: map[string]any{"output": "preserved"},
 	}
 
+	// Human-in-the-loop confirmation call/responses
+	fcHITLApproved := &genai.FunctionCall{
+		ID:   "hitl_approved_call",
+		Name: "request_vacation_days",
+		Args: map[string]any{"days": 5, "user_id": "user-123"},
+	}
+	frHITLApprovedPending := &genai.FunctionResponse{
+		ID:       "hitl_approved_call",
+		Name:     "request_vacation_days",
+		Response: map[string]any{"status": "Manager approval is required.", "request_id": "req-1"},
+	}
+	frHITLApprovedFinal := &genai.FunctionResponse{
+		ID:       "hitl_approved_call",
+		Name:     "request_vacation_days",
+		Response: map[string]any{"status": "The time off request is accepted.", "days_approved": 5, "request_id": "req-1"},
+	}
+	fcHITLApprovalRequest := &genai.FunctionCall{
+		ID:   "hitl_approved_confirmation",
+		Name: toolconfirmation.FunctionCallName,
+		Args: map[string]any{
+			"originalFunctionCall": fcHITLApproved,
+			"toolConfirmation": toolconfirmation.ToolConfirmation{
+				Confirmed: false,
+				Hint:      "Please approve or reject the tool call request_vacation_days().",
+			},
+		},
+	}
+	frHITLApprovalConfirmed := &genai.FunctionResponse{
+		ID:       "hitl_approved_confirmation",
+		Name:     toolconfirmation.FunctionCallName,
+		Response: map[string]any{"confirmed": true},
+	}
+	fcHITLDenied := &genai.FunctionCall{
+		ID:   "hitl_denied_call",
+		Name: "request_vacation_days",
+		Args: map[string]any{"days": 10, "user_id": "user-123"},
+	}
+	frHITLDeniedPending := &genai.FunctionResponse{
+		ID:       "hitl_denied_call",
+		Name:     "request_vacation_days",
+		Response: map[string]any{"status": "Manager approval is required.", "request_id": "req-2"},
+	}
+	frHITLDeniedFinal := &genai.FunctionResponse{
+		ID:       "hitl_denied_call",
+		Name:     "request_vacation_days",
+		Response: map[string]any{"status": "The time off request is rejected.", "days_approved": 0, "request_id": "req-2"},
+	}
+	fcHITLDenialRequest := &genai.FunctionCall{
+		ID:   "hitl_denied_confirmation",
+		Name: toolconfirmation.FunctionCallName,
+		Args: map[string]any{
+			"originalFunctionCall": fcHITLDenied,
+			"toolConfirmation": toolconfirmation.ToolConfirmation{
+				Confirmed: false,
+				Hint:      "Please approve or reject the tool call request_vacation_days().",
+			},
+		},
+	}
+	frHITLDenialRejected := &genai.FunctionResponse{
+		ID:       "hitl_denied_confirmation",
+		Name:     toolconfirmation.FunctionCallName,
+		Response: map[string]any{"confirmed": false},
+	}
+
 	// Error Call/Response
 	frOrphaned := &genai.FunctionResponse{
 		ID:       "no_matching_call",
@@ -802,6 +867,56 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				genai.NewContentFromText("Run long process", "user"),
 				NewContentFromFunctionCall(fcLRO, "model"),
 				NewContentFromFunctionResponse(frLROFinal, "user"),
+			},
+		},
+		{
+			name: "Rearrangement preserves unrelated function events",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run long process and search", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcLRO, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROInter, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Run long process and search", "user"),
+				NewContentFromFunctionCall(fcLRO, "model"),
+				NewContentFromFunctionResponse(frLROFinal, "user"),
+				NewContentFromFunctionCall(fcBasic, "model"),
+				NewContentFromFunctionResponse(frBasic, "user"),
+			},
+		},
+		{
+			name: "HITL confirmation approved preserves resumed tool response",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Request five vacation days", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcHITLApproved, "model")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLApprovedPending, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcHITLApprovalRequest, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLApprovalConfirmed, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLApprovedFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Request five vacation days", "user"),
+				NewContentFromFunctionCall(fcHITLApproved, "model"),
+				NewContentFromFunctionResponse(frHITLApprovedFinal, "user"),
+			},
+		},
+		{
+			name: "HITL confirmation denied preserves rejected tool response",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Request ten vacation days", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcHITLDenied, "model")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLDeniedPending, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcHITLDenialRequest, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLDenialRejected, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frHITLDeniedFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Request ten vacation days", "user"),
+				NewContentFromFunctionCall(fcHITLDenied, "model"),
+				NewContentFromFunctionResponse(frHITLDeniedFinal, "user"),
 			},
 		},
 		{
