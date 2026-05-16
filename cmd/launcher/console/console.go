@@ -99,7 +99,7 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 	rootAgent := config.AgentLoader.RootAgent()
 
-	session := resp.Session
+	sess := resp.Session
 
 	r, err := runner.New(runner.Config{
 		AppName:         appName,
@@ -144,6 +144,16 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 		}
 	}
 
+	// pendingInterrupts carries human-input prompts the agent
+	// emitted on the previous turn. While non-empty, the next
+	// stdin read is interpreted as the answer to its head; once
+	// every prompt has an answer the assembled FunctionResponse
+	// content is sent as the next "user message" turn. Mirrors
+	// adk-python cli.py's next_message + resume_invocation_id
+	// state.
+	var pendingInterrupts []pendingInterrupt
+	var pendingResponses []*genai.Part
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -156,7 +166,33 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 			log.Fatal(err)
 		case userInput := <-inputChan:
 
-			userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
+			var userMsg *genai.Content
+			if len(pendingInterrupts) > 0 {
+				// Treat the just-read line as the answer to the
+				// head of pendingInterrupts. Append it to
+				// pendingResponses; if more interrupts remain,
+				// render the next prompt and loop back to read
+				// another line.
+				current := pendingInterrupts[0]
+				pendingInterrupts = pendingInterrupts[1:]
+				pendingResponses = append(pendingResponses, buildInterruptResponse(current, userInput))
+				if len(pendingInterrupts) > 0 {
+					renderInterruptPrompt(pendingInterrupts[0])
+					continue
+				}
+				// All pending answers collected: send them as
+				// one Content with one FunctionResponse part per
+				// interrupt. Routes through runner.findAgentToRun
+				// the same way a tool-confirmation reply does.
+				userMsg = &genai.Content{
+					Role:  string(genai.RoleUser),
+					Parts: pendingResponses,
+				}
+				pendingResponses = nil
+			} else {
+				userMsg = genai.NewContentFromText(userInput, genai.RoleUser)
+			}
+
 			streamingMode := l.config.streamingMode
 			if streamingMode == "" {
 				streamingMode = defaultStreamingMode
@@ -164,12 +200,14 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 			fmt.Print("\nAgent -> ")
 			prevText := ""
-			for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
+			var collectedEvents []*session.Event
+			for event, err := range r.Run(ctx, userID, sess.ID(), userMsg, agent.RunConfig{
 				StreamingMode: streamingMode,
 			}) {
 				if err != nil {
 					fmt.Printf("\nAGENT_ERROR: %v\n", err)
 				} else {
+					collectedEvents = append(collectedEvents, event)
 					if event.LLMResponse.Content == nil {
 						continue
 					}
@@ -198,6 +236,18 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 					prevText = ""
 				}
+			}
+
+			// After the run drains, scan the collected events for
+			// long-running interrupts (workflow RequestInput,
+			// tool RequestConfirmation, …). If any are pending,
+			// render the head's prompt now; the next stdin read
+			// will be interpreted as the answer.
+			pendingInterrupts = collectPendingInterrupts(collectedEvents)
+			if len(pendingInterrupts) > 0 {
+				fmt.Println()
+				renderInterruptPrompt(pendingInterrupts[0])
+				continue
 			}
 			fmt.Print("\nUser -> ")
 		}
