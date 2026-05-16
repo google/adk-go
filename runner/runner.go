@@ -173,7 +173,12 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 		})
-		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+		// Only overwrite the plugin manager in context if this runner has its
+		// own plugins. Otherwise, inherit the parent's plugin manager (e.g.
+		// when a sub-runner is created by agenttool without PluginConfig).
+		if r.pluginManager != nil && r.pluginManager.HasPlugins() {
+			ctx = plugininternal.ToContext(ctx, r.pluginManager)
+		}
 
 		var artifacts agent.Artifacts
 		if r.artifactService != nil {
