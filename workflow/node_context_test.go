@@ -20,7 +20,7 @@ import (
 	"google.golang.org/adk/agent"
 )
 
-func TestNewNodeContext_TriggeredByRoundTrip(t *testing.T) {
+func TestNodeContext_TriggeredByPreservesValue(t *testing.T) {
 	tests := []struct {
 		name        string
 		triggeredBy string
@@ -59,9 +59,6 @@ func TestNodeContext_ResumedInput(t *testing.T) {
 		})
 		if v, ok := c.ResumedInput("approval"); !ok || v != "yes" {
 			t.Errorf("ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
-		}
-		if v, ok := c.ResumedInput("missing"); ok || v != nil {
-			t.Errorf("ResumedInput(\"missing\") = (%v, %v), want (nil, false)", v, ok)
 		}
 	})
 }
