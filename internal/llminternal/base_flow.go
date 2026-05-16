@@ -497,14 +497,17 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
+
+			// Yield function responses before confirmation requests so consumers that
+			// pause for user approval still persist completed tool results.
+			if !yield(ev, nil) {
+				return
+			}
+
 			if toolConfirmationEvent != nil {
 				if !yield(toolConfirmationEvent, nil) {
 					return
 				}
-			}
-
-			if !yield(ev, nil) {
-				return
 			}
 
 			// If the model response is structured, yield it as a final model response event.
