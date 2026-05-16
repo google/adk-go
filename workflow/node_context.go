@@ -17,9 +17,8 @@ package workflow
 import "google.golang.org/adk/agent"
 
 // nodeContext is the per-node InvocationContext seen inside Node.Run.
-// It wraps the workflow's incoming agent.InvocationContext and adds
-// engine-supplied metadata: the upstream node name (TriggeredBy)
-// and any human-input responses the scheduler injected for a
+// It wraps the workflow's incoming agent.InvocationContext and
+// surfaces the human-input responses the scheduler injected for a
 // re-entry resume activation (ResumedInput).
 //
 // TODO(wolo): replace once context-unification work lands. The
@@ -27,7 +26,6 @@ import "google.golang.org/adk/agent"
 // that the base interface does not have.
 type nodeContext struct {
 	agent.InvocationContext
-	triggeredBy string
 
 	// resumeInputs carries the user-supplied response payloads for
 	// a re-entry resume activation, keyed by InterruptID. Nil on
@@ -37,22 +35,14 @@ type nodeContext struct {
 	resumeInputs map[string]any
 }
 
-// newNodeContext returns a nodeContext wrapping parent with the given
-// upstream-node name. triggeredBy is empty for the initial START
-// activation. resumeInputs is nil for non-resume activations.
-func newNodeContext(parent agent.InvocationContext, triggeredBy string, resumeInputs map[string]any) *nodeContext {
+// newNodeContext returns a nodeContext wrapping parent. resumeInputs
+// is nil for non-resume activations.
+func newNodeContext(parent agent.InvocationContext, resumeInputs map[string]any) *nodeContext {
 	return &nodeContext{
 		InvocationContext: parent,
-		triggeredBy:       triggeredBy,
 		resumeInputs:      resumeInputs,
 	}
 }
-
-// TriggeredBy returns the name of the upstream node whose output
-// scheduled this node activation. Empty for the initial START
-// trigger and for non-workflow invocations (where the wrapper is not
-// used).
-func (c *nodeContext) TriggeredBy() string { return c.triggeredBy }
 
 // ResumedInput returns the response payload associated with the
 // given InterruptID for a re-entry resume activation. Returns
