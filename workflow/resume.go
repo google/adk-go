@@ -127,8 +127,17 @@ func (w *Workflow) Resume(
 				// ctx.ResumedInput(InterruptID), not via the
 				// input parameter. Successors fire only when the
 				// re-entry activation produces an output.
-				resumeInputs := map[string]any{interruptID: resp}
-				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, resumeInputs)
+				//
+				// Accumulate into ns.ResumedInputs so a node that
+				// yields multiple RequestInputs across resume
+				// cycles sees every prior response, not just the
+				// most recent one. The map is cleared when the
+				// node transitions to NodeCompleted.
+				if ns.ResumedInputs == nil {
+					ns.ResumedInputs = map[string]any{}
+				}
+				ns.ResumedInputs[interruptID] = resp
+				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.ResumedInputs)
 			} else {
 				// Handoff mode: schedule each successor with the
 				// response as its input, exactly as if the asker

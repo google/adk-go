@@ -447,6 +447,10 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 	}
 
 	ns.Status = NodeCompleted
+	// Release the accumulated re-entry response history; the node
+	// has finished and a future activation (if any, e.g. via
+	// loop-back routing) starts a fresh lifecycle.
+	ns.ResumedInputs = nil
 
 	if !scheduleSuccessors {
 		return nil
