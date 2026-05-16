@@ -19,7 +19,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 	"google.golang.org/genai"
 
@@ -55,11 +55,9 @@ type AuthInterceptor struct {
 }
 
 // Before implements a before request callback.
-func (a *AuthInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, error) {
-	callCtx.User = &a2asrv.AuthenticatedUser{
-		UserName: "user",
-	}
-	return ctx, nil
+func (a *AuthInterceptor) Before(ctx context.Context, callCtx *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
+	callCtx.User = a2asrv.NewAuthenticatedUser("user", nil)
+	return ctx, nil, nil
 }
 
 func main() {
@@ -105,7 +103,7 @@ func main() {
 		SessionService:  sessionService,
 		AgentLoader:     agentLoader,
 		A2AOptions: []a2asrv.RequestHandlerOption{
-			a2asrv.WithCallInterceptor(&AuthInterceptor{}),
+			a2asrv.WithCallInterceptors(&AuthInterceptor{}),
 		},
 	}
 

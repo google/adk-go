@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	a2acore "github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
-	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
+	a2acore "github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -109,8 +109,8 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 		t.Fatalf("a2aclient.NewFromCard() error = %v", err)
 	}
 
-	got, err := client.SendMessage(ctx, &a2acore.MessageSendParams{
-		Message: a2acore.NewMessage(a2acore.MessageRoleUser, a2acore.TextPart{Text: "Hi!"}),
+	got, err := client.SendMessage(ctx, &a2acore.SendMessageRequest{
+		Message: a2acore.NewMessage(a2acore.MessageRoleUser, a2acore.NewTextPart("Hi!")),
 	})
 	if err != nil {
 		t.Fatalf("client.SendMessage() error = %v", err)
@@ -126,7 +126,7 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 	if len(parts) != 1 {
 		t.Fatalf("len(task.Artifacts[0].Parts) = %d, want 1", len(parts))
 	}
-	if gotPart, ok := parts[0].(a2acore.TextPart); !ok || gotPart.Text != wantMessage {
-		t.Fatalf("task.Artifacts[0].Parts[0] = %v, want %v", parts[0], a2acore.TextPart{Text: wantMessage})
+	if gotPart := parts[0].Text(); gotPart != wantMessage {
+		t.Fatalf("task.Artifacts[0].Parts[0] = %v, want %v", parts[0], wantMessage)
 	}
 }

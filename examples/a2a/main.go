@@ -23,18 +23,18 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/agent/remoteagent"
+	"google.golang.org/adk/agent/remoteagent/v2"
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/runner"
-	"google.golang.org/adk/server/adka2a"
+	"google.golang.org/adk/server/adka2a/v2"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
@@ -79,10 +79,19 @@ func startWeatherAgentServer() string {
 
 		agentPath := "/invoke"
 		agentCard := &a2a.AgentCard{
-			Name:               agent.Name(),
+			Name:        agent.Name(),
+			Description: agent.Description(),
+			SupportedInterfaces: []*a2a.AgentInterface{
+				{
+					URL:             baseURL.JoinPath(agentPath).String(),
+					ProtocolBinding: a2a.TransportProtocolJSONRPC,
+					ProtocolVersion: a2a.Version,
+				},
+			},
+			Version:            "1.0.0",
+			DefaultInputModes:  []string{"text/plain"},
+			DefaultOutputModes: []string{"text/plain"},
 			Skills:             adka2a.BuildAgentSkills(agent),
-			PreferredTransport: a2a.TransportProtocolJSONRPC,
-			URL:                baseURL.JoinPath(agentPath).String(),
 			Capabilities:       a2a.AgentCapabilities{Streaming: true},
 		}
 
@@ -113,8 +122,8 @@ func main() {
 	a2aServerAddress := startWeatherAgentServer()
 
 	remoteAgent, err := remoteagent.NewA2A(remoteagent.A2AConfig{
-		Name:            "A2A Weather agent",
-		AgentCardSource: a2aServerAddress,
+		Name:              "A2A Weather agent",
+		AgentCardProvider: remoteagent.NewAgentCardProvider(a2aServerAddress),
 	})
 	if err != nil {
 		log.Fatalf("Failed to create a remote agent: %v", err)
