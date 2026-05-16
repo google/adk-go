@@ -86,6 +86,9 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 		if shouldExcludeEvent(ev) {
 			continue
 		}
+		if isConfirmationEvent(ev) {
+			continue
+		}
 		if isOtherAgentReply(agentName, ev) {
 			filtered = append(filtered, ConvertForeignEvent(ev))
 		} else {
@@ -576,6 +579,26 @@ func shouldExcludeEvent(ev *session.Event) bool {
 			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// isConfirmationEvent returns true if the event contains an adk_request_confirmation
+// FunctionCall or FunctionResponse. These are ADK-internal events used for the tool
+// confirmation (HITL) flow and must be filtered from LLM history — the model never
+// declared this function and cannot interpret it.
+func isConfirmationEvent(ev *session.Event) bool {
+	c := utils.Content(ev)
+	if c == nil {
+		return false
+	}
+	for _, p := range c.Parts {
+		if p.FunctionCall != nil && p.FunctionCall.Name == toolconfirmation.FunctionCallName {
+			return true
+		}
+		if p.FunctionResponse != nil && p.FunctionResponse.Name == toolconfirmation.FunctionCallName {
+			return true
 		}
 	}
 	return false
