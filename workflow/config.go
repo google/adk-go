@@ -61,11 +61,11 @@ type NodeConfig struct {
 	RerunOnResume *bool
 
 	// WaitForOutput, when true, keeps the node in NodeWaiting
-	// (re-triggerable) until it actually yields an event carrying
-	// an "output" key in Actions.StateDelta, instead of moving it
-	// to NodeCompleted on first return. JoinNode and any custom
-	// fan-in node sets this. nil defers to the engine; the
-	// engine currently treats nil as false.
+	// (re-triggerable) until it actually yields an event carrying an
+	// "output" key in Actions.StateDelta, instead of moving it to
+	// NodeCompleted on first return. JoinNode and any custom fan-in
+	// node sets this. nil means "use the engine default" — false for
+	// most node kinds.
 	WaitForOutput *bool
 
 	// RetryConfig, when non-nil, makes the scheduler retry this node
