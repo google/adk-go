@@ -43,20 +43,22 @@ func generateRequestConfirmationEvent(
 
 	parts := []*genai.Part{}
 	longRunningToolIDs := []string{}
-	functionCalls := make(map[string]*genai.FunctionCall, len(functionCallEvent.Content.Parts))
-	for _, call := range utils.FunctionCalls(functionCallEvent.Content) {
-		functionCalls[call.ID] = call
+	functionCallParts := make(map[string]*genai.Part, len(functionCallEvent.Content.Parts))
+	for _, part := range functionCallEvent.Content.Parts {
+		if part.FunctionCall != nil {
+			functionCallParts[part.FunctionCall.ID] = part
+		}
 	}
 
 	for funcID, confirmation := range functionResponseEvent.Actions.RequestedToolConfirmations {
-		originalFunctionCall, ok := functionCalls[funcID]
-		if !ok || originalFunctionCall == nil {
+		originalPart, ok := functionCallParts[funcID]
+		if !ok || originalPart.FunctionCall == nil {
 			continue
 		}
 
 		// Prepare arguments for the adk_request_confirmation call
 		args := map[string]any{
-			"originalFunctionCall": originalFunctionCall,
+			"originalFunctionCall": originalPart.FunctionCall,
 			"toolConfirmation":     confirmation,
 		}
 
@@ -66,9 +68,14 @@ func generateRequestConfirmationEvent(
 			Args: args,
 		}
 
-		parts = append(parts, &genai.Part{
+		part := &genai.Part{
 			FunctionCall: requestConfirmationFC,
-		})
+		}
+		if len(originalPart.ThoughtSignature) > 0 {
+			part.ThoughtSignature = originalPart.ThoughtSignature
+		}
+
+		parts = append(parts, part)
 		longRunningToolIDs = append(longRunningToolIDs, requestConfirmationFC.ID)
 	}
 
