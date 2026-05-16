@@ -490,9 +490,15 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
 func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*session.Event) ([]*genai.Content, error) {
-	// Find the latest event that starts the current turn and process from there
+	// Find the latest event that starts the current turn and process from there.
+	// Guard with eventBelongsToBranch to avoid anchoring on events from sibling
+	// branches in a ParallelAgent.
+	// This matches the Python SDK's _should_include_event_in_context guard.
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
+		if !eventBelongsToBranch(branch, event) {
+			continue
+		}
 		if event.Author == "user" || isOtherAgentReply(agentName, event) {
 			return buildContentsDefault(agentName, branch, events[i:])
 		}
