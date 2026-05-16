@@ -25,41 +25,28 @@ import (
 	"google.golang.org/adk/workflow"
 )
 
-// reentryNode is a custom Node with NodeConfig.RerunOnResume = true.
-// On the first activation it issues a RequestInput and exits; on the
-// re-entry activation it observes the user's response via
-// ctx.ResumedInput and emits an output, optionally calling a hook
-// supplied by the test.
+// reentryNode is a custom Node with NodeConfig.RerunOnResume = true
+// whose Run body is supplied by the test via runFn. The test
+// decides what to do on the first activation (typically yield a
+// RequestInput) and on re-entry (read ctx.ResumedInput, emit an
+// output). Single helper covers both the "ask + handle reply"
+// shape of TestWorkflowAgent_ReEntry_ResumesAtSameNode and the
+// raw input-observing shape of
+// TestWorkflowAgent_ReEntry_PreservesOriginalInput.
 type reentryNode struct {
 	workflow.BaseNode
-	interruptID string
-	onResume    func(response any, originalInput any) (output any)
+	runFn func(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
 }
 
-func newReentryNode(name, interruptID string, onResume func(response, originalInput any) any) *reentryNode {
-	t := true
+func newReentryNode(name string, runFn func(agent.InvocationContext, any) iter.Seq2[*session.Event, error]) *reentryNode {
 	return &reentryNode{
-		BaseNode:    workflow.NewBaseNode(name, "", workflow.NodeConfig{RerunOnResume: &t}),
-		interruptID: interruptID,
-		onResume:    onResume,
+		BaseNode: workflow.NewBaseNode(name, "", workflow.NodeConfig{RerunOnResume: ptrTrue()}),
+		runFn:    runFn,
 	}
 }
 
 func (n *reentryNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		if response, ok := ctx.ResumedInput(n.interruptID); ok {
-			out := n.onResume(response, input)
-			ev := session.NewEvent(ctx.InvocationID())
-			ev.Actions.StateDelta["output"] = out
-			yield(ev, nil)
-			return
-		}
-		// First activation: ask.
-		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
-			InterruptID: n.interruptID,
-			Message:     "decide",
-		}), nil)
-	}
+	return n.runFn(ctx, input)
 }
 
 // TestWorkflowAgent_ReEntry_ResumesAtSameNode verifies the canonical
@@ -69,11 +56,30 @@ func (n *reentryNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*ses
 func TestWorkflowAgent_ReEntry_ResumesAtSameNode(t *testing.T) {
 	var resumeActivations atomic.Int32
 	var capturedResponse atomic.Value
+	var capturedUnknownOK atomic.Bool
 
-	asker := newReentryNode("asker", "decide", func(response, _ any) any {
-		resumeActivations.Add(1)
-		capturedResponse.Store(response)
-		return "decision: " + response.(string)
+	asker := newReentryNode("asker", func(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			response, ok := ctx.ResumedInput("decide")
+			if !ok {
+				yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+					InterruptID: "decide",
+					Message:     "decide",
+				}), nil)
+				return
+			}
+			resumeActivations.Add(1)
+			capturedResponse.Store(response)
+			// Scheduler must populate resumeInputs with exactly the
+			// matching InterruptID — unrelated lookups return
+			// (nil, false). Pins the contract from the asker's side
+			// (complements the unit test in workflow/node_context_test.go).
+			_, okOther := ctx.ResumedInput("other_id")
+			capturedUnknownOK.Store(okOther)
+			ev := session.NewEvent(ctx.InvocationID())
+			ev.Actions.StateDelta["output"] = "decision: " + response.(string)
+			yield(ev, nil)
+		}
 	})
 
 	var handlerInput atomic.Value
@@ -100,6 +106,9 @@ func TestWorkflowAgent_ReEntry_ResumesAtSameNode(t *testing.T) {
 	if got := capturedResponse.Load(); got != "approve" {
 		t.Errorf("ResumedInput response = %v, want %q", got, "approve")
 	}
+	if capturedUnknownOK.Load() {
+		t.Errorf("ResumedInput(\"other_id\") returned ok=true on re-entry; want false")
+	}
 	if got, want := handlerInput.Load(), "decision: approve"; got != want {
 		t.Errorf("handler input = %v, want %q", got, want)
 	}
@@ -110,16 +119,17 @@ func TestWorkflowAgent_ReEntry_ResumesAtSameNode(t *testing.T) {
 // first activation, not the user's response. The response is
 // delivered separately via ResumedInput.
 func TestWorkflowAgent_ReEntry_PreservesOriginalInput(t *testing.T) {
-	var seenInputs sync.Map // attempt index -> input
+	var seenInputs sync.Map // attempt index (int32) -> input
 	var attempts atomic.Int32
 
-	// observeInput captures input on every activation (first or
-	// re-entry); the body uses ResumedInput to decide whether to
-	// emit the request or the final output.
-	observeInput := func(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	asker := newReentryNode("asker", func(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 		return func(yield func(*session.Event, error) bool) {
-			seenInputs.Store(attempts.Load(), input)
-			attempts.Add(1)
+			// get-and-increment: avoids a Load+Add window where two
+			// concurrent activations could record under the same key.
+			// (The workflow scheduler is single-consumer in practice,
+			// but the idiom is the safe default for atomic counters.)
+			attempt := attempts.Add(1) - 1
+			seenInputs.Store(attempt, input)
 			if _, ok := ctx.ResumedInput("decide"); ok {
 				ev := session.NewEvent(ctx.InvocationID())
 				ev.Actions.StateDelta["output"] = "ack"
@@ -131,12 +141,7 @@ func TestWorkflowAgent_ReEntry_PreservesOriginalInput(t *testing.T) {
 				Message:     "?",
 			}), nil)
 		}
-	}
-
-	asker := &observingReentryNode{
-		BaseNode: workflow.NewBaseNode("asker", "", workflow.NodeConfig{RerunOnResume: ptrTrue()}),
-		runFn:    observeInput,
-	}
+	})
 
 	a := makeAgent(t, workflow.Chain(workflow.Start, asker))
 	sess := newFakeSession()
@@ -148,26 +153,20 @@ func TestWorkflowAgent_ReEntry_PreservesOriginalInput(t *testing.T) {
 	// must see "draft" again as input (not "approve").
 	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("decide", "approve"))), nil)
 
-	first, _ := seenInputs.Load(int32(0))
-	second, _ := seenInputs.Load(int32(1))
+	first, ok1 := seenInputs.Load(int32(0))
+	if !ok1 {
+		t.Fatal("first activation never observed (no entry stored under index 0)")
+	}
+	second, ok2 := seenInputs.Load(int32(1))
+	if !ok2 {
+		t.Fatal("re-entry activation never observed (no entry stored under index 1)")
+	}
 	if first != "draft" {
 		t.Errorf("first activation input = %v, want %q", first, "draft")
 	}
 	if second != "draft" {
 		t.Errorf("re-entry activation input = %v, want %q (must preserve original input, not the response)", second, "draft")
 	}
-}
-
-// observingReentryNode is a Node whose Run delegates to a function-
-// typed field, so individual tests can supply their own Run body
-// without subclassing.
-type observingReentryNode struct {
-	workflow.BaseNode
-	runFn func(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
-}
-
-func (n *observingReentryNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
-	return n.runFn(ctx, input)
 }
 
 // TestWorkflowAgent_ReEntry_NoSuccessorBeforeOutput verifies that a
@@ -178,8 +177,19 @@ func (n *observingReentryNode) Run(ctx agent.InvocationContext, input any) iter.
 func TestWorkflowAgent_ReEntry_NoSuccessorBeforeOutput(t *testing.T) {
 	var handlerCount atomic.Int32
 
-	asker := newReentryNode("asker", "decide", func(response, _ any) any {
-		return "ack"
+	asker := newReentryNode("asker", func(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			if _, ok := ctx.ResumedInput("decide"); !ok {
+				yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+					InterruptID: "decide",
+					Message:     "decide",
+				}), nil)
+				return
+			}
+			ev := session.NewEvent(ctx.InvocationID())
+			ev.Actions.StateDelta["output"] = "ack"
+			yield(ev, nil)
+		}
 	})
 	handler := newCountingHandlerNode("handler", &handlerCount)
 
