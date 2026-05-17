@@ -267,7 +267,7 @@ type ArtifactVersion struct {
 	Version        int64
 	CanonicalURI   string
 	CustomMetadata map[string]any
-	CreateTime     float64
+	CreateTime     int64
 	MimeType       string
 }
 
