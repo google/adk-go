@@ -45,6 +45,7 @@ func TestNewLoopAgent(t *testing.T) {
 		args       args
 		wantEvents []*session.Event
 		wantErr    bool
+		wantRunErr bool
 	}{
 		{
 			name: "infinite loop",
@@ -197,6 +198,15 @@ func TestNewLoopAgent(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "loop agent which always yields an error",
+			args: args{
+				maxIterations: 1,
+				subAgents:     []agent.Agent{newErrorAgent(t)},
+			},
+			wantEvents: nil,
+			wantRunErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -238,7 +248,10 @@ func TestNewLoopAgent(t *testing.T) {
 
 			for event, err := range agentRunner.Run(ctx, "user_id", "session_id", genai.NewContentFromText("user input", genai.RoleUser), agent.RunConfig{}) {
 				if err != nil {
-					t.Errorf("got unexpected error: %v", err)
+					if !tt.wantRunErr {
+						t.Errorf("got unexpected error: %v", err)
+					}
+					break
 				}
 
 				if tt.args.maxIterations == 0 && len(gotEvents) == len(tt.wantEvents) {
@@ -375,4 +388,20 @@ func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, st
 			}
 		}
 	}
+}
+
+func newErrorAgent(t *testing.T) agent.Agent {
+	t.Helper()
+	a, err := agent.New(agent.Config{
+		Name: "error_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(nil, fmt.Errorf("something went wrong"))
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
 }
