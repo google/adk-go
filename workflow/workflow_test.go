@@ -59,11 +59,12 @@ func newSeededMockCtx(t *testing.T) *MockInvocationContext {
 	return ctx
 }
 
-// mustNew builds a workflow from edges and fails the test if
-// construction errors. The returned workflow is ready to Run.
+// mustNew builds an anonymous workflow from edges and fails the
+// test if construction errors. The returned workflow is ready to
+// Run; persistence is disabled.
 func mustNew(t *testing.T, edges []Edge) *Workflow {
 	t.Helper()
-	w, err := New(edges)
+	w, err := New("", edges)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
