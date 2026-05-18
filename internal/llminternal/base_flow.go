@@ -140,7 +140,7 @@ type liveSessionImpl struct {
 	activeTools map[string][]activeTask
 }
 
-func (s *liveSessionImpl) RegisterStreamingTool(toolName string, callID string, cancel context.CancelFunc) {
+func (s *liveSessionImpl) RegisterStreamingTool(toolName, callID string, cancel context.CancelFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.activeTools == nil {
