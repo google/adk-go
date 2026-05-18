@@ -491,6 +491,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 					if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
 						return
 					}
+					continue
 				}
 				tools[k] = tool
 			}
