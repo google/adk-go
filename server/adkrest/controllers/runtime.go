@@ -79,7 +79,11 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 		return nil, err
 	}
 
-	resp := r.Run(ctx, runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg)
+	var opts []runner.RunOption
+	if runAgentRequest.StateDelta != nil {
+		opts = append(opts, runner.WithStateDelta(*runAgentRequest.StateDelta))
+	}
+	resp := r.Run(ctx, runAgentRequest.UserId, runAgentRequest.SessionId, &runAgentRequest.NewMessage, *rCfg, opts...)
 
 	var events []*session.Event
 	for event, err := range resp {
