@@ -230,11 +230,8 @@ func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Ru
 	}, nil
 }
 
-func decodeRequestBody(req *http.Request) (decodedReq models.RunAgentRequest, err error) {
+func decodeRequestBody(req *http.Request) (models.RunAgentRequest, error) {
 	var runAgentRequest models.RunAgentRequest
-	defer func() {
-		err = req.Body.Close()
-	}()
 	d := json.NewDecoder(req.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(&runAgentRequest); err != nil {
