@@ -423,6 +423,13 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			return
 		}
 
+		// Create a step-level span to group generate_content and execute_tool
+		// spans within the same iteration, establishing correct parent-child
+		// hierarchy for observability backends.
+		stepCtx, stepSpan := telemetry.StartTrace(ctx, "llm_step")
+		defer stepSpan.End()
+		ctx = ctx.WithContext(stepCtx)
+
 		req := &model.LLMRequest{
 			Model: f.Model.Name(),
 		}
