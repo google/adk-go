@@ -256,8 +256,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				strings.Contains(errStr, "GoAway")
 		}
 
+		iCtx, isIContext := ctx.(*icontext.InvocationContext)
+
 		for {
-			if iCtx, ok := ctx.(*icontext.InvocationContext); ok {
+			if isIContext {
 				handle := iCtx.LiveSessionResumptionHandle()
 				if handle != "" {
 					if liveConnectConfig.SessionResumption == nil {
@@ -312,7 +314,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					}
 					if resp != nil {
 						if resp.SessionResumptionHandle != "" {
-							if iCtx, ok := ctx.(*icontext.InvocationContext); ok {
+							if isIContext {
 								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
 								iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
 							}
