@@ -458,3 +458,135 @@ func (n *progressThenOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Se
 		yield(final, nil)
 	}
 }
+
+// TestScheduler_RetryNode verifies that a node with RetryConfig
+// is retried on failure and eventually succeeds if the failure is transient.
+func TestScheduler_RetryNode(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	cfg := NodeConfig{
+		RetryConfig: &RetryConfig{
+			MaxAttempts:   3,
+			InitialDelay:  1 * time.Millisecond,
+			BackoffFactor: 1.0,
+			Jitter:        0.0,
+			ShouldRetry:   func(err error) bool { return true },
+		},
+	}
+
+	n := newRetryTestNode("retryNode", 2, cfg)
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	events := drain(t, w.Run(mockCtx))
+
+	if got := n.calls.Load(); got != 3 {
+		t.Errorf("node calls = %d, want 3", got)
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+
+	out := fmt.Sprint(events[0].Actions.StateDelta["output"])
+	if out != "seed:retryNode" {
+		t.Errorf("output = %q, want %q", out, "seed:retryNode")
+	}
+}
+
+// TestScheduler_RetryNodeExhausted verifies that a node with RetryConfig
+// eventually fails the workflow after MaxAttempts are exhausted.
+func TestScheduler_RetryNodeExhausted(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	cfg := NodeConfig{
+		RetryConfig: &RetryConfig{
+			MaxAttempts:   3,
+			InitialDelay:  1 * time.Millisecond,
+			BackoffFactor: 1.0,
+			Jitter:        0.0,
+			ShouldRetry:   func(err error) bool { return true },
+		},
+	}
+
+	n := newRetryTestNode("retryNode", 10, cfg)
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	gotErr := drainErr(t, w.Run(mockCtx))
+
+	if got := n.calls.Load(); got != 3 {
+		t.Errorf("node calls = %d, want 3", got)
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+// retryTestNode fails failCount times and then succeeds.
+type retryTestNode struct {
+	BaseNode
+	failCount int
+	calls     atomic.Int32
+	cfg       NodeConfig
+}
+
+func newRetryTestNode(name string, failCount int, cfg NodeConfig) *retryTestNode {
+	return &retryTestNode{
+		BaseNode:  NewBaseNode(name, "", cfg),
+		failCount: failCount,
+		cfg:       cfg,
+	}
+}
+
+func (n *retryTestNode) Config() NodeConfig { return n.cfg }
+
+func (n *retryTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		calls := n.calls.Add(1)
+		if int(calls) <= n.failCount {
+			yield(nil, fmt.Errorf("fail attempt %d", calls))
+			return
+		}
+		ev := session.NewEvent(ctx.InvocationID())
+		out := fmt.Sprintf("%v:%s", input, n.Name())
+		ev.Actions.StateDelta["output"] = out
+		yield(ev, nil)
+	}
+}
+
+// TestScheduler_RetryInChain verifies that a node in a chain can retry
+// and successfully propagate data to downstream nodes.
+func TestScheduler_RetryInChain(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	a := newRecordingNode("A")
+	a.release()
+
+	cfg := NodeConfig{
+		RetryConfig: &RetryConfig{
+			MaxAttempts:   3,
+			InitialDelay:  1 * time.Millisecond,
+			BackoffFactor: 1.0,
+			Jitter:        0.0,
+			ShouldRetry:   func(err error) bool { return true },
+		},
+	}
+	b := newRetryTestNode("B", 2, cfg) // Fails twice
+
+	c := newRecordingNode("C")
+	c.release()
+
+	w := mustNew(t, Chain(Start, a, b, c))
+
+	gotEvents := drain(t, w.Run(mockCtx))
+
+	wantOutputs := []string{"seed:A", "seed:A:B", "seed:A:B:C"}
+	gotOutputs := outputsOf(gotEvents)
+	if diff := cmp.Diff(wantOutputs, gotOutputs); diff != "" {
+		t.Errorf("outputs mismatch (-want +got):\n%s", diff)
+	}
+
+	if got := b.calls.Load(); got != 3 {
+		t.Errorf("node B calls = %d, want 3", got)
+	}
+}

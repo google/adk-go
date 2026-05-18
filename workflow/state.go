@@ -90,6 +90,9 @@ type NodeState struct {
 	// NodeWaiting and the wait was caused by a human-input request
 	// (as opposed to a fan-in barrier).
 	PendingRequest *session.RequestInput
+
+	// Attempt is the number of times this node has been executed.
+	Attempt int
 }
 
 // RunState is the per-invocation lifecycle state for a workflow

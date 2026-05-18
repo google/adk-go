@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
@@ -82,6 +83,12 @@ type scheduler struct {
 	// goroutines to the consumer.
 	eventQueue chan queueItem
 	wg         sync.WaitGroup
+
+	// pendingRetries is a counter of nodes that are scheduled to run but haven't completed yet.
+	// It prevents exiting the workflow on len(s.runsByName) == 0.
+	// This happens when all nodes have completed but there are still retry attempts in flight with delays
+	// since they are deleted from s.runsByName in handleCompletion.
+	pendingRetries int
 
 	parentCtx agent.InvocationContext
 }
@@ -173,6 +180,15 @@ type completionItem struct {
 
 func (completionItem) isQueueItem() {}
 
+// retryItem signals that a node should be retried after a delay.
+type retryItem struct {
+	node        Node
+	input       any
+	triggeredBy string
+}
+
+func (retryItem) isQueueItem() {}
+
 // newScheduler returns an initialised scheduler ready for the
 // consumer to drive. The caller is responsible for seeding the
 // initial trigger (typically Start with the user input).
@@ -238,6 +254,15 @@ func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
 	s.wg.Add(1)
 
 	go runNode(s.eventQueue, &s.wg, name, n, perNodeCtx, input)
+}
+
+// scheduleRetry schedules a retry for node n after the given delay.
+func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy string, delay time.Duration) {
+	time.AfterFunc(delay, func() {
+		go func() {
+			s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy}
+		}()
+	})
 }
 
 // runNode is the per-node goroutine wrapper. It drives the node's
@@ -322,7 +347,7 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	var pendingErr error // first non-nil node error; surfaced after drain
 	draining := false    // true once cancelAll has run; remaining queue items are drained without yielding or scheduling new successors
 
-	for len(s.runsByName) > 0 {
+	for len(s.runsByName) > 0 || s.pendingRetries > 0 {
 		item := <-s.eventQueue
 		switch it := item.(type) {
 		case eventItem:
@@ -341,6 +366,11 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 					draining = true
 					s.cancelAll()
 				}
+			}
+		case retryItem:
+			s.pendingRetries--
+			if !draining {
+				s.scheduleNode(it.node, it.input, it.triggeredBy)
 			}
 		}
 	}
@@ -407,6 +437,9 @@ func (s *scheduler) handleEvent(it eventItem) {
 func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool) error {
 	ns := s.state.EnsureNode(it.nodeName)
 	nr := s.runsByName[it.nodeName]
+	// For retryable nodes still delete them from run variables. If the node is retried,
+	// it will get a fresh accumulator in scheduleNode to avoid ErrMultipleOutputs
+	// from partial results of this failed run.
 	delete(s.runsByName, it.nodeName)
 	delete(s.runCancels, it.nodeName)
 
@@ -415,6 +448,24 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 		return nil // sibling cancellation; not the original error
 	}
 	if it.err != nil {
+		currentNode := s.nodesByName[it.nodeName]
+		if currentNode != nil {
+			cfg := currentNode.Config()
+			if cfg.RetryConfig != nil {
+				ns.Attempt = ns.Attempt + 1
+
+				if ShouldRetry(cfg.RetryConfig, it.err, ns.Attempt) {
+					delay := CalculateDelay(cfg.RetryConfig, ns.Attempt)
+					ns.Status = NodePending
+					s.pendingRetries++
+					s.scheduleRetry(currentNode, ns.Input, ns.TriggeredBy, delay)
+					// Return nil to continue the scheduler loop. Successors will
+					// be scheduled only when a retry attempt eventually succeeds
+					// and reaches the bottom of this function.
+					return nil // Don't fail the workflow
+				}
+			}
+		}
 		ns.Status = NodeFailed
 		return it.err
 	}
