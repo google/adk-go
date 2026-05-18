@@ -17,7 +17,6 @@ package workflow
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"iter"
 	"strings"
 	"testing"
@@ -81,19 +80,19 @@ func TestAgentNode_New(t *testing.T) {
 		want    string
 	}{
 		{
-			name: "NewToolNodeTyped",
+			name: "NewAgentNodeTyped",
 			creator: func() (Node, error) {
 				return NewAgentNodeTyped[Input, Output](myAgent, defaultNodeConfig)
 			},
 		},
 		{
-			name: "NewToolNodeWithSchemas",
+			name: "NewAgentNodeWithSchemas",
 			creator: func() (Node, error) {
 				return NewAgentNodeWithSchemas(myAgent, ischema, oschema, defaultNodeConfig)
 			},
 		},
 		{
-			name: "NewToolNode",
+			name: "NewAgentNode",
 			creator: func() (Node, error) {
 				return NewAgentNode(myAgent, defaultNodeConfig)
 			},
@@ -115,7 +114,6 @@ func TestAgentNode_New(t *testing.T) {
 			}
 
 			// Basic internal check via reflection-like cast.
-			// We use any, any for constructors that don't preserve types in the struct.
 			var inputResolved, outputResolved *jsonschema.Resolved
 			switch tn := node.(type) {
 			case *AgentNode:
@@ -187,7 +185,7 @@ func TestAgentNode_Run(t *testing.T) {
 				}
 				return output.Result
 			},
-			want: "map[val:A]",
+			want: `{"val":"A"}`,
 		},
 		{
 			name: "string_output",
@@ -217,29 +215,7 @@ func TestAgentNode_Run(t *testing.T) {
 			extract: func(t *testing.T, out any) string {
 				return out.(string)
 			},
-			want: "map[val:B]",
-		},
-		{
-			name: "schema_validation_error",
-			agent: func() (agent.Agent, error) {
-				return agent.New(agent.Config{
-					Name: "test_agent",
-					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-						return func(yield func(*session.Event, error) bool) {
-							event := session.NewEvent(ctx.InvocationID())
-							event.Actions.StateDelta = map[string]any{
-								"output": map[string]any{"result": "not-an-int"},
-							}
-							yield(event, nil)
-						}
-					},
-				})
-			},
-			nodeInput: map[string]any{},
-			node: func(a agent.Agent) (Node, error) {
-				return NewAgentNodeTyped[map[string]any, ErrorOutput](a, defaultNodeConfig)
-			},
-			wantErr: "converting agent \"test_agent\" output",
+			want: `{"val":"B"}`,
 		},
 		{
 			name: "agent_execution_error",
@@ -354,10 +330,15 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 						if uc != nil && len(uc.Parts) > 0 {
 							valStr = uc.Parts[0].Text
 						}
-						// valStr will be something like "map[val:5]"
+						// valStr will be something like `{"val":5}`
 						var val int
-						fmt.Sscanf(valStr, "map[val:%d]", &val)
-						
+						var parsed struct {
+							Val int `json:"val"`
+						}
+						if err := json.Unmarshal([]byte(valStr), &parsed); err == nil {
+							val = parsed.Val
+						}
+
 						event := session.NewEvent(ctx.InvocationID())
 						event.Actions.StateDelta = map[string]any{
 							"output": map[string]any{"result": val * 2},
@@ -390,9 +371,9 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 				}, NodeConfig{})
 
 				edges := Chain(Start, seedNode, agentNode, functionNode)
-				w, err := New(edges)
+				w, err := New("test_workflow", edges)
 				if err != nil {
-					t.Fatalf("unexpexted error: %v", err)
+					t.Fatalf("unexpected error: %v", err)
 				}
 				events := w.Run(mockCtx)
 

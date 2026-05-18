@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"encoding/json"
 	"fmt"
 	"iter"
 
@@ -23,7 +24,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	internalcontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/session"
 )
 
@@ -37,7 +37,7 @@ type AgentNode struct {
 
 // newAgentNodeWithSchemasTyped creates a new node wrapping an agent with explicitly provided schemas.
 // If a schema is nil, it will be inferred from the corresponding generic type Input or Output.
-func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (Node, error) {
+func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*AgentNode, error) {
 	if a == nil {
 		return nil, fmt.Errorf("agent cannot be nil")
 	}
@@ -45,15 +45,9 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	if err != nil {
 		return nil, fmt.Errorf("resolving input schema for agent %q: %w", a.Name(), err)
 	}
-	if ischema == nil {
-		return nil, fmt.Errorf("resolved input schema for agent %q is nil", a.Name())
-	}
 	oschema, err := resolvedSchema[Output](outputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
-	}
-	if oschema == nil {
-		return nil, fmt.Errorf("resolved output schema for agent %q is nil", a.Name())
 	}
 
 	return &AgentNode{
@@ -66,35 +60,26 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 
 // NewAgentNodeWithSchemas is a convenience wrapper for NewAgentNodeWithSchemasTyped[any, any].
 // It uses explicitly provided schemas for both input and output.
-func NewAgentNodeWithSchemas(a agent.Agent, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (Node, error) {
+func NewAgentNodeWithSchemas(a agent.Agent, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*AgentNode, error) {
 	return newAgentNodeWithSchemasTyped[any, any](a, inputSchema, outputSchema, cfg)
 }
 
 // NewAgentNodeTyped creates a new node wrapping an agent using generics to
 // automatically infer input and output schemas from the provided types.
-func NewAgentNodeTyped[Input, Output any](a agent.Agent, cfg NodeConfig) (Node, error) {
+func NewAgentNodeTyped[Input, Output any](a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return newAgentNodeWithSchemasTyped[Input, Output](a, nil, nil, cfg)
 }
 
 // NewAgentNode creates a new node wrapping an agent. Input and output schemas
 // are inferred as `any`.
-func NewAgentNode(a agent.Agent, cfg NodeConfig) (Node, error) {
+func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return NewAgentNodeTyped[any, any](a, cfg)
 }
 
 // Run implements the Node interface.
 func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		// Validate input if schema is available
-		var err error
-		if n.inputSchema != nil {
-			input, err = typeutil.ConvertToWithJSONSchema[any, any](input, n.inputSchema)
-			if err != nil {
-				yield(nil, fmt.Errorf("converting input for agent %q: %w", n.agent.Name(), err))
-				return
-			}
-		}
-
+		// TODO: add input validation
 		var userContent *genai.Content
 		if input != nil {
 			switch v := input.(type) {
@@ -105,8 +90,13 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 			case *genai.Content:
 				userContent = v
 			default:
+				b, err := json.Marshal(v)
+				if err != nil {
+					yield(nil, fmt.Errorf("marshaling input for agent %q to JSON: %w", n.agent.Name(), err))
+					return
+				}
 				userContent = &genai.Content{
-					Parts: []*genai.Part{{Text: fmt.Sprint(v)}},
+					Parts: []*genai.Part{{Text: string(b)}},
 				}
 			}
 		}
@@ -116,6 +106,7 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 			Artifacts:     ctx.Artifacts(),
 			Memory:        ctx.Memory(),
 			Session:       ctx.Session(),
+			// TODO: branch isolation in a separate PR
 			Branch:        ctx.Branch(),
 			Agent:         n.agent,
 			UserContent:   userContent,
@@ -131,16 +122,7 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 				return
 			}
 
-			// Validate output if schema is available and event has output
-			if n.outputSchema != nil && event.Actions.StateDelta != nil {
-				if output, ok := event.Actions.StateDelta["output"]; ok {
-					if err := n.outputSchema.Validate(output); err != nil {
-						yield(nil, fmt.Errorf("converting agent %q output: validation failed: %w", n.agent.Name(), err))
-						return
-					}
-				}
-			}
-
+			// TODO: add output validation
 			if !yield(event, nil) {
 				return
 			}
