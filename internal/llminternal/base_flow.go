@@ -152,7 +152,7 @@ func (s *liveSessionImpl) RegisterStreamingTool(toolName, callID string, cancel 
 	})
 }
 
-func (s *liveSessionImpl) UnregisterStreamingTool(toolName string, callID string) {
+func (s *liveSessionImpl) UnregisterStreamingTool(toolName, callID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tasks, exists := s.activeTools[toolName]
