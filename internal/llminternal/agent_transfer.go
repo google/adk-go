@@ -96,6 +96,8 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 	}
 }
 
+const transferAgentName = "transfer_to_agent"
+
 // TransferToAgentTool is a tool that handles transferring control to another agent.
 type TransferToAgentTool struct {
 	instructions    string
@@ -103,16 +105,15 @@ type TransferToAgentTool struct {
 }
 
 // NewTransferToAgentTool creates a new TransferToAgentTool.
-func NewTransferToAgentTool(agent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
-	t := &TransferToAgentTool{
-		supportedAgents: targets,
-	}
-	si, err := t.instructionsForTransferToAgent(agent, parent, targets)
+func NewTransferToAgentTool(curAgent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
+	si, err := instructionsForTransferToAgent(curAgent, parent, targets)
 	if err != nil {
 		return nil, err
 	}
-	t.instructions = si
-	return t, nil
+	return &TransferToAgentTool{
+		instructions:    si,
+		supportedAgents: targets,
+	}, nil
 }
 
 // Description implements tool.Tool.
@@ -123,7 +124,7 @@ This tool hands off control to another agent when it's more suitable to answer t
 
 // Name implements tool.Tool.
 func (t *TransferToAgentTool) Name() string {
-	return "transfer_to_agent"
+	return transferAgentName
 }
 
 // IsLongRunning implements tool.Tool.
@@ -280,7 +281,7 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 var transferToAgentPromptTmpl = template.Must(
 	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
 
-func (t *TransferToAgentTool) instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent) (string, error) {
+func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent) (string, error) {
 	if asLLMAgent(curAgent).internal().DisallowTransferToParent {
 		parent = nil
 	}
@@ -296,7 +297,7 @@ func (t *TransferToAgentTool) instructionsForTransferToAgent(curAgent, parent ag
 		AgentName:        curAgent.Name(),
 		Parent:           parent,
 		Targets:          targets,
-		ToolName:         t.Name(),
+		ToolName:         transferAgentName,
 		FormattedTargets: formatTargets(targets),
 	}); err != nil {
 		return "", err
