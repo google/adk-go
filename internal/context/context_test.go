@@ -67,16 +67,16 @@ func TestWithContext(t *testing.T) {
 
 func TestInvocationContext_LiveSessionResumptionHandle(t *testing.T) {
 	inv := NewInvocationContext(t.Context(), InvocationContextParams{})
-	
+
 	iCtx, ok := inv.(*InvocationContext)
 	if !ok {
 		t.Fatalf("NewInvocationContext did not return *InvocationContext")
 	}
-	
+
 	if iCtx.LiveSessionResumptionHandle() != "" {
 		t.Errorf("expected empty handle, got %q", iCtx.LiveSessionResumptionHandle())
 	}
-	
+
 	iCtx.SetLiveSessionResumptionHandle("test-handle")
 	if iCtx.LiveSessionResumptionHandle() != "test-handle" {
 		t.Errorf("expected test-handle, got %q", iCtx.LiveSessionResumptionHandle())
