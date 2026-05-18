@@ -18,19 +18,22 @@ package workflow
 // Built once at workflow construction; queried by the engine at
 // dispatch time.
 type graph struct {
-	successors map[Node][]Edge
+	successors   map[Node][]Edge
+	predecessors map[Node][]Edge
 }
 
-// newGraph indexes edges by source node so successor lookups are
-// O(1) at dispatch time. The returned graph references the input
-// edges by value; mutating the input edge slice afterwards does not
-// affect the graph.
+// newGraph indexes edges by source and target node so successor
+// and predecessor lookups are both O(1) at dispatch time. The
+// returned graph references the input edges by value; mutating the
+// input edge slice afterwards does not affect the graph.
 func newGraph(edges []Edge) *graph {
 	succ := make(map[Node][]Edge)
+	pred := make(map[Node][]Edge)
 	for _, edge := range edges {
 		succ[edge.From] = append(succ[edge.From], edge)
+		pred[edge.To] = append(pred[edge.To], edge)
 	}
-	return &graph{successors: succ}
+	return &graph{successors: succ, predecessors: pred}
 }
 
 // successorsOf returns the outgoing edges for a node.
@@ -40,4 +43,12 @@ func newGraph(edges []Edge) *graph {
 // callers.
 func (g *graph) successorsOf(n Node) []Edge {
 	return g.successors[n]
+}
+
+// predecessorsOf returns the incoming edges for a node. Returns
+// nil if n has no incoming edges (including the case where n is
+// not in the graph at all). The returned slice is owned by the
+// graph and must not be mutated by callers.
+func (g *graph) predecessorsOf(n Node) []Edge {
+	return g.predecessors[n]
 }

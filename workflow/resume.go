@@ -83,6 +83,19 @@ func (w *Workflow) Resume(
 		s := newScheduler(ctx, w.graph)
 		s.state = state
 
+		// Resume runs in two passes so that when one call
+		// satisfies several askers feeding a JoinNode, the
+		// barrier sees every predecessor as NodeCompleted
+		// before it is evaluated. Re-entry-mode askers are
+		// unaffected — they re-run rather than complete here.
+		type deferredHandoff struct {
+			node Node
+			resp any
+		}
+		var deferredHandoffs []deferredHandoff
+
+		// Pass 1: dispatch every waiting asker matched by
+		// responses (handoff → defer; re-entry → reschedule now).
 		scheduled := 0
 		for name, ns := range state.Nodes {
 			if ns.Status != NodeWaiting || ns.PendingRequest == nil {
@@ -139,21 +152,32 @@ func (w *Workflow) Resume(
 				ns.ResumedInputs[interruptID] = resp
 				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.ResumedInputs)
 			} else {
-				// Handoff mode: schedule each successor with the
-				// response as its input, exactly as if the asker
-				// had emitted it as output. Reuses findSuccessors
-				// so routing, fan-out and fan-in invariants apply
-				// uniformly. findSuccessors is called with
-				// event=nil, so successors reached only via a
-				// concrete Route (StringRoute etc.) do not fire —
-				// the response is opaque to the routing layer.
-				// Successors reached via an unconditional edge or
-				// via the Default route fire as usual.
-				for _, succ := range findSuccessors(s.graph, node, resp, nil) {
-					s.scheduleNode(succ.node, succ.input, succ.triggeredBy)
-				}
+				// Handoff mode: promote the asker as if it had
+				// emitted resp as its output. Recording Output
+				// lets the join barrier read it back without a
+				// special case for "completed via resume".
+				ns.Status = NodeCompleted
+				ns.Output = resp
+				deferredHandoffs = append(deferredHandoffs, deferredHandoff{
+					node: node, resp: resp,
+				})
 			}
 			scheduled++
+		}
+
+		// Pass 2: walk successors of the deferred handoffs.
+		// All matched askers are now NodeCompleted, so any
+		// downstream JoinNode sees a settled predecessor set.
+		for _, h := range deferredHandoffs {
+			// findSuccessors is called with event=nil, so
+			// successors reached only via a concrete Route
+			// (StringRoute etc.) do not fire — the response is
+			// opaque to the routing layer. Successors reached via
+			// an unconditional edge or via the Default route fire
+			// as usual.
+			for _, succ := range findSuccessors(s.graph, s.state, h.node, h.resp, nil) {
+				s.scheduleNode(succ.node, succ.input, succ.triggeredBy)
+			}
 		}
 
 		if scheduled == 0 {
