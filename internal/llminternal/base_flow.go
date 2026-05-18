@@ -263,7 +263,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if liveConnectConfig.SessionResumption == nil {
 						liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
 					}
-					fmt.Printf("DEBUG: Resuming with handle: %s\n", handle)
 					liveConnectConfig.SessionResumption.Handle = handle
 					if googlellm.GetGoogleLLMVariant(f.Model) == genai.BackendVertexAI {
 						liveConnectConfig.SessionResumption.Transparent = true
@@ -274,7 +273,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			connCtx, cancelConn := context.WithCancel(ctx)
 
 			if liveConnectConfig.SessionResumption != nil {
-				log.Printf("connecting with %s\n", liveConnectConfig.SessionResumption.Handle)
+				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle)
 			}
 			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
 			if err != nil {
@@ -314,7 +313,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if resp != nil {
 						if resp.SessionResumptionHandle != "" {
 							if iCtx, ok := ctx.(*icontext.InvocationContext); ok {
-								fmt.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
+								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
 								iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
 							}
 						}
