@@ -16,6 +16,8 @@ package vertexai
 
 import (
 	"testing"
+
+	"google.golang.org/adk/util/vertexai"
 )
 
 func TestGetReasoningEngineID(t *testing.T) {
@@ -81,7 +83,9 @@ func TestGetReasoningEngineID(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Setup the client with the test case state
 			c := &vertexAiClient{
-				reasoningEngine: tt.existingEngineID,
+				agentEngineData: &vertexai.AgentEngineData{
+					ReasoningEngine: tt.existingEngineID,
+				},
 			}
 
 			// Execute

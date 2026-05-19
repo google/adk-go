@@ -107,6 +107,7 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 		SessionService:  sessionService,
 		ArtifactService: config.ArtifactService,
 		PluginConfig:    config.PluginConfig,
+		MemoryService:   config.MemoryService,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create runner: %v", err)

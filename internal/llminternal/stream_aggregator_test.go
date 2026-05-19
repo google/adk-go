@@ -148,6 +148,160 @@ func TestProgressiveSSEStreamingFunctionCallArguments(t *testing.T) {
 	}
 }
 
+func TestThoughtSignaturePropagationToFirstFunctionCallSeparateResponses(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	testThoughtSignature := []byte("test_signature_123")
+
+	chunk1 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							// Emulate an executable code part carrying thought signature
+							ThoughtSignature: testThoughtSignature,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	chunk2 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							FunctionCall: &genai.FunctionCall{
+								Name: "print",
+								Args: map[string]any{"message": "hello"},
+							},
+						},
+						{
+							FunctionCall: &genai.FunctionCall{
+								Name: "print",
+								Args: map[string]any{"message": "world"},
+							},
+						},
+					},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	for _, chunk := range []*genai.GenerateContentResponse{chunk1, chunk2} {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected final response")
+	}
+
+	parts := finalResponse.Content.Parts
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(parts))
+	}
+
+	// The first function call should get the propagated thought signature
+	fcPart1 := parts[1]
+	if fcPart1.FunctionCall == nil || fcPart1.FunctionCall.Name != "print" {
+		t.Fatal("expected first function call to be print")
+	}
+	if string(fcPart1.ThoughtSignature) != string(testThoughtSignature) {
+		t.Errorf("expected first function call to have thought signature %s, got %s", string(testThoughtSignature), string(fcPart1.ThoughtSignature))
+	}
+
+	// The second function call should NOT get the signature (as intended by user)
+	fcPart2 := parts[2]
+	if fcPart2.FunctionCall == nil || fcPart2.FunctionCall.Name != "print" {
+		t.Fatal("expected second function call to be print")
+	}
+	if len(fcPart2.ThoughtSignature) > 0 {
+		t.Errorf("expected second function call to have no thought signature, but got %s", string(fcPart2.ThoughtSignature))
+	}
+}
+
+func TestThoughtSignaturePropagationToFirstFunctionCallSingleResponse(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	testThoughtSignature := []byte("test_signature_123")
+
+	chunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							// Emulate an executable code part carrying thought signature
+							ThoughtSignature: testThoughtSignature,
+						},
+						{
+							FunctionCall: &genai.FunctionCall{
+								Name: "print",
+								Args: map[string]any{"message": "hello"},
+							},
+						},
+						{
+							FunctionCall: &genai.FunctionCall{
+								Name: "print",
+								Args: map[string]any{"message": "world"},
+							},
+						},
+					},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected final response")
+	}
+
+	parts := finalResponse.Content.Parts
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(parts))
+	}
+
+	// The first function call should get the propagated thought signature
+	fcPart1 := parts[1]
+	if fcPart1.FunctionCall == nil || fcPart1.FunctionCall.Name != "print" {
+		t.Fatal("expected first function call to be print")
+	}
+	if string(fcPart1.ThoughtSignature) != string(testThoughtSignature) {
+		t.Errorf("expected first function call to have thought signature %s, got %s", string(testThoughtSignature), string(fcPart1.ThoughtSignature))
+	}
+
+	// The second function call should NOT get the signature (as intended by user)
+	fcPart2 := parts[2]
+	if fcPart2.FunctionCall == nil || fcPart2.FunctionCall.Name != "print" {
+		t.Fatal("expected second function call to be print")
+	}
+	if len(fcPart2.ThoughtSignature) > 0 {
+		t.Errorf("expected second function call to have no thought signature, but got %s", string(fcPart2.ThoughtSignature))
+	}
+}
+
 func TestProgressiveSSEPreservesThoughtSignature(t *testing.T) {
 	aggregator := llminternal.NewStreamingResponseAggregator()
 	ctx := t.Context()
