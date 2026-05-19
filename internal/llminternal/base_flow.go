@@ -302,7 +302,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if resp != nil {
 						if runCfg.Live.SaveLiveBlob && resp.Content != nil {
 							for _, part := range resp.Content.Parts {
-								if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
+								if part.InlineData != nil {
 									sess.audioMgr.CacheOutput(part.InlineData.Data, part.InlineData.MIMEType)
 								}
 							}

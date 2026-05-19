@@ -77,260 +77,207 @@ type audioMockAgent struct {
 
 func (m *audioMockAgent) Name() string { return m.name }
 
-func TestAudioCacheManager_FlushCaches_Both(t *testing.T) {
-	mgr := NewAudioCacheManager()
+func TestAudioCacheManager(t *testing.T) {
+	type chunk struct {
+		data []byte
+		mime string
+	}
+	tests := []struct {
+		name                string
+		inputs              []chunk
+		outputs             []chunk
+		flushUser           bool
+		flushModel          bool
+		expectedEventsCount int
+		verify              func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts)
+	}{
+		{
+			name: "FlushBoth_PCM",
+			inputs: []chunk{
+				{[]byte("input1"), "audio/pcm"},
+				{[]byte("input2"), "audio/pcm"},
+			},
+			outputs: []chunk{
+				{[]byte("output1"), "audio/pcm"},
+				{[]byte("output2"), "audio/pcm"},
+			},
+			flushUser:           true,
+			flushModel:          true,
+			expectedEventsCount: 2,
+			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				// Verify input event
+				ev1 := events[0]
+				if ev1.Author != "user" || ev1.Content.Role != "user" {
+					t.Errorf("ev1 author/role mismatch: author=%q, role=%q", ev1.Author, ev1.Content.Role)
+				}
+				if ev1.Content.Parts[0].FileData.MIMEType != "audio/pcm" {
+					t.Errorf("ev1 mimeType mismatch: got %s", ev1.Content.Parts[0].FileData.MIMEType)
+				}
 
-	mgr.CacheInput([]byte("input1"), "audio/pcm")
-	mgr.CacheInput([]byte("input2"), "audio/pcm")
-
-	mgr.CacheOutput([]byte("output1"), "audio/pcm")
-	mgr.CacheOutput([]byte("output2"), "audio/pcm")
-
-	mockArt := &audioMockArtifacts{}
-	mockSess := &audioMockSession{id: "sess1", appName: "app1", userID: "user1"}
-	mockAg := &audioMockAgent{name: "agent1"}
-	mockCtx := &audioMockInvocationContext{
-		artifacts:    mockArt,
-		session:      mockSess,
-		invocationID: "inv1",
-		agentObj:     mockAg,
+				// Verify output event
+				ev2 := events[1]
+				if ev2.Author != "agent1" || ev2.Content.Role != "model" {
+					t.Errorf("ev2 author/role mismatch: author=%q, role=%q", ev2.Author, ev2.Content.Role)
+				}
+				if ev2.Content.Parts[0].FileData.MIMEType != "audio/pcm" {
+					t.Errorf("ev2 mimeType mismatch: got %s", ev2.Content.Parts[0].FileData.MIMEType)
+				}
+			},
+		},
+		{
+			name: "FlushSelective_InputOnly",
+			inputs: []chunk{
+				{[]byte("input1"), "audio/pcm"},
+			},
+			outputs: []chunk{
+				{[]byte("output1"), "audio/pcm"},
+			},
+			flushUser:           true,
+			flushModel:          false,
+			expectedEventsCount: 1,
+			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				if events[0].Author != "user" {
+					t.Errorf("Expected author user, got %s", events[0].Author)
+				}
+			},
+		},
+		{
+			name: "FlushSelective_OutputOnly",
+			inputs: []chunk{
+				{[]byte("input1"), "audio/pcm"},
+			},
+			outputs: []chunk{
+				{[]byte("output1"), "audio/pcm"},
+			},
+			flushUser:           false,
+			flushModel:          true,
+			expectedEventsCount: 1,
+			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				if events[0].Author != "agent1" {
+					t.Errorf("Expected author agent1, got %s", events[0].Author)
+				}
+			},
+		},
+		{
+			name:                "FlushEmpty",
+			flushUser:           true,
+			flushModel:          true,
+			expectedEventsCount: 0,
+		},
+		{
+			name: "VerifyCombinedData",
+			inputs: []chunk{
+				{[]byte("chunk1"), "audio/pcm"},
+				{[]byte("chunk2"), "audio/pcm"},
+			},
+			flushUser:           true,
+			flushModel:          false,
+			expectedEventsCount: 1,
+			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				if mockArt.savedPart == nil {
+					t.Fatal("Expected savedPart, got nil")
+				}
+				expectedData := []byte("chunk1chunk2")
+				if !bytes.Equal(mockArt.savedPart.InlineData.Data, expectedData) {
+					t.Errorf("Expected combined data %s, got %s", expectedData, mockArt.savedPart.InlineData.Data)
+				}
+			},
+		},
+		{
+			name: "MimeTypeFallback",
+			inputs: []chunk{
+				{[]byte("input1"), ""},
+			},
+			flushUser:           true,
+			flushModel:          false,
+			expectedEventsCount: 1,
+			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				if mockArt.savedPart.InlineData.MIMEType != "audio/pcm" {
+					t.Errorf("Expected fallback MIMEType audio/pcm, got %s", mockArt.savedPart.InlineData.MIMEType)
+				}
+			},
+		},
+		{
+			name: "DifferentMimeTypes",
+			inputs: []chunk{
+				{[]byte("input1"), "audio/pcm"},
+			},
+			outputs: []chunk{
+				{[]byte("output1"), "audio/mp3"},
+			},
+			flushUser:           true,
+			flushModel:          true,
+			expectedEventsCount: 2,
+			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				if events[0].Content.Parts[0].FileData.MIMEType != "audio/pcm" {
+					t.Errorf("Expected input MIMEType audio/pcm, got %s", events[0].Content.Parts[0].FileData.MIMEType)
+				}
+				if events[1].Content.Parts[0].FileData.MIMEType != "audio/mp3" {
+					t.Errorf("Expected output MIMEType audio/mp3, got %s", events[1].Content.Parts[0].FileData.MIMEType)
+				}
+			},
+		},
+		{
+			name: "FiltersNonAudio",
+			inputs: []chunk{
+				{[]byte("input1"), "video/mp4"},
+				{[]byte("input2"), "image/png"},
+				{[]byte("audio_input"), "audio/pcm"},
+			},
+			outputs: []chunk{
+				{[]byte("output1"), "video/h264"},
+			},
+			flushUser:           true,
+			flushModel:          true,
+			expectedEventsCount: 1,
+			verify: func(t *testing.T, events []*session.Event, mockArt *audioMockArtifacts) {
+				ev := events[0]
+				if ev.Author != "user" {
+					t.Errorf("Expected author user, got %s", ev.Author)
+				}
+				if mockArt.savedPart == nil {
+					t.Fatal("Expected savedPart, got nil")
+				}
+				if !bytes.Equal(mockArt.savedPart.InlineData.Data, []byte("audio_input")) {
+					t.Errorf("Expected only 'audio_input' to be saved, got %s", mockArt.savedPart.InlineData.Data)
+				}
+			},
+		},
 	}
 
-	events, err := mgr.FlushCaches(mockCtx, true, true)
-	if err != nil {
-		t.Fatalf("FlushCaches failed: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := NewAudioCacheManager()
 
-	if len(events) != 2 {
-		t.Fatalf("Expected 2 events, got %d", len(events))
-	}
+			for _, in := range tt.inputs {
+				mgr.CacheInput(in.data, in.mime)
+			}
+			for _, out := range tt.outputs {
+				mgr.CacheOutput(out.data, out.mime)
+			}
 
-	// Verify input event
-	ev1 := events[0]
-	if ev1.Author != "user" {
-		t.Errorf("Expected author user, got %s", ev1.Author)
-	}
-	if ev1.Content.Role != "user" {
-		t.Errorf("Expected role user, got %s", ev1.Content.Role)
-	}
-	if len(ev1.Content.Parts) != 1 {
-		t.Fatalf("Expected 1 part, got %d", len(ev1.Content.Parts))
-	}
-	p1 := ev1.Content.Parts[0]
-	if p1.FileData == nil {
-		t.Fatal("Expected FileData, got nil")
-	}
-	if p1.FileData.MIMEType != "audio/pcm" {
-		t.Errorf("Expected MIMEType audio/pcm, got %s", p1.FileData.MIMEType)
-	}
+			mockArt := &audioMockArtifacts{}
+			mockSess := &audioMockSession{id: "sess1", appName: "app1", userID: "user1"}
+			mockAg := &audioMockAgent{name: "agent1"}
+			mockCtx := &audioMockInvocationContext{
+				artifacts:    mockArt,
+				session:      mockSess,
+				invocationID: "inv1",
+				agentObj:     mockAg,
+			}
 
-	// Verify output event
-	ev2 := events[1]
-	if ev2.Author != "agent1" {
-		t.Errorf("Expected author agent1, got %s", ev2.Author)
-	}
-	if ev2.Content.Role != "model" {
-		t.Errorf("Expected role model, got %s", ev2.Content.Role)
-	}
-}
+			events, err := mgr.FlushCaches(mockCtx, tt.flushUser, tt.flushModel)
+			if err != nil {
+				t.Fatalf("FlushCaches failed: %v", err)
+			}
 
-func TestAudioCacheManager_FlushCaches_Selective(t *testing.T) {
-	mgr := NewAudioCacheManager()
+			if len(events) != tt.expectedEventsCount {
+				t.Fatalf("Expected %d events, got %d", tt.expectedEventsCount, len(events))
+			}
 
-	mgr.CacheInput([]byte("input1"), "audio/pcm")
-	mgr.CacheOutput([]byte("output1"), "audio/pcm")
-
-	mockArt := &audioMockArtifacts{}
-	mockSess := &audioMockSession{id: "sess1", appName: "app1", userID: "user1"}
-	mockAg := &audioMockAgent{name: "agent1"}
-	mockCtx := &audioMockInvocationContext{
-		artifacts:    mockArt,
-		session:      mockSess,
-		invocationID: "inv1",
-		agentObj:     mockAg,
-	}
-
-	// Flush only input
-	events, err := mgr.FlushCaches(mockCtx, true, false)
-	if err != nil {
-		t.Fatalf("FlushCaches failed: %v", err)
-	}
-	if len(events) != 1 {
-		t.Fatalf("Expected 1 event, got %d", len(events))
-	}
-	if events[0].Author != "user" {
-		t.Errorf("Expected author user, got %s", events[0].Author)
-	}
-
-	// Flush only output
-	events, err = mgr.FlushCaches(mockCtx, false, true)
-	if err != nil {
-		t.Fatalf("FlushCaches failed: %v", err)
-	}
-	if len(events) != 1 {
-		t.Fatalf("Expected 1 event, got %d", len(events))
-	}
-	if events[0].Author != "agent1" {
-		t.Errorf("Expected author agent1, got %s", events[0].Author)
-	}
-}
-
-func TestAudioCacheManager_FlushCaches_Empty(t *testing.T) {
-	mgr := NewAudioCacheManager()
-
-	mockArt := &audioMockArtifacts{}
-	mockSess := &audioMockSession{id: "sess1", appName: "app1", userID: "user1"}
-	mockAg := &audioMockAgent{name: "agent1"}
-	mockCtx := &audioMockInvocationContext{
-		artifacts:    mockArt,
-		session:      mockSess,
-		invocationID: "inv1",
-		agentObj:     mockAg,
-	}
-
-	events, err := mgr.FlushCaches(mockCtx, true, true)
-	if err != nil {
-		t.Fatalf("FlushCaches failed: %v", err)
-	}
-	if len(events) != 0 {
-		t.Fatalf("Expected 0 events, got %d", len(events))
-	}
-}
-
-func TestAudioCacheManager_VerifyCombinedData(t *testing.T) {
-	mgr := NewAudioCacheManager()
-
-	mgr.CacheInput([]byte("chunk1"), "audio/pcm")
-	mgr.CacheInput([]byte("chunk2"), "audio/pcm")
-
-	mockArt := &audioMockArtifacts{}
-	mockSess := &audioMockSession{id: "sess1", appName: "app1", userID: "user1"}
-	mockAg := &audioMockAgent{name: "agent1"}
-	mockCtx := &audioMockInvocationContext{
-		artifacts:    mockArt,
-		session:      mockSess,
-		invocationID: "inv1",
-		agentObj:     mockAg,
-	}
-
-	_, err := mgr.FlushCaches(mockCtx, true, false)
-	if err != nil {
-		t.Fatalf("FlushCaches failed: %v", err)
-	}
-
-	if mockArt.savedPart == nil {
-		t.Fatal("Expected savedPart, got nil")
-	}
-
-	expectedData := []byte("chunk1chunk2")
-	if !bytes.Equal(mockArt.savedPart.InlineData.Data, expectedData) {
-		t.Errorf("Expected combined data %s, got %s", expectedData, mockArt.savedPart.InlineData.Data)
-	}
-}
-
-func TestAudioCacheManager_MimeTypeFallback(t *testing.T) {
-	mgr := NewAudioCacheManager()
-
-	mgr.CacheInput([]byte("input1"), "") // Empty mime type
-
-	mockArt := &audioMockArtifacts{}
-	mockSess := &audioMockSession{id: "sess1", appName: "app1", userID: "user1"}
-	mockAg := &audioMockAgent{name: "agent1"}
-	mockCtx := &audioMockInvocationContext{
-		artifacts:    mockArt,
-		session:      mockSess,
-		invocationID: "inv1",
-		agentObj:     mockAg,
-	}
-
-	_, err := mgr.FlushCaches(mockCtx, true, false)
-	if err != nil {
-		t.Fatalf("FlushCaches failed: %v", err)
-	}
-
-	if mockArt.savedPart.InlineData.MIMEType != "audio/pcm" {
-		t.Errorf("Expected fallback MIMEType audio/pcm, got %s", mockArt.savedPart.InlineData.MIMEType)
-	}
-}
-
-func TestAudioCacheManager_DifferentMimeTypes(t *testing.T) {
-	mgr := NewAudioCacheManager()
-
-	mgr.CacheInput([]byte("input1"), "audio/pcm")
-	mgr.CacheOutput([]byte("output1"), "audio/mp3")
-
-	mockArt := &audioMockArtifacts{}
-	mockSess := &audioMockSession{id: "sess1", appName: "app1", userID: "user1"}
-	mockAg := &audioMockAgent{name: "agent1"}
-	mockCtx := &audioMockInvocationContext{
-		artifacts:    mockArt,
-		session:      mockSess,
-		invocationID: "inv1",
-		agentObj:     mockAg,
-	}
-
-	events, err := mgr.FlushCaches(mockCtx, true, true)
-	if err != nil {
-		t.Fatalf("FlushCaches failed: %v", err)
-	}
-
-	if len(events) != 2 {
-		t.Fatalf("Expected 2 events, got %d", len(events))
-	}
-
-	// Verify input event has audio/pcm
-	ev1 := events[0]
-	if ev1.Content.Parts[0].FileData.MIMEType != "audio/pcm" {
-		t.Errorf("Expected input MIMEType audio/pcm, got %s", ev1.Content.Parts[0].FileData.MIMEType)
-	}
-
-	// Verify output event has audio/mp3
-	ev2 := events[1]
-	if ev2.Content.Parts[0].FileData.MIMEType != "audio/mp3" {
-		t.Errorf("Expected output MIMEType audio/mp3, got %s", ev2.Content.Parts[0].FileData.MIMEType)
-	}
-}
-
-func TestAudioCacheManager_FiltersNonAudio(t *testing.T) {
-	mgr := NewAudioCacheManager()
-
-	// These should be ignored because they are not audio/
-	mgr.CacheInput([]byte("input1"), "video/mp4")
-	mgr.CacheInput([]byte("input2"), "image/png")
-	mgr.CacheOutput([]byte("output1"), "video/h264")
-
-	// This should be kept
-	mgr.CacheInput([]byte("audio_input"), "audio/pcm")
-
-	mockArt := &audioMockArtifacts{}
-	mockSess := &audioMockSession{id: "sess1", appName: "app1", userID: "user1"}
-	mockAg := &audioMockAgent{name: "agent1"}
-	mockCtx := &audioMockInvocationContext{
-		artifacts:    mockArt,
-		session:      mockSess,
-		invocationID: "inv1",
-		agentObj:     mockAg,
-	}
-
-	events, err := mgr.FlushCaches(mockCtx, true, true)
-	if err != nil {
-		t.Fatalf("FlushCaches failed: %v", err)
-	}
-
-	// We cached 3 non-audio and 1 audio chunk. Only the 1 audio input chunk should be flushed.
-	if len(events) != 1 {
-		t.Fatalf("Expected 1 event (only audio input), got %d", len(events))
-	}
-
-	ev := events[0]
-	if ev.Author != "user" {
-		t.Errorf("Expected author user, got %s", ev.Author)
-	}
-
-	if mockArt.savedPart == nil {
-		t.Fatal("Expected savedPart, got nil")
-	}
-	if !bytes.Equal(mockArt.savedPart.InlineData.Data, []byte("audio_input")) {
-		t.Errorf("Expected only 'audio_input' to be saved, got %s", mockArt.savedPart.InlineData.Data)
+			if tt.verify != nil {
+				tt.verify(t, events, mockArt)
+			}
+		})
 	}
 }
