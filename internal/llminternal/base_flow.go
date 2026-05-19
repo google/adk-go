@@ -256,11 +256,26 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				strings.Contains(errStr, "GoAway")
 		}
 
+		iCtx, isIContext := ctx.(*icontext.InvocationContext)
+
 		for {
+			if isIContext {
+				handle := iCtx.LiveSessionResumptionHandle()
+				if handle != "" {
+					if liveConnectConfig.SessionResumption == nil {
+						liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
+					}
+					liveConnectConfig.SessionResumption.Handle = handle
+					if googlellm.GetGoogleLLMVariant(f.Model) == genai.BackendVertexAI {
+						liveConnectConfig.SessionResumption.Transparent = true
+					}
+				}
+			}
+
 			connCtx, cancelConn := context.WithCancel(ctx)
 
 			if liveConnectConfig.SessionResumption != nil {
-				log.Printf("connecting with %s\n", liveConnectConfig.SessionResumption.Handle)
+				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle)
 			}
 			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
 			if err != nil {
@@ -298,6 +313,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						return
 					}
 					if resp != nil {
+						if resp.SessionResumptionHandle != "" {
+							if isIContext {
+								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
+								iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
+							}
+						}
 						ev := session.NewEvent(ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
 						ev.LLMResponse = *resp
@@ -470,6 +491,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 					if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
 						return
 					}
+					continue
 				}
 				tools[k] = tool
 			}
