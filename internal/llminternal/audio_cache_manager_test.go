@@ -252,3 +252,85 @@ func TestAudioCacheManager_MimeTypeFallback(t *testing.T) {
 		t.Errorf("Expected fallback MIMEType audio/pcm, got %s", mockArt.savedPart.InlineData.MIMEType)
 	}
 }
+
+func TestAudioCacheManager_DifferentMimeTypes(t *testing.T) {
+	mgr := NewAudioCacheManager()
+
+	mgr.CacheInput([]byte("input1"), "audio/pcm")
+	mgr.CacheOutput([]byte("output1"), "audio/mp3")
+
+	mockArt := &audioMockArtifacts{}
+	mockSess := &audioMockSession{id: "sess1", appName: "app1", userID: "user1"}
+	mockAg := &audioMockAgent{name: "agent1"}
+	mockCtx := &audioMockInvocationContext{
+		artifacts:    mockArt,
+		session:      mockSess,
+		invocationID: "inv1",
+		agentObj:     mockAg,
+	}
+
+	events, err := mgr.FlushCaches(mockCtx, true, true)
+	if err != nil {
+		t.Fatalf("FlushCaches failed: %v", err)
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("Expected 2 events, got %d", len(events))
+	}
+
+	// Verify input event has audio/pcm
+	ev1 := events[0]
+	if ev1.Content.Parts[0].FileData.MIMEType != "audio/pcm" {
+		t.Errorf("Expected input MIMEType audio/pcm, got %s", ev1.Content.Parts[0].FileData.MIMEType)
+	}
+
+	// Verify output event has audio/mp3
+	ev2 := events[1]
+	if ev2.Content.Parts[0].FileData.MIMEType != "audio/mp3" {
+		t.Errorf("Expected output MIMEType audio/mp3, got %s", ev2.Content.Parts[0].FileData.MIMEType)
+	}
+}
+
+func TestAudioCacheManager_FiltersNonAudio(t *testing.T) {
+	mgr := NewAudioCacheManager()
+
+	// These should be ignored because they are not audio/
+	mgr.CacheInput([]byte("input1"), "video/mp4")
+	mgr.CacheInput([]byte("input2"), "image/png")
+	mgr.CacheOutput([]byte("output1"), "video/h264")
+
+	// This should be kept
+	mgr.CacheInput([]byte("audio_input"), "audio/pcm")
+
+	mockArt := &audioMockArtifacts{}
+	mockSess := &audioMockSession{id: "sess1", appName: "app1", userID: "user1"}
+	mockAg := &audioMockAgent{name: "agent1"}
+	mockCtx := &audioMockInvocationContext{
+		artifacts:    mockArt,
+		session:      mockSess,
+		invocationID: "inv1",
+		agentObj:     mockAg,
+	}
+
+	events, err := mgr.FlushCaches(mockCtx, true, true)
+	if err != nil {
+		t.Fatalf("FlushCaches failed: %v", err)
+	}
+
+	// We cached 3 non-audio and 1 audio chunk. Only the 1 audio input chunk should be flushed.
+	if len(events) != 1 {
+		t.Fatalf("Expected 1 event (only audio input), got %d", len(events))
+	}
+
+	ev := events[0]
+	if ev.Author != "user" {
+		t.Errorf("Expected author user, got %s", ev.Author)
+	}
+
+	if mockArt.savedPart == nil {
+		t.Fatal("Expected savedPart, got nil")
+	}
+	if !bytes.Equal(mockArt.savedPart.InlineData.Data, []byte("audio_input")) {
+		t.Errorf("Expected only 'audio_input' to be saved, got %s", mockArt.savedPart.InlineData.Data)
+	}
+}

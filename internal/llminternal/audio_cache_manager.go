@@ -17,6 +17,7 @@ package llminternal
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,24 +34,29 @@ type AudioCacheManager struct {
 	outputCache     [][]byte
 	inputStartTime  time.Time
 	outputStartTime time.Time
-	mimeType        string
+	inputMimeType   string
+	outputMimeType  string
 }
 
 // NewAudioCacheManager creates a new AudioCacheManager.
 func NewAudioCacheManager() *AudioCacheManager {
 	return &AudioCacheManager{
-		mimeType: "audio/pcm", // Default to audio/pcm
+		inputMimeType:  "audio/pcm", // Default to audio/pcm
+		outputMimeType: "audio/pcm", // Default to audio/pcm
 	}
 }
 
 // CacheInput caches incoming user audio data.
 func (m *AudioCacheManager) CacheInput(data []byte, mimeType string) {
+	if mimeType != "" && !strings.HasPrefix(mimeType, "audio/") {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.inputCache) == 0 {
 		m.inputStartTime = time.Now()
 		if mimeType != "" {
-			m.mimeType = mimeType
+			m.inputMimeType = mimeType
 		}
 	}
 	m.inputCache = append(m.inputCache, data)
@@ -58,12 +64,15 @@ func (m *AudioCacheManager) CacheInput(data []byte, mimeType string) {
 
 // CacheOutput caches outgoing model audio data.
 func (m *AudioCacheManager) CacheOutput(data []byte, mimeType string) {
+	if mimeType != "" && !strings.HasPrefix(mimeType, "audio/") {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.outputCache) == 0 {
 		m.outputStartTime = time.Now()
 		if mimeType != "" {
-			m.mimeType = mimeType
+			m.outputMimeType = mimeType
 		}
 	}
 	m.outputCache = append(m.outputCache, data)
@@ -77,7 +86,7 @@ func (m *AudioCacheManager) FlushCaches(ctx agent.InvocationContext, flushUser, 
 	var events []*session.Event
 
 	if flushUser && len(m.inputCache) > 0 {
-		ev, err := m.flushCache(ctx, m.inputCache, "input_audio", m.inputStartTime)
+		ev, err := m.flushCache(ctx, m.inputCache, "input_audio", m.inputMimeType, m.inputStartTime)
 		if err != nil {
 			return nil, err
 		}
@@ -88,7 +97,7 @@ func (m *AudioCacheManager) FlushCaches(ctx agent.InvocationContext, flushUser, 
 	}
 
 	if flushModel && len(m.outputCache) > 0 {
-		ev, err := m.flushCache(ctx, m.outputCache, "output_audio", m.outputStartTime)
+		ev, err := m.flushCache(ctx, m.outputCache, "output_audio", m.outputMimeType, m.outputStartTime)
 		if err != nil {
 			return nil, err
 		}
@@ -101,7 +110,7 @@ func (m *AudioCacheManager) FlushCaches(ctx agent.InvocationContext, flushUser, 
 	return events, nil
 }
 
-func (m *AudioCacheManager) flushCache(ctx agent.InvocationContext, cache [][]byte, cacheType string, startTime time.Time) (*session.Event, error) {
+func (m *AudioCacheManager) flushCache(ctx agent.InvocationContext, cache [][]byte, cacheType, mimeType string, startTime time.Time) (*session.Event, error) {
 	if len(cache) == 0 {
 		return nil, nil
 	}
@@ -116,14 +125,14 @@ func (m *AudioCacheManager) flushCache(ctx agent.InvocationContext, cache [][]by
 	// Generate filename
 	timestamp := startTime.UnixMilli()
 	ext := "pcm"
-	if m.mimeType == "audio/mp3" {
+	if mimeType == "audio/mp3" {
 		ext = "mp3"
 	}
 
 	filename := fmt.Sprintf("adk_live_audio_storage_%s_%d.%s", cacheType, timestamp, ext)
 
 	// Save to artifact service
-	part := genai.NewPartFromBytes(combinedData, m.mimeType)
+	part := genai.NewPartFromBytes(combinedData, mimeType)
 	resp, err := ctx.Artifacts().Save(ctx, filename, part)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save audio artifact: %w", err)
@@ -150,7 +159,7 @@ func (m *AudioCacheManager) flushCache(ctx agent.InvocationContext, cache [][]by
 			{
 				FileData: &genai.FileData{
 					FileURI:  artifactRef,
-					MIMEType: m.mimeType,
+					MIMEType: mimeType,
 				},
 			},
 		},
