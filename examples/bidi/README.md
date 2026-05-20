@@ -72,8 +72,8 @@ Open your browser and navigate to `http://localhost:8081`. You should see a chat
 
 - `main.go`: The main entry point that configures a simple agent and starts the server.
 - `static/`: Contains the frontend files (HTML, CSS, JS) shared by all examples.
-- `streaming_tool/`: Demonstrates a **streaming tool** that yields data over time (counting with delays) and how to handle the `stop_streaming` control signal.
-  - **Run**: `go run examples/bidi/streaming_tool/main.go`
+- `streamingtool/`: Demonstrates a **streaming tool** that yields data over time (counting with delays) and how to handle the `stop_streaming` control signal.
+  - **Run**: `go run examples/bidi/streamingtool/main.go`
 - `sequential/`: Demonstrates a **Sequential Agent** flow where control is passed from an 'Idea Generator' agent to a 'Story Teller' agent.
   - **Run**: `go run examples/bidi/sequential/main.go`
 
