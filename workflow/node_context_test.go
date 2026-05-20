@@ -20,7 +20,7 @@ import (
 	"google.golang.org/adk/agent"
 )
 
-func TestNewNodeContext_TriggeredByRoundTrip(t *testing.T) {
+func TestNodeContext_TriggeredByPreservesValue(t *testing.T) {
 	tests := []struct {
 		name        string
 		triggeredBy string
@@ -33,12 +33,34 @@ func TestNewNodeContext_TriggeredByRoundTrip(t *testing.T) {
 	parent := newMockCtx(t)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := newNodeContext(parent, tt.triggeredBy)
+			c := newNodeContext(parent, tt.triggeredBy, nil)
 			if got := c.TriggeredBy(); got != tt.triggeredBy {
 				t.Errorf("TriggeredBy() = %q, want %q", got, tt.triggeredBy)
 			}
 		})
 	}
+}
+
+func TestNodeContext_ResumedInput(t *testing.T) {
+	parent := newMockCtx(t)
+
+	t.Run("nil resumeInputs returns (nil, false)", func(t *testing.T) {
+		c := newNodeContext(parent, "", nil)
+		v, ok := c.ResumedInput("any_id")
+		if v != nil || ok {
+			t.Errorf("ResumedInput() = (%v, %v), want (nil, false)", v, ok)
+		}
+	})
+
+	t.Run("populated resumeInputs returns matched payload", func(t *testing.T) {
+		c := newNodeContext(parent, "", map[string]any{
+			"approval": "yes",
+			"comment":  "looks good",
+		})
+		if v, ok := c.ResumedInput("approval"); !ok || v != "yes" {
+			t.Errorf("ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
+		}
+	})
 }
 
 // Compile-time assertion: *nodeContext satisfies agent.InvocationContext.
