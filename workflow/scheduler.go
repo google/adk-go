@@ -907,13 +907,8 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 }
 
 // successor is the per-target dispatch tuple produced by
-// findSuccessors. The triggeredBy field carries the upstream
-// node's name for persistence on NodeState (used by Resume to
-// reconstruct the activation chain across pause/resume turns).
-// The branch field carries the composite branch string the
-// successor should run under — empty for chains that inherit the
-// parent's branch, populated when fan-out derives a sub-branch or
-// when JoinNode resolves its common predecessor prefix.
+// findSuccessors. The triggeredBy field carries the upstream node's
+// name for downstream visibility via ctx.TriggeredBy().
 type successor struct {
 	node        Node
 	input       any
