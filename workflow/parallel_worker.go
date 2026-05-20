@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"reflect"
@@ -44,12 +45,15 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 // Run executes the wrapped node in parallel for each item in the input list.
 // It aggregates the "output" from each wrapped node execution into a list and
 // yields a single final event with the aggregated list as output.
+// In case the wrapped node produces more then one output event, they will be
+// aggregated into a list, and the final result will be a multi dimensional list.
+// If any of the wrapped node executions returns an error, the workflow will return the aggregated error.
 // Non-output events emitted by the wrapped node are yielded immediately.
 func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		v := reflect.ValueOf(input)
 		if v.Kind() != reflect.Slice {
-			yield(nil, fmt.Errorf("ParallelWorker %s expects a slice input, got %T", n.Name(), input))
+			yield(nil, fmt.Errorf("parallel worker %s expects a slice input, got %T", n.Name(), input))
 			return
 		}
 
@@ -142,16 +146,11 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 			close(resCh)
 		}()
 
-		var firstErr error
+		var errs []error
 
 		for res := range resCh {
-			if res.err != nil && firstErr == nil {
-				firstErr = res.err
-				// We could cancel the context here to stop other workers,
-				// but we don't own the context. The scheduler will cancel it
-				// when we return an error.
-			}
 			if res.err != nil {
+				errs = append(errs, res.err)
 				continue
 			}
 
@@ -162,8 +161,8 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 			}
 		}
 
-		if firstErr != nil {
-			yield(nil, firstErr)
+		if len(errs) > 0 {
+			yield(nil, errors.Join(errs...))
 			return
 		}
 
