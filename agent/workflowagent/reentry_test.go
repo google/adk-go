@@ -16,6 +16,7 @@ package workflowagent
 
 import (
 	"iter"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -143,6 +144,54 @@ func TestWorkflowAgent_ReEntry_DefaultModeIsHandoff(t *testing.T) {
 	}
 	if got := handlerInput.Load(); got != "approve" {
 		t.Errorf("handler input = %v, want %q (handoff mode delivers response as next-node input)", got, "approve")
+	}
+}
+
+// TestWorkflowAgent_ReEntry_AccumulatesResumeInputs verifies that
+// a re-entry-mode node which yields RequestInput more than once
+// across resume cycles sees every prior response on every
+// subsequent activation, not only the most recent one.
+//
+// Scenario: asker walks through ask_1, ask_2, ask_3. After each
+// resume it must see every response answered so far. After the
+// third resume it observes all three and emits a final output.
+func TestWorkflowAgent_ReEntry_AccumulatesResumeInputs(t *testing.T) {
+	asker, acts := askerForSequence("asker", []string{"ask_1", "ask_2", "ask_3"}, "all answered")
+
+	var handlerInput atomic.Value
+	handler := newStringHandlerNode("handler", &handlerInput)
+
+	a := makeAgent(t, workflow.Chain(workflow.Start, asker, handler))
+	sess := newFakeSession()
+
+	turn1 := runFreshTurn(t, sess, a, "draft")
+	if got := findRequest(turn1); got != "ask_1" {
+		t.Fatalf("turn 1 RequestedInput = %q, want %q", got, "ask_1")
+	}
+	resumeAndExpect(t, sess, a, "ask_1", "yes", "ask_2")
+	resumeAndExpect(t, sess, a, "ask_2", "ok", "ask_3")
+	resumeAndExpect(t, sess, a, "ask_3", "approve", "")
+
+	if got := handlerInput.Load(); got != "all answered" {
+		t.Errorf("handler input = %v, want %q", got, "all answered")
+	}
+
+	// Per-activation accumulation: each row is what the asker
+	// must have observed on its i-th run.
+	wantResumed := []map[string]any{
+		{},                              // turn 1: fresh, nothing answered yet
+		{"ask_1": "yes"},                // turn 2: after first reply
+		{"ask_1": "yes", "ask_2": "ok"}, // turn 3
+		{"ask_1": "yes", "ask_2": "ok", "ask_3": "approve"}, // turn 4: all three visible
+	}
+	if got := acts.count(); got != len(wantResumed) {
+		t.Fatalf("activations = %d, want %d", got, len(wantResumed))
+	}
+	for i, want := range wantResumed {
+		act, _ := acts.at(i)
+		if !reflect.DeepEqual(act.resumed, want) {
+			t.Errorf("activation %d resumed = %v, want %v", i, act.resumed, want)
+		}
 	}
 }
 
