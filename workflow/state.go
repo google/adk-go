@@ -99,8 +99,8 @@ type NodeState struct {
 	// (as opposed to a fan-in barrier).
 	PendingRequest *session.RequestInput `json:"pendingRequest,omitempty"`
 
-	// Attempt is the number of times this node has been executed.
-	Attempt int `json:"attempt"`	
+	// Attempt is the number of times this node has been failed.
+	Attempt int `json:"attempt,omitempty"`	
 }
 
 // RunState is the per-invocation lifecycle state for a workflow
