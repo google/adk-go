@@ -277,6 +277,109 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	}
 }
 
+func TestLoadArtifactsTool_ProcessRequest_UnsupportedTextLikeMIME_ConvertsToText(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+	tc := createToolContext(t)
+	artifactName := "data.csv"
+	csvContent := "col1,col2\n1,2\n"
+	if _, err := tc.Artifacts().Save(t.Context(), artifactName, genai.NewPartFromBytes([]byte(csvContent), "application/csv")); err != nil {
+		t.Fatalf("Failed to save artifact %s: %v", artifactName, err)
+	}
+
+	llmRequest := loadArtifactsRequest(artifactName)
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	if err := requestProcessor.ProcessRequest(tc, llmRequest); err != nil {
+		t.Fatalf("ProcessRequest failed: %v", err)
+	}
+
+	appendedContent := llmRequest.Contents[1]
+	artifactPart := appendedContent.Parts[1]
+	if artifactPart.InlineData != nil {
+		t.Fatalf("Expected artifact to be converted to text, got inline data: %v", artifactPart.InlineData)
+	}
+	if artifactPart.Text != csvContent {
+		t.Errorf("Converted artifact text: got %q, want %q", artifactPart.Text, csvContent)
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_SupportedMIME_KeepsInlineData(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+	tc := createToolContext(t)
+	artifactName := "file.pdf"
+	pdfBytes := []byte("%PDF-1.4")
+	if _, err := tc.Artifacts().Save(t.Context(), artifactName, genai.NewPartFromBytes(pdfBytes, "application/pdf")); err != nil {
+		t.Fatalf("Failed to save artifact %s: %v", artifactName, err)
+	}
+
+	llmRequest := loadArtifactsRequest(artifactName)
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	if err := requestProcessor.ProcessRequest(tc, llmRequest); err != nil {
+		t.Fatalf("ProcessRequest failed: %v", err)
+	}
+
+	artifactPart := llmRequest.Contents[1].Parts[1]
+	if artifactPart.InlineData == nil {
+		t.Fatal("Expected supported artifact to keep inline data")
+	}
+	if artifactPart.InlineData.MIMEType != "application/pdf" {
+		t.Errorf("Inline data MIMEType: got %q, want %q", artifactPart.InlineData.MIMEType, "application/pdf")
+	}
+	if diff := cmp.Diff(pdfBytes, artifactPart.InlineData.Data); diff != "" {
+		t.Errorf("Inline data diff (-want +got):\n%s", diff)
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_UnsupportedBinaryMIME_ConvertsToPlaceholder(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+	tc := createToolContext(t)
+	artifactName := "slides.pptx"
+	if _, err := tc.Artifacts().Save(t.Context(), artifactName, genai.NewPartFromBytes([]byte{1, 2, 3}, "application/vnd.openxmlformats-officedocument.presentationml.presentation")); err != nil {
+		t.Fatalf("Failed to save artifact %s: %v", artifactName, err)
+	}
+
+	llmRequest := loadArtifactsRequest(artifactName)
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	if err := requestProcessor.ProcessRequest(tc, llmRequest); err != nil {
+		t.Fatalf("ProcessRequest failed: %v", err)
+	}
+
+	artifactPart := llmRequest.Contents[1].Parts[1]
+	if artifactPart.InlineData != nil {
+		t.Fatalf("Expected artifact to be converted to text, got inline data: %v", artifactPart.InlineData)
+	}
+	want := "[Binary artifact: slides.pptx, type: application/vnd.openxmlformats-officedocument.presentationml.presentation, size: 0.0 KB. Content cannot be displayed inline.]"
+	if artifactPart.Text != want {
+		t.Errorf("Converted artifact text: got %q, want %q", artifactPart.Text, want)
+	}
+}
+
+func loadArtifactsRequest(artifactName string) *model.LLMRequest {
+	return &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: "model",
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+						"artifact_names": []string{artifactName},
+					}),
+				},
+			},
+		},
+	}
+}
+
 func createToolContext(t *testing.T) tool.Context {
 	t.Helper()
 
