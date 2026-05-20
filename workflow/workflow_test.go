@@ -71,17 +71,18 @@ func mustNew(t *testing.T, edges []Edge) *Workflow {
 	return w
 }
 
-func (m *MockInvocationContext) Session() session.Session    { return m.sess }
-func (m *MockInvocationContext) InvocationID() string        { return "test-invocation-id" }
-func (m *MockInvocationContext) UserContent() *genai.Content { return m.userContent }
-func (m *MockInvocationContext) TriggeredBy() string         { return "" }
-func (m *MockInvocationContext) Agent() agent.Agent          { return nil }
-func (m *MockInvocationContext) Artifacts() agent.Artifacts  { return nil }
-func (m *MockInvocationContext) Memory() agent.Memory        { return nil }
-func (m *MockInvocationContext) Branch() string              { return "" }
-func (m *MockInvocationContext) RunConfig() *agent.RunConfig { return nil }
-func (m *MockInvocationContext) Ended() bool                 { return false }
-func (m *MockInvocationContext) EndInvocation()              {}
+func (m *MockInvocationContext) Session() session.Session        { return m.sess }
+func (m *MockInvocationContext) InvocationID() string            { return "test-invocation-id" }
+func (m *MockInvocationContext) UserContent() *genai.Content     { return m.userContent }
+func (m *MockInvocationContext) TriggeredBy() string             { return "" }
+func (m *MockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
+func (m *MockInvocationContext) Agent() agent.Agent              { return nil }
+func (m *MockInvocationContext) Artifacts() agent.Artifacts      { return nil }
+func (m *MockInvocationContext) Memory() agent.Memory            { return nil }
+func (m *MockInvocationContext) Branch() string                  { return "" }
+func (m *MockInvocationContext) RunConfig() *agent.RunConfig     { return nil }
+func (m *MockInvocationContext) Ended() bool                     { return false }
+func (m *MockInvocationContext) EndInvocation()                  {}
 
 func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
 	cp := *m

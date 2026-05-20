@@ -56,11 +56,12 @@ func (m *mockInvocationContext) Branch() string {
 	return m.branch
 }
 
-func (m *mockInvocationContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (m *mockInvocationContext) Done() <-chan struct{}       { return nil }
-func (m *mockInvocationContext) Err() error                  { return nil }
-func (m *mockInvocationContext) Value(any) any               { return nil }
-func (m *mockInvocationContext) TriggeredBy() string         { return "" }
+func (m *mockInvocationContext) Deadline() (time.Time, bool)     { return time.Time{}, false }
+func (m *mockInvocationContext) Done() <-chan struct{}           { return nil }
+func (m *mockInvocationContext) Err() error                      { return nil }
+func (m *mockInvocationContext) Value(any) any                   { return nil }
+func (m *mockInvocationContext) TriggeredBy() string             { return "" }
+func (m *mockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
 
 func TestGenerateRequestConfirmationEvent(t *testing.T) {
 	confirmingFunctionCall := &genai.FunctionCall{
