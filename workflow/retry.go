@@ -63,5 +63,5 @@ func ShouldRetry(cfg *RetryConfig, err error, failedAttempts int) bool {
 	if cfg.ShouldRetry != nil {
 		return cfg.ShouldRetry(err)
 	}
-	return false // Default to false if not specified
+	return true // Default to true if not specified
 }

@@ -92,11 +92,11 @@ func TestShouldRetry(t *testing.T) {
 			want:           true,
 		},
 		{
-			name:           "Default to false when ShouldRetry is nil",
+			name:           "Default to true when ShouldRetry is nil",
 			cfg:            &RetryConfig{MaxAttempts: 3},
 			err:            errTest,
 			failedAttempts: 1,
-			want:           false,
+			want:           true,
 		},
 		{
 			name:           "At max attempts",

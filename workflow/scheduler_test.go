@@ -590,3 +590,62 @@ func TestScheduler_RetryInChain(t *testing.T) {
 		t.Errorf("node B calls = %d, want 3", got)
 	}
 }
+
+// TestScheduler_RetryCancelled verifies that a node waiting for retry
+// does not run if the workflow is cancelled.
+func TestScheduler_RetryCancelled(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	ctx, cancel := context.WithCancel(mockCtx.Context)
+	mockCtx = mockCtx.WithContext(ctx).(*MockInvocationContext)
+
+	cfg := NodeConfig{
+		RetryConfig: &RetryConfig{
+			MaxAttempts:   3,
+			InitialDelay:  100 * time.Millisecond,
+			BackoffFactor: 1.0,
+			Jitter:        0.0,
+			ShouldRetry:   func(err error) bool { return true },
+		},
+	}
+
+	n := newRetryTestNode("retryNode", 2, cfg)
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	errCh := make(chan error, 1)
+	go func() {
+		var firstErr error
+		for _, err := range w.Run(mockCtx) {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		errCh <- firstErr
+	}()
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if n.calls.Load() == 1 {
+			break
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	if n.calls.Load() != 1 {
+		t.Fatalf("node calls = %d, want 1 before cancellation", n.calls.Load())
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("unexpected error: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timeout waiting for workflow to finish")
+	}
+
+	if got := n.calls.Load(); got != 1 {
+		t.Errorf("node calls = %d, want 1 (retry should not have triggered)", got)
+	}
+}

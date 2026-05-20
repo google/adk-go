@@ -79,16 +79,13 @@ type scheduler struct {
 	// Per-node cancel funcs. Owned by the consumer goroutine.
 	runCancels map[string]context.CancelFunc
 
+	// Timers for scheduled retries. Owned by the consumer goroutine.
+	retryTimers map[string]*time.Timer
+
 	// eventQueue carries events and completions from producer
 	// goroutines to the consumer.
 	eventQueue chan queueItem
 	wg         sync.WaitGroup
-
-	// pendingRetries is a counter of nodes that are scheduled to run but haven't completed yet.
-	// It prevents exiting the workflow on len(s.runsByName) == 0.
-	// This happens when all nodes have completed but there are still retry attempts in flight with delays
-	// since they are deleted from s.runsByName in handleCompletion.
-	pendingRetries int
 
 	parentCtx agent.InvocationContext
 }
@@ -199,6 +196,7 @@ func newScheduler(parent agent.InvocationContext, g *graph) *scheduler {
 		nodesByName: buildNodesByName(g),
 		runsByName:  map[string]*nodeRun{},
 		runCancels:  map[string]context.CancelFunc{},
+		retryTimers: map[string]*time.Timer{},
 		eventQueue:  make(chan queueItem, defaultEventQueueCapacity),
 		parentCtx:   parent,
 	}
@@ -258,11 +256,15 @@ func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
 
 // scheduleRetry schedules a retry for node n after the given delay.
 func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy string, delay time.Duration) {
-	time.AfterFunc(delay, func() {
+	timer := time.AfterFunc(delay, func() {
 		go func() {
-			s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy}
+			select {
+			case s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy}:
+			case <-s.parentCtx.Done():
+			}
 		}()
 	})
+	s.retryTimers[n.Name()] = timer
 }
 
 // runNode is the per-node goroutine wrapper. It drives the node's
@@ -328,6 +330,10 @@ func (s *scheduler) cancelAll() {
 	for _, cancel := range s.runCancels {
 		cancel()
 	}
+	for _, t := range s.retryTimers {
+		t.Stop()
+	}
+	s.retryTimers = nil
 }
 
 // run is the single-consumer loop. It drains the eventQueue, applies
@@ -347,8 +353,20 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	var pendingErr error // first non-nil node error; surfaced after drain
 	draining := false    // true once cancelAll has run; remaining queue items are drained without yielding or scheduling new successors
 
-	for len(s.runsByName) > 0 || s.pendingRetries > 0 {
-		item := <-s.eventQueue
+	doneChan := s.parentCtx.Done()
+
+	for len(s.runsByName) > 0 || len(s.retryTimers) > 0 {
+		var item queueItem
+		select {
+		case item = <-s.eventQueue:
+		case <-doneChan:
+			if !draining {
+				draining = true
+				s.cancelAll()
+			}
+			doneChan = nil // Disable this case so we don't busy loop
+		}
+
 		switch it := item.(type) {
 		case eventItem:
 			s.handleEvent(it)
@@ -368,7 +386,7 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 				}
 			}
 		case retryItem:
-			s.pendingRetries--
+			delete(s.retryTimers, it.node.Name())
 			if !draining {
 				s.scheduleNode(it.node, it.input, it.triggeredBy)
 			}
@@ -457,7 +475,6 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 				if ShouldRetry(cfg.RetryConfig, it.err, ns.Attempt) {
 					delay := CalculateDelay(cfg.RetryConfig, ns.Attempt)
 					ns.Status = NodePending
-					s.pendingRetries++
 					s.scheduleRetry(currentNode, ns.Input, ns.TriggeredBy, delay)
 					// Return nil to continue the scheduler loop. Successors will
 					// be scheduled only when a retry attempt eventually succeeds
@@ -486,6 +503,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 	}
 
 	ns.Status = NodeCompleted
+	ns.Attempt = 0
 
 	if !scheduleSuccessors {
 		return nil
