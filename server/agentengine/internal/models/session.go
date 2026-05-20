@@ -26,9 +26,8 @@ type CreateSessionRequest struct {
 
 // CreateSessionInput contains input parameters
 type CreateSessionInput struct {
-	UserID    string         `json:"user_id"`
-	SessionID string         `json:"session_id,omitempty"`
-	State     map[string]any `json:"state,omitempty"`
+	UserID string         `json:"user_id"`
+	State  map[string]any `json:"state,omitempty"`
 }
 
 // CreateSessionResponse contains response

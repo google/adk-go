@@ -42,12 +42,12 @@ const (
 )
 
 var (
-	gcpVertexAgentToolCallArgsName        = attribute.Key("gcp.vertex.agent.tool_call_args")
-	gcpVertexAgentEventID                 = attribute.Key("gcp.vertex.agent.event_id")
-	gcpVertexAgentToolResponseName        = attribute.Key("gcp.vertex.agent.tool_response")
-	gcpVertexAgentInvocationID            = attribute.Key("gcp.vertex.agent.invocation_id")
-	genAIUsageCacheReadInputTokens        = attribute.Key("gen_ai.usage.cache_read.input_tokens")
-	genAIUsageExperimentalReasoningTokens = attribute.Key("gen_ai.usage.experimental.reasoning_tokens")
+	gcpVertexAgentToolCallArgsName  = attribute.Key("gcp.vertex.agent.tool_call_args")
+	gcpVertexAgentEventID           = attribute.Key("gcp.vertex.agent.event_id")
+	gcpVertexAgentToolResponseName  = attribute.Key("gcp.vertex.agent.tool_response")
+	gcpVertexAgentInvocationID      = attribute.Key("gcp.vertex.agent.invocation_id")
+	genAIUsageCacheReadInputTokens  = attribute.Key("gen_ai.usage.cache_read.input_tokens")
+	genAIUsageReasoningOutputTokens = attribute.Key("gen_ai.usage.reasoning.output_tokens")
 )
 
 // tracer is the tracer instance for ADK go.
@@ -126,9 +126,12 @@ func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResu
 	if params.Response.UsageMetadata != nil {
 		span.SetAttributes(
 			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),
-			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount)),
+			// According to OpenTelemetry Semantic Conventions:
+			// https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/registry/attributes/gen-ai.md
+			// gen_ai.usage.reasoning.output_tokens (ThoughtsTokenCount) SHOULD be included in gen_ai.usage.output_tokens.
+			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount+params.Response.UsageMetadata.ThoughtsTokenCount)),
 			genAIUsageCacheReadInputTokens.Int(int(params.Response.UsageMetadata.CachedContentTokenCount)),
-			genAIUsageExperimentalReasoningTokens.Int(int(params.Response.UsageMetadata.ThoughtsTokenCount)),
+			genAIUsageReasoningOutputTokens.Int(int(params.Response.UsageMetadata.ThoughtsTokenCount)),
 		)
 	}
 }

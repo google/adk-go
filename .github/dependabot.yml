@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "02:00"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+    reviewers:
+      - "wolo-lab"
+    allow:
+      - dependency-name: "google.golang.org/genai"
+    open-pull-requests-limit: 10
