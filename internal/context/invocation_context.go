@@ -125,4 +125,9 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 // override this method.
 func (c *InvocationContext) ResumedInput(string) (any, bool) { return nil, false }
 
+// ResumedInput always returns (nil, false) for the base
+// invocation context. Implementations that carry a resume payload
+// override this method.
+func (c *InvocationContext) ResumedInput(string) (any, bool) { return nil, false }
+
 var _ agent.InvocationContext = (*InvocationContext)(nil)
