@@ -238,7 +238,7 @@ func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy string, r
 	} else {
 		nodeCtx, cancel = context.WithCancel(s.parentCtx)
 	}
-	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), triggeredBy, resumeInputs)
+	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), resumeInputs)
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
@@ -478,8 +478,9 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 }
 
 // successor is the per-target dispatch tuple produced by
-// findSuccessors. The triggeredBy field carries the upstream node's
-// name for downstream visibility via ctx.TriggeredBy().
+// findSuccessors. The triggeredBy field carries the upstream
+// node's name for persistence on NodeState (used by Resume to
+// reconstruct the activation chain across pause/resume turns).
 type successor struct {
 	node        Node
 	input       any
