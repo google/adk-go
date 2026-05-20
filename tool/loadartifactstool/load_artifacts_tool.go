@@ -21,6 +21,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
@@ -232,8 +234,68 @@ func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsSer
 	return &genai.Content{
 		Parts: []*genai.Part{
 			genai.NewPartFromText("Artifact " + artifactName + " is:"),
-			resp.Part,
+			safePartForLLM(resp.Part, artifactName),
 		},
 		Role: genai.RoleUser,
 	}, nil
+}
+
+// normalizeMIMEType drops any parameters and lowercases the type, which is
+// case-insensitive per RFC 2045.
+func normalizeMIMEType(mimeType string) string {
+	mimeType, _, _ = strings.Cut(mimeType, ";")
+	return strings.ToLower(strings.TrimSpace(mimeType))
+}
+
+// isInlineMIMETypeSupported reports whether the model accepts this type inline.
+// The media match is prefix-based on purpose: enumerating subtypes would rot.
+func isInlineMIMETypeSupported(mimeType string) bool {
+	m := normalizeMIMEType(mimeType)
+	return strings.HasPrefix(m, "image/") ||
+		strings.HasPrefix(m, "audio/") ||
+		strings.HasPrefix(m, "video/") ||
+		m == "application/pdf"
+}
+
+// isTextLikeMIMEType reports whether data of this type can be inlined as text.
+func isTextLikeMIMEType(mimeType string) bool {
+	return strings.HasPrefix(mimeType, "text/") ||
+		mimeType == "application/csv" ||
+		mimeType == "application/json" ||
+		mimeType == "application/xml"
+}
+
+// safePartForLLM returns a part the model will accept, converting or describing
+// inline data it would reject. The result is never nil.
+func safePartForLLM(part *genai.Part, artifactName string) *genai.Part {
+	if part == nil {
+		return genai.NewPartFromText(fmt.Sprintf("[Artifact: %s. No content was returned.]", artifactName))
+	}
+	if part.InlineData == nil {
+		return part
+	}
+
+	mimeType := normalizeMIMEType(part.InlineData.MIMEType)
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	data := part.InlineData.Data
+	// An empty blob is degenerate whatever its declared type.
+	if len(data) == 0 {
+		return genai.NewPartFromText(fmt.Sprintf("[Artifact: %s, type: %s. No inline data was provided.]", artifactName, mimeType))
+	}
+	if isInlineMIMETypeSupported(mimeType) {
+		return part
+	}
+	// Binary data mislabelled as text would arrive as replacement characters.
+	if isTextLikeMIMEType(mimeType) && utf8.Valid(data) {
+		return genai.NewPartFromText(string(data))
+	}
+
+	return genai.NewPartFromText(fmt.Sprintf(
+		"[Binary artifact: %s, type: %s, size: %d bytes. Content cannot be displayed inline.]",
+		artifactName,
+		mimeType,
+		len(data),
+	))
 }
