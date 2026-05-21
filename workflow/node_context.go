@@ -17,25 +17,42 @@ package workflow
 import "google.golang.org/adk/agent"
 
 // nodeContext is the per-node InvocationContext seen inside Node.Run.
-// It wraps the workflow's incoming agent.InvocationContext and adds
-// engine-supplied metadata — currently only the upstream node name
-// (TriggeredBy).
+// It wraps the workflow's incoming agent.InvocationContext and
+// surfaces the human-input responses the scheduler injected for a
+// re-entry resume activation (ResumedInput).
 //
-// TODO(wolo): replace once context-unification work lands.
+// TODO(wolo): replace once context-unification work lands. The
+// wrapper exists today only to surface workflow-specific accessors
+// that the base interface does not have.
 type nodeContext struct {
 	agent.InvocationContext
-	triggeredBy string
+
+	// resumeInputs carries the user-supplied response payloads for
+	// a re-entry resume activation, keyed by InterruptID. Nil on
+	// fresh activations and on handoff resume (where the response
+	// flows to the successor as its input rather than back to the
+	// asker via this map).
+	resumeInputs map[string]any
 }
 
-// newNodeContext returns a nodeContext wrapping parent with the given
-// upstream-node name. triggeredBy is empty for the initial START
-// activation.
-func newNodeContext(parent agent.InvocationContext, triggeredBy string) *nodeContext {
-	return &nodeContext{InvocationContext: parent, triggeredBy: triggeredBy}
+// newNodeContext returns a nodeContext wrapping parent. resumeInputs
+// is nil for non-resume activations.
+func newNodeContext(parent agent.InvocationContext, resumeInputs map[string]any) *nodeContext {
+	return &nodeContext{
+		InvocationContext: parent,
+		resumeInputs:      resumeInputs,
+	}
 }
 
-// TriggeredBy returns the name of the upstream node whose output
-// scheduled this node activation. Empty for the initial START
-// trigger and for non-workflow invocations (where the wrapper is not
-// used).
-func (c *nodeContext) TriggeredBy() string { return c.triggeredBy }
+// ResumedInput returns the response payload associated with the
+// given InterruptID for a re-entry resume activation. Returns
+// (nil, false) on fresh activations, on handoff resume, and when
+// the InterruptID does not match any payload supplied by the
+// resuming caller.
+func (c *nodeContext) ResumedInput(interruptID string) (any, bool) {
+	if c.resumeInputs == nil {
+		return nil, false
+	}
+	v, ok := c.resumeInputs[interruptID]
+	return v, ok
+}

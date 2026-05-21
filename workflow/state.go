@@ -101,6 +101,19 @@ type NodeState struct {
 
 	// Attempt is the number of times this node has been failed.
 	Attempt int `json:"attempt,omitempty"`	
+
+	// ResumedInputs accumulates response payloads for re-entry-mode
+	// nodes that yield RequestInput more than once during a single
+	// activation lifecycle. Each Resume call adds the new response
+	// keyed by its InterruptID. The map is exposed to the node via
+	// ctx.ResumedInput on every re-entry activation, so the node
+	// can observe responses to all prior requests, not only the
+	// most recent one.
+	//
+	// Cleared when the node transitions to NodeCompleted; absent
+	// for handoff-mode nodes (where successors receive the response
+	// as input and the asker never re-runs).
+	ResumedInputs map[string]any `json:"resumedInputs,omitempty"`
 }
 
 // RunState is the per-invocation lifecycle state for a workflow

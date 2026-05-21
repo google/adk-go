@@ -224,6 +224,18 @@ func buildNodesByName(g *graph) map[string]Node {
 //
 // scheduleNode runs only on the consumer goroutine.
 func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
+	s.scheduleResumedNode(n, input, triggeredBy, nil)
+}
+
+// scheduleResumedNode is like scheduleNode but additionally
+// injects resumeInputs into the per-node context, so re-entry
+// nodes can read the user-supplied response payload via
+// ctx.ResumedInput(interruptID). resumeInputs is keyed by
+// InterruptID; nil disables re-entry semantics and yields the same
+// behaviour as scheduleNode.
+//
+// scheduleResumedNode runs only on the consumer goroutine.
+func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy string, resumeInputs map[string]any) {
 	name := n.Name()
 
 	// Per-node context: WithTimeout when Config().Timeout > 0,
@@ -240,7 +252,7 @@ func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
 	} else {
 		nodeCtx, cancel = context.WithCancel(s.parentCtx)
 	}
-	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), triggeredBy)
+	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), resumeInputs)
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
@@ -504,6 +516,10 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 
 	ns.Status = NodeCompleted
 	ns.Attempt = 0
+	// Release the accumulated re-entry response history; the node
+	// has finished and a future activation (if any, e.g. via
+	// loop-back routing) starts a fresh lifecycle.
+	ns.ResumedInputs = nil
 
 	if !scheduleSuccessors {
 		return nil
@@ -535,8 +551,9 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 }
 
 // successor is the per-target dispatch tuple produced by
-// findSuccessors. The triggeredBy field carries the upstream node's
-// name for downstream visibility via ctx.TriggeredBy().
+// findSuccessors. The triggeredBy field carries the upstream
+// node's name for persistence on NodeState (used by Resume to
+// reconstruct the activation chain across pause/resume turns).
 type successor struct {
 	node        Node
 	input       any
