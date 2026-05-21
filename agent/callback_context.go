@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 
+	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/artifact"
@@ -61,18 +62,18 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 	return cc
 }
 
-// NewToolCallbackContext returns a *callbackContext that, in addition to
-// satisfying CallbackContext, also satisfies tool.Context. It is the underlying
-// constructor used by tool.NewToolContext.
+// NewToolContext constructs a ToolContext for a tool execution.
 //
-// The returned context always tracks artifact deltas. The provided actions and
-// confirmation are stored verbatim; functionCallID identifies the function call
-// the tool execution is responding to (it must be non-empty).
-//
-// Note: this returns the concrete *callbackContext type rather than an interface
-// so the tool package can attach a `var _ tool.Context = ...` assertion. Most
-// callers should use tool.NewToolContext instead.
-func NewToolCallbackContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) *callbackContext {
+// If functionCallID is empty a new UUID is generated. If actions is nil a
+// fresh session.EventActions with empty StateDelta and ArtifactDelta is
+// allocated; missing sub-maps are populated. The returned ToolContext is
+// backed by the same *callbackContext implementation used for CallbackContext,
+// so all callback-context semantics (state delta tracking, artifact delta
+// tracking, etc.) apply, plus the tool-specific extensions on ToolContext.
+func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) ToolContext {
+	if functionCallID == "" {
+		functionCallID = uuid.NewString()
+	}
 	if actions == nil {
 		actions = &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
 	}
@@ -82,7 +83,7 @@ func NewToolCallbackContext(ic InvocationContext, functionCallID string, actions
 	if actions.ArtifactDelta == nil {
 		actions.ArtifactDelta = make(map[string]int64)
 	}
-	cc := &callbackContext{
+	return &callbackContext{
 		Context:           ic,
 		invocationContext: ic,
 		actions:           actions,
@@ -90,21 +91,20 @@ func NewToolCallbackContext(ic InvocationContext, functionCallID string, actions
 		functionCallID:    functionCallID,
 		toolConfirmation:  confirmation,
 	}
-	return cc
 }
 
-// callbackContext is the single concrete implementation of CallbackContext.
-// When constructed via NewToolCallbackContext it additionally implements
-// tool.Context (the extra methods FunctionCallID, Actions, SearchMemory,
-// ToolConfirmation, RequestConfirmation are always present on the concrete
-// type; they are only meaningful when the context is used as a tool.Context).
+// callbackContext is the single concrete implementation of CallbackContext
+// (and, when constructed via NewToolContext, of ToolContext as well). The
+// tool-specific methods (FunctionCallID, Actions, SearchMemory,
+// ToolConfirmation, RequestConfirmation) are always present on the concrete
+// type; they are only meaningful when the context is used as a ToolContext.
 type callbackContext struct {
 	context.Context
 	invocationContext InvocationContext
 	artifacts         Artifacts
 	actions           *session.EventActions
 
-	// Fields below are only populated by NewToolCallbackContext.
+	// Fields below are only populated by NewToolContext.
 	functionCallID   string
 	toolConfirmation *toolconfirmation.ToolConfirmation
 }
@@ -149,15 +149,16 @@ func (c *callbackContext) UserID() string {
 	return c.invocationContext.Session().UserID()
 }
 
-var _ CallbackContext = (*callbackContext)(nil)
+var (
+	_ CallbackContext = (*callbackContext)(nil)
+	_ ToolContext     = (*callbackContext)(nil)
+)
 
-// --- tool.Context extensions ---------------------------------------------
+// --- ToolContext extensions ----------------------------------------------
 //
 // The methods below are always present on *callbackContext but only
-// meaningful when the context was constructed via NewToolCallbackContext
-// (i.e. when functionCallID is set). A compile-time assertion that this
-// method set satisfies tool.Context lives in the tool package to avoid
-// an import cycle.
+// meaningful when the context was constructed via NewToolContext (i.e.
+// when functionCallID is set).
 
 // FunctionCallID returns the function call identifier associated with the
 // current tool execution, or "" if this context was not constructed for a
