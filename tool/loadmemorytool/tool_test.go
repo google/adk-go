@@ -177,5 +177,5 @@ func createToolContext(t *testing.T, mem *mockMemory) tool.Context {
 		Memory: mem,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", nil, nil)
+	return tool.NewToolContext(ctx, "", nil, nil)
 }

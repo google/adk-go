@@ -76,7 +76,7 @@ func (m *mockSource) LoadResource(ctx context.Context, name, resourcePath string
 
 func createToolContext(t *testing.T) tool.Context {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	return toolinternal.NewToolContext(invCtx, "", nil, nil)
+	return tool.NewToolContext(invCtx, "", nil, nil)
 }
 
 func TestListSkills(t *testing.T) {

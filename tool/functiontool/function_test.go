@@ -66,7 +66,7 @@ func ExampleNew() {
 
 func createToolContext(t *testing.T) tool.Context {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	return toolinternal.NewToolContext(invCtx, "", &session.EventActions{}, nil)
+	return tool.NewToolContext(invCtx, "", &session.EventActions{}, nil)
 }
 
 //go:generate go test -v -httprecord=.*
