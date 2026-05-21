@@ -29,7 +29,7 @@ import (
 // allocated. The returned Context is backed by the same *callbackContext
 // implementation used for CallbackContext, so all callback-context semantics
 // (state delta tracking, artifact delta tracking, etc.) apply.
-func NewToolContext(ic agent.InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
+func NewToolContext(ic agent.InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) ToolContext {
 	if functionCallID == "" {
 		functionCallID = uuid.NewString()
 	}

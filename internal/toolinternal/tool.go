@@ -27,15 +27,15 @@ import (
 type FunctionTool interface {
 	tool.Tool
 	Declaration() *genai.FunctionDeclaration
-	Run(ctx tool.Context, args any) (result map[string]any, err error)
+	Run(ctx tool.ToolContext, args any) (result map[string]any, err error)
 }
 
 type StreamingFunctionTool interface {
 	tool.Tool
 	Declaration() *genai.FunctionDeclaration
-	RunStream(ctx tool.Context, args any) iter.Seq2[string, error]
+	RunStream(ctx tool.ToolContext, args any) iter.Seq2[string, error]
 }
 
 type RequestProcessor interface {
-	ProcessRequest(ctx tool.Context, req *model.LLMRequest) error
+	ProcessRequest(ctx tool.ToolContext, req *model.LLMRequest) error
 }

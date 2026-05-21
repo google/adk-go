@@ -38,7 +38,7 @@ func (s GoogleSearch) Description() string {
 }
 
 // ProcessRequest adds the GoogleSearch tool to the LLM request.
-func (s GoogleSearch) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (s GoogleSearch) ProcessRequest(ctx tool.ToolContext, req *model.LLMRequest) error {
 	return setTool(req, &genai.Tool{
 		GoogleSearch: &genai.GoogleSearch{},
 	})

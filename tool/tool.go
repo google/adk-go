@@ -49,10 +49,10 @@ type Tool interface {
 	IsLongRunning() bool
 }
 
-// Context defines the interface for the context passed to a tool when it's
+// ToolContext defines the interface for the context passed to a tool when it's
 // called. It provides access to invocation-specific information and allows
 // the tool to interact with the agent's state and memory.
-type Context interface {
+type ToolContext interface {
 	agent.CallbackContext
 	// FunctionCallID returns the unique identifier of the function call
 	// that triggered this tool execution.
@@ -238,18 +238,18 @@ type confirmationTool struct {
 type runnableTool interface {
 	Tool
 	Declaration() *genai.FunctionDeclaration
-	Run(ctx Context, args any) (result map[string]any, err error)
+	Run(ctx ToolContext, args any) (result map[string]any, err error)
 }
 
 func (t *confirmationTool) Declaration() *genai.FunctionDeclaration {
 	return t.runnableTool.Declaration()
 }
 
-func (t *confirmationTool) ProcessRequest(ctx Context, req *model.LLMRequest) error {
+func (t *confirmationTool) ProcessRequest(ctx ToolContext, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 
-func (t *confirmationTool) Run(ctx Context, args any) (map[string]any, error) {
+func (t *confirmationTool) Run(ctx ToolContext, args any) (map[string]any, error) {
 	ft := t.runnableTool
 
 	// Check for Human-in-the-Loop confirmation.

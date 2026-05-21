@@ -118,7 +118,7 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 // Run executes the wrapped agent with the provided arguments.
 // It creates a new session for the sub-agent, runs the agent, and returns
 // the final result.
-func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) {
+func (t *agentTool) Run(toolCtx tool.ToolContext, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
@@ -251,6 +251,6 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 }
 
 // ProcessRequest adds the agent tool's function declaration to the LLM request.
-func (t *agentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *agentTool) ProcessRequest(ctx tool.ToolContext, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }

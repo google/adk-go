@@ -124,7 +124,7 @@ func MustNew(opts ...PluginOption) *plugin.Plugin {
 	return p
 }
 
-func (r *retryAndReflect) afterTool(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func (r *retryAndReflect) afterTool(ctx tool.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err == nil {
 		isReflectResponse := false
 		if rt, ok := result["response_type"].(string); ok && rt == reflectAndRetryResponseType {
@@ -139,11 +139,11 @@ func (r *retryAndReflect) afterTool(ctx tool.Context, tool tool.Tool, args, resu
 	return nil, nil
 }
 
-func (r *retryAndReflect) onToolError(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+func (r *retryAndReflect) onToolError(ctx tool.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 	return r.handleToolError(ctx, tool, args, err)
 }
 
-func (r *retryAndReflect) handleToolError(ctx tool.Context, failedTool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+func (r *retryAndReflect) handleToolError(ctx tool.ToolContext, failedTool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 	// skip if the error is tool.ErrConfirmationRequired.
 	if errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmationRejected) {
 		return nil, nil
@@ -179,14 +179,14 @@ func (r *retryAndReflect) handleToolError(ctx tool.Context, failedTool tool.Tool
 	return r.createToolRetryExceedMsg(failedTool, args, err), nil
 }
 
-func (r *retryAndReflect) scopeKey(ctx tool.Context) string {
+func (r *retryAndReflect) scopeKey(ctx tool.ToolContext) string {
 	if r.scope == Global {
 		return globalScopeKey
 	}
 	return ctx.InvocationID()
 }
 
-func (r *retryAndReflect) resetFailuresForTool(ctx tool.Context, toolName string) {
+func (r *retryAndReflect) resetFailuresForTool(ctx tool.ToolContext, toolName string) {
 	scopeKey := r.scopeKey(ctx)
 
 	r.mu.Lock()

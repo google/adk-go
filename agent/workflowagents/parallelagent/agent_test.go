@@ -298,7 +298,7 @@ func createAgentWithGemini(t *testing.T, name string) agent.Agent {
 			Name:        fmt.Sprintf("search_tool_%s", name),
 			Description: "Search for information on the web",
 		},
-		func(ctx tool.Context, args struct{ Query string }) (string, error) {
+		func(ctx tool.ToolContext, args struct{ Query string }) (string, error) {
 			return fmt.Sprintf("search result for '%s' from %s", args.Query, name), nil
 		},
 	)
@@ -311,7 +311,7 @@ func createAgentWithGemini(t *testing.T, name string) agent.Agent {
 			Name:        fmt.Sprintf("analyze_tool_%s", name),
 			Description: "Analyze data and return insights",
 		},
-		func(ctx tool.Context, args struct{ Data string }) (string, error) {
+		func(ctx tool.ToolContext, args struct{ Data string }) (string, error) {
 			return fmt.Sprintf("analysis result for '%s' from %s", args.Data, name), nil
 		},
 	)

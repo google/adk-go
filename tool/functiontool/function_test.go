@@ -49,7 +49,7 @@ type SumResult struct {
 	Sum int `json:"sum"` // the sum of two integers
 }
 
-func sumFunc(ctx tool.Context, input SumArgs) (SumResult, error) {
+func sumFunc(ctx tool.ToolContext, input SumArgs) (SumResult, error) {
 	return SumResult{Sum: input.A + input.B}, nil
 }
 
@@ -64,7 +64,7 @@ func ExampleNew() {
 	_ = sumTool // use the tool
 }
 
-func createToolContext(t *testing.T) tool.Context {
+func createToolContext(t *testing.T) tool.ToolContext {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	return tool.NewToolContext(invCtx, "", &session.EventActions{}, nil)
 }
@@ -100,7 +100,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 		},
 	}
 
-	weatherReport := func(ctx tool.Context, input Args) (Result, error) {
+	weatherReport := func(ctx tool.ToolContext, input Args) (Result, error) {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
 			return ret, nil
@@ -201,7 +201,7 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	type IntOutput struct {
 		Result int `json:"result"`
 	}
-	identityFunc := func(ctx tool.Context, input IntInput) (IntOutput, error) {
+	identityFunc := func(ctx tool.ToolContext, input IntInput) (IntOutput, error) {
 		return IntOutput{Result: input.X}, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{
@@ -219,7 +219,7 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	type StringOutput struct {
 		Result string `json:"result"`
 	}
-	stringIdentityFunc := func(ctx tool.Context, input StringInput) (StringOutput, error) {
+	stringIdentityFunc := func(ctx tool.ToolContext, input StringInput) (StringOutput, error) {
 		return StringOutput{Result: input.Value}, nil
 	}
 	stringIdentityTool, err := functiontool.New(
@@ -265,7 +265,7 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 		"paris":  "The weather in Paris is sunny with a temperature of 25 derees Celsius.",
 	}
 
-	weatherReport := func(ctx tool.Context, input Args) (string, error) {
+	weatherReport := func(ctx tool.ToolContext, input Args) (string, error) {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
 			return ret, nil
@@ -355,7 +355,7 @@ func TestFunctionTool_MapInput(t *testing.T) {
 			Name:        "sum_map",
 			Description: "sums numbers provided in a map input",
 		},
-		func(ctx tool.Context, input map[string]int) (Output, error) {
+		func(ctx tool.ToolContext, input map[string]int) (Output, error) {
 			return Output{Sum: input["a"] + input["b"]}, nil
 		})
 	if err != nil {
@@ -440,7 +440,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		Name:        "print_quantity",
 		Description: "print the remaining quantity of the given fruit.",
 		InputSchema: ischema,
-	}, func(ctx tool.Context, input Args) (any, error) {
+	}, func(ctx tool.ToolContext, input Args) (any, error) {
 		fruit := strings.ToLower(input.Fruit)
 		if fruit != "mandarin" && fruit != "kiwi" {
 			t.Errorf("unexpected fruit: %q", fruit)
@@ -552,7 +552,7 @@ type SimpleArgs struct {
 	Num int
 }
 
-func okFunc(_ tool.Context, _ SimpleArgs) (string, error) {
+func okFunc(_ tool.ToolContext, _ SimpleArgs) (string, error) {
 	return "ok", nil
 }
 
@@ -926,7 +926,7 @@ type TestResult struct {
 
 func TestNew_RequireConfirmationProvider_Validation(t *testing.T) {
 	// A dummy handler to satisfy the function signature
-	dummyHandler := func(_ tool.Context, _ TestArgs) (TestResult, error) {
+	dummyHandler := func(_ tool.ToolContext, _ TestArgs) (TestResult, error) {
 		return TestResult{Value: 1}, nil
 	}
 
@@ -1037,7 +1037,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "string_tool",
 					Description: "a tool with string input",
-				}, func(ctx tool.Context, input string) (string, error) {
+				}, func(ctx tool.ToolContext, input string) (string, error) {
 					return input, nil
 				})
 			},
@@ -1049,7 +1049,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "int_tool",
 					Description: "a tool with int input",
-				}, func(ctx tool.Context, input int) (int, error) {
+				}, func(ctx tool.ToolContext, input int) (int, error) {
 					return input, nil
 				})
 			},
@@ -1061,7 +1061,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "bool_tool",
 					Description: "a tool with bool input",
-				}, func(ctx tool.Context, input bool) (bool, error) {
+				}, func(ctx tool.ToolContext, input bool) (bool, error) {
 					return input, nil
 				})
 			},
@@ -1087,7 +1087,7 @@ func TestFunctionTool_PanicRecovery(t *testing.T) {
 		Value string `json:"value"`
 	}
 
-	panicHandler := func(ctx tool.Context, input Args) (string, error) {
+	panicHandler := func(ctx tool.ToolContext, input Args) (string, error) {
 		panic("intentional panic for testing")
 	}
 

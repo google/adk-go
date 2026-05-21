@@ -32,11 +32,11 @@ type ValidateEmailArgs struct {
 
 var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 
-func validateEmail(ctx tool.Context, args ValidateEmailArgs) (bool, error) {
+func validateEmail(ctx tool.ToolContext, args ValidateEmailArgs) (bool, error) {
 	return emailRegex.MatchString(args.Email), nil
 }
 
-func getUserID(ctx tool.Context, args ValidateEmailArgs) (int, error) {
+func getUserID(ctx tool.ToolContext, args ValidateEmailArgs) (int, error) {
 	valid, err := validateEmail(ctx, args)
 	if err != nil {
 		return 0, err
@@ -58,7 +58,7 @@ func getUserID(ctx tool.Context, args ValidateEmailArgs) (int, error) {
 	return int(result % 10000), nil
 }
 
-func createBooking(ctx tool.Context, args ValidateEmailArgs) (map[string]any, error) {
+func createBooking(ctx tool.ToolContext, args ValidateEmailArgs) (map[string]any, error) {
 	userID, err := getUserID(ctx, args)
 	if err != nil {
 		return nil, err
@@ -92,7 +92,7 @@ type SearchFlightsArgs struct {
 	Preferences *FlightPreferences `json:"preferences"`
 }
 
-func searchFlights(ctx tool.Context, args SearchFlightsArgs) (map[string]any, error) {
+func searchFlights(ctx tool.ToolContext, args SearchFlightsArgs) (map[string]any, error) {
 	if args.Preferences == nil {
 		args.Preferences = &FlightPreferences{
 			CabinClass:    "Economy",
@@ -150,7 +150,7 @@ type CalculateTripCostArgs struct {
 	BaggageCount  *int    `json:"baggage_count"`
 }
 
-func calculateTripCost(ctx tool.Context, args CalculateTripCostArgs) (map[string]any, error) {
+func calculateTripCost(ctx tool.ToolContext, args CalculateTripCostArgs) (map[string]any, error) {
 	// Handle Python's default num_passengers=1 logic
 	// In Go, if the caller passes 0, we should ensure at least 1
 	// or handle it based on your specific business logic.
@@ -198,7 +198,7 @@ type reimburseArgs struct {
 	Amount  float64 `json:"amount"`
 }
 
-func reimburse(ctx tool.Context, args reimburseArgs) (map[string]any, error) {
+func reimburse(ctx tool.ToolContext, args reimburseArgs) (map[string]any, error) {
 	return map[string]any{
 		"status": "ok",
 	}, nil
@@ -209,7 +209,7 @@ type askForApprovalArgs struct {
 	Amount  float64 `json:"amount"`
 }
 
-func askForApproval(ctx tool.Context, args askForApprovalArgs) (map[string]any, error) {
+func askForApproval(ctx tool.ToolContext, args askForApprovalArgs) (map[string]any, error) {
 	return map[string]any{
 		"status":   "pending",
 		"amount":   args.Amount,

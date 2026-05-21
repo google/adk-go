@@ -168,7 +168,7 @@ func (pm *PluginManager) RunAfterAgentCallback(cctx agent.CallbackContext) (*gen
 }
 
 // RunBeforeToolCallback runs the BeforeToolCallback for all plugins.
-func (pm *PluginManager) RunBeforeToolCallback(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+func (pm *PluginManager) RunBeforeToolCallback(ctx tool.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 	for _, plugin := range pm.plugins {
 		callback := plugin.BeforeToolCallback()
 		if callback != nil {
@@ -185,7 +185,7 @@ func (pm *PluginManager) RunBeforeToolCallback(ctx tool.Context, tool tool.Tool,
 }
 
 // RunAfterToolCallback runs the AfterToolCallback for all plugins.
-func (pm *PluginManager) RunAfterToolCallback(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func (pm *PluginManager) RunAfterToolCallback(ctx tool.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	for _, plugin := range pm.plugins {
 		callback := plugin.AfterToolCallback()
 		if callback != nil {
@@ -202,7 +202,7 @@ func (pm *PluginManager) RunAfterToolCallback(ctx tool.Context, tool tool.Tool, 
 }
 
 // RunOnToolErrorCallback runs the OnToolErrorCallback for all plugins.
-func (pm *PluginManager) RunOnToolErrorCallback(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+func (pm *PluginManager) RunOnToolErrorCallback(ctx tool.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 	for _, plugin := range pm.plugins {
 		callback := plugin.OnToolErrorCallback()
 		if callback != nil {

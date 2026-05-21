@@ -277,7 +277,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	}
 }
 
-func createToolContext(t *testing.T) tool.Context {
+func createToolContext(t *testing.T) tool.ToolContext {
 	t.Helper()
 
 	artifacts := &artifactinternal.Artifacts{

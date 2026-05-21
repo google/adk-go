@@ -51,13 +51,13 @@ func LoadSkill(source skill.Source) (tool.Tool, error) {
 			Name:        "load_skill",
 			Description: "Loads the SKILL.md instructions for a given skill.",
 		},
-		func(ctx tool.Context, args LoadSkillArgs) (*LoadSkillResult, error) {
+		func(ctx tool.ToolContext, args LoadSkillArgs) (*LoadSkillResult, error) {
 			return loadSkill(ctx, args, source)
 		},
 	)
 }
 
-func loadSkill(ctx tool.Context, args LoadSkillArgs, source skill.Source) (*LoadSkillResult, error) {
+func loadSkill(ctx tool.ToolContext, args LoadSkillArgs, source skill.Source) (*LoadSkillResult, error) {
 	if args.Name == "" {
 		return nil, fmt.Errorf("skill name is required to load a skill")
 	}

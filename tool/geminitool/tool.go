@@ -55,7 +55,7 @@ type geminiTool struct {
 }
 
 // ProcessRequest adds the Gemini tool to the LLM request.
-func (t *geminiTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *geminiTool) ProcessRequest(ctx tool.ToolContext, req *model.LLMRequest) error {
 	return setTool(req, t.value)
 }
 

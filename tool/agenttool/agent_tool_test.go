@@ -347,7 +347,7 @@ func createAgentWithModel(t *testing.T, inputSchema, outputSchema *genai.Schema,
 	return agent
 }
 
-func createToolContext(t *testing.T, testAgent agent.Agent) tool.Context {
+func createToolContext(t *testing.T, testAgent agent.Agent) tool.ToolContext {
 	t.Helper()
 
 	sessionService := session.InMemoryService()

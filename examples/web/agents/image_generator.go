@@ -30,7 +30,7 @@ import (
 	"google.golang.org/adk/tool/loadartifactstool"
 )
 
-func generateImage(ctx tool.Context, input generateImageInput) (generateImageResult, error) {
+func generateImage(ctx tool.ToolContext, input generateImageInput) (generateImageResult, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
 		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
