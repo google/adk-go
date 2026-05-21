@@ -248,8 +248,8 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
 	pluginManager := pluginManagerFromContext(ctx)
 
-	callbackCtx := NewCallbackContext(ctx, false, nil, nil)
-	callbackActions := EventActionsOf(callbackCtx)
+	actions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
+	callbackCtx := NewCallbackContext(ctx, false, actions)
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunBeforeAgentCallback(callbackCtx)
@@ -263,7 +263,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			}
 			event.Author = agent.Name()
 			event.Branch = ctx.Branch()
-			event.Actions = *callbackActions
+			event.Actions = *actions
 			ctx.EndInvocation()
 			return event, nil
 		}
@@ -284,17 +284,17 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		}
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *callbackActions
+		event.Actions = *actions
 		ctx.EndInvocation()
 		return event, nil
 	}
 
 	// check if has delta create event with it
-	if len(callbackActions.StateDelta) > 0 {
+	if len(actions.StateDelta) > 0 {
 		event := session.NewEvent(ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *callbackActions
+		event.Actions = *actions
 		return event, nil
 	}
 
@@ -307,8 +307,8 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	agent := ctx.Agent()
 	pluginManager := pluginManagerFromContext(ctx)
 
-	callbackCtx := NewCallbackContext(ctx, false, nil, nil)
-	callbackActions := EventActionsOf(callbackCtx)
+	actions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
+	callbackCtx := NewCallbackContext(ctx, false, actions)
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunAfterAgentCallback(callbackCtx)
@@ -322,7 +322,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			}
 			event.Author = agent.Name()
 			event.Branch = ctx.Branch()
-			event.Actions = *callbackActions
+			event.Actions = *actions
 			return event, nil
 		}
 	}
@@ -342,18 +342,18 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 		}
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *callbackActions
+		event.Actions = *actions
 		// TODO set context invocation ended
 		// ctx.invocationEnded = true
 		return event, nil
 	}
 
 	// check if has delta create event with it
-	if len(callbackActions.StateDelta) > 0 {
+	if len(actions.StateDelta) > 0 {
 		event := session.NewEvent(ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
-		event.Actions = *callbackActions
+		event.Actions = *actions
 		return event, nil
 	}
 	return nil, nil

@@ -16,13 +16,14 @@ package context
 
 import (
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/session"
 )
 
 // NewCallbackContext returns a CallbackContext suitable for model, tool, and
 // related callbacks. The returned context's Artifacts().Save tracks each saved
 // artifact's version into the underlying EventActions.ArtifactDelta.
 func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
-	return agent.NewCallbackContext(ctx, true, nil, nil)
+	return agent.NewCallbackContext(ctx, true, nil)
 }
 
 // NewCallbackContextWithDelta returns a CallbackContext that uses the given
@@ -30,5 +31,6 @@ func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
 // EventActions. The returned context's Artifacts().Save tracks each saved
 // artifact's version into artifactDelta.
 func NewCallbackContextWithDelta(ctx agent.InvocationContext, stateDelta map[string]any, artifactDelta map[string]int64) agent.CallbackContext {
-	return agent.NewCallbackContext(ctx, true, stateDelta, artifactDelta)
+	actions := &session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta}
+	return agent.NewCallbackContext(ctx, true, actions)
 }

@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,28 +24,16 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// NewCallbackContext returns a CallbackContext backed by the given invocation
-// context. The returned context is suitable for passing to user agent / model /
-// tool callbacks.
-//
+// NewCallbackContext returns CallbackContext initialized with provided actions.
 // If trackArtifactDeltas is true, the returned context's Artifacts().Save(...)
 // wrapper records each saved artifact's version into the underlying
 // EventActions.ArtifactDelta so the resulting Event reflects the saves.
-//
-// stateDelta and artifactDelta may be nil; if non-nil they are used as the
-// initial backing maps for the EventActions on this context (allowing callers
-// that aggregate deltas across multiple callbacks to share storage).
-//
-// The returned concrete type carries the underlying *session.EventActions; use
-// EventActionsOf to retrieve it.
-func NewCallbackContext(ic InvocationContext, trackArtifactDeltas bool, stateDelta map[string]any, artifactDelta map[string]int64) CallbackContext {
-	if stateDelta == nil {
-		stateDelta = make(map[string]any)
+// actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
+func NewCallbackContext(ic InvocationContext, trackArtifactDeltas bool, actions *session.EventActions) CallbackContext {
+	if actions == nil {
+		actions = &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
 	}
-	if artifactDelta == nil {
-		artifactDelta = make(map[string]int64)
-	}
-	actions := &session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta}
+
 	cc := &callbackContext{
 		Context:           ic,
 		invocationContext: ic,
@@ -59,22 +47,7 @@ func NewCallbackContext(ic InvocationContext, trackArtifactDeltas bool, stateDel
 	return cc
 }
 
-// EventActionsOf returns the *session.EventActions backing a CallbackContext
-// produced by NewCallbackContext, or nil if the context was not produced by
-// NewCallbackContext.
-func EventActionsOf(c CallbackContext) *session.EventActions {
-	cc, ok := c.(*callbackContext)
-	if !ok {
-		return nil
-	}
-	return cc.actions
-}
-
 // callbackContext is the single concrete implementation of CallbackContext.
-//
-// Its Artifacts() return value may optionally wrap the underlying Artifacts to
-// record saved artifact versions into the EventActions.ArtifactDelta, depending
-// on the trackArtifactDeltas flag passed to NewCallbackContext.
 type callbackContext struct {
 	context.Context
 	invocationContext InvocationContext
