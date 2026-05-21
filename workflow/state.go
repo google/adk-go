@@ -99,6 +99,9 @@ type NodeState struct {
 	// (as opposed to a fan-in barrier).
 	PendingRequest *session.RequestInput `json:"pendingRequest,omitempty"`
 
+	// Attempt is the number of times this node has been failed.
+	Attempt int `json:"attempt,omitempty"`	
+
 	// ResumedInputs accumulates response payloads for re-entry-mode
 	// nodes that yield RequestInput more than once during a single
 	// activation lifecycle. Each Resume call adds the new response
