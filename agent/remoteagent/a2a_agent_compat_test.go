@@ -22,7 +22,7 @@ import (
 	"time"
 
 	legacyA2A "github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
+	legacyAClient "github.com/a2aproject/a2a-go/a2aclient"
 	legacyASrv "github.com/a2aproject/a2a-go/a2asrv"
 	v2a2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
@@ -330,7 +330,7 @@ func TestCompat_RemoteTaskCleanupCallback(t *testing.T) {
 	oldAgent := utils.Must(NewA2A(A2AConfig{
 		Name:      "remote-agent",
 		AgentCard: card,
-		RemoteTaskCleanupCallback: func(ctx context.Context, card *legacyA2A.AgentCard, client *a2aclient.Client, taskInfo legacyA2A.TaskInfo, cause error) {
+		RemoteTaskCleanupCallback: func(ctx context.Context, card *legacyA2A.AgentCard, client *legacyAClient.Client, taskInfo legacyA2A.TaskInfo, cause error) {
 			cleanupCalled = true
 			cleanupTaskInfo = taskInfo
 		},
@@ -371,6 +371,96 @@ func TestCompat_RemoteTaskCleanupCallback(t *testing.T) {
 	if cleanupTaskInfo.TaskID == "" {
 		t.Error("RemoteTaskCleanupCallback received empty TaskID")
 	}
+}
+
+func TestCompat_ContextPropagation(t *testing.T) {
+	appName := "yesapp"
+	sessionService := session.InMemoryService()
+	agnt := utils.Must(agent.New(agent.Config{
+		Name: appName,
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(&session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Yes", genai.RoleModel)}}, nil)
+			}
+		},
+	}))
+	executor := adka2a.NewExecutor(adka2a.ExecutorConfig{
+		RunnerConfig: runner.Config{
+			AppName:        appName,
+			Agent:          agnt,
+			SessionService: sessionService,
+		},
+	})
+
+	handler := legacyASrv.NewHandler(
+		executor,
+		legacyASrv.WithCallInterceptor(&testSrvAuthInterceptor{
+			BeforeFunc: func(ctx context.Context, callCtx *legacyASrv.CallContext, req *legacyASrv.Request) (context.Context, error) {
+				if headers, _ := callCtx.RequestMeta().Get("authorization"); len(headers) > 0 {
+					callCtx.User = &legacyASrv.AuthenticatedUser{UserName: headers[0]}
+				}
+				return ctx, nil
+			},
+		}),
+	)
+	server := httptest.NewServer(legacyASrv.NewJSONRPCHandler(handler))
+	t.Cleanup(server.Close)
+
+	userID := "user123"
+	remote, err := NewA2A(A2AConfig{
+		Name:      "yes-client",
+		AgentCard: newLegacyCard(server.URL),
+		ClientFactory: legacyAClient.NewFactory(legacyAClient.WithInterceptors(
+			&testClientAuthInterceptor{
+				BeforeFunc: func(ctx context.Context, req *legacyAClient.Request) (context.Context, error) {
+					req.Meta["Authorization"] = []string{userID}
+					return ctx, nil
+				},
+			},
+		)),
+	})
+	if err != nil {
+		t.Fatalf("NewA2A() error = %v", err)
+	}
+	_, err = runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remote)
+	if err != nil {
+		t.Fatalf("agent.Run() error = %v", err)
+	}
+
+	sessions, err := sessionService.List(t.Context(), &session.ListRequest{
+		AppName: appName,
+		UserID:  userID,
+	})
+	if err != nil {
+		t.Fatalf("sessionService.List() error = %v", err)
+	}
+	if len(sessions.Sessions) != 1 {
+		t.Fatalf("len(sessions.Sessions) = %d, want 1", len(sessions.Sessions))
+	}
+}
+
+type testSrvAuthInterceptor struct {
+	legacyASrv.PassthroughCallInterceptor
+	BeforeFunc func(ctx context.Context, callCtx *legacyASrv.CallContext, req *legacyASrv.Request) (context.Context, error)
+}
+
+func (i *testSrvAuthInterceptor) Before(ctx context.Context, callCtx *legacyASrv.CallContext, req *legacyASrv.Request) (context.Context, error) {
+	if i.BeforeFunc != nil {
+		return i.BeforeFunc(ctx, callCtx, req)
+	}
+	return ctx, nil
+}
+
+type testClientAuthInterceptor struct {
+	legacyAClient.PassthroughInterceptor
+	BeforeFunc func(ctx context.Context, req *legacyAClient.Request) (context.Context, error)
+}
+
+func (i *testClientAuthInterceptor) Before(ctx context.Context, req *legacyAClient.Request) (context.Context, error) {
+	if i.BeforeFunc != nil {
+		return i.BeforeFunc(ctx, req)
+	}
+	return ctx, nil
 }
 
 type mockQueue struct {
