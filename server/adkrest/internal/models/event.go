@@ -51,6 +51,7 @@ type Event struct {
 	FinishReason       genai.FinishReason                          `json:"finishReason,omitempty"`
 	ModelVersion       string                                      `json:"modelVersion,omitempty"`
 	Actions            EventActions                                `json:"actions"`
+	Output             any                                         `json:"output,omitempty"`
 }
 
 // ToSessionEvent maps Event data struct to session.Event
@@ -61,6 +62,7 @@ func ToSessionEvent(event Event) *session.Event {
 		Branch:             event.Branch,
 		Author:             event.Author,
 		LongRunningToolIDs: event.LongRunningToolIDs,
+		Output:             event.Output,
 		LLMResponse: model.LLMResponse{
 			AvgLogprobs:       event.AvgLogprobs,
 			Content:           event.Content,
@@ -93,6 +95,7 @@ func FromSessionEvent(event session.Event) Event {
 		Author:             event.Author,
 		Partial:            event.Partial,
 		LongRunningToolIDs: event.LongRunningToolIDs,
+		Output:             event.Output,
 		AvgLogprobs:        event.LLMResponse.AvgLogprobs,
 		Content:            event.LLMResponse.Content,
 		GroundingMetadata:  event.LLMResponse.GroundingMetadata,
