@@ -245,6 +245,10 @@ func TestToolNode_Run(t *testing.T) {
 					t.Fatal("expected output in state delta")
 				}
 
+				if diff := cmp.Diff(output, ev.Output); diff != "" {
+					t.Errorf("ev.Output mismatch (-stateDelta +Output):\n%s", diff)
+				}
+
 				got = tc.extract(t, output)
 			}
 
