@@ -45,7 +45,7 @@ func NewJoinNode(name string) *JoinNode {
 func (n *JoinNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		event := session.NewEvent(ctx.InvocationID())
-		event.Actions.StateDelta["output"] = input
+		event.Output = input
 		yield(event, nil)
 	}
 }

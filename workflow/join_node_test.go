@@ -148,7 +148,7 @@ func TestJoinNode_BarrierSkipsUntilAllPredecessorsComplete(t *testing.T) {
 
 // TestJoinNode_RunIsPassthrough pins the JoinNode contract
 // independently of the engine: given an aggregated input map,
-// the node emits exactly one event whose StateDelta["output"]
+// the node emits exactly one event whose Output
 // equals the input. This is the property the orchestrator relies
 // on when treating JoinNode as a no-op aggregator.
 func TestJoinNode_RunIsPassthrough(t *testing.T) {
@@ -161,12 +161,9 @@ func TestJoinNode_RunIsPassthrough(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(events))
 	}
-	got, ok := events[0].Actions.StateDelta["output"]
-	if !ok {
-		t.Fatalf("event has no StateDelta[output]; got %#v", events[0].Actions.StateDelta)
-	}
+	got := events[0].Output
 	if !reflect.DeepEqual(got, input) {
-		t.Errorf("StateDelta[output] = %#v, want %#v (verbatim)", got, input)
+		t.Errorf("Output = %#v, want %#v (verbatim)", got, input)
 	}
 }
 

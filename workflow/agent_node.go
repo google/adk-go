@@ -27,7 +27,8 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// AgentNode wraps a standard agent.Agent.
+// AgentNode wraps a standard agent.Agent. Wrapped agents should emit their final output via
+// Event.Output to be propagated to successor nodes
 type AgentNode struct {
 	BaseNode
 	agent        agent.Agent
@@ -103,9 +104,9 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 
 		// Use existing agent context instead of implementing a new one
 		params := internalcontext.InvocationContextParams{
-			Artifacts:     ctx.Artifacts(),
-			Memory:        ctx.Memory(),
-			Session:       ctx.Session(),
+			Artifacts: ctx.Artifacts(),
+			Memory:    ctx.Memory(),
+			Session:   ctx.Session(),
 			// TODO: branch isolation in a separate PR
 			Branch:        ctx.Branch(),
 			Agent:         n.agent,
