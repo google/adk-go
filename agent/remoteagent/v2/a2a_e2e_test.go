@@ -1218,7 +1218,7 @@ func TestA2AMultiHopStructuredErrorPropagation(t *testing.T) {
 		},
 		AfterExecuteCallback: func(ctx adka2a.ExecutorContext, finalEvent *a2a.TaskStatusUpdateEvent, err error) error {
 			if errors.Is(err, a2a.ErrUnauthorized) {
-				finalEvent.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, structuredErr)
+				finalEvent.Status.Message.Parts = append(finalEvent.Status.Message.Parts, structuredErr)
 			}
 			return nil
 		},
@@ -1242,8 +1242,8 @@ func TestA2AMultiHopStructuredErrorPropagation(t *testing.T) {
 	if len(task1.Status.Message.Parts) != 2 {
 		t.Fatalf("len(task1.Status.Message.Parts) = %d, want len([error text, extra parts]) = 2", len(task1.Status.Message.Parts))
 	}
-	if !strings.Contains(task1.Status.Message.Parts[0].Text(), "a2a task failed") {
-		t.Fatalf("status.Message.Parts[0].Text() = %s, want contain %q", task1.Status.Message.Parts[0].Text(), "a2a task failed")
+	if !strings.Contains(task1.Status.Message.Parts[0].Text(), a2a.ErrUnauthorized.Error()) {
+		t.Fatalf("status.Message.Parts[0].Text() = %s, want contain %q", task1.Status.Message.Parts[0].Text(), a2a.ErrUnauthorized.Error())
 	}
 	if diff := cmp.Diff(task1.Status.Message.Parts[1].Data(), structuredErr.Data()); diff != "" {
 		t.Fatalf("wrong structured error part (-want,+got):\n%s", diff)
