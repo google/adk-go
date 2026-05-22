@@ -129,6 +129,9 @@ type Event struct {
 	//
 	// At most one event per node activation may carry this field.
 	RequestedInput *RequestInput
+
+	// Output is the generic data output from a workflow node.
+	Output any
 }
 
 // RequestInput describes a single human-in-the-loop prompt emitted
