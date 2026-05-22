@@ -32,10 +32,10 @@ import (
 	"google.golang.org/adk/server/adka2a/v2"
 )
 
-// compatApiPath is a suffix used to build an A2A invocation URL for backward compatibility
+// compatApiPath is a suffix used to build an A2A invocation URL for 0.3
 const compatApiPath = "/a2a/invoke"
 
-// apiPath is a suffix used to build an A2A invocation URL for a2a-go v2
+// apiPath is a suffix used to build an A2A invocation URL for 1.0
 const apiPath = "/a2a/v2/invoke"
 
 // a2aConfig contains parameters for launching ADK A2A server
