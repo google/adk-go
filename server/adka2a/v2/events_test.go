@@ -419,6 +419,7 @@ func TestToSessionEvent(t *testing.T) {
 			},
 			want: &session.Event{
 				LLMResponse: model.LLMResponse{
+					Content:      genai.NewContentFromParts([]*genai.Part{genai.NewPartFromText("failed with an error")}, genai.RoleModel),
 					ErrorMessage: "failed with an error",
 					CustomMetadata: map[string]any{
 						customMetaTaskIDKey:    string(taskID),
@@ -483,7 +484,7 @@ func TestToSessionEvent(t *testing.T) {
 			},
 		},
 		{
-			name: "task with single-part text status",
+			name: "failed task with single-part text status",
 			input: &a2a.Task{
 				ID:        taskID,
 				ContextID: contextID,
@@ -494,7 +495,109 @@ func TestToSessionEvent(t *testing.T) {
 			},
 			want: &session.Event{
 				LLMResponse: model.LLMResponse{
+					Content:        genai.NewContentFromParts([]*genai.Part{genai.NewPartFromText("failed with an error")}, genai.RoleModel),
 					ErrorMessage:   "failed with an error",
+					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
+					TurnComplete:   true,
+				},
+				Author: agentName,
+				Branch: branch,
+			},
+		},
+		{
+			name: "completed task with single-part text status",
+			input: &a2a.Task{
+				ID:        taskID,
+				ContextID: contextID,
+				Status: a2a.TaskStatus{
+					State:   a2a.TaskStateCompleted,
+					Message: &a2a.Message{Parts: a2a.ContentParts{a2a.NewTextPart("failed with an error")}},
+				},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content:        genai.NewContentFromParts([]*genai.Part{genai.NewPartFromText("failed with an error")}, genai.RoleModel),
+					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
+					TurnComplete:   true,
+				},
+				Author: agentName,
+				Branch: branch,
+			},
+		},
+		{
+			name: "failed task with a multi-part status",
+			input: &a2a.Task{
+				ID:        taskID,
+				ContextID: contextID,
+				Status: a2a.TaskStatus{
+					State: a2a.TaskStateFailed,
+					Message: a2a.NewMessage(a2a.MessageRoleAgent,
+						a2a.NewTextPart("failed with an error"),
+						a2a.NewTextPart("extra details"),
+					),
+				},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					ErrorMessage: "failed with an error",
+					Content: genai.NewContentFromParts([]*genai.Part{
+						genai.NewPartFromText("failed with an error"),
+						genai.NewPartFromText("extra details"),
+					}, genai.RoleModel),
+					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
+					TurnComplete:   true,
+				},
+				Author: agentName,
+				Branch: branch,
+			},
+		},
+		{
+			name: "failed task status with a multi-part status",
+			input: &a2a.TaskStatusUpdateEvent{
+				TaskID:    taskID,
+				ContextID: contextID,
+				Status: a2a.TaskStatus{
+					State: a2a.TaskStateFailed,
+					Message: a2a.NewMessage(a2a.MessageRoleAgent,
+						a2a.NewTextPart("failed with an error"),
+						a2a.NewDataPart(map[string]any{"structured": true}),
+					),
+				},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					ErrorMessage: "failed with an error",
+					Content: genai.NewContentFromParts([]*genai.Part{
+						genai.NewPartFromText("failed with an error"),
+						{InlineData: &genai.Blob{
+							Data:     []byte(`<a2a_datapart_json>{"structured":true}</a2a_datapart_json>`),
+							MIMEType: "text/plain",
+						}},
+					}, genai.RoleModel),
+					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
+					TurnComplete:   true,
+				},
+				Author: agentName,
+				Branch: branch,
+			},
+		},
+		{
+			name: "failed task status metadataIsErrMessageKey not in content",
+			input: &a2a.TaskStatusUpdateEvent{
+				TaskID:    taskID,
+				ContextID: contextID,
+				Status: a2a.TaskStatus{
+					State: a2a.TaskStateFailed,
+					Message: a2a.NewMessage(a2a.MessageRoleAgent,
+						&a2a.Part{Content: a2a.Text("failed with an error"), Metadata: map[string]any{metadataIsErrMessageKey: true}},
+						a2a.NewTextPart("extra details"),
+					),
+				},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					ErrorMessage:   "failed with an error",
+					Content:        genai.NewContentFromParts([]*genai.Part{genai.NewPartFromText("extra details")}, genai.RoleModel),
 					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
 					TurnComplete:   true,
 				},
