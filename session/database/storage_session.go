@@ -83,6 +83,7 @@ type storageEvent struct {
 	Actions                []byte
 	LongRunningToolIDsJSON dynamicJSON
 	RoutesJSON             dynamicJSON
+	OutputJSON             dynamicJSON
 	Branch                 *string
 	Timestamp              time.Time `gorm:"precision:6"`
 
@@ -145,6 +146,14 @@ func createStorageEvent(session session.Session, event *session.Event) (*storage
 			return nil, fmt.Errorf("failed to marshal event route: %w", err)
 		}
 		storageEv.RoutesJSON = routesJSON
+	}
+
+	if event.Output != nil {
+		outputJSON, err := json.Marshal(event.Output)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal output: %w", err)
+		}
+		storageEv.OutputJSON = outputJSON
 	}
 
 	// Handle optional fields by taking the address of the value.
@@ -269,6 +278,13 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		}
 	}
 
+	var output any
+	if se.OutputJSON != nil {
+		if err := json.Unmarshal([]byte(se.OutputJSON), &output); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal output: %w", err)
+		}
+	}
+
 	// --- Handle simple pointer fields (dereference or use zero value) ---
 	// Use the helper to safely get the value or its zero-value default
 	branch := derefOrZero(se.Branch)
@@ -288,6 +304,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		LongRunningToolIDs: toolIDs,
 		Routes:             routes,
 		Branch:             branch,
+		Output:             output,
 		LLMResponse: model.LLMResponse{
 			Content:           content,
 			GroundingMetadata: groundingMetadata,
