@@ -229,6 +229,120 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_LoadArtifactsFunctionCall(t 
 	}
 }
 
+func TestLoadArtifactsTool_ProcessRequest_Artifacts_SafeInlineData(t *testing.T) {
+	tests := []struct {
+		name              string
+		artifactName      string
+		part              *genai.Part
+		wantText          string
+		wantTextContains  []string
+		wantInlineMIME    string
+		wantInlineData    []byte
+		wantInlineCleared bool
+	}{
+		{
+			name:              "csv becomes text",
+			artifactName:      "data.csv",
+			part:              genai.NewPartFromBytes([]byte("a,b\n1,2\n"), "application/csv"),
+			wantText:          "a,b\n1,2\n",
+			wantInlineCleared: true,
+		},
+		{
+			name:           "pdf stays inline",
+			artifactName:   "report.pdf",
+			part:           genai.NewPartFromBytes([]byte("%PDF-1.7"), "application/pdf"),
+			wantInlineMIME: "application/pdf",
+			wantInlineData: []byte("%PDF-1.7"),
+		},
+		{
+			name:         "unsupported binary becomes placeholder",
+			artifactName: "deck.pptx",
+			part: genai.NewPartFromBytes(
+				[]byte{0x50, 0x4b, 0x03, 0x04},
+				"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+			),
+			wantTextContains: []string{
+				"deck.pptx",
+				"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+				"4 bytes",
+			},
+			wantInlineCleared: true,
+		},
+		{
+			name:              "empty mime valid utf8 becomes text",
+			artifactName:      "notes",
+			part:              genai.NewPartFromBytes([]byte("plain notes"), ""),
+			wantText:          "plain notes",
+			wantInlineCleared: true,
+		},
+		{
+			name:              "empty inline data becomes placeholder",
+			artifactName:      "empty.csv",
+			part:              genai.NewPartFromBytes(nil, "application/csv"),
+			wantTextContains:  []string{"empty.csv", "no inline data"},
+			wantInlineCleared: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loadArtifactsTool := loadartifactstool.New()
+			tc := createToolContext(t)
+			if _, err := tc.Artifacts().Save(t.Context(), tt.artifactName, tt.part); err != nil {
+				t.Fatalf("Failed to save artifact %s: %v", tt.artifactName, err)
+			}
+
+			llmRequest := &model.LLMRequest{
+				Contents: []*genai.Content{
+					{
+						Role: "model",
+						Parts: []*genai.Part{
+							genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+								"artifact_names": []string{tt.artifactName},
+							}),
+						},
+					},
+				},
+			}
+
+			requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+			if !ok {
+				t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+			}
+			if err := requestProcessor.ProcessRequest(tc, llmRequest); err != nil {
+				t.Fatalf("ProcessRequest failed: %v", err)
+			}
+
+			if len(llmRequest.Contents) != 2 {
+				t.Fatalf("Expected 2 contents, got: %v", llmRequest.Contents)
+			}
+			gotPart := llmRequest.Contents[1].Parts[1]
+			if tt.wantInlineMIME != "" {
+				if gotPart.InlineData == nil {
+					t.Fatal("Expected inline data, got nil")
+				}
+				if gotPart.InlineData.MIMEType != tt.wantInlineMIME {
+					t.Errorf("Inline MIME type = %q, want %q", gotPart.InlineData.MIMEType, tt.wantInlineMIME)
+				}
+				if diff := cmp.Diff(tt.wantInlineData, gotPart.InlineData.Data); diff != "" {
+					t.Errorf("Inline data diff (-want +got):\n%s", diff)
+				}
+			}
+			if tt.wantInlineCleared && gotPart.InlineData != nil {
+				t.Fatalf("Expected inline data to be cleared, got: %v", gotPart.InlineData)
+			}
+			if tt.wantText != "" && gotPart.Text != tt.wantText {
+				t.Errorf("Text = %q, want %q", gotPart.Text, tt.wantText)
+			}
+			for _, want := range tt.wantTextContains {
+				if !strings.Contains(gotPart.Text, want) {
+					t.Errorf("Text = %q, want substring %q", gotPart.Text, want)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing.T) {
 	loadArtifactsTool := loadartifactstool.New()
 
