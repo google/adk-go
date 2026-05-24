@@ -112,14 +112,6 @@ func TestA2AInputRequired(t *testing.T) {
 					p.SetMeta(adka2a.ToA2AMetaKey("type"), "function_call")
 					return p
 				}(),
-				func() *a2a.Part {
-					p := a2a.NewDataPart(map[string]any{
-						"name":     approvalToolName,
-						"response": map[string]any{"status": string(approvalStatusPending)},
-					})
-					p.SetMeta(adka2a.ToA2AMetaKey("type"), "function_response")
-					return p
-				}(),
 			},
 			wantSecondArtifactParts: a2a.ContentParts{
 				func() *a2a.Part {
@@ -288,7 +280,6 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 				genai.NewPartFromFunctionResponse(transferToolName, nil),
 				genai.NewPartFromText(modelTextRequiresApproval),
 				genai.NewPartFromFunctionCall(approvalToolName, nil),
-				genai.NewPartFromFunctionResponse(approvalToolName, map[string]any{"status": string(approvalStatusPending)}),
 			}, []string{}),
 			wantSecondArtifactParts: a2a.ContentParts{
 				func() *a2a.Part {
