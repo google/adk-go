@@ -64,6 +64,39 @@ func (c *vertexAiClient) Close() error {
 }
 
 func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateRequest) (*localSession, error) {
+	reasoningEngine, err := c.getReasoningEngineID(req.AppName)
+	if err != nil {
+		return nil, err
+	}
+	aeData := &vertexaiutil.AgentEngineData{
+		Location:        c.agentEngineData.Location,
+		ProjectID:       c.agentEngineData.ProjectID,
+		ReasoningEngine: reasoningEngine,
+	}
+	rpcReq, err := createSessionRequest(vertexaiutil.AgentEngineResource(aeData), req)
+	if err != nil {
+		return nil, err
+	}
+	lro, err := c.rpcClient.CreateSession(ctx, rpcReq)
+	if err != nil {
+		return nil, fmt.Errorf("error creating session: %w", err)
+	}
+
+	sessionID := req.SessionID
+	if sessionID == "" {
+		sessionID, err = sessionIDByOperationName(lro.Name())
+		if err != nil {
+			return nil, fmt.Errorf("error creating session: %w", err)
+		}
+	}
+	createdSession, err := c.waitForOperation(ctx, req.AppName, req.UserID, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("LRO for CreateSession failed: %w", err)
+	}
+	return createdSession, nil
+}
+
+func createSessionRequest(parent string, req *session.CreateRequest) (*aiplatformpb.CreateSessionRequest, error) {
 	pbSession := &aiplatformpb.Session{
 		UserId: req.UserID,
 	}
@@ -76,33 +109,11 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 		pbSession.SessionState = stateStruct
 	}
 
-	reasoningEngine, err := c.getReasoningEngineID(req.AppName)
-	if err != nil {
-		return nil, err
-	}
-	aeData := &vertexaiutil.AgentEngineData{
-		Location:        c.agentEngineData.Location,
-		ProjectID:       c.agentEngineData.ProjectID,
-		ReasoningEngine: reasoningEngine,
-	}
-	rpcReq := &aiplatformpb.CreateSessionRequest{
-		Parent:  vertexaiutil.AgentEngineResource(aeData),
-		Session: pbSession,
-	}
-	lro, err := c.rpcClient.CreateSession(ctx, rpcReq)
-	if err != nil {
-		return nil, fmt.Errorf("error creating session: %w", err)
-	}
-
-	sessionID, err := sessionIDByOperationName(lro.Name())
-	if err != nil {
-		return nil, fmt.Errorf("error creating session: %w", err)
-	}
-	createdSession, err := c.waitForOperation(ctx, req.AppName, req.UserID, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("LRO for CreateSession failed: %w", err)
-	}
-	return createdSession, nil
+	return &aiplatformpb.CreateSessionRequest{
+		Parent:    parent,
+		Session:   pbSession,
+		SessionId: req.SessionID,
+	}, nil
 }
 
 func isNotFoundError(err error) bool {
