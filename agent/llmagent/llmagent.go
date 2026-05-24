@@ -254,8 +254,9 @@ type Config struct {
 	InputSchema *genai.Schema
 	// The output schema when agent replies.
 	//
-	// NOTE: when this is set, agent can only reply and cannot use any tools,
-	// such as function tools, RAGs, agent transfer, etc.
+	// OutputSchema can be used with tools. If the selected model does not
+	// support combining response schemas with tools natively, the framework uses
+	// an internal set_model_response tool to collect the structured final reply.
 	OutputSchema *genai.Schema
 
 	// Callbacks are executed in the order they are provided.
