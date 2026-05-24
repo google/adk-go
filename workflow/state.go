@@ -75,12 +75,12 @@ const (
 // of these for every node the engine has touched.
 //
 // JSON-marshallable: NodeState is persisted across pause/resume
-// turns via session.State (see persistence.go). The Input and
-// PendingRequest.Payload fields are typed any and must therefore
-// be JSON-encodable for the persisted state to round-trip. Nodes
-// that need to carry binary data across a pause should store the
-// bytes via agent.Artifacts and stash a URI string in place of
-// the bytes, mirroring how the Live API surfaces audio.
+// turns via session.State (see persistence.go). The Input, Output,
+// and PendingRequest.Payload fields are typed any and must
+// therefore be JSON-encodable for the persisted state to
+// round-trip. Nodes that need to carry binary data across a pause
+// should store the bytes via agent.Artifacts and stash a URI
+// string in place of the bytes.
 type NodeState struct {
 	// Status is the current lifecycle position. See NodeStatus.
 	Status NodeStatus `json:"status"`
@@ -88,6 +88,11 @@ type NodeState struct {
 	// Input is the value most recently handed to the node's Run
 	// method. It is set when the node is scheduled.
 	Input any `json:"input,omitempty"`
+
+	// Output is the value the node emitted via
+	// Actions.StateDelta["output"]. Set when Status transitions
+	// to NodeCompleted.
+	Output any `json:"output,omitempty"`
 
 	// TriggeredBy is the name of the upstream node that produced
 	// the current Input. Empty for the initial START activation.
