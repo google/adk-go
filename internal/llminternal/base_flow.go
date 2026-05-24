@@ -607,17 +607,23 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
-
-			// Yield function responses before confirmation requests so consumers that
-			// pause for user approval still persist completed tool results.
-			if !yield(ev, nil) {
-				return
-			}
-
 			if toolConfirmationEvent != nil {
+				ev = removeRequestedConfirmationResponses(ev)
+				if ev != nil {
+					// Keep completed tool responses, but do not send placeholder
+					// responses for tool calls that still need user confirmation.
+					if !yield(ev, nil) {
+						return
+					}
+				}
 				if !yield(toolConfirmationEvent, nil) {
 					return
 				}
+				if ev == nil {
+					return
+				}
+			} else if !yield(ev, nil) {
+				return
 			}
 
 			// If the model response is structured, yield it as a final model response event.
@@ -1177,6 +1183,28 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 		return mergedEvent, err
 	}
 	return mergedEvent, nil
+}
+
+func removeRequestedConfirmationResponses(ev *session.Event) *session.Event {
+	if ev == nil || ev.LLMResponse.Content == nil || len(ev.Actions.RequestedToolConfirmations) == 0 {
+		return ev
+	}
+
+	parts := ev.LLMResponse.Content.Parts[:0]
+	for _, part := range ev.LLMResponse.Content.Parts {
+		if part.FunctionResponse != nil {
+			if _, ok := ev.Actions.RequestedToolConfirmations[part.FunctionResponse.ID]; ok {
+				continue
+			}
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	ev.LLMResponse.Content.Parts = parts
+	ev.Actions.RequestedToolConfirmations = nil
+	return ev
 }
 
 func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.ToolContext, tool tool.Tool, fArgs map[string]any, err error) (map[string]any, error) {
