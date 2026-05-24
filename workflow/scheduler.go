@@ -516,6 +516,9 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 
 	ns.Status = NodeCompleted
 	ns.Attempt = 0
+	if nr != nil && nr.hasOutput {
+		ns.Output = nr.output
+	}
 	// Release the accumulated re-entry response history; the node
 	// has finished and a future activation (if any, e.g. via
 	// loop-back routing) starts a fresh lifecycle.
@@ -544,7 +547,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 		input = ns.Input
 	}
 
-	for _, succ := range findSuccessors(s.graph, currentNode, input, routingEv) {
+	for _, succ := range findSuccessors(s.graph, s.state, currentNode, input, routingEv) {
 		s.scheduleNode(succ.node, succ.input, succ.triggeredBy)
 	}
 	return nil
@@ -573,8 +576,11 @@ type successor struct {
 //     Default edge fans out to both targets.
 //   - If every outgoing edge has a concrete Route and none matched,
 //     and no Default is present, the workflow silently dead-ends at
-//     this node — by design, mirroring adk-python's routing semantics.
-func findSuccessors(g *graph, currentNode Node, input any, event *session.Event) []successor {
+//     this node. The absence of a matching route is treated as a
+//     deliberate decision not to continue, not an error.
+//
+// JoinNode successors are gated by appendSuccessor; see its docs.
+func findSuccessors(g *graph, state *RunState, currentNode Node, input any, event *session.Event) []successor {
 	succs := g.successorsOf(currentNode)
 	if len(succs) == 0 {
 		return nil
@@ -589,7 +595,7 @@ func findSuccessors(g *graph, currentNode Node, input any, event *session.Event)
 			continue
 		}
 		if edge.Route == nil {
-			out = append(out, successor{node: edge.To, input: input, triggeredBy: from})
+			out = appendSuccessor(out, g, state, edge.To, input, from)
 			added[edge.To] = struct{}{}
 			continue
 		}
@@ -598,13 +604,49 @@ func findSuccessors(g *graph, currentNode Node, input any, event *session.Event)
 			continue
 		}
 		if event != nil && edge.Route.Matches(event) {
-			out = append(out, successor{node: edge.To, input: input, triggeredBy: from})
+			out = appendSuccessor(out, g, state, edge.To, input, from)
 			added[edge.To] = struct{}{}
 			concreteMatched = true
 		}
 	}
 	if !concreteMatched && defaultRouteNode != nil {
-		out = append(out, successor{node: defaultRouteNode, input: input, triggeredBy: from})
+		out = appendSuccessor(out, g, state, defaultRouteNode, input, from)
 	}
 	return out
+}
+
+// appendSuccessor records a routing match in the dispatch list.
+// Non-JoinNode targets are recorded as-is. A *JoinNode target is
+// recorded only when every declared predecessor has completed;
+// its input is replaced with the aggregated predecessor outputs.
+// A barrier-blocked JoinNode is silently skipped — a later
+// predecessor completion re-evaluates the barrier.
+func appendSuccessor(out []successor, g *graph, state *RunState, target Node, input any, triggeredBy string) []successor {
+	if _, isJoin := target.(*JoinNode); !isJoin {
+		return append(out, successor{node: target, input: input, triggeredBy: triggeredBy})
+	}
+	aggregated, ok := aggregatePredecessorOutputs(g, state, target)
+	if !ok {
+		return out
+	}
+	return append(out, successor{node: target, input: aggregated, triggeredBy: triggeredBy})
+}
+
+// aggregatePredecessorOutputs returns a map of predecessor name to
+// recorded Output for every predecessor of target. Returns
+// (nil, false) if any predecessor is not yet NodeCompleted; a
+// predecessor that completed without an output contributes a nil
+// value (same as the absence the predecessor itself emitted).
+func aggregatePredecessorOutputs(g *graph, state *RunState, target Node) (map[string]any, bool) {
+	predEdges := g.predecessorsOf(target)
+	aggregated := make(map[string]any, len(predEdges))
+	for _, edge := range predEdges {
+		name := edge.From.Name()
+		ns := state.Nodes[name]
+		if ns == nil || ns.Status != NodeCompleted {
+			return nil, false
+		}
+		aggregated[name] = ns.Output
+	}
+	return aggregated, true
 }
