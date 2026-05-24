@@ -107,8 +107,8 @@ func (m *hitlMockModel) GenerateContent(ctx context.Context, req *model.LLMReque
 //     SkipSummarization flag, which halts LLM generation immediately after tool responses are returned.
 //     The runner yields:
 //     a) A model response event containing the two original parallel function calls.
-//     b) A merged function response event containing the placeholder (unexecuted) tool responses.
-//     c) An aggregated tool confirmation event containing two adk_request_confirmation wrapper calls.
+//     b) An aggregated tool confirmation event containing two adk_request_confirmation wrapper calls.
+//     No function response is returned for the pending tool calls yet.
 //  2. Turn 2: The client simulates user confirmation by returning confirmation responses matching
 //     the unique wrapper call IDs. The RequestConfirmationRequestProcessor detects these, matches
 //     them back to the original tools, and concurrently executes the sensitive tools in parallel
@@ -173,12 +173,11 @@ func TestParallelFunctionCallsWithHITL(t *testing.T) {
 		turn1Events = append(turn1Events, ev)
 	}
 
-	// Expecting exactly 3 events:
+	// Expecting exactly 2 events:
 	// 1. ModelResponseEvent (yielding the two function calls secure_call_1 and secure_call_2)
-	// 2. Merged function response event (returning placeholder executed: false responses)
-	// 3. ToolConfirmationEvent (yielding two adk_request_confirmation calls)
-	if len(turn1Events) != 3 {
-		t.Fatalf("Expected 3 events in Turn 1, got %d", len(turn1Events))
+	// 2. ToolConfirmationEvent (yielding two adk_request_confirmation calls)
+	if len(turn1Events) != 2 {
+		t.Fatalf("Expected 2 events in Turn 1, got %d", len(turn1Events))
 	}
 
 	// Verify that the model event contains our parallel calls
@@ -187,35 +186,8 @@ func TestParallelFunctionCallsWithHITL(t *testing.T) {
 		t.Errorf("Expected model event to contain 2 parts (function calls), got %d", len(modelEvent.Content.Parts))
 	}
 
-	// Verify that the merged function response event contains the placeholder unexecuted responses
-	placeholderRespEvent := turn1Events[1]
-	if len(placeholderRespEvent.Content.Parts) != 2 {
-		t.Errorf("Expected placeholder function response event to contain 2 parts, got %d", len(placeholderRespEvent.Content.Parts))
-	}
-
-	expectedPlaceholders := []*genai.Part{
-		{
-			FunctionResponse: &genai.FunctionResponse{
-				Name:     "secure_action",
-				ID:       "secure_call_1",
-				Response: map[string]any{"error": `error tool "secure_action" requires confirmation, please approve or reject`},
-			},
-		},
-		{
-			FunctionResponse: &genai.FunctionResponse{
-				Name:     "secure_action",
-				ID:       "secure_call_2",
-				Response: map[string]any{"error": `error tool "secure_action" requires confirmation, please approve or reject`},
-			},
-		},
-	}
-
-	if diff := cmp.Diff(expectedPlaceholders, placeholderRespEvent.Content.Parts); diff != "" {
-		t.Errorf("Mismatch in placeholder tool responses (-want +got):\n%s", diff)
-	}
-
 	// Verify that the tool confirmation event has the confirmation wrapper calls
-	confirmEvent := turn1Events[2]
+	confirmEvent := turn1Events[1]
 	if len(confirmEvent.Content.Parts) != 2 {
 		t.Errorf("Expected tool confirmation event to contain 2 wrapper function calls, got %d", len(confirmEvent.Content.Parts))
 	}
@@ -383,11 +355,11 @@ func TestParallelFunctionCallsWithPartialHITL(t *testing.T) {
 		turn1Events = append(turn1Events, ev)
 	}
 
-	if len(turn1Events) != 3 {
-		t.Fatalf("Expected 3 events in Turn 1, got %d", len(turn1Events))
+	if len(turn1Events) != 2 {
+		t.Fatalf("Expected 2 events in Turn 1, got %d", len(turn1Events))
 	}
 
-	confirmEvent := turn1Events[2]
+	confirmEvent := turn1Events[1]
 	var confirmCallID1, confirmCallID2 string
 	for _, p := range confirmEvent.Content.Parts {
 		origCall, err := toolconfirmation.OriginalCallFrom(p.FunctionCall)
