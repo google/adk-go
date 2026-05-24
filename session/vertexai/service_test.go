@@ -44,7 +44,7 @@ func Test_vertexaiService(t *testing.T) {
 		SupportsUserProvidedSessionID: false,
 		ProvidesServerAssignedEventID: true,
 		AppName:                       EngineId,
-	} // VertexAI forbids custom IDs
+	} // The replay suite uses server-assigned IDs; custom ID proto mapping is covered by unit tests.
 	session_test.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		name := strings.ReplaceAll(t.Name(), "/", "_")
 		s, _ := emptyService(t, name, false)
