@@ -15,7 +15,9 @@
 package llminternal
 
 import (
+	"context"
 	"errors"
+	"iter"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -681,5 +683,33 @@ func TestPreprocess_Toolset(t *testing.T) {
 				t.Errorf("preprocess() model = %s, wantModel %s", req.Model, tc.wantModel)
 			}
 		})
+	}
+}
+
+func TestCallLLMUsesInvocationRunConfig(t *testing.T) {
+	var gotStream bool
+	f := &Flow{
+		Model: &mockModelForTest{
+			name: "test-model",
+			generateContent: func(_ context.Context, _ *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+				gotStream = stream
+				return func(yield func(*model.LLMResponse, error) bool) {
+					yield(&model.LLMResponse{}, nil)
+				}
+			},
+		},
+	}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+	})
+
+	for _, err := range f.callLLM(ctx, &model.LLMRequest{}, nil, nil) {
+		if err != nil {
+			t.Fatalf("callLLM() error = %v", err)
+		}
+	}
+
+	if !gotStream {
+		t.Fatal("callLLM() did not use streaming mode from InvocationContext.RunConfig()")
 	}
 }
