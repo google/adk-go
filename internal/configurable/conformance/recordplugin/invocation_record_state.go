@@ -92,7 +92,7 @@ func (s *invocationRecordState) StartToolRecording(id string, fc *genai.Function
 	s.pendingToolCalls[id] = fc
 }
 
-func (s *invocationRecordState) CompleteToolRecording(id string, agentName string, resp *genai.FunctionResponse) {
+func (s *invocationRecordState) CompleteToolRecording(id, agentName string, resp *genai.FunctionResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
