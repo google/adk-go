@@ -161,7 +161,7 @@ func (a *agent) SubAgents() []Agent {
 
 func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		spanCtx, span := telemetry.StartInvokeAgentSpan(ctx, a, ctx.Session().ID(), ctx.InvocationID())
+		spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationAgent{Agent: a})
 		yield, endSpan := telemetry.WrapYield(span, yield, func(span trace.Span, event *session.Event, err error) {
 			telemetry.TraceAgentResult(span, telemetry.TraceAgentResultParams{
 				ResponseEvent: event,
