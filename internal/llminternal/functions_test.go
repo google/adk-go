@@ -157,12 +157,12 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 							{
 								FunctionCall: &genai.FunctionCall{
 									Name: toolconfirmation.FunctionCallName,
-								Args: map[string]any{
-									"originalFunctionCall": confirmingFunctionCall,
-									"toolConfirmation": toolconfirmation.ToolConfirmation{
-										Hint: "Are you sure?",
+									Args: map[string]any{
+										"originalFunctionCall": confirmingFunctionCall,
+										"toolConfirmation": toolconfirmation.ToolConfirmation{
+											Hint: "Are you sure?",
+										},
 									},
-								},
 								},
 							},
 						},

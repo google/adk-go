@@ -68,14 +68,10 @@ func generateRequestConfirmationEvent(
 			Args: args,
 		}
 
-		part := &genai.Part{
-			FunctionCall: requestConfirmationFC,
-		}
-		if len(originalPart.ThoughtSignature) > 0 {
-			part.ThoughtSignature = originalPart.ThoughtSignature
-		}
-
-		parts = append(parts, part)
+		parts = append(parts, &genai.Part{
+			FunctionCall:     requestConfirmationFC,
+			ThoughtSignature: originalPart.ThoughtSignature,
+		})
 		longRunningToolIDs = append(longRunningToolIDs, requestConfirmationFC.ID)
 	}
 
