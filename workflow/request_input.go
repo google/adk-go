@@ -28,7 +28,12 @@ import (
 // by-ID dispatch can route the user's follow-up reply back to the
 // workflow agent that issued the request. Mirrors
 // toolconfirmation.FunctionCallName.
-const WorkflowInputFunctionCallName = "adk_request_workflow_input"
+//
+// This is a wire-format identifier shared with other ADK runtimes
+// and must not be changed without coordinated updates across them;
+// a session recorded by one runtime must round-trip through any
+// other runtime's resume dispatch.
+const WorkflowInputFunctionCallName = "adk_request_input"
 
 // NewRequestInputEvent constructs a session.Event that asks the
 // surrounding workflow to pause and surface a human-input prompt.
