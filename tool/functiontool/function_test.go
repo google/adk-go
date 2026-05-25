@@ -891,7 +891,6 @@ func TestToolConfirmationYieldsFunctionResponseBeforeConfirmation(t *testing.T) 
 
 	runner := testutil.NewTestAgentRunner(t, a)
 	sawFunctionResponse := false
-	sawConfirmation := false
 
 	for got, err := range runner.Run(t, "id", "message") {
 		// The mock model emits a sentinel error once exhausted; treat any
@@ -905,7 +904,6 @@ func TestToolConfirmationYieldsFunctionResponseBeforeConfirmation(t *testing.T) 
 				sawFunctionResponse = true
 			}
 			if part.FunctionCall != nil && part.FunctionCall.Name == toolconfirmation.FunctionCallName {
-				sawConfirmation = true
 				if !sawFunctionResponse {
 					t.Fatal("confirmation was yielded before the tool function response")
 				}
@@ -914,9 +912,7 @@ func TestToolConfirmationYieldsFunctionResponseBeforeConfirmation(t *testing.T) 
 		}
 	}
 
-	if !sawConfirmation {
-		t.Fatal("expected confirmation event")
-	}
+	t.Fatal("expected confirmation event")
 }
 
 // Mock types for TArgs and TResults
