@@ -55,8 +55,6 @@ func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*
 // captured at sub-scheduler construction. customRunID is empty to use
 // the auto-counter, or a user-supplied stable id (validated against
 // the rules in validateCustomRunID).
-//
-// Fresh execution only; resume support lands in a follow-up PR.
 func (s *dynamicSubScheduler) runNode(child Node, input any, customRunID string) (any, error) {
 	name := child.Name()
 	runID, err := s.resolveRunID(name, customRunID)
@@ -80,6 +78,15 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, customRunID string)
 		}
 		if ev == nil {
 			continue
+		}
+		// Stamp NodeInfo.Path so the top scheduler scopes the
+		// child's Output/Routes to the child (not the parent's
+		// accumulator). RequestedInput is promoted to the parent —
+		// see scheduler.handleEvent. Skip if the child already
+		// stamped NodeInfo (nested dynamic node yielding its own
+		// terminal event, dynamic_node.go).
+		if ev.NodeInfo == nil {
+			ev.NodeInfo = &session.NodeInfo{Path: childPath}
 		}
 		if ev.RequestedInput != nil {
 			interrupted = true
