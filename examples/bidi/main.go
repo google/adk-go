@@ -41,8 +41,6 @@ func main() {
 	log.SetOutput(os.Stdout)
 	ctx := context.Background()
 
-	// gemini-3.1-flash-live-preview
-	// gemini-2.5-flash-native-audio-preview-12-2025
 	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-live-preview", &genai.ClientConfig{
 		APIKey: os.Getenv("GOOGLE_API_KEY"),
 	})
@@ -80,31 +78,27 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	uiMode := true
+	// Create runner
+	ss := session.InMemoryService()
 
-	if uiMode {
-		// Create runner
-		ss := session.InMemoryService()
-
-		_, filename, _, ok := runtime.Caller(0)
-		if !ok {
-			log.Fatal("No caller information")
-		}
-		staticDir := filepath.Join(filepath.Dir(filename), "static")
-		fs := http.FileServer(http.Dir(staticDir))
-		http.Handle("/", fs)
-		http.Handle("/static/", http.StripPrefix("/static/", fs))
-
-		controller := controllers.NewRuntimeAPIController(ss, nil, agent.NewSingleLoader(a), nil, 0, runner.PluginConfig{}, true)
-
-		http.HandleFunc("/run_live", func(w http.ResponseWriter, req *http.Request) {
-			err := controller.RunLiveHandler(w, req)
-			if err != nil {
-				log.Printf("RunLiveHandler failed: %v", err)
-			}
-		})
-
-		fmt.Println("Serving UI on http://localhost:8081")
-		log.Fatal(http.ListenAndServe(":8081", nil))
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		log.Fatal("No caller information")
 	}
+	staticDir := filepath.Join(filepath.Dir(filename), "static")
+	fs := http.FileServer(http.Dir(staticDir))
+	http.Handle("/", fs)
+	http.Handle("/static/", http.StripPrefix("/static/", fs))
+
+	controller := controllers.NewRuntimeAPIController(ss, nil, agent.NewSingleLoader(a), nil, 0, runner.PluginConfig{}, true)
+
+	http.HandleFunc("/run_live", func(w http.ResponseWriter, req *http.Request) {
+		err := controller.RunLiveHandler(w, req)
+		if err != nil {
+			log.Printf("RunLiveHandler failed: %v", err)
+		}
+	})
+
+	fmt.Println("Serving UI on http://localhost:8081")
+	log.Fatal(http.ListenAndServe(":8081", nil))
 }
