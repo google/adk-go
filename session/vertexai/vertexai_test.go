@@ -17,6 +17,7 @@ package vertexai
 import (
 	"testing"
 
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/util/vertexai"
 )
 
@@ -102,5 +103,28 @@ func TestGetReasoningEngineID(t *testing.T) {
 				t.Errorf("getReasoningEngineID() got = %v, want %v", got, tt.expectedID)
 			}
 		})
+	}
+}
+
+func TestCreateSessionRequest_UserProvidedSessionID(t *testing.T) {
+	got, err := createSessionRequest("projects/test/locations/us-central1/reasoningEngines/123", &session.CreateRequest{
+		AppName:   "test-app",
+		UserID:    "test-user",
+		SessionID: "a2a-context-id",
+		State: map[string]any{
+			"key": "value",
+		},
+	})
+	if err != nil {
+		t.Fatalf("createSessionRequest() error = %v", err)
+	}
+	if got.SessionId != "a2a-context-id" {
+		t.Errorf("SessionId = %q, want %q", got.SessionId, "a2a-context-id")
+	}
+	if got.Session.GetUserId() != "test-user" {
+		t.Errorf("Session.UserId = %q, want %q", got.Session.GetUserId(), "test-user")
+	}
+	if got.Session.GetSessionState().AsMap()["key"] != "value" {
+		t.Errorf("SessionState[key] = %v, want %q", got.Session.GetSessionState().AsMap()["key"], "value")
 	}
 }
