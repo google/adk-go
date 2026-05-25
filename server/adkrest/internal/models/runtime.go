@@ -50,3 +50,18 @@ func (req RunAgentRequest) AssertRunAgentRequestRequired() error {
 
 	return nil
 }
+
+// blob represents a genai.blob sent by the client, explicitly mapping mime_type.
+type blob struct {
+	MIMEType string `json:"mime_type,omitempty"`
+	Data     []byte `json:"data,omitempty"`
+}
+
+// LiveRequest represents the client request format for real-time interactions over WebSocket.
+type LiveRequest struct {
+	Content       *genai.Content       `json:"content,omitempty"`
+	Blob          *blob                `json:"blob,omitempty"`
+	ActivityStart *genai.ActivityStart `json:"activityStart,omitempty"`
+	ActivityEnd   *genai.ActivityEnd   `json:"activityEnd,omitempty"`
+	Close         bool                 `json:"close,omitempty"`
+}

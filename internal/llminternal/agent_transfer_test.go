@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -47,6 +48,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	}
 
 	check := func(t *testing.T, curAgent, root agent.Agent, wantParent string, wantAgents, unwantAgents []string) {
+		t.Helper()
 		req := &model.LLMRequest{}
 
 		parents, err := parentmap.New(root)
@@ -117,6 +119,22 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			})
 		}) {
 			t.Errorf("instruction does not include subagents, got: %s", strings.Join(instructions, "\n"))
+		}
+		if len(wantAgents) > 0 {
+			transferTool, ok := gotTool.(*llminternal.TransferToAgentTool)
+			if !ok {
+				t.Fatalf("failed to type convert tool %v, got %T", wantToolName, gotTool)
+			}
+			declaration := transferTool.Declaration()
+			gotEnums := slices.Clone(declaration.Parameters.Properties["agent_name"].Enum)
+			wantEnums := slices.Clone(wantAgents)
+			// Add parent to the list of agents to transfer to, if not already present.
+			if wantParent != "" && !slices.Contains(wantAgents, wantParent) {
+				wantEnums = append(wantEnums, wantParent)
+			}
+			if diff := cmp.Diff(wantEnums, gotEnums, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+				t.Fatalf("failed to set agent_name enums (-want, +got): %v", diff)
+			}
 		}
 		if len(unwantAgents) > 0 && slices.ContainsFunc(instructions, func(s string) bool {
 			return slices.ContainsFunc(unwantAgents, func(unwanted string) bool {

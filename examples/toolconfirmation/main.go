@@ -79,7 +79,7 @@ var (
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{})
+	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-lite", &genai.ClientConfig{})
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
