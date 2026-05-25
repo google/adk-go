@@ -269,6 +269,17 @@ func (pm *PluginManager) RunOnModelErrorCallback(cctx agent.CallbackContext, llm
 	return nil, nil
 }
 
+// RunOnPipelineErrorCallback runs the OnPipelineErrorCallback for all plugins.
+func (pm *PluginManager) RunOnPipelineErrorCallback(cctx agent.InvocationContext, err error) error {
+	for _, plugin := range pm.plugins {
+		callback := plugin.OnPipelineErrorCallback()
+		if callback != nil {
+			err = callback(cctx, err)
+		}
+	}
+	return err
+}
+
 // Close calls the CloseFunc on all registered plugins.
 func (pm *PluginManager) Close() error {
 	var errors []error
