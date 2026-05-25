@@ -36,7 +36,7 @@ import (
 const compatApiPath = "/a2a/invoke"
 
 // apiPath is a suffix used to build an A2A invocation URL for 1.0
-const apiPath = "/a2a/v2/invoke"
+const apiPath = "/a2a/v1/invoke"
 
 // a2aConfig contains parameters for launching ADK A2A server
 type a2aConfig struct {
