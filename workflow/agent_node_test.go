@@ -54,9 +54,7 @@ func TestAgentNode_New(t *testing.T) {
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				event := session.NewEvent(ctx.InvocationID())
-				event.Actions.StateDelta = map[string]any{
-					"output": map[string]any{"result": "success"},
-				}
+				event.Output = map[string]any{"result": "success"}
 				yield(event, nil)
 			}
 		},
@@ -162,9 +160,7 @@ func TestAgentNode_Run(t *testing.T) {
 								val = uc.Parts[0].Text
 							}
 							event := session.NewEvent(ctx.InvocationID())
-							event.Actions.StateDelta = map[string]any{
-								"output": map[string]any{"result": val},
-							}
+							event.Output = map[string]any{"result": val}
 							yield(event, nil)
 						}
 					},
@@ -200,9 +196,7 @@ func TestAgentNode_Run(t *testing.T) {
 								val = uc.Parts[0].Text
 							}
 							event := session.NewEvent(ctx.InvocationID())
-							event.Actions.StateDelta = map[string]any{
-								"output": val,
-							}
+							event.Output = val
 							yield(event, nil)
 						}
 					},
@@ -271,12 +265,7 @@ func TestAgentNode_Run(t *testing.T) {
 				}
 				count++
 
-				output, ok := ev.Actions.StateDelta["output"]
-				if !ok {
-					t.Fatal("expected output in state delta")
-				}
-
-				got = tc.extract(t, output)
+				got = tc.extract(t, ev.Output)
 			}
 
 			if tc.wantErr != "" {
@@ -340,9 +329,7 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 						}
 
 						event := session.NewEvent(ctx.InvocationID())
-						event.Actions.StateDelta = map[string]any{
-							"output": map[string]any{"result": val * 2},
-						}
+						event.Output = map[string]any{"result": val * 2}
 						yield(event, nil)
 					}
 				},
@@ -382,10 +369,8 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 					if err != nil {
 						t.Fatalf("workflow failed: %v", err)
 					}
-					if ev.Actions.StateDelta != nil {
-						if out, ok := ev.Actions.StateDelta["output"]; ok {
-							outB = out
-						}
+					if ev.Output != nil {
+						outB = ev.Output
 					}
 				}
 

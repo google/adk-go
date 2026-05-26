@@ -297,7 +297,7 @@ func askerForSequence(name string, ids []string, finalOutput any) (*reentryNode,
 
 			// All answered: emit the terminal output.
 			ev := session.NewEvent(ctx.InvocationID())
-			ev.Actions.StateDelta["output"] = finalOutput
+			ev.Output = finalOutput
 			yield(ev, nil)
 		}
 	})

@@ -109,12 +109,8 @@ func TestFunctionNode(t *testing.T) {
 		}
 		count++
 
-		output, ok := ev.Actions.StateDelta["output"]
-		if !ok {
-			t.Errorf("expected output in state delta")
-		}
-		if output != "HELLO" {
-			t.Errorf("expected output 'HELLO', got %v", output)
+		if ev.Output != "HELLO" {
+			t.Errorf("expected Output 'HELLO', got %v", ev.Output)
 		}
 	}
 
@@ -158,10 +154,8 @@ func TestSequentialWorkflow(t *testing.T) {
 		}
 		count++
 
-		if ev.Actions.StateDelta != nil {
-			if out, ok := ev.Actions.StateDelta["output"]; ok {
-				lastOutput = out
-			}
+		if ev.Output != nil {
+			lastOutput = ev.Output
 		}
 	}
 

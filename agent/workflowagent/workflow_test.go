@@ -147,11 +147,9 @@ func TestWorkflowAgent(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		if ev.Actions.StateDelta != nil {
-			if out, ok := ev.Actions.StateDelta["output"]; ok {
-				lastOutput = out
-				nodeEvents++
-			}
+		if ev.Output != nil {
+			lastOutput = ev.Output
+			nodeEvents++
 		}
 	}
 
