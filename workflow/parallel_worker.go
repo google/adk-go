@@ -31,6 +31,7 @@ type ParallelWorker struct {
 	BaseNode
 	wrapped        Node
 	maxConcurrency int
+	retryCfg       *RetryConfig
 }
 
 // NewParallelWorker creates a new ParallelWorker node.
@@ -39,10 +40,14 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 	if wrapped.Config().RetryConfig != nil {
 		return nil, fmt.Errorf("ParallelWorker %s: wrapped node %s cannot have RetryConfig", name, wrapped.Name())
 	}
+	retryCfg := cfg.RetryConfig
+	cfg.RetryConfig = nil // Hide from scheduler, so it does not try to retry the node itself.
+
 	return &ParallelWorker{
 		BaseNode:       BaseNode{name: name, config: cfg},
 		wrapped:        wrapped,
 		maxConcurrency: maxConcurrency,
+		retryCfg:       retryCfg,
 	}, nil
 }
 
@@ -159,7 +164,7 @@ func (n *ParallelWorker) runWorker(ctx agent.InvocationContext, idx int, item an
 		}
 	}()
 
-	retryCfg := n.Config().RetryConfig
+	retryCfg := n.retryCfg
 	failedAttempts := 0
 
 	for {

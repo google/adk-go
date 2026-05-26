@@ -534,3 +534,58 @@ func (n *delayedMultiOutputTestNode) Run(ctx agent.InvocationContext, input any)
 func (n *delayedMultiOutputTestNode) Name() string        { return "delayed_multi_output" }
 func (n *delayedMultiOutputTestNode) Description() string { return "" }
 func (n *delayedMultiOutputTestNode) Config() NodeConfig  { return defaultNodeConfig }
+
+func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
+	var wrappedAttempts int32
+
+	wrapped := NewFunctionNode("worker", func(ctx agent.InvocationContext, input string) (string, error) {
+		atomic.AddInt32(&wrappedAttempts, 1)
+		return "", errors.New("persistent failure")
+	}, defaultNodeConfig)
+
+	rc := DefaultRetryConfig()
+	rc.MaxAttempts = 2
+	rc.InitialDelay = 0
+	rc.MaxDelay = 0
+	rc.Jitter = 0
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, NodeConfig{RetryConfig: rc})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	splitFn := func(ctx agent.InvocationContext, input string) ([]any, error) {
+		return []any{input}, nil
+	}
+	splitNode := NewFunctionNode("split", splitFn, defaultNodeConfig)
+
+	edges := []Edge{
+		{From: Start, To: splitNode},
+		{From: splitNode, To: pw},
+	}
+
+	w := mustNew(t, edges)
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{
+		Parts: []*genai.Part{{Text: "a"}},
+	}
+
+	events := w.Run(mockCtx)
+
+	var gotErr error
+	for _, err := range events {
+		if err != nil {
+			gotErr = err
+			break
+		}
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if atomic.LoadInt32(&wrappedAttempts) != 2 {
+		t.Errorf("expected 2 attempts for wrapped node, got %d (scheduler likely retried the node)", atomic.LoadInt32(&wrappedAttempts))
+	}
+}
