@@ -196,4 +196,8 @@ func (m *geminiModel) GetGoogleLLMVariant() genai.Backend {
 	return m.client.ClientConfig().Backend
 }
 
+func (m *geminiModel) Client() *genai.Client {
+	return m.client
+}
+
 var _ googlellm.GoogleLLM = &geminiModel{}

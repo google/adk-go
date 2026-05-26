@@ -75,12 +75,12 @@ const (
 // of these for every node the engine has touched.
 //
 // JSON-marshallable: NodeState is persisted across pause/resume
-// turns via session.State (see persistence.go). The Input and
-// PendingRequest.Payload fields are typed any and must therefore
-// be JSON-encodable for the persisted state to round-trip. Nodes
-// that need to carry binary data across a pause should store the
-// bytes via agent.Artifacts and stash a URI string in place of
-// the bytes, mirroring how the Live API surfaces audio.
+// turns via session.State (see persistence.go). The Input, Output,
+// and PendingRequest.Payload fields are typed any and must
+// therefore be JSON-encodable for the persisted state to
+// round-trip. Nodes that need to carry binary data across a pause
+// should store the bytes via agent.Artifacts and stash a URI
+// string in place of the bytes.
 type NodeState struct {
 	// Status is the current lifecycle position. See NodeStatus.
 	Status NodeStatus `json:"status"`
@@ -88,6 +88,11 @@ type NodeState struct {
 	// Input is the value most recently handed to the node's Run
 	// method. It is set when the node is scheduled.
 	Input any `json:"input,omitempty"`
+
+	// Output is the value the node emitted via
+	// Actions.StateDelta["output"]. Set when Status transitions
+	// to NodeCompleted.
+	Output any `json:"output,omitempty"`
 
 	// TriggeredBy is the name of the upstream node that produced
 	// the current Input. Empty for the initial START activation.
@@ -98,6 +103,22 @@ type NodeState struct {
 	// NodeWaiting and the wait was caused by a human-input request
 	// (as opposed to a fan-in barrier).
 	PendingRequest *session.RequestInput `json:"pendingRequest,omitempty"`
+
+	// Attempt is the number of times this node has been failed.
+	Attempt int `json:"attempt,omitempty"`	
+
+	// ResumedInputs accumulates response payloads for re-entry-mode
+	// nodes that yield RequestInput more than once during a single
+	// activation lifecycle. Each Resume call adds the new response
+	// keyed by its InterruptID. The map is exposed to the node via
+	// ctx.ResumedInput on every re-entry activation, so the node
+	// can observe responses to all prior requests, not only the
+	// most recent one.
+	//
+	// Cleared when the node transitions to NodeCompleted; absent
+	// for handoff-mode nodes (where successors receive the response
+	// as input and the asker never re-runs).
+	ResumedInputs map[string]any `json:"resumedInputs,omitempty"`
 }
 
 // RunState is the per-invocation lifecycle state for a workflow

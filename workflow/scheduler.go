@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
@@ -77,6 +78,9 @@ type scheduler struct {
 
 	// Per-node cancel funcs. Owned by the consumer goroutine.
 	runCancels map[string]context.CancelFunc
+
+	// Timers for scheduled retries. Owned by the consumer goroutine.
+	retryTimers map[string]*time.Timer
 
 	// eventQueue carries events and completions from producer
 	// goroutines to the consumer.
@@ -173,6 +177,15 @@ type completionItem struct {
 
 func (completionItem) isQueueItem() {}
 
+// retryItem signals that a node should be retried after a delay.
+type retryItem struct {
+	node        Node
+	input       any
+	triggeredBy string
+}
+
+func (retryItem) isQueueItem() {}
+
 // newScheduler returns an initialised scheduler ready for the
 // consumer to drive. The caller is responsible for seeding the
 // initial trigger (typically Start with the user input).
@@ -183,6 +196,7 @@ func newScheduler(parent agent.InvocationContext, g *graph) *scheduler {
 		nodesByName: buildNodesByName(g),
 		runsByName:  map[string]*nodeRun{},
 		runCancels:  map[string]context.CancelFunc{},
+		retryTimers: map[string]*time.Timer{},
 		eventQueue:  make(chan queueItem, defaultEventQueueCapacity),
 		parentCtx:   parent,
 	}
@@ -210,6 +224,18 @@ func buildNodesByName(g *graph) map[string]Node {
 //
 // scheduleNode runs only on the consumer goroutine.
 func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
+	s.scheduleResumedNode(n, input, triggeredBy, nil)
+}
+
+// scheduleResumedNode is like scheduleNode but additionally
+// injects resumeInputs into the per-node context, so re-entry
+// nodes can read the user-supplied response payload via
+// ctx.ResumedInput(interruptID). resumeInputs is keyed by
+// InterruptID; nil disables re-entry semantics and yields the same
+// behaviour as scheduleNode.
+//
+// scheduleResumedNode runs only on the consumer goroutine.
+func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy string, resumeInputs map[string]any) {
 	name := n.Name()
 
 	// Per-node context: WithTimeout when Config().Timeout > 0,
@@ -226,7 +252,7 @@ func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
 	} else {
 		nodeCtx, cancel = context.WithCancel(s.parentCtx)
 	}
-	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), triggeredBy)
+	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), resumeInputs)
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
@@ -238,6 +264,19 @@ func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
 	s.wg.Add(1)
 
 	go runNode(s.eventQueue, &s.wg, name, n, perNodeCtx, input)
+}
+
+// scheduleRetry schedules a retry for node n after the given delay.
+func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy string, delay time.Duration) {
+	timer := time.AfterFunc(delay, func() {
+		go func() {
+			select {
+			case s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy}:
+			case <-s.parentCtx.Done():
+			}
+		}()
+	})
+	s.retryTimers[n.Name()] = timer
 }
 
 // runNode is the per-node goroutine wrapper. It drives the node's
@@ -303,6 +342,10 @@ func (s *scheduler) cancelAll() {
 	for _, cancel := range s.runCancels {
 		cancel()
 	}
+	for _, t := range s.retryTimers {
+		t.Stop()
+	}
+	s.retryTimers = nil
 }
 
 // run is the single-consumer loop. It drains the eventQueue, applies
@@ -322,8 +365,20 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	var pendingErr error // first non-nil node error; surfaced after drain
 	draining := false    // true once cancelAll has run; remaining queue items are drained without yielding or scheduling new successors
 
-	for len(s.runsByName) > 0 {
-		item := <-s.eventQueue
+	doneChan := s.parentCtx.Done()
+
+	for len(s.runsByName) > 0 || len(s.retryTimers) > 0 {
+		var item queueItem
+		select {
+		case item = <-s.eventQueue:
+		case <-doneChan:
+			if !draining {
+				draining = true
+				s.cancelAll()
+			}
+			doneChan = nil // Disable this case so we don't busy loop
+		}
+
 		switch it := item.(type) {
 		case eventItem:
 			s.handleEvent(it)
@@ -341,6 +396,11 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 					draining = true
 					s.cancelAll()
 				}
+			}
+		case retryItem:
+			delete(s.retryTimers, it.node.Name())
+			if !draining {
+				s.scheduleNode(it.node, it.input, it.triggeredBy)
 			}
 		}
 	}
@@ -407,6 +467,9 @@ func (s *scheduler) handleEvent(it eventItem) {
 func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool) error {
 	ns := s.state.EnsureNode(it.nodeName)
 	nr := s.runsByName[it.nodeName]
+	// For retryable nodes still delete them from run variables. If the node is retried,
+	// it will get a fresh accumulator in scheduleNode to avoid ErrMultipleOutputs
+	// from partial results of this failed run.
 	delete(s.runsByName, it.nodeName)
 	delete(s.runCancels, it.nodeName)
 
@@ -415,6 +478,23 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 		return nil // sibling cancellation; not the original error
 	}
 	if it.err != nil {
+		currentNode := s.nodesByName[it.nodeName]
+		if currentNode != nil {
+			cfg := currentNode.Config()
+			if cfg.RetryConfig != nil {
+				ns.Attempt = ns.Attempt + 1
+
+				if ShouldRetry(cfg.RetryConfig, it.err, ns.Attempt) {
+					delay := CalculateDelay(cfg.RetryConfig, ns.Attempt)
+					ns.Status = NodePending
+					s.scheduleRetry(currentNode, ns.Input, ns.TriggeredBy, delay)
+					// Return nil to continue the scheduler loop. Successors will
+					// be scheduled only when a retry attempt eventually succeeds
+					// and reaches the bottom of this function.
+					return nil // Don't fail the workflow
+				}
+			}
+		}
 		ns.Status = NodeFailed
 		return it.err
 	}
@@ -435,6 +515,14 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 	}
 
 	ns.Status = NodeCompleted
+	ns.Attempt = 0
+	if nr != nil && nr.hasOutput {
+		ns.Output = nr.output
+	}
+	// Release the accumulated re-entry response history; the node
+	// has finished and a future activation (if any, e.g. via
+	// loop-back routing) starts a fresh lifecycle.
+	ns.ResumedInputs = nil
 
 	if !scheduleSuccessors {
 		return nil
@@ -459,15 +547,16 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 		input = ns.Input
 	}
 
-	for _, succ := range findSuccessors(s.graph, currentNode, input, routingEv) {
+	for _, succ := range findSuccessors(s.graph, s.state, currentNode, input, routingEv) {
 		s.scheduleNode(succ.node, succ.input, succ.triggeredBy)
 	}
 	return nil
 }
 
 // successor is the per-target dispatch tuple produced by
-// findSuccessors. The triggeredBy field carries the upstream node's
-// name for downstream visibility via ctx.TriggeredBy().
+// findSuccessors. The triggeredBy field carries the upstream
+// node's name for persistence on NodeState (used by Resume to
+// reconstruct the activation chain across pause/resume turns).
 type successor struct {
 	node        Node
 	input       any
@@ -487,8 +576,11 @@ type successor struct {
 //     Default edge fans out to both targets.
 //   - If every outgoing edge has a concrete Route and none matched,
 //     and no Default is present, the workflow silently dead-ends at
-//     this node — by design, mirroring adk-python's routing semantics.
-func findSuccessors(g *graph, currentNode Node, input any, event *session.Event) []successor {
+//     this node. The absence of a matching route is treated as a
+//     deliberate decision not to continue, not an error.
+//
+// JoinNode successors are gated by appendSuccessor; see its docs.
+func findSuccessors(g *graph, state *RunState, currentNode Node, input any, event *session.Event) []successor {
 	succs := g.successorsOf(currentNode)
 	if len(succs) == 0 {
 		return nil
@@ -503,7 +595,7 @@ func findSuccessors(g *graph, currentNode Node, input any, event *session.Event)
 			continue
 		}
 		if edge.Route == nil {
-			out = append(out, successor{node: edge.To, input: input, triggeredBy: from})
+			out = appendSuccessor(out, g, state, edge.To, input, from)
 			added[edge.To] = struct{}{}
 			continue
 		}
@@ -512,13 +604,49 @@ func findSuccessors(g *graph, currentNode Node, input any, event *session.Event)
 			continue
 		}
 		if event != nil && edge.Route.Matches(event) {
-			out = append(out, successor{node: edge.To, input: input, triggeredBy: from})
+			out = appendSuccessor(out, g, state, edge.To, input, from)
 			added[edge.To] = struct{}{}
 			concreteMatched = true
 		}
 	}
 	if !concreteMatched && defaultRouteNode != nil {
-		out = append(out, successor{node: defaultRouteNode, input: input, triggeredBy: from})
+		out = appendSuccessor(out, g, state, defaultRouteNode, input, from)
 	}
 	return out
+}
+
+// appendSuccessor records a routing match in the dispatch list.
+// Non-JoinNode targets are recorded as-is. A *JoinNode target is
+// recorded only when every declared predecessor has completed;
+// its input is replaced with the aggregated predecessor outputs.
+// A barrier-blocked JoinNode is silently skipped — a later
+// predecessor completion re-evaluates the barrier.
+func appendSuccessor(out []successor, g *graph, state *RunState, target Node, input any, triggeredBy string) []successor {
+	if _, isJoin := target.(*JoinNode); !isJoin {
+		return append(out, successor{node: target, input: input, triggeredBy: triggeredBy})
+	}
+	aggregated, ok := aggregatePredecessorOutputs(g, state, target)
+	if !ok {
+		return out
+	}
+	return append(out, successor{node: target, input: aggregated, triggeredBy: triggeredBy})
+}
+
+// aggregatePredecessorOutputs returns a map of predecessor name to
+// recorded Output for every predecessor of target. Returns
+// (nil, false) if any predecessor is not yet NodeCompleted; a
+// predecessor that completed without an output contributes a nil
+// value (same as the absence the predecessor itself emitted).
+func aggregatePredecessorOutputs(g *graph, state *RunState, target Node) (map[string]any, bool) {
+	predEdges := g.predecessorsOf(target)
+	aggregated := make(map[string]any, len(predEdges))
+	for _, edge := range predEdges {
+		name := edge.From.Name()
+		ns := state.Nodes[name]
+		if ns == nil || ns.Status != NodeCompleted {
+			return nil, false
+		}
+		aggregated[name] = ns.Output
+	}
+	return aggregated, true
 }
