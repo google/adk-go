@@ -605,6 +605,36 @@ func TestToSessionEvent(t *testing.T) {
 				Branch: branch,
 			},
 		},
+		{
+			name: "input-required task status with err message and long-running tool",
+			input: &a2a.TaskStatusUpdateEvent{
+				TaskID:    taskID,
+				ContextID: contextID,
+				Status: a2a.TaskStatus{
+					State: a2a.TaskStateInputRequired,
+					Message: a2a.NewMessage(a2a.MessageRoleAgent,
+						&a2a.Part{Content: a2a.Text("requesting input"), Metadata: map[string]any{metadataIsErrMessageKey: true}},
+						func() *a2a.Part {
+							p := a2a.NewDataPart(map[string]any{"id": "tool_lr", "name": "LongRunning", "args": map[string]any{}})
+							p.Metadata = map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionCall, a2aDataPartMetaLongRunningKey: true}
+							return p
+						}(),
+					),
+				},
+			},
+			want: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: genai.NewContentFromParts([]*genai.Part{
+						{FunctionCall: &genai.FunctionCall{ID: "tool_lr", Name: "LongRunning", Args: map[string]any{}}},
+					}, genai.RoleModel),
+					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
+					TurnComplete:   true,
+				},
+				LongRunningToolIDs: []string{"tool_lr"},
+				Author:             agentName,
+				Branch:             branch,
+			},
+		},
 	}
 
 	ignoreFields := []cmp.Option{

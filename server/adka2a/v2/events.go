@@ -410,6 +410,6 @@ func convertStatusMessage(ctx agent.InvocationContext, event a2a.Event, status a
 	return &convertedStatusMessage{
 		errorMessage:       errMessage,
 		parts:              filterNilParts(convertedParts),
-		longRunningToolIDs: getLongRunningToolIDs(status.Message.Parts, convertedParts),
+		longRunningToolIDs: getLongRunningToolIDs(parts, convertedParts),
 	}, nil
 }
