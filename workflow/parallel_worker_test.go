@@ -217,7 +217,6 @@ func TestParallelWorker_SuppressIntermediateEvents(t *testing.T) {
 	}
 }
 
-
 func TestParallelWorker_WorkflowIntegration(t *testing.T) {
 	splitFn := func(ctx agent.InvocationContext, input string) ([]any, error) {
 		parts := strings.Split(input, ",")

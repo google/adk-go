@@ -49,10 +49,18 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 // Run executes the wrapped node in parallel for each item in the input list.
 // It aggregates the "output" from each wrapped node execution into a list and
 // yields a single final event with the aggregated list as output.
-// In case the wrapped node produces more then one output event, they will be
-// aggregated into a list, and the final result will be a multi dimensional list.
+//
+// RetryConfig in the wrapped nodes are not allowed, only the parent node (ParallelWorker)
+// will be respected. Each failed input will be retried based on the RetryConfig independently from other inputs.
+// Which means for the input: []any{"a", "b", "c"}, if "b" always fails, and MaxAttempt is 3
+// the ParallelWorker will perform 1 ("a") + 3 ("b" retried) + 1 ("c") = 5 calls in total.
+//
 // If any of the wrapped node executions returns a non-retryable error, the workflow
 // will fail fast, cancel other in-flight workers, and return this first encountered error.
+//
+// In case the wrapped node produces more then one output event, they will be
+// aggregated into a list, and the final result will be a multi dimensional list.
+//
 // Intermediate non-output events emitted by the wrapped node are suppressed.
 func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
@@ -175,7 +183,8 @@ func (n *ParallelWorker) runWorker(ctx agent.InvocationContext, idx int, item an
 			return
 		}
 
-		// Failure
+		// Failure, check if the retry config is configured.
+		// If so, follow the retry logic and repeat the execution of the wrapped node on failed input.
 		failedAttempts++
 		if ShouldRetry(retryCfg, runErr, failedAttempts) {
 			delay := CalculateDelay(retryCfg, failedAttempts)
