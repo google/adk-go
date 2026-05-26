@@ -101,7 +101,7 @@ type scheduler struct {
 // the error at completion.
 type nodeRun struct {
 	routingEvent *session.Event        // at most one; multiple is an error
-	output       any                   // single StateDelta["output"]; nil if hasOutput is false
+	output       any                   // single Event.Output; nil if hasOutput is false
 	hasOutput    bool                  // distinguishes "no output yet" from "output was nil"
 	inputRequest *session.RequestInput // at most one human-input request; multiple is an error
 	err          error                 // set on duplicate output, duplicate routing event, or duplicate input request
@@ -432,10 +432,8 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev.RequestedInput != nil {
 		nr.setInputRequest(it.ev.RequestedInput, it.nodeName)
 	}
-	if it.ev.Actions.StateDelta != nil {
-		if out, ok := it.ev.Actions.StateDelta["output"]; ok {
-			nr.setOutput(out, it.nodeName)
-		}
+	if it.ev.Output != nil {
+		nr.setOutput(it.ev.Output, it.nodeName)
 	}
 }
 

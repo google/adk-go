@@ -113,16 +113,7 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 					t.Fatal("expected error, got nil")
 				}
 
-				output, ok := ev.Actions.StateDelta["output"]
-				if !ok {
-					t.Fatal("expected output in state delta")
-				}
-
-				if diff := cmp.Diff(output, ev.Output); diff != "" {
-					t.Errorf("ev.Output mismatch (-stateDelta +Output):\n%s", diff)
-				}
-
-				if diff := cmp.Diff(tc.wantOutput, output); diff != "" {
+				if diff := cmp.Diff(tc.wantOutput, ev.Output); diff != "" {
 					t.Errorf("output mismatch (-want +got):\n%s", diff)
 				}
 			}

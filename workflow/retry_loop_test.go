@@ -40,7 +40,7 @@ func (n *retryLoopTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq
 		calls := n.calls.Add(1)
 
 		// Make 2 failing calls and one successful call in each execution of the node.
-		if calls % 3 != 0 {
+		if calls%3 != 0 {
 			yield(nil, fmt.Errorf("fail attempt %d", calls))
 			return
 		}
@@ -52,7 +52,7 @@ func (n *retryLoopTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq
 		} else {
 			ev.Routes = []string{"loop"}
 		}
-		ev.Actions.StateDelta["output"] = fmt.Sprintf("%v:%s", input, n.Name())
+		ev.Output = fmt.Sprintf("%v:%s", input, n.Name())
 		yield(ev, nil)
 	}
 }
@@ -97,7 +97,7 @@ func TestScheduler_RetryLoop(t *testing.T) {
 
 	wantOutputs := []string{"seed:A", "seed:A:A", "seed:A:A:Finish"}
 	gotOutputs := outputsOf(events)
-	
+
 	if diff := cmp.Diff(wantOutputs, gotOutputs); diff != "" {
 		t.Errorf("outputs mismatch (-want +got):\n%s", diff)
 	}
