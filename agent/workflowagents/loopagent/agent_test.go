@@ -306,13 +306,13 @@ func (a *customAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, err
 
 type EmptyArgs struct{}
 
-func exampleFunctionThatEscalates(ctx tool.ToolContext, myArgs EmptyArgs) (map[string]string, error) {
+func exampleFunctionThatEscalates(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = false
 	return map[string]string{}, nil
 }
 
-func exampleFunctionThatEscalatesAndSkips(ctx tool.ToolContext, myArgs EmptyArgs) (map[string]string, error) {
+func exampleFunctionThatEscalatesAndSkips(ctx tool.Context, myArgs EmptyArgs) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = true
 	return map[string]string{}, nil

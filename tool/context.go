@@ -25,6 +25,6 @@ import (
 // Deprecated: use agent.NewToolContext directly. This wrapper exists only
 // to minimize churn during the migration and will be removed in a future
 // release.
-func NewToolContext(ic agent.InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) ToolContext {
+func NewToolContext(ic agent.InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
 	return agent.NewToolContext(ic, functionCallID, actions, confirmation)
 }

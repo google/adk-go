@@ -279,7 +279,7 @@ func (p *loggingPlugin) onModelError(ctx agent.CallbackContext, req *model.LLMRe
 	return nil, nil
 }
 
-func (p *loggingPlugin) beforeTool(ctx tool.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
+func (p *loggingPlugin) beforeTool(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	p.log("🔧 TOOL STARTING")
 	p.log(fmt.Sprintf("   Tool Name: %s", t.Name()))
 	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
@@ -288,7 +288,7 @@ func (p *loggingPlugin) beforeTool(ctx tool.ToolContext, t tool.Tool, args map[s
 	return nil, nil
 }
 
-func (p *loggingPlugin) afterTool(ctx tool.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func (p *loggingPlugin) afterTool(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	p.log("🔧 TOOL COMPLETED")
 	p.log(fmt.Sprintf("   Tool Name: %s", t.Name()))
 	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))
@@ -301,7 +301,7 @@ func (p *loggingPlugin) afterTool(ctx tool.ToolContext, t tool.Tool, args, resul
 	return nil, nil
 }
 
-func (p *loggingPlugin) onToolError(ctx tool.ToolContext, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
+func (p *loggingPlugin) onToolError(ctx tool.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
 	p.log("🔧 TOOL ERROR")
 	p.log(fmt.Sprintf("   Tool Name: %s", t.Name()))
 	p.log(fmt.Sprintf("   Agent: %s", ctx.AgentName()))

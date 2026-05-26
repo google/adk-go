@@ -159,12 +159,12 @@ func (t *TransferToAgentTool) enums() []string {
 }
 
 // ProcessRequest implements types.Tool.
-func (t *TransferToAgentTool) ProcessRequest(ctx tool.ToolContext, req *model.LLMRequest) error {
+func (t *TransferToAgentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return appendTools(req, t)
 }
 
 // Run implements types.Tool.
-func (t *TransferToAgentTool) Run(ctx tool.ToolContext, args any) (map[string]any, error) {
+func (t *TransferToAgentTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	if args == nil {
 		return nil, fmt.Errorf("missing argument")
 	}

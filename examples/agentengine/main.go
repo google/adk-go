@@ -54,7 +54,7 @@ const (
 
 // memorySearchToolFunc is the implementation of the memory search tool.
 // This function demonstrates accessing memory via tool.Context.
-func memorySearchToolFunc(tctx tool.ToolContext, args Args) (Result, error) {
+func memorySearchToolFunc(tctx tool.Context, args Args) (Result, error) {
 	// The SearchMemory function is available on the context.
 	searchResults, err := tctx.SearchMemory(tctx, args.Query)
 	if err != nil {
@@ -98,7 +98,7 @@ func main() {
 	type Output struct {
 		Result int `json:"result"`
 	}
-	handler := func(ctx tool.ToolContext, input Input) (Output, error) {
+	handler := func(ctx tool.Context, input Input) (Output, error) {
 		return Output{
 			Result: input.Min + rand.IntN(input.Max-input.Min+1),
 		}, nil

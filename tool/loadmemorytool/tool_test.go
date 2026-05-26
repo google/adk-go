@@ -170,7 +170,7 @@ func TestLoadMemoryTool_ProcessRequest(t *testing.T) {
 	}
 }
 
-func createToolContext(t *testing.T, mem *mockMemory) tool.ToolContext {
+func createToolContext(t *testing.T, mem *mockMemory) tool.Context {
 	t.Helper()
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{

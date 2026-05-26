@@ -41,7 +41,7 @@ func (m *mockTool) IsLongRunning() bool { return false }
 func (m *mockTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{Name: m.name}
 }
-func (m *mockTool) Run(ctx tool.ToolContext, args any) (map[string]any, error) { return nil, nil }
+func (m *mockTool) Run(ctx tool.Context, args any) (map[string]any, error) { return nil, nil }
 
 type mockLLM struct {
 	model.LLM

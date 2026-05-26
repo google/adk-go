@@ -129,7 +129,7 @@ func (t *setModelResponseTool) Declaration() *genai.FunctionDeclaration {
 	}
 }
 
-func (t *setModelResponseTool) Run(ctx tool.ToolContext, args any) (map[string]any, error) {
+func (t *setModelResponseTool) Run(ctx tool.Context, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type for set_model_response: %T", args)

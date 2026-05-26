@@ -49,7 +49,7 @@ func TestHandleFunctionCalls_Streaming(t *testing.T) {
 		Count int `json:"count"`
 	}
 
-	handler := func(ctx tool.ToolContext, args Args) iter.Seq2[string, error] {
+	handler := func(ctx tool.Context, args Args) iter.Seq2[string, error] {
 		return func(yield func(string, error) bool) {
 			for i := 0; i < args.Count; i++ {
 				if !yield(fmt.Sprintf("chunk %d", i), nil) {
@@ -187,7 +187,7 @@ func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
 	var cancelCount int
 	var cancelMu sync.Mutex
 
-	handler := func(ctx tool.ToolContext, args Args) iter.Seq2[string, error] {
+	handler := func(ctx tool.Context, args Args) iter.Seq2[string, error] {
 		return func(yield func(string, error) bool) {
 			for i := 0; ; i++ {
 				time.Sleep(time.Millisecond)

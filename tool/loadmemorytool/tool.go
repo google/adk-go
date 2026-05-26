@@ -80,7 +80,7 @@ func (t *loadMemoryTool) Declaration() *genai.FunctionDeclaration {
 }
 
 // Run executes the tool with the provided context and arguments.
-func (t *loadMemoryTool) Run(toolCtx tool.ToolContext, args any) (map[string]any, error) {
+func (t *loadMemoryTool) Run(toolCtx tool.Context, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
@@ -109,7 +109,7 @@ func (t *loadMemoryTool) Run(toolCtx tool.ToolContext, args any) (map[string]any
 
 // ProcessRequest processes the LLM request by packing the tool and appending
 // memory-related instructions.
-func (t *loadMemoryTool) ProcessRequest(ctx tool.ToolContext, req *model.LLMRequest) error {
+func (t *loadMemoryTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}

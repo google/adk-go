@@ -126,7 +126,7 @@ func main() {
 }
 
 // requestVacationDays simulates the *initiation* of a long-running ticket creation task.
-func requestVacationDays(ctx tool.ToolContext, args RequestVacationArgs) (*RequestVacationResults, error) {
+func requestVacationDays(ctx tool.Context, args RequestVacationArgs) (*RequestVacationResults, error) {
 	log.Printf("TOOL_EXEC: 'requestVacationDays' called with days: %d for user %s (Call ID: %s)\n", args.Days, args.UserID, ctx.FunctionCallID())
 
 	if args.Days <= 0 {

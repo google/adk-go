@@ -263,7 +263,7 @@ type WeatherResult struct {
 	Timestamp   time.Time `json:"timestamp"`
 }
 
-func GetWeather(ctx tool.ToolContext, args WeatherArgs) (WeatherResult, error) {
+func GetWeather(ctx tool.Context, args WeatherArgs) (WeatherResult, error) {
 	// Simulate weather data
 	temperatures := []int{-10, -5, 0, 5, 10, 15, 20, 25, 30, 35}
 	conditions := []string{"sunny", "cloudy", "rainy", "snowy", "windy"}
@@ -291,7 +291,7 @@ type CalculationResult struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-func Calculate(ctx tool.ToolContext, args CalculationArgs) (CalculationResult, error) {
+func Calculate(ctx tool.Context, args CalculationArgs) (CalculationResult, error) {
 	operations := map[string]float64{
 		"add":      args.X + args.Y,
 		"subtract": args.X - args.Y,
@@ -341,7 +341,7 @@ type LogActivityResult struct {
 	err          error
 }
 
-func LogActivity(ctx tool.ToolContext, params LogActivityParams) (LogActivityResult, error) {
+func LogActivity(ctx tool.Context, params LogActivityParams) (LogActivityResult, error) {
 	var activityLog []LogEntry
 	val, err := ctx.State().Get("activity_log")
 	if err == nil {
@@ -366,7 +366,7 @@ func LogActivity(ctx tool.ToolContext, params LogActivityParams) (LogActivityRes
 
 // --- Before Tool Callbacks ---
 
-func beforeToolAuditCallback(ctx tool.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
+func beforeToolAuditCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	fmt.Printf("🔍 AUDIT: About to call tool '%s' with args: %v\n", t.Name(), args)
 
 	var auditLog []map[string]any
@@ -387,7 +387,7 @@ func beforeToolAuditCallback(ctx tool.ToolContext, t tool.Tool, args map[string]
 	return nil, nil // Continue execution
 }
 
-func beforeToolSecurityCallback(ctx tool.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
+func beforeToolSecurityCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	if t.Name() == "get_weather" {
 		location := ""
 		if loc, ok := args["location"].(string); ok {
@@ -411,7 +411,7 @@ func beforeToolSecurityCallback(ctx tool.ToolContext, t tool.Tool, args map[stri
 	return nil, nil // Continue execution
 }
 
-func beforeToolValidationCallback(ctx tool.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
+func beforeToolValidationCallback(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	if t.Name() == "calculate" {
 		operation, _ := args["operation"].(string)
 		y, yOK := args["y"].(float64)
@@ -430,7 +430,7 @@ func beforeToolValidationCallback(ctx tool.ToolContext, t tool.Tool, args map[st
 
 // --- After Tool Callbacks ---
 
-func afterToolEnhancementCallback(ctx tool.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func afterToolEnhancementCallback(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err != nil {
 		return result, err // Don't enhance if there was an error
 	}
@@ -444,7 +444,7 @@ func afterToolEnhancementCallback(ctx tool.ToolContext, t tool.Tool, args, resul
 	return enhancedResponse, nil
 }
 
-func afterToolAsyncCallback(ctx tool.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func afterToolAsyncCallback(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err != nil {
 		return result, err
 	}
@@ -653,7 +653,7 @@ func TestToolCallbacksAgent(t *testing.T) {
 
 type mockToolset struct{}
 
-func (m *mockToolset) ProcessRequest(ctx tool.ToolContext, req *model.LLMRequest) error {
+func (m *mockToolset) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	utils.AppendInstructions(req, "Extra instruction from mockToolset")
 	return nil
 }
