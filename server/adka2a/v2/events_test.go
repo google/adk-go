@@ -611,7 +611,7 @@ func TestToSessionEvent(t *testing.T) {
 				TaskID:    taskID,
 				ContextID: contextID,
 				Status: a2a.TaskStatus{
-					State: a2a.TaskStateInputRequired,
+					State: a2a.TaskStateFailed,
 					Message: a2a.NewMessage(a2a.MessageRoleAgent,
 						&a2a.Part{Content: a2a.Text("requesting input"), Metadata: map[string]any{metadataIsErrMessageKey: true}},
 						func() *a2a.Part {
@@ -627,6 +627,7 @@ func TestToSessionEvent(t *testing.T) {
 					Content: genai.NewContentFromParts([]*genai.Part{
 						{FunctionCall: &genai.FunctionCall{ID: "tool_lr", Name: "LongRunning", Args: map[string]any{}}},
 					}, genai.RoleModel),
+					ErrorMessage:   "requesting input",
 					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
 					TurnComplete:   true,
 				},
