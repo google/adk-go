@@ -34,7 +34,12 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Cal
 	if actions == nil {
 		actions = &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
 	}
-
+	if actions.StateDelta == nil {
+		actions.StateDelta = make(map[string]any)
+	}
+	if actions.ArtifactDelta == nil {
+		actions.ArtifactDelta = make(map[string]int64)
+	}
 	cc := &callbackContext{
 		Context:           ic,
 		invocationContext: ic,
@@ -51,6 +56,12 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Cal
 func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) CallbackContext {
 	if actions == nil {
 		actions = &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
+	}
+	if actions.StateDelta == nil {
+		actions.StateDelta = make(map[string]any)
+	}
+	if actions.ArtifactDelta == nil {
+		actions.ArtifactDelta = make(map[string]int64)
 	}
 
 	cc := &callbackContext{
