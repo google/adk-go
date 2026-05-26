@@ -13,4 +13,11 @@
 // limitations under the License.
 
 // Package adka2a allows exposing ADK agents via A2A.
+//
+// NewExecutor returns an a2a-go AgentExecutor. To serve it over HTTP, wrap it
+// with a2a-go's request handler and transport-specific HTTP handler, such as
+// [a2asrv.NewHandler] and [a2asrv.NewJSONRPCHandler].
+//
+// [a2asrv.NewHandler]: https://pkg.go.dev/github.com/a2aproject/a2a-go/v2/a2asrv#NewHandler
+// [a2asrv.NewJSONRPCHandler]: https://pkg.go.dev/github.com/a2aproject/a2a-go/v2/a2asrv#NewJSONRPCHandler
 package adka2a
