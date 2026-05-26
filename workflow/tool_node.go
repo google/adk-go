@@ -136,7 +136,6 @@ func (n *toolNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessio
 		event := session.NewEvent(ctx.InvocationID())
 		event.Actions = *eventActions
 		event.Output = toolOutput
-		event.Actions.StateDelta["output"] = toolOutput
 
 		// If output is a string, set it as content for convenience (similar to FunctionNode).
 		if s, ok := toolOutput.(string); ok {

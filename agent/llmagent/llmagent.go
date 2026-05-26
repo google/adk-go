@@ -470,6 +470,7 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		}
 
 		event.Actions.StateDelta[a.OutputKey] = result
+		event.Output = result
 	}
 }
 

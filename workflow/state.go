@@ -90,7 +90,7 @@ type NodeState struct {
 	Input any `json:"input,omitempty"`
 
 	// Output is the value the node emitted via
-	// Actions.StateDelta["output"]. Set when Status transitions
+	// Event.Output. Set when Status transitions
 	// to NodeCompleted.
 	Output any `json:"output,omitempty"`
 
@@ -105,7 +105,7 @@ type NodeState struct {
 	PendingRequest *session.RequestInput `json:"pendingRequest,omitempty"`
 
 	// Attempt is the number of times this node has been failed.
-	Attempt int `json:"attempt,omitempty"`	
+	Attempt int `json:"attempt,omitempty"`
 
 	// ResumedInputs accumulates response payloads for re-entry-mode
 	// nodes that yield RequestInput more than once during a single

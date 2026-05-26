@@ -111,7 +111,6 @@ func (n *FunctionNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*se
 
 		event := session.NewEvent(ctx.InvocationID())
 		event.Output = output
-		event.Actions.StateDelta["output"] = output
 		if s, ok := output.(string); ok {
 			event.Content = &genai.Content{
 				Parts: []*genai.Part{{Text: s}},
