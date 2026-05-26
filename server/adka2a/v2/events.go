@@ -394,7 +394,7 @@ func convertStatusMessage(ctx agent.InvocationContext, event a2a.Event, status a
 	}
 	errMessage := ""
 	parts := status.Message.Parts
-	if len(parts) > 0 && parts[0].Text() != "" {
+	if status.State == a2a.TaskStateFailed && len(parts) > 0 && parts[0].Text() != "" {
 		errMessage = parts[0].Text()
 
 		isErrMessage, _ := parts[0].Metadata[metadataIsErrMessageKey].(bool)

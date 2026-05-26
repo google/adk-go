@@ -185,9 +185,8 @@ func toTaskFailedUpdateEvent(task a2a.TaskInfoProvider, cause error, meta map[st
 }
 
 func errorFromResponse(resp *model.LLMResponse) error {
-	if resp.ErrorCode != "" {
-		return fmt.Errorf("llm error response (code %s): %q", resp.ErrorCode, resp.ErrorMessage)
-	} else {
+	if resp.ErrorCode == "" {
 		return fmt.Errorf("llm error response: %q", resp.ErrorMessage)
 	}
+	return fmt.Errorf("llm error response (code %s): %q", resp.ErrorCode, resp.ErrorMessage)
 }
