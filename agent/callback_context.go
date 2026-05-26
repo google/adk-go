@@ -25,11 +25,8 @@ import (
 )
 
 // NewCallbackContext returns CallbackContext initialized with provided actions.
-// If trackArtifactDeltas is true, the returned context's Artifacts().Save(...)
-// wrapper records each saved artifact's version into the underlying
-// EventActions.ArtifactDelta so the resulting Event reflects the saves.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
-func NewCallbackContext(ic InvocationContext, trackArtifactDeltas bool, actions *session.EventActions) CallbackContext {
+func NewCallbackContext(ic InvocationContext, actions *session.EventActions) CallbackContext {
 	if actions == nil {
 		actions = &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
 	}
@@ -38,11 +35,25 @@ func NewCallbackContext(ic InvocationContext, trackArtifactDeltas bool, actions 
 		Context:           ic,
 		invocationContext: ic,
 		actions:           actions,
+		artifacts:         ic.Artifacts(),
 	}
-	if trackArtifactDeltas {
-		cc.artifacts = &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions}
-	} else {
-		cc.artifacts = ic.Artifacts()
+	return cc
+}
+
+// NewCallbackContextWithArtifactTracking returns CallbackContext initialized with provided actions.
+// the returned context's Artifacts().Save(...) wrapper records each saved artifact's version into the underlying
+// EventActions.ArtifactDelta so the resulting Event reflects the saves.
+// actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
+func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) CallbackContext {
+	if actions == nil {
+		actions = &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
+	}
+
+	cc := &callbackContext{
+		Context:           ic,
+		invocationContext: ic,
+		actions:           actions,
+		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
 	}
 	return cc
 }

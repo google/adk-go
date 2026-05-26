@@ -23,7 +23,7 @@ import (
 // related callbacks. The returned context's Artifacts().Save tracks each saved
 // artifact's version into the underlying EventActions.ArtifactDelta.
 func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
-	return agent.NewCallbackContext(ctx, true, nil)
+	return agent.NewCallbackContextWithArtifactTracking(ctx, nil)
 }
 
 // NewCallbackContextWithDelta returns a CallbackContext that uses the given
@@ -32,5 +32,5 @@ func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
 // artifact's version into artifactDelta.
 func NewCallbackContextWithDelta(ctx agent.InvocationContext, stateDelta map[string]any, artifactDelta map[string]int64) agent.CallbackContext {
 	actions := &session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta}
-	return agent.NewCallbackContext(ctx, true, actions)
+	return agent.NewCallbackContextWithArtifactTracking(ctx, actions)
 }
