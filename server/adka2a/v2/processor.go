@@ -16,6 +16,7 @@ package adka2a
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 
@@ -83,13 +84,18 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 
 	resp := event.LLMResponse
 	if resp.ErrorCode != "" || resp.ErrorMessage != "" {
-		// TODO(yarolegovich): consider merging responses if multiple errors can be produced during an invocation
-		if p.failedEvent == nil {
-			// terminal event might add additional keys to its metadata when it's dispatched and these changes should
-			// not be reflected in this event's metadata
-			terminalEventMeta := maps.Clone(eventMeta)
-			p.failedEvent = toTaskFailedUpdateEvent(p.reqCtx, errorFromResponse(&resp), terminalEventMeta)
+		newErr := errorFromResponse(&resp)
+		mergedErr := newErr
+
+		if p.failedEvent != nil {
+			if oldErrStr, ok := p.failedEvent.Metadata["error"].(string); ok {
+				mergedErr = errors.New(oldErrStr + "\n" + newErr.Error())
+			}
 		}
+
+		terminalEventMeta := maps.Clone(eventMeta)
+		terminalEventMeta["error"] = mergedErr.Error()
+		p.failedEvent = toTaskFailedUpdateEvent(p.reqCtx, mergedErr, terminalEventMeta)
 	}
 
 	event, err = p.inputRequiredProcessor.process(ctx, event)
