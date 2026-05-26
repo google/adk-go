@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
@@ -118,9 +119,14 @@ type dummyNode struct {
 	name string
 }
 
-func (n *dummyNode) Name() string        { return n.name }
-func (n *dummyNode) Description() string { return "" }
-func (n *dummyNode) Config() NodeConfig  { return NodeConfig{} }
+func (n *dummyNode) Name() string                       { return n.name }
+func (n *dummyNode) Description() string                { return "" }
+func (n *dummyNode) Config() NodeConfig                 { return NodeConfig{} }
+func (n *dummyNode) InputSchema() *jsonschema.Resolved  { return nil }
+func (n *dummyNode) OutputSchema() *jsonschema.Resolved { return nil }
+func (n *dummyNode) ValidateInput(input any) (any, error) {
+	return input, nil
+}
 func (n *dummyNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }

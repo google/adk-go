@@ -14,6 +14,8 @@
 
 package workflow
 
+import "github.com/google/jsonschema-go/jsonschema"
+
 // BaseNode provides identity and a default Config implementation for
 // types that satisfy the Node interface. Custom node types embed
 // BaseNode by value and supply only Run.
@@ -47,3 +49,12 @@ func (b BaseNode) Description() string { return b.desc }
 
 // Config returns the node's configuration.
 func (b BaseNode) Config() NodeConfig { return b.config }
+
+// InputSchema returns nil to indicate no input validation schema by default.
+func (b BaseNode) InputSchema() *jsonschema.Resolved { return nil }
+
+// OutputSchema returns nil to indicate no output validation schema by default.
+func (b BaseNode) OutputSchema() *jsonschema.Resolved { return nil }
+
+// ValidateInput returns the input unchanged as a default passthrough implementation.
+func (b BaseNode) ValidateInput(input any) (any, error) { return input, nil }
