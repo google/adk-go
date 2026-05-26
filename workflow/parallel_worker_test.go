@@ -15,10 +15,12 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"iter"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +31,10 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
+
+var upperNode = NewFunctionNode("upper", func(ctx agent.InvocationContext, input string) (string, error) {
+	return strings.ToUpper(input), nil
+}, defaultNodeConfig)
 
 func TestParallelWorker_Run(t *testing.T) {
 	tests := []struct {
@@ -44,31 +50,25 @@ func TestParallelWorker_Run(t *testing.T) {
 			name:           "Success",
 			maxConcurrency: 0,
 			input:          []any{"a", "b", "c"},
-			wrapped: NewFunctionNode("upper", func(ctx agent.InvocationContext, input string) (string, error) {
-				return strings.ToUpper(input), nil
-			}, NodeConfig{}),
-			wantOutput: []any{"A", "B", "C"},
-			wantErr:    false,
+			wrapped:        upperNode,
+			wantOutput:     []any{"A", "B", "C"},
+			wantErr:        false,
 		},
 		{
 			name:           "EmptyList",
 			maxConcurrency: 0,
 			input:          []any{},
-			wrapped: NewFunctionNode("upper", func(ctx agent.InvocationContext, input string) (string, error) {
-				return strings.ToUpper(input), nil
-			}, NodeConfig{}),
-			wantOutput: []any{},
-			wantErr:    false,
+			wrapped:        upperNode,
+			wantOutput:     []any{},
+			wantErr:        false,
 		},
 		{
 			name:           "InvalidInput_NotSlice",
 			maxConcurrency: 0,
 			input:          "not a slice",
-			wrapped: NewFunctionNode("upper", func(ctx agent.InvocationContext, input string) (string, error) {
-				return strings.ToUpper(input), nil
-			}, NodeConfig{}),
-			wantErr:   true,
-			errSubstr: "expects a slice input",
+			wrapped:        upperNode,
+			wantErr:        true,
+			errSubstr:      "expects a slice input",
 		},
 		{
 			name:           "WorkerError",
@@ -79,7 +79,7 @@ func TestParallelWorker_Run(t *testing.T) {
 					return "", errors.New("failed on b")
 				}
 				return input, nil
-			}, NodeConfig{}),
+			}, defaultNodeConfig),
 			wantErr:   true,
 			errSubstr: "failed on b",
 		},
@@ -87,7 +87,10 @@ func TestParallelWorker_Run(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			pw := NewParallelWorker("parallel", tc.wrapped, tc.maxConcurrency, NodeConfig{})
+			pw, err := NewParallelWorker("parallel", tc.wrapped, tc.maxConcurrency, defaultNodeConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
 
 			mockCtx := newMockCtx(t)
 			events := pw.Run(mockCtx, tc.input)
@@ -100,10 +103,8 @@ func TestParallelWorker_Run(t *testing.T) {
 					gotErr = err
 					break
 				}
-				if ev != nil && ev.Actions.StateDelta != nil {
-					if out, ok := ev.Actions.StateDelta["output"]; ok {
-						gotOutput = out.([]any)
-					}
+				if out, ok := extractOutput(ev); ok {
+					gotOutput = out.([]any)
 				}
 			}
 
@@ -134,9 +135,12 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 		atomic.AddInt32(&counter, 1)
 		<-blockCh
 		return input, nil
-	}, NodeConfig{})
+	}, defaultNodeConfig)
 
-	pw := NewParallelWorker("parallel", wrapped, 2, NodeConfig{})
+	pw, err := NewParallelWorker("parallel", wrapped, 2, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	mockCtx := newMockCtx(t)
 	input := []any{1, 2, 3, 4}
@@ -175,9 +179,12 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 }
 
 func TestParallelWorker_SuppressIntermediateEvents(t *testing.T) {
-	wrapped := NewFunctionNode("wrapped", func(ctx agent.InvocationContext, input any) (any, error) { return input, nil }, NodeConfig{})
+	wrapped := NewFunctionNode("wrapped", func(ctx agent.InvocationContext, input any) (any, error) { return input, nil }, defaultNodeConfig)
 
-	pw := NewParallelWorker("parallel", wrapped, 0, NodeConfig{})
+	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	mockCtx := newMockCtx(t)
 	input := []any{1, 2}
@@ -191,16 +198,14 @@ func TestParallelWorker_SuppressIntermediateEvents(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if ev != nil {
-			if out, ok := ev.Actions.StateDelta["output"]; ok {
-				hasAggregatedOutput = true
-				wantOutput := []any{1, 2}
-				if diff := cmp.Diff(wantOutput, out); diff != "" {
-					t.Errorf("output mismatch (-want +got):\n%s", diff)
-				}
-			} else if ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].Text == "progress" {
-				nonOutputCount++
+		if out, ok := extractOutput(ev); ok {
+			hasAggregatedOutput = true
+			wantOutput := []any{1, 2}
+			if diff := cmp.Diff(wantOutput, out); diff != "" {
+				t.Errorf("output mismatch (-want +got):\n%s", diff)
 			}
+		} else if ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].Text == "progress" {
+			nonOutputCount++
 		}
 	}
 
@@ -212,44 +217,6 @@ func TestParallelWorker_SuppressIntermediateEvents(t *testing.T) {
 	}
 }
 
-func TestParallelWorker_MultipleOutputsPerWorker(t *testing.T) {
-	wrapped := &multiOutputTestNode{}
-
-	pw := NewParallelWorker("parallel", wrapped, 0, NodeConfig{})
-
-	mockCtx := newMockCtx(t)
-	input := []any{"a", "b"}
-
-	events := pw.Run(mockCtx, input)
-
-	var gotOutput []any
-	var gotErr error
-
-	for ev, err := range events {
-		if err != nil {
-			gotErr = err
-			break
-		}
-		if ev != nil && ev.Actions.StateDelta != nil {
-			if out, ok := ev.Actions.StateDelta["output"]; ok {
-				gotOutput = out.([]any)
-			}
-		}
-	}
-
-	if gotErr != nil {
-		t.Fatalf("unexpected error: %v", gotErr)
-	}
-
-	wantOutput := []any{
-		[]any{"a", "a_2"},
-		[]any{"b", "b_2"},
-	}
-
-	if diff := cmp.Diff(wantOutput, gotOutput); diff != "" {
-		t.Errorf("output mismatch (-want +got):\n%s", diff)
-	}
-}
 
 func TestParallelWorker_WorkflowIntegration(t *testing.T) {
 	splitFn := func(ctx agent.InvocationContext, input string) ([]any, error) {
@@ -260,23 +227,21 @@ func TestParallelWorker_WorkflowIntegration(t *testing.T) {
 		}
 		return res, nil
 	}
-	splitNode := NewFunctionNode("split", splitFn, NodeConfig{})
+	splitNode := NewFunctionNode("split", splitFn, defaultNodeConfig)
 
-	wrapped := NewFunctionNode("worker",
-		func(ctx agent.InvocationContext, input string) (string, error) {
-			return strings.ToUpper(input), nil
-		}, NodeConfig{})
-
-	pw := NewParallelWorker("parallel", wrapped, 0, NodeConfig{})
+	pw, err := NewParallelWorker("parallel", upperNode, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	joinFn := func(ctx agent.InvocationContext, input []any) (string, error) {
 		var strs []string
 		for _, v := range input {
 			strs = append(strs, v.(string))
 		}
-		return strings.Join(strs, ","), nil
+		return strings.Join(strs, ":"), nil
 	}
-	joinNode := NewFunctionNode("join", joinFn, NodeConfig{})
+	joinNode := NewFunctionNode("join", joinFn, defaultNodeConfig)
 
 	edges := []Edge{
 		{From: Start, To: splitNode},
@@ -298,37 +263,275 @@ func TestParallelWorker_WorkflowIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if ev != nil && ev.Actions.StateDelta != nil {
-			if out, ok := ev.Actions.StateDelta["output"]; ok {
-				lastOutput = out
-			}
+		if out, ok := extractOutput(ev); ok {
+			lastOutput = out
 		}
 	}
 
-	wantOutput := "A,B,C"
+	wantOutput := "A:B:C"
 	if lastOutput != wantOutput {
 		t.Errorf("expected output %q, got %v", wantOutput, lastOutput)
 	}
 }
 
-type multiOutputTestNode struct {
+func TestNewParallelWorker_ErrorOnWrappedRetryConfig(t *testing.T) {
+	wrapped := NewFunctionNode("wrapped", func(ctx agent.InvocationContext, input any) (any, error) { return input, nil }, NodeConfig{RetryConfig: DefaultRetryConfig()})
+
+	_, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err == nil {
+		t.Fatal("expected error when wrapped node has RetryConfig, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot have RetryConfig") {
+		t.Errorf("expected error containing 'cannot have RetryConfig', got %v", err)
+	}
+}
+
+func TestParallelWorker_Retry(t *testing.T) {
+	var mu sync.Mutex
+	attempts := make(map[string]int)
+
+	wrapped := NewFunctionNode("retry_node", func(ctx agent.InvocationContext, input string) (string, error) {
+		mu.Lock()
+		attempts[input]++
+		count := attempts[input]
+		mu.Unlock()
+
+		if input == "b" && count <= 2 {
+			return "", errors.New("temporary failure")
+		}
+		return input, nil
+	}, defaultNodeConfig)
+
+	rc := DefaultRetryConfig()
+	rc.MaxAttempts = 3
+	rc.InitialDelay = 0
+	rc.MaxDelay = 0
+	rc.Jitter = 0
+	rc.ShouldRetry = func(err error) bool { return true }
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, NodeConfig{RetryConfig: rc})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mockCtx := newMockCtx(t)
+	input := []any{"a", "b"}
+
+	events := pw.Run(mockCtx, input)
+
+	var gotOutput []any
+	var gotErr error
+
+	for ev, err := range events {
+		if err != nil {
+			gotErr = err
+			break
+		}
+		if out, ok := extractOutput(ev); ok {
+			gotOutput = out.([]any)
+		}
+	}
+
+	if gotErr != nil {
+		t.Fatalf("unexpected error: %v", gotErr)
+	}
+
+	wantOutput := []any{"a", "b"}
+	if diff := cmp.Diff(wantOutput, gotOutput); diff != "" {
+		t.Errorf("output mismatch (-want +got):\n%s", diff)
+	}
+
+	mu.Lock()
+	countA := attempts["a"]
+	countB := attempts["b"]
+	mu.Unlock()
+
+	if countA != 1 {
+		t.Errorf("expected 1 attempt for 'a', got %d", countA)
+	}
+	if countB != 3 {
+		t.Errorf("expected 3 attempts for 'b', got %d", countB)
+	}
+}
+
+func TestParallelWorker_FailFast(t *testing.T) {
+	var workerCCancelled int32
+
+	wrapped := NewFunctionNode("fail_fast_node", func(ctx agent.InvocationContext, input string) (string, error) {
+		if input == "b" {
+			return "", errors.New("error b")
+		}
+		if input == "c" {
+			// Block until cancelled
+			select {
+			case <-ctx.Done():
+				atomic.StoreInt32(&workerCCancelled, 1)
+				return "", ctx.Err()
+			case <-time.After(1 * time.Second):
+				return input, nil
+			}
+		}
+		return input, nil
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mockCtx := newMockCtx(t)
+	input := []any{"a", "b", "c"}
+
+	events := pw.Run(mockCtx, input)
+
+	var gotErr error
+	for _, err := range events {
+		if err != nil {
+			gotErr = err
+			break
+		}
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if gotErr.Error() != "error b" {
+		t.Errorf("expected error 'error b', got %v", gotErr)
+	}
+
+	// Wait a bit to make sure worker C had time to observe cancellation
+	time.Sleep(100 * time.Millisecond)
+
+	if atomic.LoadInt32(&workerCCancelled) != 1 {
+		t.Error("expected worker c to be cancelled")
+	}
+}
+
+func TestParallelWorker_CancelDuringExecution(t *testing.T) {
+	blockCh := make(chan struct{})
+	wrapped := NewFunctionNode("blocking", func(ctx agent.InvocationContext, input any) (any, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-blockCh:
+			return input, nil
+		}
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	mockCtx := &MockInvocationContext{Context: ctx}
+	input := []any{1, 2}
+
+	done := make(chan struct{})
+	var gotErr error
+	var hasFinalResult bool
+
+	go func() {
+		for ev, err := range pw.Run(mockCtx, input) {
+			if err != nil {
+				gotErr = err
+			}
+			if _, ok := extractOutput(ev); ok {
+				hasFinalResult = true
+			}
+		}
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for cancellation to complete")
+	}
+
+	if gotErr == nil {
+		t.Error("expected error on cancellation, got nil")
+	}
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", gotErr)
+	}
+	if hasFinalResult {
+		t.Error("expected no final result to be yielded")
+	}
+
+	close(blockCh)
+}
+
+func TestParallelWorker_ConcurrentMultiOutputOrder(t *testing.T) {
+	wrapped := &delayedMultiOutputTestNode{}
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mockCtx := newMockCtx(t)
+	input := []any{"a", "b", "c"}
+
+	events := pw.Run(mockCtx, input)
+
+	var gotOutput []any
+	for ev, err := range events {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if out, ok := extractOutput(ev); ok {
+			gotOutput = out.([]any)
+		}
+	}
+
+	wantOutput := []any{
+		[]any{"a", "a_2"},
+		[]any{"b", "b_2"},
+		[]any{"c", "c_2"},
+	}
+
+	if diff := cmp.Diff(wantOutput, gotOutput); diff != "" {
+		t.Errorf("output mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type delayedMultiOutputTestNode struct {
 	BaseNode
 }
 
-func (n *multiOutputTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *delayedMultiOutputTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		s := input.(string)
+
+		var delay time.Duration
+		switch s {
+		case "a":
+			delay = 100 * time.Millisecond
+		case "b":
+			delay = 50 * time.Millisecond
+		case "c":
+			delay = 10 * time.Millisecond
+		}
+
+		time.Sleep(delay)
+
 		ev1 := session.NewEvent(ctx.InvocationID())
-		ev1.Actions.StateDelta["output"] = input
+		ev1.Actions.StateDelta["output"] = s
 		if !yield(ev1, nil) {
 			return
 		}
 
 		ev2 := session.NewEvent(ctx.InvocationID())
-		ev2.Actions.StateDelta["output"] = fmt.Sprintf("%v_2", input)
+		ev2.Actions.StateDelta["output"] = fmt.Sprintf("%v_2", s)
 		yield(ev2, nil)
 	}
 }
 
-func (n *multiOutputTestNode) Name() string        { return "multi_output" }
-func (n *multiOutputTestNode) Description() string { return "" }
-func (n *multiOutputTestNode) Config() NodeConfig  { return NodeConfig{} }
+func (n *delayedMultiOutputTestNode) Name() string        { return "delayed_multi_output" }
+func (n *delayedMultiOutputTestNode) Description() string { return "" }
+func (n *delayedMultiOutputTestNode) Config() NodeConfig  { return defaultNodeConfig }

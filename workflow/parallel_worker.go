@@ -15,11 +15,12 @@
 package workflow
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"iter"
 	"reflect"
 	"sync"
+	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
@@ -34,12 +35,15 @@ type ParallelWorker struct {
 
 // NewParallelWorker creates a new ParallelWorker node.
 // maxConcurrency <= 0 means no limit on concurrency.
-func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeConfig) *ParallelWorker {
+func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeConfig) (*ParallelWorker, error) {
+	if wrapped.Config().RetryConfig != nil {
+		return nil, fmt.Errorf("ParallelWorker %s: wrapped node %s cannot have RetryConfig", name, wrapped.Name())
+	}
 	return &ParallelWorker{
 		BaseNode:       BaseNode{name: name, config: cfg},
 		wrapped:        wrapped,
 		maxConcurrency: maxConcurrency,
-	}
+	}, nil
 }
 
 // Run executes the wrapped node in parallel for each item in the input list.
@@ -47,10 +51,15 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 // yields a single final event with the aggregated list as output.
 // In case the wrapped node produces more then one output event, they will be
 // aggregated into a list, and the final result will be a multi dimensional list.
-// If any of the wrapped node executions returns an error, the workflow will return the aggregated error.
-// Non-output events emitted by the wrapped node are yielded immediately.
+// If any of the wrapped node executions returns a non-retryable error, the workflow
+// will fail fast, cancel other in-flight workers, and return this first encountered error.
+// Intermediate non-output events emitted by the wrapped node are suppressed.
 func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		cancelCtx, cancelFunc := context.WithCancel(ctx)
+		defer cancelFunc()
+		workerCtx := ctx.WithContext(cancelCtx)
+
 		v := reflect.ValueOf(input)
 		if v.Kind() != reflect.Slice {
 			yield(nil, fmt.Errorf("parallel worker %s expects a slice input, got %T", n.Name(), input))
@@ -75,12 +84,7 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 			sem = make(chan struct{}, n.maxConcurrency)
 		}
 
-		type result struct {
-			index int
-			ev    *session.Event
-			err   error
-		}
-		resCh := make(chan result, nItems)
+		resCh := make(chan workerResult, nItems)
 
 		for i := 0; i < nItems; i++ {
 			item := v.Index(i).Interface()
@@ -94,50 +98,7 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 				}
 			}
 
-			go func(idx int, it any) {
-				defer wg.Done()
-				defer func() {
-					if sem != nil {
-						<-sem
-					}
-				}()
-
-				var workerOutputs []any
-				hasOutput := false
-
-				for ev, err := range n.wrapped.Run(ctx, it) {
-					if err != nil {
-						select {
-						case resCh <- result{index: idx, err: err}:
-						case <-ctx.Done():
-						}
-						return
-					}
-
-					if ev != nil && ev.Actions.StateDelta != nil {
-						if out, ok := ev.Actions.StateDelta["output"]; ok {
-							workerOutputs = append(workerOutputs, out)
-							hasOutput = true
-						}
-					}
-				}
-
-				var finalEv *session.Event
-				if hasOutput {
-					var output any
-					if len(workerOutputs) == 1 {
-						output = workerOutputs[0]
-					} else {
-						output = workerOutputs
-					}
-					finalEv = &session.Event{Actions: session.EventActions{StateDelta: map[string]any{"output": output}}}
-				}
-
-				select {
-				case resCh <- result{index: idx, ev: finalEv}:
-				case <-ctx.Done():
-				}
-			}(i, item)
+			go n.runWorker(workerCtx, i, item, sem, resCh, &wg)
 		}
 
 		// Goroutine to close channel when all workers are done
@@ -146,11 +107,14 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 			close(resCh)
 		}()
 
-		var errs []error
+		var firstErr error
 
 		for res := range resCh {
 			if res.err != nil {
-				errs = append(errs, res.err)
+				if firstErr == nil {
+					firstErr = res.err
+					cancelFunc() // Cancel all other workers!
+				}
 				continue
 			}
 
@@ -161,8 +125,8 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 			}
 		}
 
-		if len(errs) > 0 {
-			yield(nil, errors.Join(errs...))
+		if firstErr != nil {
+			yield(nil, firstErr)
 			return
 		}
 
@@ -171,4 +135,89 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 		event.Actions.StateDelta["output"] = outputs
 		yield(event, nil)
 	}
+}
+
+type workerResult struct {
+	index int
+	ev    *session.Event
+	err   error
+}
+
+func (n *ParallelWorker) runWorker(ctx agent.InvocationContext, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup) {
+	defer wg.Done()
+	defer func() {
+		if sem != nil {
+			<-sem
+		}
+	}()
+
+	retryCfg := n.Config().RetryConfig
+	failedAttempts := 0
+
+	for {
+		var workerOutputs []any
+		var runErr error
+
+		for ev, err := range n.wrapped.Run(ctx, item) {
+			if err != nil {
+				runErr = err
+				break
+			}
+
+			if out, ok := extractOutput(ev); ok {
+				workerOutputs = append(workerOutputs, out)
+			}
+		}
+
+		if runErr == nil {
+			// On success populate the output event.
+			resCh <- workerResult{index: idx, ev: makeWorkerOutputEvent(workerOutputs)}
+			return
+		}
+
+		// Failure
+		failedAttempts++
+		if ShouldRetry(retryCfg, runErr, failedAttempts) {
+			delay := CalculateDelay(retryCfg, failedAttempts)
+			select {
+			case <-time.After(delay):
+				continue
+			case <-ctx.Done():
+				resCh <- workerResult{index: idx, err: ctx.Err()}
+				return
+			}
+		}
+
+		// Cannot retry or exhausted attempts
+		resCh <- workerResult{index: idx, err: runErr}
+		return
+	}
+}
+
+func makeWorkerOutputEvent(outputs []any) *session.Event {
+	if len(outputs) == 0 {
+		return nil
+	}
+	var output any
+	if len(outputs) == 1 {
+		output = outputs[0]
+	} else {
+		output = outputs
+	}
+	return &session.Event{Actions: session.EventActions{StateDelta: map[string]any{"output": output}}}
+}
+
+func extractOutput(ev *session.Event) (any, bool) {
+	if ev == nil {
+		return nil, false
+	}
+	if ev.Output != nil {
+		return ev.Output, true
+	}
+	if ev.Actions.StateDelta != nil {
+		if out, ok := ev.Actions.StateDelta["output"]; ok {
+			return out, true
+		}
+	}
+	return nil, false
 }
