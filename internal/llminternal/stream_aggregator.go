@@ -37,6 +37,8 @@ type streamingResponseAggregator struct {
 	citationMetadata  *genai.CitationMetadata
 	response          *model.LLMResponse
 
+	currentThoughtSignature []byte
+
 	sequence             []*genai.Part
 	currentTextBuffer    string
 	currentTextIsThought bool
@@ -102,6 +104,9 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 		if reflect.ValueOf(*part).IsZero() {
 			continue
 		}
+		if len(part.ThoughtSignature) > 0 {
+			s.currentThoughtSignature = part.ThoughtSignature
+		}
 		if part.Text != "" {
 			if s.currentTextBuffer != "" && part.Thought != s.currentTextIsThought {
 				s.flushTextBufferToSequence()
@@ -135,6 +140,10 @@ func (s *streamingResponseAggregator) processFunctionCallPart(part *genai.Part) 
 	} else {
 		if part.FunctionCall.Name != "" {
 			s.flushTextBufferToSequence()
+			if part.ThoughtSignature == nil && s.currentThoughtSignature != nil {
+				part.ThoughtSignature = s.currentThoughtSignature
+			}
+			s.currentThoughtSignature = nil
 			s.sequence = append(s.sequence, part)
 		}
 	}

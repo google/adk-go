@@ -195,6 +195,7 @@ func (s *streamQueryHandler) run(ctx context.Context, req *models.StreamQueryReq
 		AppName:           s.agentEngineID,
 		Agent:             rootAgent,
 		SessionService:    config.SessionService,
+		MemoryService:     config.MemoryService,
 		ArtifactService:   config.ArtifactService,
 		PluginConfig:      config.PluginConfig,
 		AutoCreateSession: true,
