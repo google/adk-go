@@ -17,8 +17,8 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
-	"sync/atomic"
 
 	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
@@ -29,17 +29,17 @@ import (
 	"google.golang.org/adk/model"
 )
 
-// genAICaptureMessageContent is true if message content should be elided. False by default.
-var genAICaptureMessageContent atomic.Bool
+// captureMessageContentEnvVar is the OpenTelemetry-spec env var
+// that controls whether ADK emits full message content in log
+// records (true) or elides it for privacy (anything else,
+// including unset). Defined by
+// https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/.
+const captureMessageContentEnvVar = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 
-// SetGenAICaptureMessageContent sets whether message content should be elided.
-func SetGenAICaptureMessageContent(capture bool) {
-	genAICaptureMessageContent.Store(capture)
-}
-
-// getGenAICaptureMessageContent returns whether message content should be elided.
+// getGenAICaptureMessageContent reports whether message content
+// should be captured in log records.
 func getGenAICaptureMessageContent() bool {
-	return genAICaptureMessageContent.Load()
+	return strings.TrimSpace(os.Getenv(captureMessageContentEnvVar)) == "true"
 }
 
 const elidedContent = "<elided>"
@@ -49,6 +49,19 @@ var otelLogger = global.GetLoggerProvider().Logger(
 	log.WithSchemaURL(semconv.SchemaURL),
 	log.WithInstrumentationVersion(version.Version),
 )
+
+// OverrideLoggerForTesting replaces the package-level otelLogger
+// with one derived from lp for the duration of the calling test.
+// The original logger is restored via t.Cleanup.
+func OverrideLoggerForTesting(t interface{ Cleanup(func()) }, lp log.LoggerProvider) {
+	original := otelLogger
+	otelLogger = lp.Logger(
+		systemName,
+		log.WithSchemaURL(semconv.SchemaURL),
+		log.WithInstrumentationVersion(version.Version),
+	)
+	t.Cleanup(func() { otelLogger = original })
+}
 
 // LogRequest logs the request to the model - the system message and user messages.
 // It iterates over the request contents and logs each as a separate event.
