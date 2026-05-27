@@ -272,39 +272,86 @@ SearchLoop: // A label to allow breaking out of the nested loop
 		)
 	}
 
-	// Collect all function response events *between* the call and the last response.
+	// Collect all related function response events *between* the call and the
+	// last response. Preserve unrelated tool events in their original order, so
+	// rearranging a long-running response does not drop valid concurrent tool
+	// history.
 	var responseEventsToMerge []*session.Event
+	var eventsToPreserve []*session.Event
 	for i := functionCallEventIdx + 1; i < len(events)-1; i++ {
 		event := events[i]
-		responses := utils.FunctionResponses(event.Content)
-		if len(responses) == 0 {
-			continue
+		mergeEvent, preserveEvent := splitEventForLatestFunctionResponse(event, responseIDs)
+		if mergeEvent != nil {
+			responseEventsToMerge = append(responseEventsToMerge, mergeEvent)
 		}
-
-		// Check if this event contains any response relevant to our call.
-		isRelated := false
-		for _, res := range responses {
-			if _, exists := responseIDs[res.ID]; exists {
-				isRelated = true
-				break
-			}
-		}
-
-		if isRelated {
-			responseEventsToMerge = append(responseEventsToMerge, event)
+		if preserveEvent != nil {
+			eventsToPreserve = append(eventsToPreserve, preserveEvent)
 		}
 	}
 
 	// Add the final response event itself to the list to be merged.
 	responseEventsToMerge = append(responseEventsToMerge, events[len(events)-1])
 
-	resultEvents := events[:functionCallEventIdx+1]
+	resultEvents := append([]*session.Event{}, events[:functionCallEventIdx+1]...)
+	resultEvents = append(resultEvents, eventsToPreserve...)
 	mergedEvent, err := mergeFunctionResponseEvents(responseEventsToMerge)
 	if err != nil {
 		return nil, err
 	}
 	resultEvents = append(resultEvents, mergedEvent)
 	return resultEvents, nil
+}
+
+func splitEventForLatestFunctionResponse(event *session.Event, responseIDs map[string]struct{}) (*session.Event, *session.Event) {
+	content := utils.Content(event)
+	if content == nil {
+		return nil, nil
+	}
+
+	hasRelatedResponse := false
+	hasToolPart := false
+	for _, part := range content.Parts {
+		if part == nil {
+			continue
+		}
+		if part.FunctionCall != nil {
+			hasToolPart = true
+			continue
+		}
+		if part.FunctionResponse != nil {
+			hasToolPart = true
+			if _, exists := responseIDs[part.FunctionResponse.ID]; exists {
+				hasRelatedResponse = true
+			}
+		}
+	}
+	if !hasToolPart {
+		return nil, nil
+	}
+
+	var mergeParts []*genai.Part
+	var preserveParts []*genai.Part
+	for _, part := range content.Parts {
+		if part == nil {
+			continue
+		}
+		switch {
+		case part.FunctionResponse != nil:
+			if _, exists := responseIDs[part.FunctionResponse.ID]; exists {
+				mergeParts = append(mergeParts, part)
+			} else {
+				preserveParts = append(preserveParts, part)
+			}
+		case part.FunctionCall != nil:
+			preserveParts = append(preserveParts, part)
+		case hasRelatedResponse:
+			mergeParts = append(mergeParts, part)
+		default:
+			preserveParts = append(preserveParts, part)
+		}
+	}
+
+	return cloneEventWithParts(event, mergeParts), cloneEventWithParts(event, preserveParts)
 }
 
 // rearrangeEventsForFunctionResponsesInHistory reorganizes an entire event history to ensure
@@ -613,4 +660,19 @@ func cloneEvent(e *session.Event) *session.Event {
 	}
 
 	return newEvent
+}
+
+func cloneEventWithParts(e *session.Event, parts []*genai.Part) *session.Event {
+	if len(parts) == 0 {
+		return nil
+	}
+	cloned := cloneEvent(e)
+	if cloned == nil {
+		return nil
+	}
+	if cloned.LLMResponse.Content == nil {
+		cloned.LLMResponse.Content = &genai.Content{}
+	}
+	cloned.LLMResponse.Content.Parts = append([]*genai.Part(nil), parts...)
+	return cloned
 }
