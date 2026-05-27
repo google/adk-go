@@ -83,7 +83,7 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 		if nItems == 0 {
 			// Yield an empty list as output
 			event := session.NewEvent(ctx.InvocationID())
-			event.Actions.StateDelta["output"] = []any{}
+			event.Output = []any{}
 			yield(event, nil)
 			return
 		}
@@ -132,7 +132,7 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 			}
 
 			if res.ev != nil {
-				if out, ok := res.ev.Actions.StateDelta["output"]; ok {
+				if out, ok := extractOutput(res.ev); ok {
 					outputs[res.index] = out
 				}
 			}
@@ -145,7 +145,7 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 
 		// Yield the aggregated output
 		event := session.NewEvent(ctx.InvocationID())
-		event.Actions.StateDelta["output"] = outputs
+		event.Output = outputs
 		yield(event, nil)
 	}
 }
@@ -218,7 +218,7 @@ func makeWorkerOutputEvent(outputs []any) *session.Event {
 	} else {
 		output = outputs
 	}
-	return &session.Event{Actions: session.EventActions{StateDelta: map[string]any{"output": output}}}
+	return &session.Event{Output: output}
 }
 
 func extractOutput(ev *session.Event) (any, bool) {
@@ -227,11 +227,6 @@ func extractOutput(ev *session.Event) (any, bool) {
 	}
 	if ev.Output != nil {
 		return ev.Output, true
-	}
-	if ev.Actions.StateDelta != nil {
-		if out, ok := ev.Actions.StateDelta["output"]; ok {
-			return out, true
-		}
 	}
 	return nil, false
 }

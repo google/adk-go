@@ -131,8 +131,10 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 	var counter int32
 	blockCh := make(chan struct{})
 
+	startedCh := make(chan struct{}, 4)
 	wrapped := NewFunctionNode("blocking", func(ctx agent.InvocationContext, input int) (int, error) {
 		atomic.AddInt32(&counter, 1)
+		startedCh <- struct{}{}
 		<-blockCh
 		return input, nil
 	}, defaultNodeConfig)
@@ -152,13 +154,21 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait a bit for workers to start.
+	// Wait for 2 workers to start.
 	// We expect at most 2 workers to start because maxConcurrency is 2.
-	time.Sleep(100 * time.Millisecond)
+	<-startedCh
+	<-startedCh
 
 	c := atomic.LoadInt32(&counter)
 	if c != 2 {
 		t.Errorf("expected counter to be 2, got %d", c)
+	}
+
+	// Verify no 3rd worker started
+	select {
+	case <-startedCh:
+		t.Error("expected only 2 workers to start, but more did")
+	default:
 	}
 
 	// Unblock workers
@@ -355,6 +365,7 @@ func TestParallelWorker_Retry(t *testing.T) {
 
 func TestParallelWorker_FailFast(t *testing.T) {
 	var workerCCancelled int32
+	cancelledCh := make(chan struct{})
 
 	wrapped := NewFunctionNode("fail_fast_node", func(ctx agent.InvocationContext, input string) (string, error) {
 		if input == "b" {
@@ -365,9 +376,8 @@ func TestParallelWorker_FailFast(t *testing.T) {
 			select {
 			case <-ctx.Done():
 				atomic.StoreInt32(&workerCCancelled, 1)
+				close(cancelledCh)
 				return "", ctx.Err()
-			case <-time.After(1 * time.Second):
-				return input, nil
 			}
 		}
 		return input, nil
@@ -399,8 +409,13 @@ func TestParallelWorker_FailFast(t *testing.T) {
 		t.Errorf("expected error 'error b', got %v", gotErr)
 	}
 
-	// Wait a bit to make sure worker C had time to observe cancellation
-	time.Sleep(100 * time.Millisecond)
+	// Wait for worker C to observe cancellation
+	select {
+	case <-cancelledCh:
+		// Good
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for worker C to be cancelled")
+	}
 
 	if atomic.LoadInt32(&workerCCancelled) != 1 {
 		t.Error("expected worker c to be cancelled")
@@ -409,7 +424,9 @@ func TestParallelWorker_FailFast(t *testing.T) {
 
 func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 	blockCh := make(chan struct{})
+	startedCh := make(chan struct{}, 2)
 	wrapped := NewFunctionNode("blocking", func(ctx agent.InvocationContext, input any) (any, error) {
+		startedCh <- struct{}{}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -443,7 +460,9 @@ func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	// Wait for workers to start before cancelling
+	<-startedCh
+	<-startedCh
 	cancel()
 
 	select {
@@ -466,7 +485,19 @@ func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 }
 
 func TestParallelWorker_ConcurrentMultiOutputOrder(t *testing.T) {
-	wrapped := &delayedMultiOutputTestNode{}
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	releaseC := make(chan struct{})
+	startedCh := make(chan struct{}, 3)
+
+	wrapped := &delayedMultiOutputTestNode{
+		releaseChans: map[string]chan struct{}{
+			"a": releaseA,
+			"b": releaseB,
+			"c": releaseC,
+		},
+		startedCh: startedCh,
+	}
 
 	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
 	if err != nil {
@@ -476,17 +507,33 @@ func TestParallelWorker_ConcurrentMultiOutputOrder(t *testing.T) {
 	mockCtx := newMockCtx(t)
 	input := []any{"a", "b", "c"}
 
-	events := pw.Run(mockCtx, input)
-
+	done := make(chan struct{})
 	var gotOutput []any
-	for ev, err := range events {
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+	go func() {
+		events := pw.Run(mockCtx, input)
+		for ev, err := range events {
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			if out, ok := extractOutput(ev); ok {
+				gotOutput = out.([]any)
+			}
 		}
-		if out, ok := extractOutput(ev); ok {
-			gotOutput = out.([]any)
-		}
-	}
+		close(done)
+	}()
+
+	// Wait for all workers to start
+	<-startedCh
+	<-startedCh
+	<-startedCh
+
+	// Release in reverse order to simulate out-of-order completion
+	close(releaseC)
+	close(releaseB)
+	close(releaseA)
+
+	<-done
 
 	wantOutput := []any{
 		[]any{"a", "a_2"},
@@ -501,32 +548,29 @@ func TestParallelWorker_ConcurrentMultiOutputOrder(t *testing.T) {
 
 type delayedMultiOutputTestNode struct {
 	BaseNode
+	releaseChans map[string]chan struct{}
+	startedCh    chan struct{}
 }
 
 func (n *delayedMultiOutputTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		s := input.(string)
 
-		var delay time.Duration
-		switch s {
-		case "a":
-			delay = 100 * time.Millisecond
-		case "b":
-			delay = 50 * time.Millisecond
-		case "c":
-			delay = 10 * time.Millisecond
+		if n.startedCh != nil {
+			n.startedCh <- struct{}{}
+		}
+		if ch, ok := n.releaseChans[s]; ok {
+			<-ch
 		}
 
-		time.Sleep(delay)
-
 		ev1 := session.NewEvent(ctx.InvocationID())
-		ev1.Actions.StateDelta["output"] = s
+		ev1.Output = s
 		if !yield(ev1, nil) {
 			return
 		}
 
 		ev2 := session.NewEvent(ctx.InvocationID())
-		ev2.Actions.StateDelta["output"] = fmt.Sprintf("%v_2", s)
+		ev2.Output = fmt.Sprintf("%v_2", s)
 		yield(ev2, nil)
 	}
 }
@@ -589,3 +633,4 @@ func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
 		t.Errorf("expected 2 attempts for wrapped node, got %d (scheduler likely retried the node)", atomic.LoadInt32(&wrappedAttempts))
 	}
 }
+
