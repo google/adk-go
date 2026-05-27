@@ -57,6 +57,19 @@ var tracer trace.Tracer = otel.GetTracerProvider().Tracer(
 	trace.WithSchemaURL(semconv.SchemaURL),
 )
 
+// OverrideTracerForTesting replaces the package-level tracer with one
+// derived from tp for the duration of the calling test. The original
+// tracer is restored via t.Cleanup.
+func OverrideTracerForTesting(t interface{ Cleanup(func()) }, tp trace.TracerProvider) {
+	original := tracer
+	tracer = tp.Tracer(
+		systemName,
+		trace.WithInstrumentationVersion(version.Version),
+		trace.WithSchemaURL(semconv.SchemaURL),
+	)
+	t.Cleanup(func() { tracer = original })
+}
+
 type agent interface {
 	Name() string
 	Description() string

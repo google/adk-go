@@ -576,7 +576,7 @@ func TestSpanIDPropagation(t *testing.T) {
 	}
 }
 
-func setup(t *testing.T, elided bool) *inMemoryExporter {
+func setup(t *testing.T, capture bool) *inMemoryExporter {
 	exporter := &inMemoryExporter{}
 	provider := sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)),
@@ -587,11 +587,11 @@ func setup(t *testing.T, elided bool) *inMemoryExporter {
 		otelLogger = originalLogger
 	})
 
-	original := getGenAICaptureMessageContent()
-	SetGenAICaptureMessageContent(elided)
-	t.Cleanup(func() {
-		SetGenAICaptureMessageContent(original)
-	})
+	if capture {
+		t.Setenv(captureMessageContentEnvVar, "true")
+	} else {
+		t.Setenv(captureMessageContentEnvVar, "")
+	}
 	return exporter
 }
 
