@@ -99,7 +99,7 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 	rootAgent := config.AgentLoader.RootAgent()
 
-	session := resp.Session
+	sess := resp.Session
 
 	r, err := runner.New(runner.Config{
 		AppName:         appName,
@@ -144,6 +144,14 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 		}
 	}
 
+	// pendingInterrupts carries human-input prompts the agent
+	// emitted on the previous turn. While non-empty, the next
+	// stdin read is interpreted as the answer to its head; once
+	// every prompt has an answer the assembled FunctionResponse
+	// content is sent as the next "user message" turn.
+	var pendingInterrupts []pendingInterrupt
+	var pendingResponses []*genai.Part
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -156,7 +164,33 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 			log.Fatal(err)
 		case userInput := <-inputChan:
 
-			userMsg := genai.NewContentFromText(userInput, genai.RoleUser)
+			var userMsg *genai.Content
+			if len(pendingInterrupts) > 0 {
+				// Answer the head of the queue; loop back if more
+				// prompts remain.
+				current := pendingInterrupts[0]
+				pendingInterrupts = pendingInterrupts[1:]
+				pendingResponses = append(pendingResponses, buildInterruptResponse(current, userInput))
+				if len(pendingInterrupts) > 0 {
+					renderInterruptPrompt(pendingInterrupts[0])
+					continue
+				}
+				// All answers collected. Bundle every
+				// FunctionResponse into one user Content; the
+				// workflow runtime routes each to its waiting
+				// node by FunctionResponse.ID.
+				// TODO: legacy non-workflow agents still pick
+				// one agent from the first FunctionResponse.ID
+				// and drop the rest.
+				userMsg = &genai.Content{
+					Role:  string(genai.RoleUser),
+					Parts: pendingResponses,
+				}
+				pendingResponses = nil
+			} else {
+				userMsg = genai.NewContentFromText(userInput, genai.RoleUser)
+			}
+
 			streamingMode := l.config.streamingMode
 			if streamingMode == "" {
 				streamingMode = defaultStreamingMode
@@ -164,12 +198,14 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 			fmt.Print("\nAgent -> ")
 			prevText := ""
-			for event, err := range r.Run(ctx, userID, session.ID(), userMsg, agent.RunConfig{
+			var collectedEvents []*session.Event
+			for event, err := range r.Run(ctx, userID, sess.ID(), userMsg, agent.RunConfig{
 				StreamingMode: streamingMode,
 			}) {
 				if err != nil {
 					fmt.Printf("\nAGENT_ERROR: %v\n", err)
 				} else {
+					collectedEvents = append(collectedEvents, event)
 					if event.LLMResponse.Content == nil {
 						continue
 					}
@@ -198,6 +234,16 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 					prevText = ""
 				}
+			}
+
+			// If the turn paused on any long-running interrupts,
+			// render the first prompt; the next stdin read will
+			// be its answer.
+			pendingInterrupts = collectPendingInterrupts(collectedEvents)
+			if len(pendingInterrupts) > 0 {
+				fmt.Println()
+				renderInterruptPrompt(pendingInterrupts[0])
+				continue
 			}
 			fmt.Print("\nUser -> ")
 		}
