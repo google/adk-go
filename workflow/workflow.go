@@ -191,10 +191,13 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		input := userInput(ctx)
 
 		s := newScheduler(ctx, w.graph)
-		// Seed: schedule START with the user-supplied input.
+		// Seed: schedule START with the user-supplied input. START
+		// itself runs at the workflow's root branch (inherits
+		// ctx.Branch()); its successors derive sub-branches when
+		// the START fan-out has more than one edge.
 		startState := s.state.EnsureNode(Start.Name())
 		startState.Input = input
-		s.scheduleNode(Start, input, "")
+		s.scheduleNode(Start, input, "", ctx.Branch())
 
 		s.run(yield)
 

@@ -103,6 +103,100 @@ func TestRunNode_NilChildOutput_ReturnsZero(t *testing.T) {
 	}
 }
 
+func TestRunNode_DefaultInheritsParentBranch(t *testing.T) {
+	child := newStubNode("c", "x")
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		return RunNode[string](ctx, child, nil)
+	})
+	// MockInvocationContext yields Branch() == "", and the
+	// orchestrator inherits it, so the child must also see "".
+	if got := child.lastBranch; got != "" {
+		t.Errorf("child Branch() = %q, want \"\" (inherits parent at root)", got)
+	}
+}
+
+func TestRunNode_WithUseSubBranch_AppendsSegment(t *testing.T) {
+	child := newStubNode("c", "x")
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		return RunNode[string](ctx, child, nil, WithUseSubBranch())
+	})
+	// Parent branch is "" (root); sub-branch is bare "<name>@<runID>".
+	// Auto-counter assigns runID "1" for the first call.
+	if got, want := child.lastBranch, "c@1"; got != want {
+		t.Errorf("child Branch() = %q, want %q (use_sub_branch at root)", got, want)
+	}
+}
+
+func TestRunNode_WithUseSubBranch_PlusCustomRunID(t *testing.T) {
+	child := newStubNode("c", "x")
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		return RunNode[string](ctx, child, nil, WithUseSubBranch(), WithRunID("order-42"))
+	})
+	if got, want := child.lastBranch, "c@order-42"; got != want {
+		t.Errorf("child Branch() = %q, want %q", got, want)
+	}
+}
+
+func TestRunNode_WithOverrideBranch_ReplacesBase(t *testing.T) {
+	child := newStubNode("c", "x")
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		return RunNode[string](ctx, child, nil, WithOverrideBranch("custom_branch"))
+	})
+	if got, want := child.lastBranch, "custom_branch"; got != want {
+		t.Errorf("child Branch() = %q, want %q", got, want)
+	}
+}
+
+func TestRunNode_WithOverrideBranch_PlusUseSubBranch_AppendsToOverride(t *testing.T) {
+	child := newStubNode("c", "x")
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		return RunNode[string](ctx, child, nil,
+			WithOverrideBranch("base"),
+			WithUseSubBranch())
+	})
+	if got, want := child.lastBranch, "base.c@1"; got != want {
+		t.Errorf("child Branch() = %q, want %q (override is base, use_sub_branch appends)", got, want)
+	}
+}
+
+func TestRunNode_WithOverrideBranch_Empty_TreatedAsNoOverride(t *testing.T) {
+	// Per WithOverrideBranch godoc, empty string is treated as
+	// "no override" (one documented divergence from Python). This
+	// test pins that behaviour: even with WithUseSubBranch the
+	// sub-branch derives off the inherited (empty) parent branch.
+	child := newStubNode("c", "x")
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		return RunNode[string](ctx, child, nil,
+			WithOverrideBranch(""),
+			WithUseSubBranch())
+	})
+	if got, want := child.lastBranch, "c@1"; got != want {
+		t.Errorf("child Branch() = %q, want %q (empty override is a no-op)", got, want)
+	}
+}
+
+func TestRunNode_SequentialFanOut_PerSibling_DistinctBranches(t *testing.T) {
+	// Two children scheduled sequentially with WithUseSubBranch get
+	// distinct sub-branches via the auto-counter — child name + "@1",
+	// child name + "@2", etc. (counter is per child name, not global).
+	c1 := newStubNode("c", "first")
+	// re-use the same node twice to exercise the per-name counter.
+	var got []string
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		_, _ = RunNode[string](ctx, c1, nil, WithUseSubBranch())
+		got = append(got, c1.lastBranch)
+		_, _ = RunNode[string](ctx, c1, nil, WithUseSubBranch())
+		got = append(got, c1.lastBranch)
+		return "", nil
+	})
+	want := []string{"c@1", "c@2"}
+	if got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("observed branches = %v, want %v "+
+			"(per-(name) auto-counter must produce distinct sub-branches)",
+			got, want)
+	}
+}
+
 // --- test helpers ---
 
 // runInOrchestrator drives orchestratorFn inside a dynamic node so that

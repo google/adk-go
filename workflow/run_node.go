@@ -16,14 +16,17 @@ package workflow
 
 import "fmt"
 
-// RunNodeOption configures a single RunNode call. Today only WithRunID
-// exists; the option set will grow to mirror adk-python's ctx.run_node
-// kwargs (use_as_output for output delegation, override_isolation_scope,
-// per-call timeout/retry overrides, etc.) as those features land.
+// RunNodeOption configures a single RunNode call. The option set
+// mirrors a subset of adk-python's ctx.run_node kwargs; additional
+// options (use_as_output, override_isolation_scope, per-call
+// timeout/retry overrides, etc.) will be added as those features
+// land.
 type RunNodeOption func(*runNodeOptions)
 
 type runNodeOptions struct {
-	customRunID string
+	customRunID    string
+	useSubBranch   bool
+	overrideBranch string
 }
 
 // WithRunID overrides the auto-generated counter with a stable
@@ -37,6 +40,46 @@ type runNodeOptions struct {
 // (https://adk.dev/graphs/dynamic/#custom-execution-ids).
 func WithRunID(id string) RunNodeOption {
 	return func(o *runNodeOptions) { o.customRunID = id }
+}
+
+// WithUseSubBranch derives a per-child sub-branch of the form
+// "<parentBranch>.<childName>@<runID>" (or just "<childName>@<runID>"
+// at root) for the child activation. Equivalent to adk-python's
+// use_sub_branch=True kwarg on ctx.run_node.
+//
+// Use this when the caller runs multiple concurrent or independent
+// children that should not see each other's events in their LLM
+// prompt history. Without it, every RunNode child inherits the
+// orchestrator's branch and an LlmAgent child would see sibling
+// events through the history filter
+// (internal/llminternal/contents_processor.go:eventBelongsToBranch).
+//
+// Combinable with WithOverrideBranch: the override sets the *base*,
+// and use_sub_branch appends the segment to it.
+func WithUseSubBranch() RunNodeOption {
+	return func(o *runNodeOptions) { o.useSubBranch = true }
+}
+
+// WithOverrideBranch replaces the inherited branch verbatim,
+// regardless of WithUseSubBranch. Useful for nested dispatch
+// patterns (e.g. chat coordinator → task agent) where the parent
+// assigns a specific branch label by convention.
+//
+// Combinable with WithUseSubBranch: the override sets the base,
+// and use_sub_branch appends "<childName>@<runID>" to it.
+//
+// Empty branch is treated as "no override" — callers wanting to
+// force root should pass WithUseSubBranch() alone (which derives a
+// fresh sub-branch off root). This is the one intentional
+// divergence from adk-python's override_branch=None vs "" semantics
+// (_node_runner.py:198-209), motivated by Go's lack of an optional
+// string type and the rarity of the use-it-as-force-root case
+// (no tests or samples in adk-python exercise override_branch="").
+//
+// Mirrors adk-python's override_branch kwarg on ctx.run_node
+// (agents/context.py:417, _node_runner.py:198-209).
+func WithOverrideBranch(branch string) RunNodeOption {
+	return func(o *runNodeOptions) { o.overrideBranch = branch }
 }
 
 // RunNode schedules child as a sub-node of the currently-executing
@@ -62,7 +105,7 @@ func RunNode[OUT any](ctx NodeContext, child Node, input any, opts ...RunNodeOpt
 		opt(&o)
 	}
 
-	rawOut, err := nc.subScheduler.runNode(child, input, o.customRunID)
+	rawOut, err := nc.subScheduler.runNode(child, input, o.customRunID, o.useSubBranch, o.overrideBranch)
 	if err != nil {
 		return zero, err
 	}

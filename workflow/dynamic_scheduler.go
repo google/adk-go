@@ -54,15 +54,25 @@ func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*
 // Session, invocation metadata, and cancellation come from s.parentCtx
 // captured at sub-scheduler construction. customRunID is empty to use
 // the auto-counter, or a user-supplied stable id (validated against
-// the rules in validateCustomRunID).
-func (s *dynamicSubScheduler) runNode(child Node, input any, customRunID string) (any, error) {
+// the rules in validateCustomRunID). useSubBranch and overrideBranch
+// derive the child's Branch():
+//
+//   - base = overrideBranch if non-empty, else parentCtx.Branch()
+//   - useSubBranch=true → child.Branch = base + "." + name@runID (or
+//     just name@runID when base is empty)
+//   - useSubBranch=false → child.Branch = base
+//
+// overrideBranch="" is treated as "no override" — see
+// WithOverrideBranch godoc.
+func (s *dynamicSubScheduler) runNode(child Node, input any, customRunID string, useSubBranch bool, overrideBranch string) (any, error) {
 	name := child.Name()
 	runID, err := s.resolveRunID(name, customRunID)
 	if err != nil {
 		return nil, &NodeRunError{ChildName: name, Cause: err}
 	}
 	childPath := s.parentPath + "/" + name + "@" + runID
-	childCtx := newDynamicNodeContext(s.parentCtx, childPath, runID, s)
+	childBranch := deriveChildBranch(s.parentCtx.Branch(), name, runID, useSubBranch, overrideBranch)
+	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s)
 
 	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
 	// subScheduler) in the embedded context.Context so tools running
