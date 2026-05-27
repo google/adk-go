@@ -657,6 +657,16 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 		Name:     "long_running_tool",
 		Response: map[string]any{"status": "completed", "result": "done"},
 	}
+	fcInterleaved := &genai.FunctionCall{
+		ID:   "interleaved_call_456",
+		Name: "lookup_tool",
+		Args: map[string]any{"query": "related work"},
+	}
+	frInterleaved := &genai.FunctionResponse{
+		ID:       "interleaved_call_456",
+		Name:     "lookup_tool",
+		Response: map[string]any{"results": []string{"doc1", "doc2"}},
+	}
 
 	// Mixed LRO/Normal Calls/Responses
 	fcLROMixed := &genai.FunctionCall{
@@ -917,6 +927,24 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				genai.NewContentFromText("Request ten vacation days", "user"),
 				NewContentFromFunctionCall(fcHITLDenied, "model"),
 				NewContentFromFunctionResponse(frHITLDeniedFinal, "user"),
+			},
+		},
+		{
+			name: "Rearrangement preserves interleaved unrelated tool events",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run long process", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcLRO, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROInter, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcInterleaved, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frInterleaved, "user")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Run long process", "user"),
+				NewContentFromFunctionCall(fcLRO, "model"),
+				NewContentFromFunctionResponse(frLROFinal, "user"),
+				NewContentFromFunctionCall(fcInterleaved, "model"),
+				NewContentFromFunctionResponse(frInterleaved, "user"),
 			},
 		},
 		{
