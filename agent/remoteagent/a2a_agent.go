@@ -136,6 +136,18 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 		Description:          cfg.Description,
 		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
+		ClientProvider: func(ctx context.Context, card *v2a2a.AgentCard) (v2.A2AClient, error) {
+			legacyCard := a2av0.FromV1AgentCard(card)
+			factory := cfg.ClientFactory
+			if factory == nil {
+				factory = a2aclient.NewFactory()
+			}
+			client, err := factory.CreateFromCard(ctx, legacyCard)
+			if err != nil {
+				return nil, err
+			}
+			return &compatClient{client: client}, nil
+		},
 	}
 
 	if cfg.AgentCard != nil {

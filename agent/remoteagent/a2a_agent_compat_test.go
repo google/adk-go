@@ -24,12 +24,14 @@ import (
 	legacyA2A "github.com/a2aproject/a2a-go/a2a"
 	legacyAClient "github.com/a2aproject/a2a-go/a2aclient"
 	legacyASrv "github.com/a2aproject/a2a-go/a2asrv"
+	legacyEQ "github.com/a2aproject/a2a-go/a2asrv/eventqueue"
 	v2a2a "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	v2asrv "github.com/a2aproject/a2a-go/v2/a2asrv"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
@@ -524,6 +526,19 @@ func newLegacyCard(serverURL string) *legacyA2A.AgentCard {
 	})
 }
 
+func newV0Card(serverURL string) *legacyA2A.AgentCard {
+	return a2av0.FromV1AgentCard(&v2a2a.AgentCard{
+		SupportedInterfaces: []*v2a2a.AgentInterface{
+			{
+				URL: serverURL,
+				ProtocolBinding: v2a2a.TransportProtocolJSONRPC,
+				ProtocolVersion: a2av0.Version,
+			},
+		},
+		Capabilities: v2a2a.AgentCapabilities{Streaming: true},
+	})
+}
+
 func newInvocationContext(t *testing.T, events []*session.Event) agent.InvocationContext {
 	t.Helper()
 	ctx := t.Context()
@@ -565,4 +580,231 @@ func runAndCollect(ic agent.InvocationContext, agnt agent.Agent) ([]*session.Eve
 		collected = append(collected, ev)
 	}
 	return collected, nil
+}
+
+type mockLegacyExecutor struct {
+	executeFn func(ctx context.Context, reqCtx *legacyASrv.RequestContext, queue legacyEQ.Queue) error
+	cancelFn  func(ctx context.Context, reqCtx *legacyASrv.RequestContext, queue legacyEQ.Queue) error
+	cleanupFn func(ctx context.Context, reqCtx *legacyASrv.RequestContext, result legacyA2A.SendMessageResult, err error)
+}
+
+var (
+	_ legacyASrv.AgentExecutor         = (*mockLegacyExecutor)(nil)
+	_ legacyASrv.AgentExecutionCleaner = (*mockLegacyExecutor)(nil)
+
+	transferToolName      = "transfer_to_agent"
+	modelTextRootTransfer = "transferring... please hold... beepboop..."
+)
+
+type testA2AServer struct {
+	*httptest.Server
+	handler legacyASrv.RequestHandler
+}
+
+func (e *mockLegacyExecutor) Execute(ctx context.Context, reqCtx *legacyASrv.RequestContext, queue legacyEQ.Queue) error {
+	if e.executeFn != nil {
+		return e.executeFn(ctx, reqCtx, queue)
+	}
+	return nil
+}
+
+func (e *mockLegacyExecutor) Cancel(ctx context.Context, reqCtx *legacyASrv.RequestContext, queue legacyEQ.Queue) error {
+	if e.cancelFn != nil {
+		return e.cancelFn(ctx, reqCtx, queue)
+	}
+	return queue.Write(ctx, legacyA2A.NewStatusUpdateEvent(reqCtx, legacyA2A.TaskStateCanceled, nil))
+}
+
+func (e *mockLegacyExecutor) Cleanup(ctx context.Context, reqCtx *legacyASrv.RequestContext, result legacyA2A.SendMessageResult, err error) {
+	if e.cleanupFn != nil {
+		e.cleanupFn(ctx, reqCtx, result, err)
+	}
+}
+
+func startLegacyA2AServer(t *testing.T, executor legacyASrv.AgentExecutor) *testA2AServer {
+	t.Helper()
+	handler := legacyASrv.NewHandler(executor)
+	server := httptest.NewServer(legacyASrv.NewJSONRPCHandler(handler))
+	return &testA2AServer{Server: server, handler: handler}
+}
+
+func newLegacyA2AClient(t *testing.T, server *testA2AServer) *legacyAClient.Client {
+	t.Helper()
+	card := newV0Card(server.Server.URL)
+	client, err := legacyAClient.NewFromCard(t.Context(), card)
+	if err != nil {
+		t.Fatalf("legacyAClient.NewFromCard() error = %v", err)
+	}
+	return client
+}
+
+func newA2ARemoteAgent(t *testing.T, name string, server *testA2AServer, clientFactory *legacyAClient.Factory) agent.Agent {
+	t.Helper()
+	card := newV0Card(server.Server.URL)
+
+	return utils.Must(NewA2A(A2AConfig{AgentCard: card, Name: name}))
+}
+
+type llmStub struct {
+	name            string
+	generateContent func(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error]
+}
+
+func (d *llmStub) Name() string {
+	return d.name
+}
+
+func (d *llmStub) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return d.generateContent(ctx, req, stream)
+}
+
+func newRootAgent(name string, subAgent agent.Agent) agent.Agent {
+	return utils.Must(llmagent.New(llmagent.Config{
+		Name:      name,
+		SubAgents: []agent.Agent{subAgent},
+		Model: &llmStub{
+			name: name + "-model",
+			generateContent: func(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+				return func(yield func(*model.LLMResponse, error) bool) {
+					yield(&model.LLMResponse{
+						Content: genai.NewContentFromParts([]*genai.Part{
+							genai.NewPartFromText(modelTextRootTransfer),
+							genai.NewPartFromFunctionCall(transferToolName, map[string]any{"agent_name": subAgent.Name()}),
+						}, genai.RoleModel),
+					}, nil)
+				}
+			},
+		},
+	}))
+}
+
+func TestCompat_A2ACleanupPropagation(t *testing.T) {
+	// Remote A2A server publishes a submitted task and start generating artifact updates
+	// until it detects a context cancelation
+	remoteTaskIDChan, remoteCleanupCalledChan := make(chan legacyA2A.TaskID, 1), make(chan struct{}, 2)
+	serverB := startLegacyA2AServer(t, &mockLegacyExecutor{
+		cancelFn: func(ctx context.Context, reqCtx *legacyASrv.RequestContext, queue legacyEQ.Queue) error {
+			event := legacyA2A.NewStatusUpdateEvent(reqCtx, legacyA2A.TaskStateCanceled, nil)
+			event.Final = true
+			return queue.Write(ctx, event)
+		},
+		executeFn: func(ctx context.Context, reqCtx *legacyASrv.RequestContext, queue legacyEQ.Queue) error {
+			remoteTaskIDChan <- reqCtx.TaskID
+			if err := queue.Write(ctx, legacyA2A.NewSubmittedTask(reqCtx, reqCtx.Message)); err != nil {
+				return err
+			}
+			for ctx.Err() == nil {
+				if err := queue.Write(ctx, legacyA2A.NewArtifactEvent(reqCtx, legacyA2A.TextPart{Text: "foo"})); err != nil {
+					return err
+				}
+				time.Sleep(1 * time.Millisecond)
+			}
+			return queue.Write(ctx, legacyA2A.NewStatusUpdateEvent(reqCtx, legacyA2A.TaskStateCompleted, nil))
+		},
+		cleanupFn: func(ctx context.Context, reqCtx *legacyASrv.RequestContext, result legacyA2A.SendMessageResult, cause error) {
+			remoteCleanupCalledChan <- struct{}{}
+		},
+	})
+	defer serverB.Close()
+
+	// Root server connects to server B through remote subagent
+	remoteAgentB := newA2ARemoteAgent(t, "remote-agent-b", serverB, legacyAClient.NewFactory())
+	rootA := newRootAgent("agent-b", remoteAgentB)
+
+	// A2A Execution Cleanup callback
+	executorCleanupCalledChan := make(chan struct{}, 2)
+	executorA := adka2a.NewExecutor(adka2a.ExecutorConfig{
+		OutputMode: adka2a.OutputArtifactPerEvent,
+		RunnerConfig: runner.Config{
+			AppName:        rootA.Name(),
+			SessionService: session.InMemoryService(),
+			Agent:          rootA,
+		},
+		A2AExecutionCleanupCallback: func(ctx context.Context, reqCtx *legacyASrv.RequestContext, subAgentCards []*legacyA2A.AgentCard, result legacyA2A.SendMessageResult, cause error) {
+			executorCleanupCalledChan <- struct{}{}
+		},
+		RunConfig: agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+	})
+
+	serverA := startLegacyA2AServer(t, executorA)
+	defer serverA.Close()
+
+	client := newLegacyA2AClient(t, serverA)
+
+	// Send a streaming message in a detached goroutine, passing status update through chan
+	statusUpdateEventChan := make(chan legacyA2A.Event, 10)
+	go func() {
+		defer close(statusUpdateEventChan)
+		msg := legacyA2A.NewMessage(legacyA2A.MessageRoleUser, legacyA2A.TextPart{Text: "work"})
+		for event, err := range client.SendStreamingMessage(t.Context(), &legacyA2A.MessageSendParams{Message: msg}) {
+			if err != nil {
+				t.Errorf("client.SendStreamingMessage() error = %v", err)
+				return
+			}
+			if _, ok := event.(*legacyA2A.TaskArtifactUpdateEvent); ok {
+				continue
+			}
+			statusUpdateEventChan <- event
+		}
+	}()
+
+	// Issue a task cancellation request
+	taskID := (<-statusUpdateEventChan).TaskInfo().TaskID
+	cancelResultChan := make(chan *legacyA2A.Task, 1)
+	go func() {
+		defer close(cancelResultChan)
+		task, err := client.CancelTask(t.Context(), &legacyA2A.TaskIDParams{ID: taskID})
+		if err != nil {
+			t.Errorf("client.CancelTask() error = %v", err)
+			return
+		}
+		cancelResultChan <- task
+	}()
+
+	// Check the streaming message sender got a cancelled state task in their response
+	var lastStreamingUpdate legacyA2A.Event
+	for event := range statusUpdateEventChan {
+		lastStreamingUpdate = event
+	}
+	if tu, ok := lastStreamingUpdate.(*legacyA2A.TaskStatusUpdateEvent); ok {
+		if tu.Status.State != legacyA2A.TaskStateCanceled {
+			t.Errorf("lastStreamingUpdate.Status.State = %q, want %q", tu.Status.State, legacyA2A.TaskStateCanceled)
+		}
+	} else {
+		t.Fatalf("type(lastStreamingUpdate) = %T, want *a2a.TaskStatusUpdateEvent", lastStreamingUpdate)
+	}
+
+	// Check subagent task got cancelled when the parent task was cancelled.
+	// Reads from channel twice because cleanup gets called both for cancelation and execution.
+	timeout := time.After(5 * time.Second)
+	for range 2 {
+		select {
+		case <-remoteCleanupCalledChan:
+		case <-timeout:
+			t.Fatalf("remote cleanup was not called")
+		}
+	}
+	var remoteTaskID legacyA2A.TaskID
+	select {
+	case remoteTaskID = <-remoteTaskIDChan:
+	case <-time.After(1 * time.Second):
+		t.Fatal("server B was never reached; remoteTaskIDChan is empty")
+	}
+
+	for range 2 {
+		select {
+		case <-executorCleanupCalledChan:
+		case <-timeout:
+			t.Fatalf("executor cleanup was not called")
+		}
+	}
+
+	remoteClient := newLegacyA2AClient(t, serverB)
+	remoteTask, err := remoteClient.GetTask(t.Context(), &legacyA2A.TaskQueryParams{ID: remoteTaskID})
+	if err != nil {
+		t.Fatalf("remoteClient.GetTask() error = %v", err)
+	}
+	if remoteTask.Status.State != legacyA2A.TaskStateCanceled {
+		t.Errorf("remoteTask.Status.State = %q, want %q", remoteTask.Status.State, legacyA2A.TaskStateCanceled)
+	}
 }
