@@ -16,7 +16,6 @@ package loadmemorytool_test
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -130,18 +129,13 @@ func TestLoadMemoryTool_Run(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			resultBytes, err := json.Marshal(result)
-			if err != nil {
-				t.Fatalf("Tool result marshaling error = %v", err)
-			}
 
-			var response memory.SearchResponse
-			if err = json.Unmarshal(resultBytes, &response); err != nil {
-				t.Fatalf("Failed to unmarshal into [memory.SearchResponse]: %v. Got: %s", err, string(resultBytes))
+			memories, ok := result["memories"].([]memory.Entry)
+			if !ok {
+				t.Fatalf("result['memories'] is not []memory.Entry, got %T", result["memories"])
 			}
-
-			if len(response.Memories) != tt.wantLen {
-				t.Errorf("Run() returned %d memories, want %d", len(response.Memories), tt.wantLen)
+			if len(memories) != tt.wantLen {
+				t.Errorf("Run() returned %d memories, want %d", len(memories), tt.wantLen)
 			}
 		})
 	}
