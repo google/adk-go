@@ -16,6 +16,7 @@ package vertexai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -517,7 +518,15 @@ func createAiplatformpbContent(event *session.Event) (*aiplatformpb.Content, err
 				}
 			}
 			if part.FunctionResponse != nil {
-				response, err := structpb.NewStruct(part.FunctionResponse.Response)
+				var functionResponseMap map[string]any
+				jsonBytes, err := json.Marshal(part.FunctionResponse.Response)
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal function response: %w", err)
+				}
+				if err := json.Unmarshal(jsonBytes, &functionResponseMap); err != nil {
+					return nil, fmt.Errorf("failed to unmarshal function response: %w", err)
+				}
+				response, err := structpb.NewStruct(functionResponseMap)
 				if err != nil {
 					return nil, fmt.Errorf("failed to convert function response to structpb: %w", err)
 				}
