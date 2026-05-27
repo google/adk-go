@@ -216,7 +216,7 @@ func TestScheduler_NodeTimeout(t *testing.T) {
 }
 
 // TestScheduler_MultipleOutputsFailNode verifies that a node which
-// yields more than one event carrying StateDelta["output"] fails
+// yields more than one event carrying Output fails
 // the workflow with ErrMultipleOutputs (matching adk-python's
 // "single output per node" contract). The first output value is
 // preserved; subsequent ones trip the accumulator error.
@@ -233,7 +233,7 @@ func TestScheduler_MultipleOutputsFailNode(t *testing.T) {
 }
 
 // TestScheduler_ProgressEventsThenSingleOutputSucceed verifies
-// that events with no StateDelta["output"] (progress / status
+// that events with no Output (progress / status
 // events) do not consume the single-output budget. A node may
 // yield many such events followed by exactly one output event
 // without violating the contract.
@@ -251,11 +251,8 @@ func TestScheduler_ProgressEventsThenSingleOutputSucceed(t *testing.T) {
 		t.Fatalf("event count = %d, want %d", got, want)
 	}
 	last := events[len(events)-1]
-	if last.Actions.StateDelta == nil {
-		t.Fatal("last event has nil StateDelta")
-	}
-	if got, want := fmt.Sprint(last.Actions.StateDelta["output"]), "final"; got != want {
-		t.Errorf("last event output = %q, want %q", got, want)
+	if got, want := fmt.Sprint(last.Output), "final"; got != want {
+		t.Errorf("last event Output = %q, want %q", got, want)
 	}
 }
 
@@ -291,17 +288,15 @@ func drainErr(t *testing.T, seq iter.Seq2[*session.Event, error]) error {
 	return firstErr
 }
 
-// outputsOf extracts the StateDelta["output"] string from each event,
+// outputsOf extracts the Output string from each event,
 // sorted to make assertions order-independent across concurrent runs.
 func outputsOf(events []*session.Event) []string {
 	out := make([]string, 0, len(events))
 	for _, ev := range events {
-		if ev == nil || ev.Actions.StateDelta == nil {
+		if ev == nil || ev.Output == nil {
 			continue
 		}
-		if v, ok := ev.Actions.StateDelta["output"]; ok {
-			out = append(out, fmt.Sprint(v))
-		}
+		out = append(out, fmt.Sprint(ev.Output))
 	}
 	sort.Strings(out)
 	return out
@@ -328,7 +323,7 @@ func (n *recordingNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*s
 		<-n.released
 		ev := session.NewEvent(ctx.InvocationID())
 		out := fmt.Sprintf("%v:%s", input, n.Name())
-		ev.Actions.StateDelta["output"] = out
+		ev.Output = out
 		yield(ev, nil)
 	}
 }
@@ -353,7 +348,7 @@ func (n *blockingNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*sessio
 	return func(yield func(*session.Event, error) bool) {
 		n.work()
 		ev := session.NewEvent(ctx.InvocationID())
-		ev.Actions.StateDelta["output"] = n.Name()
+		ev.Output = n.Name()
 		yield(ev, nil)
 	}
 }
@@ -401,7 +396,7 @@ func (n *cancelObservingNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[
 }
 
 // multiOutputNode yields one event per supplied output value, each
-// carrying StateDelta["output"]. Used to exercise the
+// carrying Output. Used to exercise the
 // single-output-per-node constraint.
 type multiOutputNode struct {
 	BaseNode
@@ -419,7 +414,7 @@ func (n *multiOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*ses
 	return func(yield func(*session.Event, error) bool) {
 		for _, out := range n.outputs {
 			ev := session.NewEvent(ctx.InvocationID())
-			ev.Actions.StateDelta["output"] = out
+			ev.Output = out
 			if !yield(ev, nil) {
 				return
 			}
@@ -448,13 +443,12 @@ func (n *progressThenOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Se
 	return func(yield func(*session.Event, error) bool) {
 		for range n.progressCount {
 			ev := session.NewEvent(ctx.InvocationID())
-			// progress event: no StateDelta["output"]
 			if !yield(ev, nil) {
 				return
 			}
 		}
 		final := session.NewEvent(ctx.InvocationID())
-		final.Actions.StateDelta["output"] = n.finalOutput
+		final.Output = n.finalOutput
 		yield(final, nil)
 	}
 }
@@ -487,7 +481,7 @@ func TestScheduler_RetryNode(t *testing.T) {
 		t.Fatalf("expected 1 event, got %d", len(events))
 	}
 
-	out := fmt.Sprint(events[0].Actions.StateDelta["output"])
+	out := fmt.Sprint(events[0].Output)
 	if out != "seed:retryNode" {
 		t.Errorf("output = %q, want %q", out, "seed:retryNode")
 	}
@@ -549,7 +543,7 @@ func (n *retryTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*s
 		}
 		ev := session.NewEvent(ctx.InvocationID())
 		out := fmt.Sprintf("%v:%s", input, n.Name())
-		ev.Actions.StateDelta["output"] = out
+		ev.Output = out
 		yield(ev, nil)
 	}
 }

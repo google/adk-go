@@ -240,16 +240,7 @@ func TestToolNode_Run(t *testing.T) {
 				}
 				count++
 
-				output, ok := ev.Actions.StateDelta["output"]
-				if !ok {
-					t.Fatal("expected output in state delta")
-				}
-
-				if diff := cmp.Diff(output, ev.Output); diff != "" {
-					t.Errorf("ev.Output mismatch (-stateDelta +Output):\n%s", diff)
-				}
-
-				got = tc.extract(t, output)
+				got = tc.extract(t, ev.Output)
 			}
 
 			if tc.wantErr != "" {
@@ -331,10 +322,8 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 					if err != nil {
 						t.Fatalf("workflow failed: %v", err)
 					}
-					if ev.Actions.StateDelta != nil {
-						if out, ok := ev.Actions.StateDelta["output"]; ok {
-							outB = out
-						}
+					if ev.Output != nil {
+						outB = ev.Output
 					}
 				}
 

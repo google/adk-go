@@ -219,7 +219,7 @@ func TestScheduler_HitlNode_ConcurrentBranches_PausesOnlyWhenAllNonRunning(t *te
 	})
 	plainNode := newHitlNode("plain", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
-		ev.Actions.StateDelta["output"] = "done"
+		ev.Output = "done"
 		yield(ev, nil)
 	})
 	plainDownstream := newHitlNode("plain_downstream", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {

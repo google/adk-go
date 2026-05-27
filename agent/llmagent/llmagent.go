@@ -25,6 +25,7 @@ import (
 	agentinternal "google.golang.org/adk/internal/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -76,6 +77,7 @@ func New(cfg Config) (agent.Agent, error) {
 
 		State: llminternal.State{
 			Model:                    cfg.Model,
+			Mode:                     cfg.Mode,
 			GenerateContentConfig:    cfg.GenerateContentConfig,
 			Tools:                    cfg.Tools,
 			Toolsets:                 cfg.Toolsets,
@@ -123,7 +125,57 @@ func New(cfg Config) (agent.Agent, error) {
 	state.AgentType = agentinternal.TypeLLMAgent
 	state.Config = cfg
 
+	if err := installTaskTools(a); err != nil {
+		return nil, err
+	}
+
 	return a, nil
+}
+
+func installTaskTools(a *llmAgent) error {
+	state := llminternal.Reveal(a)
+
+	if state.Mode == llminternal.ModeTask {
+		finishTool, err := workflowinternal.NewFinishTaskTool(a)
+		if err != nil {
+			return fmt.Errorf("installing `finish_task` tool for agent %q: %w", a.Name(), err)
+		}
+		state.Tools = append(state.Tools, finishTool)
+	}
+
+	for _, sub := range a.SubAgents() {
+		subInternal, ok := sub.(llminternal.Agent)
+		if !ok {
+			continue
+		}
+		subState := llminternal.Reveal(subInternal)
+		if subState.Mode == llminternal.ModeUnset {
+			subState.Mode = llminternal.ModeChat
+		}
+
+		switch subState.Mode {
+		case llminternal.ModeSingleTurn:
+			t, err := workflowinternal.NewSingleTurnTool(sub)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to install `single_turn` agent tool for sub-agent %q of %q: %w",
+					sub.Name(), a.Name(), err,
+				)
+			}
+			state.Tools = append(state.Tools, t)
+		case llminternal.ModeTask:
+			t, err := workflowinternal.NewTaskAgentTool(sub)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to install `task` agent tool for sub-agent %q of %q: %w",
+					sub.Name(), a.Name(), err,
+				)
+			}
+			state.Tools = append(state.Tools, t)
+		}
+	}
+
+	return nil
 }
 
 // Config of the LLMAgent.
@@ -280,7 +332,32 @@ type Config struct {
 	// - Extracts agent reply for later use, such as in tools, callbacks, etc.
 	// - Connects agents to coordinate with each other.
 	OutputKey string
+
+	// Mode is the delegation mode for this agent.
+	//
+	// Options:
+	//   ModeChat: Standard chat agent reachable via transfer_to_agent.
+	//   ModeTask: Task agent that chats with the user to accomplish a task.
+	//   ModeSingleTurn: Agents that complete a task without chatting with the user.
+	//
+	// Default value is ModeChat as a sub-agent, ModeSingleTurn as a node in a workflow.
+	Mode Mode
 }
+
+// Mode is the delegation mode of an LLMAgent. See [Config.Mode] for details.
+type Mode = llminternal.Mode
+
+const (
+	// ModeUnset means the mode has not been set explicitly.
+	ModeUnset = llminternal.ModeUnset
+	// ModeChat is the standard chat agent reachable via transfer_to_agent.
+	ModeChat = llminternal.ModeChat
+	// ModeTask is a task agent that chats with the user to accomplish a task.
+	ModeTask = llminternal.ModeTask
+	// ModeSingleTurn is an agent that completes a task without chatting with
+	// the user.
+	ModeSingleTurn = llminternal.ModeSingleTurn
+)
 
 // BeforeModelCallback that is called before sending a request to the model.
 //
@@ -470,6 +547,7 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		}
 
 		event.Actions.StateDelta[a.OutputKey] = result
+		event.Output = result
 	}
 }
 

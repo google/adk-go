@@ -15,6 +15,7 @@
 package llmagent_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"iter"
@@ -22,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -34,6 +36,8 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/workflow"
+	"google.golang.org/adk/internal/agent/runconfig"
 )
 
 const modelName = "gemini-2.5-flash"
@@ -1192,4 +1196,105 @@ func TestFindAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLLMAgent_WorkflowIntegration_OutputPropagatesToSuccessor(t *testing.T) {
+	// 1. mock LLM returning "hello world"
+	testLLM := &testutil.MockModel{
+		Responses: []*genai.Content{
+			genai.NewContentFromText("hello world", genai.RoleModel),
+		},
+	}
+
+	// 2. LLMAgent with OutputKey="result"
+	a, err := llmagent.New(llmagent.Config{
+		Name:      "llm_agent",
+		Model:     testLLM,
+		OutputKey: "result",
+	})
+	if err != nil {
+		t.Fatalf("failed to create llm agent: %v", err)
+	}
+
+	// 3. wrap in AgentNode
+	agentNode, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("failed to create agent node: %v", err)
+	}
+
+	// 4. Chain(Start, agentNode, fnNode), where fnNode asserts on input
+	var gotInput any
+	fnNode := workflow.NewFunctionNode("receiver", func(ctx agent.InvocationContext, in any) (any, error) {
+		gotInput = in
+		return nil, nil
+	}, workflow.NodeConfig{})
+
+	edges := workflow.Chain(workflow.Start, agentNode, fnNode)
+	w, err := workflow.New("test_workflow", edges)
+	if err != nil {
+		t.Fatalf("failed to create workflow: %v", err)
+	}
+
+	// Run the workflow. We need a mock context and session.
+	runCtx := runconfig.ToContext(t.Context(), &runconfig.RunConfig{})
+	mockCtx := &mockInvocationContext{
+		Context: runCtx,
+		sess:    &mockSession{id: "test-session-id"},
+	}
+
+	events := w.Run(mockCtx)
+	for ev, err := range events {
+		if err != nil {
+			t.Fatalf("workflow run failed: %v", err)
+		}
+		_ = ev
+	}
+
+	// 5. assert: fnNode got "hello world"
+	if diff := cmp.Diff("hello world", gotInput); diff != "" {
+		t.Errorf("fnNode got unexpected input (-want +got):\n%s", diff)
+	}
+}
+
+type mockEvents struct{}
+
+func (m mockEvents) All() iter.Seq[*session.Event] {
+	return func(yield func(*session.Event) bool) {}
+}
+func (m mockEvents) Len() int                { return 0 }
+func (m mockEvents) At(i int) *session.Event { return nil }
+
+type mockSession struct {
+	id string
+}
+
+func (m *mockSession) ID() string                { return m.id }
+func (m *mockSession) AppName() string           { return "test-app" }
+func (m *mockSession) UserID() string            { return "test-user" }
+func (m *mockSession) State() session.State      { return nil }
+func (m *mockSession) Events() session.Events    { return mockEvents{} }
+func (m *mockSession) LastUpdateTime() time.Time { return time.Now() }
+
+type mockInvocationContext struct {
+	context.Context
+	sess        session.Session
+	userContent *genai.Content
+}
+
+func (m *mockInvocationContext) Session() session.Session        { return m.sess }
+func (m *mockInvocationContext) InvocationID() string            { return "test-invocation-id" }
+func (m *mockInvocationContext) UserContent() *genai.Content     { return m.userContent }
+func (m *mockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
+func (m *mockInvocationContext) Agent() agent.Agent              { return nil }
+func (m *mockInvocationContext) Artifacts() agent.Artifacts      { return nil }
+func (m *mockInvocationContext) Memory() agent.Memory            { return nil }
+func (m *mockInvocationContext) Branch() string                  { return "" }
+func (m *mockInvocationContext) RunConfig() *agent.RunConfig     { return nil }
+func (m *mockInvocationContext) Ended() bool                     { return false }
+func (m *mockInvocationContext) EndInvocation()                  {}
+
+func (m *mockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
+	cp := *m
+	cp.Context = ctx
+	return &cp
 }
