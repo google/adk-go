@@ -530,7 +530,7 @@ func newV0Card(serverURL string) *legacyA2A.AgentCard {
 	return a2av0.FromV1AgentCard(&v2a2a.AgentCard{
 		SupportedInterfaces: []*v2a2a.AgentInterface{
 			{
-				URL: serverURL,
+				URL:             serverURL,
 				ProtocolBinding: v2a2a.TransportProtocolJSONRPC,
 				ProtocolVersion: a2av0.Version,
 			},
@@ -638,7 +638,7 @@ func newLegacyA2AClient(t *testing.T, server *testA2AServer) *legacyAClient.Clie
 	return client
 }
 
-func newA2ARemoteAgent(t *testing.T, name string, server *testA2AServer, clientFactory *legacyAClient.Factory) agent.Agent {
+func newA2ARemoteAgent(t *testing.T, name string, server *testA2AServer) agent.Agent {
 	t.Helper()
 	card := newV0Card(server.Server.URL)
 
@@ -708,7 +708,7 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 	defer serverB.Close()
 
 	// Root server connects to server B through remote subagent
-	remoteAgentB := newA2ARemoteAgent(t, "remote-agent-b", serverB, legacyAClient.NewFactory())
+	remoteAgentB := newA2ARemoteAgent(t, "remote-agent-b", serverB)
 	rootA := newRootAgent("agent-b", remoteAgentB)
 
 	// A2A Execution Cleanup callback

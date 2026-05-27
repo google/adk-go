@@ -27,7 +27,8 @@ import (
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
 	"github.com/a2aproject/a2a-go/log"
-	v2a2a "github.com/a2aproject/a2a-go/v2/a2a"
+	a2av2 "github.com/a2aproject/a2a-go/v2/a2a"
+	a2aclientv2 "github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 
 	"google.golang.org/genai"
@@ -136,13 +137,21 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 		Description:          cfg.Description,
 		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
-		ClientProvider: func(ctx context.Context, card *v2a2a.AgentCard) (v2.A2AClient, error) {
-			legacyCard := a2av0.FromV1AgentCard(card)
-			factory := cfg.ClientFactory
-			if factory == nil {
-				factory = a2aclient.NewFactory()
+		ClientProvider: func(ctx context.Context, card *a2av2.AgentCard) (v2.A2AClient, error) {
+			if cfg.ClientFactory == nil {
+				factory := a2aclientv2.NewFactory(
+					a2aclientv2.WithCompatTransport(
+						a2av0.Version, a2av2.TransportProtocolJSONRPC, a2av0.NewJSONRPCTransportFactory(a2av0.JSONRPCTransportConfig{}),
+					),
+					a2aclientv2.WithCompatTransport(
+						a2av0.Version, a2av2.TransportProtocolHTTPJSON, a2av0.NewRESTTransportFactory(a2av0.RESTTransportConfig{}),
+					),
+				)
+				return factory.CreateFromCard(ctx, card)
 			}
-			client, err := factory.CreateFromCard(ctx, legacyCard)
+
+			legacyCard := a2av0.FromV1AgentCard(card)
+			client, err := cfg.ClientFactory.CreateFromCard(ctx, legacyCard)
 			if err != nil {
 				return nil, err
 			}
@@ -155,7 +164,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	} else if cfg.AgentCardSource != "" {
 		source := cfg.AgentCardSource
 		resolveOpts := cfg.CardResolveOptions
-		v1Cfg.AgentCardProvider = func(ctx context.Context) (*v2a2a.AgentCard, error) {
+		v1Cfg.AgentCardProvider = func(ctx context.Context) (*a2av2.AgentCard, error) {
 			v0Card, err := agentcard.DefaultResolver.Resolve(ctx, source, resolveOpts...)
 			if err != nil {
 				return nil, err
@@ -172,19 +181,8 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 		v1Cfg.MessageSendConfig = req.Config
 	}
 
-	if cfg.ClientFactory != nil {
-		v1Cfg.ClientProvider = func(ctx context.Context, card *v2a2a.AgentCard) (v2.A2AClient, error) {
-			legacyCard := a2av0.FromV1AgentCard(card)
-			client, err := cfg.ClientFactory.CreateFromCard(ctx, legacyCard)
-			if err != nil {
-				return nil, err
-			}
-			return &compatClient{client: client}, nil
-		}
-	}
-
 	if cfg.Converter != nil {
-		v1Cfg.Converter = func(ctx agent.InvocationContext, req *v2a2a.SendMessageRequest, event v2a2a.Event, err error) (*session.Event, error) {
+		v1Cfg.Converter = func(ctx agent.InvocationContext, req *a2av2.SendMessageRequest, event a2av2.Event, err error) (*session.Event, error) {
 			legacyReq := a2av0.FromV1SendMessageRequest(req)
 			var legacyEvent a2a.Event
 			if event != nil {
@@ -201,7 +199,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.BeforeRequestCallbacks != nil {
 		v1Cfg.BeforeRequestCallbacks = make([]v2.BeforeA2ARequestCallback, 0, len(cfg.BeforeRequestCallbacks))
 		for _, cb := range cfg.BeforeRequestCallbacks {
-			v1Cfg.BeforeRequestCallbacks = append(v1Cfg.BeforeRequestCallbacks, func(ctx agent.CallbackContext, req *v2a2a.SendMessageRequest) (*session.Event, error) {
+			v1Cfg.BeforeRequestCallbacks = append(v1Cfg.BeforeRequestCallbacks, func(ctx agent.CallbackContext, req *a2av2.SendMessageRequest) (*session.Event, error) {
 				legacyReq := a2av0.FromV1SendMessageRequest(req)
 				resp, err := cb(ctx, legacyReq)
 				if resp != nil || err != nil { // short-circuit, no need to convert the request back
@@ -221,7 +219,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.AfterRequestCallbacks != nil {
 		v1Cfg.AfterRequestCallbacks = make([]v2.AfterA2ARequestCallback, 0, len(cfg.AfterRequestCallbacks))
 		for _, cb := range cfg.AfterRequestCallbacks {
-			v1Cfg.AfterRequestCallbacks = append(v1Cfg.AfterRequestCallbacks, func(ctx agent.CallbackContext, req *v2a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error) {
+			v1Cfg.AfterRequestCallbacks = append(v1Cfg.AfterRequestCallbacks, func(ctx agent.CallbackContext, req *a2av2.SendMessageRequest, resp *session.Event, err error) (*session.Event, error) {
 				legacyReq := a2av0.FromV1SendMessageRequest(req)
 				newResp, newErr := cb(ctx, legacyReq, resp, err)
 				if newResp != nil || newErr != nil { // short-circuit, no need to convert the request back
@@ -239,7 +237,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	}
 
 	if cfg.A2APartConverter != nil {
-		v1Cfg.A2APartConverter = func(ctx context.Context, a2aEvent v2a2a.Event, part *v2a2a.Part) (*genai.Part, error) {
+		v1Cfg.A2APartConverter = func(ctx context.Context, a2aEvent a2av2.Event, part *a2av2.Part) (*genai.Part, error) {
 			legacyEvent, convErr := a2av0.FromV1Event(a2aEvent)
 			if convErr != nil {
 				return nil, convErr
@@ -249,7 +247,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	}
 
 	if cfg.GenAIPartConverter != nil {
-		v1Cfg.GenAIPartConverter = func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (*v2a2a.Part, error) {
+		v1Cfg.GenAIPartConverter = func(ctx context.Context, adkEvent *session.Event, part *genai.Part) (*a2av2.Part, error) {
 			legacyPart, err := cfg.GenAIPartConverter(ctx, adkEvent, part)
 			if err != nil {
 				return nil, err
@@ -259,7 +257,7 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	}
 
 	if cfg.RemoteTaskCleanupCallback != nil {
-		v1Cfg.RemoteTaskCleanupCallback = func(ctx context.Context, card *v2a2a.AgentCard, client v2.A2AClient, taskInfo v2a2a.TaskInfo, cause error) {
+		v1Cfg.RemoteTaskCleanupCallback = func(ctx context.Context, card *a2av2.AgentCard, client v2.A2AClient, taskInfo a2av2.TaskInfo, cause error) {
 			legacyCard := a2av0.FromV1AgentCard(card)
 			legacyTaskInfo := a2a.TaskInfo{TaskID: a2a.TaskID(taskInfo.TaskID), ContextID: taskInfo.ContextID}
 
@@ -295,7 +293,7 @@ type compatClient struct {
 	client *a2aclient.Client
 }
 
-func (s *compatClient) SendMessage(ctx context.Context, req *v2a2a.SendMessageRequest) (v2a2a.SendMessageResult, error) {
+func (s *compatClient) SendMessage(ctx context.Context, req *a2av2.SendMessageRequest) (a2av2.SendMessageResult, error) {
 	legacyResp, err := s.client.SendMessage(ctx, a2av0.FromV1SendMessageRequest(req))
 	if err != nil {
 		return nil, err
@@ -304,15 +302,15 @@ func (s *compatClient) SendMessage(ctx context.Context, req *v2a2a.SendMessageRe
 	if err != nil {
 		return nil, err
 	}
-	res, ok := v1Event.(v2a2a.SendMessageResult)
+	res, ok := v1Event.(a2av2.SendMessageResult)
 	if !ok {
 		return nil, fmt.Errorf("converted event does not implement SendMessageResult: %T", v1Event)
 	}
 	return res, nil
 }
 
-func (s *compatClient) SendStreamingMessage(ctx context.Context, req *v2a2a.SendMessageRequest) iter.Seq2[v2a2a.Event, error] {
-	return func(yield func(v2a2a.Event, error) bool) {
+func (s *compatClient) SendStreamingMessage(ctx context.Context, req *a2av2.SendMessageRequest) iter.Seq2[a2av2.Event, error] {
+	return func(yield func(a2av2.Event, error) bool) {
 		for legacyEvent, err := range s.client.SendStreamingMessage(ctx, a2av0.FromV1SendMessageRequest(req)) {
 			if err != nil {
 				yield(nil, err)
@@ -330,7 +328,7 @@ func (s *compatClient) SendStreamingMessage(ctx context.Context, req *v2a2a.Send
 	}
 }
 
-func (s *compatClient) CancelTask(ctx context.Context, req *v2a2a.CancelTaskRequest) (*v2a2a.Task, error) {
+func (s *compatClient) CancelTask(ctx context.Context, req *a2av2.CancelTaskRequest) (*a2av2.Task, error) {
 	legacyResp, err := s.client.CancelTask(ctx, a2av0.FromV1CancelTaskRequest(req))
 	if err != nil {
 		return nil, err
