@@ -64,6 +64,16 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, customRunID string)
 	childPath := s.parentPath + "/" + name + "@" + runID
 	childCtx := newDynamicNodeContext(s.parentCtx, childPath, runID, s)
 
+	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
+	// subScheduler) in the embedded context.Context so tools running
+	// inside an LlmAgent that is itself running as this dynamic
+	// child can recover the NodeContext via
+	// workflow.NodeContextFromGoContext. See
+	// scheduleResumedNode for the static-node equivalent.
+	childCtx.InvocationContext = childCtx.InvocationContext.WithContext(
+		WithNodeContext(childCtx.InvocationContext, childCtx),
+	)
+
 	var (
 		out         any
 		interrupted bool
