@@ -91,7 +91,7 @@ func RunNode[OUT any](ctx NodeContext, child Node, input any, opts ...RunNodeOpt
 		opt(&o)
 	}
 
-	rawOut, err := nc.subScheduler.runNode(child, input, o.customRunID, o.useSubBranch, o.overrideBranch)
+	rawOut, err := nc.subScheduler.runNode(child, input, o)
 	if err != nil {
 		return zero, err
 	}
