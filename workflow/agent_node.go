@@ -102,12 +102,16 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 			}
 		}
 
-		// Use existing agent context instead of implementing a new one
+		// Use existing agent context instead of implementing a new one.
+		// Branch is inherited from ctx so the agent runs under the
+		// activation's branch; the scheduler assigns sub-branches at
+		// fan-out (workflow/scheduler.go) and the LLM history filter
+		// (internal/llminternal/contents_processor.go) scopes events
+		// by branch prefix.
 		params := internalcontext.InvocationContextParams{
-			Artifacts: ctx.Artifacts(),
-			Memory:    ctx.Memory(),
-			Session:   ctx.Session(),
-			// TODO: branch isolation in a separate PR
+			Artifacts:     ctx.Artifacts(),
+			Memory:        ctx.Memory(),
+			Session:       ctx.Session(),
 			Branch:        ctx.Branch(),
 			Agent:         n.agent,
 			UserContent:   userContent,
