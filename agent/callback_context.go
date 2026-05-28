@@ -31,15 +31,7 @@ import (
 // NewCallbackContext returns CallbackContext initialized with provided actions.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
 func NewCallbackContext(ic InvocationContext, actions *session.EventActions) CallbackContext {
-	if actions == nil {
-		actions = &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	}
-	if actions.StateDelta == nil {
-		actions.StateDelta = make(map[string]any)
-	}
-	if actions.ArtifactDelta == nil {
-		actions.ArtifactDelta = make(map[string]int64)
-	}
+	actions = prepareEventActions(actions)
 	cc := &callbackContext{
 		Context:           ic,
 		invocationContext: ic,
@@ -54,16 +46,7 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Cal
 // EventActions.ArtifactDelta so the resulting Event reflects the saves.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
 func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) CallbackContext {
-	if actions == nil {
-		actions = &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	}
-	if actions.StateDelta == nil {
-		actions.StateDelta = make(map[string]any)
-	}
-	if actions.ArtifactDelta == nil {
-		actions.ArtifactDelta = make(map[string]int64)
-	}
-
+	actions = prepareEventActions(actions)
 	cc := &callbackContext{
 		Context:           ic,
 		invocationContext: ic,
@@ -85,15 +68,7 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 	if functionCallID == "" {
 		functionCallID = uuid.NewString()
 	}
-	if actions == nil {
-		actions = &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	}
-	if actions.StateDelta == nil {
-		actions.StateDelta = make(map[string]any)
-	}
-	if actions.ArtifactDelta == nil {
-		actions.ArtifactDelta = make(map[string]int64)
-	}
+	actions = prepareEventActions(actions)
 	return &callbackContext{
 		Context:           ic,
 		invocationContext: ic,
@@ -102,6 +77,20 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 		functionCallID:    functionCallID,
 		toolConfirmation:  confirmation,
 	}
+}
+
+func prepareEventActions(actions *session.EventActions) *session.EventActions {
+	if actions == nil {
+		return &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
+	}
+	// create missing maps if needed
+	if actions.StateDelta == nil {
+		actions.StateDelta = make(map[string]any)
+	}
+	if actions.ArtifactDelta == nil {
+		actions.ArtifactDelta = make(map[string]int64)
+	}
+	return actions
 }
 
 // callbackContext is the single concrete implementation of CallbackContext

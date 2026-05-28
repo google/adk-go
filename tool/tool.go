@@ -45,7 +45,7 @@ type Tool interface {
 	IsLongRunning() bool
 }
 
-// Context is an alias for agent.Context.
+// Context is an alias for agent.ToolContext.
 //
 // Deprecated: use agent.Context directly. This alias exists only to
 // minimize churn during the migration and will be removed in a future
