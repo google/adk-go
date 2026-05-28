@@ -173,7 +173,10 @@ func main() {
 		log.Fatalf("failed to create classifier agent: %v", err)
 	}
 
-	classifyNode := workflow.NewAgentNode(classifier, workflow.NodeConfig{})
+	classifyNode, err := workflow.NewAgentNode(classifier, workflow.NodeConfig{})
+	if err != nil {
+		log.Fatalf("failed to create classify node: %v", err)
+	}
 	routeNode := newRouteNode()
 	question := workflow.NewFunctionNode("answer_question", answerQuestion, workflow.NodeConfig{})
 	statement := workflow.NewFunctionNode("comment_statement", commentOnStatement, workflow.NodeConfig{})
