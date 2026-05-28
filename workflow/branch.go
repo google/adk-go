@@ -25,26 +25,20 @@ import (
 // Branch composition helpers for the static, parallel, and dynamic
 // schedulers. Branches are dot-separated strings identifying the
 // position of an in-flight node within an invocation's parallel
-// execution tree. The LLM history filter
-// (internal/llminternal/contents_processor.go:eventBelongsToBranch)
-// uses prefix matching with explicit dot delimiter to scope events:
-// an agent on branch "a.b" sees events on branches "" (root), "a"
+// execution tree. The LLM flow processor's history filter uses
+// prefix matching with explicit dot delimiter to scope events: an
+// agent on branch "a.b" sees events on branches "" (root), "a"
 // (ancestor), and "a.b" (self) but not "a.c" (sibling).
-//
-// Mirrors adk-python's logic in:
-//   - src/google/adk/workflow/_node_runner.py:198-209 (sub-branch derivation)
-//   - src/google/adk/workflow/_workflow.py:59-71 (common-prefix)
-//   - src/google/adk/flows/llm_flows/contents.py:885-900 (matching)
 
 // deriveSubBranch appends segment to parent with the dot delimiter.
 // An empty parent yields the bare segment (root + segment), keeping
 // the resulting string non-dot-prefixed; an empty segment is a
 // no-op returning parent unchanged.
 //
-// segment is expected to be a stable identifier — Python uses
-// "<node_name>@<run_id>" — but this helper does not impose a shape.
-// Callers that need uniqueness across replays must supply a stable
-// run id (auto-counter or WithRunID for dynamic; index+1 for
+// segment is expected to be a stable identifier (callers commonly
+// use "<node_name>@<run_id>") but this helper does not impose a
+// shape. Callers that need uniqueness across replays must supply a
+// stable run id (auto-counter or WithRunID for dynamic; index+1 for
 // ParallelWorker; "<successor>@1" for static fan-out).
 func deriveSubBranch(parent, segment string) string {
 	if segment == "" {
@@ -79,9 +73,10 @@ func withBranch(ctx agent.InvocationContext, branch string) agent.InvocationCont
 // value.
 //
 // WithContext is overridden so the branch survives a subsequent
-// context-cancellation wrap (e.g. ParallelWorker calls
-// ctx.WithContext(cancelCtx) on its input, and the resulting ctx
-// must still carry the override when callers later read Branch()).
+// context-cancellation wrap. Without this, a caller that does
+// ctx.WithContext(cancelCtx) would get an InvocationContext whose
+// Branch() returns the inner mock's branch (empty), silently
+// losing the override.
 type branchOverride struct {
 	agent.InvocationContext
 	branch string
@@ -100,9 +95,7 @@ func (b *branchOverride) WithContext(ctx context.Context) agent.InvocationContex
 }
 
 // deriveChildBranch composes the branch for a dynamically-scheduled
-// child given the parent's branch and the RunNode options. Mirrors
-// adk-python's logic in _node_runner._create_child_context
-// (_node_runner.py:198-209).
+// child given the parent's branch and the RunNode options.
 //
 // Algorithm:
 //   - base = overrideBranch if non-empty, else parentBranch
@@ -110,9 +103,9 @@ func (b *branchOverride) WithContext(ctx context.Context) agent.InvocationContex
 //     when base is empty)
 //   - useSubBranch=false → base unchanged
 //
-// Note: overrideBranch="" is treated as "no override" (Go does not
-// distinguish nil from empty string the way Python distinguishes
-// None from ""); see WithOverrideBranch godoc for the rationale.
+// Note: overrideBranch="" is treated as "no override" (Go lacks an
+// optional string type that would distinguish unset from
+// explicitly-empty); see WithOverrideBranch godoc for the rationale.
 func deriveChildBranch(parentBranch, name, runID string, useSubBranch bool, overrideBranch string) string {
 	base := parentBranch
 	if overrideBranch != "" {
@@ -137,7 +130,6 @@ func deriveChildBranch(parentBranch, name, runID string, useSubBranch bool, over
 //
 // Note that segment-aware comparison is intentional: branches "a"
 // and "ab" share no prefix (zero common segments), not "a"-as-string.
-// This matches Python's segment-split behaviour at _workflow.py:63-71.
 func commonBranchPrefix(branches []string) string {
 	if len(branches) == 0 {
 		return ""

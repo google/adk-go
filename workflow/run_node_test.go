@@ -183,12 +183,19 @@ func TestRunNode_SequentialFanOut_PerSibling_DistinctBranches(t *testing.T) {
 	// re-use the same node twice to exercise the per-name counter.
 	var got []string
 	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
-		_, _ = RunNode[string](ctx, c1, nil, WithUseSubBranch())
+		if _, err := RunNode[string](ctx, c1, nil, WithUseSubBranch()); err != nil {
+			return "", err
+		}
 		got = append(got, c1.lastBranch)
-		_, _ = RunNode[string](ctx, c1, nil, WithUseSubBranch())
+		if _, err := RunNode[string](ctx, c1, nil, WithUseSubBranch()); err != nil {
+			return "", err
+		}
 		got = append(got, c1.lastBranch)
 		return "", nil
 	})
+	if len(got) != 2 {
+		t.Fatalf("got %d branches, want 2 (orchestrator may have errored mid-loop)", len(got))
+	}
 	want := []string{"c@1", "c@2"}
 	if got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("observed branches = %v, want %v "+

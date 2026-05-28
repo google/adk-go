@@ -105,8 +105,7 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 		// Use existing agent context instead of implementing a new one.
 		// Branch is inherited from ctx so the agent runs under the
 		// activation's branch; the scheduler assigns sub-branches at
-		// fan-out (workflow/scheduler.go) and the LLM history filter
-		// (internal/llminternal/contents_processor.go) scopes events
+		// fan-out, and the LLM flow's history filter scopes events
 		// by branch prefix.
 		params := internalcontext.InvocationContextParams{
 			Artifacts:     ctx.Artifacts(),

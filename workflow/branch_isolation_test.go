@@ -23,33 +23,15 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// TestRunNode_SequentialFanOut_WithUseSubBranch_DistinctBranches is
-// the post-Phase 3 form of the original branch-isolation Phase 0
-// reproducer. It verifies that opting into WithUseSubBranch() at
-// each RunNode call produces distinct per-child branches so
-// downstream LlmAgent children, reading session.Events() filtered
-// by branch
-// (internal/llminternal/contents_processor.go:eventBelongsToBranch),
-// no longer see each other's events.
-//
-// History: in Phase 0 (before this plan started) this test was
-// XFAILed and pinned the "all children share Branch == \"\"" bug.
-// Phase 3 added WithUseSubBranch / WithOverrideBranch options;
-// applying WithUseSubBranch() at the call site is the
-// Python-equivalent fix.
-//
-// The companion test
-// TestRunNode_SequentialFanOut_NoOption_StillSharesBranch below
-// pins that *omitting* the option keeps the old inherit-parent
-// behaviour, matching Python's default (use_sub_branch=False).
+// TestRunNode_SequentialFanOut_WithUseSubBranch_DistinctBranches
+// verifies that opting into WithUseSubBranch() at each RunNode call
+// produces distinct per-child branches.
 //
 // Why sequential (not errgroup): per req §5.1 D-Emit-Sequential,
 // emit / RunNode are single-goroutine only. Running fan-out via
 // errgroup violates the iter.Seq2 contract (concurrent yield calls
 // from multiple goroutines) and races on the event-collection slice
-// inside drainDynamicWithErr. A future PR may add a parallel
-// reproducer once each goroutine gets its own sub-context; for
-// branch derivation correctness the sequential form is sufficient.
+// inside drainDynamicWithErr.
 func TestRunNode_SequentialFanOut_WithUseSubBranch_DistinctBranches(t *testing.T) {
 	const (
 		childName = "peeker"
@@ -111,10 +93,9 @@ func TestRunNode_SequentialFanOut_WithUseSubBranch_DistinctBranches(t *testing.T
 }
 
 // TestRunNode_SequentialFanOut_NoOption_StillSharesBranch pins the
-// Python-default behaviour (use_sub_branch=False): without the
-// opt-in, children inherit the orchestrator's branch verbatim. This
-// preserves backward compatibility for code that relies on inherited
-// branches.
+// default behaviour: without the opt-in, children inherit the
+// orchestrator's branch verbatim. This preserves backward
+// compatibility for code that relies on inherited branches.
 func TestRunNode_SequentialFanOut_NoOption_StillSharesBranch(t *testing.T) {
 	const (
 		childName = "peeker"

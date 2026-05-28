@@ -101,13 +101,9 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 		resCh := make(chan workerResult, nItems)
 
 		// Branch isolation: derive a per-item sub-branch so each
-		// worker's wrapped node sees an isolated event history
-		// (the LLM contents-processor filter scopes by branch
-		// prefix). Mirrors adk-python _parallel_worker.py:96-102
-		// which passes use_sub_branch=True on ctx.run_node so the
-		// dynamic scheduler generates a fresh sub-branch per item.
-		// Run id mirrors Python's auto-counter ("1", "2", ...) so
-		// items 0..N-1 receive sub-branches name@1..name@N.
+		// worker's wrapped node sees an isolated event history (the
+		// LLM flow's history filter scopes by branch prefix). Items
+		// 0..N-1 receive sub-branches name@1..name@N.
 		parentBranch := workerCtx.Branch()
 		wrappedName := n.wrapped.Name()
 

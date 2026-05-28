@@ -15,7 +15,6 @@
 package workflow
 
 import (
-	"sort"
 	"sync"
 	"testing"
 
@@ -23,9 +22,8 @@ import (
 )
 
 // branchRecorder returns a FunctionNode that captures the
-// ctx.Branch() string into *seen at execution time. Used by the
-// scheduler-branch tests to verify what branch the scheduler
-// assigned to each activation.
+// ctx.Branch() string into *seen at execution time, keyed by node
+// name.
 func branchRecorder(name string, mu *sync.Mutex, seen *map[string]string) *FunctionNode {
 	return NewFunctionNode(name,
 		func(ctx agent.InvocationContext, input any) (string, error) {
@@ -66,8 +64,7 @@ func TestScheduler_SingleSuccessorChain_InheritsRootBranch(t *testing.T) {
 
 // TestScheduler_MultipleSuccessors_AssignsSubBranches verifies that
 // fan-out from one node to N successors derives sub-branches of the
-// form "<successor>@1" for each branch. Mirrors Python
-// _workflow.py:692 where use_sub_branch = len(next_nodes) > 1.
+// form "<successor>@1" for each branch.
 func TestScheduler_MultipleSuccessors_AssignsSubBranches(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 	var mu sync.Mutex
@@ -208,10 +205,10 @@ func TestScheduler_JoinNode_NestedFanOut(t *testing.T) {
 	if got, want := seen["leaf2"], "leaf2@1"; got != want {
 		t.Errorf("seen[leaf2] = %q, want %q", got, want)
 	}
-	// Common prefix of "leaf1@1" and "leaf2@1" is "" (no shared segments)
-	// — because outer is on the *root* branch, its successors' sub-branches
-	// share no parent segment. This matches Python: the join joins back to
-	// the deepest common ancestor, which here is root.
+	// Common prefix of "leaf1@1" and "leaf2@1" is "" (no shared
+	// segments) — because outer is on the *root* branch, its
+	// successors' sub-branches share no parent segment, so the join
+	// returns to root (deepest common ancestor).
 	if got, want := seen["handler"], ""; got != want {
 		t.Errorf("seen[handler] = %q, want %q", got, want)
 	}
@@ -219,8 +216,7 @@ func TestScheduler_JoinNode_NestedFanOut(t *testing.T) {
 
 // TestScheduler_EventsAreBranchStamped verifies that the scheduler
 // stamps Event.Branch on every emitted event using the activation's
-// branch when the node itself leaves Event.Branch empty (mirrors
-// Python's _enrich_event behaviour in _node_runner.py:400-401).
+// branch when the node itself leaves Event.Branch empty.
 func TestScheduler_EventsAreBranchStamped(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 	var mu sync.Mutex
@@ -255,49 +251,6 @@ func TestScheduler_EventsAreBranchStamped(t *testing.T) {
 				t.Errorf("event from %q has Branch = %q, want %q",
 					author, got, wantBranch)
 			}
-		}
-	}
-}
-
-// TestScheduler_AllNodeStateBranchesPersisted verifies that the
-// scheduler records each activation's branch in NodeState.Branch so
-// resume after pause can reconstruct the same branch tree.
-func TestScheduler_AllNodeStateBranchesPersisted(t *testing.T) {
-	mockCtx := newSeededMockCtx(t)
-	var mu sync.Mutex
-	seen := map[string]string{}
-
-	a := branchRecorder("a", &mu, &seen)
-	b := branchRecorder("b", &mu, &seen)
-	c := branchRecorder("c", &mu, &seen)
-
-	w := mustNew(t, []Edge{
-		{From: Start, To: a},
-		{From: Start, To: b},
-		{From: Start, To: c},
-	})
-
-	drain(t, w.Run(mockCtx))
-
-	// We can't reach the scheduler's internal state.Nodes from
-	// outside w.Run, but the branch_test for the helper logic
-	// covers the recording path. Here we sanity-check that the
-	// observed branches from the ctx side match what the scheduler
-	// should have written to NodeState (the latter is verified
-	// implicitly by the existing resume tests, which would break
-	// if NodeState.Branch were not preserved).
-	got := make([]string, 0, len(seen))
-	for _, v := range seen {
-		got = append(got, v)
-	}
-	sort.Strings(got)
-	want := []string{"a@1", "b@1", "c@1"}
-	if len(got) != len(want) {
-		t.Fatalf("seen branches = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("seen[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
 }

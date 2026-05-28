@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"errors"
 	"sort"
 	"sync"
 	"testing"
@@ -24,14 +25,9 @@ import (
 
 // TestParallelWorker_PerItemSubBranch verifies that ParallelWorker
 // gives each of its N concurrent workers a distinct sub-branch of
-// the form "<wrapped>@<i+1>", so a downstream LlmAgent reading
-// session.Events() filtered by branch
-// (internal/llminternal/contents_processor.go:eventBelongsToBranch)
-// no longer sees sibling-worker events in its prompt history.
-//
-// Mirrors adk-python _parallel_worker.py:96-102 which passes
-// use_sub_branch=True on ctx.run_node so the dynamic scheduler
-// derives a fresh sub-branch per item.
+// the form "<wrapped>@<i+1>", so a downstream LlmAgent reading the
+// session event log under the LLM flow's branch-prefix filter no
+// longer sees sibling-worker events in its prompt history.
 func TestParallelWorker_PerItemSubBranch(t *testing.T) {
 	const wrappedName = "summarize"
 
@@ -138,21 +134,17 @@ func TestParallelWorker_SubBranchUnderNonRootParent(t *testing.T) {
 func TestParallelWorker_RetryKeepsSameBranch(t *testing.T) {
 	const wrappedName = "flaky"
 
+	errAlwaysFail := errors.New("force retry")
 	var (
 		mu               sync.Mutex
-		attemptsByBranch = map[string][]int{}
-		attempts         int
+		attemptsByBranch = map[string]int{}
 	)
 	wrapped := NewFunctionNode(wrappedName,
 		func(ctx agent.InvocationContext, input string) (string, error) {
 			mu.Lock()
-			attempts++
-			attempt := attempts
-			attemptsByBranch[ctx.Branch()] = append(attemptsByBranch[ctx.Branch()], attempt)
+			attemptsByBranch[ctx.Branch()]++
 			mu.Unlock()
-			// Always fail; the retry loop in runWorker will
-			// re-invoke this function on the same ctx.
-			return "", errRetryablePhase2
+			return "", errAlwaysFail
 		}, defaultNodeConfig)
 
 	cfg := NodeConfig{RetryConfig: &RetryConfig{MaxAttempts: 3}}
@@ -162,31 +154,26 @@ func TestParallelWorker_RetryKeepsSameBranch(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	events := pw.Run(mockCtx, []any{"a"})
-	for _, err := range events {
-		// We expect the worker to ultimately fail after retries.
-		_ = err
+	var gotErr error
+	for _, runErr := range pw.Run(mockCtx, []any{"a"}) {
+		if runErr != nil {
+			gotErr = runErr
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected wrapped node to ultimately fail after retries, got nil error")
 	}
 
 	if got := len(attemptsByBranch); got != 1 {
 		t.Fatalf("attemptsByBranch keys = %d, want 1 "+
 			"(retries must share one branch); got %+v", got, attemptsByBranch)
 	}
-	for branch, attemptList := range attemptsByBranch {
+	for branch, count := range attemptsByBranch {
 		if branch != wrappedName+"@1" {
 			t.Errorf("retry branch = %q, want %q", branch, wrappedName+"@1")
 		}
-		if len(attemptList) < 2 {
-			t.Errorf("retry attempts under %q = %v, want ≥2", branch, attemptList)
+		if count < 2 {
+			t.Errorf("retry attempts under %q = %d, want ≥2", branch, count)
 		}
 	}
 }
-
-// errRetryablePhase2 is a sentinel for the retry test above to
-// trigger ShouldRetry's positive path without interfering with
-// other tests' error matching.
-type phase2RetryErr struct{}
-
-func (phase2RetryErr) Error() string { return "phase2 retry test" }
-
-var errRetryablePhase2 = phase2RetryErr{}

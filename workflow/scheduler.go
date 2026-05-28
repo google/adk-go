@@ -225,11 +225,10 @@ func buildNodesByName(g *graph) map[string]Node {
 // it returns (success, error, panic, or cancellation).
 //
 // branch is the composite branch string this activation runs under;
-// empty means inherit the workflow's root branch. Branch is used
-// (1) to scope LLM history visibility via
-// internal/llminternal/contents_processor.go:eventBelongsToBranch
-// and (2) to stamp Event.Branch on emitted events when the node
-// itself does not set it.
+// empty means inherit the workflow's root branch. Branch scopes
+// LLM history visibility (via the flow processor's branch-prefix
+// filter) and gets stamped onto every emitted event when the node
+// leaves Event.Branch empty.
 //
 // scheduleNode runs only on the consumer goroutine.
 func (s *scheduler) scheduleNode(n Node, input any, triggeredBy, branch string) {
@@ -468,14 +467,10 @@ func (s *scheduler) handleEvent(it eventItem) {
 		return
 	}
 	// Stamp the activation's branch onto events that did not set one.
-	// Mirrors Python _node_runner._enrich_event (_node_runner.py:400-401).
-	// Nodes that explicitly set Event.Branch are respected; nodes that
-	// emit Event{Branch: ""} are interpreted as "use the activation's
-	// branch" (matching the Go default-value model — Python uses
-	// Optional and treats "" as a sentinel for "intentionally unscoped",
-	// which the LlmAgent flow currently emits via ctx.Branch() ==
-	// internal/llminternal/base_flow.go:931, never as an explicit
-	// override).
+	// Nodes that explicitly set Event.Branch are respected; nodes
+	// that emit Event{Branch: ""} use the activation's branch by
+	// default (Go has no way to distinguish "unset" from "explicit
+	// empty" on a string field).
 	if it.ev.Branch == "" && nr.branch != "" {
 		it.ev.Branch = nr.branch
 	}
@@ -645,7 +640,7 @@ type successor struct {
 //
 // JoinNode successors are gated by appendSuccessor; see its docs.
 //
-// Branch derivation (Python parity, _workflow.py:692-727):
+// Branch derivation:
 //
 //   - When this activation fans out to >1 successor, each non-Join
 //     successor is given a sub-branch

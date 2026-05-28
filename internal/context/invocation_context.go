@@ -113,14 +113,12 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 	return &newCtx
 }
 
-// WithBranch returns a copy of c with Branch replaced. Used by the
-// workflow scheduler at fan-out to give each successor its own
-// branch so the LLM history filter
-// (internal/llminternal/contents_processor.go:eventBelongsToBranch)
-// scopes events per parallel branch.
+// WithBranch returns a copy of c with Branch replaced. Useful for
+// callers that need to scope the LLM flow's history filter per
+// parallel branch.
 //
-// Not part of the agent.InvocationContext interface today; promote
-// to the interface only when a non-workflow caller needs it.
+// Not part of the agent.InvocationContext interface; promote if
+// more implementers need it.
 func (c *InvocationContext) WithBranch(branch string) *InvocationContext {
 	newCtx := *c
 	newCtx.params.Branch = branch

@@ -16,11 +16,7 @@ package workflow
 
 import "fmt"
 
-// RunNodeOption configures a single RunNode call. The option set
-// mirrors a subset of adk-python's ctx.run_node kwargs; additional
-// options (use_as_output, override_isolation_scope, per-call
-// timeout/retry overrides, etc.) will be added as those features
-// land.
+// RunNodeOption configures a single RunNode call.
 type RunNodeOption func(*runNodeOptions)
 
 type runNodeOptions struct {
@@ -35,27 +31,22 @@ type runNodeOptions struct {
 // non-digit character (purely numeric ids collide with the
 // auto-counter), and exclude the composite-path separators '/' and
 // '@'. Violations surface as ErrInvalidRunID from RunNode.
-//
-// Mirrors adk-python's run_id kwarg
-// (https://adk.dev/graphs/dynamic/#custom-execution-ids).
 func WithRunID(id string) RunNodeOption {
 	return func(o *runNodeOptions) { o.customRunID = id }
 }
 
 // WithUseSubBranch derives a per-child sub-branch of the form
 // "<parentBranch>.<childName>@<runID>" (or just "<childName>@<runID>"
-// at root) for the child activation. Equivalent to adk-python's
-// use_sub_branch=True kwarg on ctx.run_node.
+// at root) for the child activation.
 //
 // Use this when the caller runs multiple concurrent or independent
 // children that should not see each other's events in their LLM
 // prompt history. Without it, every RunNode child inherits the
 // orchestrator's branch and an LlmAgent child would see sibling
-// events through the history filter
-// (internal/llminternal/contents_processor.go:eventBelongsToBranch).
+// events through the LLM flow's history filter.
 //
-// Combinable with WithOverrideBranch: the override sets the *base*,
-// and use_sub_branch appends the segment to it.
+// Combinable with WithOverrideBranch: the override sets the base,
+// and the sub-branch segment is appended to it.
 func WithUseSubBranch() RunNodeOption {
 	return func(o *runNodeOptions) { o.useSubBranch = true }
 }
@@ -66,18 +57,13 @@ func WithUseSubBranch() RunNodeOption {
 // assigns a specific branch label by convention.
 //
 // Combinable with WithUseSubBranch: the override sets the base,
-// and use_sub_branch appends "<childName>@<runID>" to it.
+// and the sub-branch segment "<childName>@<runID>" is appended.
 //
 // Empty branch is treated as "no override" — callers wanting to
 // force root should pass WithUseSubBranch() alone (which derives a
-// fresh sub-branch off root). This is the one intentional
-// divergence from adk-python's override_branch=None vs "" semantics
-// (_node_runner.py:198-209), motivated by Go's lack of an optional
-// string type and the rarity of the use-it-as-force-root case
-// (no tests or samples in adk-python exercise override_branch="").
-//
-// Mirrors adk-python's override_branch kwarg on ctx.run_node
-// (agents/context.py:417, _node_runner.py:198-209).
+// fresh sub-branch off root). Go lacks an optional string type
+// that would distinguish unset from explicitly-empty, so the
+// empty case is folded into "no override".
 func WithOverrideBranch(branch string) RunNodeOption {
 	return func(o *runNodeOptions) { o.overrideBranch = branch }
 }
