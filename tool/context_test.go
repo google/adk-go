@@ -20,12 +20,11 @@ import (
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 )
 
 func TestNewToolContext_Interfaces(t *testing.T) {
 	inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	toolCtx := tool.NewToolContext(inv, "fn1", &session.EventActions{}, nil)
+	toolCtx := agent.NewToolContext(inv, "fn1", &session.EventActions{}, nil)
 
 	if _, ok := toolCtx.(agent.ReadonlyContext); !ok {
 		t.Errorf("ToolContext(%+T) is unexpectedly not a ReadonlyContext", toolCtx)
@@ -38,7 +37,7 @@ func TestNewToolContext_Interfaces(t *testing.T) {
 func TestNewToolContext_RequestConfirmation_SetsSkipSummarization(t *testing.T) {
 	inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	actions := &session.EventActions{}
-	toolCtx := tool.NewToolContext(inv, "fn1", actions, nil)
+	toolCtx := agent.NewToolContext(inv, "fn1", actions, nil)
 
 	err := toolCtx.RequestConfirmation("please confirm", map[string]any{"key": "value"})
 	if err != nil {
@@ -68,7 +67,7 @@ func TestNewToolContext_RequestConfirmation_AutoGeneratesIDWhenEmpty(t *testing.
 	inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	actions := &session.EventActions{}
 	// NewToolContext auto-generates a UUID when functionCallID is empty.
-	toolCtx := tool.NewToolContext(inv, "", actions, nil)
+	toolCtx := agent.NewToolContext(inv, "", actions, nil)
 
 	err := toolCtx.RequestConfirmation("hint", nil)
 	if err != nil {

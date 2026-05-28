@@ -28,6 +28,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/testutil"
@@ -66,7 +67,7 @@ func ExampleNew() {
 
 func createToolContext(t *testing.T) tool.Context {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	return tool.NewToolContext(invCtx, "", &session.EventActions{}, nil)
+	return agent.NewToolContext(invCtx, "", &session.EventActions{}, nil)
 }
 
 //go:generate go test -v -httprecord=.*

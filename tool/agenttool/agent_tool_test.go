@@ -364,5 +364,5 @@ func createToolContext(t *testing.T, testAgent agent.Agent) tool.Context {
 		Session: createResponse.Session,
 	})
 
-	return tool.NewToolContext(ctx, "", &session.EventActions{}, nil)
+	return agent.NewToolContext(ctx, "", &session.EventActions{}, nil)
 }

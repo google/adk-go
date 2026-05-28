@@ -314,7 +314,7 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunSuccess", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := tool.NewToolContext(invCtx, "", nil, nil)
+		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": 10.0} // JSON numbers often come as float64
 		got, err := toolInstance.Run(toolCtx, input)
@@ -328,7 +328,7 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunValidationFailure_Type", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := tool.NewToolContext(invCtx, "", nil, nil)
+		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": "not a number"}
 		_, err := toolInstance.Run(toolCtx, input)
@@ -339,7 +339,7 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunValidationFailure_MissingRequired", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := tool.NewToolContext(invCtx, "", nil, nil)
+		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"other": 123}
 		_, err := toolInstance.Run(toolCtx, input)
