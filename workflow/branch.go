@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"strings"
 
 	"google.golang.org/adk/agent"
@@ -77,19 +78,26 @@ func withBranch(ctx agent.InvocationContext, branch string) agent.InvocationCont
 // mocks). All other interface methods delegate to the embedded
 // value.
 //
-// Caveat: callers that chain WithContext on a branchOverride get
-// back the *inner* type's WithContext result, which loses the
-// branch override. The scheduler does not do this — it calls
-// WithContext first to set up the per-node cancellation, then
-// withBranch once — so the chaining hazard does not arise in
-// practice. If a future caller needs both, it must call withBranch
-// last.
+// WithContext is overridden so the branch survives a subsequent
+// context-cancellation wrap (e.g. ParallelWorker calls
+// ctx.WithContext(cancelCtx) on its input, and the resulting ctx
+// must still carry the override when callers later read Branch()).
 type branchOverride struct {
 	agent.InvocationContext
 	branch string
 }
 
 func (b *branchOverride) Branch() string { return b.branch }
+
+// WithContext returns a branchOverride wrapping the inner
+// InvocationContext's WithContext result so the branch override is
+// preserved through context-cancellation wrapping.
+func (b *branchOverride) WithContext(ctx context.Context) agent.InvocationContext {
+	return &branchOverride{
+		InvocationContext: b.InvocationContext.WithContext(ctx),
+		branch:            b.branch,
+	}
+}
 
 // deriveChildBranch composes the branch for a dynamically-scheduled
 // child given the parent's branch and the RunNode options. Mirrors
