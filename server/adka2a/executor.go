@@ -130,7 +130,10 @@ type ExecutorConfig struct {
 	A2AExecutionCleanupCallback A2AExecutionCleanupCallback
 }
 
-var _ a2asrv.AgentExecutor = (*Executor)(nil)
+var (
+	_ a2asrv.AgentExecutor         = (*Executor)(nil)
+	_ a2asrv.AgentExecutionCleaner = (*Executor)(nil)
+)
 
 // Executor is the legacy AgentExecutor implementation which delegates to [v2.Executor].
 type Executor struct {
@@ -294,6 +297,28 @@ func (e *Executor) Cancel(ctx context.Context, reqCtx *a2asrv.RequestContext, qu
 	}
 
 	return nil
+}
+
+func (e *Executor) Cleanup(ctx context.Context, reqCtx *a2asrv.RequestContext, result a2a.SendMessageResult, cause error) {
+	execCtx, err := toExecutorContext(ctx, reqCtx)
+	if err != nil {
+		log.Warn(ctx, "failed to convert request context to executor context", "error", err)
+		return
+	}
+
+	v2Event, err := a2av0.ToV1Event(result)
+	if err != nil {
+		log.Warn(ctx, "failed to convert result to v2 event", "error", err)
+		return
+	}
+
+	v2Result, ok := v2Event.(a2av2.SendMessageResult)
+	if !ok {
+		log.Warn(ctx, "converted event is not SendMessageResult", "type", fmt.Sprintf("%T", v2Event))
+		return
+	}
+
+	e.impl.Cleanup(ctx, execCtx, v2Result, cause)
 }
 
 // ExecutorContext provides read-only information about the context of an A2A agent execution.
