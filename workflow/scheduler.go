@@ -254,6 +254,21 @@ func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy string, r
 	}
 	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), resumeInputs)
 
+	// EXPERIMENTAL: stash perNodeCtx in the embedded context.Context
+	// so tools running inside an LlmAgent that is itself running as
+	// this node can recover the NodeContext via
+	// workflow.NodeContextFromGoContext. The value rides through
+	// every downstream NewInvocationContext / WithContext call by
+	// virtue of context.Context value-chain propagation.
+	//
+	// See WithNodeContext / NodeContextFromGoContext in
+	// node_context_bridge.go. Top-level static activations have
+	// subScheduler == nil, so RunNode will still reject them; the
+	// stash is harmless in that case.
+	perNodeCtx.InvocationContext = perNodeCtx.InvocationContext.WithContext(
+		WithNodeContext(perNodeCtx.InvocationContext, perNodeCtx),
+	)
+
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
 	ns.Input = input
