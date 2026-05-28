@@ -160,10 +160,9 @@ func TestRunNode_WithOverrideBranch_PlusUseSubBranch_AppendsToOverride(t *testin
 }
 
 func TestRunNode_WithOverrideBranch_Empty_TreatedAsNoOverride(t *testing.T) {
-	// Per WithOverrideBranch godoc, empty string is treated as
-	// "no override" (one documented divergence from Python). This
-	// test pins that behaviour: even with WithUseSubBranch the
-	// sub-branch derives off the inherited (empty) parent branch.
+	// Empty WithOverrideBranch is a no-op (per WithOverrideBranch
+	// godoc): even combined with WithUseSubBranch the sub-branch
+	// derives off the inherited parent branch.
 	child := newStubNode("c", "x")
 	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
 		return RunNode[string](ctx, child, nil,
