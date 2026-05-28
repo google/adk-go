@@ -132,6 +132,26 @@ type Event struct {
 
 	// Output is the generic data output from a workflow node.
 	Output any
+
+	// NodeInfo carries workflow-node metadata for events emitted
+	// inside a workflow. Nil for non-workflow events.
+	NodeInfo *NodeInfo `json:"nodeInfo,omitempty"`
+}
+
+// NodeInfo carries the per-event metadata identifying which node in
+// a workflow activation emitted it.
+//
+// TODO(wolo): adk-python's NodeInfo also has OutputFor []string
+// (fan-in re-attribution) and MessageAsOutput bool (content-as-output
+// shorthand). Add as the corresponding features land in adk-go.
+type NodeInfo struct {
+	// Path is the composite path of the emitting node within its
+	// workflow activation. Empty for top-level static nodes;
+	// "<parent_path>/<child_name>@<run_id>" for dynamic children.
+	// The scheduler uses it to scope per-activation Output/Routes
+	// invariants to the emitter, allowing dynamic nodes to forward
+	// children's terminal events alongside their own.
+	Path string `json:"path,omitempty"`
 }
 
 // RequestInput describes a single human-in-the-loop prompt emitted
