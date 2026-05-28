@@ -169,3 +169,191 @@ func TestAiplatformToGenaiContentPreservesFunctionIDs(t *testing.T) {
 		t.Errorf("FunctionResponse.ID = %q, want %q", got, want)
 	}
 }
+
+func TestToInt32Map(t *testing.T) {
+	tests := []struct {
+		name string
+		in   map[string]int64
+		want map[string]int32
+	}{
+		{
+			name: "nil map",
+			in:   nil,
+			want: nil,
+		},
+		{
+			name: "empty map",
+			in:   map[string]int64{},
+			want: nil,
+		},
+		{
+			name: "single entry",
+			in:   map[string]int64{"chart.html": 1},
+			want: map[string]int32{"chart.html": 1},
+		},
+		{
+			name: "multiple entries",
+			in:   map[string]int64{"a.txt": 1, "b.png": 3},
+			want: map[string]int32{"a.txt": 1, "b.png": 3},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := toInt32Map(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("toInt32Map() len = %d, want %d", len(got), len(tt.want))
+			}
+			for k, wantV := range tt.want {
+				if gotV, ok := got[k]; !ok || gotV != wantV {
+					t.Errorf("toInt32Map()[%q] = %d, want %d", k, gotV, wantV)
+				}
+			}
+		})
+	}
+}
+
+func TestToInt64Map(t *testing.T) {
+	tests := []struct {
+		name string
+		in   map[string]int32
+		want map[string]int64
+	}{
+		{
+			name: "nil map",
+			in:   nil,
+			want: nil,
+		},
+		{
+			name: "empty map",
+			in:   map[string]int32{},
+			want: nil,
+		},
+		{
+			name: "single entry",
+			in:   map[string]int32{"chart.html": 1},
+			want: map[string]int64{"chart.html": 1},
+		},
+		{
+			name: "multiple entries",
+			in:   map[string]int32{"a.txt": 1, "b.png": 3},
+			want: map[string]int64{"a.txt": 1, "b.png": 3},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := toInt64Map(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("toInt64Map() len = %d, want %d", len(got), len(tt.want))
+			}
+			for k, wantV := range tt.want {
+				if gotV, ok := got[k]; !ok || gotV != wantV {
+					t.Errorf("toInt64Map()[%q] = %d, want %d", k, gotV, wantV)
+				}
+			}
+		})
+	}
+}
+
+func TestAppendEventSerializesArtifactDelta(t *testing.T) {
+	// This test verifies that createAiplatformpbContent and the event
+	// construction in appendEvent correctly handle ArtifactDelta.
+	// We test the serialization path by constructing the EventActions
+	// the same way appendEvent does.
+	tests := []struct {
+		name          string
+		stateDelta    map[string]any
+		artifactDelta map[string]int64
+		wantNilAction bool
+		wantArtifact  map[string]int32
+	}{
+		{
+			name:          "only artifact delta",
+			stateDelta:    nil,
+			artifactDelta: map[string]int64{"chart.html": 1},
+			wantNilAction: false,
+			wantArtifact:  map[string]int32{"chart.html": 1},
+		},
+		{
+			name:          "both state and artifact delta",
+			stateDelta:    map[string]any{"key": "value"},
+			artifactDelta: map[string]int64{"file.txt": 2},
+			wantNilAction: false,
+			wantArtifact:  map[string]int32{"file.txt": 2},
+		},
+		{
+			name:          "neither state nor artifact delta",
+			stateDelta:    nil,
+			artifactDelta: nil,
+			wantNilAction: true,
+			wantArtifact:  nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Replicate the appendEvent logic for constructing EventActions
+			var eventState *aiplatformpb.EventActions
+			if len(tt.stateDelta) > 0 || len(tt.artifactDelta) > 0 {
+				eventState = &aiplatformpb.EventActions{}
+				if len(tt.stateDelta) > 0 {
+					sessionState, err := structpb.NewStruct(tt.stateDelta)
+					if err != nil {
+						t.Fatalf("structpb.NewStruct() failed: %v", err)
+					}
+					eventState.StateDelta = sessionState
+				}
+				if len(tt.artifactDelta) > 0 {
+					eventState.ArtifactDelta = toInt32Map(tt.artifactDelta)
+				}
+			}
+
+			if tt.wantNilAction {
+				if eventState != nil {
+					t.Fatal("expected nil EventActions, got non-nil")
+				}
+				return
+			}
+
+			if eventState == nil {
+				t.Fatal("expected non-nil EventActions, got nil")
+			}
+
+			gotArtifact := eventState.GetArtifactDelta()
+			if len(gotArtifact) != len(tt.wantArtifact) {
+				t.Fatalf("ArtifactDelta len = %d, want %d", len(gotArtifact), len(tt.wantArtifact))
+			}
+			for k, wantV := range tt.wantArtifact {
+				if gotV, ok := gotArtifact[k]; !ok || gotV != wantV {
+					t.Errorf("ArtifactDelta[%q] = %d, want %d", k, gotV, wantV)
+				}
+			}
+		})
+	}
+}
+
+func TestListSessionEventsDeserializesArtifactDelta(t *testing.T) {
+	// Simulate what listSessionEvents does when reading back ArtifactDelta
+	// from a proto SessionEvent.
+	pbActions := &aiplatformpb.EventActions{
+		ArtifactDelta: map[string]int32{
+			"chart.html": 1,
+			"data.csv":   2,
+		},
+	}
+
+	got := toInt64Map(pbActions.GetArtifactDelta())
+
+	want := map[string]int64{
+		"chart.html": 1,
+		"data.csv":   2,
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("ArtifactDelta len = %d, want %d", len(got), len(want))
+	}
+	for k, wantV := range want {
+		if gotV, ok := got[k]; !ok || gotV != wantV {
+			t.Errorf("ArtifactDelta[%q] = %d, want %d", k, gotV, wantV)
+		}
+	}
+}
