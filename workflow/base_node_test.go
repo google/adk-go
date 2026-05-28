@@ -90,7 +90,7 @@ func TestNewBaseNode_RoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := NewBaseNode(tt.nameArg, tt.descArg, tt.cfg, nil, nil)
+			b := NewBaseNode(tt.nameArg, tt.descArg, tt.cfg)
 			if got := b.Name(); got != tt.nameArg {
 				t.Errorf("Name() = %q, want %q", got, tt.nameArg)
 			}
@@ -113,7 +113,7 @@ type testSchemaInput struct {
 }
 
 func TestBaseNode_NilSchemas(t *testing.T) {
-	b := NewBaseNode("nil_schema_node", "no validation node", NodeConfig{}, nil, nil)
+	b := NewBaseNode("nil_schema_node", "no validation node", NodeConfig{})
 	if b.InputSchema() != nil {
 		t.Errorf("InputSchema() = %v, want nil", b.InputSchema())
 	}
@@ -142,7 +142,7 @@ func TestBaseNode_WithSchemas(t *testing.T) {
 		t.Fatalf("Resolve failed: %v", err)
 	}
 
-	b := NewBaseNode("schema_node", "validation node", NodeConfig{}, resolvedInputSchema, resolvedInputSchema)
+	b := NewBaseNodeWithSchemas("schema_node", "validation node", NodeConfig{}, resolvedInputSchema, resolvedInputSchema)
 	if b.InputSchema() != resolvedInputSchema {
 		t.Errorf("InputSchema() = %v, want %v", b.InputSchema(), resolvedInputSchema)
 	}

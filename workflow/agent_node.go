@@ -50,7 +50,7 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	}
 
 	return &AgentNode{
-		BaseNode:     NewBaseNode(a.Name(), a.Description(), cfg, ischema, oschema),
+		BaseNode:     NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
 		agent:        a,
 	}, nil
 }
@@ -103,12 +103,15 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 			}
 		}
 
-		// Use existing agent context instead of implementing a new one
+		// Use existing agent context instead of implementing a new one.
+		// Branch is inherited from ctx so the agent runs under the
+		// activation's branch; the scheduler assigns sub-branches at
+		// fan-out, and the LLM flow's history filter scopes events
+		// by branch prefix.
 		params := internalcontext.InvocationContextParams{
-			Artifacts: ctx.Artifacts(),
-			Memory:    ctx.Memory(),
-			Session:   ctx.Session(),
-			// TODO: branch isolation in a separate PR
+			Artifacts:     ctx.Artifacts(),
+			Memory:        ctx.Memory(),
+			Session:       ctx.Session(),
 			Branch:        ctx.Branch(),
 			Agent:         n.agent,
 			UserContent:   userContent,

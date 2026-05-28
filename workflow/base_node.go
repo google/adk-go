@@ -30,6 +30,21 @@ type BaseNode struct {
 	outputSchema *jsonschema.Resolved
 }
 
+// NewBaseNodeWithSchemas returns a BaseNode with the given identity, configuration, and schemas.
+func NewBaseNodeWithSchemas(
+	name, description string,
+	cfg NodeConfig,
+	inputSchema, outputSchema *jsonschema.Resolved,
+) BaseNode {
+	return BaseNode{
+		name:         name,
+		desc:         description,
+		config:       cfg,
+		inputSchema:  inputSchema,
+		outputSchema: outputSchema,
+	}
+}
+
 // NewBaseNode returns a BaseNode with the given identity and
 // configuration. Embedders typically call it from their own
 // constructor:
@@ -42,18 +57,8 @@ type BaseNode struct {
 //	func NewCustomNode(name string, cfg NodeConfig) *CustomNode {
 //	    return &CustomNode{BaseNode: NewBaseNode(name, "", cfg)}
 //	}
-func NewBaseNode(
-	name, description string,
-	cfg NodeConfig,
-	inputSchema, outputSchema *jsonschema.Resolved,
-) BaseNode {
-	return BaseNode{
-		name:         name,
-		desc:         description,
-		config:       cfg,
-		inputSchema:  inputSchema,
-		outputSchema: outputSchema,
-	}
+func NewBaseNode(name, description string, cfg NodeConfig) BaseNode {
+	return NewBaseNodeWithSchemas(name, description, cfg, nil, nil)
 }
 
 // Name returns the node's name.

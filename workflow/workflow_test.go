@@ -278,7 +278,7 @@ func TestWorkflowRouting(t *testing.T) {
 	createNodes := func() (*CustomRouteNode, *FunctionNode, *FunctionNode, *CustomRouteNode, *FunctionNode, *testTracker) {
 		tracker := &testTracker{}
 		nodeX := &CustomRouteNode{
-			BaseNode: NewBaseNode("X", "", defaultNodeConfig, nil, nil),
+			BaseNode: NewBaseNode("X", "", defaultNodeConfig),
 		}
 		nodeA := NewFunctionNode("A", func(ctx agent.InvocationContext, input any) (string, error) {
 			record(tracker, "A")
@@ -289,7 +289,7 @@ func TestWorkflowRouting(t *testing.T) {
 			return "pathB", nil
 		}, defaultNodeConfig)
 		nodeC := &CustomRouteNode{
-			BaseNode: NewBaseNode("C", "", defaultNodeConfig, nil, nil),
+			BaseNode: NewBaseNode("C", "", defaultNodeConfig),
 			route:    []string{"branchD"},
 			onRun: func() {
 				record(tracker, "C")

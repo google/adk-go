@@ -64,7 +64,7 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 	}
 
 	return &ToolNode{
-		BaseNode:     NewBaseNode(t.Name(), t.Description(), cfg, ischema, oschema),
+		BaseNode:     NewBaseNodeWithSchemas(t.Name(), t.Description(), cfg, ischema, oschema),
 		tool:         t,
 	}, nil
 }
@@ -102,14 +102,16 @@ func (n *ToolNode) runTool(toolCtx tool.Context, input any) (any, error) {
 	var toolOutput any = output
 
 	// Validate
-	if err := n.OutputSchema().Validate(output); err != nil {
-		if val, ok := output["result"]; ok {
-			if err := n.OutputSchema().Validate(val); err != nil {
-				return nil, fmt.Errorf("converting tool %q output: validation failed for result key: %w", n.tool.Name(), err)
+	if schema := n.OutputSchema(); schema != nil {
+		if err := schema.Validate(output); err != nil {
+			if val, ok := output["result"]; ok {
+				if err := schema.Validate(val); err != nil {
+					return nil, fmt.Errorf("converting tool %q output: validation failed for result key: %w", n.tool.Name(), err)
+				}
+				toolOutput = val
+			} else {
+				return nil, fmt.Errorf("converting tool %q output: validation failed: %w", n.tool.Name(), err)
 			}
-			toolOutput = val
-		} else {
-			return nil, fmt.Errorf("converting tool %q output: validation failed: %w", n.tool.Name(), err)
 		}
 	}
 

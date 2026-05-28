@@ -49,20 +49,35 @@ func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*
 // runNode executes child once, forwards its events upstream, and
 // classifies the outcome. HITL surfaces as ErrNodeInterrupted; runtime
 // failure as ErrNodeFailed; a child that fails after requesting input
-// surfaces as ErrNodeFailed (matches adk-python precedence).
+// surfaces as ErrNodeFailed.
 //
 // Session, invocation metadata, and cancellation come from s.parentCtx
-// captured at sub-scheduler construction. customRunID is empty to use
-// the auto-counter, or a user-supplied stable id (validated against
-// the rules in validateCustomRunID).
-func (s *dynamicSubScheduler) runNode(child Node, input any, customRunID string) (any, error) {
+// captured at sub-scheduler construction. opts carries the resolved
+// per-call configuration assembled from RunNode's variadic
+// RunNodeOption arguments: opts.customRunID is empty to use the
+// auto-counter or a user-supplied stable id (validated against the
+// rules in validateCustomRunID); opts.useSubBranch and
+// opts.overrideBranch derive the child's Branch() via
+// deriveChildBranch.
+func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions) (any, error) {
 	name := child.Name()
-	runID, err := s.resolveRunID(name, customRunID)
+	runID, err := s.resolveRunID(name, opts.customRunID)
 	if err != nil {
 		return nil, &NodeRunError{ChildName: name, Cause: err}
 	}
 	childPath := s.parentPath + "/" + name + "@" + runID
-	childCtx := newDynamicNodeContext(s.parentCtx, childPath, runID, s)
+	childBranch := deriveChildBranch(s.parentCtx.Branch(), name, runID, opts.useSubBranch, opts.overrideBranch)
+	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s)
+
+	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
+	// subScheduler) in the embedded context.Context so tools running
+	// inside an LlmAgent that is itself running as this dynamic
+	// child can recover the NodeContext via
+	// workflow.NodeContextFromGoContext. See
+	// scheduleResumedNode for the static-node equivalent.
+	childCtx.InvocationContext = childCtx.InvocationContext.WithContext(
+		WithNodeContext(childCtx.InvocationContext, childCtx),
+	)
 
 	var (
 		out         any

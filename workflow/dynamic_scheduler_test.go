@@ -115,7 +115,7 @@ func TestSubScheduler_RunNode_FreshExecution(t *testing.T) {
 		return nil
 	})
 
-	out, err := sub.runNode(child, "world", "")
+	out, err := sub.runNode(child, "world", runNodeOptions{})
 	if err != nil {
 		t.Fatalf("runNode: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestSubScheduler_RunNode_CustomIDInPath(t *testing.T) {
 	child := newStubNode("processor", nil)
 	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
 
-	if _, err := sub.runNode(child, nil, "order-42"); err != nil {
+	if _, err := sub.runNode(child, nil, runNodeOptions{customRunID: "order-42"}); err != nil {
 		t.Fatalf("runNode: %v", err)
 	}
 	// The child must have observed its NodeContext populated with the
@@ -152,7 +152,7 @@ func TestSubScheduler_RunNode_HITLReturnsInterrupted(t *testing.T) {
 		return nil
 	})
 
-	_, err := sub.runNode(child, nil, "")
+	_, err := sub.runNode(child, nil, runNodeOptions{})
 	if !errors.Is(err, ErrNodeInterrupted) {
 		t.Fatalf("err = %v, want ErrNodeInterrupted", err)
 	}
@@ -172,7 +172,7 @@ func TestSubScheduler_RunNode_ErrorWinsOverInterrupt(t *testing.T) {
 	child := newInterruptThenFailNode("flaky")
 	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
 
-	_, err := sub.runNode(child, nil, "")
+	_, err := sub.runNode(child, nil, runNodeOptions{})
 	if !errors.Is(err, ErrNodeFailed) {
 		t.Errorf("err = %v, want ErrNodeFailed", err)
 	}
@@ -195,13 +195,14 @@ func newTopLevelCtx(t *testing.T) *nodeContext {
 // stubNode emits one Event{Output: out} and exits.
 type stubNode struct {
 	BaseNode
-	out      any
-	lastPath string
+	out        any
+	lastPath   string
+	lastBranch string
 }
 
 func newStubNode(name string, out any) *stubNode {
 	return &stubNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil),
+		BaseNode: NewBaseNode(name, "", NodeConfig{}),
 		out:      out,
 	}
 }
@@ -210,6 +211,7 @@ func (n *stubNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Ev
 	if nc, ok := ctx.(NodeContext); ok {
 		n.lastPath = nc.Path()
 	}
+	n.lastBranch = ctx.Branch()
 	out := n.out
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{Output: out}, nil)
@@ -224,7 +226,7 @@ type requestInputNode struct {
 
 func newRequestInputNode(name, msg string) *requestInputNode {
 	return &requestInputNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil),
+		BaseNode: NewBaseNode(name, "", NodeConfig{}),
 		message:  msg,
 	}
 }
@@ -244,7 +246,7 @@ func (n *requestInputNode) Run(agent.InvocationContext, any) iter.Seq2[*session.
 type interruptThenFailNode struct{ BaseNode }
 
 func newInterruptThenFailNode(name string) *interruptThenFailNode {
-	return &interruptThenFailNode{BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil)}
+	return &interruptThenFailNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
 
 func (n *interruptThenFailNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {

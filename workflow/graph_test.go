@@ -169,7 +169,7 @@ func TestNewGraph_PreservesEdgeOrder(t *testing.T) {
 // graph-structure tests. Run is a no-op; only Name matters for
 // diagnostic output.
 func newTestNode(name string) Node {
-	return &testNode{BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil)}
+	return &testNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
 
 type testNode struct {

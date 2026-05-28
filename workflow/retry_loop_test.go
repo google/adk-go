@@ -69,7 +69,7 @@ func TestScheduler_RetryLoop(t *testing.T) {
 	}
 
 	nodeA := &retryLoopTestNode{
-		BaseNode: NewBaseNode("A", "", cfg, nil, nil),
+		BaseNode: NewBaseNode("A", "", cfg),
 		cfg:      cfg,
 	}
 

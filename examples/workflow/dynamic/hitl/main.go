@@ -57,7 +57,7 @@ type askName struct {
 
 func newAskName() *askName {
 	return &askName{
-		BaseNode: workflow.NewBaseNode("ask_name", "asks the user for their name", workflow.NodeConfig{}, nil, nil),
+		BaseNode: workflow.NewBaseNode("ask_name", "asks the user for their name", workflow.NodeConfig{}),
 	}
 }
 
