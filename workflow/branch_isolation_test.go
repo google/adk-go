@@ -16,6 +16,7 @@ package workflow
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"testing"
 
@@ -23,84 +24,72 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// TestRunNode_SequentialFanOut_WithUseSubBranch_DistinctBranches
-// verifies that opting into WithUseSubBranch() at each RunNode call
-// produces distinct per-child branches.
+// TestRunNode_SequentialFanOut_BranchesFromOptions drives a
+// dynamic orchestrator that sequentially calls RunNode three times
+// on the same child and verifies the per-call Branch() observed by
+// the child as a function of the RunNode options passed.
 //
 // Why sequential (not errgroup): per req §5.1 D-Emit-Sequential,
 // emit / RunNode are single-goroutine only. Running fan-out via
 // errgroup violates the iter.Seq2 contract (concurrent yield calls
 // from multiple goroutines) and races on the event-collection slice
 // inside drainDynamicWithErr.
-func TestRunNode_SequentialFanOut_WithUseSubBranch_DistinctBranches(t *testing.T) {
-	const (
-		childName = "peeker"
-		nItems    = 3
-	)
+func TestRunNode_SequentialFanOut_BranchesFromOptions(t *testing.T) {
+	const childName = "peeker"
 
-	var seenBranches []string
-	peekerNode := NewFunctionNode(
-		childName,
-		func(ctx agent.InvocationContext, input string) (string, error) {
-			seenBranches = append(seenBranches, ctx.Branch())
-			return input, nil
+	tests := []struct {
+		name string
+		// extraOpts are appended after the per-call WithRunID; nil
+		// or empty means "inherit parent branch" (no opt-in).
+		extraOpts []RunNodeOption
+		// wantBranches is the sorted list of Branch() values the
+		// child should observe across the three sequential calls.
+		wantBranches []string
+	}{
+		{
+			// Opt-in: each child sees a distinct sub-branch of the
+			// form "<childName>@<customRunID>" off the
+			// orchestrator's root branch.
+			name:      "WithUseSubBranch_DistinctBranches",
+			extraOpts: []RunNodeOption{WithUseSubBranch()},
+			wantBranches: []string{
+				childName + "@custom-1",
+				childName + "@custom-2",
+				childName + "@custom-3",
+			},
 		},
-		NodeConfig{},
-	)
+		{
+			// Default behaviour: without the opt-in, children
+			// inherit the orchestrator's branch verbatim
+			// (backward-compat contract for callers relying on
+			// inherited branches).
+			name:         "NoOption_StillSharesBranch",
+			extraOpts:    nil,
+			wantBranches: []string{"", "", ""},
+		},
+	}
 
-	orch := NewDynamicNode[any, []string](
-		"orch",
-		func(ctx NodeContext, _ any, _ func(*session.Event) error) ([]string, error) {
-			items := []string{"a", "b", "c"}
-			results := make([]string, len(items))
-			for i, item := range items {
-				out, err := RunNode[string](ctx, peekerNode, item,
-					WithUseSubBranch(),
-					WithRunID(fmt.Sprintf("custom-%d", i+1)))
-				if err != nil {
-					return nil, err
-				}
-				results[i] = out
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			seenBranches := runSequentialFanOut(t, childName, tc.extraOpts)
+			sort.Strings(seenBranches)
+			if !slices.Equal(seenBranches, tc.wantBranches) {
+				t.Errorf("seenBranches = %q, want %q",
+					seenBranches, tc.wantBranches)
 			}
-			return results, nil
-		},
-		NodeConfig{},
-	)
-
-	_, err := drainDynamicWithErr(t, orch, nil)
-	if err != nil {
-		t.Fatalf("orchestrator: %v", err)
-	}
-
-	if got, want := len(seenBranches), nItems; got != want {
-		t.Fatalf("got %d peeker invocations, want %d", got, want)
-	}
-
-	// Parent (orchestrator) runs on root branch "" (mock ctx); each
-	// child sub-branch is bare "<childName>@<customRunID>".
-	sort.Strings(seenBranches)
-	wantBranches := []string{
-		childName + "@custom-1",
-		childName + "@custom-2",
-		childName + "@custom-3",
-	}
-	for i, want := range wantBranches {
-		if seenBranches[i] != want {
-			t.Errorf("seenBranches[%d] = %q, want %q",
-				i, seenBranches[i], want)
-		}
+		})
 	}
 }
 
-// TestRunNode_SequentialFanOut_NoOption_StillSharesBranch pins the
-// default behaviour: without the opt-in, children inherit the
-// orchestrator's branch verbatim. This preserves backward
-// compatibility for code that relies on inherited branches.
-func TestRunNode_SequentialFanOut_NoOption_StillSharesBranch(t *testing.T) {
-	const (
-		childName = "peeker"
-		nItems    = 3
-	)
+// runSequentialFanOut drives a dynamic orchestrator that sequentially
+// invokes a peeker child three times (items "a"/"b"/"c"), passing
+// WithRunID("custom-N") plus the caller-supplied extraOpts on each
+// call, and returns the Branch() values the child observed in call
+// order. Fails the test if the orchestrator errors or invokes the
+// child a wrong number of times.
+func runSequentialFanOut(t *testing.T, childName string, extraOpts []RunNodeOption) []string {
+	t.Helper()
+	const nItems = 3
 
 	var seenBranches []string
 	peekerNode := NewFunctionNode(
@@ -118,8 +107,10 @@ func TestRunNode_SequentialFanOut_NoOption_StillSharesBranch(t *testing.T) {
 			items := []string{"a", "b", "c"}
 			results := make([]string, len(items))
 			for i, item := range items {
-				out, err := RunNode[string](ctx, peekerNode, item,
-					WithRunID(fmt.Sprintf("custom-%d", i+1)))
+				opts := append([]RunNodeOption{
+					WithRunID(fmt.Sprintf("custom-%d", i+1)),
+				}, extraOpts...)
+				out, err := RunNode[string](ctx, peekerNode, item, opts...)
 				if err != nil {
 					return nil, err
 				}
@@ -130,19 +121,11 @@ func TestRunNode_SequentialFanOut_NoOption_StillSharesBranch(t *testing.T) {
 		NodeConfig{},
 	)
 
-	_, err := drainDynamicWithErr(t, orch, nil)
-	if err != nil {
+	if _, err := drainDynamicWithErr(t, orch, nil); err != nil {
 		t.Fatalf("orchestrator: %v", err)
 	}
-
 	if got, want := len(seenBranches), nItems; got != want {
 		t.Fatalf("got %d peeker invocations, want %d", got, want)
 	}
-	for i, b := range seenBranches {
-		if b != "" {
-			t.Errorf("seenBranches[%d] = %q, want \"\" "+
-				"(without WithUseSubBranch the child should inherit "+
-				"the orchestrator's root branch)", i, b)
-		}
-	}
+	return seenBranches
 }
