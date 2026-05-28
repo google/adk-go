@@ -98,6 +98,17 @@ type NodeState struct {
 	// the current Input. Empty for the initial START activation.
 	TriggeredBy string `json:"triggeredBy,omitempty"`
 
+	// Branch is the composite branch string assigned to this
+	// activation at scheduling time. Empty for nodes that inherit
+	// the root branch (single-successor chains); populated for
+	// nodes scheduled after a fan-out and for JoinNodes resolving
+	// the common branch prefix of their predecessors.
+	//
+	// Persisted so resume can reconstruct the same branch tree on
+	// re-entry, which is required for JoinNode's common-prefix
+	// derivation to remain stable across pause/resume turns.
+	Branch string `json:"branch,omitempty"`
+
 	// PendingRequest, when non-nil, carries the human-input request
 	// the node emitted before pausing. Non-nil iff Status ==
 	// NodeWaiting and the wait was caused by a human-input request
