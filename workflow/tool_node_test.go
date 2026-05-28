@@ -57,24 +57,24 @@ func TestToolNode_New(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		creator func() (Node, error)
+		creator func() (*ToolNode, error)
 		want    string
 	}{
 		{
 			name: "NewToolNodeTyped",
-			creator: func() (Node, error) {
+			creator: func() (*ToolNode, error) {
 				return NewToolNodeTyped[Input, Output](myTool, defaultNodeConfig)
 			},
 		},
 		{
 			name: "NewToolNodeWithSchemas",
-			creator: func() (Node, error) {
+			creator: func() (*ToolNode, error) {
 				return NewToolNodeWithSchemas(myTool, ischema, oschema, defaultNodeConfig)
 			},
 		},
 		{
 			name: "NewToolNode",
-			creator: func() (Node, error) {
+			creator: func() (*ToolNode, error) {
 				return NewToolNode(myTool, defaultNodeConfig)
 			},
 		},
@@ -94,15 +94,7 @@ func TestToolNode_New(t *testing.T) {
 				t.Errorf("node.Description() = %q, want %q", got, want)
 			}
 
-			// Basic internal check via reflection-like cast.
-			// We use any, any for constructors that don't preserve types in the struct.
-			var inputResolved, outputResolved *jsonschema.Resolved
-			switch tn := node.(type) {
-			case *toolNode:
-				inputResolved, outputResolved = tn.inputSchema, tn.outputSchema
-			default:
-				t.Errorf("unknown node type: %T", tn)
-			}
+			inputResolved, outputResolved := node.inputSchema, node.outputSchema
 
 			if inputResolved == nil || outputResolved == nil {
 				t.Error("expected schemas to be resolved")
