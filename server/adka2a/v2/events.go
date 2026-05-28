@@ -254,20 +254,19 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task, partConverter A2AP
 
 	event := NewRemoteAgentEvent(ctx)
 
-	if task.Status.Message != nil {
-		allMsgParts, err := convertParts(ctx, task, task.Status.Message.Parts, partConverter)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert status message parts: %w", err)
-		}
-		lrtIDs := getLongRunningToolIDs(task.Status.Message.Parts, allMsgParts)
-		msgParts := filterNilParts(allMsgParts)
+	convertedStatusMsg, err := convertStatusMessage(ctx, task, task.Status, partConverter)
+	if err != nil {
+		return nil, err
+	}
+	parts = append(parts, convertedStatusMsg.parts...)
+	longRunningToolIDs = append(longRunningToolIDs, convertedStatusMsg.longRunningToolIDs...)
 
-		if task.Status.State == a2a.TaskStateFailed && len(msgParts) == 1 && msgParts[0].Text != "" {
-			event.ErrorMessage = msgParts[0].Text
+	if task.Status.State == a2a.TaskStateFailed {
+		if convertedStatusMsg.errorMessage != "" {
+			event.ErrorMessage = convertedStatusMsg.errorMessage
 		} else {
-			parts = append(parts, msgParts...)
+			event.ErrorMessage = "a2a task failed"
 		}
-		longRunningToolIDs = append(longRunningToolIDs, lrtIDs...)
 	}
 
 	isTerminal := task.Status.State.Terminal() || task.Status.State == a2a.TaskStateInputRequired
@@ -294,25 +293,25 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 
 	event := NewRemoteAgentEvent(ctx)
 
-	var allParts []*genai.Part
-	var err error
-	if update.Status.Message != nil {
-		allParts, err = convertParts(ctx, update, update.Status.Message.Parts, partConverter)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert status message parts: %w", err)
+	convertedStatusMsg, err := convertStatusMessage(ctx, update, update.Status, partConverter)
+	if err != nil {
+		return nil, err
+	}
+	if len(convertedStatusMsg.parts) > 0 {
+		event.Content = genai.NewContentFromParts(convertedStatusMsg.parts, genai.RoleModel)
+	}
+	event.LongRunningToolIDs = convertedStatusMsg.longRunningToolIDs
+
+	if update.Status.State == a2a.TaskStateFailed {
+		if convertedStatusMsg.errorMessage != "" {
+			event.ErrorMessage = convertedStatusMsg.errorMessage
+		} else {
+			event.ErrorMessage = "a2a task failed"
 		}
 	}
-	parts := filterNilParts(allParts)
-	if update.Status.State == a2a.TaskStateFailed && len(parts) == 1 && parts[0].Text != "" {
-		event.ErrorMessage = parts[0].Text
-	} else if len(parts) > 0 {
-		event.Content = genai.NewContentFromParts(parts, genai.RoleModel)
-	}
+
 	if err := processA2AMeta(update, event); err != nil {
 		return nil, fmt.Errorf("metadata processing failed: %w", err)
-	}
-	if update.Status.Message != nil {
-		event.LongRunningToolIDs = getLongRunningToolIDs(update.Status.Message.Parts, allParts)
 	}
 	event.TurnComplete = true
 	return event, nil
@@ -381,4 +380,36 @@ func filterNilParts(parts []*genai.Part) []*genai.Part {
 		}
 	}
 	return result
+}
+
+type convertedStatusMessage struct {
+	errorMessage       string
+	parts              []*genai.Part
+	longRunningToolIDs []string
+}
+
+func convertStatusMessage(ctx agent.InvocationContext, event a2a.Event, status a2a.TaskStatus, partConverter A2APartConverter) (*convertedStatusMessage, error) {
+	if status.Message == nil {
+		return &convertedStatusMessage{}, nil
+	}
+	errMessage := ""
+	parts := status.Message.Parts
+	if status.State == a2a.TaskStateFailed && len(parts) > 0 && parts[0].Text() != "" {
+		errMessage = parts[0].Text()
+
+		isErrMessage, _ := parts[0].Metadata[metadataIsErrMessageKey].(bool)
+		if isErrMessage {
+			parts = parts[1:]
+		}
+	}
+
+	convertedParts, err := convertParts(ctx, event, parts, partConverter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert status message parts: %w", err)
+	}
+	return &convertedStatusMessage{
+		errorMessage:       errMessage,
+		parts:              filterNilParts(convertedParts),
+		longRunningToolIDs: getLongRunningToolIDs(parts, convertedParts),
+	}, nil
 }

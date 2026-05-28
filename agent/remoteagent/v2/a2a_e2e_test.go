@@ -410,7 +410,18 @@ func TestA2ACleanupPropagation(t *testing.T) {
 	// Root server connects to server B through remote subagent
 	remoteAgentB := newA2ARemoteAgent(t, "remote-agent-b", serverB)
 	rootA := newRootAgent("agent-b", remoteAgentB)
-	executorA := newAgentExecutor(rootA, nil, adka2a.OutputArtifactPerEvent)
+	executorCleanupCalledChan := make(chan struct{}, 2)
+	executorA := adka2a.NewExecutor(adka2a.ExecutorConfig{
+		OutputMode: adka2a.OutputArtifactPerRun,
+		RunnerConfig: runner.Config{
+			AppName:        rootA.Name(),
+			SessionService: session.InMemoryService(),
+			Agent:          rootA,
+		},
+		A2AExecutionCleanupCallback: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext, subAgentCards []*a2a.AgentCard, result a2a.SendMessageResult, cause error) {
+			executorCleanupCalledChan <- struct{}{}
+		},
+	})
 	serverA := startA2AServer(executorA)
 	defer serverA.Close()
 
@@ -461,9 +472,23 @@ func TestA2ACleanupPropagation(t *testing.T) {
 
 	// Check subagent task got cancelled when the parent task was cancelled.
 	// Reads from channel twice because cleanup gets called both for cancelation and execution.
-	<-remoteCleanupCalledChan
-	<-remoteCleanupCalledChan
+	timeout := time.After(5 * time.Second)
+	for range 2 {
+		select {
+		case <-remoteCleanupCalledChan:
+		case <-timeout:
+			t.Fatalf("remote cleanup was not called")
+		}
+	}
 	remoteTaskID := <-remoteTaskIDChan
+
+	for range 2 {
+		select {
+		case <-executorCleanupCalledChan:
+		case <-timeout:
+			t.Fatalf("executor cleanup was not called")
+		}
+	}
 	remoteClient := newA2AClient(t, serverB)
 	remoteTask, err := remoteClient.GetTask(t.Context(), &a2a.GetTaskRequest{ID: remoteTaskID})
 	if err != nil {
@@ -1197,5 +1222,55 @@ func TestA2AMultiHopInputRequiredCancellation(t *testing.T) {
 	}
 	if remoteTask.Status.State != a2a.TaskStateCanceled {
 		t.Fatalf("remoteTask.Status.State = %q, want %q", remoteTask.Status.State, a2a.TaskStateCanceled)
+	}
+}
+
+func TestA2AMultiHopStructuredErrorPropagation(t *testing.T) {
+	// Server B with structured error serialization logic
+	structuredErr := a2a.NewDataPart(map[string]any{"error_type": "auth_required"})
+	serverB := startA2AServer(adka2a.NewExecutor(adka2a.ExecutorConfig{
+		RunnerConfig: runner.Config{
+			AppName: "broken",
+			Agent: utils.Must(agent.New(agent.Config{
+				Name: "broken",
+				Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						yield(nil, a2a.ErrUnauthorized)
+					}
+				},
+			})),
+			SessionService: session.InMemoryService(),
+		},
+		AfterExecuteCallback: func(ctx adka2a.ExecutorContext, finalEvent *a2a.TaskStatusUpdateEvent, err error) error {
+			if errors.Is(err, a2a.ErrUnauthorized) {
+				finalEvent.Status.Message.Parts = append(finalEvent.Status.Message.Parts, structuredErr)
+			}
+			return nil
+		},
+	}))
+	defer serverB.Close()
+
+	// Server A, default configuration
+	remoteAgent := newA2ARemoteAgent(t, "broken-remote", serverB)
+	rootAgent := newRootAgent("root", remoteAgent)
+	executorA := newAgentExecutor(rootAgent, nil, adka2a.OutputArtifactPerRun)
+	serverA := startA2AServer(executorA)
+	defer serverA.Close()
+
+	// Send message
+	clientA := newA2AClient(t, serverA)
+	msg1 := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("Hello"))
+	task1 := mustSendMessage(t, clientA, msg1)
+	if task1.Status.State != a2a.TaskStateFailed {
+		t.Fatalf("task1.Status.State = %q, want %q", task1.Status.State, a2a.TaskStateFailed)
+	}
+	if len(task1.Status.Message.Parts) != 2 {
+		t.Fatalf("len(task1.Status.Message.Parts) = %d, want len([error text, extra parts]) = 2", len(task1.Status.Message.Parts))
+	}
+	if !strings.Contains(task1.Status.Message.Parts[0].Text(), a2a.ErrUnauthorized.Error()) {
+		t.Fatalf("status.Message.Parts[0].Text() = %s, want contain %q", task1.Status.Message.Parts[0].Text(), a2a.ErrUnauthorized.Error())
+	}
+	if diff := cmp.Diff(task1.Status.Message.Parts[1].Data(), structuredErr.Data()); diff != "" {
+		t.Fatalf("wrong structured error part (-want,+got):\n%s", diff)
 	}
 }
