@@ -29,7 +29,7 @@ import (
 // FunctionNode wraps a custom function.
 type FunctionNode struct {
 	BaseNode
-	fn func(ctx agent.InvocationContext, input any) (any, error)
+	fn           func(ctx agent.InvocationContext, input any) (any, error)
 }
 
 // NewFunctionNode creates a new node wrapping a custom function using generics to automatically infer input and output types.
@@ -95,8 +95,8 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 	}
 
 	return &FunctionNode{
-		BaseNode: BaseNode{name: name, config: cfg},
-		fn:       wrappedFn,
+		BaseNode:     BaseNode{name: name, config: cfg},
+		fn:           wrappedFn,
 	}
 }
 
