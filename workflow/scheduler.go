@@ -32,8 +32,8 @@ const defaultEventQueueCapacity = 16
 
 var (
 	// ErrMultipleOutputs is returned when a node yields more than
-	// one event whose Actions.StateDelta carries an "output" key.
-	// A node activation may emit at most one output value.
+	// one event with Event.Output set. A node activation may emit
+	// at most one output value.
 	ErrMultipleOutputs = errors.New("workflow: node produced multiple events with output values; only one event per execution can carry output")
 
 	// ErrMultipleRoutingEvents is returned when a node yields more
@@ -413,9 +413,18 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	}
 }
 
-// handleEvent updates the per-node accumulator and is called once
-// per event. The event itself has already been read from the queue
-// and will be yielded to the caller by the consumer loop.
+// handleEvent updates the per-node accumulator. The event has
+// already been read from the queue and will be yielded to the
+// caller by the consumer loop.
+//
+// Descendant events (NodeInfo.Path != it.nodeName) are dynamic-node
+// children forwarded by the sub-scheduler. Their Output/Routes
+// belong to the child, not the parent — skip the parent accumulator.
+//
+// RequestedInput is the exception: the child's pause unwinds the
+// orchestrator (dynamic_scheduler.go runNode), and Workflow.Resume
+// matches InterruptID against the parent's NodeState.PendingRequest,
+// so the parent must transition to NodeWaiting on a descendant pause.
 func (s *scheduler) handleEvent(it eventItem) {
 	nr := s.runsByName[it.nodeName]
 	if nr == nil {
@@ -426,11 +435,19 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev == nil {
 		return
 	}
-	if it.ev.Routes != nil {
-		nr.setRoutingEvent(it.ev, it.nodeName)
+	var path string
+	if it.ev.NodeInfo != nil {
+		path = it.ev.NodeInfo.Path
 	}
+	isDescendant := path != "" && path != it.nodeName
 	if it.ev.RequestedInput != nil {
 		nr.setInputRequest(it.ev.RequestedInput, it.nodeName)
+	}
+	if isDescendant {
+		return
+	}
+	if it.ev.Routes != nil {
+		nr.setRoutingEvent(it.ev, it.nodeName)
 	}
 	if it.ev.Output != nil {
 		nr.setOutput(it.ev.Output, it.nodeName)
