@@ -367,3 +367,50 @@ func TestValidateCycles(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateSubWorkflowNames(t *testing.T) {
+	// Create a valid sub-workflow
+	subWf, err := New("child_wf", []Edge{{From: Start, To: &dummyNode{name: "A"}}})
+	if err != nil {
+		t.Fatalf("failed to create sub-workflow: %v", err)
+	}
+
+	wfNode := &WorkflowNode{
+		BaseNode:    NewBaseNode("nested_node", "", NodeConfig{}),
+		subWorkflow: subWf,
+	}
+
+	tests := []struct {
+		name           string
+		parentName     string
+		edges          []Edge
+		expectErrorMsg string
+	}{
+		{
+			name:       "no collision",
+			parentName: "parent_wf",
+			edges:      []Edge{{From: Start, To: wfNode}},
+		},
+		{
+			name:           "collision with sub-workflow name",
+			parentName:     "child_wf",
+			edges:          []Edge{{From: Start, To: wfNode}},
+			expectErrorMsg: "sub-workflow name collision: child_wf",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateSubWorkflowNames(tc.parentName, tc.edges)
+			if tc.expectErrorMsg != "" {
+				if err == nil {
+					t.Errorf("expected error matching %q, got none", tc.expectErrorMsg)
+				} else if !strings.Contains(err.Error(), tc.expectErrorMsg) {
+					t.Errorf("expected error containing %q, got %v", tc.expectErrorMsg, err)
+				}
+			} else if err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+		})
+	}
+}

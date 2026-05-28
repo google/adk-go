@@ -137,6 +137,9 @@ func New(name string, edges []Edge) (*Workflow, error) {
 	if err := validateNodes(edges); err != nil {
 		return nil, err
 	}
+	if err := validateSubWorkflowNames(name, edges); err != nil {
+		return nil, err
+	}
 	// TODO(wolo): sanity-check name (reject whitespace-only,
 	// reject characters that break the session.State key shape).
 	// TODO(wolo): record a graph fingerprint (e.g. sorted node
@@ -170,12 +173,23 @@ func (w *Workflow) Name() string {
 // effects, yields events to the caller, and schedules successors
 // when nodes complete. The consumer is the only mutator of the
 // per-node lifecycle map and of session state.
+// Run drives the workflow to completion or to a graceful pause
+// when any node enters NodeWaiting. It returns an iter.Seq2 that
+// yields events from per-node goroutines in arrival order; the
+// caller may break from the range loop at any point and the
+// engine will cancel all in-flight nodes before returning.
+//
+// It extracts the input from the user context and forwards it to RunNode.
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		input := userInput(ctx)
+	return w.RunNode(ctx, userInput(ctx))
+}
 
+// RunNode drives the workflow with the given input.
+// This is used by WorkflowNode to run nested workflows.
+func (w *Workflow) RunNode(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
 		s := newScheduler(ctx, w.graph)
-		// Seed: schedule START with the user-supplied input.
+		// Seed: schedule START with the supplied input.
 		startState := s.state.EnsureNode(Start.Name())
 		startState.Input = input
 		s.scheduleNode(Start, input, "")

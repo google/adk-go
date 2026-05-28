@@ -46,6 +46,9 @@ var ErrNodesNotReachable = errors.New("nodes not reachable from start node")
 // contain any conditional edges.
 var ErrUnconditionalCycle = errors.New("unconditional cycle detected")
 
+// ErrSubWorkflowNameCollision is returned when a sub-workflow has the same name as the parent workflow.
+var ErrSubWorkflowNameCollision = errors.New("sub-workflow name collision")
+
 // validateNodes executes a set of edges validation checks.
 func validateNodes(edges []Edge) error {
 	if err := validateUniqueNames(edges); err != nil {
@@ -56,6 +59,29 @@ func validateNodes(edges []Edge) error {
 	}
 	if err := validateStartNodeNoIncoming(edges); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateSubWorkflowNames checks that no sub-workflow has the same name as the parent workflow.
+func validateSubWorkflowNames(workflowName string, edges []Edge) error {
+	for _, edge := range edges {
+		if err := checkSubWorkflowName(edge.From, workflowName); err != nil {
+			return err
+		}
+		if err := checkSubWorkflowName(edge.To, workflowName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkSubWorkflowName checks if the node is a WorkflowNode and if its sub-workflow has the same name as the parent workflow.
+func checkSubWorkflowName(node Node, workflowName string) error {
+	if wfNode, ok := node.(*WorkflowNode); ok {
+		if wfNode.subWorkflow.Name() == workflowName {
+			return fmt.Errorf("%w: %s", ErrSubWorkflowNameCollision, workflowName)
+		}
 	}
 	return nil
 }
