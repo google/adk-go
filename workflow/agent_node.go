@@ -32,8 +32,6 @@ import (
 type AgentNode struct {
 	BaseNode
 	agent        agent.Agent
-	inputSchema  *jsonschema.Resolved
-	outputSchema *jsonschema.Resolved
 }
 
 // newAgentNodeWithSchemasTyped creates a new node wrapping an agent with explicitly provided schemas.
@@ -52,10 +50,8 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	}
 
 	return &AgentNode{
-		BaseNode:     NewBaseNode(a.Name(), a.Description(), cfg),
+		BaseNode:     NewBaseNode(a.Name(), a.Description(), cfg, ischema, oschema),
 		agent:        a,
-		inputSchema:  ischema,
-		outputSchema: oschema,
 	}, nil
 }
 
@@ -80,10 +76,15 @@ func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 // Run implements the Node interface.
 func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		// TODO: add input validation
+		validatedInput, err := n.ValidateInput(input)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
 		var userContent *genai.Content
-		if input != nil {
-			switch v := input.(type) {
+		if validatedInput != nil {
+			switch v := validatedInput.(type) {
 			case string:
 				userContent = &genai.Content{
 					Parts: []*genai.Part{{Text: v}},

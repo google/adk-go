@@ -14,15 +14,20 @@
 
 package workflow
 
-import "github.com/google/jsonschema-go/jsonschema"
+import (
+	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/adk/internal/typeutil"
+)
 
 // BaseNode provides identity and a default Config implementation for
 // types that satisfy the Node interface. Custom node types embed
 // BaseNode by value and supply only Run.
 type BaseNode struct {
-	name   string
-	desc   string
-	config NodeConfig
+	name         string
+	desc         string
+	config       NodeConfig
+	inputSchema  *jsonschema.Resolved
+	outputSchema *jsonschema.Resolved
 }
 
 // NewBaseNode returns a BaseNode with the given identity and
@@ -37,8 +42,18 @@ type BaseNode struct {
 //	func NewCustomNode(name string, cfg NodeConfig) *CustomNode {
 //	    return &CustomNode{BaseNode: NewBaseNode(name, "", cfg)}
 //	}
-func NewBaseNode(name, description string, cfg NodeConfig) BaseNode {
-	return BaseNode{name: name, desc: description, config: cfg}
+func NewBaseNode(
+	name, description string,
+	cfg NodeConfig,
+	inputSchema, outputSchema *jsonschema.Resolved,
+) BaseNode {
+	return BaseNode{
+		name:         name,
+		desc:         description,
+		config:       cfg,
+		inputSchema:  inputSchema,
+		outputSchema: outputSchema,
+	}
 }
 
 // Name returns the node's name.
@@ -50,11 +65,20 @@ func (b BaseNode) Description() string { return b.desc }
 // Config returns the node's configuration.
 func (b BaseNode) Config() NodeConfig { return b.config }
 
-// InputSchema returns nil to indicate no input validation schema by default.
-func (b BaseNode) InputSchema() *jsonschema.Resolved { return nil }
+// InputSchema returns the node's input validation schema.
+func (b BaseNode) InputSchema() *jsonschema.Resolved { return b.inputSchema }
 
-// OutputSchema returns nil to indicate no output validation schema by default.
-func (b BaseNode) OutputSchema() *jsonschema.Resolved { return nil }
+// OutputSchema returns the node's output validation schema.
+func (b BaseNode) OutputSchema() *jsonschema.Resolved { return b.outputSchema }
 
-// ValidateInput returns the input unchanged as a default passthrough implementation.
-func (b BaseNode) ValidateInput(input any) (any, error) { return input, nil }
+// ValidateInput validates and coerces the input using the node's input schema.
+func (b BaseNode) ValidateInput(in any) (any, error) {
+	return defaultValidateInput(in, b.inputSchema)
+}
+
+func defaultValidateInput(in any, schema *jsonschema.Resolved) (any, error) {
+	if schema == nil {
+		return in, nil
+	}
+	return typeutil.ConvertToWithJSONSchema[any, any](in, schema)
+}

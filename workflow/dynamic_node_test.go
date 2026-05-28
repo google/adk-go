@@ -280,7 +280,7 @@ type failingNode struct {
 
 func newFailingNode(name string, err error) *failingNode {
 	return &failingNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil),
 		err:      err,
 	}
 }

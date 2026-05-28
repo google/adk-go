@@ -37,7 +37,7 @@ type JoinNode struct {
 
 // NewJoinNode returns a JoinNode with the given name.
 func NewJoinNode(name string) *JoinNode {
-	return &JoinNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
+	return &JoinNode{BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil)}
 }
 
 // Run satisfies the Node interface. See JoinNode for the

@@ -209,7 +209,7 @@ type reentryNode struct {
 
 func newReentryNode(name string, runFn func(agent.InvocationContext, any) iter.Seq2[*session.Event, error]) *reentryNode {
 	return &reentryNode{
-		BaseNode: workflow.NewBaseNode(name, "", workflow.NodeConfig{RerunOnResume: ptrTrue()}),
+		BaseNode: workflow.NewBaseNode(name, "", workflow.NodeConfig{RerunOnResume: ptrTrue()}, nil, nil),
 		runFn:    runFn,
 	}
 }

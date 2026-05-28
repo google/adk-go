@@ -311,7 +311,7 @@ type recordingNode struct {
 
 func newRecordingNode(name string) *recordingNode {
 	return &recordingNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil),
 		released: make(chan struct{}),
 	}
 }
@@ -339,7 +339,7 @@ type blockingNode struct {
 
 func newBlockingNode(name string, work func()) *blockingNode {
 	return &blockingNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil),
 		work:     work,
 	}
 }
@@ -361,7 +361,7 @@ type erroringNode struct {
 
 func newErroringNode(name string, err error) *erroringNode {
 	return &erroringNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil),
 		err:      err,
 	}
 }
@@ -382,7 +382,7 @@ type cancelObservingNode struct {
 }
 
 func newCancelObservingNode(name string) *cancelObservingNode {
-	return &cancelObservingNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
+	return &cancelObservingNode{BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil)}
 }
 
 // Config returns n.cfg, which tests may mutate after construction.
@@ -405,7 +405,7 @@ type multiOutputNode struct {
 
 func newMultiOutputNode(name string, outputs []string) *multiOutputNode {
 	return &multiOutputNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil),
 		outputs:  outputs,
 	}
 }
@@ -433,7 +433,7 @@ type progressThenOutputNode struct {
 
 func newProgressThenOutputNode(name string, progressCount int, finalOutput string) *progressThenOutputNode {
 	return &progressThenOutputNode{
-		BaseNode:      NewBaseNode(name, "", NodeConfig{}),
+		BaseNode:      NewBaseNode(name, "", NodeConfig{}, nil, nil),
 		progressCount: progressCount,
 		finalOutput:   finalOutput,
 	}
@@ -526,7 +526,7 @@ type retryTestNode struct {
 
 func newRetryTestNode(name string, failCount int, cfg NodeConfig) *retryTestNode {
 	return &retryTestNode{
-		BaseNode:  NewBaseNode(name, "", cfg),
+		BaseNode:  NewBaseNode(name, "", cfg, nil, nil),
 		failCount: failCount,
 		cfg:       cfg,
 	}

@@ -433,7 +433,7 @@ type hitlNode struct {
 
 func newHitlNode(name string, run func(ctx agent.InvocationContext, input any, yield func(*session.Event, error) bool)) *hitlNode {
 	return &hitlNode{
-		BaseNode: workflow.NewBaseNode(name, "", workflow.NodeConfig{}),
+		BaseNode: workflow.NewBaseNode(name, "", workflow.NodeConfig{}, nil, nil),
 		run:      run,
 	}
 }

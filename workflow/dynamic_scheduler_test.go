@@ -201,7 +201,7 @@ type stubNode struct {
 
 func newStubNode(name string, out any) *stubNode {
 	return &stubNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil),
 		out:      out,
 	}
 }
@@ -224,7 +224,7 @@ type requestInputNode struct {
 
 func newRequestInputNode(name, msg string) *requestInputNode {
 	return &requestInputNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil),
 		message:  msg,
 	}
 }
@@ -244,7 +244,7 @@ func (n *requestInputNode) Run(agent.InvocationContext, any) iter.Seq2[*session.
 type interruptThenFailNode struct{ BaseNode }
 
 func newInterruptThenFailNode(name string) *interruptThenFailNode {
-	return &interruptThenFailNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
+	return &interruptThenFailNode{BaseNode: NewBaseNode(name, "", NodeConfig{}, nil, nil)}
 }
 
 func (n *interruptThenFailNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {

@@ -35,7 +35,7 @@ type hitlNode struct {
 
 func newHitlNode(name string, run func(ctx agent.InvocationContext, input any, yield func(*session.Event, error) bool)) *hitlNode {
 	return &hitlNode{
-		BaseNode: NewBaseNode(name, "", defaultNodeConfig),
+		BaseNode: NewBaseNode(name, "", defaultNodeConfig, nil, nil),
 		run:      run,
 	}
 }

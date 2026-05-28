@@ -61,7 +61,7 @@ func (n *inlineNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sess
 }
 
 func mkNode(name, desc string, run func(agent.InvocationContext, any) iter.Seq2[*session.Event, error]) *inlineNode {
-	return &inlineNode{BaseNode: workflow.NewBaseNode(name, desc, workflow.NodeConfig{}), run: run}
+	return &inlineNode{BaseNode: workflow.NewBaseNode(name, desc, workflow.NodeConfig{}, nil, nil), run: run}
 }
 
 // askName pauses the workflow with a RequestInput asking for the
