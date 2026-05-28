@@ -466,11 +466,9 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev == nil {
 		return
 	}
-	// Stamp the activation's branch onto events that did not set one.
-	// Nodes that explicitly set Event.Branch are respected; nodes
-	// that emit Event{Branch: ""} use the activation's branch by
-	// default (Go has no way to distinguish "unset" from "explicit
-	// empty" on a string field).
+	// Stamp the activation's branch onto events that left
+	// Event.Branch empty; nodes that set a non-empty Event.Branch
+	// keep it.
 	if it.ev.Branch == "" && nr.branch != "" {
 		it.ev.Branch = nr.branch
 	}

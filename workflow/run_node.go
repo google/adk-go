@@ -59,11 +59,9 @@ func WithUseSubBranch() RunNodeOption {
 // Combinable with WithUseSubBranch: the override sets the base,
 // and the sub-branch segment "<childName>@<runID>" is appended.
 //
-// Empty branch is treated as "no override" — callers wanting to
-// force root should pass WithUseSubBranch() alone (which derives a
-// fresh sub-branch off root). Go lacks an optional string type
-// that would distinguish unset from explicitly-empty, so the
-// empty case is folded into "no override".
+// Empty branch is treated as "no override". To force root, pass
+// WithUseSubBranch() alone, which derives a fresh sub-branch off
+// root.
 func WithOverrideBranch(branch string) RunNodeOption {
 	return func(o *runNodeOptions) { o.overrideBranch = branch }
 }

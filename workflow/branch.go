@@ -93,9 +93,8 @@ func (b *branchOverride) WithContext(ctx context.Context) agent.InvocationContex
 //     when base is empty)
 //   - useSubBranch=false → base unchanged
 //
-// Note: overrideBranch="" is treated as "no override" (Go lacks an
-// optional string type that would distinguish unset from
-// explicitly-empty); see WithOverrideBranch godoc for the rationale.
+// Note: overrideBranch="" is treated as "no override"; see
+// WithOverrideBranch godoc.
 func deriveChildBranch(parentBranch, name, runID string, useSubBranch bool, overrideBranch string) string {
 	base := parentBranch
 	if overrideBranch != "" {
