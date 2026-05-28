@@ -40,6 +40,11 @@ type NodeContext interface {
 	// static nodes; auto-counter or user-supplied via WithRunID for
 	// dynamic children.
 	RunID() string
+
+	// WithBranch returns a NodeContext whose Branch() returns the
+	// given value; all other fields (path, runID, subScheduler,
+	// resumeInputs, embedded InvocationContext) are preserved.
+	WithBranch(branch string) NodeContext
 }
 
 // nodeContext is the unexported NodeContext implementation.
@@ -102,3 +107,16 @@ func (c *nodeContext) ResumedInput(interruptID string) (any, bool) {
 
 func (c *nodeContext) Path() string  { return c.path }
 func (c *nodeContext) RunID() string { return c.runID }
+
+func (c *nodeContext) WithBranch(branch string) NodeContext {
+	// Reuse the package-level withBranch helper to swap Branch on
+	// the underlying InvocationContext; preserve the NodeContext
+	// envelope (path, runID, resumeInputs, subScheduler) unchanged.
+	return &nodeContext{
+		InvocationContext: withBranch(c.InvocationContext, branch),
+		resumeInputs:      c.resumeInputs,
+		path:              c.path,
+		runID:             c.runID,
+		subScheduler:      c.subScheduler,
+	}
+}
