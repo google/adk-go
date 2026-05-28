@@ -260,10 +260,10 @@ func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy, branch s
 	} else {
 		nodeCtx, cancel = context.WithCancel(s.parentCtx)
 	}
-	// Order matters: WithContext sets up per-node cancellation
-	// (returns *icontext.InvocationContext via the typed
-	// implementation), then withBranch overrides Branch() on the
-	// same concrete type. Reversing would lose the cancellation.
+	// Order matters: WithContext sets up per-node cancellation on
+	// the underlying InvocationContext; withBranch then wraps the
+	// result in branchOverride. Reversing would either lose the
+	// cancellation context or strip the branch override.
 	wrapped := withBranch(s.parentCtx.WithContext(nodeCtx), branch)
 	perNodeCtx := newNodeContext(wrapped, resumeInputs)
 

@@ -113,18 +113,6 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 	return &newCtx
 }
 
-// WithBranch returns a copy of c with Branch replaced. Useful for
-// callers that need to scope the LLM flow's history filter per
-// parallel branch.
-//
-// Not part of the agent.InvocationContext interface; promote if
-// more implementers need it.
-func (c *InvocationContext) WithBranch(branch string) *InvocationContext {
-	newCtx := *c
-	newCtx.params.Branch = branch
-	return &newCtx
-}
-
 // ResumedInput always returns (nil, false) for the base
 // invocation context. Implementations that carry a resume payload
 // override this method.

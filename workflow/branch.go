@@ -19,7 +19,6 @@ import (
 	"strings"
 
 	"google.golang.org/adk/agent"
-	icontext "google.golang.org/adk/internal/context"
 )
 
 // Branch composition helpers for the static, parallel, and dynamic
@@ -51,31 +50,22 @@ func deriveSubBranch(parent, segment string) string {
 }
 
 // withBranch returns ctx wrapped with branch as its Branch().
-// Today the only implementer of agent.InvocationContext is
-// *icontext.InvocationContext, so the common path is a single type
-// assertion + WithBranch. Anything else falls back to a small
-// adapter that overrides only Branch() — sufficient for tests that
-// supply a hand-rolled MockInvocationContext.
+// Implemented as a small adapter that overrides only Branch() and
+// delegates the rest of the interface to the embedded ctx.
 func withBranch(ctx agent.InvocationContext, branch string) agent.InvocationContext {
 	if ctx.Branch() == branch {
 		return ctx
 	}
-	if ic, ok := ctx.(*icontext.InvocationContext); ok {
-		return ic.WithBranch(branch)
-	}
 	return &branchOverride{InvocationContext: ctx, branch: branch}
 }
 
-// branchOverride wraps any InvocationContext and overrides Branch().
-// Used as a fallback when ctx is not the canonical
-// *icontext.InvocationContext implementation (currently only test
-// mocks). All other interface methods delegate to the embedded
-// value.
+// branchOverride wraps an InvocationContext and overrides Branch().
+// All other interface methods delegate to the embedded value.
 //
 // WithContext is overridden so the branch survives a subsequent
 // context-cancellation wrap. Without this, a caller that does
 // ctx.WithContext(cancelCtx) would get an InvocationContext whose
-// Branch() returns the inner mock's branch (empty), silently
+// Branch() returns the inner ctx's branch (empty), silently
 // losing the override.
 type branchOverride struct {
 	agent.InvocationContext
