@@ -31,6 +31,9 @@ type runNodeOptions struct {
 // non-digit character (purely numeric ids collide with the
 // auto-counter), and exclude the composite-path separators '/' and
 // '@'. Violations surface as ErrInvalidRunID from RunNode.
+//
+// Mirrors adk-python's run_id kwarg
+// (https://adk.dev/graphs/dynamic/#custom-execution-ids).
 func WithRunID(id string) RunNodeOption {
 	return func(o *runNodeOptions) { o.customRunID = id }
 }
