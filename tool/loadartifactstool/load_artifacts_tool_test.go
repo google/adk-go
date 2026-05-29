@@ -278,6 +278,144 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	}
 }
 
+func TestLoadArtifactsTool_ProcessRequest_UnsupportedTextLikeMIME_ConvertsToText(t *testing.T) {
+	artifactName := "data.csv"
+	csvContent := "col1,col2\n1,2\n"
+	artifactPart := processLoadArtifactRequest(
+		t,
+		artifactName,
+		genai.NewPartFromBytes([]byte(csvContent), "application/csv; charset=utf-8"),
+	)
+
+	if artifactPart.InlineData != nil {
+		t.Fatalf("Expected artifact to be converted to text, got inline data: %v", artifactPart.InlineData)
+	}
+	if artifactPart.Text != csvContent {
+		t.Errorf("Converted artifact text: got %q, want %q", artifactPart.Text, csvContent)
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_SupportedMIME_KeepsInlineData(t *testing.T) {
+	artifactName := "file.pdf"
+	pdfBytes := []byte("%PDF-1.4")
+	artifactPart := processLoadArtifactRequest(
+		t,
+		artifactName,
+		genai.NewPartFromBytes(pdfBytes, "application/pdf"),
+	)
+
+	if artifactPart.InlineData == nil {
+		t.Fatal("Expected supported artifact to keep inline data")
+	}
+	if artifactPart.InlineData.MIMEType != "application/pdf" {
+		t.Errorf("Inline data MIMEType: got %q, want %q", artifactPart.InlineData.MIMEType, "application/pdf")
+	}
+	if diff := cmp.Diff(pdfBytes, artifactPart.InlineData.Data); diff != "" {
+		t.Errorf("Inline data diff (-want +got):\n%s", diff)
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_UnsupportedBinaryMIME_ConvertsToPlaceholder(t *testing.T) {
+	artifactName := "slides.pptx"
+	artifactPart := processLoadArtifactRequest(
+		t,
+		artifactName,
+		genai.NewPartFromBytes([]byte{1, 2, 3}, "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+	)
+
+	if artifactPart.InlineData != nil {
+		t.Fatalf("Expected artifact to be converted to text, got inline data: %v", artifactPart.InlineData)
+	}
+	want := "[Binary artifact: slides.pptx, type: application/vnd.openxmlformats-officedocument.presentationml.presentation, size: 0.0 KB. Content cannot be displayed inline.]"
+	if artifactPart.Text != want {
+		t.Errorf("Converted artifact text: got %q, want %q", artifactPart.Text, want)
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_UnsupportedMIME_NoData_ConvertsToNoDataPlaceholder(t *testing.T) {
+	artifactName := "empty.bin"
+	artifactPart := processLoadArtifactRequest(
+		t,
+		artifactName,
+		&genai.Part{InlineData: &genai.Blob{MIMEType: "application/octet-stream"}},
+	)
+
+	if artifactPart.InlineData != nil {
+		t.Fatalf("Expected artifact to be converted to text, got inline data: %v", artifactPart.InlineData)
+	}
+	want := "[Artifact: empty.bin, type: application/octet-stream. No inline data was provided.]"
+	if artifactPart.Text != want {
+		t.Errorf("Converted artifact text: got %q, want %q", artifactPart.Text, want)
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_EmptyMIME_DefaultsToOctetStream(t *testing.T) {
+	artifactName := "unknown"
+	artifactPart := processLoadArtifactRequest(
+		t,
+		artifactName,
+		genai.NewPartFromBytes([]byte{0xDE, 0xAD, 0xBE, 0xEF}, ""),
+	)
+
+	if artifactPart.InlineData != nil {
+		t.Fatalf("Expected artifact to be converted to text, got inline data: %v", artifactPart.InlineData)
+	}
+	want := "[Binary artifact: unknown, type: application/octet-stream, size: 0.0 KB. Content cannot be displayed inline.]"
+	if artifactPart.Text != want {
+		t.Errorf("Converted artifact text: got %q, want %q", artifactPart.Text, want)
+	}
+}
+
+func processLoadArtifactRequest(t *testing.T, artifactName string, artifact *genai.Part) *genai.Part {
+	t.Helper()
+
+	loadArtifactsTool := loadartifactstool.New()
+	tc := createToolContext(t)
+	if _, err := tc.Artifacts().Save(t.Context(), artifactName, artifact); err != nil {
+		t.Fatalf("Failed to save artifact %s: %v", artifactName, err)
+	}
+
+	llmRequest := loadArtifactsRequest(artifactName)
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	if err := requestProcessor.ProcessRequest(tc, llmRequest); err != nil {
+		t.Fatalf("ProcessRequest failed: %v", err)
+	}
+	if len(llmRequest.Contents) != 2 {
+		t.Fatalf("Expected 2 contents, got %d", len(llmRequest.Contents))
+	}
+
+	appendedContent := llmRequest.Contents[1]
+	if appendedContent.Role != genai.RoleUser {
+		t.Errorf("Appended Content Role: got %v, want %v", appendedContent.Role, genai.RoleUser)
+	}
+	if len(appendedContent.Parts) != 2 {
+		t.Fatalf("Expected 2 parts in appended content, got %d", len(appendedContent.Parts))
+	}
+	if got, want := appendedContent.Parts[0].Text, "Artifact "+artifactName+" is:"; got != want {
+		t.Errorf("First part of appended content: got %q, want %q", got, want)
+	}
+	return appendedContent.Parts[1]
+}
+
+func loadArtifactsRequest(artifactName string) *model.LLMRequest {
+	return &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: "model",
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+						"artifact_names": []string{artifactName},
+					}),
+				},
+			},
+		},
+	}
+}
+
 func createToolContext(t *testing.T) tool.Context {
 	t.Helper()
 

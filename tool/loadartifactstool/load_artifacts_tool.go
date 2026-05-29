@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
@@ -31,6 +32,22 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
+
+var geminiSupportedInlineMIMEPrefixes = []string{
+	"image/",
+	"audio/",
+	"video/",
+}
+
+var geminiSupportedInlineMIMETypes = map[string]bool{
+	"application/pdf": true,
+}
+
+var textLikeMIMETypes = map[string]bool{
+	"application/csv":  true,
+	"application/json": true,
+	"application/xml":  true,
+}
 
 // artifactsTool is a tool that loads artifacts and adds them to the session.
 type artifactsTool struct {
@@ -213,8 +230,58 @@ func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsSer
 	return &genai.Content{
 		Parts: []*genai.Part{
 			genai.NewPartFromText("Artifact " + artifactName + " is:"),
-			resp.Part,
+			safePartForLLM(resp.Part, artifactName),
 		},
 		Role: genai.RoleUser,
 	}, nil
+}
+
+func normalizeMIMEType(mimeType string) string {
+	mimeType, _, _ = strings.Cut(mimeType, ";")
+	return strings.TrimSpace(mimeType)
+}
+
+func isInlineMIMETypeSupported(mimeType string) bool {
+	normalized := normalizeMIMEType(mimeType)
+	if normalized == "" {
+		return false
+	}
+	if geminiSupportedInlineMIMETypes[normalized] {
+		return true
+	}
+	for _, prefix := range geminiSupportedInlineMIMEPrefixes {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func safePartForLLM(part *genai.Part, artifactName string) *genai.Part {
+	if part == nil || part.InlineData == nil {
+		return part
+	}
+	if isInlineMIMETypeSupported(part.InlineData.MIMEType) {
+		return part
+	}
+
+	mimeType := normalizeMIMEType(part.InlineData.MIMEType)
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	data := part.InlineData.Data
+	if data == nil {
+		return genai.NewPartFromText(fmt.Sprintf("[Artifact: %s, type: %s. No inline data was provided.]", artifactName, mimeType))
+	}
+	if strings.HasPrefix(mimeType, "text/") || textLikeMIMETypes[mimeType] {
+		return genai.NewPartFromText(strings.ToValidUTF8(string(data), "\uFFFD"))
+	}
+
+	sizeKB := float64(len(data)) / 1024
+	return genai.NewPartFromText(fmt.Sprintf(
+		"[Binary artifact: %s, type: %s, size: %.1f KB. Content cannot be displayed inline.]",
+		artifactName,
+		mimeType,
+		sizeKB,
+	))
 }
