@@ -15,10 +15,14 @@
 package workflow
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
+
+	"go.opentelemetry.io/otel/codes"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/utils"
@@ -190,7 +194,7 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 //
 // Session, invocation metadata, and cancellation come from
 // s.parentCtx. opts carries the resolved RunNodeOption arguments.
-func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions) (any, error) {
+func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions) (out any, err error) {
 	name := child.Name()
 	runID, err := s.resolveRunID(name, opts.customRunID)
 	if err != nil {
@@ -204,13 +208,6 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// and resume rebuilds a fresh sub-scheduler.
 	if err := s.claimDelegation(childPath, name, opts.useAsOutput); err != nil {
 		return nil, err
-	}
-
-	// Cached (WithRunID replay): the child already ran, so publish its
-	// output for the delegation immediately.
-	if cached, ok := s.lookupCachedOutput(childPath); ok {
-		s.commitDelegation(childPath, cached)
-		return cached, nil
 	}
 
 	childBranch := deriveChildBranch(s.parentCtx.Branch(), name, runID, opts.useSubBranch, opts.overrideBranch)
@@ -236,6 +233,37 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// logContext(childCtx, "childCtx after withIsolationScope", 0)
 	//	log.Printf("childCtx: %+v branch: %v", childCtx, childCtx.Branch())
 
+	// Emit an "invoke_node <name>" span nested under the dynamic
+	// node's span (carried in s.parentCtx), so RunNode-driven
+	// children appear in the trace tree. The span is opened before the
+	// cache lookup so a cached (WithRunID replay) hit is still emitted
+	// as its own span. startNodeSpan returns a context carrying the span.
+	span, spanCtx := startNodeSpan(childCtx, child)
+	defer span.End()
+	childCtx = spanCtx
+
+	// Record genuine runtime failures on the span. Pauses (HITL
+	// ErrNodeInterrupted, WaitForOutput ErrNodeWaitingForOutput) and
+	// parent cancellation (context.Canceled) are expected control
+	// flow, not span errors — matching the top scheduler's runNode.
+	defer func() {
+		if err != nil &&
+			!errors.Is(err, context.Canceled) &&
+			!errors.Is(err, ErrNodeInterrupted) &&
+			!errors.Is(err, ErrNodeWaitingForOutput) {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+	}()
+
+	// Cached (WithRunID replay): the child already ran, so publish its
+	// output for the delegation immediately. The span opened above still
+	// records the cache hit.
+	if cached, ok := s.lookupCachedOutput(childPath); ok {
+		s.commitDelegation(childPath, cached)
+		return cached, nil
+	}
+
 	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
 	// subScheduler) in the embedded context.Context so tools running
 	// inside an LlmAgent that is itself running as this dynamic
@@ -255,7 +283,6 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// // childCtx= iCtx3
 
 	var (
-		out         any
 		hasOutput   bool
 		interrupted bool
 		// pendingLongRunningIDs collects FunctionCall IDs the child

@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -44,10 +45,14 @@ var nonDeterministicSpanAttributes = map[string]bool{
 }
 
 // SpanDigest is a deterministic snapshot of a span: name, normalised
-// attributes, child spans, and the log records emitted while the
-// span was active.
+// attributes, status, child spans, and the log records emitted while
+// the span was active.
 type SpanDigest struct {
-	Name       string
+	Name string
+	// Status is the span's status code ("Error" or "Ok"); empty for
+	// the default Unset status. Lets error-handling scenarios assert
+	// that a failed span was actually marked as an error.
+	Status     string
 	Attributes map[string]any
 	Children   []*SpanDigest
 	Logs       []*LogDigest
@@ -81,6 +86,7 @@ func buildSpanDigest(s tracetest.SpanStub) *spanWithMeta {
 	return &spanWithMeta{
 		digest: &SpanDigest{
 			Name:       s.Name,
+			Status:     statusString(s.Status.Code),
 			Attributes: normaliseSpanAttributes(s.Attributes),
 		},
 		spanID:    s.SpanContext.SpanID(),
@@ -151,6 +157,20 @@ func linkAndSort(digests []*spanWithMeta) []*SpanDigest {
 		out[i] = r.digest
 	}
 	return out
+}
+
+// statusString renders a span status code as a stable string,
+// collapsing the default Unset code to "" so unaffected spans don't
+// need to declare a Status in their expected digest.
+func statusString(c codes.Code) string {
+	switch c {
+	case codes.Error:
+		return "Error"
+	case codes.Ok:
+		return "Ok"
+	default:
+		return ""
+	}
 }
 
 // normaliseSpanAttributes converts the OTel attribute slice into a

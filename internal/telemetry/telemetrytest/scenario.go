@@ -26,13 +26,20 @@ import (
 )
 
 // RunScenario drives rootAgent through a single user turn via a
-// real Runner backed by an in-memory session service. Used by
-// every functional telemetry test; kept here rather than in a
-// _test.go file so callers in any external test package can reuse
-// the same scenario harness.
+// real Runner backed by an in-memory session service and returns the
+// first error the run yields (nil on success). Used by every
+// functional telemetry test; kept here rather than in a _test.go
+// file so callers in any external test package can reuse the same
+// scenario harness.
+//
+// Returning the run error (rather than failing the test internally)
+// lets callers decide: happy-path tests t.Fatal on a non-nil error,
+// while error-handling tests assert the telemetry emitted up to (and
+// including) the failure. Harness-setup failures (runner/session
+// construction) still fail the test directly.
 //
 // Mirrors functional_test_helpers.run_agent_scenario in adk-python.
-func RunScenario(t *testing.T, rootAgent agent.Agent, prompt string) {
+func RunScenario(t *testing.T, rootAgent agent.Agent, prompt string) error {
 	t.Helper()
 	ctx := context.Background()
 
@@ -54,9 +61,10 @@ func RunScenario(t *testing.T, rootAgent agent.Agent, prompt string) {
 	}
 
 	msg := genai.NewContentFromText(prompt, genai.RoleUser)
-	for _, err := range r.Run(ctx, "test_user", sess.Session.ID(), msg, agent.RunConfig{}) {
-		if err != nil {
-			t.Fatalf("runner.Run yielded error: %v", err)
+	for _, runErr := range r.Run(ctx, "test_user", sess.Session.ID(), msg, agent.RunConfig{}) {
+		if runErr != nil {
+			return runErr
 		}
 	}
+	return nil
 }
