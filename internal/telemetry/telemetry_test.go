@@ -29,6 +29,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/genai"
 
+	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 )
@@ -105,20 +106,57 @@ func TestWrapYield_MultipleCalls(t *testing.T) {
 
 var errTest = errors.New("test error")
 
-type mockAgent struct{}
-
-func (a *mockAgent) Name() string {
-	return "test-agent"
+// fakeAgent satisfies both [AgentLike] and [agentinternal.Agent]
+// by embedding [agentinternal.State] (which provides the unexported
+// internal() method required by the Agent interface). Used by
+// node-tracing tests to drive [StartNodeSpan] without spinning up
+// a real agent.
+type fakeAgent struct {
+	agentinternal.State
+	name        string
+	description string
 }
 
-func (a *mockAgent) Description() string {
-	return "test-agent-description"
+func (f *fakeAgent) Name() string        { return f.name }
+func (f *fakeAgent) Description() string { return f.description }
+
+// fakeInvocationContext satisfies [InvocationContext]. The session
+// is built lazily from the in-memory service so the conversation
+// ID attribute matches sessionID exactly.
+type fakeInvocationContext struct {
+	t            *testing.T
+	sessionID    string
+	invocationID string
+	sess         session.Session
 }
+
+func (f *fakeInvocationContext) Session() session.Session {
+	if f.sess == nil {
+		svc := session.InMemoryService()
+		resp, err := svc.Create(context.Background(), &session.CreateRequest{
+			AppName:   "test_app",
+			UserID:    "test_user",
+			SessionID: f.sessionID,
+		})
+		if err != nil {
+			f.t.Fatalf("session create: %v", err)
+		}
+		f.sess = resp.Session
+	}
+	return f.sess
+}
+
+func (f *fakeInvocationContext) InvocationID() string { return f.invocationID }
 
 func TestInvokeAgent(t *testing.T) {
 	sessionID := "test-session"
 	invocationID := "test-invocation-id"
-	agent := &mockAgent{}
+	a := &fakeAgent{
+		State:       agentinternal.State{AgentType: agentinternal.TypeLLMAgent},
+		name:        "test-agent",
+		description: "test-agent-description",
+	}
+	ictx := &fakeInvocationContext{t: t, sessionID: sessionID, invocationID: invocationID}
 	tests := []struct {
 		name         string
 		resultParams TraceAgentResultParams
@@ -163,7 +201,7 @@ func TestInvokeAgent(t *testing.T) {
 			exporter := setupTestTracer(t)
 			ctx := t.Context()
 
-			_, span := StartInvokeAgentSpan(ctx, agent, sessionID, invocationID)
+			_, span := StartNodeSpan(ctx, ictx, OperationAgent{Agent: a})
 			TraceAgentResult(span, tc.resultParams)
 			span.End()
 
