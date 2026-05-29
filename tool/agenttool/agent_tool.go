@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
@@ -84,35 +85,7 @@ func (t *agentTool) IsLongRunning() bool {
 // If the agent does not have an input schema, a default schema with a
 // "request" string parameter is used.
 func (t *agentTool) Declaration() *genai.FunctionDeclaration {
-	decl := &genai.FunctionDeclaration{
-		Name:        t.Name(),
-		Description: t.Description(),
-	}
-
-	var agentInputSchema *genai.Schema
-	llmAgent, ok := t.agent.(llminternal.Agent)
-	if ok && llmAgent != nil {
-		// TODO - understand what build_function_declaration does in python and apply if needed.
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil
-		}
-		agentInputSchema = llminternal.Reveal(internalLlmAgent).InputSchema
-	}
-
-	if agentInputSchema != nil {
-		decl.Parameters = agentInputSchema
-	} else {
-		decl.Parameters = &genai.Schema{
-			Type: "OBJECT",
-			Properties: map[string]*genai.Schema{
-				"request": {Type: "STRING"},
-			},
-			Required: []string{"request"},
-		}
-	}
-	// TODO - understand how _api_variant affects response type.
-	return decl
+	return workflowinternal.MakeFunctionDeclaration(t.agent)
 }
 
 // Run executes the wrapped agent with the provided arguments.
