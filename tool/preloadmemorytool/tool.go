@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
@@ -133,3 +134,5 @@ func extractText(mem memory.Entry) string {
 	}
 	return b.String()
 }
+
+var _ toolinternal.RequestProcessor = (*preloadMemoryTool)(nil)

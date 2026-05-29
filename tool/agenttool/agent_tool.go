@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
@@ -254,3 +255,8 @@ func (t *agentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) 
 func (t *agentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
+
+var (
+	_ toolinternal.FunctionTool     = (*agentTool)(nil)
+	_ toolinternal.RequestProcessor = (*agentTool)(nil)
+)

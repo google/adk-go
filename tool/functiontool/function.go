@@ -24,6 +24,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/model"
@@ -274,3 +275,8 @@ func resolvedSchema[T any](override *jsonschema.Schema) (*jsonschema.Resolved, e
 	}
 	return schema.Resolve(nil)
 }
+
+var (
+	_ toolinternal.FunctionTool     = (*functionTool[struct{}, struct{}])(nil)
+	_ toolinternal.RequestProcessor = (*functionTool[struct{}, struct{}])(nil)
+)
