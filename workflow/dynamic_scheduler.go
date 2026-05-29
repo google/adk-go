@@ -15,10 +15,14 @@
 package workflow
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
+
+	"go.opentelemetry.io/otel/codes"
 
 	"google.golang.org/adk/session"
 )
@@ -59,7 +63,7 @@ func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*
 //
 // Session, invocation metadata, and cancellation come from
 // s.parentCtx. opts carries the resolved RunNodeOption arguments.
-func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions) (any, error) {
+func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions) (result any, err error) {
 	name := child.Name()
 	runID, err := s.resolveRunID(name, opts.customRunID)
 	if err != nil {
@@ -73,6 +77,25 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 
 	childBranch := deriveChildBranch(s.parentCtx.Branch(), name, runID, opts.useSubBranch, opts.overrideBranch)
 	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s)
+
+	// Emit an "invoke_node <name>" span nested under the dynamic
+	// node's span (carried in s.parentCtx), so RunNode-driven
+	// children appear in the trace tree. startNodeSpan returns a
+	// *nodeContext because childCtx is one.
+	span, spanCtx := startNodeSpan(childCtx, child)
+	defer span.End()
+	childCtx = spanCtx.(*nodeContext)
+
+	// Record genuine runtime failures on the span. HITL pauses
+	// (ErrNodeInterrupted) and parent cancellation (context.Canceled)
+	// are expected control flow, not span errors — matching the top
+	// scheduler's runNode, which skips context.Canceled.
+	defer func() {
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, ErrNodeInterrupted) {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+	}()
 
 	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
 	// subScheduler) in the embedded context.Context so tools running
