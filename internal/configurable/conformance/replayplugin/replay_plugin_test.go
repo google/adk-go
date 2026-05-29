@@ -121,6 +121,83 @@ recordings:
 		}
 	})
 
+	t.Run("BeforeModelCallback_WithSingleLlmResponse_ReturnsRecordedResponse", func(t *testing.T) {
+		plugin, mockSession, _ := setup(t)
+		tempDir := t.TempDir()
+
+		// 1. Create recording file with singular llm_response instead of plural llm_responses
+		recordingsYaml := `
+recordings:
+  - user_message_index: 0
+    agent_name: "test_agent"
+    llm_recording:
+      llm_request:
+        model: "gemini-2.0-flash"
+        contents:
+          - role: "user"
+            parts:
+              - text: "Hello"
+      llm_response:
+        content:
+          role: "model"
+          parts:
+            - text: "Recorded response"
+`
+		createRecordingsFile(t, tempDir, recordingsYaml)
+
+		// 2. Setup replay config
+		err := mockSession.State().Set("_adk_replay_config", map[string]any{
+			"dir":                tempDir,
+			"user_message_index": 0,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// 3. Load recordings (BeforeRunCallback)
+		invContext := &MockInvocationContext{
+			session:      mockSession,
+			invocationID: "test-invocation",
+		}
+		_, err = plugin.BeforeRunCallback()(invContext)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// 4. Call BeforeModelCallback with matching request
+		cbContext := &MockCallbackContext{
+			state:        mockSession.State(),
+			invocationID: "test-invocation",
+			agentName:    "test_agent",
+		}
+
+		request := &model.LLMRequest{
+			Model: "gemini-2.0-flash",
+			Contents: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "Hello"}},
+				},
+			},
+		}
+
+		result, err := plugin.BeforeModelCallback()(cbContext, request)
+		// 5. Verify
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result == nil {
+			t.Fatal("expected non-nil result")
+		}
+		if result.Content == nil {
+			t.Fatal("expected non-nil result.Content")
+		}
+
+		if got := result.Content.Parts[0].Text; got != "Recorded response" {
+			t.Errorf("expected %q, got %q", "Recorded response", got)
+		}
+	})
+
 	t.Run("BeforeModelCallback_RequestMismatch_ReturnsEmpty", func(t *testing.T) {
 		plugin, mockSession, _ := setup(t)
 		tempDir := t.TempDir()
@@ -400,7 +477,7 @@ func (m *MockInvocationContext) RunConfig() *agent.RunConfig                    
 func (m *MockInvocationContext) EndInvocation()                                          {}
 func (m *MockInvocationContext) Ended() bool                                             { return false }
 func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
-func (m *MockInvocationContext) TriggeredBy() string                                     { return "" }
+func (m *MockInvocationContext) ResumedInput(string) (any, bool)                         { return nil, false }
 func (m *MockInvocationContext) Value(key any) any                                       { return nil }
 func (m *MockInvocationContext) Deadline() (deadline time.Time, ok bool)                 { return time.Time{}, false }
 func (m *MockInvocationContext) Done() <-chan struct{}                                   { return nil }

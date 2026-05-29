@@ -71,17 +71,17 @@ func mustNew(t *testing.T, edges []Edge) *Workflow {
 	return w
 }
 
-func (m *MockInvocationContext) Session() session.Session    { return m.sess }
-func (m *MockInvocationContext) InvocationID() string        { return "test-invocation-id" }
-func (m *MockInvocationContext) UserContent() *genai.Content { return m.userContent }
-func (m *MockInvocationContext) TriggeredBy() string         { return "" }
-func (m *MockInvocationContext) Agent() agent.Agent          { return nil }
-func (m *MockInvocationContext) Artifacts() agent.Artifacts  { return nil }
-func (m *MockInvocationContext) Memory() agent.Memory        { return nil }
-func (m *MockInvocationContext) Branch() string              { return "" }
-func (m *MockInvocationContext) RunConfig() *agent.RunConfig { return nil }
-func (m *MockInvocationContext) Ended() bool                 { return false }
-func (m *MockInvocationContext) EndInvocation()              {}
+func (m *MockInvocationContext) Session() session.Session        { return m.sess }
+func (m *MockInvocationContext) InvocationID() string            { return "test-invocation-id" }
+func (m *MockInvocationContext) UserContent() *genai.Content     { return m.userContent }
+func (m *MockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
+func (m *MockInvocationContext) Agent() agent.Agent              { return nil }
+func (m *MockInvocationContext) Artifacts() agent.Artifacts      { return nil }
+func (m *MockInvocationContext) Memory() agent.Memory            { return nil }
+func (m *MockInvocationContext) Branch() string                  { return "" }
+func (m *MockInvocationContext) RunConfig() *agent.RunConfig     { return nil }
+func (m *MockInvocationContext) Ended() bool                     { return false }
+func (m *MockInvocationContext) EndInvocation()                  {}
 
 func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
 	cp := *m
@@ -109,12 +109,8 @@ func TestFunctionNode(t *testing.T) {
 		}
 		count++
 
-		output, ok := ev.Actions.StateDelta["output"]
-		if !ok {
-			t.Errorf("expected output in state delta")
-		}
-		if output != "HELLO" {
-			t.Errorf("expected output 'HELLO', got %v", output)
+		if ev.Output != "HELLO" {
+			t.Errorf("expected Output 'HELLO', got %v", ev.Output)
 		}
 	}
 
@@ -158,10 +154,8 @@ func TestSequentialWorkflow(t *testing.T) {
 		}
 		count++
 
-		if ev.Actions.StateDelta != nil {
-			if out, ok := ev.Actions.StateDelta["output"]; ok {
-				lastOutput = out
-			}
+		if ev.Output != nil {
+			lastOutput = ev.Output
 		}
 	}
 

@@ -57,24 +57,24 @@ func TestToolNode_New(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		creator func() (Node, error)
+		creator func() (*ToolNode, error)
 		want    string
 	}{
 		{
 			name: "NewToolNodeTyped",
-			creator: func() (Node, error) {
+			creator: func() (*ToolNode, error) {
 				return NewToolNodeTyped[Input, Output](myTool, defaultNodeConfig)
 			},
 		},
 		{
 			name: "NewToolNodeWithSchemas",
-			creator: func() (Node, error) {
+			creator: func() (*ToolNode, error) {
 				return NewToolNodeWithSchemas(myTool, ischema, oschema, defaultNodeConfig)
 			},
 		},
 		{
 			name: "NewToolNode",
-			creator: func() (Node, error) {
+			creator: func() (*ToolNode, error) {
 				return NewToolNode(myTool, defaultNodeConfig)
 			},
 		},
@@ -94,15 +94,7 @@ func TestToolNode_New(t *testing.T) {
 				t.Errorf("node.Description() = %q, want %q", got, want)
 			}
 
-			// Basic internal check via reflection-like cast.
-			// We use any, any for constructors that don't preserve types in the struct.
-			var inputResolved, outputResolved *jsonschema.Resolved
-			switch tn := node.(type) {
-			case *toolNode:
-				inputResolved, outputResolved = tn.inputSchema, tn.outputSchema
-			default:
-				t.Errorf("unknown node type: %T", tn)
-			}
+			inputResolved, outputResolved := node.inputSchema, node.outputSchema
 
 			if inputResolved == nil || outputResolved == nil {
 				t.Error("expected schemas to be resolved")
@@ -240,12 +232,7 @@ func TestToolNode_Run(t *testing.T) {
 				}
 				count++
 
-				output, ok := ev.Actions.StateDelta["output"]
-				if !ok {
-					t.Fatal("expected output in state delta")
-				}
-
-				got = tc.extract(t, output)
+				got = tc.extract(t, ev.Output)
 			}
 
 			if tc.wantErr != "" {
@@ -327,10 +314,8 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 					if err != nil {
 						t.Fatalf("workflow failed: %v", err)
 					}
-					if ev.Actions.StateDelta != nil {
-						if out, ok := ev.Actions.StateDelta["output"]; ok {
-							outB = out
-						}
+					if ev.Output != nil {
+						outB = ev.Output
 					}
 				}
 

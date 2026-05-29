@@ -29,8 +29,8 @@ import (
 	"google.golang.org/adk/tool"
 )
 
-// toolNode wraps a tool from the tool package.
-type toolNode struct {
+// ToolNode wraps a tool from the tool package.
+type ToolNode struct {
 	BaseNode
 	tool         tool.Tool
 	inputSchema  *jsonschema.Resolved
@@ -43,7 +43,7 @@ type runnableTool interface {
 
 // newToolNodeWithSchemasTyped creates a new node wrapping a tool with explicitly provided schemas.
 // If a schema is nil, it will be inferred from the corresponding generic type Input or Output.
-func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (Node, error) {
+func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*ToolNode, error) {
 	if t == nil {
 		return nil, fmt.Errorf("tool cannot be nil")
 	}
@@ -66,7 +66,7 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 		return nil, fmt.Errorf("tool %q (type %T) is not directly runnable in workflow node", t.Name(), t)
 	}
 
-	return &toolNode{
+	return &ToolNode{
 		BaseNode:     NewBaseNode(t.Name(), t.Description(), cfg),
 		tool:         t,
 		inputSchema:  ischema,
@@ -76,23 +76,23 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 
 // NewToolNodeWithSchemas is a convenience wrapper for NewToolNodeWithSchemasTyped[any, any].
 // It uses explicitly provided schemas for both input and output.
-func NewToolNodeWithSchemas(t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (Node, error) {
+func NewToolNodeWithSchemas(t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*ToolNode, error) {
 	return newToolNodeWithSchemasTyped[any, any](t, inputSchema, outputSchema, cfg)
 }
 
 // NewToolNodeTyped creates a new node wrapping a tool using generics to
 // automatically infer input and output schemas from the provided types.
-func NewToolNodeTyped[Input, Output any](t tool.Tool, cfg NodeConfig) (Node, error) {
+func NewToolNodeTyped[Input, Output any](t tool.Tool, cfg NodeConfig) (*ToolNode, error) {
 	return newToolNodeWithSchemasTyped[Input, Output](t, nil, nil, cfg)
 }
 
 // NewToolNode creates a new node wrapping a tool. Input and output schemas
 // are inferred as 'any'.
-func NewToolNode(t tool.Tool, cfg NodeConfig) (Node, error) {
+func NewToolNode(t tool.Tool, cfg NodeConfig) (*ToolNode, error) {
 	return NewToolNodeTyped[any, any](t, cfg)
 }
 
-func (n *toolNode) runTool(toolCtx tool.Context, input any) (any, error) {
+func (n *ToolNode) runTool(toolCtx tool.Context, input any) (any, error) {
 	runnable := n.tool.(runnableTool)
 	toolInput, err := typeutil.ConvertToWithJSONSchema[any, any](input, n.inputSchema)
 	if err != nil {
@@ -122,7 +122,7 @@ func (n *toolNode) runTool(toolCtx tool.Context, input any) (any, error) {
 }
 
 // Run implements the Node interface and executes the tool.
-func (n *toolNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *ToolNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		eventActions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
 		toolCtx := toolinternal.NewToolContext(ctx, uuid.NewString(), eventActions, nil)
@@ -135,7 +135,7 @@ func (n *toolNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessio
 
 		event := session.NewEvent(ctx.InvocationID())
 		event.Actions = *eventActions
-		event.Actions.StateDelta["output"] = toolOutput
+		event.Output = toolOutput
 
 		// If output is a string, set it as content for convenience (similar to FunctionNode).
 		if s, ok := toolOutput.(string); ok {

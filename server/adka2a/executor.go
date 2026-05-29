@@ -253,6 +253,11 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 		return err
 	}
 
+	ctx, callCtx := a2asrvv2.NewCallContext(ctx, execCtx.ServiceParams)
+	if execCtx.User.Authenticated {
+		callCtx.User = a2asrvv2.NewAuthenticatedUser(execCtx.User.Name, execCtx.User.Attributes)
+	}
+
 	for event, err := range e.impl.Execute(ctx, execCtx) {
 		if err != nil {
 			return err
@@ -339,7 +344,7 @@ func toRequestContext(ctx *a2asrvv2.ExecutorContext) *a2asrv.RequestContext {
 }
 
 func toExecutorContext(ctx context.Context, reqCtx *a2asrv.RequestContext) (*a2asrvv2.ExecutorContext, error) {
-	var user *a2asrvv2.User
+	user := &a2asrvv2.User{Authenticated: false}
 	reqMeta := make(map[string][]string)
 	if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
 		user = &a2asrvv2.User{Name: callCtx.User.Name(), Authenticated: callCtx.User.Authenticated()}

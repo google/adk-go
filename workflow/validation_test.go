@@ -239,14 +239,16 @@ func TestConnectivity(t *testing.T) {
 	}{
 		{
 			name: "all nodes connected",
-			edges: []Edge{{From: Start, To: nodeA},
+			edges: []Edge{
+				{From: Start, To: nodeA},
 				{From: nodeA, To: nodeB},
 				{From: nodeB, To: nodeC},
 			},
 		},
 		{
 			name: "disconnected nodes",
-			edges: []Edge{{From: Start, To: nodeA},
+			edges: []Edge{
+				{From: Start, To: nodeA},
 				{From: nodeB, To: nodeC},
 			},
 			expectErrorMsg: "nodes not reachable from start node: \"B, C\"",

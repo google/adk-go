@@ -83,6 +83,19 @@ func (w *Workflow) Resume(
 		s := newScheduler(ctx, w.graph)
 		s.state = state
 
+		// Resume runs in two passes so that when one call
+		// satisfies several askers feeding a JoinNode, the
+		// barrier sees every predecessor as NodeCompleted
+		// before it is evaluated. Re-entry-mode askers are
+		// unaffected — they re-run rather than complete here.
+		type deferredHandoff struct {
+			node Node
+			resp any
+		}
+		var deferredHandoffs []deferredHandoff
+
+		// Pass 1: dispatch every waiting asker matched by
+		// responses (handoff → defer; re-entry → reschedule now).
 		scheduled := 0
 		for name, ns := range state.Nodes {
 			if ns.Status != NodeWaiting || ns.PendingRequest == nil {
@@ -111,23 +124,67 @@ func (w *Workflow) Resume(
 				continue
 			}
 
+			// Snapshot InterruptID before consuming PendingRequest;
+			// re-entry mode passes it through resumeInputs.
+			interruptID := ns.PendingRequest.InterruptID
+
 			// Consume PendingRequest before scheduling. A duplicate
 			// Resume with the same InterruptID will skip this node
 			// because PendingRequest is now nil.
 			ns.PendingRequest = nil
 			ns.Status = NodePending
 
-			// Handoff mode: schedule each successor with the
-			// response as its input, exactly as if the asker had
-			// emitted it as output. Reuses findSuccessors so
-			// routing, fan-out and fan-in invariants apply
-			// uniformly. (No routing event is supplied, so a
-			// router-style handoff target falls back to its
-			// Default route or dead-ends.)
-			for _, succ := range findSuccessors(s.graph, node, resp, nil) {
-				s.scheduleNode(succ.node, succ.input, succ.triggeredBy)
+			if r := node.Config().RerunOnResume; r != nil && *r {
+				// Re-entry mode: re-activate the asker with its
+				// original input; the response is delivered via
+				// ctx.ResumedInput(InterruptID), not via the
+				// input parameter. Successors fire only when the
+				// re-entry activation produces an output.
+				//
+				// Accumulate into ns.ResumedInputs so a node that
+				// yields multiple RequestInputs across resume
+				// cycles sees every prior response, not just the
+				// most recent one. The map is cleared when the
+				// node transitions to NodeCompleted.
+				if ns.ResumedInputs == nil {
+					ns.ResumedInputs = map[string]any{}
+				}
+				ns.ResumedInputs[interruptID] = resp
+				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.Branch, ns.ResumedInputs)
+			} else {
+				// Handoff mode: promote the asker as if it had
+				// emitted resp as its output. Recording Output
+				// lets the join barrier read it back without a
+				// special case for "completed via resume".
+				ns.Status = NodeCompleted
+				ns.Output = resp
+				deferredHandoffs = append(deferredHandoffs, deferredHandoff{
+					node: node, resp: resp,
+				})
 			}
 			scheduled++
+		}
+
+		// Pass 2: walk successors of the deferred handoffs.
+		// All matched askers are now NodeCompleted, so any
+		// downstream JoinNode sees a settled predecessor set.
+		for _, h := range deferredHandoffs {
+			// findSuccessors is called with event=nil, so
+			// successors reached only via a concrete Route
+			// (StringRoute etc.) do not fire — the response is
+			// opaque to the routing layer. Successors reached via
+			// an unconditional edge or via the Default route fire
+			// as usual.
+			// Handoff successors inherit the asker's branch so the
+			// downstream LLM history filter still scopes correctly
+			// when a parallel branch resumes via handoff.
+			parentBranch := ""
+			if ns := s.state.Nodes[h.node.Name()]; ns != nil {
+				parentBranch = ns.Branch
+			}
+			for _, succ := range findSuccessors(s.graph, s.state, h.node, h.resp, nil, parentBranch) {
+				s.scheduleNode(succ.node, succ.input, succ.triggeredBy, succ.branch)
+			}
 		}
 
 		if scheduled == 0 {

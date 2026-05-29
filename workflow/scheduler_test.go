@@ -216,7 +216,7 @@ func TestScheduler_NodeTimeout(t *testing.T) {
 }
 
 // TestScheduler_MultipleOutputsFailNode verifies that a node which
-// yields more than one event carrying StateDelta["output"] fails
+// yields more than one event carrying Output fails
 // the workflow with ErrMultipleOutputs (matching adk-python's
 // "single output per node" contract). The first output value is
 // preserved; subsequent ones trip the accumulator error.
@@ -233,7 +233,7 @@ func TestScheduler_MultipleOutputsFailNode(t *testing.T) {
 }
 
 // TestScheduler_ProgressEventsThenSingleOutputSucceed verifies
-// that events with no StateDelta["output"] (progress / status
+// that events with no Output (progress / status
 // events) do not consume the single-output budget. A node may
 // yield many such events followed by exactly one output event
 // without violating the contract.
@@ -251,11 +251,8 @@ func TestScheduler_ProgressEventsThenSingleOutputSucceed(t *testing.T) {
 		t.Fatalf("event count = %d, want %d", got, want)
 	}
 	last := events[len(events)-1]
-	if last.Actions.StateDelta == nil {
-		t.Fatal("last event has nil StateDelta")
-	}
-	if got, want := fmt.Sprint(last.Actions.StateDelta["output"]), "final"; got != want {
-		t.Errorf("last event output = %q, want %q", got, want)
+	if got, want := fmt.Sprint(last.Output), "final"; got != want {
+		t.Errorf("last event Output = %q, want %q", got, want)
 	}
 }
 
@@ -291,17 +288,15 @@ func drainErr(t *testing.T, seq iter.Seq2[*session.Event, error]) error {
 	return firstErr
 }
 
-// outputsOf extracts the StateDelta["output"] string from each event,
+// outputsOf extracts the Output string from each event,
 // sorted to make assertions order-independent across concurrent runs.
 func outputsOf(events []*session.Event) []string {
 	out := make([]string, 0, len(events))
 	for _, ev := range events {
-		if ev == nil || ev.Actions.StateDelta == nil {
+		if ev == nil || ev.Output == nil {
 			continue
 		}
-		if v, ok := ev.Actions.StateDelta["output"]; ok {
-			out = append(out, fmt.Sprint(v))
-		}
+		out = append(out, fmt.Sprint(ev.Output))
 	}
 	sort.Strings(out)
 	return out
@@ -328,7 +323,7 @@ func (n *recordingNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*s
 		<-n.released
 		ev := session.NewEvent(ctx.InvocationID())
 		out := fmt.Sprintf("%v:%s", input, n.Name())
-		ev.Actions.StateDelta["output"] = out
+		ev.Output = out
 		yield(ev, nil)
 	}
 }
@@ -353,7 +348,7 @@ func (n *blockingNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*sessio
 	return func(yield func(*session.Event, error) bool) {
 		n.work()
 		ev := session.NewEvent(ctx.InvocationID())
-		ev.Actions.StateDelta["output"] = n.Name()
+		ev.Output = n.Name()
 		yield(ev, nil)
 	}
 }
@@ -401,7 +396,7 @@ func (n *cancelObservingNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[
 }
 
 // multiOutputNode yields one event per supplied output value, each
-// carrying StateDelta["output"]. Used to exercise the
+// carrying Output. Used to exercise the
 // single-output-per-node constraint.
 type multiOutputNode struct {
 	BaseNode
@@ -419,7 +414,7 @@ func (n *multiOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*ses
 	return func(yield func(*session.Event, error) bool) {
 		for _, out := range n.outputs {
 			ev := session.NewEvent(ctx.InvocationID())
-			ev.Actions.StateDelta["output"] = out
+			ev.Output = out
 			if !yield(ev, nil) {
 				return
 			}
@@ -448,13 +443,203 @@ func (n *progressThenOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Se
 	return func(yield func(*session.Event, error) bool) {
 		for range n.progressCount {
 			ev := session.NewEvent(ctx.InvocationID())
-			// progress event: no StateDelta["output"]
 			if !yield(ev, nil) {
 				return
 			}
 		}
 		final := session.NewEvent(ctx.InvocationID())
-		final.Actions.StateDelta["output"] = n.finalOutput
+		final.Output = n.finalOutput
 		yield(final, nil)
+	}
+}
+
+// TestScheduler_RetryNode verifies that a node with RetryConfig
+// is retried on failure and eventually succeeds if the failure is transient.
+func TestScheduler_RetryNode(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	cfg := NodeConfig{
+		RetryConfig: &RetryConfig{
+			MaxAttempts:   3,
+			InitialDelay:  1 * time.Millisecond,
+			BackoffFactor: 1.0,
+			Jitter:        0.0,
+			ShouldRetry:   func(err error) bool { return true },
+		},
+	}
+
+	n := newRetryTestNode("retryNode", 2, cfg)
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	events := drain(t, w.Run(mockCtx))
+
+	if got := n.calls.Load(); got != 3 {
+		t.Errorf("node calls = %d, want 3", got)
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+
+	out := fmt.Sprint(events[0].Output)
+	if out != "seed:retryNode" {
+		t.Errorf("output = %q, want %q", out, "seed:retryNode")
+	}
+}
+
+// TestScheduler_RetryNodeExhausted verifies that a node with RetryConfig
+// eventually fails the workflow after MaxAttempts are exhausted.
+func TestScheduler_RetryNodeExhausted(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	cfg := NodeConfig{
+		RetryConfig: &RetryConfig{
+			MaxAttempts:   3,
+			InitialDelay:  1 * time.Millisecond,
+			BackoffFactor: 1.0,
+			Jitter:        0.0,
+			ShouldRetry:   func(err error) bool { return true },
+		},
+	}
+
+	n := newRetryTestNode("retryNode", 10, cfg)
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	gotErr := drainErr(t, w.Run(mockCtx))
+
+	if got := n.calls.Load(); got != 3 {
+		t.Errorf("node calls = %d, want 3", got)
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+// retryTestNode fails failCount times and then succeeds.
+type retryTestNode struct {
+	BaseNode
+	failCount int
+	calls     atomic.Int32
+	cfg       NodeConfig
+}
+
+func newRetryTestNode(name string, failCount int, cfg NodeConfig) *retryTestNode {
+	return &retryTestNode{
+		BaseNode:  NewBaseNode(name, "", cfg),
+		failCount: failCount,
+		cfg:       cfg,
+	}
+}
+
+func (n *retryTestNode) Config() NodeConfig { return n.cfg }
+
+func (n *retryTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		calls := n.calls.Add(1)
+		if int(calls) <= n.failCount {
+			yield(nil, fmt.Errorf("fail attempt %d", calls))
+			return
+		}
+		ev := session.NewEvent(ctx.InvocationID())
+		out := fmt.Sprintf("%v:%s", input, n.Name())
+		ev.Output = out
+		yield(ev, nil)
+	}
+}
+
+// TestScheduler_RetryInChain verifies that a node in a chain can retry
+// and successfully propagate data to downstream nodes.
+func TestScheduler_RetryInChain(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	a := newRecordingNode("A")
+	a.release()
+
+	cfg := NodeConfig{
+		RetryConfig: &RetryConfig{
+			MaxAttempts:   3,
+			InitialDelay:  1 * time.Millisecond,
+			BackoffFactor: 1.0,
+			Jitter:        0.0,
+			ShouldRetry:   func(err error) bool { return true },
+		},
+	}
+	b := newRetryTestNode("B", 2, cfg) // Fails twice
+
+	c := newRecordingNode("C")
+	c.release()
+
+	w := mustNew(t, Chain(Start, a, b, c))
+
+	gotEvents := drain(t, w.Run(mockCtx))
+
+	wantOutputs := []string{"seed:A", "seed:A:B", "seed:A:B:C"}
+	gotOutputs := outputsOf(gotEvents)
+	if diff := cmp.Diff(wantOutputs, gotOutputs); diff != "" {
+		t.Errorf("outputs mismatch (-want +got):\n%s", diff)
+	}
+
+	if got := b.calls.Load(); got != 3 {
+		t.Errorf("node B calls = %d, want 3", got)
+	}
+}
+
+// TestScheduler_RetryCancelled verifies that a node waiting for retry
+// does not run if the workflow is cancelled.
+func TestScheduler_RetryCancelled(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	ctx, cancel := context.WithCancel(mockCtx.Context)
+	mockCtx = mockCtx.WithContext(ctx).(*MockInvocationContext)
+
+	cfg := NodeConfig{
+		RetryConfig: &RetryConfig{
+			MaxAttempts:   3,
+			InitialDelay:  100 * time.Millisecond,
+			BackoffFactor: 1.0,
+			Jitter:        0.0,
+			ShouldRetry:   func(err error) bool { return true },
+		},
+	}
+
+	n := newRetryTestNode("retryNode", 2, cfg)
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	errCh := make(chan error, 1)
+	go func() {
+		var firstErr error
+		for _, err := range w.Run(mockCtx) {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		errCh <- firstErr
+	}()
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if n.calls.Load() == 1 {
+			break
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	if n.calls.Load() != 1 {
+		t.Fatalf("node calls = %d, want 1 before cancellation", n.calls.Load())
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("unexpected error: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timeout waiting for workflow to finish")
+	}
+
+	if got := n.calls.Load(); got != 1 {
+		t.Errorf("node calls = %d, want 1 (retry should not have triggered)", got)
 	}
 }
