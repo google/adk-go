@@ -93,6 +93,30 @@ type scheduler struct {
 	wg         sync.WaitGroup
 
 	parentCtx agent.InvocationContext
+
+	// maxConcurrency caps len(runsByName); 0 disables the cap.
+	// When at the cap, scheduleResumedNode enqueues into
+	// pendingQueue (status NodePending) and the consumer drains
+	// pendingQueue via tryDispatchPending on each completion.
+	// Set once at construction; immutable thereafter.
+	maxConcurrency int
+
+	// pendingQueue holds activations queued while the
+	// concurrency cap is saturated. FIFO; nodes are dispatched
+	// in arrival order as in-flight nodes complete. Owned by the
+	// consumer goroutine.
+	pendingQueue []pendingActivation
+}
+
+// pendingActivation is a deferred scheduleResumedNode call kept on
+// the consumer-owned pendingQueue while the concurrency cap is
+// saturated. Drained by tryDispatchPending on each completion.
+type pendingActivation struct {
+	node         Node
+	input        any
+	triggeredBy  string
+	branch       string
+	resumeInputs map[string]any // nil for non-resume schedules
 }
 
 // nodeRun is the per-node consumer-side accumulator. It buffers the
@@ -196,16 +220,23 @@ func (retryItem) isQueueItem() {}
 // newScheduler returns an initialised scheduler ready for the
 // consumer to drive. The caller is responsible for seeding the
 // initial trigger (typically Start with the user input).
-func newScheduler(parent agent.InvocationContext, g *graph) *scheduler {
+//
+// maxConcurrency caps len(runsByName) at any point in time:
+// scheduleResumedNode enqueues into pendingQueue when the cap is
+// reached, and the consumer drains the queue via
+// tryDispatchPending as in-flight nodes complete. 0 disables the
+// cap (unlimited).
+func newScheduler(parent agent.InvocationContext, g *graph, maxConcurrency int) *scheduler {
 	return &scheduler{
-		state:       NewRunState(),
-		graph:       g,
-		nodesByName: buildNodesByName(g),
-		runsByName:  map[string]*nodeRun{},
-		runCancels:  map[string]context.CancelFunc{},
-		retryTimers: map[string]*time.Timer{},
-		eventQueue:  make(chan queueItem, defaultEventQueueCapacity),
-		parentCtx:   parent,
+		state:          NewRunState(),
+		graph:          g,
+		nodesByName:    buildNodesByName(g),
+		runsByName:     map[string]*nodeRun{},
+		runCancels:     map[string]context.CancelFunc{},
+		retryTimers:    map[string]*time.Timer{},
+		eventQueue:     make(chan queueItem, defaultEventQueueCapacity),
+		parentCtx:      parent,
+		maxConcurrency: maxConcurrency,
 	}
 }
 
@@ -235,9 +266,34 @@ func buildNodesByName(g *graph) map[string]Node {
 // filter) and gets stamped onto every emitted event when the node
 // leaves Event.Branch empty.
 //
+// When the engine's max-concurrency cap is reached, the activation
+// is enqueued instead of started; the node enters NodePending and
+// the scheduler dispatches it as in-flight nodes complete.
+//
 // scheduleNode runs only on the consumer goroutine.
 func (s *scheduler) scheduleNode(n Node, input any, triggeredBy, branch string) {
 	s.scheduleResumedNode(n, input, triggeredBy, branch, nil)
+}
+
+// atConcurrencyLimit reports whether the number of in-flight
+// activations has reached the configured cap. Always false when
+// maxConcurrency is 0 (unlimited).
+func (s *scheduler) atConcurrencyLimit() bool {
+	return s.maxConcurrency > 0 && len(s.runsByName) >= s.maxConcurrency
+}
+
+// tryDispatchPending starts as many queued activations as the
+// current concurrency budget allows. FIFO over pendingQueue;
+// stops when the queue is empty or the cap is reached again.
+//
+// Called after every completion (and after retry-timer expiry)
+// to make room-becoming-available immediately observable.
+func (s *scheduler) tryDispatchPending() {
+	for len(s.pendingQueue) > 0 && !s.atConcurrencyLimit() {
+		next := s.pendingQueue[0]
+		s.pendingQueue = s.pendingQueue[1:]
+		s.startNode(next.node, next.input, next.triggeredBy, next.branch, next.resumeInputs)
+	}
 }
 
 // scheduleResumedNode is like scheduleNode but additionally
@@ -247,8 +303,38 @@ func (s *scheduler) scheduleNode(n Node, input any, triggeredBy, branch string) 
 // InterruptID; nil disables re-entry semantics and yields the same
 // behaviour as scheduleNode.
 //
+// When the engine's max-concurrency cap is reached, the
+// activation is enqueued onto pendingQueue and the node enters
+// NodePending instead of starting immediately. tryDispatchPending
+// drains the queue as in-flight nodes complete.
+//
 // scheduleResumedNode runs only on the consumer goroutine.
 func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy, branch string, resumeInputs map[string]any) {
+	if s.atConcurrencyLimit() {
+		name := n.Name()
+		ns := s.state.EnsureNode(name)
+		ns.Status = NodePending
+		ns.Input = input
+		ns.TriggeredBy = triggeredBy
+		ns.Branch = branch
+		s.pendingQueue = append(s.pendingQueue, pendingActivation{
+			node:         n,
+			input:        input,
+			triggeredBy:  triggeredBy,
+			branch:       branch,
+			resumeInputs: resumeInputs,
+		})
+		return
+	}
+	s.startNode(n, input, triggeredBy, branch, resumeInputs)
+}
+
+// startNode is the unguarded core of scheduleResumedNode: it
+// creates the per-node context, registers bookkeeping, and
+// launches the runner goroutine. Always honours the call; the
+// concurrency-cap check is done by scheduleResumedNode (the
+// public entry point) before reaching here.
+func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, resumeInputs map[string]any) {
 	name := n.Name()
 
 	// Per-node context: WithTimeout when Config().Timeout > 0,
@@ -380,6 +466,11 @@ func runNode(
 // before observing ctx.Done(); the consumer continues draining
 // until runsByName is empty.
 //
+// Also drops the pendingQueue so queued (NodePending) activations
+// do not start after cancellation. Their NodeState is left as
+// NodePending — the surrounding RunState snapshot preserves the
+// fact that they were ready-but-not-yet-started.
+//
 // cancelAll runs only on the consumer goroutine.
 func (s *scheduler) cancelAll() {
 	for _, cancel := range s.runCancels {
@@ -389,6 +480,7 @@ func (s *scheduler) cancelAll() {
 		t.Stop()
 	}
 	s.retryTimers = nil
+	s.pendingQueue = nil
 }
 
 // run is the single-consumer loop. It drains the eventQueue, applies
@@ -439,6 +531,11 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 					draining = true
 					s.cancelAll()
 				}
+			}
+			// A slot just freed up; promote any queued
+			// activations to running.
+			if !draining {
+				s.tryDispatchPending()
 			}
 		case retryItem:
 			delete(s.retryTimers, it.node.Name())

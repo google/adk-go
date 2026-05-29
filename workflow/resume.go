@@ -80,7 +80,7 @@ func (w *Workflow) Resume(
 			return
 		}
 
-		s := newScheduler(ctx, w.graph)
+		s := newScheduler(ctx, w.graph, w.maxConcurrency)
 		s.state = state
 
 		// Resume runs in two passes so that when one call
