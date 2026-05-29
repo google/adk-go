@@ -400,7 +400,7 @@ func (s *gcsService) GetArtifactVersion(ctx context.Context, req *artifact.GetAr
 			Version:        version,
 			CanonicalURI:   canonicalURI,
 			CustomMetadata: customMeta,
-			CreateTime:     attrs.Created.Unix(),
+			CreateTime:     attrs.Created,
 			MimeType:       attrs.ContentType,
 		},
 	}, nil
