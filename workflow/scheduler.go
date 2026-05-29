@@ -684,6 +684,7 @@ func findSuccessors(g *graph, state *RunState, currentNode Node, input any, even
 		out = appendSuccessor(out, g, state, defaultRouteNode, input, from, parentBranch)
 	}
 	// Second pass: if we fanned out to more than one successor,
+	// stamp a sub-branch onto each non-Join entry whose branch is
 	// still the inherited parentBranch. JoinNode entries already
 	// carry their common-prefix branch from appendSuccessor and
 	// must not be re-derived.
