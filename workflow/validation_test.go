@@ -370,7 +370,7 @@ func TestValidateCycles(t *testing.T) {
 
 func TestValidateSubWorkflowNames(t *testing.T) {
 	// Create a valid sub-workflow
-	subWf, err := New("child_wf", []Edge{{From: Start, To: &dummyNode{name: "A"}}})
+	subWf, err := New("inner_wf", []Edge{{From: Start, To: &dummyNode{name: "A"}}})
 	if err != nil {
 		t.Fatalf("failed to create sub-workflow: %v", err)
 	}
@@ -388,14 +388,14 @@ func TestValidateSubWorkflowNames(t *testing.T) {
 	}{
 		{
 			name:       "no collision",
-			parentName: "parent_wf",
+			parentName: "outer_wf",
 			edges:      []Edge{{From: Start, To: wfNode}},
 		},
 		{
 			name:           "collision with sub-workflow name",
-			parentName:     "child_wf",
+			parentName:     "inner_wf",
 			edges:          []Edge{{From: Start, To: wfNode}},
-			expectErrorMsg: "sub-workflow name collision: child_wf",
+			expectErrorMsg: `sub-workflow name collision: "inner_wf"`,
 		},
 	}
 

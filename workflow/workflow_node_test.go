@@ -63,34 +63,34 @@ func (m *mockWorkflowSession) Events() session.Events { return nil }
 func (m *mockWorkflowSession) LastUpdateTime() time.Time { return time.Now() }
 
 func TestNestedWorkflow(t *testing.T) {
-	// Create child workflow edges
-	childFn := func(ctx agent.InvocationContext, input string) (string, error) {
-		return input + "-child", nil
+	// Create inner workflow edges
+	innerFn := func(ctx agent.InvocationContext, input string) (string, error) {
+		return input + "-inner", nil
 	}
-	childNode := NewFunctionNode("child_node", childFn, defaultNodeConfig)
-	childEdges := Chain(Start, childNode)
+	innerNode := NewFunctionNode("inner_node", innerFn, defaultNodeConfig)
+	innerEdges := Chain(Start, innerNode)
 
-	// Create parent workflow with WorkflowNode
-	wfNode, err := NewWorkflowNode("nested_step", childEdges)
+	// Create outer workflow with WorkflowNode
+	wfNode, err := NewWorkflowNode("nested_step", innerEdges)
 	if err != nil {
 		t.Fatalf("failed to create workflow node: %v", err)
 	}
 
-	suffixFn := func(ctx agent.InvocationContext, input string) (string, error) {
-		return input + "-parent", nil
+	outerFn := func(ctx agent.InvocationContext, input string) (string, error) {
+		return input + "-outer", nil
 	}
-	parentNode := NewFunctionNode("parent_node", suffixFn, defaultNodeConfig)
+	outerNode := NewFunctionNode("outer_node", outerFn, defaultNodeConfig)
 
-	parentEdges := Chain(Start, wfNode, parentNode)
-	parentWf := mustNew(t, parentEdges)
+	outerEdges := Chain(Start, wfNode, outerNode)
+	outerWf := mustNew(t, outerEdges)
 
-	// Run parent workflow
+	// Run outer workflow
 	mockCtx := newMockCtx(t)
 	mockCtx.userContent = &genai.Content{
 		Parts: []*genai.Part{{Text: "input"}},
 	}
 
-	events := parentWf.Run(mockCtx)
+	events := outerWf.Run(mockCtx)
 
 	var lastOutput any
 	for ev, err := range events {
@@ -102,39 +102,39 @@ func TestNestedWorkflow(t *testing.T) {
 		}
 	}
 
-	if lastOutput != "input-child-parent" {
-		t.Errorf("expected last output 'input-child-parent', got %v", lastOutput)
+	if lastOutput != "input-inner-outer" {
+		t.Errorf("expected last output 'input-inner-outer', got %v", lastOutput)
 	}
 }
 
 func TestNestedWorkflow_MultipleOutputs(t *testing.T) {
-	// Create child workflow edges with two nodes producing outputs
-	childFn1 := func(ctx agent.InvocationContext, input string) (string, error) {
-		return input + "-child1", nil
+	// Create inner workflow edges with two nodes producing outputs
+	innerFn1 := func(ctx agent.InvocationContext, input string) (string, error) {
+		return input + "-inner1", nil
 	}
-	childFn2 := func(ctx agent.InvocationContext, input string) (string, error) {
-		return input + "-child2", nil
+	innerFn2 := func(ctx agent.InvocationContext, input string) (string, error) {
+		return input + "-inner2", nil
 	}
-	childNode1 := NewFunctionNode("child_node1", childFn1, defaultNodeConfig)
-	childNode2 := NewFunctionNode("child_node2", childFn2, defaultNodeConfig)
-	childEdges := Chain(Start, childNode1, childNode2)
+	innerNode1 := NewFunctionNode("inner_node1", innerFn1, defaultNodeConfig)
+	innerNode2 := NewFunctionNode("inner_node2", innerFn2, defaultNodeConfig)
+	innerEdges := Chain(Start, innerNode1, innerNode2)
 
-	// Create parent workflow with WorkflowNode
-	wfNode, err := NewWorkflowNode("nested_step", childEdges)
+	// Create outer workflow with WorkflowNode
+	wfNode, err := NewWorkflowNode("nested_step", innerEdges)
 	if err != nil {
 		t.Fatalf("failed to create workflow node: %v", err)
 	}
 
-	parentEdges := Chain(Start, wfNode)
-	parentWf := mustNew(t, parentEdges)
+	outerEdges := Chain(Start, wfNode)
+	outerWf := mustNew(t, outerEdges)
 
-	// Run parent workflow
+	// Run outer workflow
 	mockCtx := newMockCtx(t)
 	mockCtx.userContent = &genai.Content{
 		Parts: []*genai.Part{{Text: "input"}},
 	}
 
-	events := parentWf.Run(mockCtx)
+	events := outerWf.Run(mockCtx)
 
 	var lastOutput any
 	for ev, err := range events {
@@ -146,13 +146,13 @@ func TestNestedWorkflow_MultipleOutputs(t *testing.T) {
 		}
 	}
 
-	if lastOutput != "input-child1-child2" {
-		t.Errorf("expected last output 'input-child1-child2', got %v", lastOutput)
+	if lastOutput != "input-inner1-inner2" {
+		t.Errorf("expected last output 'input-inner1-inner2', got %v", lastOutput)
 	}
 }
 
 func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
-	// Create child workflow edges
+	// Create inner workflow edges
 	nestedStateUpdater := func(ctx agent.InvocationContext, input string) (string, error) {
 		err := ctx.Session().State().Set("my_key", "my_value")
 		if err != nil {
@@ -168,7 +168,7 @@ func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 		t.Fatalf("failed to create workflow node: %v", err)
 	}
 
-	// Create parent workflow
+	// Create outer workflow
 	outerStateReader := func(ctx agent.InvocationContext, input string) (string, error) {
 		val, err := ctx.Session().State().Get("my_key")
 		if err != nil {
@@ -178,10 +178,10 @@ func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 	}
 	outerNode := NewFunctionNode("outer_state_reader", outerStateReader, defaultNodeConfig)
 
-	parentEdges := Chain(Start, wfNode, outerNode)
-	parentWf := mustNew(t, parentEdges)
+	outerEdges := Chain(Start, wfNode, outerNode)
+	outerWf := mustNew(t, outerEdges)
 
-	// Run parent workflow
+	// Run outer workflow
 	mockCtx := newMockCtx(t)
 	mockCtx.userContent = &genai.Content{
 		Parts: []*genai.Part{{Text: "input"}},
@@ -191,7 +191,7 @@ func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 	mSess := &mockWorkflowSession{state: mState}
 	mockCtx.sess = mSess
 
-	events := parentWf.Run(mockCtx)
+	events := outerWf.Run(mockCtx)
 
 	var lastOutput any
 	for ev, err := range events {
@@ -210,8 +210,8 @@ func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 }
 
 func TestNestedWorkflow_Cancellation(t *testing.T) {
-	// Arrange: Create child workflow with a node that waits
-	// and the parent workflow that should be cancelled.
+	// Arrange: Create inner workflow with a node that waits
+	// and the outer workflow that should be cancelled.
 	ch := make(chan struct{})
 	started := make(chan struct{})
 	waitingFn := func(ctx agent.InvocationContext, input string) (string, error) {
@@ -224,17 +224,17 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 		}
 	}
 	waitingNode := NewFunctionNode("waiting_node", waitingFn, defaultNodeConfig)
-	childEdges := Chain(Start, waitingNode)
+	innerEdges := Chain(Start, waitingNode)
 	
-	wfNode, err := NewWorkflowNode("nested_agent", childEdges)
+	wfNode, err := NewWorkflowNode("nested_agent", innerEdges)
 	if err != nil {
 		t.Fatalf("failed to create workflow node: %v", err)
 	}
-	parentEdges := Chain(Start, wfNode)
-	parentWf := mustNew(t, parentEdges)
+	outerEdges := Chain(Start, wfNode)
+	outerWf := mustNew(t, outerEdges)
 
 
-	// Act: run the parent workflow with a cancellable context and cancel it.
+	// Act: run the outer workflow with a cancellable context and cancel it.
 	baseCtx, cancel := context.WithCancel(t.Context())
 	mockCtx := &MockInvocationContext{Context: baseCtx}
 	
@@ -243,7 +243,7 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for _, err := range parentWf.Run(mockCtx) {
+		for _, err := range outerWf.Run(mockCtx) {
 			if err != nil {
 				runErr = err
 			}
@@ -264,26 +264,26 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 }
 
 func TestNestedWorkflow_ErrorPropagation(t *testing.T) {
-	// Create child workflow with a node that fails
+	// Create inner workflow with a node that fails
 	failingFn := func(ctx agent.InvocationContext, input string) (string, error) {
 		return "", errors.New("intentional failure")
 	}
 	failingNode := NewFunctionNode("failing_node", failingFn, defaultNodeConfig)
-	childEdges := Chain(Start, failingNode)
+	innerEdges := Chain(Start, failingNode)
 	
-	wfNode, err := NewWorkflowNode("nested_agent", childEdges)
+	wfNode, err := NewWorkflowNode("nested_agent", innerEdges)
 	if err != nil {
 		t.Fatalf("failed to create workflow node: %v", err)
 	}
 
-	parentEdges := Chain(Start, wfNode)
-	parentWf := mustNew(t, parentEdges)
+	outerEdges := Chain(Start, wfNode)
+	outerWf := mustNew(t, outerEdges)
 
-	// Run parent workflow
+	// Run outer workflow
 	mockCtx := newMockCtx(t)
 	
 	var runErr error
-	for _, err := range parentWf.Run(mockCtx) {
+	for _, err := range outerWf.Run(mockCtx) {
 		if err != nil {
 			runErr = err
 		}

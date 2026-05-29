@@ -80,7 +80,7 @@ func validateSubWorkflowNames(workflowName string, edges []Edge) error {
 func checkSubWorkflowName(node Node, workflowName string) error {
 	if wfNode, ok := node.(*WorkflowNode); ok {
 		if wfNode.subWorkflow.Name() == workflowName {
-			return fmt.Errorf("%w: %s", ErrSubWorkflowNameCollision, workflowName)
+			return fmt.Errorf("%w: %q", ErrSubWorkflowNameCollision, workflowName)
 		}
 	}
 	return nil
