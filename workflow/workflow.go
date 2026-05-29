@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
@@ -122,6 +123,7 @@ func (s *startNode) OutputSchema() *jsonschema.Resolved { return nil }
 func (s *startNode) ValidateInput(input any) (any, error) {
 	return input, nil
 }
+
 func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
@@ -151,6 +153,9 @@ type Workflow struct {
 // follow-up turn will find nothing to resume from.
 func New(name string, edges []Edge) (*Workflow, error) {
 	if err := validateNodes(edges); err != nil {
+		return nil, err
+	}
+	if err := validateSubWorkflowNames(name, edges); err != nil {
 		return nil, err
 	}
 	// TODO(wolo): sanity-check name (reject whitespace-only,
@@ -187,14 +192,15 @@ func (w *Workflow) Name() string {
 // when nodes complete. The consumer is the only mutator of the
 // per-node lifecycle map and of session state.
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		input := userInput(ctx)
+	return w.RunNode(ctx, userInput(ctx))
+}
 
+// RunNode drives the workflow with the given input.
+// This is used by WorkflowNode to run nested workflows.
+func (w *Workflow) RunNode(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
 		s := newScheduler(ctx, w.graph)
-		// Seed: schedule START with the user-supplied input. START
-		// itself runs at the workflow's root branch (inherits
-		// ctx.Branch()); its successors derive sub-branches when
-		// the START fan-out has more than one edge.
+		// Seed: schedule START with the supplied input.
 		startState := s.state.EnsureNode(Start.Name())
 		startState.Input = input
 		s.scheduleNode(Start, input, "", ctx.Branch())
