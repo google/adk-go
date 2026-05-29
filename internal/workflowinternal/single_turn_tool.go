@@ -113,6 +113,19 @@ func getInputSchema(cur agent.Agent) *genai.Schema {
 	return nil
 }
 
+func getOutputSchema(cur agent.Agent) *genai.Schema {
+	llmAgent, ok := cur.(llminternal.Agent)
+	if ok && llmAgent != nil {
+		return llminternal.Reveal(llmAgent).OutputSchema
+	}
+
+	if len(cur.SubAgents()) > 0 {
+		return getOutputSchema(cur.SubAgents()[len(cur.SubAgents())-1])
+	}
+
+	return nil
+}
+
 // MakeFunctionDeclaration creates a function declaration for a given agent.
 func MakeFunctionDeclaration(curAgent agent.Agent) *genai.FunctionDeclaration {
 	decl := &genai.FunctionDeclaration{
