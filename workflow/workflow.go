@@ -191,13 +191,6 @@ func (w *Workflow) Name() string {
 // effects, yields events to the caller, and schedules successors
 // when nodes complete. The consumer is the only mutator of the
 // per-node lifecycle map and of session state.
-// Run drives the workflow to completion or to a graceful pause
-// when any node enters NodeWaiting. It returns an iter.Seq2 that
-// yields events from per-node goroutines in arrival order; the
-// caller may break from the range loop at any point and the
-// engine will cancel all in-flight nodes before returning.
-//
-// It extracts the input from the user context and forwards it to RunNode.
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return w.RunNode(ctx, userInput(ctx))
 }
