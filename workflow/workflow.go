@@ -19,6 +19,7 @@ import (
 	"iter"
 	"strings"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
@@ -32,6 +33,16 @@ type Node interface {
 	Name() string
 	Description() string
 	Config() NodeConfig
+	// InputSchema returns the JSON schema for the node's input.
+	// If it returns nil, it indicates there is no schema and no input validation is performed.
+	InputSchema() *jsonschema.Resolved
+	// OutputSchema returns the JSON schema for the node's output.
+	// If it returns nil, it indicates there is no schema and no output validation is performed.
+	OutputSchema() *jsonschema.Resolved
+	// ValidateInput validates and optionally coerces/transforms the input before the node runs.
+	// It returns the validated input (which might be coerced/parsed/transformed) or an error.
+	// It will be called by the scheduler before Run on every activation.
+	ValidateInput(input any) (any, error)
 	Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
 }
 
@@ -103,9 +114,14 @@ var Start Node = &startNode{}
 
 type startNode struct{}
 
-func (s *startNode) Name() string        { return "START" }
-func (s *startNode) Description() string { return "Start node" }
-func (s *startNode) Config() NodeConfig  { return NodeConfig{} }
+func (s *startNode) Name() string                       { return "START" }
+func (s *startNode) Description() string                { return "Start node" }
+func (s *startNode) Config() NodeConfig                 { return NodeConfig{} }
+func (s *startNode) InputSchema() *jsonschema.Resolved  { return nil }
+func (s *startNode) OutputSchema() *jsonschema.Resolved { return nil }
+func (s *startNode) ValidateInput(input any) (any, error) {
+	return input, nil
+}
 func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
@@ -192,7 +208,7 @@ func (w *Workflow) RunNode(ctx agent.InvocationContext, input any) iter.Seq2[*se
 		// Seed: schedule START with the supplied input.
 		startState := s.state.EnsureNode(Start.Name())
 		startState.Input = input
-		s.scheduleNode(Start, input, "")
+		s.scheduleNode(Start, input, "", ctx.Branch())
 
 		s.run(yield)
 

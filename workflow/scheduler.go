@@ -105,6 +105,7 @@ type nodeRun struct {
 	hasOutput    bool                  // distinguishes "no output yet" from "output was nil"
 	inputRequest *session.RequestInput // at most one human-input request; multiple is an error
 	err          error                 // set on duplicate output, duplicate routing event, or duplicate input request
+	branch       string                // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
 }
 
 // recordErr stores err as the accumulator's first error. Subsequent
@@ -182,6 +183,7 @@ type retryItem struct {
 	node        Node
 	input       any
 	triggeredBy string
+	branch      string
 }
 
 func (retryItem) isQueueItem() {}
@@ -222,9 +224,15 @@ func buildNodesByName(g *graph) map[string]Node {
 // wrapper is responsible for pushing exactly one completionItem when
 // it returns (success, error, panic, or cancellation).
 //
+// branch is the composite branch string this activation runs under;
+// empty means inherit the workflow's root branch. Branch scopes
+// LLM history visibility (via the flow processor's branch-prefix
+// filter) and gets stamped onto every emitted event when the node
+// leaves Event.Branch empty.
+//
 // scheduleNode runs only on the consumer goroutine.
-func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
-	s.scheduleResumedNode(n, input, triggeredBy, nil)
+func (s *scheduler) scheduleNode(n Node, input any, triggeredBy, branch string) {
+	s.scheduleResumedNode(n, input, triggeredBy, branch, nil)
 }
 
 // scheduleResumedNode is like scheduleNode but additionally
@@ -235,7 +243,7 @@ func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
 // behaviour as scheduleNode.
 //
 // scheduleResumedNode runs only on the consumer goroutine.
-func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy string, resumeInputs map[string]any) {
+func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy, branch string, resumeInputs map[string]any) {
 	name := n.Name()
 
 	// Per-node context: WithTimeout when Config().Timeout > 0,
@@ -252,13 +260,34 @@ func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy string, r
 	} else {
 		nodeCtx, cancel = context.WithCancel(s.parentCtx)
 	}
-	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), resumeInputs)
+	// Order matters: WithContext sets up per-node cancellation on
+	// the underlying InvocationContext; withBranch then wraps the
+	// result in branchOverride. Reversing would either lose the
+	// cancellation context or strip the branch override.
+	wrapped := withBranch(s.parentCtx.WithContext(nodeCtx), branch)
+	perNodeCtx := newNodeContext(wrapped, resumeInputs)
+
+	// EXPERIMENTAL: stash perNodeCtx in the embedded context.Context
+	// so tools running inside an LlmAgent that is itself running as
+	// this node can recover the NodeContext via
+	// workflow.NodeContextFromGoContext. The value rides through
+	// every downstream NewInvocationContext / WithContext call by
+	// virtue of context.Context value-chain propagation.
+	//
+	// See WithNodeContext / NodeContextFromGoContext in
+	// node_context_bridge.go. Top-level static activations have
+	// subScheduler == nil, so RunNode will still reject them; the
+	// stash is harmless in that case.
+	perNodeCtx.InvocationContext = perNodeCtx.InvocationContext.WithContext(
+		WithNodeContext(perNodeCtx.InvocationContext, perNodeCtx),
+	)
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
 	ns.Input = input
 	ns.TriggeredBy = triggeredBy
-	s.runsByName[name] = &nodeRun{}
+	ns.Branch = branch
+	s.runsByName[name] = &nodeRun{branch: branch}
 
 	s.runCancels[name] = cancel
 	s.wg.Add(1)
@@ -267,11 +296,13 @@ func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy string, r
 }
 
 // scheduleRetry schedules a retry for node n after the given delay.
-func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy string, delay time.Duration) {
+// branch is preserved across attempts so retries do not silently
+// move the node to a different branch.
+func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy, branch string, delay time.Duration) {
 	timer := time.AfterFunc(delay, func() {
 		go func() {
 			select {
-			case s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy}:
+			case s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy, branch: branch}:
 			case <-s.parentCtx.Done():
 			}
 		}()
@@ -400,7 +431,7 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 		case retryItem:
 			delete(s.retryTimers, it.node.Name())
 			if !draining {
-				s.scheduleNode(it.node, it.input, it.triggeredBy)
+				s.scheduleNode(it.node, it.input, it.triggeredBy, it.branch)
 			}
 		}
 	}
@@ -434,6 +465,12 @@ func (s *scheduler) handleEvent(it eventItem) {
 	}
 	if it.ev == nil {
 		return
+	}
+	// Stamp the activation's branch onto events that left
+	// Event.Branch empty; nodes that set a non-empty Event.Branch
+	// keep it.
+	if it.ev.Branch == "" && nr.branch != "" {
+		it.ev.Branch = nr.branch
 	}
 	var path string
 	if it.ev.NodeInfo != nil {
@@ -502,7 +539,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 				if ShouldRetry(cfg.RetryConfig, it.err, ns.Attempt) {
 					delay := CalculateDelay(cfg.RetryConfig, ns.Attempt)
 					ns.Status = NodePending
-					s.scheduleRetry(currentNode, ns.Input, ns.TriggeredBy, delay)
+					s.scheduleRetry(currentNode, ns.Input, ns.TriggeredBy, ns.Branch, delay)
 					// Return nil to continue the scheduler loop. Successors will
 					// be scheduled only when a retry attempt eventually succeeds
 					// and reaches the bottom of this function.
@@ -562,8 +599,8 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 		input = ns.Input
 	}
 
-	for _, succ := range findSuccessors(s.graph, s.state, currentNode, input, routingEv) {
-		s.scheduleNode(succ.node, succ.input, succ.triggeredBy)
+	for _, succ := range findSuccessors(s.graph, s.state, currentNode, input, routingEv, ns.Branch) {
+		s.scheduleNode(succ.node, succ.input, succ.triggeredBy, succ.branch)
 	}
 	return nil
 }
@@ -572,10 +609,15 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 // findSuccessors. The triggeredBy field carries the upstream
 // node's name for persistence on NodeState (used by Resume to
 // reconstruct the activation chain across pause/resume turns).
+// The branch field carries the composite branch string the
+// successor should run under — empty for chains that inherit the
+// parent's branch, populated when fan-out derives a sub-branch or
+// when JoinNode resolves its common predecessor prefix.
 type successor struct {
 	node        Node
 	input       any
 	triggeredBy string
+	branch      string
 }
 
 // findSuccessors evaluates the outgoing edges of currentNode against
@@ -595,7 +637,21 @@ type successor struct {
 //     deliberate decision not to continue, not an error.
 //
 // JoinNode successors are gated by appendSuccessor; see its docs.
-func findSuccessors(g *graph, state *RunState, currentNode Node, input any, event *session.Event) []successor {
+//
+// Branch derivation:
+//
+//   - When this activation fans out to >1 successor, each non-Join
+//     successor is given a sub-branch
+//     "<parentBranch>.<successorName>@1" (run_id "1" because the
+//     static scheduler does not auto-counter activations of the
+//     same name within one fan-out; loop-back routing re-enters the
+//     same node and the sub-branch stays stable).
+//   - When this activation has a single successor, the successor
+//     inherits parentBranch unchanged.
+//   - JoinNode successors compute their own branch in
+//     appendSuccessor as the common dot-prefix of the branches of
+//     all completed predecessors — see aggregatePredecessorBranches.
+func findSuccessors(g *graph, state *RunState, currentNode Node, input any, event *session.Event, parentBranch string) []successor {
 	succs := g.successorsOf(currentNode)
 	if len(succs) == 0 {
 		return nil
@@ -610,7 +666,7 @@ func findSuccessors(g *graph, state *RunState, currentNode Node, input any, even
 			continue
 		}
 		if edge.Route == nil {
-			out = appendSuccessor(out, g, state, edge.To, input, from)
+			out = appendSuccessor(out, g, state, edge.To, input, from, parentBranch)
 			added[edge.To] = struct{}{}
 			continue
 		}
@@ -619,32 +675,63 @@ func findSuccessors(g *graph, state *RunState, currentNode Node, input any, even
 			continue
 		}
 		if event != nil && edge.Route.Matches(event) {
-			out = appendSuccessor(out, g, state, edge.To, input, from)
+			out = appendSuccessor(out, g, state, edge.To, input, from, parentBranch)
 			added[edge.To] = struct{}{}
 			concreteMatched = true
 		}
 	}
 	if !concreteMatched && defaultRouteNode != nil {
-		out = appendSuccessor(out, g, state, defaultRouteNode, input, from)
+		out = appendSuccessor(out, g, state, defaultRouteNode, input, from, parentBranch)
+	}
+	// Second pass: if we fanned out to more than one successor,
+	// still the inherited parentBranch. JoinNode entries already
+	// carry their common-prefix branch from appendSuccessor and
+	// must not be re-derived.
+	if len(out) > 1 {
+		for i, s := range out {
+			if _, isJoin := s.node.(*JoinNode); isJoin {
+				continue
+			}
+			if s.branch != parentBranch {
+				continue
+			}
+			out[i].branch = deriveSubBranch(parentBranch, s.node.Name()+"@1")
+		}
 	}
 	return out
 }
 
 // appendSuccessor records a routing match in the dispatch list.
-// Non-JoinNode targets are recorded as-is. A *JoinNode target is
-// recorded only when every declared predecessor has completed;
-// its input is replaced with the aggregated predecessor outputs.
-// A barrier-blocked JoinNode is silently skipped — a later
-// predecessor completion re-evaluates the barrier.
-func appendSuccessor(out []successor, g *graph, state *RunState, target Node, input any, triggeredBy string) []successor {
+// Non-JoinNode targets are recorded with parentBranch as their
+// initial branch; findSuccessors may upgrade to a sub-branch in a
+// second pass if this activation fanned out.
+//
+// A *JoinNode target is recorded only when every declared
+// predecessor has completed; its input is replaced with the
+// aggregated predecessor outputs, and its branch is the common
+// dot-prefix of all predecessor branches. A barrier-blocked
+// JoinNode is silently skipped — a later predecessor completion
+// re-evaluates the barrier.
+func appendSuccessor(out []successor, g *graph, state *RunState, target Node, input any, triggeredBy, parentBranch string) []successor {
 	if _, isJoin := target.(*JoinNode); !isJoin {
-		return append(out, successor{node: target, input: input, triggeredBy: triggeredBy})
+		return append(out, successor{
+			node:        target,
+			input:       input,
+			triggeredBy: triggeredBy,
+			branch:      parentBranch,
+		})
 	}
 	aggregated, ok := aggregatePredecessorOutputs(g, state, target)
 	if !ok {
 		return out
 	}
-	return append(out, successor{node: target, input: aggregated, triggeredBy: triggeredBy})
+	joinBranch := commonBranchPrefix(aggregatePredecessorBranches(g, state, target))
+	return append(out, successor{
+		node:        target,
+		input:       aggregated,
+		triggeredBy: triggeredBy,
+		branch:      joinBranch,
+	})
 }
 
 // aggregatePredecessorOutputs returns a map of predecessor name to
@@ -664,4 +751,28 @@ func aggregatePredecessorOutputs(g *graph, state *RunState, target Node) (map[st
 		aggregated[name] = ns.Output
 	}
 	return aggregated, true
+}
+
+// aggregatePredecessorBranches returns the branch strings recorded
+// for every predecessor of target. Order is the graph's
+// predecessor-edge order, which is deterministic per construction.
+// Callers feed the result into commonBranchPrefix to compute the
+// join's own branch.
+//
+// Assumes appendSuccessor's caller has already verified all
+// predecessors are NodeCompleted (via aggregatePredecessorOutputs
+// returning ok); a missing entry contributes "" which conservatively
+// short-circuits the common-prefix to root.
+func aggregatePredecessorBranches(g *graph, state *RunState, target Node) []string {
+	predEdges := g.predecessorsOf(target)
+	branches := make([]string, 0, len(predEdges))
+	for _, edge := range predEdges {
+		name := edge.From.Name()
+		var br string
+		if ns := state.Nodes[name]; ns != nil {
+			br = ns.Branch
+		}
+		branches = append(branches, br)
+	}
+	return branches
 }

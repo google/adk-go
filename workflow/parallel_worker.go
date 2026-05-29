@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"reflect"
+	"strconv"
 	"sync"
 	"time"
 
@@ -99,6 +100,13 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 
 		resCh := make(chan workerResult, nItems)
 
+		// Branch isolation: derive a per-item sub-branch so each
+		// worker's wrapped node sees an isolated event history (the
+		// LLM flow's history filter scopes by branch prefix). Items
+		// 0..N-1 receive sub-branches name@1..name@N.
+		parentBranch := workerCtx.Branch()
+		wrappedName := n.wrapped.Name()
+
 		for i := 0; i < nItems; i++ {
 			item := v.Index(i).Interface()
 
@@ -111,7 +119,9 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 				}
 			}
 
-			go n.runWorker(workerCtx, i, item, sem, resCh, &wg)
+			itemBranch := deriveSubBranch(parentBranch, wrappedName+"@"+strconv.Itoa(i+1))
+			itemCtx := withBranch(workerCtx, itemBranch)
+			go n.runWorker(itemCtx, i, item, sem, resCh, &wg)
 		}
 
 		// Goroutine to close channel when all workers are done
