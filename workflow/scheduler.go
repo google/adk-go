@@ -21,7 +21,12 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/session"
 )
 
@@ -331,6 +336,9 @@ func runNode(
 ) {
 	defer wg.Done()
 
+	span, ctx := startNodeSpan(ctx, n)
+	defer span.End()
+
 	// completion holds the final completionItem. It is sent in the
 	// outer defer so panic recovery, normal exit, and cancellation
 	// all funnel through the same send path.
@@ -338,6 +346,10 @@ func runNode(
 	defer func() {
 		if r := recover(); r != nil {
 			completion.err = fmt.Errorf("node %q panicked: %v", name, r)
+		}
+		if completion.err != nil && !errors.Is(completion.err, context.Canceled) {
+			span.RecordError(completion.err)
+			span.SetStatus(codes.Error, completion.err.Error())
 		}
 		out <- completion
 	}()
@@ -776,4 +788,13 @@ func aggregatePredecessorBranches(g *graph, state *RunState, target Node) []stri
 		branches = append(branches, br)
 	}
 	return branches
+}
+
+func startNodeSpan(ctx agent.InvocationContext, n Node) (trace.Span, agent.InvocationContext) {
+	if n == Start {
+		// Don't create span for the Start node.
+		return noop.Span{}, ctx
+	}
+	spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationNode{Node: n})
+	return span, ctx.WithContext(spanCtx)
 }
