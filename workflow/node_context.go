@@ -15,6 +15,8 @@
 package workflow
 
 import (
+	"context"
+
 	"google.golang.org/adk/agent"
 )
 
@@ -118,5 +120,21 @@ func (c *nodeContext) WithBranch(branch string) NodeContext {
 		path:              c.path,
 		runID:             c.runID,
 		subScheduler:      c.subScheduler,
+	}
+}
+
+// WithContext preserves the nodeContext wrapper when callers derive
+// a new context from this one (e.g. when the scheduler attaches an
+// OpenTelemetry span context). Without this override, the base
+// invocationContext.WithContext would return a *invocationContext
+// and silently drop the resumeInputs map, breaking re-entry resume
+// activations and any other workflow-specific accessors.
+func (c *nodeContext) WithContext(ctx context.Context) agent.InvocationContext {
+	return &nodeContext{
+		c.InvocationContext.WithContext(ctx),
+		c.resumeInputs,
+		c.path,
+		c.runID,
+		c.subScheduler,
 	}
 }

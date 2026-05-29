@@ -70,26 +70,6 @@ func OverrideTracerForTesting(t interface{ Cleanup(func()) }, tp trace.TracerPro
 	t.Cleanup(func() { tracer = original })
 }
 
-type agent interface {
-	Name() string
-	Description() string
-}
-
-// StartInvokeAgentSpan starts a new semconv invoke_agent span.
-// It returns a new context with the span and the span itself.
-func StartInvokeAgentSpan(ctx context.Context, agent agent, sessionID, invocationID string) (context.Context, trace.Span) {
-	agentName := agent.Name()
-	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("invoke_agent %s", agentName), trace.WithAttributes(
-		gcpVertexAgentInvocationID.String(invocationID), // used by adk-web
-		semconv.GenAIOperationNameInvokeAgent,
-		semconv.GenAIAgentDescription(agent.Description()),
-		semconv.GenAIAgentName(agentName),
-		semconv.GenAIConversationID(sessionID),
-	))
-
-	return spanCtx, span
-}
-
 type TraceAgentResultParams struct {
 	ResponseEvent *session.Event
 	Error         error
