@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
@@ -55,11 +56,11 @@ type mockWorkflowSession struct {
 	state session.State
 }
 
-func (m *mockWorkflowSession) ID() string              { return "test-session" }
-func (m *mockWorkflowSession) AppName() string         { return "test-app" }
-func (m *mockWorkflowSession) UserID() string          { return "test-user" }
-func (m *mockWorkflowSession) State() session.State   { return m.state }
-func (m *mockWorkflowSession) Events() session.Events { return nil }
+func (m *mockWorkflowSession) ID() string                { return "test-session" }
+func (m *mockWorkflowSession) AppName() string           { return "test-app" }
+func (m *mockWorkflowSession) UserID() string            { return "test-user" }
+func (m *mockWorkflowSession) State() session.State      { return m.state }
+func (m *mockWorkflowSession) Events() session.Events    { return nil }
 func (m *mockWorkflowSession) LastUpdateTime() time.Time { return time.Now() }
 
 func TestNestedWorkflow(t *testing.T) {
@@ -162,7 +163,7 @@ func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 	}
 	nestedNode := NewFunctionNode("nested_state_updater", nestedStateUpdater, defaultNodeConfig)
 	nestedEdges := Chain(Start, nestedNode)
-	
+
 	wfNode, err := NewWorkflowNode("nested_agent", nestedEdges)
 	if err != nil {
 		t.Fatalf("failed to create workflow node: %v", err)
@@ -186,7 +187,7 @@ func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 	mockCtx.userContent = &genai.Content{
 		Parts: []*genai.Part{{Text: "input"}},
 	}
-	
+
 	mState := &mockWorkflowState{data: make(map[string]any)}
 	mSess := &mockWorkflowSession{state: mState}
 	mockCtx.sess = mSess
@@ -225,7 +226,7 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 	}
 	waitingNode := NewFunctionNode("waiting_node", waitingFn, defaultNodeConfig)
 	innerEdges := Chain(Start, waitingNode)
-	
+
 	wfNode, err := NewWorkflowNode("nested_agent", innerEdges)
 	if err != nil {
 		t.Fatalf("failed to create workflow node: %v", err)
@@ -233,11 +234,10 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 	outerEdges := Chain(Start, wfNode)
 	outerWf := mustNew(t, outerEdges)
 
-
 	// Act: run the outer workflow with a cancellable context and cancel it.
 	baseCtx, cancel := context.WithCancel(t.Context())
 	mockCtx := &MockInvocationContext{Context: baseCtx}
-	
+
 	var runErr error
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -270,7 +270,7 @@ func TestNestedWorkflow_ErrorPropagation(t *testing.T) {
 	}
 	failingNode := NewFunctionNode("failing_node", failingFn, defaultNodeConfig)
 	innerEdges := Chain(Start, failingNode)
-	
+
 	wfNode, err := NewWorkflowNode("nested_agent", innerEdges)
 	if err != nil {
 		t.Fatalf("failed to create workflow node: %v", err)
@@ -281,7 +281,7 @@ func TestNestedWorkflow_ErrorPropagation(t *testing.T) {
 
 	// Run outer workflow
 	mockCtx := newMockCtx(t)
-	
+
 	var runErr error
 	for _, err := range outerWf.Run(mockCtx) {
 		if err != nil {

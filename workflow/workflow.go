@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
@@ -122,6 +123,7 @@ func (s *startNode) OutputSchema() *jsonschema.Resolved { return nil }
 func (s *startNode) ValidateInput(input any) (any, error) {
 	return input, nil
 }
+
 func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
