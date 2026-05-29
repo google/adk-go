@@ -21,6 +21,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/artifact"
 	artifactinternal "google.golang.org/adk/internal/artifact"
 	icontext "google.golang.org/adk/internal/context"
@@ -291,5 +292,5 @@ func createToolContext(t *testing.T) tool.Context {
 		Artifacts: artifacts,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", nil, nil)
+	return agent.NewToolContext(ctx, "", nil, nil)
 }
