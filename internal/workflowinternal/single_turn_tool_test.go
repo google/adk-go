@@ -15,6 +15,7 @@
 package workflowinternal_test
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"slices"
@@ -26,10 +27,12 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/workflow"
 )
 
 const (
@@ -114,7 +117,7 @@ func TestSingleTurnTool_Declaration(t *testing.T) {
 	}
 }
 
-func TestSingleTurnTool_Run_LLMRecoverableFailures(t *testing.T) {
+func TestSingleTurnTool_Run_Failures(t *testing.T) {
 	tests := []struct {
 		name        string
 		inputSchema *genai.Schema
@@ -158,17 +161,19 @@ func TestSingleTurnTool_Run_LLMRecoverableFailures(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			st := newSingleTurnTool(t, newLLMAgent(t, agentName, agentDesc, tc.inputSchema))
+			a := newLLMAgent(t, agentName, agentDesc, tc.inputSchema)
+			st := newSingleTurnTool(t, a)
 
 			got, err := st.Run(nil, tc.args)
-			if err != nil {
-				t.Fatalf("Run(%v) err = %v, want nil (LLM-recoverable failure surfaces via result[\"error\"])",
-					tc.args, err)
+			if err == nil {
+				t.Fatalf("Run(%v) err = nil, want non-nil", tc.args)
 			}
-			errStr := unpackErrorResult(t, got)
+			if got != nil {
+				t.Errorf("Run(%v) result = %v, want nil", tc.args, got)
+			}
 			for _, sub := range tc.wantSubstr {
-				if !strings.Contains(errStr, sub) {
-					t.Errorf("result[\"error\"] = %q, want substring %q", errStr, sub)
+				if !strings.Contains(err.Error(), sub) {
+					t.Errorf("Run(%v) err = %q, want substring %q", tc.args, err.Error(), sub)
 				}
 			}
 		})
@@ -195,6 +200,67 @@ func TestSingleTurnTool_ProcessRequest_RegistersTool(t *testing.T) {
 			}
 		}
 		t.Errorf("req.Config function declarations missing %q; got %v", agentName, names)
+	}
+}
+
+func TestSingleTurnTool_Run_HappyPath(t *testing.T) {
+	const wantOutput = "world"
+
+	a, err := agent.New(agent.Config{
+		Name:        "echo_agent",
+		Description: "Yields a single fixed-output event.",
+		Run: func(_ agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(&session.Event{Output: wantOutput}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	st := newSingleTurnTool(t, a)
+
+	var (
+		gotResult map[string]any
+		gotErr    error
+	)
+	orchestrator := workflow.NewDynamicNode("orchestrator",
+		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
+			ic := ctx.WithContext(workflow.WithNodeContext(ctx, ctx))
+			toolCtx := toolinternal.NewToolContext(ic, "fc-id", &session.EventActions{}, nil)
+			gotResult, gotErr = st.Run(toolCtx, map[string]any{"request": "hello"})
+			return nil, gotErr
+		},
+		workflow.NodeConfig{},
+	)
+
+	w, err := workflow.New("root", workflow.Chain(workflow.Start, orchestrator))
+	if err != nil {
+		t.Fatalf("workflow.New: %v", err)
+	}
+
+	sessResp, err := session.InMemoryService().Create(t.Context(), &session.CreateRequest{
+		AppName:   "test_app",
+		UserID:    "test_user",
+		SessionID: "test_session",
+	})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+
+	ic := &fakeInvocationContext{Context: t.Context(), sess: sessResp.Session}
+	for _, err := range w.Run(ic) {
+		if err != nil {
+			t.Fatalf("workflow.Run error: %v", err)
+		}
+	}
+
+	if gotErr != nil {
+		t.Fatalf("SingleTurnTool.Run err = %v, want nil", gotErr)
+	}
+	want := map[string]any{"result": wantOutput}
+	if diff := cmp.Diff(want, gotResult); diff != "" {
+		t.Errorf("SingleTurnTool.Run result diff (-want +got):\n%s", diff)
 	}
 }
 
@@ -242,26 +308,6 @@ func newCompositeAgent(t *testing.T, name, description string, subAgents ...agen
 	return a
 }
 
-func unpackErrorResult(t *testing.T, result map[string]any) string {
-	t.Helper()
-	if result == nil {
-		t.Fatalf("Run result = nil, want map with \"error\" key")
-	}
-	raw, ok := result["error"]
-	if !ok {
-		t.Fatalf("Run result missing \"error\" key; got keys %v", sortedKeys(result))
-	}
-	switch v := raw.(type) {
-	case error:
-		return v.Error()
-	case string:
-		return v
-	default:
-		t.Fatalf("result[\"error\"] has unexpected type %T (%v)", raw, raw)
-		return ""
-	}
-}
-
 func sortedKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -269,4 +315,26 @@ func sortedKeys(m map[string]any) []string {
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+type fakeInvocationContext struct {
+	context.Context
+	sess session.Session
+}
+
+func (c *fakeInvocationContext) Agent() agent.Agent              { return nil }
+func (c *fakeInvocationContext) Artifacts() agent.Artifacts      { return nil }
+func (c *fakeInvocationContext) Memory() agent.Memory            { return nil }
+func (c *fakeInvocationContext) Session() session.Session        { return c.sess }
+func (c *fakeInvocationContext) InvocationID() string            { return "test-invocation-id" }
+func (c *fakeInvocationContext) Branch() string                  { return "" }
+func (c *fakeInvocationContext) UserContent() *genai.Content     { return nil }
+func (c *fakeInvocationContext) RunConfig() *agent.RunConfig     { return nil }
+func (c *fakeInvocationContext) EndInvocation()                  {}
+func (c *fakeInvocationContext) Ended() bool                     { return false }
+func (c *fakeInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
+func (c *fakeInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
+	cp := *c
+	cp.Context = ctx
+	return &cp
 }

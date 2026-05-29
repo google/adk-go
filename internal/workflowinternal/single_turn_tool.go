@@ -56,14 +56,14 @@ func (t *SingleTurnTool) IsLongRunning() bool {
 func (t *SingleTurnTool) Run(toolCtx tool.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
-		return map[string]any{"error": fmt.Errorf("expecting map[string]any arguments, got %T", args)}, nil
+		return nil, fmt.Errorf("single turn tool expects map[string]any arguments, got %T", args)
 	}
 
 	var nodeInput any
 
 	if t.funcDeclaration.Parameters != nil {
 		if err := utils.ValidateMapOnSchema(margs, t.funcDeclaration.Parameters, true); err != nil {
-			return map[string]any{"error": fmt.Errorf("argument validation failed for agent %s: %w", t.agent.Name(), err)}, nil
+			return nil, fmt.Errorf("argument validation failed for agent %s: %w", t.agent.Name(), err)
 		}
 		nodeInput = margs
 	} else {
