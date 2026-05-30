@@ -27,6 +27,11 @@ import (
 var (
 	_ Node = (*startNode)(nil)
 	_ Node = (*FunctionNode)(nil)
+	_ Node = (*AgentNode)(nil)
+	_ Node = (*ToolNode)(nil)
+	_ Node = (*JoinNode)(nil)
+	_ Node = (*ParallelWorker)(nil)
+	_ Node = (*WorkflowNode)(nil)
 )
 
 func TestNewBaseNode_RoundTrip(t *testing.T) {

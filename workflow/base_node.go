@@ -87,3 +87,6 @@ func defaultValidateInput(in any, schema *jsonschema.Resolved) (any, error) {
 	}
 	return typeutil.ConvertToWithJSONSchema[any, any](in, schema)
 }
+
+// ValidateOutput returns the output unchanged as a default passthrough implementation.
+func (b BaseNode) ValidateOutput(output any) (any, error) { return output, nil }
