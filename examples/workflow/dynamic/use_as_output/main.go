@@ -37,7 +37,7 @@ import (
 )
 
 // Drafts longer than this are sent back to the reviser.
-const maxDraftChars = 400
+const maxDraftChars = 60
 
 func main() {
 	ctx := context.Background()
@@ -78,20 +78,22 @@ func main() {
 
 	// sender mocks delivery; a real system would call the outbound
 	// mail API here.
-	senderNode := workflow.NewFunctionNode("sender",
+	senderNode := workflow.NewFunctionNode(
+		"sender",
 		func(_ agent.InvocationContext, approvedDraft string) (string, error) {
 			return "EMAIL SENT — " + approvedDraft, nil
 		},
 		workflow.NodeConfig{},
 	)
 
-	orchestrate := workflow.NewDynamicNode[string, string]("orchestrate",
+	orchestrate := workflow.NewDynamicNode[string, string](
+		"orchestrate",
 		func(nc workflow.NodeContext, topic string, _ func(*session.Event) error) (string, error) {
 			draft, err := workflow.RunNode[string](nc, drafterNode, topic)
 			if err != nil {
 				return "", err
 			}
-
+			log.Println("Draft: ", len(draft))
 			if len(draft) <= maxDraftChars {
 				// Happy path: delegate so the sender's confirmation
 				// becomes orchestrate's output and flows downstream.
@@ -110,7 +112,8 @@ func main() {
 		workflow.NodeConfig{},
 	)
 
-	report := workflow.NewFunctionNode("report",
+	report := workflow.NewFunctionNode(
+		"report",
 		func(_ agent.InvocationContext, orchestrateOutput string) (string, error) {
 			return "REPORT: " + strings.TrimSpace(orchestrateOutput), nil
 		},
