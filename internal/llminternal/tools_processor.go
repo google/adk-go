@@ -24,8 +24,7 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// ContentRequestProcessor populates the LLMRequest's Contents based on
-// the InvocationContext that includes the previous events.
+// toolProcessor collects the agent's tools and toolsets for the LLM flow.
 func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if f.Tools != nil {
