@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/tool"
@@ -86,7 +87,7 @@ func (m *mockSource) Search(ctx context.Context, query string) ([]*skill.Frontma
 
 func createToolContext(t *testing.T) tool.Context {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	return toolinternal.NewToolContext(invCtx, "", nil, nil)
+	return agent.NewToolContext(invCtx, "", nil, nil)
 }
 
 func TestListSkills(t *testing.T) {

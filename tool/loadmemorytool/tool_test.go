@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/memory"
@@ -177,5 +178,5 @@ func createToolContext(t *testing.T, mem *mockMemory) tool.Context {
 		Memory: mem,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", nil, nil)
+	return agent.NewToolContext(ctx, "", nil, nil)
 }

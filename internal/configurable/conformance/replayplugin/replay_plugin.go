@@ -316,8 +316,7 @@ func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invoca
 		return nil, fmt.Errorf("failed to parse recordings from %s: %w", recordingsPath, err)
 	}
 
-	removeUnderscores(&root)
-	fixTypeMismatches(&root)
+	normalizeYAMLNode(&root)
 
 	var recordings recording.Recordings
 	if err := root.Decode(&recordings); err != nil {
