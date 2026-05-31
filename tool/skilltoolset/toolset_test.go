@@ -118,7 +118,7 @@ func TestTools(t *testing.T) {
 	for _, t := range tools {
 		got = append(got, t.Name())
 	}
-	want := []string{"list_skills", "load_skill", "load_skill_resource"}
+	want := []string{"list_skills", "load_skill", "load_skill_resource", "search_skills"}
 	if diff := cmp.Diff(want, got, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
 		t.Errorf("Tools result mismatch (-want +got):\n%s", diff)
 	}
