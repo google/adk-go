@@ -193,6 +193,10 @@ func (f *fileSystemSource) ListResources(ctx context.Context, name, resourceDire
 	return resources, nil
 }
 
+func (s *fileSystemSource) Search(ctx context.Context, query string) ([]*Frontmatter, error) {
+	return nil, nil
+}
+
 func (f *fileSystemSource) validateSkill(name string) error {
 	_, _, closer, err := f.readSkill(name)
 	if err != nil {

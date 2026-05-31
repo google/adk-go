@@ -135,6 +135,10 @@ func (s *completePreloadSource) ListResources(ctx context.Context, name, subpath
 	return result, nil
 }
 
+func (s *completePreloadSource) Search(ctx context.Context, query string) ([]*Frontmatter, error) {
+	return nil, nil
+}
+
 func (s *completePreloadSource) reload(ctx context.Context) error {
 	frontmatters, err := s.base.ListFrontmatters(ctx)
 	if err != nil {

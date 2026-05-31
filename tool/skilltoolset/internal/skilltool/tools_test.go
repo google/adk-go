@@ -74,6 +74,16 @@ func (m *mockSource) LoadResource(ctx context.Context, name, resourcePath string
 	return io.NopCloser(strings.NewReader(res)), nil
 }
 
+func (m *mockSource) Search(ctx context.Context, query string) ([]*skill.Frontmatter, error) {
+	var frontmatters []*skill.Frontmatter
+	for _, fm := range m.frontmatters {
+		if strings.Contains(fm.Description, query) {
+			frontmatters = append(frontmatters, fm)
+		}
+	}
+	return frontmatters, nil
+}
+
 func createToolContext(t *testing.T) tool.Context {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	return toolinternal.NewToolContext(invCtx, "", nil, nil)
@@ -183,5 +193,43 @@ func TestLoadSkillResource(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("result mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestSearch(t *testing.T) {
+	source := &mockSource{
+		frontmatters: []*skill.Frontmatter{
+			{
+				Name:        "skill1",
+				Description: "description1",
+			},
+		},
+		instructions: map[string]string{
+			"skill1": "instructions1",
+		},
+	}
+	tool, err := skilltool.SearchSkills(source)
+	if err != nil {
+		t.Fatalf("SearchSkills failed: %v", err)
+	}
+	functionTool, ok := tool.(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("SearchSkills tool does not implement toolinternal.FunctionTool")
+	}
+
+	got, err := functionTool.Run(createToolContext(t), map[string]any{"query": "description1"})
+	if err != nil {
+		t.Fatalf("SearchSkills tool.Run failed: %v", err)
+	}
+	want := map[string]any{
+		"skills": []any{
+			map[string]any{
+				"name":        "skill1",
+				"description": "description1",
+			},
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("SearchSkills result mismatch (-want +got):\n%s", diff)
 	}
 }

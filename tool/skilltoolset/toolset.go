@@ -41,7 +41,9 @@ This is very important:
 ` +
 		"1. If a skill seems relevant to the current user query, you MUST use the `load_skill` tool with `skill_name=\"<SKILL_NAME>\"` to read its full instructions before proceeding.\n" +
 		"2. Once you have read the instructions, follow them exactly as documented before replying to the user. For example, If the instruction lists multiple steps, please make sure you complete all of them in order.\n" +
-		"3. The `load_skill_resource` tool is for viewing files within a skill's directory (e.g., `references/*`, `assets/*`, `scripts/*`). Do NOT use other tools to access these files.\n"
+		"3. The `load_skill_resource` tool is for viewing files within a skill's directory (e.g., `references/*`, `assets/*`, `scripts/*`). Do NOT use other tools to access these files.\n" +
+
+		"If the currently available skills are not useful for the given task, you MAY use the `search_skills` tool to discover additional skills."
 )
 
 // Config holds the configuration for creating a Skill Toolset.
@@ -86,9 +88,13 @@ func New(ctx context.Context, cfg Config) (*SkillToolset, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create load skill resource tool: %w", err)
 	}
+	searchTool, err := skilltool.SearchSkills(cfg.Source)
+	if err != nil {
+		return nil, fmt.Errorf("create search skills tool: %w", err)
+	}
 	return &SkillToolset{
 		name:              name,
-		tools:             []tool.Tool{listTool, loadTool, loadResourceTool},
+		tools:             []tool.Tool{listTool, loadTool, loadResourceTool, searchTool},
 		source:            cfg.Source,
 		systemInstruction: instruction,
 	}, nil
@@ -105,13 +111,18 @@ func (ts *SkillToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) { 
 // the list of available skills and the system instruction explaining to the
 // agent what it can do with these skills.
 func (ts *SkillToolset) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+	instr := "If the locally available skills are insufficient for \n" +
+		"the given task, you may use the `search_skills` tool to discover\n" +
+		"additional skills."
+
 	skills, err := ts.source.ListFrontmatters(ctx)
 	if err != nil {
 		return err
 	}
 	if len(skills) == 0 {
+		utils.AppendInstructions(req, ts.systemInstruction, instr)
 		return nil
 	}
-	utils.AppendInstructions(req, ts.systemInstruction, skilltool.SkillsToXML(skills))
+	utils.AppendInstructions(req, ts.systemInstruction, skilltool.SkillsToXML(skills), instr)
 	return nil
 }

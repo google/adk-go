@@ -408,3 +408,7 @@ func (m *mockMergedBaseSource) LoadResource(ctx context.Context, name, resourceP
 	}
 	return io.NopCloser(bytes.NewReader([]byte(content))), nil
 }
+
+func (s *mockMergedBaseSource) Search(ctx context.Context, query string) ([]*Frontmatter, error) {
+	return nil, nil
+}
