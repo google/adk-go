@@ -645,14 +645,48 @@ func (s *scheduler) handleEvent(it eventItem) {
 		nr.setRoutingEvent(it.ev, it.nodeName)
 	}
 	if out, ok := childEventOutput(it.ev); ok {
+		// Validate (and optionally coerce) the output against the
+		// node's output schema before it is committed to the
+		// accumulator and forwarded to the consumer. Events without
+		// output bypass validation entirely.
+		validated, err := s.validateNodeOutput(it.nodeName, out)
+		if err != nil {
+			nr.recordErr(err)
+			return
+		}
+		// Write the validated value back onto the event when it is
+		// carried via Event.Output. Outputs derived from model text
+		// (MessageAsOutput) are not stamped back onto Event.Output.
+		if it.ev.Output != nil {
+			it.ev.Output = validated
+		}
 		// Record the paths this output counts for. Dynamic children
 		// arrive pre-stamped (delegation chain); other output events
 		// get their own path. Mirrors adk-python _enrich_event.
 		if it.ev.NodeInfo != nil && it.ev.NodeInfo.OutputFor == nil {
 			it.ev.NodeInfo.OutputFor = []string{it.ev.NodeInfo.Path}
 		}
-		nr.setOutput(out, it.nodeName)
+		nr.setOutput(validated, it.nodeName)
 	}
+}
+
+// validateNodeOutput invokes ValidateOutput on the node identified by
+// nodeName for the given output value. On validation failure the
+// returned error is wrapped with the node name to aid debugging; the
+// caller is responsible for recording it on the node-run accumulator
+// so handleCompletion surfaces it as a NodeFailed transition.
+func (s *scheduler) validateNodeOutput(nodeName string, out any) (any, error) {
+	n := s.nodesByName[nodeName]
+	if n == nil {
+		// Defensive: should never happen because handleEvent is only
+		// invoked for nodes registered in the graph.
+		return out, nil
+	}
+	validated, err := n.ValidateOutput(out)
+	if err != nil {
+		return nil, fmt.Errorf("output validation failed for node %q: %w", nodeName, err)
+	}
+	return validated, nil
 }
 
 // handleCompletion finalises a node's run: transitions its lifecycle
