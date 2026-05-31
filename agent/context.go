@@ -19,7 +19,9 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 /*
@@ -125,4 +127,64 @@ type CallbackContext interface {
 
 	Artifacts() Artifacts
 	State() session.State
+}
+
+// ToolContext is the context passed to a tool when it is called. It extends
+// CallbackContext with tool-specific facilities: access to the originating
+// function call, mutable event actions, long-term memory search, and the
+// Human-in-the-Loop (HITL) confirmation flow.
+type ToolContext interface {
+	CallbackContext
+
+	// FunctionCallID returns the unique identifier of the function call
+	// that triggered this tool execution.
+	FunctionCallID() string
+
+	// Actions returns the EventActions for the current event. This can be
+	// used by the tool to modify the agent's state, transfer to another
+	// agent, or perform other actions.
+	Actions() *session.EventActions
+
+	// SearchMemory performs a semantic search on the agent's memory.
+	SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error)
+
+	// ToolConfirmation returns a handler for checking the Human-in-the-Loop
+	// confirmation status for the current tool context. This should be used
+	// within a tool's logic *before* performing any sensitive operations that
+	// require user approval.
+	//
+	// Example Usage:
+	//   if confirmation := ctx.ToolConfirmation(); confirmation == nil {
+	//       // Confirmation required, create confirmation or handle appropriately
+	//       ctx.RequestConfirmation("hint", payload)
+	//   }
+	//
+	// The returned *toolconfirmation.ToolConfirmation object provides methods
+	// to check the actual confirmation state.
+	ToolConfirmation() *toolconfirmation.ToolConfirmation
+
+	// RequestConfirmation initiates the Human-in-the-Loop (HITL) process to
+	// ask the user for approval before the tool proceeds with a specific
+	// action. Call this method when a tool needs explicit user consent.
+	//
+	// This will typically result in the ADK emitting a special event
+	// (e.g., a FunctionCall like "adk_request_confirmation") to the client
+	// application/UI, prompting the user for a decision.
+	//
+	// Args:
+	//   - hint: A human-readable string explaining why confirmation is needed.
+	//     This is usually displayed to the user in the confirmation prompt.
+	//   - payload: Any additional data or context about the action requiring
+	//     confirmation.
+	//
+	// Returns:
+	//   - nil: If the confirmation request was successfully enqueued or
+	//     initiated within the ADK. This indicates that the process of asking
+	//     the user has begun. It does NOT mean the action is approved. The
+	//     tool's execution will likely pause or be suspended until the user
+	//     responds.
+	//   - error: If there was a failure in initiating the confirmation process
+	//     itself (e.g., invalid arguments, issue with the event system). The
+	//     request to ask the user has not been sent.
+	RequestConfirmation(hint string, payload any) error
 }

@@ -25,7 +25,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -315,7 +314,7 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunSuccess", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
+		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": 10.0} // JSON numbers often come as float64
 		got, err := toolInstance.Run(toolCtx, input)
@@ -329,7 +328,7 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunValidationFailure_Type", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
+		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"count": "not a number"}
 		_, err := toolInstance.Run(toolCtx, input)
@@ -340,7 +339,7 @@ func TestSetModelResponseTool(t *testing.T) {
 
 	t.Run("RunValidationFailure_MissingRequired", func(t *testing.T) {
 		invCtx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-		toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
+		toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 		input := map[string]any{"other": 123}
 		_, err := toolInstance.Run(toolCtx, input)

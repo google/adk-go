@@ -145,7 +145,7 @@ func convertSnake(path, indent string, o any) (any, error) {
 			return map[string]any{}, nil
 		}
 		return res, nil
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if v.IsNil() {
 			return nil, nil
 		}

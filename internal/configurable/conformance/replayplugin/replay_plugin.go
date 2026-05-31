@@ -129,6 +129,10 @@ func (p *replayPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequ
 		return nil, err
 	}
 
+	if len(recording.LLMResponses) == 0 {
+		return nil, fmt.Errorf("no LLM responses found in recording for agent %q", agentName)
+	}
+
 	return recording.LLMResponses[0], nil
 }
 
@@ -312,8 +316,7 @@ func (p *replayPlugin) loadInvocationState(ctx agent.InvocationContext) (*invoca
 		return nil, fmt.Errorf("failed to parse recordings from %s: %w", recordingsPath, err)
 	}
 
-	removeUnderscores(&root)
-	fixTypeMismatches(&root)
+	normalizeYAMLNode(&root)
 
 	var recordings recording.Recordings
 	if err := root.Decode(&recordings); err != nil {
@@ -425,6 +428,17 @@ func verifyLLMRequestMatch(expectedLLMRequest, actualLLMRequest *model.LLMReques
 		cmpopts.EquateEmpty(),
 	}
 
+	for _, toolAny := range expectedLLMRequest.Tools {
+		if funcDecl, ok := toolAny.(*genai.FunctionDeclaration); ok {
+			funcDecl.Description = normalizeDescription(funcDecl.Description)
+		}
+	}
+	for _, toolAny := range actualLLMRequest.Tools {
+		if funcDecl, ok := toolAny.(*genai.FunctionDeclaration); ok {
+			funcDecl.Description = normalizeDescription(funcDecl.Description)
+		}
+	}
+
 	if transferToolAny, ok := expectedLLMRequest.Tools["transfer_to_agent"]; ok {
 		transferTool := transferToolAny.(*genai.FunctionDeclaration)
 		transferTool.Description = `Transfer the question to another agent.
@@ -434,10 +448,19 @@ This tool hands off control to another agent when it's more suitable to answer t
 	if expectedLLMRequest.Config != nil {
 		for _, tool := range expectedLLMRequest.Config.Tools {
 			for _, funcDecl := range tool.FunctionDeclarations {
+				funcDecl.Description = normalizeDescription(funcDecl.Description)
 				if funcDecl.Name == "transfer_to_agent" {
 					funcDecl.Description = `Transfer the question to another agent.
 This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
 				}
+			}
+		}
+	}
+
+	if actualLLMRequest.Config != nil {
+		for _, tool := range actualLLMRequest.Config.Tools {
+			for _, funcDecl := range tool.FunctionDeclarations {
+				funcDecl.Description = normalizeDescription(funcDecl.Description)
 			}
 		}
 	}
@@ -579,4 +602,20 @@ func verifyToolCallMatch(expectedToolCall *genai.FunctionCall, toolName string, 
 	}
 
 	return nil
+}
+
+func normalizeDescription(desc string) string {
+	lines := strings.Split(desc, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		cleaned = append(cleaned, strings.TrimSpace(line))
+	}
+	// Remove empty lines at the start and end
+	for len(cleaned) > 0 && cleaned[0] == "" {
+		cleaned = cleaned[1:]
+	}
+	for len(cleaned) > 0 && cleaned[len(cleaned)-1] == "" {
+		cleaned = cleaned[:len(cleaned)-1]
+	}
+	return strings.Join(cleaned, "\n")
 }

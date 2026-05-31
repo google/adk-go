@@ -29,18 +29,18 @@ type Recordings struct {
 // Recording represents a single interaction recording, ordered by request timestamp.
 type Recording struct {
 	// Index of the user message this recording belongs to (0-based).
-	UserMessageIndex int `yaml:"usermessageindex"`
+	UserMessageIndex int `yaml:"user_message_index"`
 
 	// Name of the agent.
-	AgentName string `yaml:"agentname"`
+	AgentName string `yaml:"agent_name"`
 
 	// oneof fields - start
 
 	// LLM request-response pair.
-	LLMRecording *LLMRecording `yaml:"llmrecording,omitempty"`
+	LLMRecording *LLMRecording `yaml:"llm_recording,omitempty"`
 
 	// Tool call-response pair.
-	ToolRecording *ToolRecording `yaml:"toolrecording,omitempty"`
+	ToolRecording *ToolRecording `yaml:"tool_recording,omitempty"`
 
 	// oneof fields - end
 
@@ -51,17 +51,17 @@ type Recording struct {
 // LLMRecording represents a paired LLM request and response.
 type LLMRecording struct {
 	// Required. The LLM request.
-	LLMRequest *model.LLMRequest `yaml:"llmrequest,omitempty"`
+	LLMRequest *model.LLMRequest `yaml:"llm_request,omitempty"`
 
 	// Required. The LLM response.
-	LLMResponses []*model.LLMResponse `yaml:"llmresponses,omitempty"`
+	LLMResponses []*model.LLMResponse `yaml:"llm_responses,omitempty"`
 }
 
 // ToolRecording represents a paired tool call and response.
 type ToolRecording struct {
 	// Required. The tool call.
-	ToolCall *genai.FunctionCall `yaml:"toolcall,omitempty"`
+	ToolCall *genai.FunctionCall `yaml:"tool_call,omitempty"`
 
 	// Required. The tool response.
-	ToolResponse *genai.FunctionResponse `yaml:"toolresponse,omitempty"`
+	ToolResponse *genai.FunctionResponse `yaml:"tool_response,omitempty"`
 }

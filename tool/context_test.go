@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,19 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package toolinternal
+package tool_test
 
 import (
 	"testing"
 
 	"google.golang.org/adk/agent"
-	contextinternal "google.golang.org/adk/internal/context"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/session"
 )
 
-func TestToolContext(t *testing.T) {
-	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
-	toolCtx := NewToolContext(inv, "fn1", &session.EventActions{}, nil)
+func TestNewToolContext_Interfaces(t *testing.T) {
+	inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	toolCtx := agent.NewToolContext(inv, "fn1", &session.EventActions{}, nil)
 
 	if _, ok := toolCtx.(agent.ReadonlyContext); !ok {
 		t.Errorf("ToolContext(%+T) is unexpectedly not a ReadonlyContext", toolCtx)
@@ -34,10 +34,10 @@ func TestToolContext(t *testing.T) {
 	}
 }
 
-func TestRequestConfirmation_SetsSkipSummarization(t *testing.T) {
-	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
+func TestNewToolContext_RequestConfirmation_SetsSkipSummarization(t *testing.T) {
+	inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	actions := &session.EventActions{}
-	toolCtx := NewToolContext(inv, "fn1", actions, nil)
+	toolCtx := agent.NewToolContext(inv, "fn1", actions, nil)
 
 	err := toolCtx.RequestConfirmation("please confirm", map[string]any{"key": "value"})
 	if err != nil {
@@ -63,11 +63,11 @@ func TestRequestConfirmation_SetsSkipSummarization(t *testing.T) {
 	}
 }
 
-func TestRequestConfirmation_AutoGeneratesIDWhenEmpty(t *testing.T) {
-	inv := contextinternal.NewInvocationContext(t.Context(), contextinternal.InvocationContextParams{})
+func TestNewToolContext_RequestConfirmation_AutoGeneratesIDWhenEmpty(t *testing.T) {
+	inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	actions := &session.EventActions{}
 	// NewToolContext auto-generates a UUID when functionCallID is empty.
-	toolCtx := NewToolContext(inv, "", actions, nil)
+	toolCtx := agent.NewToolContext(inv, "", actions, nil)
 
 	err := toolCtx.RequestConfirmation("hint", nil)
 	if err != nil {

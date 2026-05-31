@@ -58,15 +58,17 @@ func getUserID(ctx tool.Context, args ValidateEmailArgs) (int, error) {
 	return int(result % 10000), nil
 }
 
-func createBooking(ctx tool.Context, args ValidateEmailArgs) (map[string]any, error) {
-	userID, err := getUserID(ctx, args)
-	if err != nil {
-		return nil, err
-	}
+type CreateBookingArgs struct {
+	UserID      int    `json:"user_id"`
+	IsConfirmed bool   `json:"is_confirmed"`
+	Details     string `json:"details"`
+}
+
+func createBooking(ctx tool.Context, args CreateBookingArgs) (map[string]any, error) {
 	return map[string]any{
-		"user_id":           userID,
-		"is_confirmed":      true,
-		"details":           "Booking created for user " + args.Email,
+		"user_id":           args.UserID,
+		"is_confirmed":      args.IsConfirmed,
+		"details":           args.Details,
 		"user_id_type":      "int",
 		"is_confirmed_type": "bool",
 		"details_type":      "string",
@@ -243,8 +245,7 @@ Args:
 
 Returns:
   A dictionary containing the booking information and the types of the
-  received arguments.
-`,
+  received arguments.`,
 	}, createBooking)
 	if err != nil {
 		return fmt.Errorf("error creating create booking tool: %w", err)
