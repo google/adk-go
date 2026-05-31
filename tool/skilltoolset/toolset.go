@@ -111,18 +111,13 @@ func (ts *SkillToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) { 
 // the list of available skills and the system instruction explaining to the
 // agent what it can do with these skills.
 func (ts *SkillToolset) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
-	instr := "If the locally available skills are insufficient for \n" +
-		"the given task, you may use the `search_skills` tool to discover\n" +
-		"additional skills."
-
 	skills, err := ts.source.ListFrontmatters(ctx)
 	if err != nil {
 		return err
 	}
 	if len(skills) == 0 {
-		utils.AppendInstructions(req, ts.systemInstruction, instr)
 		return nil
 	}
-	utils.AppendInstructions(req, ts.systemInstruction, skilltool.SkillsToXML(skills), instr)
+	utils.AppendInstructions(req, ts.systemInstruction, skilltool.SkillsToXML(skills))
 	return nil
 }
