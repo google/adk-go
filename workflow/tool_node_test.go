@@ -197,6 +197,27 @@ func TestToolNode_Run(t *testing.T) {
 			},
 			wantErr: "tool \"fail_tool\" execution failed: something went wrong",
 		},
+		{
+			name: "nil_output_schema_no_panic",
+			tool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name: "greet",
+				}, func(ctx tool.Context, in Input) (Output, error) {
+					return Output{Greeting: "Hello " + in.Name}, nil
+				})
+			},
+			nodeInput: map[string]any{"name": "World"},
+			node: func(t tool.Tool) (Node, error) {
+				return &ToolNode{
+					BaseNode: NewBaseNode(t.Name(), t.Description(), defaultNodeConfig),
+					tool:     t,
+				}, nil
+			},
+			extract: func(t *testing.T, out any) string {
+				return out.(map[string]any)["greeting"].(string)
+			},
+			want: "Hello World",
+		},
 	}
 
 	for _, tc := range tests {
