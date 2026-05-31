@@ -80,7 +80,7 @@ func newDynamicNodeWithResolvedSchemas[IN, OUT any](
 	cfg NodeConfig,
 ) *dynamicNode[IN, OUT] {
 	return &dynamicNode[IN, OUT]{
-		BaseNode:     NewBaseNode(name, "", cfg),
+		BaseNode:     NewBaseNodeWithSchemas(name, "", cfg, inputSchema, outputSchema),
 		fn:           fn,
 		inputSchema:  inputSchema,
 		outputSchema: outputSchema,

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // Compile-time assertions: every built-in workflow node must satisfy
@@ -104,5 +105,71 @@ func TestNewBaseNode_RoundTrip(t *testing.T) {
 				t.Errorf("Config() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+type testSchemaInput struct {
+	Value string `json:"value"`
+}
+
+func TestBaseNode_NilSchemas(t *testing.T) {
+	b := NewBaseNode("nil_schema_node", "no validation node", NodeConfig{})
+	if b.InputSchema() != nil {
+		t.Errorf("InputSchema() = %v, want nil", b.InputSchema())
+	}
+	if b.OutputSchema() != nil {
+		t.Errorf("OutputSchema() = %v, want nil", b.OutputSchema())
+	}
+
+	// ValidateInput with nil schema is a passthrough.
+	input := map[string]any{"value": "hello"}
+	got, err := b.ValidateInput(input)
+	if err != nil {
+		t.Fatalf("ValidateInput failed: %v", err)
+	}
+	if diff := cmp.Diff(input, got); diff != "" {
+		t.Errorf("ValidateInput mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestBaseNode_WithSchemas(t *testing.T) {
+	s, err := jsonschema.For[testSchemaInput](nil)
+	if err != nil {
+		t.Fatalf("jsonschema.For failed: %v", err)
+	}
+	resolvedInputSchema, err := s.Resolve(nil)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	b := NewBaseNodeWithSchemas("schema_node", "validation node", NodeConfig{}, resolvedInputSchema, resolvedInputSchema)
+	if b.InputSchema() != resolvedInputSchema {
+		t.Errorf("InputSchema() = %v, want %v", b.InputSchema(), resolvedInputSchema)
+	}
+	if b.OutputSchema() != resolvedInputSchema {
+		t.Errorf("OutputSchema() = %v, want %v", b.OutputSchema(), resolvedInputSchema)
+	}
+
+	// Valid input is coerced/returned.
+	input := map[string]any{"value": "hello"}
+	got, err := b.ValidateInput(input)
+	if err != nil {
+		t.Fatalf("ValidateInput failed on valid input: %v", err)
+	}
+	// ValidateInput returns a coerced type (which is map[string]any because we coerce using ConvertToWithJSONSchema[any, any])
+	// Let's verify it contains the expected value.
+	gotMap, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("expected got to be map[string]any, got %T", got)
+	}
+	if gotMap["value"] != "hello" {
+		t.Errorf("expected value %q, got %v", "hello", gotMap["value"])
+	}
+
+	// Invalid input fails validation.
+	invalidInput := map[string]any{"value": 123}
+	_, err = b.ValidateInput(invalidInput)
+	if err == nil {
+		t.Error("expected ValidateInput to fail on invalid input type, but succeeded")
 	}
 }
