@@ -30,6 +30,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/httprr"
@@ -307,7 +308,7 @@ func TestCallToolReconnection(t *testing.T) {
 
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	ctx := icontext.NewReadonlyContext(invCtx)
-	toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
+	toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 	// Get tools first to establish a session.
 	tools, err := ts.Tools(ctx)

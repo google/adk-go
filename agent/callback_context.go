@@ -16,21 +16,22 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"iter"
 
+	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 // NewCallbackContext returns CallbackContext initialized with provided actions.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
 func NewCallbackContext(ic InvocationContext, actions *session.EventActions) CallbackContext {
-	if actions == nil {
-		actions = &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	}
-
+	actions = prepareEventActions(actions)
 	cc := &callbackContext{
 		Context:           ic,
 		invocationContext: ic,
@@ -45,10 +46,7 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Cal
 // EventActions.ArtifactDelta so the resulting Event reflects the saves.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
 func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) CallbackContext {
-	if actions == nil {
-		actions = &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	}
-
+	actions = prepareEventActions(actions)
 	cc := &callbackContext{
 		Context:           ic,
 		invocationContext: ic,
@@ -58,12 +56,57 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 	return cc
 }
 
-// callbackContext is the single concrete implementation of CallbackContext.
+// NewToolContext constructs a ToolContext for a tool execution.
+//
+// If functionCallID is empty a new UUID is generated. If actions is nil a
+// fresh session.EventActions with empty StateDelta and ArtifactDelta is
+// allocated; missing sub-maps are populated. The returned ToolContext is
+// backed by the same *callbackContext implementation used for CallbackContext,
+// so all callback-context semantics (state delta tracking, artifact delta
+// tracking, etc.) apply, plus the tool-specific extensions on ToolContext.
+func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) ToolContext {
+	if functionCallID == "" {
+		functionCallID = uuid.NewString()
+	}
+	actions = prepareEventActions(actions)
+	return &callbackContext{
+		Context:           ic,
+		invocationContext: ic,
+		actions:           actions,
+		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
+		functionCallID:    functionCallID,
+		toolConfirmation:  confirmation,
+	}
+}
+
+func prepareEventActions(actions *session.EventActions) *session.EventActions {
+	if actions == nil {
+		return &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
+	}
+	// create missing maps if needed
+	if actions.StateDelta == nil {
+		actions.StateDelta = make(map[string]any)
+	}
+	if actions.ArtifactDelta == nil {
+		actions.ArtifactDelta = make(map[string]int64)
+	}
+	return actions
+}
+
+// callbackContext is the single concrete implementation of CallbackContext
+// (and, when constructed via NewToolContext, of ToolContext as well). The
+// tool-specific methods (FunctionCallID, Actions, SearchMemory,
+// ToolConfirmation, RequestConfirmation) are always present on the concrete
+// type; they are only meaningful when the context is used as a ToolContext.
 type callbackContext struct {
 	context.Context
 	invocationContext InvocationContext
 	artifacts         Artifacts
 	actions           *session.EventActions
+
+	// Fields below are only populated by NewToolContext.
+	functionCallID   string
+	toolConfirmation *toolconfirmation.ToolConfirmation
 }
 
 func (c *callbackContext) AgentName() string {
@@ -106,7 +149,68 @@ func (c *callbackContext) UserID() string {
 	return c.invocationContext.Session().UserID()
 }
 
-var _ CallbackContext = (*callbackContext)(nil)
+var (
+	_ CallbackContext = (*callbackContext)(nil)
+	_ ToolContext     = (*callbackContext)(nil)
+)
+
+// --- ToolContext extensions ----------------------------------------------
+//
+// The methods below are always present on *callbackContext but only
+// meaningful when the context was constructed via NewToolContext (i.e.
+// when functionCallID is set).
+
+// FunctionCallID returns the function call identifier associated with the
+// current tool execution, or "" if this context was not constructed for a
+// tool call.
+func (c *callbackContext) FunctionCallID() string {
+	return c.functionCallID
+}
+
+// Actions returns the EventActions for the current event. Tools can mutate
+// the returned value to influence the agent loop (e.g. state deltas, agent
+// transfers).
+func (c *callbackContext) Actions() *session.EventActions {
+	return c.actions
+}
+
+// SearchMemory performs a semantic search on the agent's memory.
+func (c *callbackContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	if c.invocationContext.Memory() == nil {
+		return nil, fmt.Errorf("memory service is not set")
+	}
+	return c.invocationContext.Memory().SearchMemory(ctx, query)
+}
+
+// ToolConfirmation returns the Human-in-the-Loop confirmation handle for the
+// current tool execution, or nil if no confirmation is currently associated
+// with the call.
+func (c *callbackContext) ToolConfirmation() *toolconfirmation.ToolConfirmation {
+	return c.toolConfirmation
+}
+
+// RequestConfirmation initiates the Human-in-the-Loop (HITL) approval flow
+// for the current tool call. It records a pending confirmation in the
+// underlying EventActions and sets SkipSummarization so the agent loop halts
+// until the user responds.
+func (c *callbackContext) RequestConfirmation(hint string, payload any) error {
+	if c.functionCallID == "" {
+		return fmt.Errorf("error function call id not set when requesting confirmation for tool")
+	}
+	if c.actions.RequestedToolConfirmations == nil {
+		c.actions.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
+	}
+	c.actions.RequestedToolConfirmations[c.functionCallID] = toolconfirmation.ToolConfirmation{
+		Hint:      hint,
+		Confirmed: false,
+		Payload:   payload,
+	}
+	// SkipSummarization stops the agent loop after this tool call. Without it,
+	// the function response event becomes lastEvent and IsFinalResponse() returns
+	// false (hasFunctionResponses == true), causing the loop to continue.
+	c.actions.SkipSummarization = true
+	return nil
+}
 
 // callbackContextState is a session.State implementation backed by the
 // callback context's EventActions.StateDelta and the underlying session state.
