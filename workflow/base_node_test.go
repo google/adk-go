@@ -20,6 +20,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/session"
 )
 
 // Compile-time assertions: every built-in workflow node must satisfy
@@ -204,4 +207,114 @@ func TestBaseNode_WithSchemas(t *testing.T) {
 	if err == nil {
 		t.Error("expected ValidateOutput to fail on invalid output type, but succeeded")
 	}
+}
+
+// resolveTestSchema generates a *jsonschema.Resolved from a Go type
+// for use in tests.
+func resolveTestSchema[T any](t *testing.T) *jsonschema.Resolved {
+	t.Helper()
+	s, err := jsonschema.For[T](nil)
+	if err != nil {
+		t.Fatalf("jsonschema.For failed: %v", err)
+	}
+	resolved, err := s.Resolve(nil)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	return resolved
+}
+
+// TestDefaultValidateOutput_PassthroughTypes verifies that framework
+// control values (*session.Event, *session.RequestInput) are returned
+// unchanged by defaultValidateOutput even when a strict schema is
+// configured: they are routed through Event.Output by some nodes but
+// are not user output payloads.
+func TestDefaultValidateOutput_PassthroughTypes(t *testing.T) {
+	schema := resolveTestSchema[testSchemaInput](t)
+
+	tests := []struct {
+		name string
+		in   any
+	}{
+		{
+			name: "*session.Event",
+			in:   &session.Event{Author: "node"},
+		},
+		{
+			name: "*session.RequestInput",
+			in:   &session.RequestInput{InterruptID: "approval"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := defaultValidateOutput(tc.in, schema)
+			if err != nil {
+				t.Fatalf("expected passthrough, got error: %v", err)
+			}
+			if got != tc.in {
+				t.Errorf("expected identity passthrough, got different value")
+			}
+		})
+	}
+}
+
+// TestDefaultValidateOutput_ContentFallback exercises the
+// *genai.Content fallback path: extract text from parts, return it
+// directly when the schema's root type is "string", otherwise
+// JSON-parse and re-validate. When the fallback cannot produce a
+// valid value the original validation error is surfaced.
+func TestDefaultValidateOutput_ContentFallback(t *testing.T) {
+	t.Run("string_schema_returns_text", func(t *testing.T) {
+		schema := resolveTestSchema[string](t)
+		content := &genai.Content{
+			Parts: []*genai.Part{{Text: "hello "}, {Text: "world"}},
+		}
+		got, err := defaultValidateOutput(content, schema)
+		if err != nil {
+			t.Fatalf("defaultValidateOutput failed: %v", err)
+		}
+		if got != "hello world" {
+			t.Errorf("got %q, want %q", got, "hello world")
+		}
+	})
+
+	t.Run("object_schema_parses_json", func(t *testing.T) {
+		schema := resolveTestSchema[testSchemaInput](t)
+		content := &genai.Content{
+			Parts: []*genai.Part{{Text: `{"value":"hello"}`}},
+		}
+		got, err := defaultValidateOutput(content, schema)
+		if err != nil {
+			t.Fatalf("defaultValidateOutput failed: %v", err)
+		}
+		gotMap, ok := got.(map[string]any)
+		if !ok {
+			t.Fatalf("expected map[string]any, got %T", got)
+		}
+		if gotMap["value"] != "hello" {
+			t.Errorf("got %v, want value=hello", gotMap)
+		}
+	})
+
+	t.Run("invalid_json_returns_original_error", func(t *testing.T) {
+		schema := resolveTestSchema[testSchemaInput](t)
+		content := &genai.Content{
+			Parts: []*genai.Part{{Text: "not valid json"}},
+		}
+		_, err := defaultValidateOutput(content, schema)
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+	})
+
+	t.Run("empty_text_returns_original_error", func(t *testing.T) {
+		schema := resolveTestSchema[testSchemaInput](t)
+		content := &genai.Content{
+			Parts: []*genai.Part{{Text: "   "}},
+		}
+		_, err := defaultValidateOutput(content, schema)
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+	})
 }

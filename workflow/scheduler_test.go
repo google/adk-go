@@ -20,11 +20,13 @@ import (
 	"fmt"
 	"iter"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/jsonschema-go/jsonschema"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
@@ -253,6 +255,82 @@ func TestScheduler_ProgressEventsThenSingleOutputSucceed(t *testing.T) {
 	last := events[len(events)-1]
 	if got, want := fmt.Sprint(last.Output), "final"; got != want {
 		t.Errorf("last event Output = %q, want %q", got, want)
+	}
+}
+
+// TestScheduler_ValidateOutput_ValidPasses verifies that a node
+// with an output_schema whose yielded output conforms to the schema
+// is forwarded unchanged to the consumer.
+func TestScheduler_ValidateOutput_ValidPasses(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	schema := resolveTestSchema[testSchemaInput](t)
+	n := newSchemaValidatedNode("n", schema, map[string]any{"value": "hello"})
+
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	events := drain(t, w.Run(mockCtx))
+	if got, want := len(events), 1; got != want {
+		t.Fatalf("event count = %d, want %d", got, want)
+	}
+	gotMap, ok := events[0].Output.(map[string]any)
+	if !ok {
+		t.Fatalf("Output type = %T, want map[string]any", events[0].Output)
+	}
+	if gotMap["value"] != "hello" {
+		t.Errorf("Output[value] = %v, want %q", gotMap["value"], "hello")
+	}
+}
+
+// TestScheduler_ValidateOutput_InvalidEndsActivation verifies that
+// when a node yields output that fails its output_schema, the
+// scheduler surfaces a validation error and the activation does not
+// transition to NodeCompleted.
+func TestScheduler_ValidateOutput_InvalidEndsActivation(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	schema := resolveTestSchema[testSchemaInput](t)
+	// "value" must be a string; an integer must trip validation.
+	n := newSchemaValidatedNode("n", schema, map[string]any{"value": 123})
+
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	gotErr := drainErr(t, w.Run(mockCtx))
+	if gotErr == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	wantSubstr := `output validation failed for node "n"`
+	if !strings.Contains(gotErr.Error(), wantSubstr) {
+		t.Errorf("error = %q, want substring %q", gotErr.Error(), wantSubstr)
+	}
+}
+
+// TestScheduler_ValidateOutput_NoOutputSkipsValidation verifies that
+// events without Output (progress / status events) are forwarded
+// without invoking ValidateOutput, even when the node carries an
+// output_schema that would reject nil.
+func TestScheduler_ValidateOutput_NoOutputSkipsValidation(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	schema := resolveTestSchema[testSchemaInput](t)
+	// 3 progress events (Output == nil) + 1 valid output event.
+	n := &progressThenSchemaOutputNode{
+		BaseNode: NewBaseNodeWithSchemas("n", "", NodeConfig{}, nil, schema),
+		progress: 3,
+		output:   map[string]any{"value": "hello"},
+	}
+
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	events := drain(t, w.Run(mockCtx))
+	if got, want := len(events), 4; got != want {
+		t.Fatalf("event count = %d, want %d", got, want)
+	}
+	// Last event carries the (validated) output; first 3 are passthrough.
+	for i := 0; i < 3; i++ {
+		if events[i].Output != nil {
+			t.Errorf("event %d Output = %v, want nil (progress)", i, events[i].Output)
+		}
+	}
+	if got := events[3].Output; got == nil {
+		t.Errorf("last event Output = nil, want validated map")
 	}
 }
 
@@ -641,5 +719,51 @@ func TestScheduler_RetryCancelled(t *testing.T) {
 
 	if got := n.calls.Load(); got != 1 {
 		t.Errorf("node calls = %d, want 1 (retry should not have triggered)", got)
+	}
+}
+
+// schemaValidatedNode yields exactly one event whose Output is the
+// supplied value. The BaseNode carries the supplied output schema so
+// the scheduler invokes ValidateOutput on the yielded value.
+type schemaValidatedNode struct {
+	BaseNode
+	output any
+}
+
+func newSchemaValidatedNode(name string, schema *jsonschema.Resolved, output any) *schemaValidatedNode {
+	return &schemaValidatedNode{
+		BaseNode: NewBaseNodeWithSchemas(name, "", NodeConfig{}, nil, schema),
+		output:   output,
+	}
+}
+
+func (n *schemaValidatedNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Output = n.output
+		yield(ev, nil)
+	}
+}
+
+// progressThenSchemaOutputNode yields `progress` events without Output
+// followed by one event carrying `output`. Used to verify that the
+// scheduler does not invoke ValidateOutput on output-less events.
+type progressThenSchemaOutputNode struct {
+	BaseNode
+	progress int
+	output   any
+}
+
+func (n *progressThenSchemaOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		for i := 0; i < n.progress; i++ {
+			ev := session.NewEvent(ctx.InvocationID())
+			if !yield(ev, nil) {
+				return
+			}
+		}
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Output = n.output
+		yield(ev, nil)
 	}
 }

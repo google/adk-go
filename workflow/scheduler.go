@@ -596,8 +596,33 @@ func (s *scheduler) handleEvent(it eventItem) {
 		nr.setRoutingEvent(it.ev, it.nodeName)
 	}
 	if it.ev.Output != nil {
-		nr.setOutput(it.ev.Output, it.nodeName)
+		validated, err := s.validateNodeOutput(it.nodeName, it.ev.Output)
+		if err != nil {
+			nr.recordErr(err)
+			return
+		}
+		it.ev.Output = validated
+		nr.setOutput(validated, it.nodeName)
 	}
+}
+
+// validateNodeOutput invokes ValidateOutput on the node identified by
+// nodeName for the given output value. On validation failure the
+// returned error is wrapped with the node name to aid debugging; the
+// caller is responsible for recording it on the node-run accumulator
+// so handleCompletion surfaces it as a NodeFailed transition.
+func (s *scheduler) validateNodeOutput(nodeName string, out any) (any, error) {
+	n := s.nodesByName[nodeName]
+	if n == nil {
+		// Defensive: should never happen because handleEvent is only
+		// invoked for nodes registered in the graph.
+		return out, nil
+	}
+	validated, err := n.ValidateOutput(out)
+	if err != nil {
+		return nil, fmt.Errorf("output validation failed for node %q: %w", nodeName, err)
+	}
+	return validated, nil
 }
 
 // handleCompletion finalises a node's run: transitions its lifecycle
