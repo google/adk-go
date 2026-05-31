@@ -24,7 +24,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
@@ -33,8 +32,6 @@ import (
 type ToolNode struct {
 	BaseNode
 	tool         tool.Tool
-	inputSchema  *jsonschema.Resolved
-	outputSchema *jsonschema.Resolved
 }
 
 type runnableTool interface {
@@ -67,10 +64,8 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 	}
 
 	return &ToolNode{
-		BaseNode:     NewBaseNode(t.Name(), t.Description(), cfg),
+		BaseNode:     NewBaseNodeWithSchemas(t.Name(), t.Description(), cfg, ischema, oschema),
 		tool:         t,
-		inputSchema:  ischema,
-		outputSchema: oschema,
 	}, nil
 }
 
@@ -94,7 +89,7 @@ func NewToolNode(t tool.Tool, cfg NodeConfig) (*ToolNode, error) {
 
 func (n *ToolNode) runTool(toolCtx tool.Context, input any) (any, error) {
 	runnable := n.tool.(runnableTool)
-	toolInput, err := typeutil.ConvertToWithJSONSchema[any, any](input, n.inputSchema)
+	toolInput, err := n.ValidateInput(input)
 	if err != nil {
 		return nil, fmt.Errorf("converting input for tool %q: %w", n.tool.Name(), err)
 	}
@@ -107,14 +102,16 @@ func (n *ToolNode) runTool(toolCtx tool.Context, input any) (any, error) {
 	var toolOutput any = output
 
 	// Validate
-	if err := n.outputSchema.Validate(output); err != nil {
-		if val, ok := output["result"]; ok {
-			if err := n.outputSchema.Validate(val); err != nil {
-				return nil, fmt.Errorf("converting tool %q output: validation failed for result key: %w", n.tool.Name(), err)
+	if schema := n.OutputSchema(); schema != nil {
+		if err := schema.Validate(output); err != nil {
+			if val, ok := output["result"]; ok {
+				if err := schema.Validate(val); err != nil {
+					return nil, fmt.Errorf("converting tool %q output: validation failed for result key: %w", n.tool.Name(), err)
+				}
+				toolOutput = val
+			} else {
+				return nil, fmt.Errorf("converting tool %q output: validation failed: %w", n.tool.Name(), err)
 			}
-			toolOutput = val
-		} else {
-			return nil, fmt.Errorf("converting tool %q output: validation failed: %w", n.tool.Name(), err)
 		}
 	}
 
