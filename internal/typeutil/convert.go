@@ -31,14 +31,19 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 		return zero, err
 	}
 	if resolvedSchema != nil {
-		// See https://github.com/google/jsonschema-go/issues/23: in order to
-		// validate, we must validate against a map[string]any. Struct validation
-		// does not work as it cannot account for `omitempty` or custom marshalling.
-		var m map[string]any
-		if err := json.Unmarshal(rawArgs, &m); err != nil {
+		// Validate the JSON-decoded form rather than the Go value —
+		// struct validation can't account for `omitempty` or custom
+		// marshalling (see
+		// https://github.com/google/jsonschema-go/issues/23). Decoding
+		// into `any` accepts every JSON shape (object → map[string]any,
+		// scalar → string/float64/bool, array → []any); a
+		// map[string]any intermediate would reject non-object inputs
+		// the schema permits.
+		var decoded any
+		if err := json.Unmarshal(rawArgs, &decoded); err != nil {
 			return zero, err
 		}
-		if err := resolvedSchema.Validate(m); err != nil {
+		if err := resolvedSchema.Validate(decoded); err != nil {
 			return zero, err
 		}
 	}
