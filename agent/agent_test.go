@@ -29,6 +29,7 @@ import (
 
 func TestAgentCallbacks(t *testing.T) {
 	t.Parallel()
+	t.Fatalf("Planned fail")
 
 	tests := []struct {
 		name         string
