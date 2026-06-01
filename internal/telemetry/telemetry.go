@@ -57,24 +57,17 @@ var tracer trace.Tracer = otel.GetTracerProvider().Tracer(
 	trace.WithSchemaURL(semconv.SchemaURL),
 )
 
-type agent interface {
-	Name() string
-	Description() string
-}
-
-// StartInvokeAgentSpan starts a new semconv invoke_agent span.
-// It returns a new context with the span and the span itself.
-func StartInvokeAgentSpan(ctx context.Context, agent agent, sessionID, invocationID string) (context.Context, trace.Span) {
-	agentName := agent.Name()
-	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("invoke_agent %s", agentName), trace.WithAttributes(
-		gcpVertexAgentInvocationID.String(invocationID), // used by adk-web
-		semconv.GenAIOperationNameInvokeAgent,
-		semconv.GenAIAgentDescription(agent.Description()),
-		semconv.GenAIAgentName(agentName),
-		semconv.GenAIConversationID(sessionID),
-	))
-
-	return spanCtx, span
+// OverrideTracerForTesting replaces the package-level tracer with one
+// derived from tp for the duration of the calling test. The original
+// tracer is restored via t.Cleanup.
+func OverrideTracerForTesting(t interface{ Cleanup(func()) }, tp trace.TracerProvider) {
+	original := tracer
+	tracer = tp.Tracer(
+		systemName,
+		trace.WithInstrumentationVersion(version.Version),
+		trace.WithSchemaURL(semconv.SchemaURL),
+	)
+	t.Cleanup(func() { tracer = original })
 }
 
 type TraceAgentResultParams struct {

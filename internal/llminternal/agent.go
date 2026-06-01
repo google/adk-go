@@ -27,8 +27,19 @@ type Agent interface {
 	internal() *State
 }
 
+type Mode string
+
+const (
+	ModeUnset      Mode = ""
+	ModeChat       Mode = "chat"
+	ModeTask       Mode = "task"
+	ModeSingleTurn Mode = "single_turn"
+)
+
 type State struct {
 	Model model.LLM
+
+	Mode Mode
 
 	Tools    []tool.Tool
 	Toolsets []tool.Toolset

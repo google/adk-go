@@ -21,7 +21,12 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/telemetry"
 	"google.golang.org/adk/session"
 )
 
@@ -32,8 +37,8 @@ const defaultEventQueueCapacity = 16
 
 var (
 	// ErrMultipleOutputs is returned when a node yields more than
-	// one event whose Actions.StateDelta carries an "output" key.
-	// A node activation may emit at most one output value.
+	// one event with Event.Output set. A node activation may emit
+	// at most one output value.
 	ErrMultipleOutputs = errors.New("workflow: node produced multiple events with output values; only one event per execution can carry output")
 
 	// ErrMultipleRoutingEvents is returned when a node yields more
@@ -88,6 +93,30 @@ type scheduler struct {
 	wg         sync.WaitGroup
 
 	parentCtx agent.InvocationContext
+
+	// maxConcurrency caps len(runsByName); 0 disables the cap.
+	// When at the cap, scheduleResumedNode enqueues into
+	// pendingQueue (status NodePending) and the consumer drains
+	// pendingQueue via tryDispatchPending on each completion.
+	// Set once at construction; immutable thereafter.
+	maxConcurrency int
+
+	// pendingQueue holds activations queued while the
+	// concurrency cap is saturated. FIFO; nodes are dispatched
+	// in arrival order as in-flight nodes complete. Owned by the
+	// consumer goroutine.
+	pendingQueue []pendingActivation
+}
+
+// pendingActivation is a deferred scheduleResumedNode call kept on
+// the consumer-owned pendingQueue while the concurrency cap is
+// saturated. Drained by tryDispatchPending on each completion.
+type pendingActivation struct {
+	node         Node
+	input        any
+	triggeredBy  string
+	branch       string
+	resumeInputs map[string]any // nil for non-resume schedules
 }
 
 // nodeRun is the per-node consumer-side accumulator. It buffers the
@@ -105,6 +134,7 @@ type nodeRun struct {
 	hasOutput    bool                  // distinguishes "no output yet" from "output was nil"
 	inputRequest *session.RequestInput // at most one human-input request; multiple is an error
 	err          error                 // set on duplicate output, duplicate routing event, or duplicate input request
+	branch       string                // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
 }
 
 // recordErr stores err as the accumulator's first error. Subsequent
@@ -182,6 +212,7 @@ type retryItem struct {
 	node        Node
 	input       any
 	triggeredBy string
+	branch      string
 }
 
 func (retryItem) isQueueItem() {}
@@ -189,16 +220,23 @@ func (retryItem) isQueueItem() {}
 // newScheduler returns an initialised scheduler ready for the
 // consumer to drive. The caller is responsible for seeding the
 // initial trigger (typically Start with the user input).
-func newScheduler(parent agent.InvocationContext, g *graph) *scheduler {
+//
+// maxConcurrency caps len(runsByName) at any point in time:
+// scheduleResumedNode enqueues into pendingQueue when the cap is
+// reached, and the consumer drains the queue via
+// tryDispatchPending as in-flight nodes complete. 0 disables the
+// cap (unlimited).
+func newScheduler(parent agent.InvocationContext, g *graph, maxConcurrency int) *scheduler {
 	return &scheduler{
-		state:       NewRunState(),
-		graph:       g,
-		nodesByName: buildNodesByName(g),
-		runsByName:  map[string]*nodeRun{},
-		runCancels:  map[string]context.CancelFunc{},
-		retryTimers: map[string]*time.Timer{},
-		eventQueue:  make(chan queueItem, defaultEventQueueCapacity),
-		parentCtx:   parent,
+		state:          NewRunState(),
+		graph:          g,
+		nodesByName:    buildNodesByName(g),
+		runsByName:     map[string]*nodeRun{},
+		runCancels:     map[string]context.CancelFunc{},
+		retryTimers:    map[string]*time.Timer{},
+		eventQueue:     make(chan queueItem, defaultEventQueueCapacity),
+		parentCtx:      parent,
+		maxConcurrency: maxConcurrency,
 	}
 }
 
@@ -222,9 +260,40 @@ func buildNodesByName(g *graph) map[string]Node {
 // wrapper is responsible for pushing exactly one completionItem when
 // it returns (success, error, panic, or cancellation).
 //
+// branch is the composite branch string this activation runs under;
+// empty means inherit the workflow's root branch. Branch scopes
+// LLM history visibility (via the flow processor's branch-prefix
+// filter) and gets stamped onto every emitted event when the node
+// leaves Event.Branch empty.
+//
+// When the engine's max-concurrency cap is reached, the activation
+// is enqueued instead of started; the node enters NodePending and
+// the scheduler dispatches it as in-flight nodes complete.
+//
 // scheduleNode runs only on the consumer goroutine.
-func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
-	s.scheduleResumedNode(n, input, triggeredBy, nil)
+func (s *scheduler) scheduleNode(n Node, input any, triggeredBy, branch string) {
+	s.scheduleResumedNode(n, input, triggeredBy, branch, nil)
+}
+
+// atConcurrencyLimit reports whether the number of in-flight
+// activations has reached the configured cap. Always false when
+// maxConcurrency is 0 (unlimited).
+func (s *scheduler) atConcurrencyLimit() bool {
+	return s.maxConcurrency > 0 && len(s.runsByName) >= s.maxConcurrency
+}
+
+// tryDispatchPending starts as many queued activations as the
+// current concurrency budget allows. FIFO over pendingQueue;
+// stops when the queue is empty or the cap is reached again.
+//
+// Called after every completion (and after retry-timer expiry)
+// to make room-becoming-available immediately observable.
+func (s *scheduler) tryDispatchPending() {
+	for len(s.pendingQueue) > 0 && !s.atConcurrencyLimit() {
+		next := s.pendingQueue[0]
+		s.pendingQueue = s.pendingQueue[1:]
+		s.startNode(next.node, next.input, next.triggeredBy, next.branch, next.resumeInputs)
+	}
 }
 
 // scheduleResumedNode is like scheduleNode but additionally
@@ -234,8 +303,38 @@ func (s *scheduler) scheduleNode(n Node, input any, triggeredBy string) {
 // InterruptID; nil disables re-entry semantics and yields the same
 // behaviour as scheduleNode.
 //
+// When the engine's max-concurrency cap is reached, the
+// activation is enqueued onto pendingQueue and the node enters
+// NodePending instead of starting immediately. tryDispatchPending
+// drains the queue as in-flight nodes complete.
+//
 // scheduleResumedNode runs only on the consumer goroutine.
-func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy string, resumeInputs map[string]any) {
+func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy, branch string, resumeInputs map[string]any) {
+	if s.atConcurrencyLimit() {
+		name := n.Name()
+		ns := s.state.EnsureNode(name)
+		ns.Status = NodePending
+		ns.Input = input
+		ns.TriggeredBy = triggeredBy
+		ns.Branch = branch
+		s.pendingQueue = append(s.pendingQueue, pendingActivation{
+			node:         n,
+			input:        input,
+			triggeredBy:  triggeredBy,
+			branch:       branch,
+			resumeInputs: resumeInputs,
+		})
+		return
+	}
+	s.startNode(n, input, triggeredBy, branch, resumeInputs)
+}
+
+// startNode is the unguarded core of scheduleResumedNode: it
+// creates the per-node context, registers bookkeeping, and
+// launches the runner goroutine. Always honours the call; the
+// concurrency-cap check is done by scheduleResumedNode (the
+// public entry point) before reaching here.
+func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, resumeInputs map[string]any) {
 	name := n.Name()
 
 	// Per-node context: WithTimeout when Config().Timeout > 0,
@@ -252,13 +351,34 @@ func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy string, r
 	} else {
 		nodeCtx, cancel = context.WithCancel(s.parentCtx)
 	}
-	perNodeCtx := newNodeContext(s.parentCtx.WithContext(nodeCtx), resumeInputs)
+	// Order matters: WithContext sets up per-node cancellation on
+	// the underlying InvocationContext; withBranch then wraps the
+	// result in branchOverride. Reversing would either lose the
+	// cancellation context or strip the branch override.
+	wrapped := withBranch(s.parentCtx.WithContext(nodeCtx), branch)
+	perNodeCtx := newNodeContext(wrapped, resumeInputs)
+
+	// EXPERIMENTAL: stash perNodeCtx in the embedded context.Context
+	// so tools running inside an LlmAgent that is itself running as
+	// this node can recover the NodeContext via
+	// workflow.NodeContextFromGoContext. The value rides through
+	// every downstream NewInvocationContext / WithContext call by
+	// virtue of context.Context value-chain propagation.
+	//
+	// See WithNodeContext / NodeContextFromGoContext in
+	// node_context_bridge.go. Top-level static activations have
+	// subScheduler == nil, so RunNode will still reject them; the
+	// stash is harmless in that case.
+	perNodeCtx.InvocationContext = perNodeCtx.InvocationContext.WithContext(
+		WithNodeContext(perNodeCtx.InvocationContext, perNodeCtx),
+	)
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
 	ns.Input = input
 	ns.TriggeredBy = triggeredBy
-	s.runsByName[name] = &nodeRun{}
+	ns.Branch = branch
+	s.runsByName[name] = &nodeRun{branch: branch}
 
 	s.runCancels[name] = cancel
 	s.wg.Add(1)
@@ -267,11 +387,13 @@ func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy string, r
 }
 
 // scheduleRetry schedules a retry for node n after the given delay.
-func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy string, delay time.Duration) {
+// branch is preserved across attempts so retries do not silently
+// move the node to a different branch.
+func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy, branch string, delay time.Duration) {
 	timer := time.AfterFunc(delay, func() {
 		go func() {
 			select {
-			case s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy}:
+			case s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy, branch: branch}:
 			case <-s.parentCtx.Done():
 			}
 		}()
@@ -300,6 +422,9 @@ func runNode(
 ) {
 	defer wg.Done()
 
+	span, ctx := startNodeSpan(ctx, n)
+	defer span.End()
+
 	// completion holds the final completionItem. It is sent in the
 	// outer defer so panic recovery, normal exit, and cancellation
 	// all funnel through the same send path.
@@ -307,6 +432,10 @@ func runNode(
 	defer func() {
 		if r := recover(); r != nil {
 			completion.err = fmt.Errorf("node %q panicked: %v", name, r)
+		}
+		if completion.err != nil && !errors.Is(completion.err, context.Canceled) {
+			span.RecordError(completion.err)
+			span.SetStatus(codes.Error, completion.err.Error())
 		}
 		out <- completion
 	}()
@@ -337,6 +466,11 @@ func runNode(
 // before observing ctx.Done(); the consumer continues draining
 // until runsByName is empty.
 //
+// Also drops the pendingQueue so queued (NodePending) activations
+// do not start after cancellation. Their NodeState is left as
+// NodePending — the surrounding RunState snapshot preserves the
+// fact that they were ready-but-not-yet-started.
+//
 // cancelAll runs only on the consumer goroutine.
 func (s *scheduler) cancelAll() {
 	for _, cancel := range s.runCancels {
@@ -346,6 +480,7 @@ func (s *scheduler) cancelAll() {
 		t.Stop()
 	}
 	s.retryTimers = nil
+	s.pendingQueue = nil
 }
 
 // run is the single-consumer loop. It drains the eventQueue, applies
@@ -397,10 +532,15 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 					s.cancelAll()
 				}
 			}
+			// A slot just freed up; promote any queued
+			// activations to running.
+			if !draining {
+				s.tryDispatchPending()
+			}
 		case retryItem:
 			delete(s.retryTimers, it.node.Name())
 			if !draining {
-				s.scheduleNode(it.node, it.input, it.triggeredBy)
+				s.scheduleNode(it.node, it.input, it.triggeredBy, it.branch)
 			}
 		}
 	}
@@ -413,9 +553,18 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	}
 }
 
-// handleEvent updates the per-node accumulator and is called once
-// per event. The event itself has already been read from the queue
-// and will be yielded to the caller by the consumer loop.
+// handleEvent updates the per-node accumulator. The event has
+// already been read from the queue and will be yielded to the
+// caller by the consumer loop.
+//
+// Descendant events (NodeInfo.Path != it.nodeName) are dynamic-node
+// children forwarded by the sub-scheduler. Their Output/Routes
+// belong to the child, not the parent — skip the parent accumulator.
+//
+// RequestedInput is the exception: the child's pause unwinds the
+// orchestrator (dynamic_scheduler.go runNode), and Workflow.Resume
+// matches InterruptID against the parent's NodeState.PendingRequest,
+// so the parent must transition to NodeWaiting on a descendant pause.
 func (s *scheduler) handleEvent(it eventItem) {
 	nr := s.runsByName[it.nodeName]
 	if nr == nil {
@@ -426,11 +575,25 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev == nil {
 		return
 	}
-	if it.ev.Routes != nil {
-		nr.setRoutingEvent(it.ev, it.nodeName)
+	// Stamp the activation's branch onto events that left
+	// Event.Branch empty; nodes that set a non-empty Event.Branch
+	// keep it.
+	if it.ev.Branch == "" && nr.branch != "" {
+		it.ev.Branch = nr.branch
 	}
+	var path string
+	if it.ev.NodeInfo != nil {
+		path = it.ev.NodeInfo.Path
+	}
+	isDescendant := path != "" && path != it.nodeName
 	if it.ev.RequestedInput != nil {
 		nr.setInputRequest(it.ev.RequestedInput, it.nodeName)
+	}
+	if isDescendant {
+		return
+	}
+	if it.ev.Routes != nil {
+		nr.setRoutingEvent(it.ev, it.nodeName)
 	}
 	if it.ev.Output != nil {
 		nr.setOutput(it.ev.Output, it.nodeName)
@@ -485,7 +648,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 				if ShouldRetry(cfg.RetryConfig, it.err, ns.Attempt) {
 					delay := CalculateDelay(cfg.RetryConfig, ns.Attempt)
 					ns.Status = NodePending
-					s.scheduleRetry(currentNode, ns.Input, ns.TriggeredBy, delay)
+					s.scheduleRetry(currentNode, ns.Input, ns.TriggeredBy, ns.Branch, delay)
 					// Return nil to continue the scheduler loop. Successors will
 					// be scheduled only when a retry attempt eventually succeeds
 					// and reaches the bottom of this function.
@@ -545,8 +708,8 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 		input = ns.Input
 	}
 
-	for _, succ := range findSuccessors(s.graph, s.state, currentNode, input, routingEv) {
-		s.scheduleNode(succ.node, succ.input, succ.triggeredBy)
+	for _, succ := range findSuccessors(s.graph, s.state, currentNode, input, routingEv, ns.Branch) {
+		s.scheduleNode(succ.node, succ.input, succ.triggeredBy, succ.branch)
 	}
 	return nil
 }
@@ -555,10 +718,15 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 // findSuccessors. The triggeredBy field carries the upstream
 // node's name for persistence on NodeState (used by Resume to
 // reconstruct the activation chain across pause/resume turns).
+// The branch field carries the composite branch string the
+// successor should run under — empty for chains that inherit the
+// parent's branch, populated when fan-out derives a sub-branch or
+// when JoinNode resolves its common predecessor prefix.
 type successor struct {
 	node        Node
 	input       any
 	triggeredBy string
+	branch      string
 }
 
 // findSuccessors evaluates the outgoing edges of currentNode against
@@ -578,7 +746,21 @@ type successor struct {
 //     deliberate decision not to continue, not an error.
 //
 // JoinNode successors are gated by appendSuccessor; see its docs.
-func findSuccessors(g *graph, state *RunState, currentNode Node, input any, event *session.Event) []successor {
+//
+// Branch derivation:
+//
+//   - When this activation fans out to >1 successor, each non-Join
+//     successor is given a sub-branch
+//     "<parentBranch>.<successorName>@1" (run_id "1" because the
+//     static scheduler does not auto-counter activations of the
+//     same name within one fan-out; loop-back routing re-enters the
+//     same node and the sub-branch stays stable).
+//   - When this activation has a single successor, the successor
+//     inherits parentBranch unchanged.
+//   - JoinNode successors compute their own branch in
+//     appendSuccessor as the common dot-prefix of the branches of
+//     all completed predecessors — see aggregatePredecessorBranches.
+func findSuccessors(g *graph, state *RunState, currentNode Node, input any, event *session.Event, parentBranch string) []successor {
 	succs := g.successorsOf(currentNode)
 	if len(succs) == 0 {
 		return nil
@@ -593,7 +775,7 @@ func findSuccessors(g *graph, state *RunState, currentNode Node, input any, even
 			continue
 		}
 		if edge.Route == nil {
-			out = appendSuccessor(out, g, state, edge.To, input, from)
+			out = appendSuccessor(out, g, state, edge.To, input, from, parentBranch)
 			added[edge.To] = struct{}{}
 			continue
 		}
@@ -602,32 +784,64 @@ func findSuccessors(g *graph, state *RunState, currentNode Node, input any, even
 			continue
 		}
 		if event != nil && edge.Route.Matches(event) {
-			out = appendSuccessor(out, g, state, edge.To, input, from)
+			out = appendSuccessor(out, g, state, edge.To, input, from, parentBranch)
 			added[edge.To] = struct{}{}
 			concreteMatched = true
 		}
 	}
 	if !concreteMatched && defaultRouteNode != nil {
-		out = appendSuccessor(out, g, state, defaultRouteNode, input, from)
+		out = appendSuccessor(out, g, state, defaultRouteNode, input, from, parentBranch)
+	}
+	// Second pass: if we fanned out to more than one successor,
+	// stamp a sub-branch onto each non-Join entry whose branch is
+	// still the inherited parentBranch. JoinNode entries already
+	// carry their common-prefix branch from appendSuccessor and
+	// must not be re-derived.
+	if len(out) > 1 {
+		for i, s := range out {
+			if _, isJoin := s.node.(*JoinNode); isJoin {
+				continue
+			}
+			if s.branch != parentBranch {
+				continue
+			}
+			out[i].branch = deriveSubBranch(parentBranch, s.node.Name()+"@1")
+		}
 	}
 	return out
 }
 
 // appendSuccessor records a routing match in the dispatch list.
-// Non-JoinNode targets are recorded as-is. A *JoinNode target is
-// recorded only when every declared predecessor has completed;
-// its input is replaced with the aggregated predecessor outputs.
-// A barrier-blocked JoinNode is silently skipped — a later
-// predecessor completion re-evaluates the barrier.
-func appendSuccessor(out []successor, g *graph, state *RunState, target Node, input any, triggeredBy string) []successor {
+// Non-JoinNode targets are recorded with parentBranch as their
+// initial branch; findSuccessors may upgrade to a sub-branch in a
+// second pass if this activation fanned out.
+//
+// A *JoinNode target is recorded only when every declared
+// predecessor has completed; its input is replaced with the
+// aggregated predecessor outputs, and its branch is the common
+// dot-prefix of all predecessor branches. A barrier-blocked
+// JoinNode is silently skipped — a later predecessor completion
+// re-evaluates the barrier.
+func appendSuccessor(out []successor, g *graph, state *RunState, target Node, input any, triggeredBy, parentBranch string) []successor {
 	if _, isJoin := target.(*JoinNode); !isJoin {
-		return append(out, successor{node: target, input: input, triggeredBy: triggeredBy})
+		return append(out, successor{
+			node:        target,
+			input:       input,
+			triggeredBy: triggeredBy,
+			branch:      parentBranch,
+		})
 	}
 	aggregated, ok := aggregatePredecessorOutputs(g, state, target)
 	if !ok {
 		return out
 	}
-	return append(out, successor{node: target, input: aggregated, triggeredBy: triggeredBy})
+	joinBranch := commonBranchPrefix(aggregatePredecessorBranches(g, state, target))
+	return append(out, successor{
+		node:        target,
+		input:       aggregated,
+		triggeredBy: triggeredBy,
+		branch:      joinBranch,
+	})
 }
 
 // aggregatePredecessorOutputs returns a map of predecessor name to
@@ -647,4 +861,37 @@ func aggregatePredecessorOutputs(g *graph, state *RunState, target Node) (map[st
 		aggregated[name] = ns.Output
 	}
 	return aggregated, true
+}
+
+// aggregatePredecessorBranches returns the branch strings recorded
+// for every predecessor of target. Order is the graph's
+// predecessor-edge order, which is deterministic per construction.
+// Callers feed the result into commonBranchPrefix to compute the
+// join's own branch.
+//
+// Assumes appendSuccessor's caller has already verified all
+// predecessors are NodeCompleted (via aggregatePredecessorOutputs
+// returning ok); a missing entry contributes "" which conservatively
+// short-circuits the common-prefix to root.
+func aggregatePredecessorBranches(g *graph, state *RunState, target Node) []string {
+	predEdges := g.predecessorsOf(target)
+	branches := make([]string, 0, len(predEdges))
+	for _, edge := range predEdges {
+		name := edge.From.Name()
+		var br string
+		if ns := state.Nodes[name]; ns != nil {
+			br = ns.Branch
+		}
+		branches = append(branches, br)
+	}
+	return branches
+}
+
+func startNodeSpan(ctx agent.InvocationContext, n Node) (trace.Span, agent.InvocationContext) {
+	if n == Start {
+		// Don't create span for the Start node.
+		return noop.Span{}, ctx
+	}
+	spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationNode{Node: n})
+	return span, ctx.WithContext(spanCtx)
 }

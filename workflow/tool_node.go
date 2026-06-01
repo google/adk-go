@@ -25,17 +25,14 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
 
-// toolNode wraps a tool from the tool package.
-type toolNode struct {
+// ToolNode wraps a tool from the tool package.
+type ToolNode struct {
 	BaseNode
-	tool         tool.Tool
-	inputSchema  *jsonschema.Resolved
-	outputSchema *jsonschema.Resolved
+	tool tool.Tool
 }
 
 type runnableTool interface {
@@ -44,7 +41,7 @@ type runnableTool interface {
 
 // newToolNodeWithSchemasTyped creates a new node wrapping a tool with explicitly provided schemas.
 // If a schema is nil, it will be inferred from the corresponding generic type Input or Output.
-func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (Node, error) {
+func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*ToolNode, error) {
 	if t == nil {
 		return nil, fmt.Errorf("tool cannot be nil")
 	}
@@ -67,33 +64,31 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 		return nil, fmt.Errorf("tool %q (type %T) is not directly runnable in workflow node", t.Name(), t)
 	}
 
-	return &toolNode{
-		BaseNode:     NewBaseNode(t.Name(), t.Description(), cfg),
-		tool:         t,
-		inputSchema:  ischema,
-		outputSchema: oschema,
+	return &ToolNode{
+		BaseNode: NewBaseNodeWithSchemas(t.Name(), t.Description(), cfg, ischema, oschema),
+		tool:     t,
 	}, nil
 }
 
 // NewToolNodeWithSchemas is a convenience wrapper for NewToolNodeWithSchemasTyped[any, any].
 // It uses explicitly provided schemas for both input and output.
-func NewToolNodeWithSchemas(t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (Node, error) {
+func NewToolNodeWithSchemas(t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*ToolNode, error) {
 	return newToolNodeWithSchemasTyped[any, any](t, inputSchema, outputSchema, cfg)
 }
 
 // NewToolNodeTyped creates a new node wrapping a tool using generics to
 // automatically infer input and output schemas from the provided types.
-func NewToolNodeTyped[Input, Output any](t tool.Tool, cfg NodeConfig) (Node, error) {
+func NewToolNodeTyped[Input, Output any](t tool.Tool, cfg NodeConfig) (*ToolNode, error) {
 	return newToolNodeWithSchemasTyped[Input, Output](t, nil, nil, cfg)
 }
 
 // NewToolNode creates a new node wrapping a tool. Input and output schemas
 // are inferred as 'any'.
-func NewToolNode(t tool.Tool, cfg NodeConfig) (Node, error) {
+func NewToolNode(t tool.Tool, cfg NodeConfig) (*ToolNode, error) {
 	return NewToolNodeTyped[any, any](t, cfg)
 }
 
-func (n *toolNode) runTool(toolCtx tool.Context, input any) (any, error) {
+func (n *ToolNode) runTool(toolCtx tool.Context, input any) (any, error) {
 	runnable := n.tool.(runnableTool)
 	// Upstream nodes (like LLM Agents) frequently produce serialized JSON strings representing
 	// structured tool call arguments. Since ToolNodes expect structured key-value mappings (maps)
@@ -107,7 +102,7 @@ func (n *toolNode) runTool(toolCtx tool.Context, input any) (any, error) {
 		}
 	}
 
-	toolInput, err := typeutil.ConvertToWithJSONSchema[any, any](input, n.inputSchema)
+	toolInput, err := n.ValidateInput(input)
 	if err != nil {
 		return nil, fmt.Errorf("converting input for tool %q: %w", n.tool.Name(), err)
 	}
@@ -120,14 +115,16 @@ func (n *toolNode) runTool(toolCtx tool.Context, input any) (any, error) {
 	var toolOutput any = output
 
 	// Validate
-	if err := n.outputSchema.Validate(output); err != nil {
-		if val, ok := output["result"]; ok {
-			if err := n.outputSchema.Validate(val); err != nil {
-				return nil, fmt.Errorf("converting tool %q output: validation failed for result key: %w", n.tool.Name(), err)
+	if schema := n.OutputSchema(); schema != nil {
+		if err := schema.Validate(output); err != nil {
+			if val, ok := output["result"]; ok {
+				if err := schema.Validate(val); err != nil {
+					return nil, fmt.Errorf("converting tool %q output: validation failed for result key: %w", n.tool.Name(), err)
+				}
+				toolOutput = val
+			} else {
+				return nil, fmt.Errorf("converting tool %q output: validation failed: %w", n.tool.Name(), err)
 			}
-			toolOutput = val
-		} else {
-			return nil, fmt.Errorf("converting tool %q output: validation failed: %w", n.tool.Name(), err)
 		}
 	}
 
@@ -135,7 +132,7 @@ func (n *toolNode) runTool(toolCtx tool.Context, input any) (any, error) {
 }
 
 // Run implements the Node interface and executes the tool.
-func (n *toolNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *ToolNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		eventActions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
 		toolCtx := toolinternal.NewToolContext(ctx, uuid.NewString(), eventActions, nil)

@@ -19,8 +19,6 @@ import (
 	"fmt"
 	"iter"
 
-	"strings"
-
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
@@ -33,9 +31,7 @@ import (
 // Event.Output to be propagated to successor nodes
 type AgentNode struct {
 	BaseNode
-	agent        agent.Agent
-	inputSchema  *jsonschema.Resolved
-	outputSchema *jsonschema.Resolved
+	agent agent.Agent
 }
 
 // newAgentNodeWithSchemasTyped creates a new node wrapping an agent with explicitly provided schemas.
@@ -54,10 +50,8 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	}
 
 	return &AgentNode{
-		BaseNode:     NewBaseNode(a.Name(), a.Description(), cfg),
-		agent:        a,
-		inputSchema:  ischema,
-		outputSchema: oschema,
+		BaseNode: NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
+		agent:    a,
 	}, nil
 }
 
@@ -82,10 +76,15 @@ func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 // Run implements the Node interface.
 func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		// TODO: add input validation
+		validatedInput, err := n.ValidateInput(input)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+
 		var userContent *genai.Content
-		if input != nil {
-			switch v := input.(type) {
+		if validatedInput != nil {
+			switch v := validatedInput.(type) {
 			case string:
 				userContent = &genai.Content{
 					Parts: []*genai.Part{{Text: v}},
@@ -104,12 +103,15 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 			}
 		}
 
-		// Use existing agent context instead of implementing a new one
+		// Use existing agent context instead of implementing a new one.
+		// Branch is inherited from ctx so the agent runs under the
+		// activation's branch; the scheduler assigns sub-branches at
+		// fan-out, and the LLM flow's history filter scopes events
+		// by branch prefix.
 		params := internalcontext.InvocationContextParams{
-			Artifacts: ctx.Artifacts(),
-			Memory:    ctx.Memory(),
-			Session:   ctx.Session(),
-			// TODO: branch isolation in a separate PR
+			Artifacts:     ctx.Artifacts(),
+			Memory:        ctx.Memory(),
+			Session:       ctx.Session(),
 			Branch:        ctx.Branch(),
 			Agent:         n.agent,
 			UserContent:   userContent,
@@ -125,23 +127,7 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 				return
 			}
 
-			// Conversational LLM agents yield complex, nested event messages (event.Content).
-			// Downstream workflow nodes (like FunctionNodes or ToolNodes) expect simpler inputs
-			// (like raw text strings) rather than wrapped LLM response envelopes.
-			// If the agent completes without setting event.Output, we automatically extract
-			// and concatenate all final text-only (non-thought) content parts and populate
-			// event.Output as a clean string, ensuring seamless node-to-node data flow.
-			if event != nil && event.Output == nil && event.IsFinalResponse() && event.Content != nil {
-				var sb strings.Builder
-				for _, part := range event.Content.Parts {
-					if part.Text != "" && !part.Thought {
-						sb.WriteString(part.Text)
-					}
-				}
-				if sb.Len() > 0 {
-					event.Output = sb.String()
-				}
-			}
+			synthesizeAgentOutput(event)
 
 			// TODO: add output validation
 			if !yield(event, nil) {
@@ -149,4 +135,31 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 			}
 		}
 	}
+}
+
+// synthesizeAgentOutput sets Event.Output from concatenated model
+// text on final model responses so RunNode returns the agent's
+// reply instead of the zero value.
+func synthesizeAgentOutput(event *session.Event) {
+	if event == nil || event.Output != nil {
+		return
+	}
+	if !event.IsFinalResponse() {
+		return
+	}
+	content := event.LLMResponse.Content
+	if content == nil || content.Role != "model" {
+		return
+	}
+	var b []byte
+	for _, p := range content.Parts {
+		if p == nil || p.Text == "" || p.Thought {
+			continue
+		}
+		b = append(b, p.Text...)
+	}
+	if len(b) == 0 {
+		return
+	}
+	event.Output = string(b)
 }

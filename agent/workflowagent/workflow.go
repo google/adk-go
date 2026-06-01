@@ -16,11 +16,13 @@ package workflowagent
 
 import (
 	"encoding/json"
+	"fmt"
 	"iter"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	agentinternal "google.golang.org/adk/internal/agent"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/workflow"
@@ -50,7 +52,7 @@ func New(cfg Config) (agent.Agent, error) {
 
 	wa := &workflowAgent{workflow: w}
 
-	return agent.New(agent.Config{
+	wfAgent, err := agent.New(agent.Config{
 		Name:                 cfg.Name,
 		Description:          cfg.Description,
 		SubAgents:            cfg.SubAgents,
@@ -58,6 +60,22 @@ func New(cfg Config) (agent.Agent, error) {
 		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
 		Run:                  wa.run,
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Tag the agent state so the telemetry layer can emit
+	// "invoke_workflow <name>" spans instead of "invoke_agent <name>"
+	// for workflow-backed agents.
+	internalAgent, ok := wfAgent.(agentinternal.Agent)
+	if !ok {
+		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
+	}
+	state := agentinternal.Reveal(internalAgent)
+	state.AgentType = agentinternal.TypeWorkflowAgent
+	state.Config = cfg
+
+	return wfAgent, nil
 }
 
 // workflowAgent is the wrapper that dispatches between

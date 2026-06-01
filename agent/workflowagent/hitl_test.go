@@ -265,6 +265,73 @@ func TestWorkflowAgent_FreshTurn_NotMistakenForResume(t *testing.T) {
 	}
 }
 
+// TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator verifies
+// that a child RequestedInput inside a dynamic-node orchestrator
+// (called via workflow.RunNode) transitions the orchestrator to
+// NodeWaiting, so Workflow.Resume matches by InterruptID and the
+// orchestrator re-enters to produce the final output.
+func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
+	const interruptID = "ask_name_dyn"
+
+	asker := newHitlNode("ask_name", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+		nc, ok := ctx.(workflow.NodeContext)
+		if ok {
+			if resp, ok := nc.ResumedInput(interruptID); ok {
+				ev := session.NewEvent(ctx.InvocationID())
+				ev.Output = resp
+				yield(ev, nil)
+				return
+			}
+		}
+		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+			InterruptID: interruptID,
+			Message:     "What's your name?",
+		}), nil)
+	})
+
+	orchestrator := workflow.NewDynamicNode[string, string]("hitl_demo",
+		func(nc workflow.NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			out, err := workflow.RunNode[any](nc, asker, nil)
+			if err != nil {
+				// Pause: err is ErrNodeInterrupted (swallowed by dynamicNode.Run).
+				// Resume: err is nil and out is the child's response.
+				return "", err
+			}
+			name, _ := out.(string)
+			if name == "" {
+				name = "stranger"
+			}
+			return "Hello, " + name + "!", nil
+		},
+		workflow.NodeConfig{},
+	)
+
+	a := makeAgent(t, workflow.Chain(workflow.Start, orchestrator))
+	sess := newFakeSession()
+
+	// Turn 1: fresh Run; orchestrator schedules asker; asker pauses.
+	turn1 := runFreshTurn(t, sess, a, "start")
+	if got := findRequest(turn1); got != interruptID {
+		t.Fatalf("turn 1 RequestedInput = %q, want %q", got, interruptID)
+	}
+
+	// Turn 2: resume with the reply.
+	turn2 := drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage(interruptID, "Wolo"))), nil)
+	if got := findRequest(turn2); got != "" {
+		t.Errorf("turn 2 unexpectedly emitted a RequestedInput: %q", got)
+	}
+
+	var got any
+	for _, ev := range turn2 {
+		if ev.Output != nil && ev.NodeInfo != nil && ev.NodeInfo.Path == "hitl_demo" {
+			got = ev.Output
+		}
+	}
+	if want := "Hello, Wolo!"; got != want {
+		t.Errorf("orchestrator output = %v, want %q", got, want)
+	}
+}
+
 // =============================================================================
 // Test fixtures and helpers
 // =============================================================================

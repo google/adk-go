@@ -28,7 +28,6 @@ import (
 	"google.golang.org/adk/cmd/launcher"
 	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/telemetry"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
 	"google.golang.org/adk/tool/functiontool"
@@ -107,11 +106,11 @@ func main() {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
 
+	// Save message content in OpenTelemetry logs
+	os.Setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+
 	config := &launcher.Config{
 		AgentLoader: agent.NewSingleLoader(a),
-		TelemetryOptions: []telemetry.Option{
-			telemetry.WithGenAICaptureMessageContent(true),
-		},
 	}
 
 	l := full.NewLauncher()

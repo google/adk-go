@@ -429,3 +429,67 @@ func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
 	}
 }
 
+func TestAgentNode_SynthesizesOutputFromModelText(t *testing.T) {
+	wrapped, err := agent.New(agent.Config{
+		Name: "talky",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// Partial must not be promoted to Output.
+				partial := session.NewEvent(ctx.InvocationID())
+				partial.LLMResponse.Partial = true
+				partial.LLMResponse.Content = &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "Hel"}},
+				}
+				if !yield(partial, nil) {
+					return
+				}
+				// Thought parts are skipped; text parts concatenate.
+				final := session.NewEvent(ctx.InvocationID())
+				final.LLMResponse.Content = &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "thinking…", Thought: true},
+						{Text: "Hello, "},
+						{Text: "world!"},
+					},
+				}
+				yield(final, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	node, err := NewAgentNode(wrapped, NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+
+	mockCtx := newMockCtx(t)
+	mockCtx.sess = &mockSession{id: "test-session-id"}
+	var (
+		gotPartial *session.Event
+		gotFinal   *session.Event
+	)
+	for ev, err := range node.Run(mockCtx, "ignored") {
+		if err != nil {
+			t.Fatalf("node.Run: %v", err)
+		}
+		if ev.LLMResponse.Partial {
+			gotPartial = ev
+		} else {
+			gotFinal = ev
+		}
+	}
+
+	if gotPartial == nil || gotFinal == nil {
+		t.Fatalf("missing events: partial=%v final=%v", gotPartial, gotFinal)
+	}
+	if gotPartial.Output != nil {
+		t.Errorf("partial event Output = %v, want nil (partials must not be promoted)", gotPartial.Output)
+	}
+	if got, want := gotFinal.Output, "Hello, world!"; got != want {
+		t.Errorf("final event Output = %v, want %q", got, want)
+	}
+}

@@ -19,6 +19,8 @@ import (
 	"iter"
 	"strings"
 
+	"github.com/google/jsonschema-go/jsonschema"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
@@ -32,6 +34,16 @@ type Node interface {
 	Name() string
 	Description() string
 	Config() NodeConfig
+	// InputSchema returns the JSON schema for the node's input.
+	// If it returns nil, it indicates there is no schema and no input validation is performed.
+	InputSchema() *jsonschema.Resolved
+	// OutputSchema returns the JSON schema for the node's output.
+	// If it returns nil, it indicates there is no schema and no output validation is performed.
+	OutputSchema() *jsonschema.Resolved
+	// ValidateInput validates and optionally coerces/transforms the input before the node runs.
+	// It returns the validated input (which might be coerced/parsed/transformed) or an error.
+	// It will be called by the scheduler before Run on every activation.
+	ValidateInput(input any) (any, error)
 	Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
 }
 
@@ -103,9 +115,15 @@ var Start Node = &startNode{}
 
 type startNode struct{}
 
-func (s *startNode) Name() string        { return "START" }
-func (s *startNode) Description() string { return "Start node" }
-func (s *startNode) Config() NodeConfig  { return NodeConfig{} }
+func (s *startNode) Name() string                       { return "START" }
+func (s *startNode) Description() string                { return "Start node" }
+func (s *startNode) Config() NodeConfig                 { return NodeConfig{} }
+func (s *startNode) InputSchema() *jsonschema.Resolved  { return nil }
+func (s *startNode) OutputSchema() *jsonschema.Resolved { return nil }
+func (s *startNode) ValidateInput(input any) (any, error) {
+	return input, nil
+}
+
 func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
@@ -118,6 +136,38 @@ type Workflow struct {
 	// workflow's RunState is persisted in session.State. Empty
 	// disables persistence. Set at construction by New.
 	name string
+
+	// maxConcurrency caps the number of graph-scheduled nodes that
+	// may run concurrently within a single Run invocation. 0
+	// (the default) means unlimited. Set via WithMaxConcurrency.
+	maxConcurrency int
+}
+
+// Option configures a Workflow at construction time. Pass options
+// as trailing variadic arguments to New.
+type Option func(*workflowOptions)
+
+// workflowOptions holds the resolved settings derived from the
+// caller's Option list. Zero values mean "no override / use
+// engine defaults".
+type workflowOptions struct {
+	maxConcurrency int
+}
+
+// WithMaxConcurrency caps how many graph-scheduled nodes may run
+// concurrently in a single Workflow invocation; nodes beyond the
+// cap queue as NodePending. n <= 0 disables the cap (unlimited).
+//
+// Does NOT apply to dynamic sub-nodes invoked via workflow.RunNode
+// from inside a DynamicNode body — they are awaited inline by the
+// parent and gating them would deadlock.
+func WithMaxConcurrency(n int) Option {
+	return func(o *workflowOptions) {
+		if n < 0 {
+			n = 0
+		}
+		o.maxConcurrency = n
+	}
 }
 
 // New creates a new Workflow engine with the given name and edges.
@@ -133,8 +183,14 @@ type Workflow struct {
 // An empty name disables persistence: the workflow runs normally
 // but its RunState is neither saved nor loaded, so Resume on a
 // follow-up turn will find nothing to resume from.
-func New(name string, edges []Edge) (*Workflow, error) {
+//
+// Optional Option values configure engine behaviour
+// (concurrency cap, etc.); see WithMaxConcurrency.
+func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	if err := validateNodes(edges); err != nil {
+		return nil, err
+	}
+	if err := validateSubWorkflowNames(name, edges); err != nil {
 		return nil, err
 	}
 	// TODO(wolo): sanity-check name (reject whitespace-only,
@@ -148,7 +204,15 @@ func New(name string, edges []Edge) (*Workflow, error) {
 	if err := validateWorkflow(graph); err != nil {
 		return nil, err
 	}
-	return &Workflow{graph: graph, name: name}, nil
+	var o workflowOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return &Workflow{
+		graph:          graph,
+		name:           name,
+		maxConcurrency: o.maxConcurrency,
+	}, nil
 }
 
 // Name returns the workflow's persistence-namespacing name as set
@@ -171,14 +235,18 @@ func (w *Workflow) Name() string {
 // when nodes complete. The consumer is the only mutator of the
 // per-node lifecycle map and of session state.
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		input := userInput(ctx)
+	return w.RunNode(ctx, userInput(ctx))
+}
 
-		s := newScheduler(ctx, w.graph)
-		// Seed: schedule START with the user-supplied input.
+// RunNode drives the workflow with the given input.
+// This is used by WorkflowNode to run nested workflows.
+func (w *Workflow) RunNode(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		s := newScheduler(ctx, w.graph, w.maxConcurrency)
+		// Seed: schedule START with the supplied input.
 		startState := s.state.EnsureNode(Start.Name())
 		startState.Input = input
-		s.scheduleNode(Start, input, "")
+		s.scheduleNode(Start, input, "", ctx.Branch())
 
 		s.run(yield)
 

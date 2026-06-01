@@ -80,7 +80,7 @@ func (w *Workflow) Resume(
 			return
 		}
 
-		s := newScheduler(ctx, w.graph)
+		s := newScheduler(ctx, w.graph, w.maxConcurrency)
 		s.state = state
 
 		// Resume runs in two passes so that when one call
@@ -150,7 +150,7 @@ func (w *Workflow) Resume(
 					ns.ResumedInputs = map[string]any{}
 				}
 				ns.ResumedInputs[interruptID] = resp
-				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.ResumedInputs)
+				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.Branch, ns.ResumedInputs)
 			} else {
 				// Handoff mode: promote the asker as if it had
 				// emitted resp as its output. Recording Output
@@ -175,8 +175,15 @@ func (w *Workflow) Resume(
 			// opaque to the routing layer. Successors reached via
 			// an unconditional edge or via the Default route fire
 			// as usual.
-			for _, succ := range findSuccessors(s.graph, s.state, h.node, h.resp, nil) {
-				s.scheduleNode(succ.node, succ.input, succ.triggeredBy)
+			// Handoff successors inherit the asker's branch so the
+			// downstream LLM history filter still scopes correctly
+			// when a parallel branch resumes via handoff.
+			parentBranch := ""
+			if ns := s.state.Nodes[h.node.Name()]; ns != nil {
+				parentBranch = ns.Branch
+			}
+			for _, succ := range findSuccessors(s.graph, s.state, h.node, h.resp, nil, parentBranch) {
+				s.scheduleNode(succ.node, succ.input, succ.triggeredBy, succ.branch)
 			}
 		}
 
