@@ -29,12 +29,15 @@ type dynamicSubScheduler struct {
 	parentCtx  NodeContext
 	emitUp     func(*session.Event) error
 
-	// mu protects runCountByChild.
+	// mu guards everything below. Never held across child.Run.
 	mu sync.Mutex
-	// runCountByChild seeds the auto-counter for each child name —
-	// the n-th invocation of any given name gets runID
-	// strconv.Itoa(n).
+	// runCountByChild seeds the auto-counter per child name; the
+	// n-th invocation gets runID strconv.Itoa(n).
 	runCountByChild map[string]int
+	// resultByPath caches successful child outputs keyed by
+	// childPath ("<parentPath>/<name>@<runID>"). Failures and HITL
+	// interrupts are not cached.
+	resultByPath map[string]any
 }
 
 func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*session.Event) error) *dynamicSubScheduler {
@@ -43,22 +46,19 @@ func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*
 		parentCtx:       parent,
 		emitUp:          emitUp,
 		runCountByChild: map[string]int{},
+		resultByPath:    map[string]any{},
 	}
 }
 
-// runNode executes child once, forwards its events upstream, and
-// classifies the outcome. HITL surfaces as ErrNodeInterrupted; runtime
-// failure as ErrNodeFailed; a child that fails after requesting input
-// surfaces as ErrNodeFailed.
+// runNode executes child once and classifies the outcome: HITL →
+// ErrNodeInterrupted, runtime failure → ErrNodeFailed. A child that
+// fails after requesting input surfaces as ErrNodeFailed. A repeated
+// call with the same stable WithRunID returns the cached output
+// without re-running the child; auto-counter ids never collide so
+// the cache is effectively bypassed for them.
 //
-// Session, invocation metadata, and cancellation come from s.parentCtx
-// captured at sub-scheduler construction. opts carries the resolved
-// per-call configuration assembled from RunNode's variadic
-// RunNodeOption arguments: opts.customRunID is empty to use the
-// auto-counter or a user-supplied stable id (validated against the
-// rules in validateCustomRunID); opts.useSubBranch and
-// opts.overrideBranch derive the child's Branch() via
-// deriveChildBranch.
+// Session, invocation metadata, and cancellation come from
+// s.parentCtx. opts carries the resolved RunNodeOption arguments.
 func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions) (any, error) {
 	name := child.Name()
 	runID, err := s.resolveRunID(name, opts.customRunID)
@@ -66,6 +66,11 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		return nil, &NodeRunError{ChildName: name, Cause: err}
 	}
 	childPath := s.parentPath + "/" + name + "@" + runID
+
+	if cached, ok := s.lookupCachedOutput(childPath); ok {
+		return cached, nil
+	}
+
 	childBranch := deriveChildBranch(s.parentCtx.Branch(), name, runID, opts.useSubBranch, opts.overrideBranch)
 	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s)
 
@@ -118,12 +123,29 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	}
 
 	if interrupted {
+		// HITL is not terminal — parent re-runs on resume and is
+		// expected to re-invoke RunNode. Do not cache.
 		return nil, &NodeRunError{
 			ChildName: name, ChildPath: childPath, RunID: runID,
 			Cause: ErrNodeInterrupted,
 		}
 	}
+
+	s.storeCachedOutput(childPath, out)
 	return out, nil
+}
+
+func (s *dynamicSubScheduler) lookupCachedOutput(childPath string) (any, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out, ok := s.resultByPath[childPath]
+	return out, ok
+}
+
+func (s *dynamicSubScheduler) storeCachedOutput(childPath string, out any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resultByPath[childPath] = out
 }
 
 // resolveRunID validates a user-supplied id, or returns the next

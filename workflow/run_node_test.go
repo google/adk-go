@@ -16,9 +16,12 @@ package workflow
 
 import (
 	"errors"
+	"iter"
 	"strings"
+	"sync"
 	"testing"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
 
@@ -174,6 +177,26 @@ func TestRunNode_WithOverrideBranch_Empty_TreatedAsNoOverride(t *testing.T) {
 	}
 }
 
+func TestRunNode_WithRunID_IdempotentReplay(t *testing.T) {
+	child := newCountingStubNode("c", "the_value")
+	got1, got2 := "", ""
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		var err error
+		got1, err = RunNode[string](ctx, child, nil, WithRunID("stable-id"))
+		if err != nil {
+			return "", err
+		}
+		got2, err = RunNode[string](ctx, child, nil, WithRunID("stable-id"))
+		return "", err
+	})
+	if got1 != "the_value" || got2 != "the_value" {
+		t.Errorf("RunNode outputs = (%q, %q), want both %q", got1, got2, "the_value")
+	}
+	if got := child.runCount(); got != 1 {
+		t.Errorf("child.Run invocations = %d, want 1", got)
+	}
+}
+
 func TestRunNode_SequentialFanOut_PerSibling_DistinctBranches(t *testing.T) {
 	// Two children scheduled sequentially with WithUseSubBranch get
 	// distinct sub-branches via the auto-counter — child name + "@1",
@@ -237,4 +260,29 @@ func runInOrchestratorWithErr[OUT any](t *testing.T, orchestratorFn func(NodeCon
 		return got, runErr
 	}
 	return got, gotErr
+}
+
+// countingStubNode is a stubNode that counts Run invocations so
+// cache-hit tests can assert the child was not re-executed.
+type countingStubNode struct {
+	*stubNode
+	mu    sync.Mutex
+	calls int
+}
+
+func newCountingStubNode(name string, out any) *countingStubNode {
+	return &countingStubNode{stubNode: newStubNode(name, out)}
+}
+
+func (n *countingStubNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	n.mu.Lock()
+	n.calls++
+	n.mu.Unlock()
+	return n.stubNode.Run(ctx, input)
+}
+
+func (n *countingStubNode) runCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.calls
 }
