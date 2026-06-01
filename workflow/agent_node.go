@@ -127,10 +127,39 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 				return
 			}
 
+			synthesizeAgentOutput(event)
+
 			// TODO: add output validation
 			if !yield(event, nil) {
 				return
 			}
 		}
 	}
+}
+
+// synthesizeAgentOutput sets Event.Output from concatenated model
+// text on final model responses so RunNode returns the agent's
+// reply instead of the zero value.
+func synthesizeAgentOutput(event *session.Event) {
+	if event == nil || event.Output != nil {
+		return
+	}
+	if !event.IsFinalResponse() {
+		return
+	}
+	content := event.LLMResponse.Content
+	if content == nil || content.Role != "model" {
+		return
+	}
+	var b []byte
+	for _, p := range content.Parts {
+		if p == nil || p.Text == "" || p.Thought {
+			continue
+		}
+		b = append(b, p.Text...)
+	}
+	if len(b) == 0 {
+		return
+	}
+	event.Output = string(b)
 }
