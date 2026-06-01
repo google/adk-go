@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"iter"
 
+	"strings"
+
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
@@ -121,6 +123,24 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 			if err != nil {
 				yield(nil, err)
 				return
+			}
+
+			// Conversational LLM agents yield complex, nested event messages (event.Content).
+			// Downstream workflow nodes (like FunctionNodes or ToolNodes) expect simpler inputs
+			// (like raw text strings) rather than wrapped LLM response envelopes.
+			// If the agent completes without setting event.Output, we automatically extract
+			// and concatenate all final text-only (non-thought) content parts and populate
+			// event.Output as a clean string, ensuring seamless node-to-node data flow.
+			if event != nil && event.Output == nil && event.IsFinalResponse() && event.Content != nil {
+				var sb strings.Builder
+				for _, part := range event.Content.Parts {
+					if part.Text != "" && !part.Thought {
+						sb.WriteString(part.Text)
+					}
+				}
+				if sb.Len() > 0 {
+					event.Output = sb.String()
+				}
 			}
 
 			// TODO: add output validation
