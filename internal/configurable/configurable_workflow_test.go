@@ -112,7 +112,6 @@ func (m *MockInvocationContext) WithContext(ctx context.Context) agent.Invocatio
 	return &cp
 }
 
-
 func TestLoadWorkflowYAML(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "workflow.yaml")
@@ -125,7 +124,7 @@ edges:
     - upper_fn
     - suffix_fn
 `
-	if err := os.WriteFile(configPath, []byte(yamlContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(yamlContent), 0o644); err != nil {
 		t.Fatalf("failed to write temp workflow: %v", err)
 	}
 
@@ -180,7 +179,7 @@ edges:
     - upper_fn
     - default: suffix_fn
 `
-	if err := os.WriteFile(configPath, []byte(yamlContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(yamlContent), 0o644); err != nil {
 		t.Fatalf("failed to write temp routing workflow: %v", err)
 	}
 
@@ -241,7 +240,7 @@ agent_class: FunctionNode
 func_code: alpha_fn
 `
 	subAgentPath := filepath.Join(tempDir, "agent_alpha.yaml")
-	if err := os.WriteFile(subAgentPath, []byte(subAgentYAML), 0644); err != nil {
+	if err := os.WriteFile(subAgentPath, []byte(subAgentYAML), 0o644); err != nil {
 		t.Fatalf("failed to write sub-agent yaml: %v", err)
 	}
 
@@ -256,7 +255,7 @@ edges:
       BETA: beta_fn
 `
 	workflowPath := filepath.Join(tempDir, "complex_workflow.yaml")
-	if err := os.WriteFile(workflowPath, []byte(workflowYAML), 0644); err != nil {
+	if err := os.WriteFile(workflowPath, []byte(workflowYAML), 0o644); err != nil {
 		t.Fatalf("failed to write workflow yaml: %v", err)
 	}
 
@@ -357,7 +356,7 @@ agent_class: LoopAgent
 max_iterations: 5
 `
 	subAgentPath := filepath.Join(tempDir, "agent_loop.yaml")
-	if err := os.WriteFile(subAgentPath, []byte(subAgentYAML), 0644); err != nil {
+	if err := os.WriteFile(subAgentPath, []byte(subAgentYAML), 0o644); err != nil {
 		t.Fatalf("failed to write sub-agent yaml: %v", err)
 	}
 
@@ -370,7 +369,7 @@ edges:
     - agent_loop.yaml
 `
 	workflowPath := filepath.Join(tempDir, "loop_workflow.yaml")
-	if err := os.WriteFile(workflowPath, []byte(workflowYAML), 0644); err != nil {
+	if err := os.WriteFile(workflowPath, []byte(workflowYAML), 0o644); err != nil {
 		t.Fatalf("failed to write workflow yaml: %v", err)
 	}
 
@@ -421,7 +420,7 @@ name: aggregate_join
 agent_class: JoinNode
 `
 	joinPath := filepath.Join(tempDir, "aggregate_join.yaml")
-	if err := os.WriteFile(joinPath, []byte(joinYAML), 0644); err != nil {
+	if err := os.WriteFile(joinPath, []byte(joinYAML), 0o644); err != nil {
 		t.Fatalf("failed to write join node yaml: %v", err)
 	}
 
@@ -438,7 +437,7 @@ edges:
     - aggregate_join.yaml
 `
 	workflowPath := filepath.Join(tempDir, "join_workflow.yaml")
-	if err := os.WriteFile(workflowPath, []byte(workflowYAML), 0644); err != nil {
+	if err := os.WriteFile(workflowPath, []byte(workflowYAML), 0o644); err != nil {
 		t.Fatalf("failed to write workflow yaml: %v", err)
 	}
 
@@ -508,7 +507,7 @@ agent_class: ToolNode
 tool_code: test_tool
 `
 	toolNodePath := filepath.Join(tempDir, "my_tool_node.yaml")
-	if err := os.WriteFile(toolNodePath, []byte(toolNodeYAML), 0644); err != nil {
+	if err := os.WriteFile(toolNodePath, []byte(toolNodeYAML), 0o644); err != nil {
 		t.Fatalf("failed to write tool node yaml: %v", err)
 	}
 
@@ -521,7 +520,7 @@ edges:
     - my_tool_node.yaml
 `
 	workflowPath := filepath.Join(tempDir, "tool_workflow.yaml")
-	if err := os.WriteFile(workflowPath, []byte(workflowYAML), 0644); err != nil {
+	if err := os.WriteFile(workflowPath, []byte(workflowYAML), 0o644); err != nil {
 		t.Fatalf("failed to write workflow yaml: %v", err)
 	}
 
