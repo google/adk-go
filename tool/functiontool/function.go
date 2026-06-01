@@ -24,6 +24,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/typeutil"
 	"google.golang.org/adk/model"
@@ -67,8 +68,8 @@ type Config struct {
 }
 
 // Func represents a Go function that can be wrapped in a tool.
-// It takes a tool.Context and a generic argument type, and returns a generic result type.
-type Func[TArgs, TResults any] func(tool.Context, TArgs) (TResults, error)
+// It takes a agent.ToolContext and a generic argument type, and returns a generic result type.
+type Func[TArgs, TResults any] func(agent.ToolContext, TArgs) (TResults, error)
 
 // ErrInvalidArgument indicates the input parameter type is invalid.
 var ErrInvalidArgument = errors.New("invalid argument")
@@ -151,7 +152,7 @@ func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
 }
 
 // ProcessRequest packs the function tool's declaration into the LLM request.
-func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, f)
 }
 
@@ -181,7 +182,7 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 }
 
 // Run executes the tool with the provided context and yields events.
-func (f *functionTool[TArgs, TResults]) Run(ctx tool.Context, args any) (result map[string]any, err error) {
+func (f *functionTool[TArgs, TResults]) Run(ctx agent.ToolContext, args any) (result map[string]any, err error) {
 	// TODO: Handle function call request from tc.InvocationContext.
 	defer func() {
 		if r := recover(); r != nil {

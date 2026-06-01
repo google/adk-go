@@ -126,7 +126,7 @@ func (p *recordPlugin) afterModel(ctx agent.CallbackContext, resp *model.LLMResp
 	return nil, nil
 }
 
-func (p *recordPlugin) beforeTool(ctx tool.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+func (p *recordPlugin) beforeTool(ctx agent.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
 	on, err := p.isRecordModeOn(ctx.State())
 	if err != nil || !on {
 		return nil, nil
@@ -147,7 +147,7 @@ func (p *recordPlugin) beforeTool(ctx tool.Context, t tool.Tool, args map[string
 	return nil, nil
 }
 
-func (p *recordPlugin) afterTool(ctx tool.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func (p *recordPlugin) afterTool(ctx agent.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	on, recordErr := p.isRecordModeOn(ctx.State())
 	if recordErr != nil || !on {
 		return nil, nil
