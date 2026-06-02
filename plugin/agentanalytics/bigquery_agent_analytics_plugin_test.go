@@ -508,7 +508,8 @@ func TestHybridContentParser(t *testing.T) {
 		defer ts.Close()
 
 		// Create GCS offloader
-		offloader, err := newGCSOffloader(ctx, "test-project", "test-bucket",
+		offloader, err := newGCSOffloader(
+			ctx, "test-project", "test-bucket",
 			option.WithHTTPClient(ts.Client()),
 			option.WithEndpoint(ts.URL),
 		)
