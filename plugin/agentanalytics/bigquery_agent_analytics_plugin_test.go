@@ -427,3 +427,96 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 		t.Errorf("Expected partitioning field to be 'timestamp', got request body: %s", requestBody)
 	}
 }
+
+func TestContextualTraceStacking(t *testing.T) {
+	p, _, mCtx := setupTestPlugin(t)
+
+	beforeRunCb := p.BeforeRunCallback()
+	if beforeRunCb == nil {
+		t.Fatal("BeforeRunCallback is nil")
+	}
+
+	// 1. Trigger BeforeRunCallback to push root span
+	_, err := beforeRunCb(mCtx)
+	if err != nil {
+		t.Fatalf("BeforeRunCallback error: %v", err)
+	}
+
+	stack := tm.getStack(mCtx.InvocationID())
+	if stack == nil {
+		t.Fatal("Expected stack to be initialized, got nil")
+	}
+
+	stack.mu.Lock()
+	spansLen := len(stack.spans)
+	stack.mu.Unlock()
+	if spansLen != 1 {
+		t.Errorf("Expected 1 span in stack, got %d", spansLen)
+	}
+
+	stack.mu.Lock()
+	rootSpanID := stack.spans[0].spanID
+	stack.mu.Unlock()
+	if rootSpanID == "" {
+		t.Error("Expected non-empty root span ID")
+	}
+
+	// 2. Trigger BeforeModelCallback to push nested span
+	beforeModelCb := p.BeforeModelCallback()
+	if beforeModelCb == nil {
+		t.Fatal("BeforeModelCallback is nil")
+	}
+
+	_, err = beforeModelCb(mCtx, &model.LLMRequest{Model: "test-model"})
+	if err != nil {
+		t.Fatalf("BeforeModelCallback error: %v", err)
+	}
+
+	stack.mu.Lock()
+	spansLen = len(stack.spans)
+	stack.mu.Unlock()
+	if spansLen != 2 {
+		t.Errorf("Expected 2 spans in stack after model start, got %d", spansLen)
+	}
+
+	stack.mu.Lock()
+	nestedSpan := stack.spans[1]
+	stack.mu.Unlock()
+	if nestedSpan.parentSpanID != rootSpanID {
+		t.Errorf("Expected nested span parent ID to be %s, got %s", rootSpanID, nestedSpan.parentSpanID)
+	}
+
+	// 3. Trigger AfterModelCallback to pop nested span
+	afterModelCb := p.AfterModelCallback()
+	if afterModelCb == nil {
+		t.Fatal("AfterModelCallback is nil")
+	}
+
+	_, err = afterModelCb(mCtx, &model.LLMResponse{}, nil)
+	if err != nil {
+		t.Fatalf("AfterModelCallback error: %v", err)
+	}
+
+	stack.mu.Lock()
+	spansLen = len(stack.spans)
+	stack.mu.Unlock()
+	if spansLen != 1 {
+		t.Errorf("Expected 1 span in stack after model end, got %d", spansLen)
+	}
+
+	// 4. Trigger AfterRunCallback to pop root span and cleanup
+	afterRunCb := p.AfterRunCallback()
+	if afterRunCb == nil {
+		t.Fatal("AfterRunCallback is nil")
+	}
+
+	afterRunCb(mCtx)
+
+	tm.mu.RLock()
+	_, exists := tm.stacks[mCtx.InvocationID()]
+	tm.mu.RUnlock()
+	if exists {
+		t.Error("Expected stack to be cleaned up and removed from traceManager, but it still exists")
+	}
+}
+
