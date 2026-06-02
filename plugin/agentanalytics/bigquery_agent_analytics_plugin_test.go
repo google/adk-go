@@ -38,6 +38,9 @@ import (
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/agenttool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type mockTransport struct {
@@ -427,3 +430,29 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 		t.Errorf("Expected partitioning field to be 'timestamp', got request body: %s", requestBody)
 	}
 }
+
+func TestToolProvenance(t *testing.T) {
+	// 1. Test LOCAL tool origin
+	localTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:        "local_test_tool",
+		Description: "Local tool description",
+	}, func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+		return map[string]any{"status": "ok"}, nil
+	})
+	if err != nil {
+		t.Fatalf("Failed to create functiontool: %v", err)
+	}
+
+	origin := getToolOrigin(localTool)
+	if origin != "LOCAL" {
+		t.Errorf("Expected LOCAL tool origin, got: %s", origin)
+	}
+
+	// 2. Test SUB_AGENT tool origin
+	subAgentTool := agenttool.New(nil, nil)
+	origin = getToolOrigin(subAgentTool)
+	if origin != "SUB_AGENT" {
+		t.Errorf("Expected SUB_AGENT tool origin, got: %s", origin)
+	}
+}
+
