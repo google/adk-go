@@ -543,7 +543,8 @@ func createAnalyticsViews(ctx context.Context, client *bq.Client, config Config)
 		allCols = append(allCols, extraCols...)
 		columnsStr := strings.Join(allCols, ",\n  ")
 
-		sql := fmt.Sprintf(viewSQLTemplate,
+		sql := fmt.Sprintf(
+			viewSQLTemplate,
 			config.ProjectID, config.DatasetID, viewName,
 			columnsStr,
 			config.ProjectID, config.DatasetID, config.TableName,
@@ -565,4 +566,3 @@ func createAnalyticsViews(ctx context.Context, client *bq.Client, config Config)
 	}
 	return nil
 }
-
