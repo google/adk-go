@@ -340,4 +340,3 @@ func getToolOrigin(t tool.Tool) string {
 	}
 	return "UNKNOWN"
 }
-
