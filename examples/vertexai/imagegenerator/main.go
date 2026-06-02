@@ -39,7 +39,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.0-flash-001", nil)
+	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-image-preview", nil)
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}

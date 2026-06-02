@@ -30,6 +30,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/httprr"
@@ -307,7 +308,7 @@ func TestCallToolReconnection(t *testing.T) {
 
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	ctx := icontext.NewReadonlyContext(invCtx)
-	toolCtx := toolinternal.NewToolContext(invCtx, "", nil, nil)
+	toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
 
 	// Get tools first to establish a session.
 	tools, err := ts.Tools(ctx)
@@ -415,6 +416,9 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 			city: "Lisbon",
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall(toolName, map[string]any{"city": "Lisbon"}, "model"),
+				genai.NewContentFromFunctionResponse(toolName, map[string]any{
+					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"city": "Lisbon"},
@@ -424,9 +428,6 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call get_weather() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse(toolName, map[string]any{
-					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
-				}, "user"),
 			},
 		},
 		{
@@ -438,6 +439,9 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": true}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall(toolName, map[string]any{"city": "Lisbon"}, "model"),
+				genai.NewContentFromFunctionResponse(toolName, map[string]any{
+					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"city": "Lisbon"},
@@ -447,9 +451,6 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call get_weather() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse(toolName, map[string]any{
-					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
-				}, "user"),
 				genai.NewContentFromFunctionResponse(toolName, map[string]any{
 					"output": map[string]any{"weather_summary": string(`Today in "Lisbon" is sunny`)},
 				}, "user"),
@@ -465,6 +466,9 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": false}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall(toolName, map[string]any{"city": "Lisbon"}, "model"),
+				genai.NewContentFromFunctionResponse(toolName, map[string]any{
+					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"city": "Lisbon"},
@@ -474,9 +478,6 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call get_weather() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse(toolName, map[string]any{
-					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
-				}, "user"),
 				genai.NewContentFromFunctionResponse(toolName, map[string]any{
 					"error": errors.New("error tool \"get_weather\" call is rejected"),
 				}, "user"),
@@ -523,6 +524,9 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 			city: "Lisbon",
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall(toolName, map[string]any{"city": "Lisbon"}, "model"),
+				genai.NewContentFromFunctionResponse(toolName, map[string]any{
+					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"city": "Lisbon"},
@@ -532,9 +536,6 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call get_weather() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse(toolName, map[string]any{
-					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
-				}, "user"),
 			},
 		},
 		{
@@ -545,6 +546,9 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 			city: "Lisbon",
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall(toolName, map[string]any{"city": "Lisbon"}, "model"),
+				genai.NewContentFromFunctionResponse(toolName, map[string]any{
+					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"city": "Lisbon"},
@@ -554,9 +558,6 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call get_weather() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse(toolName, map[string]any{
-					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
-				}, "user"),
 			},
 		},
 		{
@@ -568,6 +569,9 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": true}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall(toolName, map[string]any{"city": "Lisbon"}, "model"),
+				genai.NewContentFromFunctionResponse(toolName, map[string]any{
+					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"city": "Lisbon"},
@@ -577,9 +581,6 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call get_weather() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse(toolName, map[string]any{
-					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
-				}, "user"),
 				genai.NewContentFromFunctionResponse(toolName, map[string]any{
 					"output": map[string]any{"weather_summary": string(`Today in "Lisbon" is sunny`)},
 				}, "user"),
@@ -595,6 +596,9 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": false}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall(toolName, map[string]any{"city": "Lisbon"}, "model"),
+				genai.NewContentFromFunctionResponse(toolName, map[string]any{
+					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"city": "Lisbon"},
@@ -604,9 +608,6 @@ func TestMCPToolSetConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call get_weather() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse(toolName, map[string]any{
-					"error": errors.New("error tool \"get_weather\" requires confirmation, please approve or reject"),
-				}, "user"),
 				genai.NewContentFromFunctionResponse(toolName, map[string]any{
 					"error": errors.New("error tool \"get_weather\" call is rejected"),
 				}, "user"),
