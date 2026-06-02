@@ -24,7 +24,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
-	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
@@ -32,7 +31,7 @@ import (
 // ToolNode wraps a tool from the tool package.
 type ToolNode struct {
 	BaseNode
-	tool         tool.Tool
+	tool tool.Tool
 }
 
 type runnableTool interface {
@@ -65,8 +64,8 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 	}
 
 	return &ToolNode{
-		BaseNode:     NewBaseNodeWithSchemas(t.Name(), t.Description(), cfg, ischema, oschema),
-		tool:         t,
+		BaseNode: NewBaseNodeWithSchemas(t.Name(), t.Description(), cfg, ischema, oschema),
+		tool:     t,
 	}, nil
 }
 
@@ -135,7 +134,7 @@ func (n *ToolNode) runTool(toolCtx tool.Context, input any) (any, error) {
 func (n *ToolNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		eventActions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-		toolCtx := toolinternal.NewToolContext(ctx, uuid.NewString(), eventActions, nil)
+		toolCtx := agent.NewToolContext(ctx, uuid.NewString(), eventActions, nil)
 
 		toolOutput, err := n.runTool(toolCtx, input)
 		if err != nil {

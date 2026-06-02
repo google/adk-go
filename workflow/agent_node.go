@@ -31,7 +31,7 @@ import (
 // Event.Output to be propagated to successor nodes
 type AgentNode struct {
 	BaseNode
-	agent        agent.Agent
+	agent agent.Agent
 }
 
 // newAgentNodeWithSchemasTyped creates a new node wrapping an agent with explicitly provided schemas.
@@ -50,8 +50,8 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	}
 
 	return &AgentNode{
-		BaseNode:     NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
-		agent:        a,
+		BaseNode: NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
+		agent:    a,
 	}, nil
 }
 
