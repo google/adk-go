@@ -128,19 +128,22 @@ type ReadonlyContext interface {
 }
 
 // CallbackContext is passed to user callbacks during agent execution.
-type CallbackContext interface {
-	ReadonlyContext
-
-	Artifacts() Artifacts
-	State() session.State
-}
+type CallbackContext = Context
 
 // ToolContext is the context passed to a tool when it is called. It extends
 // CallbackContext with tool-specific facilities: access to the originating
 // function call, mutable event actions, long-term memory search, and the
 // Human-in-the-Loop (HITL) confirmation flow.
-type ToolContext interface {
-	CallbackContext
+type ToolContext = Context
+
+type Context interface {
+	ReadonlyContext
+
+	// Callback context
+	Artifacts() Artifacts
+	State() session.State
+
+	// ToolContext section
 
 	// FunctionCallID returns the unique identifier of the function call
 	// that triggered this tool execution.
@@ -193,8 +196,4 @@ type ToolContext interface {
 	//     itself (e.g., invalid arguments, issue with the event system). The
 	//     request to ask the user has not been sent.
 	RequestConfirmation(hint string, payload any) error
-}
-
-type Context interface {
-	ToolContext
 }

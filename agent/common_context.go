@@ -32,7 +32,7 @@ import (
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
 func NewCallbackContext(ic InvocationContext, actions *session.EventActions) CallbackContext {
 	actions = prepareEventActions(actions)
-	cc := &callbackContext{
+	cc := &commonContext{
 		Context:           ic,
 		invocationContext: ic,
 		actions:           actions,
@@ -51,7 +51,7 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Cal
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
 func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) CallbackContext {
 	actions = prepareEventActions(actions)
-	cc := &callbackContext{
+	cc := &commonContext{
 		Context:           ic,
 		invocationContext: ic,
 		actions:           actions,
@@ -77,7 +77,7 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 		functionCallID = uuid.NewString()
 	}
 	actions = prepareEventActions(actions)
-	return &callbackContext{
+	return &commonContext{
 		Context:           ic,
 		invocationContext: ic,
 		actions:           actions,
@@ -101,12 +101,12 @@ func prepareEventActions(actions *session.EventActions) *session.EventActions {
 	return actions
 }
 
-// callbackContext is the single concrete implementation of CallbackContext
+// commonContext is the single concrete implementation of CallbackContext
 // (and, when constructed via NewToolContext, of ToolContext as well). The
 // tool-specific methods (FunctionCallID, Actions, SearchMemory,
 // ToolConfirmation, RequestConfirmation) are always present on the concrete
 // type; they are only meaningful when the context is used as a ToolContext.
-type callbackContext struct {
+type commonContext struct {
 	context.Context
 	invocationContext InvocationContext
 	artifacts         Artifacts
@@ -117,49 +117,49 @@ type callbackContext struct {
 	toolConfirmation *toolconfirmation.ToolConfirmation
 }
 
-func (c *callbackContext) AgentName() string {
+func (c *commonContext) AgentName() string {
 	return c.invocationContext.Agent().Name()
 }
 
-func (c *callbackContext) ReadonlyState() session.ReadonlyState {
+func (c *commonContext) ReadonlyState() session.ReadonlyState {
 	return c.invocationContext.Session().State()
 }
 
-func (c *callbackContext) State() session.State {
+func (c *commonContext) State() session.State {
 	return &callbackContextState{ctx: c}
 }
 
-func (c *callbackContext) Artifacts() Artifacts {
+func (c *commonContext) Artifacts() Artifacts {
 	return c.artifacts
 }
 
-func (c *callbackContext) InvocationID() string {
+func (c *commonContext) InvocationID() string {
 	return c.invocationContext.InvocationID()
 }
 
-func (c *callbackContext) UserContent() *genai.Content {
+func (c *commonContext) UserContent() *genai.Content {
 	return c.invocationContext.UserContent()
 }
 
-func (c *callbackContext) AppName() string {
+func (c *commonContext) AppName() string {
 	return c.invocationContext.Session().AppName()
 }
 
-func (c *callbackContext) Branch() string {
+func (c *commonContext) Branch() string {
 	return c.invocationContext.Branch()
 }
 
-func (c *callbackContext) SessionID() string {
+func (c *commonContext) SessionID() string {
 	return c.invocationContext.Session().ID()
 }
 
-func (c *callbackContext) UserID() string {
+func (c *commonContext) UserID() string {
 	return c.invocationContext.Session().UserID()
 }
 
 var (
-	_ CallbackContext = (*callbackContext)(nil)
-	_ ToolContext     = (*callbackContext)(nil)
+	_ CallbackContext = (*commonContext)(nil)
+	_ ToolContext     = (*commonContext)(nil)
 )
 
 // --- ToolContext extensions ----------------------------------------------
@@ -171,19 +171,19 @@ var (
 // FunctionCallID returns the function call identifier associated with the
 // current tool execution, or "" if this context was not constructed for a
 // tool call.
-func (c *callbackContext) FunctionCallID() string {
+func (c *commonContext) FunctionCallID() string {
 	return c.functionCallID
 }
 
 // Actions returns the EventActions for the current event. Tools can mutate
 // the returned value to influence the agent loop (e.g. state deltas, agent
 // transfers).
-func (c *callbackContext) Actions() *session.EventActions {
+func (c *commonContext) Actions() *session.EventActions {
 	return c.actions
 }
 
 // SearchMemory performs a semantic search on the agent's memory.
-func (c *callbackContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+func (c *commonContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	if c.invocationContext.Memory() == nil {
 		return nil, fmt.Errorf("memory service is not set")
 	}
@@ -193,7 +193,7 @@ func (c *callbackContext) SearchMemory(ctx context.Context, query string) (*memo
 // ToolConfirmation returns the Human-in-the-Loop confirmation handle for the
 // current tool execution, or nil if no confirmation is currently associated
 // with the call.
-func (c *callbackContext) ToolConfirmation() *toolconfirmation.ToolConfirmation {
+func (c *commonContext) ToolConfirmation() *toolconfirmation.ToolConfirmation {
 	return c.toolConfirmation
 }
 
@@ -201,7 +201,7 @@ func (c *callbackContext) ToolConfirmation() *toolconfirmation.ToolConfirmation 
 // for the current tool call. It records a pending confirmation in the
 // underlying EventActions and sets SkipSummarization so the agent loop halts
 // until the user responds.
-func (c *callbackContext) RequestConfirmation(hint string, payload any) error {
+func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 	if c.functionCallID == "" {
 		return fmt.Errorf("error function call id not set when requesting confirmation for tool")
 	}
@@ -223,7 +223,7 @@ func (c *callbackContext) RequestConfirmation(hint string, payload any) error {
 // callbackContextState is a session.State implementation backed by the
 // callback context's EventActions.StateDelta and the underlying session state.
 type callbackContextState struct {
-	ctx *callbackContext
+	ctx *commonContext
 }
 
 func (c *callbackContextState) Get(key string) (any, error) {
