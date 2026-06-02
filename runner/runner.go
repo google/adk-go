@@ -125,6 +125,29 @@ type Runner struct {
 	autoCreateSession bool
 }
 
+func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string) (session.Session, error) {
+	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
+		AppName:   r.appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err == nil {
+		return getResp.Session, nil
+	}
+	if !r.autoCreateSession {
+		return nil, err
+	}
+	createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   r.appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return createResp.Session, nil
+}
+
 // Run runs the agent for the given user input, yielding events from agents.
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
@@ -138,29 +161,10 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			opt(&options)
 		}
 
-		var storedSession session.Session
-		getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
-			AppName:   r.appName,
-			UserID:    userID,
-			SessionID: sessionID,
-		})
+		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 		if err != nil {
-			if !r.autoCreateSession {
-				yield(nil, err)
-				return
-			}
-			createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
-				AppName:   r.appName,
-				UserID:    userID,
-				SessionID: sessionID,
-			})
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			storedSession = createResp.Session
-		} else {
-			storedSession = getResp.Session
+			yield(nil, err)
+			return
 		}
 
 		agentToRun, err := r.findAgentToRun(storedSession, msg)
@@ -331,27 +335,9 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		opt(&options)
 	}
 
-	var storedSession session.Session
-	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
-		AppName:   r.appName,
-		UserID:    userID,
-		SessionID: sessionID,
-	})
+	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 	if err != nil {
-		if !r.autoCreateSession {
-			return nil, nil, err
-		}
-		createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
-			AppName:   r.appName,
-			UserID:    userID,
-			SessionID: sessionID,
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		storedSession = createResp.Session
-	} else {
-		storedSession = getResp.Session
+		return nil, nil, err
 	}
 
 	// msg is nil for Live run as it's streaming
