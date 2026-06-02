@@ -15,7 +15,6 @@
 package agentanalytics
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -407,7 +406,6 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 				createCalled = true
 				bodyBytes, _ := io.ReadAll(r.Body)
 				requestBody = string(bodyBytes)
-				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 				return &http.Response{
 					StatusCode: http.StatusOK,
