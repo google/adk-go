@@ -519,4 +519,3 @@ func TestContextualTraceStacking(t *testing.T) {
 		t.Error("Expected stack to be cleaned up and removed from traceManager, but it still exists")
 	}
 }
-

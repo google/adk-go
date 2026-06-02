@@ -603,4 +603,3 @@ func (s *spanStack) getStartTime(spanID string) time.Time {
 	}
 	return time.Time{}
 }
-
