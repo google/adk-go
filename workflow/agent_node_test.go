@@ -135,9 +135,6 @@ func TestAgentNode_Run(t *testing.T) {
 	type Output struct {
 		Result string `json:"result"`
 	}
-	type ErrorOutput struct {
-		Result int `json:"result"`
-	}
 
 	tests := []struct {
 		name      string
