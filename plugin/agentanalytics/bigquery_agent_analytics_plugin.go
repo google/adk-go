@@ -321,7 +321,7 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 	return baseplugin.New(cfg)
 }
 
-func schemaFieldsMatch(existing, desired bq.Schema) (newFields bq.Schema, updatedRecords bq.Schema) {
+func schemaFieldsMatch(existing, desired bq.Schema) (newFields, updatedRecords bq.Schema) {
 	existingByName := make(map[string]*bq.FieldSchema)
 	for _, f := range existing {
 		existingByName[f.Name] = f
