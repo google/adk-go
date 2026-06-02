@@ -90,7 +90,7 @@ func DefaultConfig() Config {
 			MaxDelay:     10 * time.Second,
 			Multiplier:   2.0,
 		},
-		EventAllowlist:     nil,
-		EventDenylist:      nil,
+		EventAllowlist: nil,
+		EventDenylist:  nil,
 	}
 }
