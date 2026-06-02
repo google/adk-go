@@ -67,7 +67,7 @@ func NewRegistrySource(ctx context.Context, config RegistryConfig) (skills.Sourc
 	}, nil
 }
 
-var _ skills.Source = &vertexAIRegistrySource{}
+var _ skills.Source = (*vertexAIRegistrySource)(nil)
 
 // ListFrontmatters retrieves named skill frontmatters (if applicable) from the registry.
 //
