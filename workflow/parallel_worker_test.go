@@ -373,12 +373,10 @@ func TestParallelWorker_FailFast(t *testing.T) {
 		}
 		if input == "c" {
 			// Block until cancelled
-			select {
-			case <-ctx.Done():
-				atomic.StoreInt32(&workerCCancelled, 1)
-				close(cancelledCh)
-				return "", ctx.Err()
-			}
+			<-ctx.Done()
+			atomic.StoreInt32(&workerCCancelled, 1)
+			close(cancelledCh)
+			return "", ctx.Err()
 		}
 		return input, nil
 	}, defaultNodeConfig)
@@ -633,4 +631,3 @@ func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
 		t.Errorf("expected 2 attempts for wrapped node, got %d (scheduler likely retried the node)", atomic.LoadInt32(&wrappedAttempts))
 	}
 }
-
