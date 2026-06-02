@@ -427,3 +427,124 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 		t.Errorf("Expected partitioning field to be 'timestamp', got request body: %s", requestBody)
 	}
 }
+
+func TestEventFiltering(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.Enabled = true
+	config.ProjectID = "test-project"
+	config.DatasetID = "test-dataset"
+	config.TableName = "test-table"
+	config.EventAllowlist = []string{"USER_MESSAGE"}
+	config.EventDenylist = []string{"MODEL_REQUEST"}
+
+	mockTransport := &mockTransport{
+		roundTrip: func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("{}")),
+			}, nil
+		},
+	}
+	httpClient := &http.Client{Transport: mockTransport}
+	bqClient, err := bq.NewClient(ctx, config.ProjectID, option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("Failed to create bigquery client: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	requestsChan := make(chan *storagepb.AppendRowsRequest, 10)
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: requestsChan})
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial test server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("Failed to create BigQuery write client: %v", err)
+	}
+
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	mCtx := &mockInvocationContext{
+		ctx:          ctx,
+		agentName:    "test-agent",
+		sessionID:    "sess-id",
+		invocationID: "inv-id",
+		userID:       "user-id",
+	}
+
+	// Test USER_MESSAGE (in allowlist)
+	userMsgCb := p.OnUserMessageCallback()
+	if userMsgCb == nil {
+		t.Fatal("OnUserMessageCallback is nil")
+	}
+	_, err = userMsgCb(mCtx, &genai.Content{Parts: []*genai.Part{{Text: "hello"}}})
+	if err != nil {
+		t.Fatalf("OnUserMessageCallback error: %v", err)
+	}
+
+	p.AfterRunCallback()(mCtx)
+
+	select {
+	case req := <-requestsChan:
+		if req == nil {
+			t.Error("Received nil request")
+		}
+	case <-time.After(1 * time.Second):
+		t.Error("Timed out waiting for USER_MESSAGE event, expected it to be logged")
+	}
+
+	// Test MODEL_REQUEST (in denylist)
+	modelReqCb := p.BeforeModelCallback()
+	if modelReqCb == nil {
+		t.Fatal("BeforeModelCallback is nil")
+	}
+	// Clear requestsChan
+	for len(requestsChan) > 0 {
+		<-requestsChan
+	}
+
+	_, err = modelReqCb(mCtx, &model.LLMRequest{})
+	if err != nil {
+		t.Fatalf("BeforeModelCallback error: %v", err)
+	}
+	p.AfterRunCallback()(mCtx)
+
+	select {
+	case req := <-requestsChan:
+		t.Errorf("Expected no event to be logged for MODEL_REQUEST due to denylist, but got: %v", req)
+	case <-time.After(100 * time.Millisecond):
+		// Success, no event logged
+	}
+
+	// Test MODEL_RESPONSE (not in allowlist)
+	modelRespCb := p.AfterModelCallback()
+	if modelRespCb == nil {
+		t.Fatal("AfterModelCallback is nil")
+	}
+	_, err = modelRespCb(mCtx, &model.LLMResponse{}, nil)
+	if err != nil {
+		t.Fatalf("AfterModelCallback error: %v", err)
+	}
+	p.AfterRunCallback()(mCtx)
+
+	select {
+	case req := <-requestsChan:
+		t.Errorf("Expected no event to be logged for MODEL_RESPONSE due to allowlist, but got: %v", req)
+	case <-time.After(100 * time.Millisecond):
+		// Success, no event logged
+	}
+}
