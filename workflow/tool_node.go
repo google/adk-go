@@ -33,6 +33,10 @@ import (
 type ToolNode struct {
 	BaseNode
 	tool tool.Tool
+}
+
+// runnableTool is the internal interface that Node uses to invoke tools.
+type runnableTool interface {
 	Run(ctx tool.Context, args any) (map[string]any, error)
 }
 
