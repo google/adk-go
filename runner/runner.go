@@ -65,13 +65,23 @@ type PluginConfig struct {
 type RunOption func(*runOptions)
 
 type runOptions struct {
-	stateDelta map[string]any
+	stateDelta       map[string]any
+	yieldUserMessage bool
 }
 
 // WithStateDelta sets a state delta for the run invocation.
 func WithStateDelta(delta map[string]any) RunOption {
 	return func(o *runOptions) {
 		o.stateDelta = delta
+	}
+}
+
+// WithYieldUserMessage makes Run yield the user message event (after it is
+// appended to the session) before any agent/node events. Mirrors
+// adk-python's yield_user_message. Currently honored by the node path.
+func WithYieldUserMessage() RunOption {
+	return func(o *runOptions) {
+		o.yieldUserMessage = true
 	}
 }
 
@@ -173,6 +183,15 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
+		// Node path: an LlmAgent runs through the ADK 2.0 node runtime
+		// (the Go equivalent of adk-python's _run_node_async, reached for
+		// an LlmAgent root). Detection is automatic — the user does not
+		// configure anything. See run_node.go.
+		if isLlmAgent(agentToRun) {
+			r.runNode(ctx, storedSession, agentToRun, msg, cfg, options, yield)
+			return
+		}
+
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
@@ -207,7 +226,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			UserContent: msg,
 			RunConfig:   &cfg,
 		})
-		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
+		ctx, _, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -516,14 +535,14 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	}, wrappedIter, nil
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.InvocationContext, error) {
+func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.InvocationContext, *session.Event, error) {
 	if msg == nil {
-		return ctx, nil
+		return ctx, nil, nil
 	}
 	if pluginManager != nil {
 		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, msg)
 		if err != nil {
-			return ctx, fmt.Errorf("error running on run user message callback : %w", err)
+			return ctx, nil, fmt.Errorf("error running on run user message callback : %w", err)
 		}
 		if modifiedMsg != nil {
 			msg = modifiedMsg
@@ -548,7 +567,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 			}
 			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
 			if _, err := artifactsService.Save(ctx, fileName, part); err != nil {
-				return ctx, fmt.Errorf("failed to save artifact %s: %w", fileName, err)
+				return ctx, nil, fmt.Errorf("failed to save artifact %s: %w", fileName, err)
 			}
 			// Replace the part with a text placeholder
 			msg.Parts[i] = &genai.Part{
@@ -568,9 +587,9 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 	}
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
-		return ctx, fmt.Errorf("failed to append event to sessionService: %w", err)
+		return ctx, nil, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
-	return ctx, nil
+	return ctx, event, nil
 }
 
 // findAgentToRun returns the agent that should handle the next request based on
