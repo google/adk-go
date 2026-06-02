@@ -17,6 +17,8 @@ package workflowinternal
 import (
 	"fmt"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
@@ -24,7 +26,6 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/workflow"
-	"google.golang.org/genai"
 )
 
 type SingleTurnTool struct {

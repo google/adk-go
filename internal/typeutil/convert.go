@@ -31,17 +31,18 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 		return zero, err
 	}
 	if resolvedSchema != nil {
-		// Validate the JSON-decoded form rather than the Go value —
+		// Validate the JSON-decoded form rather than the Go value:
 		// struct validation can't account for `omitempty` or custom
 		// marshalling (see
-		// https://github.com/google/jsonschema-go/issues/23). Decoding
-		// into `any` accepts every JSON shape (object → map[string]any,
-		// scalar → string/float64/bool, array → []any); a
-		// map[string]any intermediate would reject non-object inputs
-		// the schema permits.
+		// https://github.com/google/jsonschema-go/issues/23).
 		var decoded any
 		if err := json.Unmarshal(rawArgs, &decoded); err != nil {
 			return zero, err
+		}
+		// An absent input (e.g. a tool invoked with no arguments)
+		// should satisfy an object schema.
+		if decoded == nil && schemaExpectsObject(resolvedSchema) {
+			decoded = map[string]any{}
 		}
 		if err := resolvedSchema.Validate(decoded); err != nil {
 			return zero, err
@@ -52,4 +53,26 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 		return zero, err
 	}
 	return typed, nil
+}
+
+// schemaExpectsObject reports whether the resolved schema's root type
+// is (or includes) "object". Used to decide whether a JSON `null`
+// input should be treated as an empty object for validation.
+func schemaExpectsObject(resolved *jsonschema.Resolved) bool {
+	if resolved == nil {
+		return false
+	}
+	root := resolved.Schema()
+	if root == nil {
+		return false
+	}
+	if root.Type == "object" {
+		return true
+	}
+	for _, t := range root.Types {
+		if t == "object" {
+			return true
+		}
+	}
+	return false
 }

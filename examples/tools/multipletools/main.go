@@ -107,7 +107,9 @@ func main() {
 	}
 
 	// Save message content in OpenTelemetry logs
-	os.Setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+	if err := os.Setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true"); err != nil {
+		log.Fatalf("Failed to set env var: %v", err)
+	}
 
 	config := &launcher.Config{
 		AgentLoader: agent.NewSingleLoader(a),
