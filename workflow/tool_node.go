@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"encoding/json"
 	"fmt"
 	"iter"
 
@@ -89,6 +90,18 @@ func NewToolNode(t tool.Tool, cfg NodeConfig) (*ToolNode, error) {
 
 func (n *ToolNode) runTool(toolCtx tool.Context, input any) (any, error) {
 	runnable := n.tool.(runnableTool)
+	// Upstream nodes (like LLM Agents) frequently produce serialized JSON strings representing
+	// structured tool call arguments. Since ToolNodes expect structured key-value mappings (maps)
+	// to conform to their input validation schemas, receiving a raw JSON string would cause a crash.
+	// If the input is a raw string, we attempt to eagerly unmarshal it as JSON into a map[string]any
+	// to make the workflow node fully self-healing and compatible with upstream text outputs.
+	if s, ok := input.(string); ok {
+		var m map[string]any
+		if json.Unmarshal([]byte(s), &m) == nil {
+			input = m
+		}
+	}
+
 	toolInput, err := n.ValidateInput(input)
 	if err != nil {
 		return nil, fmt.Errorf("converting input for tool %q: %w", n.tool.Name(), err)
