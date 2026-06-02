@@ -633,4 +633,3 @@ func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
 		t.Errorf("expected 2 attempts for wrapped node, got %d (scheduler likely retried the node)", atomic.LoadInt32(&wrappedAttempts))
 	}
 }
-
