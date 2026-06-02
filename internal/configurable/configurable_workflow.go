@@ -188,7 +188,7 @@ func parseEdges(ctx context.Context, parentPath string, nodes []yaml.Node) ([]wo
 }
 
 // resolveNodeLike maps a YAML identifier to a concrete workflow.Node.
-func resolveNodeLike(ctx context.Context, parentPath string, ref string) (workflow.Node, error) {
+func resolveNodeLike(ctx context.Context, parentPath, ref string) (workflow.Node, error) {
 	if ref == "START" {
 		return workflow.Start, nil
 	}
