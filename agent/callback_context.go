@@ -38,7 +38,11 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Cal
 		actions:           actions,
 		artifacts:         ic.Artifacts(),
 	}
-	return cc
+	// wrap the callbackContext in order to log information about someone using ToolContext-related methods for CallbackContext
+	wrapper := &callbackContextWrapper{
+		context: cc,
+	}
+	return wrapper
 }
 
 // NewCallbackContextWithArtifactTracking returns CallbackContext initialized with provided actions.
@@ -53,7 +57,11 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 		actions:           actions,
 		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
 	}
-	return cc
+	// wrap the callbackContext in order to log information about someone using ToolContext-related methods for CallbackContext
+	wrapper := &callbackContextWrapper{
+		context: cc,
+	}
+	return wrapper
 }
 
 // NewToolContext constructs a ToolContext for a tool execution.

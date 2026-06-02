@@ -194,3 +194,7 @@ type ToolContext interface {
 	//     request to ask the user has not been sent.
 	RequestConfirmation(hint string, payload any) error
 }
+
+type Context interface {
+	ToolContext
+}
