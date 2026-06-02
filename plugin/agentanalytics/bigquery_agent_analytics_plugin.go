@@ -363,9 +363,10 @@ func (p *hybridContentParser) parseContentObject(ctx context.Context, content *g
 		} else if part.InlineData != nil {
 			if p.offloader != nil {
 				ext := ".bin"
-				if part.InlineData.MIMEType == "image/png" {
+				switch part.InlineData.MIMEType {
+				case "image/png":
 					ext = ".png"
-				} else if part.InlineData.MIMEType == "image/jpeg" {
+				case "image/jpeg":
 					ext = ".jpg"
 				}
 
