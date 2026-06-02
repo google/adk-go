@@ -538,4 +538,3 @@ func TestOnEventCallback_A2A(t *testing.T) {
 		t.Error("Timed out waiting for request")
 	}
 }
-
