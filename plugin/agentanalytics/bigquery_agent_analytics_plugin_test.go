@@ -427,3 +427,115 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 		t.Errorf("Expected partitioning field to be 'timestamp', got request body: %s", requestBody)
 	}
 }
+
+func TestOnEventCallback_StateDelta(t *testing.T) {
+	p, requestsChan, mCtx := setupTestPlugin(t)
+
+	eventCb := p.OnEventCallback()
+	if eventCb == nil {
+		t.Fatal("OnEventCallback is nil")
+	}
+
+	_, err := eventCb(mCtx, &session.Event{
+		Author: "test-author",
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"key1": "value1",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("OnEventCallback error: %v", err)
+	}
+
+	p.AfterRunCallback()(mCtx)
+
+	select {
+	case req := <-requestsChan:
+		if req == nil {
+			t.Error("Received nil request")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Timed out waiting for request")
+	}
+}
+
+func TestOnEventCallback_HITL(t *testing.T) {
+	p, requestsChan, mCtx := setupTestPlugin(t)
+
+	eventCb := p.OnEventCallback()
+	if eventCb == nil {
+		t.Fatal("OnEventCallback is nil")
+	}
+
+	_, err := eventCb(mCtx, &session.Event{
+		Author: "test-author",
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						FunctionCall: &genai.FunctionCall{
+							Name: "adk_request_credential",
+							Args: map[string]any{"prompt": "need password"},
+						},
+					},
+					{
+						FunctionResponse: &genai.FunctionResponse{
+							Name:     "adk_request_credential",
+							Response: map[string]any{"password": "123"},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("OnEventCallback error: %v", err)
+	}
+
+	p.AfterRunCallback()(mCtx)
+
+	select {
+	case req := <-requestsChan:
+		if req == nil {
+			t.Error("Received nil request")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Timed out waiting for request")
+	}
+}
+
+func TestOnEventCallback_A2A(t *testing.T) {
+	p, requestsChan, mCtx := setupTestPlugin(t)
+
+	eventCb := p.OnEventCallback()
+	if eventCb == nil {
+		t.Fatal("OnEventCallback is nil")
+	}
+
+	_, err := eventCb(mCtx, &session.Event{
+		Author: "test-author",
+		LLMResponse: model.LLMResponse{
+			CustomMetadata: map[string]any{
+				"a2a:task_id":    "task-123",
+				"a2a:context_id": "ctx-456",
+				"a2a:response":   `{"result": "success"}`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("OnEventCallback error: %v", err)
+	}
+
+	p.AfterRunCallback()(mCtx)
+
+	select {
+	case req := <-requestsChan:
+		if req == nil {
+			t.Error("Received nil request")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Timed out waiting for request")
+	}
+}
+
