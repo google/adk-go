@@ -88,6 +88,7 @@ func (fakeArtifacts) List(context.Context) (*artifact.ListResponse, error) { ret
 func (fakeArtifacts) Load(context.Context, string) (*artifact.LoadResponse, error) {
 	return nil, nil
 }
+
 func (fakeArtifacts) LoadVersion(context.Context, string, int) (*artifact.LoadResponse, error) {
 	return nil, nil
 }

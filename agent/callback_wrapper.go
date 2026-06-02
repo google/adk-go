@@ -17,14 +17,14 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
-	"log"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool/toolconfirmation"
-	"google.golang.org/genai"
 )
 
 type callbackContextWrapper struct {

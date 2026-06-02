@@ -491,6 +491,7 @@ func (m *MockCallbackContext) ToolConfirmation() *toolconfirmation.ToolConfirmat
 func (m *MockCallbackContext) RequestConfirmation(hint string, payload any) error {
 	return fmt.Errorf("RequestConfirmation() is not supported for MockCallbackContext")
 }
+
 func (m *MockCallbackContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	return nil, fmt.Errorf("SearchMemory() is not supported for MockCallbackContext")
 }
