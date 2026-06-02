@@ -27,7 +27,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/model"
@@ -227,7 +226,7 @@ func TestSingleTurnTool_Run_HappyPath(t *testing.T) {
 	orchestrator := workflow.NewDynamicNode("orchestrator",
 		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
 			ic := ctx.WithContext(workflow.WithNodeContext(ctx, ctx))
-			toolCtx := toolinternal.NewToolContext(ic, "fc-id", &session.EventActions{}, nil)
+			toolCtx := agent.NewToolContext(ic, "fc-id", &session.EventActions{}, nil)
 			gotResult, gotErr = st.Run(toolCtx, map[string]any{"request": "hello"})
 			return nil, gotErr
 		},
