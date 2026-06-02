@@ -21,9 +21,9 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
 )
 
 type Example struct {
@@ -55,7 +55,7 @@ func (s exampleTool) Description() string {
 }
 
 // ProcessRequest adds the exampleTool examples to the LLM request.
-func (s exampleTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (s exampleTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
 	parts := ctx.UserContent().Parts
 	if len(parts) == 0 || parts[0].Text == "" {
 		return nil

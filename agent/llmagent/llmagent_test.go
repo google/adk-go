@@ -453,7 +453,7 @@ func TestToolCallback(t *testing.T) {
 		Number int `json:"number"`
 	}
 
-	handler := func(_ tool.Context, input Args) (Result, error) {
+	handler := func(_ agent.ToolContext, input Args) (Result, error) {
 		return Result{Number: 1}, nil
 	}
 	rand, _ := functiontool.New(functiontool.Config{
@@ -472,10 +472,10 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, nil
 				},
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -508,10 +508,10 @@ func TestToolCallback(t *testing.T) {
 			Tools:                    []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
 				// Since it retursn non nil, the next callback won't be executed.
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"number": "3"}, nil
 				},
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -543,10 +543,10 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, nil
 				},
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -579,10 +579,10 @@ func TestToolCallback(t *testing.T) {
 			Tools:                    []tool.Tool{rand},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
 				// Since it retursn non nil, the next callback won't be executed.
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "3"}, nil
 				},
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -614,12 +614,12 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"number": "3"}, nil
 				},
 			},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -651,12 +651,12 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, nil
 				},
 			},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, nil
 				},
 			},
@@ -861,7 +861,7 @@ func TestFunctionTool(t *testing.T) {
 	}
 
 	prompt := "what is the sum of 1 + 2?"
-	handler := func(_ tool.Context, input Args) (Result, error) {
+	handler := func(_ agent.ToolContext, input Args) (Result, error) {
 		if input.A != 1 || input.B != 2 {
 			t.Errorf("handler received %+v, want {a: 1, b: 2}", input)
 		}
