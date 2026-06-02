@@ -512,4 +512,3 @@ func (p *hybridContentParser) parse(ctx context.Context, content any, traceID, s
 	truncObj, truncated, _ := recursiveSmartTruncate(content, p.maxLen)
 	return truncObj, nil, truncated
 }
-
