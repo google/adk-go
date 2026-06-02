@@ -109,17 +109,6 @@ func (n *FunctionNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*se
 			return
 		}
 
-		// If the return type is already a *session.Event, yield it directly.
-		// This ensures that a custom FunctionNode can explicitly route its output
-		// (via event.Routes) to select conditional successors.
-		if ev, ok := output.(*session.Event); ok {
-			if ev.InvocationID == "" {
-				ev.InvocationID = ctx.InvocationID()
-			}
-			yield(ev, nil)
-			return
-		}
-
 		event := session.NewEvent(ctx.InvocationID())
 		event.Output = output
 		if s, ok := output.(string); ok {
