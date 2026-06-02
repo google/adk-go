@@ -460,7 +460,7 @@ func TestHybridContentParser(t *testing.T) {
 				{Text: "Another somewhat longer text that will still fit but combined with the other it might exceed if we joined them?"},
 			},
 		}
-		res, parts, trunc = parser.parse(ctx, contentInput, "trace-1", "span-1")
+		res, parts, _ = parser.parse(ctx, contentInput, "trace-1", "span-1")
 		resMap, ok := res.(map[string]any)
 		if !ok {
 			t.Fatalf("Expected result to be map, got %T", res)
@@ -516,7 +516,7 @@ func TestHybridContentParser(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to create GCS offloader: %v", err)
 		}
-		defer offloader.close()
+		defer func() { _ = offloader.close() }()
 
 		// Use hybridContentParser with offloader, maxLen=50, inlineTextLimit = 10 (which is smaller than our test text)
 		parser := &hybridContentParser{
