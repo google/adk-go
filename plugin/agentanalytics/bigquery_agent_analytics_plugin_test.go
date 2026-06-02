@@ -38,7 +38,6 @@ import (
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
-	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/functiontool"
 )
@@ -436,7 +435,7 @@ func TestToolProvenance(t *testing.T) {
 	localTool, err := functiontool.New[map[string]any, map[string]any](functiontool.Config{
 		Name:        "local_test_tool",
 		Description: "Local tool description",
-	}, func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+	}, func(ctx agent.Context, args map[string]any) (map[string]any, error) {
 		return map[string]any{"status": "ok"}, nil
 	})
 	if err != nil {
@@ -455,4 +454,3 @@ func TestToolProvenance(t *testing.T) {
 		t.Errorf("Expected SUB_AGENT tool origin, got: %s", origin)
 	}
 }
-
