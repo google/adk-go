@@ -66,6 +66,12 @@ type Config struct {
 
 	// Automatically add new columns to existing tables when schema evolves.
 	AutoSchemaUpgrade bool
+
+	// Automatically create per-event-type BigQuery views.
+	CreateViews bool
+
+	// Prefix for auto-created view names.
+	ViewPrefix string
 }
 
 // DefaultConfig returns the default configuration for the agent analytics plugin.
@@ -90,5 +96,7 @@ func DefaultConfig() Config {
 			Multiplier:   2.0,
 		},
 		AutoSchemaUpgrade: true,
+		CreateViews:       true,
+		ViewPrefix:         "v",
 	}
 }

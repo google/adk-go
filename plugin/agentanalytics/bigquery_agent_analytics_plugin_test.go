@@ -206,6 +206,8 @@ func setupTestPlugin(t *testing.T) (*baseplugin.Plugin, chan *storagepb.AppendRo
 	config.ProjectID = "test-project"
 	config.DatasetID = "test-dataset"
 	config.TableName = "test-table"
+	config.CreateViews = false
+	config.AutoSchemaUpgrade = false
 
 	mockTransport := &mockTransport{
 		roundTrip: func(r *http.Request) (*http.Response, error) {
@@ -351,6 +353,8 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 	config.ProjectID = "test-project"
 	config.DatasetID = "test-dataset"
 	config.TableName = "test-table"
+	config.CreateViews = false
+	config.AutoSchemaUpgrade = false
 
 	createCalled := false
 	var requestBody string
@@ -480,6 +484,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableExists(t *testing.T) {
 	config.DatasetID = "test-dataset"
 	config.TableName = "test-table"
 	config.AutoSchemaUpgrade = false
+	config.CreateViews = false
 
 	mockTransport := &mockTransport{
 		roundTrip: func(r *http.Request) (*http.Response, error) {
@@ -538,6 +543,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableNotFound_CreateSucceeds(t *testing
 	config.DatasetID = "test-dataset"
 	config.TableName = "test-table"
 	config.AutoSchemaUpgrade = false
+	config.CreateViews = false
 
 	createCalled := false
 
@@ -608,6 +614,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableNotFound_CreateFails(t *testing.T)
 	config.DatasetID = "test-dataset"
 	config.TableName = "test-table"
 	config.AutoSchemaUpgrade = false
+	config.CreateViews = false
 
 	mockTransport := &mockTransport{
 		roundTrip: func(r *http.Request) (*http.Response, error) {
@@ -675,6 +682,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_MetadataError_Non404(t *testing.T) {
 	config.DatasetID = "test-dataset"
 	config.TableName = "test-table"
 	config.AutoSchemaUpgrade = false
+	config.CreateViews = false
 
 	createAttempted := false
 
