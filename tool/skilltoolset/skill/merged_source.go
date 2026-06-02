@@ -105,3 +105,23 @@ func (m *mergedSource) LoadResource(ctx context.Context, name, resourcePath stri
 	}
 	return nil, ErrSkillNotFound
 }
+
+func (m *mergedSource) Search(ctx context.Context, query string) ([]*Frontmatter, error) {
+	var allFrontmatters []*Frontmatter
+	names := make(map[string]bool) // Track skill names to detect duplicates.
+
+	for _, source := range m.sources {
+		frontmatters, err := source.Search(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		for _, fm := range frontmatters {
+			if names[fm.Name] {
+				return nil, fmt.Errorf("%w: %q", ErrDuplicateSkill, fm.Name)
+			}
+			names[fm.Name] = true
+		}
+		allFrontmatters = append(allFrontmatters, frontmatters...)
+	}
+	return allFrontmatters, nil
+}

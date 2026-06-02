@@ -58,4 +58,7 @@ type Source interface {
 	//
 	// NOTE: The caller is responsible for closing the returned io.ReadCloser.
 	LoadResource(ctx context.Context, name, resourcePath string) (io.ReadCloser, error)
+
+	// Search returns skills discovered through semantic or keyword search query.
+	Search(ctx context.Context, query string) ([]*Frontmatter, error)
 }
