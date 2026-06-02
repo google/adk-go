@@ -97,6 +97,6 @@ func DefaultConfig() Config {
 		},
 		AutoSchemaUpgrade: true,
 		CreateViews:       true,
-		ViewPrefix:         "v",
+		ViewPrefix:        "v",
 	}
 }
