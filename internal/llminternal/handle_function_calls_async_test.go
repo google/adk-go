@@ -38,7 +38,7 @@ type SleepResult struct {
 	Success bool `json:"success"`
 }
 
-func sleepFunc(ctx tool.Context, input SleepArgs) (SleepResult, error) {
+func sleepFunc(ctx agent.ToolContext, input SleepArgs) (SleepResult, error) {
 	time.Sleep(time.Duration(input.DurationMS) * time.Millisecond)
 	return SleepResult{Success: true}, nil
 }

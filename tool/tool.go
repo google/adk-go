@@ -189,18 +189,18 @@ type confirmationTool struct {
 type runnableTool interface {
 	Tool
 	Declaration() *genai.FunctionDeclaration
-	Run(ctx Context, args any) (result map[string]any, err error)
+	Run(ctx agent.ToolContext, args any) (result map[string]any, err error)
 }
 
 func (t *confirmationTool) Declaration() *genai.FunctionDeclaration {
 	return t.runnableTool.Declaration()
 }
 
-func (t *confirmationTool) ProcessRequest(ctx Context, req *model.LLMRequest) error {
+func (t *confirmationTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 
-func (t *confirmationTool) Run(ctx Context, args any) (map[string]any, error) {
+func (t *confirmationTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
 	ft := t.runnableTool
 
 	// Check for Human-in-the-Loop confirmation.

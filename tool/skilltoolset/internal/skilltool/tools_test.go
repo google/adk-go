@@ -25,7 +25,6 @@ import (
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
-	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/skilltoolset/internal/skilltool"
 	"google.golang.org/adk/tool/skilltoolset/skill"
 )
@@ -75,7 +74,7 @@ func (m *mockSource) LoadResource(ctx context.Context, name, resourcePath string
 	return io.NopCloser(strings.NewReader(res)), nil
 }
 
-func createToolContext(t *testing.T) tool.Context {
+func createToolContext(t *testing.T) agent.ToolContext {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	return agent.NewToolContext(invCtx, "", nil, nil)
 }

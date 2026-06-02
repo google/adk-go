@@ -28,7 +28,6 @@ import (
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/loadmemorytool"
 )
 
@@ -171,7 +170,7 @@ func TestLoadMemoryTool_ProcessRequest(t *testing.T) {
 	}
 }
 
-func createToolContext(t *testing.T, mem *mockMemory) tool.Context {
+func createToolContext(t *testing.T, mem *mockMemory) agent.ToolContext {
 	t.Helper()
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{

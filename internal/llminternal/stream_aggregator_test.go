@@ -629,7 +629,7 @@ type GetWeatherArgs struct {
 	Location string `json:"location"`
 }
 
-func getWeather(ctx tool.Context, args GetWeatherArgs) (map[string]any, error) {
+func getWeather(ctx agent.ToolContext, args GetWeatherArgs) (map[string]any, error) {
 	return map[string]any{
 		"temperature": 22,
 		"condition":   "sunny",
@@ -945,7 +945,7 @@ func TestPartialFunctionCallsNotExecutedInNoneStreamingMode(t *testing.T) {
 		CallID string `json:"call_id"`
 	}
 
-	trackExecution := func(ctx tool.Context, args TrackExecutionArgs) (string, error) {
+	trackExecution := func(ctx agent.ToolContext, args TrackExecutionArgs) (string, error) {
 		executionLog = append(executionLog, args.CallID)
 		return "Executed: " + args.CallID, nil
 	}
