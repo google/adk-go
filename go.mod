@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	cloud.google.com/go v0.123.0
 	cloud.google.com/go/aiplatform v1.121.0
-	cloud.google.com/go/storage v1.56.1
+	cloud.google.com/go/storage v1.59.2
 	github.com/a2aproject/a2a-go v0.3.15
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
 	github.com/glebarez/sqlite v1.8.0
@@ -37,7 +37,7 @@ require (
 )
 
 require (
-	cloud.google.com/go/bigquery v1.73.1
+	cloud.google.com/go/bigquery v1.74.0
 	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 )
@@ -52,16 +52,13 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.25 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
-	golang.org/x/mod v0.33.0 // indirect
-	golang.org/x/telemetry v0.0.0-20260209163413-e7419c687ee4 // indirect
-	golang.org/x/tools v0.42.0 // indirect
+	golang.org/x/mod v0.35.0 // indirect
+	golang.org/x/telemetry v0.0.0-20260409153401-be6f6cb8b1fa // indirect
+	golang.org/x/tools v0.44.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 )
 
-require (
-	github.com/a2aproject/a2a-go/v2 v2.3.1
-	golang.org/x/mod v0.35.0 // indirect
-)
+require github.com/a2aproject/a2a-go/v2 v2.3.1
 
 require (
 	cel.dev/expr v0.25.1 // indirect
@@ -116,9 +113,9 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto v0.0.0-20260319201613-d00831a3d3e7 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260427160629-7cedc36a6bc4 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260511170946-3700d4141b60 // indirect
-	modernc.org/libc v1.22.3 // indirect
-	modernc.org/mathutil v1.5.0 // indirect
-	modernc.org/memory v1.5.0 // indirect
-	modernc.org/sqlite v1.21.1 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260511170946-3700d4141b60
+	modernc.org/libc v1.67.6 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.11.0 // indirect
+	modernc.org/sqlite v1.46.1 // indirect
 )
