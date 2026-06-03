@@ -85,7 +85,7 @@ func (t *artifactsTool) Declaration() *genai.FunctionDeclaration {
 }
 
 // Run implements tool.Tool.
-func (t *artifactsTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (t *artifactsTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
@@ -117,7 +117,7 @@ func (t *artifactsTool) Run(ctx tool.Context, args any) (map[string]any, error) 
 
 // ProcessRequest processes the LLM request. It packs the tool, appends initial
 // instructions, and processes any load artifacts function calls.
-func (t *artifactsTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *artifactsTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func (t *artifactsTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) 
 	return t.processLoadArtifactsFunctionCall(ctx, req)
 }
 
-func (t *artifactsTool) appendInitialInstructions(ctx tool.Context, req *model.LLMRequest) error {
+func (t *artifactsTool) appendInitialInstructions(ctx agent.ToolContext, req *model.LLMRequest) error {
 	resp, err := ctx.Artifacts().List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", err)
@@ -151,7 +151,7 @@ func (t *artifactsTool) appendInitialInstructions(ctx tool.Context, req *model.L
 	return nil
 }
 
-func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx tool.Context, req *model.LLMRequest) error {
+func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.ToolContext, req *model.LLMRequest) error {
 	if len(req.Contents) == 0 {
 		return nil
 	}

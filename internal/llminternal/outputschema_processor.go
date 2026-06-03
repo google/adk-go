@@ -27,7 +27,6 @@ import (
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 )
 
 const (
@@ -129,7 +128,7 @@ func (t *setModelResponseTool) Declaration() *genai.FunctionDeclaration {
 	}
 }
 
-func (t *setModelResponseTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (t *setModelResponseTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type for set_model_response: %T", args)

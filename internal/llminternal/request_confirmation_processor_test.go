@@ -51,7 +51,7 @@ func (m *mockTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{Name: m.name}
 }
 
-func (m *mockTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (m *mockTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
 	if ctx.ToolConfirmation() == nil || !ctx.ToolConfirmation().Confirmed {
 		return map[string]any{"error": string("Tool execution not confirmed")}, nil
 	}

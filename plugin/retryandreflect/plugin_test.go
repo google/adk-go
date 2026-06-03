@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/agent"
 )
 
 type mockTool struct {
@@ -31,7 +31,7 @@ func (m *mockTool) Description() string { return "" }
 func (m *mockTool) IsLongRunning() bool { return false }
 
 type mockContext struct {
-	tool.Context
+	agent.ToolContext
 	invocationID string
 }
 

@@ -410,7 +410,18 @@ func TestA2ACleanupPropagation(t *testing.T) {
 	// Root server connects to server B through remote subagent
 	remoteAgentB := newA2ARemoteAgent(t, "remote-agent-b", serverB)
 	rootA := newRootAgent("agent-b", remoteAgentB)
-	executorA := newAgentExecutor(rootA, nil, adka2a.OutputArtifactPerEvent)
+	executorCleanupCalledChan := make(chan struct{}, 2)
+	executorA := adka2a.NewExecutor(adka2a.ExecutorConfig{
+		OutputMode: adka2a.OutputArtifactPerRun,
+		RunnerConfig: runner.Config{
+			AppName:        rootA.Name(),
+			SessionService: session.InMemoryService(),
+			Agent:          rootA,
+		},
+		A2AExecutionCleanupCallback: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext, subAgentCards []*a2a.AgentCard, result a2a.SendMessageResult, cause error) {
+			executorCleanupCalledChan <- struct{}{}
+		},
+	})
 	serverA := startA2AServer(executorA)
 	defer serverA.Close()
 
@@ -461,9 +472,23 @@ func TestA2ACleanupPropagation(t *testing.T) {
 
 	// Check subagent task got cancelled when the parent task was cancelled.
 	// Reads from channel twice because cleanup gets called both for cancelation and execution.
-	<-remoteCleanupCalledChan
-	<-remoteCleanupCalledChan
+	timeout := time.After(5 * time.Second)
+	for range 2 {
+		select {
+		case <-remoteCleanupCalledChan:
+		case <-timeout:
+			t.Fatalf("remote cleanup was not called")
+		}
+	}
 	remoteTaskID := <-remoteTaskIDChan
+
+	for range 2 {
+		select {
+		case <-executorCleanupCalledChan:
+		case <-timeout:
+			t.Fatalf("executor cleanup was not called")
+		}
+	}
 	remoteClient := newA2AClient(t, serverB)
 	remoteTask, err := remoteClient.GetTask(t.Context(), &a2a.GetTaskRequest{ID: remoteTaskID})
 	if err != nil {
@@ -861,7 +886,7 @@ func newLongRunningTool(t *testing.T) tool.Tool {
 		Name:          approvalToolName,
 		Description:   "Request approval before proceeding.",
 		IsLongRunning: true,
-	}, func(ctx tool.Context, x map[string]any) (approval, error) {
+	}, func(ctx agent.ToolContext, x map[string]any) (approval, error) {
 		return approval{Status: approvalStatusPending, TicketID: a2a.NewContextID()}, nil
 	})
 	if err != nil {
@@ -876,7 +901,7 @@ func newToolConfirmation(t *testing.T) tool.Tool {
 	requestApproval, err := functiontool.New(functiontool.Config{
 		Name:        approvalToolName,
 		Description: "Request approval before proceeding.",
-	}, func(ctx tool.Context, x map[string]any) (approval, error) {
+	}, func(ctx agent.ToolContext, x map[string]any) (approval, error) {
 		confirmation := ctx.ToolConfirmation()
 		if confirmation == nil {
 			ticketID := a2a.NewContextID()
