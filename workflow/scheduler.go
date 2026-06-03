@@ -189,9 +189,22 @@ type queueItem interface{ isQueueItem() }
 // consumer. nodeName is required so the consumer can correlate the
 // event with the right nodeRun without relying on channel-FIFO-
 // per-task semantics (which Go channels do not provide).
+//
+// processed, when non-nil, is a back-pressure handshake: the
+// producing goroutine blocks until the consumer closes it, which
+// happens only after the event has been yielded to (and thus
+// persisted by) the caller. This restores the ordering guarantee
+// that a non-partial event — notably a function-response — is
+// visible in the session before the producing LlmAgent flow loops
+// and rebuilds the next model request's contents from session
+// history. It mirrors adk-python's enqueue_event/processed_signal
+// handshake (invocation_context.enqueue_event ↔
+// _consume_event_queue). Nil for partial events, which are
+// fire-and-forget and never persisted.
 type eventItem struct {
-	nodeName string
-	ev       *session.Event
+	nodeName  string
+	ev        *session.Event
+	processed chan struct{}
 }
 
 func (eventItem) isQueueItem() {}
@@ -445,11 +458,30 @@ func runNode(
 			completion.err = err
 			return
 		}
+		// For non-partial events, install a processed handshake and
+		// block until the consumer has yielded (and thus persisted)
+		// the event. This guarantees a function-response is in the
+		// session before the node's LlmAgent flow loops and rebuilds
+		// the next model request from session history — otherwise the
+		// model would not see the tool result and would re-issue the
+		// call. Partial (streaming) events are fire-and-forget.
+		var processed chan struct{}
+		if ev != nil && !ev.LLMResponse.Partial {
+			processed = make(chan struct{})
+		}
 		select {
-		case out <- eventItem{nodeName: name, ev: ev}:
+		case out <- eventItem{nodeName: name, ev: ev, processed: processed}:
 		case <-ctx.Done():
 			completion.err = ctx.Err()
 			return
+		}
+		if processed != nil {
+			select {
+			case <-processed:
+			case <-ctx.Done():
+				completion.err = ctx.Err()
+				return
+			}
 		}
 	}
 	// If the node's iter returned cleanly but the context was
@@ -522,6 +554,17 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 					draining = true
 					s.cancelAll()
 				}
+			}
+			// Release the producer's back-pressure handshake. By
+			// this point the event has been yielded to the caller
+			// (which persists non-partial events synchronously), so
+			// the producing node may safely resume and rebuild its
+			// next request from the now-updated session. Always
+			// signal — even when draining — so a blocked producer
+			// does not leak. Closed-channel double-signal is
+			// impossible: each eventItem carries a fresh channel.
+			if it.processed != nil {
+				close(it.processed)
 			}
 		case completionItem:
 			err := s.handleCompletion(it, !draining)
