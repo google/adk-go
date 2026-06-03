@@ -100,8 +100,20 @@ var (
 
 func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		// pauseOnLongRunning gates the long-running pause guard below.
+		// It is set only by the node runtime (the analog of adk-python
+		// is_resumable). When true, a long-running tool call ends the
+		// turn so the node can park on it and resume on a later turn
+		// with the human reply. When false (legacy agent path), flow
+		// keeps the non-resumable behavior — continue and summarize —
+		// matching adk-python's test_functions_long_running.
+		pauseOnLongRunning := false
+		if rc := runconfig.FromContext(ctx); rc != nil {
+			pauseOnLongRunning = rc.PauseOnLongRunning
+		}
 		for {
 			var lastEvent *session.Event
+			openLongRunning := false
 			for ev, err := range f.runOneStep(ctx) {
 				if err != nil {
 					yield(nil, err)
@@ -112,8 +124,16 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 					return
 				}
 				lastEvent = ev
+				if ev != nil && len(ev.LongRunningToolIDs) > 0 {
+					openLongRunning = true
+				}
 			}
 			if lastEvent == nil || lastEvent.IsFinalResponse() {
+				return
+			}
+			if pauseOnLongRunning && openLongRunning {
+				// A long-running tool call is pending its real reply;
+				// end the turn so the node runtime can pause for it.
 				return
 			}
 			if lastEvent.LLMResponse.Partial {

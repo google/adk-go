@@ -135,11 +135,18 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx a
 		t.Fatalf("failed to collect events: %v", err)
 	}
 
-	// 3. Assertions for Initial Run
-	if len(mockModel.Requests) != 2 {
-		// Marshal the slice into a readable JSON string
+	// 3. Assertions for Initial Run.
+	//
+	// The LlmAgent runs through the node runtime, which pauses on a
+	// long-running tool call. So turn 1 issues exactly ONE model
+	// request (the user prompt), the tool returns its "pending"
+	// result, and the turn ends WITHOUT a follow-up summarization
+	// request. The model's queued "response1" is consumed on the
+	// first resume turn instead. This matches adk-python's resumable
+	// node runtime (pause on the long-running call, resume later).
+	if len(mockModel.Requests) != 1 {
 		requestsJSON, _ := json.MarshalIndent(mockModel.Requests, "", "  ")
-		t.Fatalf("got %d requests, want 2;\n- requests:\n%s", len(mockModel.Requests), requestsJSON)
+		t.Fatalf("got %d requests, want 1;\n- requests:\n%s", len(mockModel.Requests), requestsJSON)
 	}
 	if *callCount != 1 {
 		t.Errorf("function called %d times, want 1", *callCount)
@@ -153,20 +160,11 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx a
 		t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
 	}
 
-	// Assert second request
-	wantSecondReq := []*genai.Content{
-		genai.NewContentFromText("test1", "user"),
-		genai.NewContentFromFunctionCall("increaseByOne", map[string]any{}, "model"),
-		genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{resultKey: "pending"}, "user"),
-	}
-	if diff := cmp.Diff(wantSecondReq, mockModel.Requests[1].Contents); diff != "" {
-		t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
-	}
-
+	// Turn 1 events: the long-running call and its "pending" response.
+	// No model-summarization text event — the turn paused.
 	wantEventParts := []*genai.Part{
 		genai.NewPartFromFunctionCall("increaseByOne", map[string]any{}),
 		genai.NewPartFromFunctionResponse("increaseByOne", map[string]any{resultKey: "pending"}),
-		genai.NewPartFromText("response1"),
 	}
 	if diff := cmp.Diff(wantEventParts, eventParts, cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
 		cmpopts.IgnoreFields(genai.FunctionResponse{}, "ID")); diff != "" {
@@ -176,6 +174,10 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx a
 	functionCallEventPart := eventParts[0]
 	idFromTheFunctionCallEvent := functionCallEventPart.FunctionCall.ID
 
+	// Each resume turn supplies the human reply as a FunctionResponse
+	// keyed by the original call ID. The node resumes, the model is
+	// called once more, and it returns the next queued text response.
+	// Request counts start at 2 (turn 1 made request #1).
 	testCases := []struct {
 		name           string         // Name for the Run subtest
 		inputContent   *genai.Content // The content to send
@@ -189,9 +191,9 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx a
 			inputContent: NewContentFromFunctionResponseWithID(
 				"increaseByOne", map[string]any{"status": "still waiting"}, idFromTheFunctionCallEvent, "user",
 			),
-			wantReqCount:   3,
+			wantReqCount:   2,
 			wantEventCount: 1,
-			wantEventText:  "response2",
+			wantEventText:  "response1",
 			wantContent:    genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{"status": "still waiting"}, "user"),
 		},
 		{
@@ -199,9 +201,9 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx a
 			inputContent: NewContentFromFunctionResponseWithID(
 				"increaseByOne", map[string]any{"result": 2}, idFromTheFunctionCallEvent, "user",
 			),
-			wantReqCount:   4,
+			wantReqCount:   3,
 			wantEventCount: 1,
-			wantEventText:  "response3",
+			wantEventText:  "response2",
 			wantContent:    genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{"result": 2}, "user"),
 		},
 		{
@@ -209,9 +211,9 @@ func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx a
 			inputContent: NewContentFromFunctionResponseWithID(
 				"increaseByOne", map[string]any{"result": 3}, idFromTheFunctionCallEvent, "user",
 			),
-			wantReqCount:   5,
+			wantReqCount:   4,
 			wantEventCount: 1,
-			wantEventText:  "response4",
+			wantEventText:  "response3",
 			wantContent:    genai.NewContentFromFunctionResponse("increaseByOne", map[string]any{"result": 3}, "user"),
 		},
 	}
@@ -298,25 +300,25 @@ func TestLongRunningToolIDsAreSet(t *testing.T) {
 		t.Fatalf("failed to collect events: %v", err)
 	}
 
-	if len(events) != 3 { // first event is function call, seconds is function response, third is llm message back
-		// Marshal the slice into a readable JSON string
+	// The LlmAgent runs through the node runtime, which pauses on a
+	// long-running tool call: turn 1 ends after the call + its initial
+	// "pending" response, WITHOUT a follow-up model summarization. So
+	// exactly 2 events (call, pending response); "response1" is not
+	// produced until a resume turn supplies the real reply.
+	if len(events) != 2 {
 		eventsJSON, _ := json.MarshalIndent(events, "", "  ")
-		t.Fatalf("got %d for events length, want 3;\n- events:\n%s", len(events), eventsJSON)
+		t.Fatalf("got %d for events length, want 2;\n- events:\n%s", len(events), eventsJSON)
 	}
 
 	// Assert responses
 	functionCallEvent := events[0]
 	functionResponseEvent := events[1]
-	llmResponseEvent := events[2]
 	// First event should have LongRunningToolIDs field
 	if functionCallEvent.LongRunningToolIDs == nil || len(functionCallEvent.LongRunningToolIDs) != 1 {
 		t.Fatalf("Invalid LongRunningToolIDs for functionCallEvent")
 	}
 	if functionResponseEvent.LongRunningToolIDs != nil {
 		t.Errorf("Invalid LongRunningToolIDs for functionResponseEvent")
-	}
-	if len(llmResponseEvent.LongRunningToolIDs) != 0 {
-		t.Errorf("Invalid LongRunningToolIDs for llmResponseEvent")
 	}
 	if functionCallEvent.LongRunningToolIDs[0] != functionCallEvent.LLMResponse.Content.Parts[0].FunctionCall.ID {
 		t.Fatalf("Invalid LongRunningToolIDs for functionCallEvent got %q expected %q",

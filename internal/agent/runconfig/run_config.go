@@ -31,6 +31,16 @@ const (
 type RunConfig struct {
 	StreamingMode StreamingMode
 	Live          *agent.LiveRunConfig
+
+	// PauseOnLongRunning makes the LlmAgent flow stop the turn after a
+	// long-running tool call instead of feeding its initial "pending"
+	// response back to the model in the same turn. It is set by the
+	// node runtime (the equivalent of adk-python's is_resumable): the
+	// node then parks on the call's LongRunningToolIDs and resumes on
+	// a later turn carrying the human reply. The legacy agent path
+	// leaves this false, so flow keeps the non-resumable behavior
+	// (continue and summarize), matching adk-python.
+	PauseOnLongRunning bool
 }
 
 func ToContext(ctx context.Context, cfg *RunConfig) context.Context {

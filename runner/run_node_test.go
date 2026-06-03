@@ -86,30 +86,52 @@ func userText(text string) *genai.Content {
 	return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: text}}}
 }
 
-// runStateForAgent loads the RunState the node path persists, using the
-// same naming scheme the runner uses internally ("<app>/<agent name>").
+// runStateForAgent reconstructs the paused RunState from session
+// history the same way the runner does (the node path no longer
+// persists a RunState blob; it rehydrates from events).
 func runStateForAgent(t *testing.T, ctx context.Context, svc session.Service, a agent.Agent) *workflow.RunState {
 	t.Helper()
 	got, err := svc.Get(ctx, &session.GetRequest{AppName: nodeTestApp, UserID: nodeTestUser, SessionID: nodeTestSession})
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	state, err := workflow.LoadRunState(got.Session, nodeTestApp+"/"+a.Name())
+	// Rebuild a single-node workflow whose node name matches the
+	// agent (ReconstructRunState attributes events by author == node
+	// name), so reconstruction sees the same waiting node the runner
+	// would.
+	node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
 	if err != nil {
-		t.Fatalf("LoadRunState() error = %v", err)
+		t.Fatalf("workflow.NewAgentNode() error = %v", err)
+	}
+	wf, err := workflow.New(nodeTestApp+"/"+a.Name(), []workflow.Edge{
+		{From: workflow.Start, To: node},
+	})
+	if err != nil {
+		t.Fatalf("workflow.New() error = %v", err)
+	}
+	state, err := wf.ReconstructRunState(got.Session)
+	if err != nil {
+		t.Fatalf("ReconstructRunState() error = %v", err)
 	}
 	return state
 }
 
-// hasWaitingInterrupt reports whether the RunState has a node parked on a
-// human-input request with the given InterruptID.
+// hasWaitingInterrupt reports whether the RunState has a node parked
+// (NodeWaiting) on the given long-running interrupt ID. The node path
+// pauses on Event.LongRunningToolIDs recorded as NodeState.Interrupts
+// (no synthetic RequestInput), matching adk-python.
 func hasWaitingInterrupt(state *workflow.RunState, id string) bool {
 	if state == nil {
 		return false
 	}
 	for _, ns := range state.Nodes {
-		if ns != nil && ns.Status == workflow.NodeWaiting && ns.PendingRequest != nil && ns.PendingRequest.InterruptID == id {
-			return true
+		if ns == nil || ns.Status != workflow.NodeWaiting {
+			continue
+		}
+		for _, got := range ns.Interrupts {
+			if got == id {
+				return true
+			}
 		}
 	}
 	return false
@@ -232,10 +254,10 @@ func TestRunner_LlmAgent_LongRunningTool_PausesAndResumes(t *testing.T) {
 	r := newNodeTestRunner(t, a, svc)
 
 	// --- Turn 1: should pause on the long-running tool -----------------
-	var (
-		longRunningID string
-		sawPause      bool
-	)
+	// The pause signal is the long-running tool-call event itself
+	// (Event.LongRunningToolIDs); the scheduler parks the node on it
+	// with no separate RequestInput event, matching adk-python.
+	var longRunningID string
 	for ev, err := range r.Run(ctx, nodeTestUser, nodeTestSession, userText("please approve"), agent.RunConfig{}) {
 		if err != nil {
 			t.Fatalf("turn 1 Run() error = %v", err)
@@ -246,15 +268,16 @@ func TestRunner_LlmAgent_LongRunningTool_PausesAndResumes(t *testing.T) {
 		if len(ev.LongRunningToolIDs) > 0 {
 			longRunningID = ev.LongRunningToolIDs[0]
 		}
-		if ev.RequestedInput != nil {
-			sawPause = true
-		}
 	}
 	if longRunningID == "" {
 		t.Fatal("did not observe a long-running tool call from the LlmAgent")
 	}
-	if !sawPause {
-		t.Fatal("node wrapper did not bridge the long-running tool into a workflow RequestedInput pause")
+	// The long-running tool must END the turn: the flow must not call the
+	// model again with the tool's pending response in the same turn (doing
+	// so makes a real model emit a spurious final answer instead of
+	// pausing). Exactly one model call is expected in turn 1.
+	if m.call != 1 {
+		t.Errorf("turn 1 made %d model calls, want 1 (long-running tool must stop the turn, not feed its pending response back to the model)", m.call)
 	}
 
 	// RunState must be persisted with the pause so turn 2 can resume.
