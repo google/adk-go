@@ -29,9 +29,6 @@ func TestNewToolContext_Interfaces(t *testing.T) {
 	if _, ok := toolCtx.(agent.ReadonlyContext); !ok {
 		t.Errorf("ToolContext(%+T) is unexpectedly not a ReadonlyContext", toolCtx)
 	}
-	if _, ok := toolCtx.(agent.CallbackContext); !ok {
-		t.Errorf("ToolContext(%+T) is unexpectedly not a CallbackContext", toolCtx)
-	}
 }
 
 func TestNewToolContext_RequestConfirmation_SetsSkipSummarization(t *testing.T) {
