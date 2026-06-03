@@ -45,20 +45,23 @@ func isLlmAgent(a agent.Agent) bool {
 	return ok
 }
 
-// runNode is the Go equivalent of adk-python Runner._run_node_async. It
-// drives an LlmAgent (agentToRun) through the workflow engine by wrapping
-// it in a node and running a single-node workflow (START -> node),
-// reusing the same session/plugin/persist pipeline as the agent path.
-//
-// Detection and wrapping are automatic (see Run); the user does not
-// configure anything. The wrapping node bridges the LlmAgent's own HITL
-// (long-running tools / tool confirmation, which emit LongRunningToolIDs)
-// into a workflow pause; see llmAgentNode.
-//
-// The workflow scheduler owns the per-node goroutines and the event
-// channel (the analog of Python's ic.event_queue), and cancels in-flight
-// nodes when the caller stops consuming the returned iterator. There is
-// therefore no need for a done-sentinel or an explicit cleanup task here.
+// buildRunnerNode wraps an agent as the workflow node that the node
+// runtime drives, dispatching on the agent kind (the Go counterpart of
+// adk-python's build_node). Only LlmAgent is supported today; other agent
+// kinds will dispatch here as they gain node wrappers.
+func buildRunnerNode(a agent.Agent) (workflow.Node, error) {
+	if isLlmAgent(a) {
+		return newLlmAgentNode(a), nil
+	}
+	return nil, fmt.Errorf("node runtime: unsupported agent type %T", a)
+}
+
+// runNode drives an LlmAgent through the workflow engine by wrapping it
+// in a single-node workflow (START -> node), reusing the agent path's
+// session/plugin/persist pipeline. The wrapping node bridges the agent's
+// HITL (long-running tools, which emit LongRunningToolIDs) into a
+// workflow pause; see newLlmAgentNode. Go equivalent of adk-python
+// Runner._run_node_async.
 func (r *Runner) runNode(
 	ctx context.Context,
 	storedSession session.Session,
@@ -68,11 +71,11 @@ func (r *Runner) runNode(
 	opts runOptions,
 	yield func(*session.Event, error) bool,
 ) {
-	// Wrap the LlmAgent in the HITL-bridging node and build a single-node
-	// workflow (START -> node). The workflow name must be stable and
-	// non-empty so its RunState persists across turns for HITL resume; we
-	// derive it from the app name and the agent name.
-	node := newLlmAgentNode(agentToRun)
+	node, err := buildRunnerNode(agentToRun)
+	if err != nil {
+		yield(nil, err)
+		return
+	}
 	wf, err := workflow.New(rootWorkflowName(r.appName, agentToRun), []workflow.Edge{
 		{From: workflow.Start, To: node},
 	})
@@ -81,29 +84,23 @@ func (r *Runner) runNode(
 		return
 	}
 
-	// 1. Build the invocation context. UserContent carries the user
-	// message, which Workflow.Run reads as the workflow's seed input
-	// (workflow.userInput); this mirrors Python's node_input.
+	// UserContent is read by Workflow.Run as the workflow's seed input.
 	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg)
 
-	// Append the incoming user message (fresh text or the function-
-	// response reply) to the session for history. Same helper the agent
-	// path uses; it also runs the on_user_message plugin callback.
+	// Append the user message to history (also runs the on_user_message
+	// plugin callback), same as the agent path.
 	ictx, userEvent, err := r.appendMessageToSession(ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, opts.stateDelta)
 	if err != nil {
 		yield(nil, err)
 		return
 	}
-	// Optionally yield the user message event before any node events,
-	// mirroring adk-python's yield_user_message.
 	if opts.yieldUserMessage && userEvent != nil {
 		if !yield(userEvent, nil) {
 			return
 		}
 	}
 
-	// 2. Plugin lifecycle: defer after_run, run before_run and honor an
-	// early-exit decision. Mirrors the agent path.
+	// Plugin lifecycle: defer after_run, run before_run, honor early exit.
 	pluginManager := r.pluginManager
 	if pluginManager != nil {
 		defer pluginManager.RunAfterRunCallback(ictx)
@@ -124,27 +121,25 @@ func (r *Runner) runNode(
 		}
 	}
 
-	// 3. Choose the producer: Resume (HITL continuation) vs Run (fresh).
-	// We treat the turn as a resume only when a function response in msg
-	// matches a node that is currently waiting in the persisted RunState.
-	state, err := workflow.LoadRunState(storedSession, wf.Name())
+	// Resume (HITL continuation) vs Run (fresh): a resume is a turn whose
+	// function response answers a node waiting on an open interrupt. The
+	// paused state comes from session history, not a persisted blob.
+	state, err := wf.ReconstructRunState(storedSession)
 	if err != nil {
-		yield(nil, fmt.Errorf("failed to load workflow run state: %w", err))
+		yield(nil, fmt.Errorf("failed to reconstruct workflow run state: %w", err))
 		return
 	}
 
 	var events iter.Seq2[*session.Event, error]
-	if responses := buildResumeResponses(msg, state, storedSession); len(responses) > 0 {
+	responses := buildResumeResponses(msg, state, storedSession)
+	if len(responses) > 0 {
 		events = wf.Resume(ictx, state, responses)
 	} else {
 		events = wf.Run(ictx)
 	}
 
-	// 4. Consume the workflow's event stream. This is the same loop the
-	// agent path runs (the equivalent of Python's _consume_event_queue):
-	// run the on_event plugin callback, persist non-partial events, and
-	// yield. The RunState StateDelta event emitted by Run/Resume flows
-	// through the same persist branch, so HITL pause state is saved here.
+	// Consume the workflow's event stream, same loop as the agent path:
+	// on_event plugin callback, persist non-partial events, yield.
 	for event, evErr := range events {
 		if evErr != nil {
 			if !yield(nil, evErr) {
@@ -153,12 +148,9 @@ func (r *Runner) runNode(
 			continue
 		}
 
-		// Stamp the agent name as author on internal control events that
-		// the workflow engine emits without one (e.g. the RunState
-		// StateDelta event from Run/Resume). Otherwise a later turn's
-		// findAgentToRun would scan these events and log a spurious
-		// "Event from an unknown agent" warning, since an empty author
-		// resolves to no agent in the tree.
+		// Stamp the agent as author on engine control events that have
+		// none, else a later turn's findAgentToRun logs a spurious
+		// "unknown agent" warning for the empty author.
 		if event.Author == "" {
 			event.Author = agentToRun.Name()
 		}
@@ -176,7 +168,6 @@ func (r *Runner) runNode(
 			}
 		}
 
-		// Only commit non-partial events to the session service.
 		if !event.LLMResponse.Partial {
 			if err := r.sessionService.AppendEvent(ictx, storedSession, event); err != nil {
 				yield(nil, fmt.Errorf("failed to add event to session: %w", err))
@@ -197,10 +188,9 @@ func rootWorkflowName(appName string, a agent.Agent) string {
 	return appName + "/" + a.Name()
 }
 
-// newNodeInvocationContext builds the InvocationContext for the node
-// path. It mirrors the agent path's context wiring: the parent map is
-// attached so the wrapped LlmAgent can transfer / resolve tools, and the
-// resolved agent is set so the flow runs against it.
+// newNodeInvocationContext builds the node path's InvocationContext,
+// mirroring the agent path's wiring (parent map for transfer/tool
+// resolution, resolved agent for the flow).
 func (r *Runner) newNodeInvocationContext(
 	ctx context.Context,
 	storedSession session.Session,
@@ -244,24 +234,16 @@ func (r *Runner) newNodeInvocationContext(
 	})
 }
 
-// buildResumeResponses maps each function response in msg to its
-// InterruptID -> payload, but only for responses that answer a
-// still-pending long-running call. This is the Go analog of adk-python's
-// _extract_resume_inputs.
+// buildResumeResponses maps msg's function responses to interruptID ->
+// payload, keeping only those that answer a still-pending interrupt.
+// Returns nil for a fresh turn (nothing answered). Go analog of
+// adk-python _extract_resume_inputs.
 //
-// A turn is a HITL resume when msg carries a FunctionResponse whose ID
-// matches a long-running tool call that the node paused on. We accept a
-// match against EITHER the single interrupt currently recorded as waiting
-// in RunState OR any unanswered long-running call still open in session
-// history. The latter is essential when the model emitted more than one
-// long-running call in a turn: the workflow scheduler can only record one
-// RequestedInput per activation, so RunState.waiting tracks just one of
-// them, but the human may answer the others. Matching against open
-// history calls lets each answer drive a resume, after which the node
-// re-runs and re-pauses on whatever is still unanswered until all are
-// resolved.
-//
-// Returns nil when the turn answers no pending interrupt (a fresh turn).
+// Pending = interrupts waiting in RunState PLUS any unanswered
+// long-running call open in history. The latter matters when one turn
+// emitted several long-running calls: RunState records only one as
+// waiting, but the human may answer the others; matching open history
+// calls lets each answer drive a resume until all are resolved.
 func buildResumeResponses(msg *genai.Content, state *workflow.RunState, sess session.Session) map[string]any {
 	if msg == nil {
 		return nil
@@ -290,8 +272,7 @@ func buildResumeResponses(msg *genai.Content, state *workflow.RunState, sess ses
 		if out == nil {
 			out = map[string]any{}
 		}
-		// Pass the response payload through opaquely. Workflow.Resume
-		// validates it against the request's ResponseSchema if any.
+		// Opaque payload; Workflow.Resume validates against any schema.
 		out[fr.ID] = decodeResumeResponse(fr)
 	}
 	return out
@@ -324,10 +305,9 @@ func openLongRunningCallIDs(sess session.Session) map[string]struct{} {
 	return open
 }
 
-// decodeResumeResponse extracts the user-supplied payload from a function
-// response. It accepts the shapes the console launcher and other ADK
-// runtimes produce: {"response": <value>}, {"payload": <any>}, or the raw
-// Response map. A string under "response" is parsed as JSON when possible.
+// decodeResumeResponse extracts the user payload from a function
+// response, accepting {"response": v}, {"payload": v}, or the raw map. A
+// string under "response" is JSON-parsed when possible.
 func decodeResumeResponse(fr *genai.FunctionResponse) any {
 	if fr.Response == nil {
 		return nil
@@ -348,208 +328,19 @@ func decodeResumeResponse(fr *genai.FunctionResponse) any {
 	return fr.Response
 }
 
-// waitingInterruptIDs returns the set of InterruptIDs for every node in
-// state that is currently paused on a human-input request.
+// waitingInterruptIDs returns the set of interrupt IDs for every node
+// in state that is currently paused on a long-running interrupt.
 func waitingInterruptIDs(state *workflow.RunState) map[string]struct{} {
 	ids := map[string]struct{}{}
 	for _, ns := range state.Nodes {
-		if ns == nil {
+		if ns == nil || ns.Status != workflow.NodeWaiting {
 			continue
 		}
-		if ns.Status == workflow.NodeWaiting && ns.PendingRequest != nil && ns.PendingRequest.InterruptID != "" {
-			ids[ns.PendingRequest.InterruptID] = struct{}{}
+		for _, id := range ns.Interrupts {
+			if id != "" {
+				ids[id] = struct{}{}
+			}
 		}
 	}
 	return ids
-}
-
-// llmAgentNode wraps an LlmAgent as a workflow node and bridges the
-// LlmAgent's own HITL into a workflow pause.
-//
-// adk-go currently has two separate HITL signals: workflow RequestedInput
-// (which pauses the scheduler) and the LlmAgent's LongRunningToolIDs
-// (which does not). adk-python unifies them on long_running_tool_ids;
-// until adk-go does the same in the workflow core (see
-// runner/DESIGN_run_node.md section 10.5), this node performs the bridge
-// locally: when the wrapped agent emits an event with LongRunningToolIDs,
-// the node also yields a RequestedInput so the scheduler pauses and
-// persists RunState. On resume the node re-runs (RerunOnResume) and feeds
-// the human's reply back to the agent as a function response.
-type llmAgentNode struct {
-	workflow.BaseNode
-	agent agent.Agent
-}
-
-// rerunOnResume is referenced by value via &rerunOnResume below.
-var rerunOnResume = true
-
-func newLlmAgentNode(a agent.Agent) *llmAgentNode {
-	return &llmAgentNode{
-		// RerunOnResume puts the node in re-entry mode: on resume the node
-		// re-runs and reads the reply via ctx.ResumedInput, rather than
-		// handing the reply to a successor (this node has none).
-		BaseNode: workflow.NewBaseNode(a.Name(), a.Description(), workflow.NodeConfig{
-			RerunOnResume: &rerunOnResume,
-		}),
-		agent: a,
-	}
-}
-
-func (n *llmAgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		// The node's input is the runner's user message: fresh text on a
-		// new turn, or the human's FunctionResponse(s) on a HITL resume.
-		// The runner already appended it to the session, and the LlmAgent
-		// flow's contents processor pairs a resume FunctionResponse with
-		// the pending long-running call by ID (replacing the original
-		// "pending" response). So we feed the message straight through —
-		// we do NOT synthesize a second FunctionResponse, which would
-		// duplicate it in history and confuse the model.
-		userContent := inputToUserContent(input)
-
-		// Interrupts answered by this turn: any long-running call ID for
-		// which the message carries a matching FunctionResponse. We must
-		// not re-pause for these even though the agent's history still
-		// shows the original long-running call.
-		resolved := resolvedInterruptIDs(userContent)
-
-		agentCtx := n.newAgentContext(ctx, userContent)
-
-		var pending []string // unresolved long-running interrupt IDs seen this run
-		for event, err := range n.agent.Run(agentCtx) {
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			synthesizeNodeOutput(event)
-			for _, id := range event.LongRunningToolIDs {
-				if !resolved[id] {
-					pending = append(pending, id)
-				}
-			}
-			if !yield(event, nil) {
-				return
-			}
-		}
-
-		// HITL bridge: if the agent emitted long-running tool calls that
-		// were not answered by this turn, pause the workflow by emitting an
-		// event that only sets RequestedInput (keyed by the real
-		// long-running call ID). The scheduler parks the node
-		// (NodeWaiting) on RequestedInput alone and persists RunState.
-		//
-		// We deliberately do NOT use workflow.NewRequestInputEvent: it
-		// injects a synthetic "adk_request_input" FunctionCall into the
-		// model conversation, which a real model rejects on resume (the
-		// agent already has its own real long-running FunctionCall
-		// pending). The pause event carries no model Content, so it does
-		// not pollute the LLM history.
-		//
-		// The scheduler enforces a single RequestedInput per activation,
-		// so we pause on the first unresolved interrupt. The console (and
-		// other clients) still see every long-running call from the
-		// agent's own events and can answer them across turns.
-		if len(pending) > 0 {
-			yield(newPauseEvent(ctx, pending[0]), nil)
-		}
-	}
-}
-
-// resolvedInterruptIDs returns the set of FunctionResponse IDs carried by
-// content, i.e. the long-running interrupts the current turn answers.
-func resolvedInterruptIDs(content *genai.Content) map[string]bool {
-	if content == nil {
-		return nil
-	}
-	out := map[string]bool{}
-	for _, p := range content.Parts {
-		if p.FunctionResponse != nil && p.FunctionResponse.ID != "" {
-			out[p.FunctionResponse.ID] = true
-		}
-	}
-	return out
-}
-
-// newPauseEvent builds a content-free event that only sets RequestedInput,
-// so the scheduler pauses the node (NodeWaiting) and persists RunState
-// without adding any synthetic FunctionCall to the model conversation. The
-// InterruptID is the LlmAgent's real long-running tool call ID, so the
-// follow-up FunctionResponse to that call resumes the run.
-func newPauseEvent(ctx agent.InvocationContext, interruptID string) *session.Event {
-	ev := session.NewEvent(ctx.InvocationID())
-	if a := ctx.Agent(); a != nil {
-		ev.Author = a.Name()
-	}
-	ev.Branch = ctx.Branch()
-	ev.RequestedInput = &session.RequestInput{
-		InterruptID: interruptID,
-		Message:     "Awaiting response for long-running tool call.",
-	}
-	return ev
-}
-
-// newAgentContext builds the per-agent InvocationContext, mirroring
-// workflow.AgentNode: it inherits services and branch from ctx and runs
-// the wrapped agent with the given user content.
-func (n *llmAgentNode) newAgentContext(ctx agent.InvocationContext, userContent *genai.Content) agent.InvocationContext {
-	return icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:     ctx.Artifacts(),
-		Memory:        ctx.Memory(),
-		Session:       ctx.Session(),
-		Branch:        ctx.Branch(),
-		Agent:         n.agent,
-		UserContent:   userContent,
-		RunConfig:     ctx.RunConfig(),
-		EndInvocation: ctx.Ended(),
-		InvocationID:  ctx.InvocationID(),
-	})
-}
-
-// inputToUserContent converts a node input value into a user Content for
-// the wrapped agent.
-func inputToUserContent(input any) *genai.Content {
-	switch v := input.(type) {
-	case nil:
-		return nil
-	case *genai.Content:
-		return v
-	case string:
-		if v == "" {
-			return nil
-		}
-		return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: v}}}
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return nil
-		}
-		return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: string(b)}}}
-	}
-}
-
-// synthesizeNodeOutput sets Event.Output from a final model text response
-// so the node produces an output value (mirrors workflow.AgentNode's
-// synthesizeAgentOutput).
-func synthesizeNodeOutput(event *session.Event) {
-	if event == nil || event.Output != nil {
-		return
-	}
-	if !event.IsFinalResponse() {
-		return
-	}
-	content := event.LLMResponse.Content
-	if content == nil || content.Role != "model" {
-		return
-	}
-	var b []byte
-	for _, p := range content.Parts {
-		if p == nil || p.Text == "" || p.Thought {
-			continue
-		}
-		b = append(b, p.Text...)
-	}
-	if len(b) == 0 {
-		return
-	}
-	event.Output = string(b)
 }

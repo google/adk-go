@@ -185,8 +185,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 		// Node path: an LlmAgent runs through the ADK 2.0 node runtime
 		// (the Go equivalent of adk-python's _run_node_async, reached for
-		// an LlmAgent root). Detection is automatic — the user does not
-		// configure anything. See run_node.go.
+		// an LlmAgent root).
 		if isLlmAgent(agentToRun) {
 			r.runNode(ctx, storedSession, agentToRun, msg, cfg, options, yield)
 			return

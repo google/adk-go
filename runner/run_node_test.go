@@ -37,84 +37,6 @@ const (
 	nodeTestSession = "s"
 )
 
-// scriptedModel is a fake model.LLM that yields a fixed sequence of
-// contents, one per GenerateContent call. It avoids importing
-// internal/testutil (which imports runner, creating a cycle).
-type scriptedModel struct {
-	responses []*genai.Content
-	call      int
-}
-
-func (m *scriptedModel) Name() string { return "scripted" }
-
-func (m *scriptedModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
-	return func(yield func(*model.LLMResponse, error) bool) {
-		i := m.call
-		if i >= len(m.responses) {
-			i = len(m.responses) - 1
-		}
-		m.call++
-		yield(&model.LLMResponse{Content: m.responses[i]}, nil)
-	}
-}
-
-func newNodeTestRunner(t *testing.T, a agent.Agent, svc session.Service) *runner.Runner {
-	t.Helper()
-	r, err := runner.New(runner.Config{
-		AppName:        nodeTestApp,
-		Agent:          a,
-		SessionService: svc,
-	})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	return r
-}
-
-func newNodeTestSession(t *testing.T, ctx context.Context, svc session.Service) {
-	t.Helper()
-	if _, err := svc.Create(ctx, &session.CreateRequest{
-		AppName:   nodeTestApp,
-		UserID:    nodeTestUser,
-		SessionID: nodeTestSession,
-	}); err != nil {
-		t.Fatalf("sessionService.Create() error = %v", err)
-	}
-}
-
-func userText(text string) *genai.Content {
-	return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: text}}}
-}
-
-// runStateForAgent loads the RunState the node path persists, using the
-// same naming scheme the runner uses internally ("<app>/<agent name>").
-func runStateForAgent(t *testing.T, ctx context.Context, svc session.Service, a agent.Agent) *workflow.RunState {
-	t.Helper()
-	got, err := svc.Get(ctx, &session.GetRequest{AppName: nodeTestApp, UserID: nodeTestUser, SessionID: nodeTestSession})
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
-	}
-	state, err := workflow.LoadRunState(got.Session, nodeTestApp+"/"+a.Name())
-	if err != nil {
-		t.Fatalf("LoadRunState() error = %v", err)
-	}
-	return state
-}
-
-// hasWaitingInterrupt reports whether the RunState has a node parked on a
-// human-input request with the given InterruptID.
-func hasWaitingInterrupt(state *workflow.RunState, id string) bool {
-	if state == nil {
-		return false
-	}
-	for _, ns := range state.Nodes {
-		if ns != nil && ns.Status == workflow.NodeWaiting && ns.PendingRequest != nil && ns.PendingRequest.InterruptID == id {
-			return true
-		}
-	}
-	return false
-}
-
 // TestRunner_LlmAgent_FreshTurn verifies that a plain LlmAgent root is
 // automatically driven through the node path and yields its model text.
 // The user configures nothing special — only Config.Agent.
@@ -133,21 +55,32 @@ func TestRunner_LlmAgent_FreshTurn(t *testing.T) {
 
 	r := newNodeTestRunner(t, a, svc)
 
-	var texts []string
+	var gotText string
+	var sawNodeInfo bool
 	for ev, err := range r.Run(ctx, nodeTestUser, nodeTestSession, userText("hi"), agent.RunConfig{}) {
 		if err != nil {
 			t.Fatalf("Run() error = %v", err)
 		}
-		if ev != nil && ev.LLMResponse.Content != nil {
+		if ev == nil {
+			continue
+		}
+		// The event must be stamped by the node runtime with the
+		// agent's name as its path — this is what distinguishes the
+		// node path from the legacy agent path.
+		if ev.NodeInfo != nil && ev.NodeInfo.Path == "greeter" {
+			sawNodeInfo = true
+		}
+		if ev.LLMResponse.Content != nil {
 			for _, p := range ev.LLMResponse.Content.Parts {
-				if p.Text != "" {
-					texts = append(texts, p.Text)
-				}
+				gotText += p.Text
 			}
 		}
 	}
-	if len(texts) == 0 {
-		t.Fatal("expected at least one model text event from the LlmAgent")
+	if gotText != "hello there" {
+		t.Errorf("model text = %q, want %q", gotText, "hello there")
+	}
+	if !sawNodeInfo {
+		t.Error("expected an event stamped with NodeInfo.Path=greeter (node path)")
 	}
 }
 
@@ -201,10 +134,13 @@ func TestRunner_LlmAgent_LongRunningTool_PausesAndResumes(t *testing.T) {
 	svc := session.InMemoryService()
 	newNodeTestSession(t, ctx, svc)
 
-	// Turn 1: model calls the long-running tool.
+	// Turn 1: model calls the long-running tool, then (after the tool's
+	// pending result is fed back) emits a follow-up text and the turn
+	// pauses on the unresolved long-running call.
 	// Turn 2 (resume): model produces a final text answer.
 	m := &scriptedModel{responses: []*genai.Content{
 		genai.NewContentFromFunctionCall("ask_human", map[string]any{}, "model"),
+		genai.NewContentFromText("waiting for approval", "model"),
 		genai.NewContentFromText("all done", "model"),
 	}}
 
@@ -232,10 +168,10 @@ func TestRunner_LlmAgent_LongRunningTool_PausesAndResumes(t *testing.T) {
 	r := newNodeTestRunner(t, a, svc)
 
 	// --- Turn 1: should pause on the long-running tool -----------------
-	var (
-		longRunningID string
-		sawPause      bool
-	)
+	// The pause signal is the long-running tool-call event itself
+	// (Event.LongRunningToolIDs); the scheduler parks the node on it
+	// with no separate RequestInput event, matching adk-python.
+	var longRunningID string
 	for ev, err := range r.Run(ctx, nodeTestUser, nodeTestSession, userText("please approve"), agent.RunConfig{}) {
 		if err != nil {
 			t.Fatalf("turn 1 Run() error = %v", err)
@@ -246,15 +182,16 @@ func TestRunner_LlmAgent_LongRunningTool_PausesAndResumes(t *testing.T) {
 		if len(ev.LongRunningToolIDs) > 0 {
 			longRunningID = ev.LongRunningToolIDs[0]
 		}
-		if ev.RequestedInput != nil {
-			sawPause = true
-		}
 	}
 	if longRunningID == "" {
 		t.Fatal("did not observe a long-running tool call from the LlmAgent")
 	}
-	if !sawPause {
-		t.Fatal("node wrapper did not bridge the long-running tool into a workflow RequestedInput pause")
+	// A long-running tool that returns a pending (non-empty) result feeds
+	// it back to the model once more in the same turn (matching adk-python),
+	// so the model can emit a follow-up before the turn pauses on the
+	// unresolved long-running call. Two model calls are expected in turn 1.
+	if m.call != 2 {
+		t.Errorf("turn 1 made %d model calls, want 2 (pending long-running result is fed back to the model once)", m.call)
 	}
 
 	// RunState must be persisted with the pause so turn 2 can resume.
@@ -290,4 +227,103 @@ func TestRunner_LlmAgent_LongRunningTool_PausesAndResumes(t *testing.T) {
 	if !sawDone {
 		t.Error("did not observe the LlmAgent's final answer after resume")
 	}
+}
+
+// scriptedModel is a fake model.LLM that yields a fixed sequence of
+// contents, one per GenerateContent call. It avoids importing
+// internal/testutil (which imports runner, creating a cycle).
+type scriptedModel struct {
+	responses []*genai.Content
+	call      int
+}
+
+func (m *scriptedModel) Name() string { return "scripted" }
+
+func (m *scriptedModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		i := m.call
+		if i >= len(m.responses) {
+			i = len(m.responses) - 1
+		}
+		m.call++
+		yield(&model.LLMResponse{Content: m.responses[i]}, nil)
+	}
+}
+
+func newNodeTestRunner(t *testing.T, a agent.Agent, svc session.Service) *runner.Runner {
+	t.Helper()
+	r, err := runner.New(runner.Config{
+		AppName:        nodeTestApp,
+		Agent:          a,
+		SessionService: svc,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return r
+}
+
+func newNodeTestSession(t *testing.T, ctx context.Context, svc session.Service) {
+	t.Helper()
+	if _, err := svc.Create(ctx, &session.CreateRequest{
+		AppName:   nodeTestApp,
+		UserID:    nodeTestUser,
+		SessionID: nodeTestSession,
+	}); err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+}
+
+func userText(text string) *genai.Content {
+	return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: text}}}
+}
+
+// runStateForAgent reconstructs the paused RunState from session
+// history the same way the runner does.
+func runStateForAgent(t *testing.T, ctx context.Context, svc session.Service, a agent.Agent) *workflow.RunState {
+	t.Helper()
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: nodeTestApp, UserID: nodeTestUser, SessionID: nodeTestSession})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	// Rebuild a single-node workflow whose node name matches the
+	// agent (ReconstructRunState attributes events by author == node
+	// name), so reconstruction sees the same waiting node the runner
+	// would.
+	node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode() error = %v", err)
+	}
+	wf, err := workflow.New(nodeTestApp+"/"+a.Name(), []workflow.Edge{
+		{From: workflow.Start, To: node},
+	})
+	if err != nil {
+		t.Fatalf("workflow.New() error = %v", err)
+	}
+	state, err := wf.ReconstructRunState(got.Session)
+	if err != nil {
+		t.Fatalf("ReconstructRunState() error = %v", err)
+	}
+	return state
+}
+
+// hasWaitingInterrupt reports whether the RunState has a node parked
+// (NodeWaiting) on the given long-running interrupt ID. The node path
+// pauses on Event.LongRunningToolIDs recorded as NodeState.Interrupts
+// (no synthetic RequestInput), matching adk-python.
+func hasWaitingInterrupt(state *workflow.RunState, id string) bool {
+	if state == nil {
+		return false
+	}
+	for _, ns := range state.Nodes {
+		if ns == nil || ns.Status != workflow.NodeWaiting {
+			continue
+		}
+		for _, got := range ns.Interrupts {
+			if got == id {
+				return true
+			}
+		}
+	}
+	return false
 }
