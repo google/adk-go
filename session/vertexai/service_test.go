@@ -158,6 +158,7 @@ func deleteAllFromApp(t *testing.T, v session.Service, app string) {
 	})
 	if err != nil {
 		t.Errorf("error listing session for delete all: %s", err)
+		return
 	}
 
 	for _, s := range sessionsResp.Sessions {

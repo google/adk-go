@@ -87,7 +87,7 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			req := &session.CreateRequest{
 				AppName:   testAppName,
 				UserID:    "testUserID",
-				SessionID: "testSessionID",
+				SessionID: "test-session-id",
 				State: map[string]any{
 					"k": float64(5),
 				},
