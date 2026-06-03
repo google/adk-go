@@ -1,0 +1,105 @@
+httprr trace v1
+1127 1537
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 895
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Search for AI news"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Use the search tool to find information, then provide a brief response.\n\nYou are an agent. Your internal name is \"agent2\". The description about you is \"Test agent agent2 that searches for information\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Search for information on the web","name":"search_tool_agent2","parametersJsonSchema":{"additionalProperties":false,"properties":{"Query":{"type":"string"}},"required":["Query"],"type":"object"},"responseJsonSchema":{"type":"string"}},{"description":"Analyze data and return insights","name":"analyze_tool_agent2","parametersJsonSchema":{"additionalProperties":false,"properties":{"Data":{"type":"string"}},"required":["Data"],"type":"object"},"responseJsonSchema":{"type":"string"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Tue, 10 Mar 2026 14:10:09 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=839
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "search_tool_agent2",
+              "args": {
+                "Query": "AI news"
+              }
+            },
+            "thoughtSignature": "CtICAb4+9vtlb0gcS4vqZ08t7q9ey+1CXWXyovOKA2owAQsWvdbT4bXw7XN7ebSC4pkLTSQnH7uJEKmhn/fhW1as+hykHUqV/MeKN29HBLrY+h1U6GMRjbY6ORp+V+yA/H1k7ugH4TPeFMhZXKV7R3ioZx2Qc1EFP5KnEe5QoJcbaDITPb3UCLgTBSK29DfhhS5yaDrrXniRiHrjeROrBCgOYmhPp+/B7mgpg2s+QYHN5dzJZHzfxSAKT0TsuzJYLlF0lFk+jSmQWahPQPxyLpGlimzP8nehd+vFn1JUog54+0pSS81K7kgVPg9BwIWbUQiTWMyi+H9R3lIcPcWS93WNWRt9dDGoiq8+pI/dTn+ML/WD6eUqYJ5LaniZrkWaVWKw82Q54Vk9aYOX7WvTn+Yqx08I5sFZj0NM79KZjuvMe4v2lNkyGSBwEHUQmJqQuuzoMVs="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 130,
+    "candidatesTokenCount": 19,
+    "totalTokenCount": 229,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 130
+      }
+    ],
+    "thoughtsTokenCount": 80
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "QCawafHoFpHrnsEPpaTr2Qw"
+}
+1848 895
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1615
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Search for AI news"}],"role":"user"},{"parts":[{"functionCall":{"args":{"Query":"AI news"},"name":"search_tool_agent2"},"thoughtSignature":"CtICAb4+9vtlb0gcS4vqZ08t7q9ey+1CXWXyovOKA2owAQsWvdbT4bXw7XN7ebSC4pkLTSQnH7uJEKmhn/fhW1as+hykHUqV/MeKN29HBLrY+h1U6GMRjbY6ORp+V+yA/H1k7ugH4TPeFMhZXKV7R3ioZx2Qc1EFP5KnEe5QoJcbaDITPb3UCLgTBSK29DfhhS5yaDrrXniRiHrjeROrBCgOYmhPp+/B7mgpg2s+QYHN5dzJZHzfxSAKT0TsuzJYLlF0lFk+jSmQWahPQPxyLpGlimzP8nehd+vFn1JUog54+0pSS81K7kgVPg9BwIWbUQiTWMyi+H9R3lIcPcWS93WNWRt9dDGoiq8+pI/dTn+ML/WD6eUqYJ5LaniZrkWaVWKw82Q54Vk9aYOX7WvTn+Yqx08I5sFZj0NM79KZjuvMe4v2lNkyGSBwEHUQmJqQuuzoMVs="}],"role":"model"},{"parts":[{"functionResponse":{"name":"search_tool_agent2","response":{"result":"search result for 'AI news' from agent2"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Use the search tool to find information, then provide a brief response.\n\nYou are an agent. Your internal name is \"agent2\". The description about you is \"Test agent agent2 that searches for information\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Search for information on the web","name":"search_tool_agent2","parametersJsonSchema":{"additionalProperties":false,"properties":{"Query":{"type":"string"}},"required":["Query"],"type":"object"},"responseJsonSchema":{"type":"string"}},{"description":"Analyze data and return insights","name":"analyze_tool_agent2","parametersJsonSchema":{"additionalProperties":false,"properties":{"Data":{"type":"string"}},"required":["Data"],"type":"object"},"responseJsonSchema":{"type":"string"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Tue, 10 Mar 2026 14:10:10 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=917
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I found some AI news for you. Would you like me to analyze it or something else?"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 176,
+    "candidatesTokenCount": 19,
+    "totalTokenCount": 195,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 176
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "QSawad76G9v6nsEP1paPoAU"
+}

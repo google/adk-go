@@ -1,0 +1,121 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package context
+
+import (
+	"context"
+
+	"github.com/google/uuid"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/session"
+)
+
+type InvocationContextParams struct {
+	Artifacts agent.Artifacts
+	Memory    agent.Memory
+	Session   session.Session
+
+	Branch string
+	Agent  agent.Agent
+
+	UserContent                 *genai.Content
+	RunConfig                   *agent.RunConfig
+	EndInvocation               bool
+	InvocationID                string
+	LiveSessionResumptionHandle string
+}
+
+func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
+	if params.InvocationID == "" {
+		params.InvocationID = "e-" + uuid.NewString()
+	}
+	return &InvocationContext{
+		Context: ctx,
+		params:  params,
+	}
+}
+
+type InvocationContext struct {
+	context.Context
+
+	params InvocationContextParams
+}
+
+func (c *InvocationContext) Artifacts() agent.Artifacts {
+	return c.params.Artifacts
+}
+
+func (c *InvocationContext) Agent() agent.Agent {
+	return c.params.Agent
+}
+
+func (c *InvocationContext) Branch() string {
+	return c.params.Branch
+}
+
+func (c *InvocationContext) InvocationID() string {
+	return c.params.InvocationID
+}
+
+func (c *InvocationContext) Memory() agent.Memory {
+	return c.params.Memory
+}
+
+func (c *InvocationContext) Session() session.Session {
+	return c.params.Session
+}
+
+func (c *InvocationContext) UserContent() *genai.Content {
+	return c.params.UserContent
+}
+
+func (c *InvocationContext) RunConfig() *agent.RunConfig {
+	return c.params.RunConfig
+}
+
+func (c *InvocationContext) EndInvocation() {
+	c.params.EndInvocation = true
+}
+
+func (c *InvocationContext) Ended() bool {
+	return c.params.EndInvocation
+}
+
+// LiveSessionResumptionHandle returns the active live session's resumption handle.
+// This handle is used to reconnect and resume a bidirectional streaming session with the model.
+func (c *InvocationContext) LiveSessionResumptionHandle() string {
+	return c.params.LiveSessionResumptionHandle
+}
+
+// SetLiveSessionResumptionHandle stores the latest resumption handle received from the model.
+// This allows subsequent reconnection attempts in the live loop to resume the same session state.
+func (c *InvocationContext) SetLiveSessionResumptionHandle(handle string) {
+	c.params.LiveSessionResumptionHandle = handle
+}
+
+func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
+	newCtx := *c
+	newCtx.Context = ctx
+	return &newCtx
+}
+
+// ResumedInput always returns (nil, false) for the base
+// invocation context. Implementations that carry a resume payload
+// override this method.
+func (c *InvocationContext) ResumedInput(string) (any, bool) { return nil, false }
+
+var _ agent.InvocationContext = (*InvocationContext)(nil)

@@ -1,0 +1,332 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package llminternal
+
+import (
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
+)
+
+type mockAgent struct {
+	agent.Agent
+	name string
+}
+
+func (m *mockAgent) Name() string {
+	return m.name
+}
+
+type mockInvocationContext struct {
+	agent.InvocationContext
+	invocationID string
+	agentName    string
+	branch       string
+}
+
+func (m *mockInvocationContext) InvocationID() string {
+	return m.invocationID
+}
+
+func (m *mockInvocationContext) Agent() agent.Agent {
+	return &mockAgent{name: m.agentName}
+}
+
+func (m *mockInvocationContext) Branch() string {
+	return m.branch
+}
+
+func (m *mockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
+
+func TestGenerateRequestConfirmationEvent(t *testing.T) {
+	confirmingFunctionCall := &genai.FunctionCall{
+		ID:   "call_1",
+		Name: "test_tool",
+		Args: map[string]any{"arg": "val"},
+	}
+
+	tests := []struct {
+		name                  string
+		invocationContext     agent.InvocationContext
+		functionCallEvent     *session.Event
+		functionResponseEvent *session.Event
+		wantEvent             *session.Event
+	}{
+		{
+			name: "no confirmation requested",
+			invocationContext: &mockInvocationContext{
+				invocationID: "inv_1",
+				agentName:    "agent_1",
+			},
+			functionCallEvent: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{FunctionCall: confirmingFunctionCall},
+						},
+					},
+				},
+			},
+			functionResponseEvent: &session.Event{
+				Actions: session.EventActions{
+					RequestedToolConfirmations: nil,
+				},
+			},
+			wantEvent: nil,
+		},
+		{
+			name: "confirmation requested but no matching function call",
+			invocationContext: &mockInvocationContext{
+				invocationID: "inv_1",
+				agentName:    "agent_1",
+			},
+			functionCallEvent: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{FunctionCall: &genai.FunctionCall{ID: "other_call"}},
+						},
+					},
+				},
+			},
+			functionResponseEvent: &session.Event{
+				Actions: session.EventActions{
+					RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+						"call_1": {
+							Hint: "Are you sure?",
+						},
+					},
+				},
+			},
+			wantEvent: nil,
+		},
+		{
+			name: "confirmation requested and matching function call",
+			invocationContext: &mockInvocationContext{
+				invocationID: "inv_1",
+				agentName:    "agent_1",
+				branch:       "main",
+			},
+			functionCallEvent: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{FunctionCall: confirmingFunctionCall},
+						},
+					},
+				},
+			},
+			functionResponseEvent: &session.Event{
+				Actions: session.EventActions{
+					RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+						"call_1": {
+							Hint: "Are you sure?",
+						},
+					},
+				},
+			},
+			wantEvent: &session.Event{
+				InvocationID: "inv_1",
+				Author:       "agent_1",
+				Branch:       "main",
+				Actions: session.EventActions{
+					StateDelta:    map[string]any{},
+					ArtifactDelta: map[string]int64{},
+				},
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: genai.RoleModel,
+						Parts: []*genai.Part{
+							{
+								FunctionCall: &genai.FunctionCall{
+									Name: toolconfirmation.FunctionCallName,
+									Args: map[string]any{
+										"originalFunctionCall": confirmingFunctionCall,
+										"toolConfirmation": toolconfirmation.ToolConfirmation{
+											Hint: "Are you sure?",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := generateRequestConfirmationEvent(tt.invocationContext, tt.functionCallEvent, tt.functionResponseEvent)
+
+			if diff := cmp.Diff(tt.wantEvent, got,
+				cmpopts.IgnoreFields(session.Event{}, "Timestamp", "LongRunningToolIDs", "ID"),
+				cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"), // Ignore generated IDs
+			); diff != "" {
+				t.Errorf("generateRequestConfirmationEvent() mismatch (-want +got):\n%s", diff)
+			}
+
+			if got != nil {
+				for _, s := range got.LongRunningToolIDs {
+					if s == "" {
+						t.Errorf("empty long running tool id")
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestGenerateRequestConfirmationEventHasID verifies that the event returned
+// by generateRequestConfirmationEvent always has a non-empty ID.
+//
+// In Python ADK, every Event gets a UUID via model_post_init:
+//
+//	def model_post_init(self, __context):
+//	    if not self.id:
+//	        self.id = Event.new_id()   # str(uuid.uuid4())
+//
+// In Go ADK, events must be created with session.NewEvent() to get an ID.
+// A raw &session.Event{} literal leaves ID as "" which breaks features
+// that rely on event IDs (e.g. time-travel restart_from_event_id).
+func TestGenerateRequestConfirmationEventHasID(t *testing.T) {
+	confirmingFunctionCall := &genai.FunctionCall{
+		ID:   "call_1",
+		Name: "test_tool",
+		Args: map[string]any{"arg": "val"},
+	}
+
+	ctx := &mockInvocationContext{
+		invocationID: "inv_1",
+		agentName:    "agent_1",
+		branch:       "main",
+	}
+
+	functionCallEvent := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{FunctionCall: confirmingFunctionCall},
+				},
+			},
+		},
+	}
+
+	functionResponseEvent := &session.Event{
+		Actions: session.EventActions{
+			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+				"call_1": {
+					Hint: "Are you sure?",
+				},
+			},
+		},
+	}
+
+	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if got == nil {
+		t.Fatal("expected non-nil event")
+	}
+
+	if got.ID == "" {
+		t.Error("event ID is empty; events must have a UUID for time-travel and session lookup")
+	}
+
+	if got.InvocationID != "inv_1" {
+		t.Errorf("expected InvocationID=\"inv_1\", got %q", got.InvocationID)
+	}
+}
+
+func TestGenerateRequestConfirmationEventPreservesThoughtSignature(t *testing.T) {
+	thoughtSignature := []byte("test-thought-signature")
+	ctx := &mockInvocationContext{
+		invocationID: "inv_1",
+		agentName:    "agent_1",
+	}
+	functionCallEvent := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						ThoughtSignature: thoughtSignature,
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_1",
+							Name: "test_tool",
+							Args: map[string]any{"arg": "val"},
+						},
+					},
+				},
+			},
+		},
+	}
+	functionResponseEvent := &session.Event{
+		Actions: session.EventActions{
+			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+				"call_1": {Hint: "Are you sure?"},
+			},
+		},
+	}
+
+	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if got == nil || got.Content == nil || len(got.Content.Parts) != 1 {
+		t.Fatalf("expected one confirmation part, got %#v", got)
+	}
+	if diff := cmp.Diff(thoughtSignature, got.Content.Parts[0].ThoughtSignature); diff != "" {
+		t.Errorf("ThoughtSignature mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestGenerateRequestConfirmationEventNoThoughtSignature(t *testing.T) {
+	ctx := &mockInvocationContext{
+		invocationID: "inv_1",
+		agentName:    "agent_1",
+	}
+	functionCallEvent := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_1",
+							Name: "test_tool",
+							Args: map[string]any{"arg": "val"},
+						},
+					},
+				},
+			},
+		},
+	}
+	functionResponseEvent := &session.Event{
+		Actions: session.EventActions{
+			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+				"call_1": {Hint: "Are you sure?"},
+			},
+		},
+	}
+
+	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	if got == nil || got.Content == nil || len(got.Content.Parts) != 1 {
+		t.Fatalf("expected one confirmation part, got %#v", got)
+	}
+	if len(got.Content.Parts[0].ThoughtSignature) != 0 {
+		t.Errorf("ThoughtSignature = %q, want empty", got.Content.Parts[0].ThoughtSignature)
+	}
+}

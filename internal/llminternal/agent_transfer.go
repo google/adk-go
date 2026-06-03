@@ -1,0 +1,344 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package llminternal
+
+import (
+	"bytes"
+	"fmt"
+	"iter"
+	"slices"
+	"strings"
+
+	"github.com/google/safehtml/template"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/agent/parentmap"
+	"google.golang.org/adk/internal/toolinternal"
+	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+)
+
+// From src/google/adk/flows/llm_flows/auto_flow.py
+//
+// * SingleFlow
+//
+// SingleFlow is the LLM flow that handles tool calls.
+//
+//  A single flow only considers the agent itself and its tools.
+//  No sub-agents are allowed for a single flow, i.e.,
+//      DisallowTransferToParent == true &&
+//      DisallowTransferToPeers == true &&
+//      len(SubAgents) == 0
+//
+// * AutoFlow
+//
+// Agent transfers are allowed in the following directions:
+//
+//  1. From parent to sub-agent.
+//  2. From sub-agent to parent.
+//  3. From sub-agent to its peer agent.
+//
+// Peer-agent transfers are only enabled when all the following conditions are met:
+//
+//  - The parent agent is also an LLMAgent.
+//  - This agent has DisallowTransferToPeers set to false (default).
+//
+// Depending on the target agent type, the transfer may be automatically
+// reversed. See python's Runner._find_agent_to_run method for which
+// agent will remain active to handle the next user message.
+// (src/google/adk/runners.py)
+//
+// TODO: implement it in the runners package and update this doc.
+
+// AgentTransferRequestProcessor processes agent transfer requests.
+func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		// TODO: support agent types other than LLMAgent, that have parent/subagents?
+		agent := ctx.Agent()
+		if !shouldUseAutoFlow(agent) {
+			return
+		}
+
+		parents := parentmap.FromContext(ctx)
+
+		targets := transferTargets(agent, parents[agent.Name()])
+		if len(targets) == 0 {
+			return
+		}
+
+		// TODO(hyangah): why do we set this up in request processor
+		// instead of registering this as a normal function tool of the Agent?
+		transferToAgentTool, err := NewTransferToAgentTool(agent, parents[agent.Name()], targets)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		utils.AppendInstructions(req, transferToAgentTool.instructions)
+		err = appendTools(req, transferToAgentTool)
+		if err != nil {
+			yield(nil, err)
+		}
+	}
+}
+
+const transferAgentName = "transfer_to_agent"
+
+// TransferToAgentTool is a tool that handles transferring control to another agent.
+type TransferToAgentTool struct {
+	instructions    string
+	supportedAgents []agent.Agent
+}
+
+// NewTransferToAgentTool creates a new TransferToAgentTool.
+func NewTransferToAgentTool(curAgent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
+	si, err := instructionsForTransferToAgent(curAgent, parent, targets)
+	if err != nil {
+		return nil, err
+	}
+	return &TransferToAgentTool{
+		instructions:    si,
+		supportedAgents: targets,
+	}, nil
+}
+
+// Description implements tool.Tool.
+func (t *TransferToAgentTool) Description() string {
+	return `Transfer the question to another agent.
+This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
+}
+
+// Name implements tool.Tool.
+func (t *TransferToAgentTool) Name() string {
+	return transferAgentName
+}
+
+// IsLongRunning implements tool.Tool.
+func (t *TransferToAgentTool) IsLongRunning() bool {
+	return false
+}
+
+func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"agent_name": {
+					Type:        genai.TypeString,
+					Description: "the agent name to transfer to",
+					Enum:        t.enums(),
+				},
+			},
+			Required: []string{"agent_name"},
+		},
+	}
+}
+
+func (t *TransferToAgentTool) enums() []string {
+	var agentNames []string
+	for _, a := range t.supportedAgents {
+		agentNames = append(agentNames, a.Name())
+	}
+	return agentNames
+}
+
+// ProcessRequest implements types.Tool.
+func (t *TransferToAgentTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+	return appendTools(req, t)
+}
+
+// Run implements types.Tool.
+func (t *TransferToAgentTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
+	if args == nil {
+		return nil, fmt.Errorf("missing argument")
+	}
+	m, ok := args.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected args type: %T", args)
+	}
+	agent, ok := m["agent_name"].(string)
+	if !ok || agent == "" {
+		return nil, fmt.Errorf("empty agent_name: %v", args)
+	}
+	ctx.Actions().TransferToAgent = agent
+	return map[string]any{}, nil
+}
+
+var _ tool.Tool = (*TransferToAgentTool)(nil)
+
+func transferTargets(agent, parent agent.Agent) []agent.Agent {
+	targets := slices.Clone(agent.SubAgents())
+
+	llmAgent := asLLMAgent(agent)
+	llmParent := asLLMAgent(parent)
+
+	if llmParent == nil {
+		return targets
+	}
+
+	if !llmAgent.internal().DisallowTransferToParent {
+		targets = append(targets, parent)
+	}
+	// For peer-agent transfers, it's only enabled when all below conditions are met:
+	// - the parent agent is also of AutoFlow.
+	// - DisallowTransferToPeers is false.
+	if !llmAgent.internal().DisallowTransferToPeers {
+		if shouldUseAutoFlow(parent) {
+			for _, peer := range parent.SubAgents() {
+				if peer.Name() != agent.Name() {
+					targets = append(targets, peer)
+				}
+			}
+		}
+	}
+	return targets
+}
+
+func asLLMAgent(agent agent.Agent) Agent {
+	if agent == nil {
+		return nil
+	}
+	if llmAgent, ok := agent.(Agent); ok {
+		return llmAgent
+	}
+	return nil
+}
+
+func shouldUseAutoFlow(agent agent.Agent) bool {
+	a := asLLMAgent(agent)
+	if a == nil {
+		return false
+	}
+	return len(agent.SubAgents()) != 0 || !a.internal().DisallowTransferToParent || !a.internal().DisallowTransferToPeers
+}
+
+// appendTools appends the tools to the request.
+// Appending duplicate tools or nameless tools is an error.
+func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
+	if r.Tools == nil {
+		r.Tools = make(map[string]any)
+	}
+
+	var declarations []*genai.FunctionDeclaration
+
+	for i, tool := range tools {
+		if tool == nil || tool.Name() == "" {
+			return fmt.Errorf("tools[%d] tool without name: %v", i, tool)
+		}
+		name := tool.Name()
+		if _, ok := r.Tools[name]; ok {
+			return fmt.Errorf("tools[%d] duplicate tool: %q", i, name)
+		}
+		r.Tools[name] = tool
+
+		if fnTool, ok := tool.(toolinternal.FunctionTool); ok {
+			if decl := fnTool.Declaration(); decl != nil {
+				// TODO: verify for duplicates.
+				declarations = append(declarations, decl)
+			}
+		}
+	}
+	if len(declarations) == 0 {
+		return nil
+	}
+	if r.Config == nil {
+		r.Config = &genai.GenerateContentConfig{}
+	}
+	// Find an existing genai.Tool with FunctionDeclarations
+	var funcTool *genai.Tool
+	for _, gt := range r.Config.Tools {
+		if gt.FunctionDeclarations != nil {
+			funcTool = gt
+			break
+		}
+	}
+	if funcTool != nil {
+		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, declarations...)
+	} else {
+		r.Config.Tools = append(r.Config.Tools, &genai.Tool{
+			FunctionDeclarations: declarations,
+		})
+	}
+	return nil
+}
+
+var transferToAgentPromptTmpl = template.Must(
+	template.New("transfer_to_agent_prompt").Parse(agentTransferInstructionTemplate))
+
+func instructionsForTransferToAgent(curAgent, parent agent.Agent, targets []agent.Agent) (string, error) {
+	if asLLMAgent(curAgent).internal().DisallowTransferToParent {
+		parent = nil
+	}
+
+	var buf bytes.Buffer
+	if err := transferToAgentPromptTmpl.Execute(&buf, struct {
+		AgentName        string
+		Parent           agent.Agent
+		Targets          []agent.Agent
+		ToolName         string
+		FormattedTargets string
+	}{
+		AgentName:        curAgent.Name(),
+		Parent:           parent,
+		Targets:          targets,
+		ToolName:         transferAgentName,
+		FormattedTargets: formatTargets(targets),
+	}); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func formatTargets(targets []agent.Agent) string {
+	availableAgentNames := make([]string, len(targets))
+	for i, t := range targets {
+		availableAgentNames[i] = t.Name()
+	}
+	slices.Sort(availableAgentNames)
+	formattedAgentNames := make([]string, len(availableAgentNames))
+	for i, name := range availableAgentNames {
+		formattedAgentNames[i] = fmt.Sprintf("`%s`", name)
+	}
+	return strings.Join(formattedAgentNames, ", ")
+}
+
+// Prompt source:
+//  flows/llm_flows/agent_transfer.py _build_target_agents_instructions.
+
+const agentTransferInstructionTemplate = `
+You have a list of other agents to transfer to:
+
+{{range .Targets}}
+Agent name: {{.Name}}
+Agent description: {{.Description}}
+
+{{end}}
+If you are the best to answer the question according to your description,
+you can answer it.
+
+If another agent is better for answering the question according to its
+description, call ` + "`" + `{{.ToolName}}` + "`" + ` function to transfer the question to that
+agent. When transferring, do not generate any text other than the function
+call.
+
+**NOTE**: the only available agents for ` + "`" + `{{.ToolName}}` + "`" + ` function are
+{{.FormattedTargets}}.
+{{if .Parent}}
+If neither you nor the other agents are best for the question, transfer to your parent agent {{.Parent.Name}}.
+{{end}}`

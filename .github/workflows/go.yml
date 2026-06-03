@@ -1,0 +1,51 @@
+# This workflow will build a golang project
+# For more information see: 
+# - https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
+# - https://golangci-lint.run/usage/configuration/
+
+name: Go
+
+on:
+  push:
+    branches: [ "main", "v2" ]
+
+  pull_request:
+    branches: [ "main", "v2" ]
+
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    
+    - name: Setup
+      uses: ./.github/actions/setup
+
+    - name: Tidy
+      run: go mod tidy -diff
+      
+    - name: Build
+      run: go build -mod=readonly -v ./...
+
+    - name: Test
+      run: go test -race -mod=readonly -v -count=1 -shuffle=on ./...
+  
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    
+    - name: Setup
+      uses: ./.github/actions/setup
+    
+    - name: Lint
+      uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20  # v9.2.0
+      with:
+        install-mode: goinstall
+        version: 5256574b81bcedfbcae9099f745f6aee9335da10 # v2.3.1

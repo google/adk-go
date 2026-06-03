@@ -1,0 +1,449 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package runner
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"iter"
+	"strings"
+	"testing"
+
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
+)
+
+func TestRunner_findAgentToRun(t *testing.T) {
+	t.Parallel()
+
+	appName, userID, sessionID := "test", "userID", "sessionID"
+
+	agentTree := agentTree(t)
+
+	tests := []struct {
+		name        string
+		rootAgent   agent.Agent
+		session     session.Session
+		userMessage *genai.Content
+		wantAgent   agent.Agent
+		wantErr     bool
+	}{
+		{
+			name: "last event from agent allowing transfer",
+			session: createSession(t, t.Context(), appName, userID, sessionID, []*session.Event{
+				{
+					Author: "allows_transfer_agent",
+				},
+			}),
+			rootAgent: agentTree.root,
+			wantAgent: agentTree.allowsTransferAgent,
+		},
+		{
+			name: "last event from agent not allowing transfer",
+			session: createSession(t, t.Context(), appName, userID, sessionID, []*session.Event{
+				{
+					Author: "no_transfer_agent",
+				},
+			}),
+			rootAgent: agentTree.root,
+			wantAgent: agentTree.root,
+		},
+		{
+			name:      "no events from agents, call root",
+			session:   createSession(t, t.Context(), appName, userID, sessionID, []*session.Event{}),
+			rootAgent: agentTree.root,
+			wantAgent: agentTree.root,
+		},
+		{
+			name: "last event from user with function response",
+			session: createSession(t, t.Context(), appName, userID, sessionID, []*session.Event{
+				{
+					Author: agentTree.noTransferAgent.Name(),
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										Name: "fn_name",
+										ID:   "fn_id",
+									},
+								},
+							},
+						},
+					},
+				},
+				{
+					Author: agentTree.root.Name(),
+				},
+			}),
+			userMessage: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{
+					Name: "fn_name",
+					ID:   "fn_id",
+				},
+			}}, genai.RoleUser),
+			rootAgent: agentTree.root,
+			wantAgent: agentTree.noTransferAgent,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &Runner{
+				rootAgent: tt.rootAgent,
+			}
+			gotAgent, err := r.findAgentToRun(tt.session, tt.userMessage)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Runner.findAgentToRun() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantAgent != gotAgent {
+				t.Errorf("Runner.findAgentToRun() = %+v, want %+v", gotAgent.Name(), tt.wantAgent.Name())
+			}
+		})
+	}
+}
+
+func Test_isTransferrableAcrossAgentTree(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent agent.Agent
+		want  bool
+	}{
+		{
+			name: "disallow for agent with DisallowTransferToParent",
+			agent: must(llmagent.New(llmagent.Config{
+				Name:                     "test",
+				DisallowTransferToParent: true,
+			})),
+			want: false,
+		},
+		{
+			name: "disallow for non-LLM agent",
+			agent: must(agent.New(agent.Config{
+				Name: "test",
+			})),
+			want: false,
+		},
+		{
+			name: "allow for the default LLM agent",
+			agent: must(llmagent.New(llmagent.Config{
+				Name: "test",
+			})),
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner, err := New(Config{
+				AppName:        "testApp",
+				Agent:          tt.agent,
+				SessionService: session.InMemoryService(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := runner.isTransferableAcrossAgentTree(tt.agent); got != tt.want {
+				t.Errorf("isTransferrableAcrossAgentTree() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
+	ctx := context.Background()
+	appName := "testApp"
+	userID := "testUser"
+	sessionID := "testSession"
+
+	sessionService := session.InMemoryService()
+	artifactService := artifact.InMemoryService()
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// no-op, we are testing logic before agent run.
+			}
+		},
+	}))
+
+	r, err := New(Config{
+		AppName:        appName,
+		Agent:          testAgent,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	r.artifactService = artifactService
+
+	_, err = sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+
+	// Blob data, the message is saved only when inline data is present.
+	blobData := []byte("this is not blob data - René Magritte")
+	msg := &genai.Content{
+		Parts: []*genai.Part{
+			genai.NewPartFromText("here is a file"),
+			{InlineData: &genai.Blob{MIMEType: "application/octet-stream", Data: blobData}},
+		},
+		Role: genai.RoleUser,
+	}
+
+	cfg := agent.RunConfig{
+		SaveInputBlobsAsArtifacts: true,
+	}
+
+	// Consume the iterator from Run. The agent itself does nothing, but the runner
+	// will save the artifact before calling the agent.
+	for _, err := range r.Run(ctx, userID, sessionID, msg, cfg) {
+		if err != nil {
+			t.Fatalf("r.Run() returned an error: %v", err)
+		}
+	}
+
+	listResp, err := artifactService.List(ctx, &artifact.ListRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatalf("artifactService.List() error = %v", err)
+	}
+	if len(listResp.FileNames) != 1 {
+		t.Fatalf("expected 1 artifact, got %d", len(listResp.FileNames))
+	}
+	savedFileName := listResp.FileNames[0]
+
+	if !strings.HasPrefix(savedFileName, "artifact_") {
+		t.Errorf("saved file name should start with 'artifact_', got %q", savedFileName)
+	}
+
+	loadResp, err := artifactService.Load(ctx, &artifact.LoadRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+		FileName:  savedFileName,
+	})
+	if err != nil {
+		t.Fatalf("artifactService.Load() error = %v", err)
+	}
+
+	if !bytes.Equal(loadResp.Part.InlineData.Data, blobData) {
+		t.Errorf("loaded artifact data does not match original blob data")
+	}
+
+	getResponse, err := sessionService.Get(ctx, &session.GetRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatalf("sessionService.Get() error = %v", err)
+	}
+
+	events := getResponse.Session.Events()
+	if events.Len() == 0 {
+		t.Fatal("no events in session")
+	}
+	userEvent := events.At(0)
+	if userEvent.Author != "user" {
+		t.Fatalf("expected first event to be from user, got %s", userEvent.Author)
+	}
+
+	// The part with InlineData should be replaced.
+	if len(userEvent.LLMResponse.Content.Parts) != 2 {
+		t.Fatalf("expected 2 parts in user message event, got %d", len(userEvent.LLMResponse.Content.Parts))
+	}
+	partWithBlob := userEvent.LLMResponse.Content.Parts[1]
+	if partWithBlob.InlineData != nil {
+		t.Errorf("InlineData was not removed from the message part in the session")
+	}
+	expectedText := fmt.Sprintf("Uploaded file: %s. It has been saved to the artifacts", savedFileName)
+	if partWithBlob.Text != expectedText {
+		t.Errorf("unexpected text in placeholder part. got %q, want %q", partWithBlob.Text, expectedText)
+	}
+}
+
+// creates agentTree for tests and returns references to the agents
+func agentTree(t *testing.T) agentTreeStruct {
+	t.Helper()
+
+	sub1 := must(llmagent.New(llmagent.Config{
+		Name:                     "no_transfer_agent",
+		DisallowTransferToParent: true,
+	}))
+	sub2 := must(llmagent.New(llmagent.Config{
+		Name: "allows_transfer_agent",
+	}))
+	parent := must(llmagent.New(llmagent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{sub1, sub2},
+	}))
+
+	return agentTreeStruct{
+		root:                parent,
+		noTransferAgent:     sub1,
+		allowsTransferAgent: sub2,
+	}
+}
+
+type agentTreeStruct struct {
+	root, noTransferAgent, allowsTransferAgent agent.Agent
+}
+
+func must[T agent.Agent](a T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return a
+}
+
+func createSession(t *testing.T, ctx context.Context, sessionID, appName, userID string, events []*session.Event) session.Session {
+	t.Helper()
+
+	service := session.InMemoryService()
+
+	resp, err := service.Create(ctx, &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, event := range events {
+		if err := service.AppendEvent(ctx, resp.Session, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	return resp.Session
+}
+
+func TestRunner_AutoCreateSession(t *testing.T) {
+	t.Parallel()
+
+	appName := "testApp"
+	userID := "testUser"
+	sessionID := "testSession"
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// no-op, we are testing logic before agent run.
+			}
+		},
+	}))
+
+	tests := []struct {
+		name              string
+		autoCreateSession bool
+		setupSession      bool
+		wantErr           bool
+	}{
+		{
+			name:              "auto_create_true_session_missing",
+			autoCreateSession: true,
+			setupSession:      false,
+			wantErr:           false,
+		},
+		{
+			name:              "auto_create_false_session_missing",
+			autoCreateSession: false,
+			setupSession:      false,
+			wantErr:           true,
+		},
+		{
+			name:              "auto_create_false_session_exists",
+			autoCreateSession: false,
+			setupSession:      true,
+			wantErr:           false,
+		},
+		{
+			name:              "auto_create_true_session_exists",
+			autoCreateSession: true,
+			setupSession:      true,
+			wantErr:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			sessionService := session.InMemoryService()
+
+			if tt.setupSession {
+				_, err := sessionService.Create(ctx, &session.CreateRequest{
+					AppName:   appName,
+					UserID:    userID,
+					SessionID: sessionID,
+				})
+				if err != nil {
+					t.Fatalf("failed to setup session: %v", err)
+				}
+			}
+
+			r, err := New(Config{
+				AppName:           appName,
+				Agent:             testAgent,
+				SessionService:    sessionService,
+				AutoCreateSession: tt.autoCreateSession,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+			gotError := false
+			for _, err := range r.Run(ctx, userID, sessionID, msg, agent.RunConfig{}) {
+				if err != nil {
+					gotError = true
+				}
+			}
+
+			if gotError != tt.wantErr {
+				t.Errorf("Runner.Run() error = %v, wantErr %v", gotError, tt.wantErr)
+			}
+
+			// If we expected success, verify session exists/persists
+			if !tt.wantErr {
+				_, err = sessionService.Get(ctx, &session.GetRequest{
+					AppName:   appName,
+					UserID:    userID,
+					SessionID: sessionID,
+				})
+				if err != nil {
+					t.Errorf("expected session to exist, but got error: %v", err)
+				}
+			}
+		})
+	}
+}
