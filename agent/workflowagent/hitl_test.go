@@ -26,6 +26,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/workflow"
 )
@@ -336,18 +337,20 @@ func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 // Test fixtures and helpers
 // =============================================================================
 
-// fakeSession is a minimal session.Session implementation that
-// faithfully models the AppendEvent-gated state contract used by
-// session.InMemoryService and persistent backends: state mutations
-// are applied only when applyStateDelta is called for an event
-// (the unit-test analogue of session.Service.AppendEvent), never
-// via direct State.Set from inside the agent.
+// fakeSession is a minimal session.Session that records appended
+// events, as the real session services do. HITL resume reconstructs
+// paused state from this event history (Workflow.ReconstructRunState),
+// so the test must append every yielded event — and the inbound user
+// FunctionResponse on a resume turn — into the session.
 //
-// drainAgent (this file) calls applyStateDelta for every event the
-// agent yields, simulating what the runner does in production.
+// drainAgent (this file) appends every event the agent yields, and
+// appendUserMessage records the inbound resume message, together
+// simulating what the runner does in production.
 type fakeSession struct {
 	session.Session
-	state *fakeSessionState
+	state  *fakeSessionState
+	mu     sync.Mutex
+	events []*session.Event
 }
 
 func newFakeSession() *fakeSession {
@@ -357,18 +360,55 @@ func newFakeSession() *fakeSession {
 func (s *fakeSession) ID() string           { return "test-session-id" }
 func (s *fakeSession) State() session.State { return s.state }
 
-// applyStateDelta merges any Actions.StateDelta on the supplied
-// event into the underlying state map. Mirrors what
-// inMemoryService.AppendEvent does for session-scoped (no
-// app:/user:/temp: prefix) keys; HITL persistence uses such keys.
-func (s *fakeSession) applyStateDelta(ev *session.Event) {
-	if ev == nil || len(ev.Actions.StateDelta) == 0 {
+func (s *fakeSession) Events() session.Events {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return fakeEvents(append([]*session.Event(nil), s.events...))
+}
+
+// appendEvent records an event in history (the test analogue of
+// session.Service.AppendEvent) and applies any StateDelta.
+func (s *fakeSession) appendEvent(ev *session.Event) {
+	if ev == nil {
 		return
 	}
-	s.state.mu.Lock()
-	defer s.state.mu.Unlock()
-	for k, v := range ev.Actions.StateDelta {
-		s.state.m[k] = v
+	s.mu.Lock()
+	s.events = append(s.events, ev)
+	s.mu.Unlock()
+	if len(ev.Actions.StateDelta) > 0 {
+		s.state.mu.Lock()
+		for k, v := range ev.Actions.StateDelta {
+			s.state.m[k] = v
+		}
+		s.state.mu.Unlock()
+	}
+}
+
+// appendUserMessage records an inbound user message as a "user"
+// event so a resume turn's FunctionResponse is visible to
+// ReconstructRunState, mirroring the runner appending the user turn.
+func (s *fakeSession) appendUserMessage(msg *genai.Content) {
+	if msg == nil {
+		return
+	}
+	ev := session.NewEvent("test-invocation-id")
+	ev.Author = "user"
+	ev.LLMResponse = model.LLMResponse{Content: msg}
+	s.appendEvent(ev)
+}
+
+// fakeEvents is a session.Events over a fixed slice.
+type fakeEvents []*session.Event
+
+func (e fakeEvents) Len() int                { return len(e) }
+func (e fakeEvents) At(i int) *session.Event { return e[i] }
+func (e fakeEvents) All() iter.Seq[*session.Event] {
+	return func(yield func(*session.Event) bool) {
+		for _, ev := range e {
+			if !yield(ev) {
+				return
+			}
+		}
 	}
 }
 
@@ -461,6 +501,12 @@ func makeAgent(t *testing.T, edges []workflow.Edge) agent.Agent {
 // pause/resume round-trips through fakeSessionState as they would
 // in production.
 func newMockCtx(sess session.Session, agt agent.Agent, msg *genai.Content) *MockInvocationContext {
+	// Append the inbound user turn to history first, as the runner
+	// does in production, so a resume turn's FunctionResponse is
+	// visible to ReconstructRunState.
+	if fs, ok := sess.(*fakeSession); ok {
+		fs.appendUserMessage(msg)
+	}
 	return &MockInvocationContext{
 		Context:     context.TODO(),
 		sess:        sess,
@@ -469,13 +515,11 @@ func newMockCtx(sess session.Session, agt agent.Agent, msg *genai.Content) *Mock
 	}
 }
 
-// drainAgent consumes the agent's iter.Seq2, collecting events,
-// and applies each event's StateDelta to sess. The applyStateDelta
-// step replaces the AppendEvent-side state propagation that the
-// real runner performs; without it state writes from the agent
-// would never become visible to subsequent calls. Fails the test
-// if the iterator yields a non-nil error that the test did not
-// opt into via wantErr.
+// drainAgent consumes the agent's iter.Seq2, collecting events and
+// appending each to sess. The append step is the test analogue of
+// the runner's AppendEvent: it builds the session history that the
+// next turn's ReconstructRunState reads. Fails the test if the
+// iterator yields a non-nil error the test did not opt into.
 func drainAgent(t *testing.T, sess *fakeSession, seq iter.Seq2[*session.Event, error], wantErr error) []*session.Event {
 	t.Helper()
 	var got []*session.Event
@@ -488,7 +532,7 @@ func drainAgent(t *testing.T, sess *fakeSession, seq iter.Seq2[*session.Event, e
 			continue
 		}
 		got = append(got, ev)
-		sess.applyStateDelta(ev)
+		sess.appendEvent(ev)
 	}
 	switch {
 	case wantErr == nil && sawErr != nil:

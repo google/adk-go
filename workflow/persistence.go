@@ -16,86 +16,388 @@ package workflow
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
+	"strings"
+
+	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/session"
 )
 
-// runStateSessionKeyPrefix is the prefix used by RunStateSessionKey
-// for namespacing workflow RunStates inside session.State.
-const runStateSessionKeyPrefix = "adk.workflow.runstate."
-
-// RunStateSessionKey returns the session.State key under which a
-// workflow's RunState is persisted between invocations. Namespaced
-// by workflow name so multiple workflows in the same session do
-// not collide.
-func RunStateSessionKey(workflowName string) string {
-	return runStateSessionKeyPrefix + workflowName
+// nodeScanState accumulates, per node, what the session history says
+// about a paused run. Mirrors adk-python's _ChildScanState.
+type nodeScanState struct {
+	// interrupts are the long-running tool IDs the node raised
+	// (insertion-ordered for stable reconstruction).
+	interrupts []string
+	seen       map[string]struct{}
+	// resolved maps an interrupt ID to the (last) user response.
+	resolved map[string]any
+	// schemas maps an interrupt ID to its declared response schema,
+	// re-extracted from the pause FunctionCall args.
+	schemas   map[string]*jsonschema.Schema
+	output    any
+	hasOutput bool
+	branch    string
 }
 
-// LoadRunState reads and decodes the workflow's persisted RunState
-// from the given session. Returns (nil, nil) when no state has
-// been stored yet, so callers can distinguish "nothing to resume"
-// from "load failed". An empty workflowName disables persistence
-// and always returns (nil, nil).
-func LoadRunState(sess session.Session, workflowName string) (*RunState, error) {
-	if sess == nil || workflowName == "" {
-		return nil, nil
+func (s *nodeScanState) addInterrupt(id string) {
+	if s.seen == nil {
+		s.seen = map[string]struct{}{}
 	}
-	state := sess.State()
-	if state == nil {
-		return nil, nil
+	if _, ok := s.seen[id]; ok {
+		return
 	}
-	raw, err := state.Get(RunStateSessionKey(workflowName))
-	if err != nil {
-		if errors.Is(err, session.ErrStateKeyNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	// raw is JSON-encoded []byte (or its base64-string form when
-	// the session backend round-trips StateDelta through JSON).
-	decode := func(b []byte) (*RunState, error) {
-		var state RunState
-		if err := json.Unmarshal(b, &state); err != nil {
-			return nil, fmt.Errorf("workflow: decode run state: %w", err)
-		}
-		return &state, nil
-	}
-	switch v := raw.(type) {
-	case []byte:
-		return decode(v)
-	case string:
-		return decode([]byte(v))
-	default:
-		return nil, fmt.Errorf("workflow: run state has unexpected type %T (want []byte or string)", raw)
-	}
+	s.seen[id] = struct{}{}
+	s.interrupts = append(s.interrupts, id)
 }
 
-// NewRunStateEvent builds a session.Event whose Actions.StateDelta
-// carries the workflow's serialised RunState. Workflow.Run and
-// Workflow.Resume yield this event before returning so the
-// surrounding event-append pipeline can persist the state
-// alongside every other delta-based update.
+// ReconstructRunState rebuilds the paused RunState by scanning session
+// history instead of loading a persisted blob, mirroring adk-python's
+// rehydration (workflow/utils/_rehydration_utils.py:
+// _reconstruct_node_states + _workflow.py:_infer_node_state).
 //
-// Persistence backends apply state mutations only when they
-// observe them on Event.Actions.StateDelta during the append
-// path; a direct session.State().Set updates the per-invocation
-// copy but is not propagated to storage. Returning nil for an
-// empty workflowName lets callers use NewRunStateEvent
-// unconditionally and skip the yield when persistence is not
-// desired.
-func NewRunStateEvent(invocationID, workflowName string, state *RunState) (*session.Event, error) {
-	if workflowName == "" || state == nil {
+// For each node it collects the long-running interrupts it raised
+// (Event.LongRunningToolIDs, attributed by event node path), the user
+// FunctionResponses that resolved them, and each interrupt's declared
+// response schema. inferNodeState then maps that scan to a NodeState
+// (WAITING / PENDING+ResumedInputs / COMPLETED+Output). Returns
+// (nil, nil) when no node has interrupt history.
+func (w *Workflow) ReconstructRunState(sess session.Session) (*RunState, error) {
+	if sess == nil {
 		return nil, nil
 	}
-	bytes, err := json.Marshal(state)
-	if err != nil {
-		return nil, fmt.Errorf("workflow: encode run state: %w", err)
+	nodesByName := buildNodesByName(w.graph)
+	events := sess.Events()
+
+	scans := map[string]*nodeScanState{}
+	interruptOwner := map[string]string{} // interrupt ID -> node name
+	scanFor := func(name string) *nodeScanState {
+		s := scans[name]
+		if s == nil {
+			s = &nodeScanState{resolved: map[string]any{}, schemas: map[string]*jsonschema.Schema{}}
+			scans[name] = s
+		}
+		return s
 	}
-	ev := session.NewEvent(invocationID)
-	ev.Actions.StateDelta[RunStateSessionKey(workflowName)] = bytes
-	return ev, nil
+
+	for i := 0; i < events.Len(); i++ {
+		ev := events.At(i)
+		if ev == nil {
+			continue
+		}
+
+		// A user FunctionResponse resolves an interrupt — not the
+		// tool's own initial "pending" response (authored by the
+		// node). Mirrors adk-python's event.author == 'user' gate.
+		// Last response per interrupt wins, so a retry after a
+		// rejected payload supersedes the earlier one.
+		if ev.Author == "user" && ev.Content != nil {
+			for _, p := range ev.Content.Parts {
+				fr := frPart(p)
+				if fr == nil {
+					continue
+				}
+				owner, ok := interruptOwner[fr.ID]
+				if !ok {
+					continue
+				}
+				scanFor(owner).resolved[fr.ID] = unwrapResponse(fr.Response)
+			}
+			continue
+		}
+
+		// Interrupts the node raised, attributed to the static graph
+		// node that emitted the event (NodeInfo.Path; dynamic children
+		// fold into their static ancestor — see eventNodeName).
+		owner := eventNodeName(ev)
+		if _, ok := nodesByName[owner]; !ok {
+			continue
+		}
+		s := scanFor(owner)
+		if ev.Output != nil {
+			s.output = ev.Output
+			s.hasOutput = true
+			s.branch = ev.Branch
+		}
+		for _, id := range ev.LongRunningToolIDs {
+			if id == "" {
+				continue
+			}
+			s.addInterrupt(id)
+			if s.branch == "" {
+				s.branch = ev.Branch
+			}
+			interruptOwner[id] = owner
+			if sc := schemaFromEvent(ev, id); sc != nil {
+				s.schemas[id] = sc
+			}
+		}
+	}
+
+	// Cached node outputs feed predecessor-input reconstruction for
+	// re-entry nodes; the workflow seed input is the START successor's
+	// input. completed is every node that emitted any event in history
+	// (used by Resume to skip already-run successors); WAITING nodes
+	// are subtracted below.
+	nodeOutputs := map[string]any{}
+	completed := map[string]bool{}
+	for i := 0; i < events.Len(); i++ {
+		ev := events.At(i)
+		if ev == nil {
+			continue
+		}
+		name := eventNodeName(ev)
+		if _, ok := nodesByName[name]; !ok {
+			continue
+		}
+		completed[name] = true
+		if ev.Output != nil {
+			nodeOutputs[name] = ev.Output
+		}
+	}
+	workflowInput := firstUserInput(events)
+
+	var state *RunState
+	for nodeName, scan := range scans {
+		if len(scan.interrupts) == 0 {
+			continue
+		}
+		ns, err := w.inferNodeState(nodeName, scan, nodeOutputs, workflowInput)
+		if err != nil {
+			return nil, err
+		}
+		if ns == nil {
+			continue
+		}
+		if state == nil {
+			state = NewRunState()
+		}
+		state.Nodes[nodeName] = ns
+	}
+	if state != nil {
+		for name, ns := range state.Nodes {
+			if ns.Status == NodeWaiting {
+				delete(completed, name)
+			}
+		}
+		state.completed = completed
+	}
+	return state, nil
+}
+
+// inferNodeState maps a node's scan to a NodeState, mirroring
+// adk-python _infer_node_state.
+//
+// Status priority:
+//   - unresolved interrupts, re-run + some resolved -> NodePending
+//     (partial resume: re-run with the resolved responses)
+//   - unresolved interrupts otherwise               -> NodeWaiting
+//   - all resolved, re-run                           -> NodePending (re-entry)
+//   - all resolved, handoff                          -> NodeCompleted
+//     with Output = the response (forwarded to successors by Resume)
+func (w *Workflow) inferNodeState(nodeName string, scan *nodeScanState, nodeOutputs map[string]any, workflowInput any) (*NodeState, error) {
+	unresolved := make([]string, 0, len(scan.interrupts))
+	for _, id := range scan.interrupts {
+		if _, done := scan.resolved[id]; !done {
+			unresolved = append(unresolved, id)
+		}
+	}
+
+	reenter := false
+	if n := buildNodesByName(w.graph)[nodeName]; n != nil {
+		if r := n.Config().RerunOnResume; r != nil && *r {
+			reenter = true
+		}
+	}
+
+	// Validate each surviving (last-wins) response against its schema.
+	// A superseded invalid payload never reaches here.
+	resumed := map[string]any{}
+	for id, resp := range scan.resolved {
+		if sc := scan.schemas[id]; sc != nil {
+			validated, err := validateResumeResponse(resp, sc)
+			if err != nil {
+				return nil, fmt.Errorf("%w: interrupt %q: %w", ErrInvalidResumeResponse, id, err)
+			}
+			resp = validated
+		}
+		resumed[id] = resp
+	}
+
+	ns := &NodeState{Branch: scan.branch, interruptSchemas: scan.schemas}
+
+	switch {
+	case len(unresolved) > 0 && reenter && len(resumed) > 0:
+		// Partial resume: re-run with resolved responses so the node
+		// can proceed or re-interrupt.
+		ns.Status = NodePending
+		ns.ResumedInputs = resumed
+		ns.Interrupts = unresolved
+		ns.Input, ns.TriggeredBy = w.predecessorInput(nodeName, nodeOutputs, workflowInput)
+	case len(unresolved) > 0:
+		// Still waiting for the remaining interrupts.
+		ns.Status = NodeWaiting
+		ns.Interrupts = unresolved
+		if len(resumed) > 0 {
+			ns.ResumedInputs = resumed
+		}
+	case reenter:
+		// All resolved, re-entry: re-run with the responses.
+		ns.Status = NodePending
+		ns.ResumedInputs = resumed
+		ns.Input, ns.TriggeredBy = w.predecessorInput(nodeName, nodeOutputs, workflowInput)
+	default:
+		// All resolved, handoff: the node is done; its output is the
+		// response, which Resume forwards to successors. Keep the
+		// resolved responses so Resume can gate the idempotent
+		// successor trigger on this turn's responses.
+		ns.Status = NodeCompleted
+		ns.Output = resumeOutput(resumed)
+		ns.ResumedInputs = resumed
+	}
+	return ns, nil
+}
+
+// predecessorInput walks incoming edges backward to find a resuming
+// node's input: a predecessor's cached output, else the workflow seed
+// input for a START successor. Mirrors adk-python
+// _find_predecessor_input.
+func (w *Workflow) predecessorInput(nodeName string, nodeOutputs map[string]any, workflowInput any) (any, string) {
+	node := buildNodesByName(w.graph)[nodeName]
+	if node == nil {
+		return nil, ""
+	}
+	incoming := w.graph.predecessorsOf(node)
+	if len(incoming) == 0 {
+		return nil, ""
+	}
+	for _, e := range incoming {
+		from := e.From.Name()
+		if from != Start.Name() {
+			if out, ok := nodeOutputs[from]; ok {
+				return out, from
+			}
+		}
+	}
+	for _, e := range incoming {
+		if e.From.Name() == Start.Name() {
+			return workflowInput, Start.Name()
+		}
+	}
+	return nodeOutputs[incoming[0].From.Name()], incoming[0].From.Name()
+}
+
+// firstUserInput returns the seed workflow input: the text of the
+// first user event in history (the original prompt), used as the
+// START successor's input on re-entry. Resume turns (user
+// FunctionResponses) are skipped.
+func firstUserInput(events session.Events) any {
+	for i := 0; i < events.Len(); i++ {
+		ev := events.At(i)
+		if ev == nil || ev.Author != "user" || ev.Content == nil {
+			continue
+		}
+		var text string
+		hasFR := false
+		for _, p := range ev.Content.Parts {
+			if p == nil {
+				continue
+			}
+			if p.FunctionResponse != nil {
+				hasFR = true
+			}
+			text += p.Text
+		}
+		if hasFR {
+			continue
+		}
+		if text != "" {
+			return text
+		}
+	}
+	return nil
+}
+
+// eventNodeName returns the name of the static graph node that owns
+// ev, for attribution during rehydration.
+//
+// Static node events are stamped with NodeInfo.Path == node name. A
+// dynamic child invoked via RunNode carries a hierarchical path like
+// "parent/child@1"; its interrupt is owned by the nearest static
+// ancestor (the first path segment). Falls back to Author for the
+// LlmAgent node path, where Author == node name and no path is set.
+func eventNodeName(ev *session.Event) string {
+	if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
+		path := ev.NodeInfo.Path
+		if i := strings.IndexByte(path, '/'); i >= 0 {
+			return path[:i]
+		}
+		return path
+	}
+	return ev.Author
+}
+
+// frPart returns the FunctionResponse on a part if present and keyed.
+func frPart(p *genai.Part) *genai.FunctionResponse {
+	if p == nil || p.FunctionResponse == nil || p.FunctionResponse.ID == "" {
+		return nil
+	}
+	return p.FunctionResponse
+}
+
+// schemaFromEvent re-extracts the response schema for interrupt id
+// from the pause event (RequestedInput or the adk_request_input
+// FunctionCall args), mirroring adk-python _extract_schema_from_event.
+// The schema lives only in the events; it is not persisted.
+func schemaFromEvent(ev *session.Event, id string) *jsonschema.Schema {
+	if ev.RequestedInput != nil && ev.RequestedInput.InterruptID == id {
+		return ev.RequestedInput.ResponseSchema
+	}
+	if ev.Content == nil {
+		return nil
+	}
+	for _, p := range ev.Content.Parts {
+		if p == nil {
+			continue
+		}
+		fc := p.FunctionCall
+		if fc == nil || fc.Name != WorkflowInputFunctionCallName || fc.ID != id {
+			continue
+		}
+		if raw, ok := fc.Args["responseSchema"]; ok {
+			if sc, ok := raw.(*jsonschema.Schema); ok {
+				return sc
+			}
+		}
+	}
+	return nil
+}
+
+// unwrapResponse extracts the original value from a FunctionResponse
+// payload. A sole single-key wrapper — {"result": v} (adk-python),
+// {"response": v} or {"payload": v} (adk-go) — is unwrapped, with
+// string values JSON-parsed when possible; anything else passes
+// through. Mirrors adk-python _unwrap_response, extended with the
+// adk-go keys for cross-runtime sessions.
+func unwrapResponse(data map[string]any) any {
+	if len(data) != 1 {
+		return data
+	}
+	for _, key := range []string{"result", "response", "payload"} {
+		v, ok := data[key]
+		if !ok {
+			continue
+		}
+		if s, isStr := v.(string); isStr {
+			var parsed any
+			if err := json.Unmarshal([]byte(s), &parsed); err == nil {
+				return parsed
+			}
+			return s
+		}
+		return v
+	}
+	return data
 }

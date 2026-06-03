@@ -95,7 +95,12 @@ type workflowAgent struct {
 // Workflow.Run (every other turn).
 func (a *workflowAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		if responses, state, ok := a.detectResume(ctx); ok {
+		responses, state, ok, err := a.detectResume(ctx)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		if ok {
 			for ev, err := range a.workflow.Resume(ctx, state, responses) {
 				if !yield(ev, err) {
 					return
@@ -116,10 +121,10 @@ func (a *workflowAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Even
 // responses map keyed by InterruptID (suitable for
 // Workflow.Resume), the RunState loaded from session, and true if
 // this turn is a resume; (nil, nil, false) for a fresh turn.
-func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]any, *workflow.RunState, bool) {
+func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]any, *workflow.RunState, bool, error) {
 	frs := utils.FunctionResponses(ctx.UserContent())
 	if len(frs) == 0 {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
 
 	responses := map[string]any{}
@@ -130,17 +135,21 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 		responses[fr.ID] = decodeWorkflowInputResponse(fr)
 	}
 	if len(responses) == 0 {
-		return nil, nil, false
+		return nil, nil, false, nil
 	}
 
-	state, err := workflow.LoadRunState(ctx.Session(), a.workflow.Name())
-	if err != nil || state == nil {
-		// No persisted state means there is nothing to resume;
-		// fall through to a fresh Workflow.Run.
-		return nil, nil, false
+	state, err := a.workflow.ReconstructRunState(ctx.Session())
+	if err != nil {
+		// Surface reconstruction errors (e.g. schema validation
+		// failures) to the caller instead of silently falling
+		// through to a fresh Run.
+		return nil, nil, false, err
+	}
+	if state == nil {
+		return nil, nil, false, nil
 	}
 
-	return responses, state, true
+	return responses, state, true, nil
 }
 
 // decodeWorkflowInputResponse extracts the user-supplied payload

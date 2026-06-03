@@ -14,7 +14,7 @@
 
 package workflow
 
-import "google.golang.org/adk/session"
+import "github.com/google/jsonschema-go/jsonschema"
 
 // NodeStatus is the lifecycle status of a node in the workflow graph.
 //
@@ -109,11 +109,19 @@ type NodeState struct {
 	// derivation to remain stable across pause/resume turns.
 	Branch string `json:"branch,omitempty"`
 
-	// PendingRequest, when non-nil, carries the human-input request
-	// the node emitted before pausing. Non-nil iff Status ==
-	// NodeWaiting and the wait was caused by a human-input request
-	// (as opposed to a fan-in barrier).
-	PendingRequest *session.RequestInput `json:"pendingRequest,omitempty"`
+	// Interrupts holds the long-running tool call IDs the node is
+	// waiting on. Non-empty iff Status == NodeWaiting due to a
+	// long-running tool pause; lets resume match a human's
+	// FunctionResponse to the node. Mirrors adk-python
+	// NodeState.interrupts.
+	Interrupts []string `json:"interrupts,omitempty"`
+
+	// interruptSchemas maps an interrupt ID to its declared response
+	// schema, re-extracted from the pause event during rehydration.
+	// Not persisted: the schema lives only in the events and is
+	// rebuilt each turn (matching adk-python, which keeps no schema
+	// on NodeState). Consumed by Resume to validate the payload.
+	interruptSchemas map[string]*jsonschema.Schema
 
 	// Attempt is the number of times this node has been failed.
 	Attempt int `json:"attempt,omitempty"`
@@ -139,12 +147,33 @@ type RunState struct {
 	// Nodes is the per-node lifecycle map. Absent entries are
 	// inactive.
 	Nodes map[string]*NodeState `json:"nodes,omitempty"`
+
+	// completed is the set of node names that already produced an
+	// output in session history. Reconstructed by ReconstructRunState
+	// and used by Resume to avoid re-triggering a handoff successor
+	// that already ran on a prior turn (idempotency). Not persisted.
+	completed map[string]bool
 }
 
 // NewRunState returns an empty state with the Nodes map
 // initialised so callers can write to it without a nil check.
 func NewRunState() *RunState {
 	return &RunState{Nodes: map[string]*NodeState{}}
+}
+
+// HasWaiting reports whether any node is paused (NodeWaiting),
+// i.e. the run left work to resume on a later turn. When false,
+// the run finished and there is nothing to persist for resume.
+func (s *RunState) HasWaiting() bool {
+	if s == nil {
+		return false
+	}
+	for _, ns := range s.Nodes {
+		if ns != nil && ns.Status == NodeWaiting {
+			return true
+		}
+	}
+	return false
 }
 
 // EnsureNode returns the NodeState for the given node name,
