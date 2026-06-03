@@ -97,6 +97,37 @@ func (w *Workflow) Resume(
 		// Pass 1: dispatch every waiting asker matched by
 		// responses (handoff → defer; re-entry → reschedule now).
 		scheduled := 0
+
+		// Long-running-tool interrupts (NodeState.Interrupts) pause a
+		// node without a PendingRequest/RequestInput. They are always
+		// re-entry: on resume, re-activate the node so its flow
+		// continues from session history (the human's FunctionResponse
+		// is already appended). No schema/handoff handling — the reply
+		// is matched to the tool call by ID inside the LlmAgent flow.
+		for name, ns := range state.Nodes {
+			if ns.Status != NodeWaiting || len(ns.Interrupts) == 0 {
+				continue
+			}
+			matched := false
+			for _, id := range ns.Interrupts {
+				if _, ok := responses[id]; ok {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+			node := s.nodesByName[name]
+			if node == nil {
+				continue
+			}
+			ns.Interrupts = nil
+			ns.Status = NodePending
+			s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.Branch, nil)
+			scheduled++
+		}
+
 		for name, ns := range state.Nodes {
 			if ns.Status != NodeWaiting || ns.PendingRequest == nil {
 				continue
@@ -199,7 +230,14 @@ func (w *Workflow) Resume(
 		// StateDelta. If new nodes paused during this Resume the
 		// next turn will see them; if the run completed the state
 		// reflects that too.
-		yieldRunStateEvent(ctx, w.name, s.state, yield)
+		//
+		// Skip when the caller rehydrates from session history
+		// (WithRehydratedRunState): re-pauses are reconstructed from
+		// the events themselves, so no run-state event is emitted
+		// (matches adk-python).
+		if !w.rehydrateRunState {
+			yieldRunStateEvent(ctx, w.name, s.state, yield)
+		}
 	}
 }
 

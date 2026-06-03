@@ -115,6 +115,15 @@ type NodeState struct {
 	// (as opposed to a fan-in barrier).
 	PendingRequest *session.RequestInput `json:"pendingRequest,omitempty"`
 
+	// Interrupts holds the long-running tool call IDs the node is
+	// waiting on (raised via Event.LongRunningToolIDs and not yet
+	// answered by a matching FunctionResponse). Non-empty iff
+	// Status == NodeWaiting due to a long-running tool pause.
+	// Mirrors adk-python NodeState.interrupts: it lets resume match
+	// a human's FunctionResponse to the waiting node without a
+	// synthetic RequestInput. A node can wait on more than one.
+	Interrupts []string `json:"interrupts,omitempty"`
+
 	// Attempt is the number of times this node has been failed.
 	Attempt int `json:"attempt,omitempty"`
 
@@ -145,6 +154,21 @@ type RunState struct {
 // initialised so callers can write to it without a nil check.
 func NewRunState() *RunState {
 	return &RunState{Nodes: map[string]*NodeState{}}
+}
+
+// HasWaiting reports whether any node is paused (NodeWaiting),
+// i.e. the run left work to resume on a later turn. When false,
+// the run finished and there is nothing to persist for resume.
+func (s *RunState) HasWaiting() bool {
+	if s == nil {
+		return false
+	}
+	for _, ns := range s.Nodes {
+		if ns != nil && ns.Status == NodeWaiting {
+			return true
+		}
+	}
+	return false
 }
 
 // EnsureNode returns the NodeState for the given node name,

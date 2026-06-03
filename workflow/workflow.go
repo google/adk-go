@@ -141,6 +141,15 @@ type Workflow struct {
 	// may run concurrently within a single Run invocation. 0
 	// (the default) means unlimited. Set via WithMaxConcurrency.
 	maxConcurrency int
+
+	// rehydrateRunState, when true, suppresses emitting the RunState
+	// StateDelta event from Run/Resume. The caller instead
+	// reconstructs paused state from session history via
+	// ReconstructRunState (matching adk-python, which never persists
+	// a run-state event). Used by the runner's LlmAgent node path so
+	// a HITL pause turn yields only the domain events, not an extra
+	// content-free state event. Set via WithRehydratedRunState.
+	rehydrateRunState bool
 }
 
 // Option configures a Workflow at construction time. Pass options
@@ -151,7 +160,21 @@ type Option func(*workflowOptions)
 // caller's Option list. Zero values mean "no override / use
 // engine defaults".
 type workflowOptions struct {
-	maxConcurrency int
+	maxConcurrency    int
+	rehydrateRunState bool
+}
+
+// WithRehydratedRunState makes the workflow suppress the RunState
+// StateDelta event normally yielded by Run/Resume. Use it when the
+// caller reconstructs paused state from session history (via
+// Workflow.ReconstructRunState) rather than from a persisted
+// run-state blob. This matches adk-python, which never persists a
+// run-state event. Without this option the workflow persists its
+// RunState as an event (the default, used by graph workflows).
+func WithRehydratedRunState() Option {
+	return func(o *workflowOptions) {
+		o.rehydrateRunState = true
+	}
 }
 
 // WithMaxConcurrency caps how many graph-scheduled nodes may run
@@ -209,9 +232,10 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 		opt(&o)
 	}
 	return &Workflow{
-		graph:          graph,
-		name:           name,
-		maxConcurrency: o.maxConcurrency,
+		graph:             graph,
+		name:              name,
+		maxConcurrency:    o.maxConcurrency,
+		rehydrateRunState: o.rehydrateRunState,
 	}, nil
 }
 
@@ -259,7 +283,21 @@ func (w *Workflow) RunNode(ctx agent.InvocationContext, input any) iter.Seq2[*se
 		// surrounding event-append pipeline can propagate it to
 		// storage; see NewRunStateEvent for why a direct
 		// State.Set is not sufficient.
-		yieldRunStateEvent(ctx, w.name, s.state, yield)
+		//
+		// Only emit when the run actually paused (a node is
+		// NodeWaiting). A fully-completed run has nothing to
+		// resume, so persisting it would add a spurious,
+		// content-free StateDelta event to every turn — which
+		// breaks event-count and stream-aggregator expectations
+		// for plain (non-HITL) agent runs. Resume always persists
+		// (see resume.go) so a consumed pause is correctly cleared.
+		//
+		// Skip entirely when the caller rehydrates state from
+		// session history (WithRehydratedRunState): no run-state
+		// event is emitted, matching adk-python.
+		if !w.rehydrateRunState && s.state.HasWaiting() {
+			yieldRunStateEvent(ctx, w.name, s.state, yield)
+		}
 	}
 }
 

@@ -135,6 +135,16 @@ type nodeRun struct {
 	inputRequest *session.RequestInput // at most one human-input request; multiple is an error
 	err          error                 // set on duplicate output, duplicate routing event, or duplicate input request
 	branch       string                // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
+
+	// interruptIDs accumulates long-running tool call IDs that the
+	// node's events raised but did not resolve within this run, i.e.
+	// the node is waiting for an external/human reply. Mirrors
+	// adk-python's Context._interrupt_ids: any event's
+	// LongRunningToolIDs are added; a later FunctionResponse with a
+	// matching ID removes it. A non-empty set at completion parks the
+	// node in NodeWaiting — no separate pause event is emitted (the
+	// long-running call event already in the session IS the signal).
+	interruptIDs map[string]struct{}
 }
 
 // recordErr stores err as the accumulator's first error. Subsequent
@@ -170,6 +180,34 @@ func (nr *nodeRun) setInputRequest(req *session.RequestInput, nodeName string) {
 	nr.inputRequest = req
 }
 
+// trackInterrupts accumulates the long-running tool call IDs the
+// node raised this run via Event.LongRunningToolIDs. A non-empty set
+// at completion parks the node in NodeWaiting (long-running pause).
+//
+// We deliberately do NOT resolve an interrupt from a FunctionResponse
+// seen in the same run: the tool's own initial "pending" response
+// arrives in the SAME run that raised the call, so treating it as a
+// reply would cancel the pause. The genuine reply (human/external)
+// arrives on a LATER turn — a fresh node run that continues from
+// session history and does not re-raise the call, so its interrupt
+// set is simply empty and the node completes. This mirrors
+// adk-python, where the long-running call event ends the turn and the
+// pause persists until a new invocation supplies the response.
+func (nr *nodeRun) trackInterrupts(ev *session.Event) {
+	if ev == nil {
+		return
+	}
+	for _, id := range ev.LongRunningToolIDs {
+		if id == "" {
+			continue
+		}
+		if nr.interruptIDs == nil {
+			nr.interruptIDs = map[string]struct{}{}
+		}
+		nr.interruptIDs[id] = struct{}{}
+	}
+}
+
 // setOutput stores out as the node's single output value. A second
 // call records ErrMultipleOutputs instead of overwriting.
 func (nr *nodeRun) setOutput(out any, nodeName string) {
@@ -189,9 +227,22 @@ type queueItem interface{ isQueueItem() }
 // consumer. nodeName is required so the consumer can correlate the
 // event with the right nodeRun without relying on channel-FIFO-
 // per-task semantics (which Go channels do not provide).
+//
+// processed, when non-nil, is a back-pressure handshake: the
+// producing goroutine blocks until the consumer closes it, which
+// happens only after the event has been yielded to (and thus
+// persisted by) the caller. This restores the ordering guarantee
+// that a non-partial event — notably a function-response — is
+// visible in the session before the producing LlmAgent flow loops
+// and rebuilds the next model request's contents from session
+// history. It mirrors adk-python's enqueue_event/processed_signal
+// handshake (invocation_context.enqueue_event ↔
+// _consume_event_queue). Nil for partial events, which are
+// fire-and-forget and never persisted.
 type eventItem struct {
-	nodeName string
-	ev       *session.Event
+	nodeName  string
+	ev        *session.Event
+	processed chan struct{}
 }
 
 func (eventItem) isQueueItem() {}
@@ -445,11 +496,30 @@ func runNode(
 			completion.err = err
 			return
 		}
+		// For non-partial events, install a processed handshake and
+		// block until the consumer has yielded (and thus persisted)
+		// the event. This guarantees a function-response is in the
+		// session before the node's LlmAgent flow loops and rebuilds
+		// the next model request from session history — otherwise the
+		// model would not see the tool result and would re-issue the
+		// call. Partial (streaming) events are fire-and-forget.
+		var processed chan struct{}
+		if ev != nil && !ev.LLMResponse.Partial {
+			processed = make(chan struct{})
+		}
 		select {
-		case out <- eventItem{nodeName: name, ev: ev}:
+		case out <- eventItem{nodeName: name, ev: ev, processed: processed}:
 		case <-ctx.Done():
 			completion.err = ctx.Err()
 			return
+		}
+		if processed != nil {
+			select {
+			case <-processed:
+			case <-ctx.Done():
+				completion.err = ctx.Err()
+				return
+			}
 		}
 	}
 	// If the node's iter returned cleanly but the context was
@@ -523,6 +593,17 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 					s.cancelAll()
 				}
 			}
+			// Release the producer's back-pressure handshake. By
+			// this point the event has been yielded to the caller
+			// (which persists non-partial events synchronously), so
+			// the producing node may safely resume and rebuild its
+			// next request from the now-updated session. Always
+			// signal — even when draining — so a blocked producer
+			// does not leak. Closed-channel double-signal is
+			// impossible: each eventItem carries a fresh channel.
+			if it.processed != nil {
+				close(it.processed)
+			}
 		case completionItem:
 			err := s.handleCompletion(it, !draining)
 			if err != nil && pendingErr == nil {
@@ -588,6 +669,13 @@ func (s *scheduler) handleEvent(it eventItem) {
 	isDescendant := path != "" && path != it.nodeName
 	if it.ev.RequestedInput != nil {
 		nr.setInputRequest(it.ev.RequestedInput, it.nodeName)
+	}
+	// Accumulate long-running interrupts from the node's own events.
+	// A non-empty open set at completion parks the node in
+	// NodeWaiting, with no separate pause event — the long-running
+	// call event already carries the signal (matches adk-python).
+	if !isDescendant {
+		nr.trackInterrupts(it.ev)
 	}
 	if isDescendant {
 		return
@@ -672,6 +760,21 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 	if nr != nil && nr.inputRequest != nil {
 		ns.Status = NodeWaiting
 		ns.PendingRequest = nr.inputRequest
+		return nil
+	}
+
+	// Long-running-tool pause: the node raised LongRunningToolIDs
+	// that were not answered within this run. Park it WAITING and
+	// record the open interrupt IDs so resume can match a human's
+	// FunctionResponse back to this node — without any synthetic
+	// pause event (the long-running call event already in the
+	// session is the signal). Mirrors adk-python _handle_completion.
+	if nr != nil && len(nr.interruptIDs) > 0 {
+		ns.Status = NodeWaiting
+		ns.Interrupts = ns.Interrupts[:0]
+		for id := range nr.interruptIDs {
+			ns.Interrupts = append(ns.Interrupts, id)
+		}
 		return nil
 	}
 
