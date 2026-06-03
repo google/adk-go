@@ -38,6 +38,9 @@ var (
 	// activation interrupting concurrently — at most one pending HITL
 	// per activation.
 	ErrParallelHITLUnsupported = errors.New("workflow: parallel HITL is not supported")
+
+	// ErrInputValidation indicates that the node input did not pass validation.
+	ErrInputValidation = errors.New("workflow: input validation failed")
 )
 
 // NodeRunError wraps a sentinel with the failing child's identity.

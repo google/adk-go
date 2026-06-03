@@ -14,7 +14,10 @@
 
 package workflow
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // defaultRetryConfig is the default retry configuration for a node.
 var defaultRetryConfig = RetryConfig{
@@ -23,9 +26,11 @@ var defaultRetryConfig = RetryConfig{
 	MaxDelay:      60 * time.Second,
 	BackoffFactor: 2.0,
 	Jitter:        1.0,
-	ShouldRetry: func(error) bool {
-		return true
-	},
+	ShouldRetry:   defaultShouldRetry,
+}
+
+func defaultShouldRetry(err error) bool {
+	return !errors.Is(err, ErrInputValidation)
 }
 
 // DefaultRetryConfig returns a copy of the default retry policy

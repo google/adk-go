@@ -25,9 +25,11 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/jsonschema-go/jsonschema"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 )
 
 // TestScheduler_LinearChain verifies that a linear graph
@@ -643,3 +645,93 @@ func TestScheduler_RetryCancelled(t *testing.T) {
 		t.Errorf("node calls = %d, want 1 (retry should not have triggered)", got)
 	}
 }
+
+func TestScheduler_InputValidationSuccess(t *testing.T) {
+	intSchema, err := (&jsonschema.Schema{Type: "integer"}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schema: %v", err)
+	}
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "123"}}}
+	node := &validationTestNode{
+		BaseNode: NewBaseNodeWithSchemas("val_node", "", NodeConfig{}, intSchema, nil),
+	}
+	w := mustNew(t, []Edge{{From: Start, To: node}})
+	events := drain(t, w.Run(mockCtx))
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	// JSON numbers unmarshal as float64 when unmarshaled into any
+	if got, ok := node.runInput.(float64); !ok || got != 123.0 {
+		t.Errorf("expected node to receive validated float64(123.0), got %T(%v)", node.runInput, node.runInput)
+	}
+}
+
+func TestScheduler_InputValidationFailure(t *testing.T) {
+	intSchema, err := (&jsonschema.Schema{Type: "integer"}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schema: %v", err)
+	}
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "not-an-integer"}}}
+	node := &validationTestNode{
+		BaseNode: NewBaseNodeWithSchemas("val_node", "", NodeConfig{
+			RetryConfig: &RetryConfig{
+				MaxAttempts:   3,
+				InitialDelay:  1 * time.Millisecond,
+				BackoffFactor: 1.0,
+				Jitter:        0.0,
+			},
+		}, intSchema, nil),
+	}
+	w := mustNew(t, []Edge{{From: Start, To: node}})
+	
+	var runErr error
+	for _, err := range w.Run(mockCtx) {
+		if err != nil {
+			runErr = err
+			break
+		}
+	}
+
+	if runErr == nil {
+		t.Fatal("expected validation error, got none")
+	}
+	if !errors.Is(runErr, ErrInputValidation) {
+		t.Errorf("expected run error to wrap ErrInputValidation, got: %v", runErr)
+	}
+
+	if got := node.calls.Load(); got != 0 {
+		t.Errorf("node calls = %d, want 0", got)
+	}
+
+	if got := node.validates.Load(); got != 1 {
+		t.Errorf("node validates = %d, want 1 (meaning no retries)", got)
+	}
+}
+
+type validationTestNode struct {
+	BaseNode
+	runInput any
+	calls    atomic.Int32
+	validates atomic.Int32
+}
+
+func (n *validationTestNode) ValidateInput(input any) (any, error) {
+	n.validates.Add(1)
+	return n.BaseNode.ValidateInput(input)
+}
+
+func (n *validationTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		n.calls.Add(1)
+		n.runInput = input
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Output = "ok"
+		yield(ev, nil)
+	}
+}
+
