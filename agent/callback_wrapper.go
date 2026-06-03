@@ -27,9 +27,13 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+// callbackContextWrapper is used to emit log entries for unexpected calls - those
+// related to ToolContext when Context is used as callback context
 type callbackContextWrapper struct {
 	context CallbackContext
 }
+
+// ToolContext-related: emit logs and return empty data
 
 // Actions implements [Context].
 func (c *callbackContextWrapper) Actions() *session.EventActions {
@@ -37,6 +41,36 @@ func (c *callbackContextWrapper) Actions() *session.EventActions {
 	log.Print("Actions() is not supported for CallbackContext")
 	return nil
 }
+
+// FunctionCallID implements [Context].
+func (c *callbackContextWrapper) FunctionCallID() string {
+	// return "", FunctionCallID() do not make any sense for CallbackContext
+	log.Print("FunctionCallID() is not supported for CallbackContext")
+	return ""
+}
+
+// RequestConfirmation implements [Context].
+func (c *callbackContextWrapper) RequestConfirmation(hint string, payload any) error {
+	//  RequestConfirmation() does not make any sense for CallbackContext
+	log.Print("RequestConfirmation() is not supported for CallbackContext")
+	return fmt.Errorf("RequestConfirmation() is not supported for callback context")
+}
+
+// SearchMemory implements [Context].
+func (c *callbackContextWrapper) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	//  SearchMemory() does not make any sense for CallbackContext
+	log.Print("SearchMemory() is not supported for CallbackContext")
+	return nil, fmt.Errorf("SearchMemory() is not supported for callback context")
+}
+
+// ToolConfirmation implements [Context].
+func (c *callbackContextWrapper) ToolConfirmation() *toolconfirmation.ToolConfirmation {
+	// ToolConfirmation() does not make any sense for CallbackContext
+	log.Print("ToolConfirmation() is not supported for CallbackContext")
+	return nil
+}
+
+// non ToolContext-related - call embedded context.
 
 // AgentName implements [Context].
 func (c *callbackContextWrapper) AgentName() string {
@@ -73,13 +107,6 @@ func (c *callbackContextWrapper) Err() error {
 	return c.context.Err()
 }
 
-// FunctionCallID implements [Context].
-func (c *callbackContextWrapper) FunctionCallID() string {
-	// return "", FunctionCallID() do not make any sense for CallbackContext
-	log.Print("FunctionCallID() is not supported for CallbackContext")
-	return ""
-}
-
 // InvocationID implements [Context].
 func (c *callbackContextWrapper) InvocationID() string {
 	return c.context.InvocationID()
@@ -90,20 +117,6 @@ func (c *callbackContextWrapper) ReadonlyState() session.ReadonlyState {
 	return c.context.ReadonlyState()
 }
 
-// RequestConfirmation implements [Context].
-func (c *callbackContextWrapper) RequestConfirmation(hint string, payload any) error {
-	//  RequestConfirmation() does not make any sense for CallbackContext
-	log.Print("RequestConfirmation() is not supported for CallbackContext")
-	return fmt.Errorf("RequestConfirmation() is not supported for callback context")
-}
-
-// SearchMemory implements [Context].
-func (c *callbackContextWrapper) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
-	//  SearchMemory() does not make any sense for CallbackContext
-	log.Print("SearchMemory() is not supported for CallbackContext")
-	return nil, fmt.Errorf("SearchMemory() is not supported for callback context")
-}
-
 // SessionID implements [Context].
 func (c *callbackContextWrapper) SessionID() string {
 	return c.context.SessionID()
@@ -112,13 +125,6 @@ func (c *callbackContextWrapper) SessionID() string {
 // State implements [Context].
 func (c *callbackContextWrapper) State() session.State {
 	return c.context.State()
-}
-
-// ToolConfirmation implements [Context].
-func (c *callbackContextWrapper) ToolConfirmation() *toolconfirmation.ToolConfirmation {
-	// ToolConfirmation() does not make any sense for CallbackContext
-	log.Print("ToolConfirmation() is not supported for CallbackContext")
-	return nil
 }
 
 // UserContent implements [Context].
