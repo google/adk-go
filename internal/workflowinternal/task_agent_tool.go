@@ -48,7 +48,7 @@ func (t *TaskAgentTool) Declaration() *genai.FunctionDeclaration {
 	return t.funcDeclaration
 }
 
-func (t *TaskAgentTool) Run(toolCtx tool.Context, args any) (map[string]any, error) {
+func (t *TaskAgentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, error) {
 	// Framework handles task delegation dispatch directly via the wrapper.
 	// TODO: add _defer_response logic.
 	return nil, nil
@@ -66,7 +66,7 @@ func (t *TaskAgentTool) IsLongRunning() bool {
 	return false
 }
 
-func (t *TaskAgentTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *TaskAgentTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 
