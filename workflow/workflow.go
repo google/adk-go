@@ -44,6 +44,10 @@ type Node interface {
 	// It returns the validated input (which might be coerced/parsed/transformed) or an error.
 	// It will be called by the scheduler before Run on every activation.
 	ValidateInput(input any) (any, error)
+	// ValidateOutput validates and optionally coerces/transforms an output emitted by the node.
+	// It returns the validated output (which might be coerced/parsed/transformed) or an error.
+	// The scheduler invokes it on every yielded event with a non-nil output, before forwarding it to the consumer.
+	ValidateOutput(output any) (any, error)
 	Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
 }
 
@@ -122,6 +126,10 @@ func (s *startNode) InputSchema() *jsonschema.Resolved  { return nil }
 func (s *startNode) OutputSchema() *jsonschema.Resolved { return nil }
 func (s *startNode) ValidateInput(input any) (any, error) {
 	return input, nil
+}
+
+func (s *startNode) ValidateOutput(output any) (any, error) {
+	return output, nil
 }
 
 func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
