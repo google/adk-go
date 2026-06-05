@@ -644,8 +644,8 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev.Routes != nil {
 		nr.setRoutingEvent(it.ev, it.nodeName)
 	}
-	if it.ev.Output != nil {
-		nr.setOutput(it.ev.Output, it.nodeName)
+	if out, ok := childEventOutput(it.ev); ok {
+		nr.setOutput(out, it.nodeName)
 	}
 }
 

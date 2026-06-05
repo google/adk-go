@@ -57,6 +57,28 @@ func TestScheduler_LinearChain(t *testing.T) {
 	}
 }
 
+// TestScheduler_MessageAsOutput_FeedsSuccessor verifies that a node
+// whose message IS its output (NodeInfo.MessageAsOutput, no explicit
+// Event.Output) has its model text derived as the node output and fed
+// to the successor as input.
+func TestScheduler_MessageAsOutput_FeedsSuccessor(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	a := newMessageAsOutputNode("A", "hello")
+	b := newRecordingNode("B")
+	b.release()
+
+	w := mustNew(t, Chain(Start, a, b))
+
+	gotEvents := drain(t, w.Run(mockCtx))
+
+	// B echoes "<input>:B"; the input must be A's derived output.
+	got := outputsOf(gotEvents)
+	if len(got) != 1 || got[0] != "hello:B" {
+		t.Errorf("outputs = %v, want [\"hello:B\"] (A's message text fed to B)", got)
+	}
+}
+
 // TestScheduler_FanOutConcurrency verifies that three nodes
 // downstream of START are mid-Run simultaneously, not serialised by
 // the legacy BFS. Each node blocks on its release channel until the
