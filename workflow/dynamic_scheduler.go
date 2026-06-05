@@ -29,6 +29,12 @@ type dynamicSubScheduler struct {
 	parentCtx  NodeContext
 	emitUp     func(*session.Event) error
 
+	// outputForAncestors are the extra node paths this activation's
+	// output counts for, set when this activation is itself a
+	// WithUseAsOutput child. A delegating child's event is stamped
+	// OutputFor=[childPath, parentPath, ...outputForAncestors].
+	outputForAncestors []string
+
 	// mu guards everything below. Never held across child.Run.
 	mu sync.Mutex
 	// runCountByChild seeds the auto-counter per child name; the
@@ -41,21 +47,19 @@ type dynamicSubScheduler struct {
 	delegation   outputDelegation
 }
 
-// outputDelegation is the at-most-one WithUseAsOutput delegation for a
-// parent activation. claim is set eagerly on the first delegating child
-// and never cleared within the activation (matching adk-python's
-// _output_delegated); a second delegating child is rejected. A fresh
-// sub-scheduler is built per activation, so there is nothing to reset
-// across turns. hasValue is the source of truth for readability because
-// nil is a valid delegated value.
+// outputDelegation is the at-most-one WithUseAsOutput claim for a parent
+// activation. claimed is set eagerly on the first delegating child and
+// never cleared within the activation (matching adk-python's
+// _output_delegated); a second delegating child is rejected. The output
+// value flows up on the child's event (stamped OutputFor), so the claim
+// only needs to record that delegation happened, not the value. A fresh
+// sub-scheduler is built per activation, so nothing resets across turns.
 //
 // Methods require the enclosing scheduler's mu to be held.
 type outputDelegation struct {
 	claimed   bool
 	childPath string
 	childName string
-	value     any
-	hasValue  bool
 }
 
 // reserve claims the delegation for childPath. Re-claiming the same
@@ -69,20 +73,6 @@ func (d *outputDelegation) reserve(childPath, childName string) (existingName st
 	d.childPath = childPath
 	d.childName = childName
 	return "", true
-}
-
-// commit publishes value for the claiming child. Mismatched childPath is
-// silently dropped rather than clobbering another child's delegation.
-func (d *outputDelegation) commit(childPath string, value any) {
-	if !d.claimed || d.childPath != childPath {
-		return
-	}
-	d.value = value
-	d.hasValue = true
-}
-
-func (d *outputDelegation) output() (any, bool) {
-	return d.value, d.hasValue
 }
 
 func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*session.Event) error) *dynamicSubScheduler {
@@ -120,15 +110,20 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		return nil, err
 	}
 
-	// Cached (WithRunID replay): the child already ran, so publish its
-	// output for the delegation immediately.
+	// Cached (WithRunID replay): the child already ran.
 	if cached, ok := s.lookupCachedOutput(childPath); ok {
-		s.commitDelegation(childPath, cached)
 		return cached, nil
 	}
 
 	childBranch := deriveChildBranch(s.parentCtx.Branch(), name, runID, opts.useSubBranch, opts.overrideBranch)
-	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s)
+	// A delegating child extends the OutputFor chain: its own delegating
+	// children must also count their output for this parent and its
+	// ancestors.
+	var childAncestors []string
+	if opts.useAsOutput {
+		childAncestors = append([]string{s.parentPath}, s.outputForAncestors...)
+	}
+	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
 
 	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
 	// subScheduler) in the embedded context.Context so tools running
@@ -167,12 +162,22 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		if ev.RequestedInput != nil {
 			interrupted = true
 		}
-		// A delegated child's output is re-emitted on the parent's
-		// terminal event, so drop it here to avoid a duplicate.
 		if childOut, ok := childEventOutput(ev); ok {
 			out = childOut
+			// Every output event records the paths its output counts
+			// for, starting with the emitter (mirrors adk-python
+			// _node_runner._enrich_event). Under delegation the same
+			// event also stands in for the parent and its ancestors, so
+			// the parent skips re-emitting a duplicate.
+			if ev.NodeInfo.OutputFor == nil {
+				ev.NodeInfo.OutputFor = []string{ev.NodeInfo.Path}
+			}
 			if opts.useAsOutput {
-				continue
+				ev.Output = childOut // may have been carried as message text
+				ev.NodeInfo.OutputFor = appendUnique(ev.NodeInfo.OutputFor, s.parentPath)
+				for _, a := range s.outputForAncestors {
+					ev.NodeInfo.OutputFor = appendUnique(ev.NodeInfo.OutputFor, a)
+				}
 			}
 		}
 		if err := s.emitUp(ev); err != nil {
@@ -193,7 +198,6 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	}
 
 	s.storeCachedOutput(childPath, out)
-	s.commitDelegation(childPath, out) // no-op unless this child claimed the delegation
 	return out, nil
 }
 
@@ -231,16 +235,14 @@ func (s *dynamicSubScheduler) claimDelegation(childPath, childName string, useAs
 	return nil
 }
 
-func (s *dynamicSubScheduler) commitDelegation(childPath string, value any) {
+// isDelegated reports whether a child claimed this activation's output
+// via WithUseAsOutput. When true, that child's event already carried the
+// output up (stamped with OutputFor), so the parent must not emit its own
+// terminal output event.
+func (s *dynamicSubScheduler) isDelegated() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.delegation.commit(childPath, value)
-}
-
-func (s *dynamicSubScheduler) delegatedOutput() (any, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.delegation.output()
+	return s.delegation.claimed
 }
 
 // resolveRunID validates a user-supplied id, or returns the next
@@ -284,4 +286,14 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// appendUnique appends s to paths if not already present.
+func appendUnique(paths []string, s string) []string {
+	for _, p := range paths {
+		if p == s {
+			return paths
+		}
+	}
+	return append(paths, s)
 }

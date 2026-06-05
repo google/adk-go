@@ -17,7 +17,7 @@ package workflow
 import (
 	"errors"
 	"iter"
-	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -194,9 +194,14 @@ func TestRunNode_WithUseAsOutput_ChildOutputBecomesParentOutput(t *testing.T) {
 	if got := parentTerminalOutput(t, events, "orch"); got != "child_value" {
 		t.Errorf("parent terminal Output = %v, want %q", got, "child_value")
 	}
-	// Delegated child must not emit a duplicate output event.
-	if got := outputBearingPaths(events); !reflect.DeepEqual(got, []string{"orch"}) {
-		t.Errorf("paths of events with Output = %v, want exactly [\"orch\"]", got)
+	// Delegation produces exactly one output event (the child's, stamped
+	// OutputFor with the parent) — no duplicate parent re-emit.
+	outs := outputBearingEvents(events)
+	if len(outs) != 1 {
+		t.Fatalf("got %d output events, want 1 (no duplicate from delegation)", len(outs))
+	}
+	if !slices.Contains(outs[0].NodeInfo.OutputFor, "orch") {
+		t.Errorf("output event OutputFor = %v, want it to contain %q", outs[0].NodeInfo.OutputFor, "orch")
 	}
 }
 
@@ -240,6 +245,58 @@ func TestRunNode_WithUseAsOutput_MessageAsOutputEmptyTextIsValidOutput(t *testin
 	if got := parentTerminalOutput(t, events, "orch"); got != "" {
 		t.Errorf("parent terminal Output = %#v, want empty string (MessageAsOutput treats \"\" as a valid output)", got)
 	}
+}
+
+func TestRunNode_WithUseAsOutput_MultiLevelDelegationStampsAllAncestors(t *testing.T) {
+	// outer delegates to middle, which delegates to inner. inner's one
+	// output event must carry OutputFor for all three levels, and no
+	// duplicate output events are emitted.
+	inner := newStubNode("inner", "deep_value")
+	middle := NewDynamicNode[string, string](
+		"middle",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			_, err := RunNode[string](ctx, inner, nil, WithUseAsOutput())
+			return "", err
+		},
+		NodeConfig{},
+	)
+	outer := NewDynamicNode[string, string](
+		"outer",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			_, err := RunNode[string](ctx, middle, nil, WithUseAsOutput())
+			return "", err
+		},
+		NodeConfig{},
+	)
+	events := drainDynamic(t, outer, "")
+
+	outs := outputBearingEvents(events)
+	if len(outs) != 1 {
+		t.Fatalf("got %d output events, want 1 (multi-level delegation must not duplicate)", len(outs))
+	}
+	if outs[0].Output != "deep_value" {
+		t.Errorf("output = %v, want %q", outs[0].Output, "deep_value")
+	}
+	// Every level recovers its output from this single event: each
+	// node name appears as a segment of some OutputFor path.
+	for _, level := range []string{"outer", "middle", "inner"} {
+		if !slices.ContainsFunc(outs[0].NodeInfo.OutputFor, func(p string) bool {
+			return pathHasSegment(p, level)
+		}) {
+			t.Errorf("OutputFor %v does not cover level %q", outs[0].NodeInfo.OutputFor, level)
+		}
+	}
+}
+
+// pathHasSegment reports whether name appears as a path segment, with or
+// without a "@runID" suffix.
+func pathHasSegment(path, name string) bool {
+	for _, seg := range strings.Split(path, "/") {
+		if seg == name || strings.HasPrefix(seg, name+"@") {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRunNode_WithUseAsOutput_SecondDelegationReturnsError(t *testing.T) {
@@ -369,34 +426,33 @@ func runInOrchestratorWithErr[OUT any](t *testing.T, orchestratorFn func(NodeCon
 	return got, gotErr
 }
 
-// outputBearingPaths returns NodeInfo.Path of every event whose
-// Output is non-nil, preserving order.
-func outputBearingPaths(events []*session.Event) []string {
-	var paths []string
+// outputBearingEvents returns every event whose Output is non-nil,
+// preserving order.
+func outputBearingEvents(events []*session.Event) []*session.Event {
+	var out []*session.Event
 	for _, ev := range events {
-		if ev.Output == nil {
-			continue
+		if ev.Output != nil {
+			out = append(out, ev)
 		}
-		var path string
-		if ev.NodeInfo != nil {
-			path = ev.NodeInfo.Path
-		}
-		paths = append(paths, path)
 	}
-	return paths
+	return out
 }
 
-// parentTerminalOutput returns the Output of the last event
-// stamped with parentPath.
+// parentTerminalOutput returns the Output of the last event that counts
+// as parentPath's output: either stamped with that Path, or carrying it
+// in OutputFor (the WithUseAsOutput delegation case).
 func parentTerminalOutput(t *testing.T, events []*session.Event, parentPath string) any {
 	t.Helper()
 	for i := len(events) - 1; i >= 0; i-- {
 		ev := events[i]
-		if ev.NodeInfo != nil && ev.NodeInfo.Path == parentPath {
+		if ev.NodeInfo == nil {
+			continue
+		}
+		if ev.NodeInfo.Path == parentPath || slices.Contains(ev.NodeInfo.OutputFor, parentPath) {
 			return ev.Output
 		}
 	}
-	t.Fatalf("no event with NodeInfo.Path == %q found among %d events", parentPath, len(events))
+	t.Fatalf("no event for node %q found among %d events", parentPath, len(events))
 	return nil
 }
 

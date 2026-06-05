@@ -112,7 +112,12 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 
 		emit := makeEmit(yield, parentNC)
 		sub := newDynamicSubScheduler(parentNC, n.composePath(parentNC), emit)
-		orchestratorCtx := newDynamicNodeContext(parentNC, sub.parentPath, "", sub)
+		// If this node is itself a delegating child, carry its OutputFor
+		// chain so its own delegating children extend it.
+		if p, ok := parentNC.(*nodeContext); ok {
+			sub.outputForAncestors = p.outputForAncestors
+		}
+		orchestratorCtx := newDynamicNodeContext(parentNC, sub.parentPath, "", sub, nil)
 
 		out, err := n.fn(orchestratorCtx, typedInput, emit)
 		if err != nil {
@@ -125,12 +130,15 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 			return
 		}
 
-		ev := session.NewEvent(parentNC.InvocationID())
-		if delegated, ok := sub.delegatedOutput(); ok {
-			ev.Output = delegated
-		} else {
-			ev.Output = out
+		if sub.isDelegated() {
+			// A WithUseAsOutput child already carried this node's output
+			// up (its event is stamped OutputFor with this node's path),
+			// so don't emit a duplicate terminal event.
+			return
 		}
+
+		ev := session.NewEvent(parentNC.InvocationID())
+		ev.Output = out
 		ev.NodeInfo = &session.NodeInfo{Path: sub.parentPath}
 		// TODO(wolo): validate ev.Output against n.outputSchema,
 		// mirroring function_node.go:87-92.

@@ -65,6 +65,11 @@ type nodeContext struct {
 	// subScheduler is non-nil only when this context belongs to a
 	// dynamic-node activation; RunNode uses it to schedule children.
 	subScheduler *dynamicSubScheduler
+
+	// outputForAncestors are the extra node paths this activation's
+	// output counts for, set when this activation is a WithUseAsOutput
+	// child so its own delegating children can extend the chain.
+	outputForAncestors []string
 }
 
 // Compile-time: *nodeContext implements NodeContext.
@@ -85,17 +90,18 @@ func newNodeContext(parent agent.InvocationContext, resumeInputs map[string]any)
 // dynamic node's own activation passes runID="" — it is not itself a
 // sub-scheduler child. Child inherits resumeInputs so HITL responses
 // reach dynamic children.
-func newDynamicNodeContext(parent NodeContext, path, runID string, sub *dynamicSubScheduler) *nodeContext {
+func newDynamicNodeContext(parent NodeContext, path, runID string, sub *dynamicSubScheduler, outputForAncestors []string) *nodeContext {
 	var inherited map[string]any
 	if p, ok := parent.(*nodeContext); ok {
 		inherited = p.resumeInputs
 	}
 	return &nodeContext{
-		InvocationContext: parent,
-		resumeInputs:      inherited,
-		path:              path,
-		runID:             runID,
-		subScheduler:      sub,
+		InvocationContext:  parent,
+		resumeInputs:       inherited,
+		path:               path,
+		runID:              runID,
+		subScheduler:       sub,
+		outputForAncestors: outputForAncestors,
 	}
 }
 
@@ -115,11 +121,12 @@ func (c *nodeContext) WithBranch(branch string) NodeContext {
 	// the underlying InvocationContext; preserve the NodeContext
 	// envelope (path, runID, resumeInputs, subScheduler) unchanged.
 	return &nodeContext{
-		InvocationContext: withBranch(c.InvocationContext, branch),
-		resumeInputs:      c.resumeInputs,
-		path:              c.path,
-		runID:             c.runID,
-		subScheduler:      c.subScheduler,
+		InvocationContext:  withBranch(c.InvocationContext, branch),
+		resumeInputs:       c.resumeInputs,
+		path:               c.path,
+		runID:              c.runID,
+		subScheduler:       c.subScheduler,
+		outputForAncestors: c.outputForAncestors,
 	}
 }
 
@@ -136,5 +143,6 @@ func (c *nodeContext) WithContext(ctx context.Context) agent.InvocationContext {
 		c.path,
 		c.runID,
 		c.subScheduler,
+		c.outputForAncestors,
 	}
 }

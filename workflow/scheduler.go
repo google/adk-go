@@ -645,6 +645,12 @@ func (s *scheduler) handleEvent(it eventItem) {
 		nr.setRoutingEvent(it.ev, it.nodeName)
 	}
 	if out, ok := childEventOutput(it.ev); ok {
+		// Record the paths this output counts for. Dynamic children
+		// arrive pre-stamped (delegation chain); other output events
+		// get their own path. Mirrors adk-python _enrich_event.
+		if it.ev.NodeInfo != nil && it.ev.NodeInfo.OutputFor == nil {
+			it.ev.NodeInfo.OutputFor = []string{it.ev.NodeInfo.Path}
+		}
 		nr.setOutput(out, it.nodeName)
 	}
 }

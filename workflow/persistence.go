@@ -190,6 +190,16 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node) (out
 		completed[name] = true
 		if ev.Output != nil {
 			outputs[name] = ev.Output
+			// A delegated output (WithUseAsOutput) also counts for the
+			// static owners of the ancestor paths in OutputFor, so they
+			// recover their output without a re-emitted event.
+			for _, p := range ev.NodeInfo.OutputFor {
+				if owner := staticOwner(p); owner != name {
+					if _, ok := nodesByName[owner]; ok {
+						outputs[owner] = ev.Output
+					}
+				}
+			}
 		}
 	}
 	return outputs, completed
@@ -382,13 +392,18 @@ func firstUserInput(events session.Events) any {
 // LlmAgent node path, where Author == node name and no path is set.
 func eventNodeName(ev *session.Event) string {
 	if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
-		path := ev.NodeInfo.Path
-		if i := strings.IndexByte(path, '/'); i >= 0 {
-			return path[:i]
-		}
-		return path
+		return staticOwner(ev.NodeInfo.Path)
 	}
 	return ev.Author
+}
+
+// staticOwner returns the static graph node name owning a node path:
+// the first segment of a hierarchical "parent/child@1" path.
+func staticOwner(path string) string {
+	if i := strings.IndexByte(path, '/'); i >= 0 {
+		return path[:i]
+	}
+	return path
 }
 
 // frPart returns the FunctionResponse on a part if present and keyed.
