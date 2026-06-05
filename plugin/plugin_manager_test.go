@@ -30,6 +30,7 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
@@ -876,3 +877,36 @@ func TestModelCallbacks(t *testing.T) {
 		})
 	}
 }
+
+func TestClearPlugins(t *testing.T) {
+	p, err := plugin.New(plugin.Config{
+		Name: "test-plugin",
+	})
+	if err != nil {
+		t.Fatalf("failed to create plugin: %v", err)
+	}
+
+	model := &testutil.MockModel{}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "test_agent",
+		Model: model,
+	})
+	if err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	r, err := runner.New(runner.Config{
+		AppName: "test-app",
+		Agent:   a,
+		SessionService: session.InMemoryService(),
+		PluginConfig: runner.PluginConfig{
+			Plugins: []*plugin.Plugin{p},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create runner: %v", err)
+	}
+
+	r.ClearPlugins()
+}
+

@@ -704,3 +704,11 @@ func hasInlineData(event *session.Event) bool {
 	}
 	return false
 }
+
+// ClearPlugins clears all registered plugins from the runner's plugin manager.
+func (r *Runner) ClearPlugins() {
+	if r.pluginManager != nil {
+		r.pluginManager.ClearPlugins()
+	}
+}
+

@@ -294,6 +294,11 @@ func (pm *PluginManager) Close() error {
 	return nil
 }
 
+// ClearPlugins clears all registered plugins from the manager.
+func (pm *PluginManager) ClearPlugins() {
+	pm.plugins = nil
+}
+
 func ToContext(ctx context.Context, cfg *PluginManager) context.Context {
 	return context.WithValue(ctx, plugincontext.PluginManagerCtxKey, cfg)
 }
