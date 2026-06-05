@@ -37,9 +37,6 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 	type Output struct {
 		Result string `json:"result"`
 	}
-	type TargetOutput struct {
-		Result int `json:"result"`
-	}
 
 	tests := []struct {
 		name         string
@@ -79,18 +76,6 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 			wantOutput:   map[string]any{"result": "zero"},
 			wantErr:      false,
 		},
-		{
-			name:     "ValidationError",
-			nodeName: "test",
-			fn: func(ctx agent.Context, input Input) (map[string]any, error) {
-				return map[string]any{"result": "not-an-int"}, nil
-			},
-			inputSchema:  mustSchema[Input](t),
-			outputSchema: mustSchema[TargetOutput](t),
-			input:        Input{Value: "hello"},
-			wantErr:      true,
-			errSubstr:    "validation failed for output",
-		},
 	}
 
 	for _, tc := range tests {
@@ -129,6 +114,49 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 				t.Errorf("expected 1 event, got %d", count)
 			}
 		})
+	}
+}
+
+// TestFunctionNode_ValidateOutput verifies that output schema validation
+// is enforced through the node-level ValidateOutput contract (invoked
+// scheduler-side), not inline inside Run. Run itself passes the output
+// through unchanged; ValidateOutput surfaces the schema mismatch.
+func TestFunctionNode_ValidateOutput(t *testing.T) {
+	type Input struct {
+		Value string `json:"value"`
+	}
+	type TargetOutput struct {
+		Result int `json:"result"`
+	}
+
+	fn := func(ctx agent.Context, input Input) (map[string]any, error) {
+		return map[string]any{"result": "not-an-int"}, nil
+	}
+	node, err := NewFunctionNodeWithSchema[Input, map[string]any](
+		"test", fn, mustSchema[Input](t), mustSchema[TargetOutput](t), defaultNodeConfig)
+	if err != nil {
+		t.Fatalf("NewFunctionNodeWithSchema failed: %v", err)
+	}
+
+	// Run no longer validates: it yields the raw output without error.
+	mockCtx := &MockInvocationContext{sess: nil}
+	exCtx := agent.NewNodeContext(mockCtx, nil)
+	var got any
+	count := 0
+	for ev, err := range node.Run(exCtx, Input{Value: "hello"}) {
+		if err != nil {
+			t.Fatalf("Run returned unexpected error: %v", err)
+		}
+		got = ev.Output
+		count++
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 event from Run, got %d", count)
+	}
+
+	// ValidateOutput (the scheduler-side contract) rejects the mismatch.
+	if _, err := node.ValidateOutput(got); err == nil {
+		t.Fatalf("ValidateOutput: expected validation error, got nil")
 	}
 }
 
