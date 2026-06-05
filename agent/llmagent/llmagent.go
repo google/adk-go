@@ -25,6 +25,7 @@ import (
 	agentinternal "google.golang.org/adk/internal/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -532,24 +533,39 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 				sb.WriteString(part.Text)
 			}
 		}
-		result := sb.String()
+		text := sb.String()
 
-		// TODO: add output schema validation and unmarshalling
+		// When an output schema is declared, parse and validate the
+		// model text against it and persist the structured object
+		// instead of the raw string. This matches adk-python's
+		// __maybe_save_output_to_state, where state[output_key] holds
+		// the validated object. With no schema, the raw text is saved.
+		var output any = text
 		if a.OutputSchema != nil {
 			// If the result from the final chunk is just whitespace or empty,
 			// it means this is an empty final chunk of a stream.
 			// Do not attempt to parse it as JSON.
-			if strings.TrimSpace(result) == "" {
+			if strings.TrimSpace(text) == "" {
 				return
 			}
+			validated, err := utils.ValidateOutputSchema(text, a.OutputSchema)
+			if err != nil {
+				// The model did not return JSON matching the schema;
+				// skip the state write rather than persisting malformed
+				// output.
+				// TODO: log at warning level "output schema validation
+				// failed for agent %s: %v".
+				return
+			}
+			output = validated
 		}
 
 		if event.Actions.StateDelta == nil {
 			event.Actions.StateDelta = make(map[string]any)
 		}
 
-		event.Actions.StateDelta[a.OutputKey] = result
-		event.Output = result
+		event.Actions.StateDelta[a.OutputKey] = output
+		event.Output = output
 	}
 }
 

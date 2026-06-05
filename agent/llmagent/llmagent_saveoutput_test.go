@@ -29,6 +29,18 @@ type MockOutputSchema struct {
 	Confidence float64 `json:"confidence"`
 }
 
+// mockOutputGenaiSchema returns the genai.Schema equivalent of
+// MockOutputSchema for use as an LlmAgent OutputSchema in tests.
+func mockOutputGenaiSchema() *genai.Schema {
+	return &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"message":    {Type: genai.TypeString},
+			"confidence": {Type: genai.TypeNumber},
+		},
+	}
+}
+
 // createTestEvent is a helper to build events for tests.
 func createTestEvent(author, contentText string, isFinal bool) *session.Event {
 	var parts []*genai.Part
@@ -105,7 +117,41 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			event:          createTestEvent("testagent", "Test response", true),
 			wantStateDelta: map[string]any{},
 		},
-		// TODO tests with OutputSchema
+		{
+			name: "saves parsed object when output schema matches",
+			agentConfig: Config{
+				Name:         "test_agent",
+				OutputKey:    "result",
+				OutputSchema: mockOutputGenaiSchema(),
+			},
+			event: createTestEvent(
+				"test_agent", `{"message": "hi", "confidence": 0.5}`, true),
+			wantStateDelta: map[string]any{
+				"result": map[string]any{"message": "hi", "confidence": 0.5},
+			},
+		},
+		{
+			name: "skips when output is not valid JSON",
+			agentConfig: Config{
+				Name:         "test_agent",
+				OutputKey:    "result",
+				OutputSchema: mockOutputGenaiSchema(),
+			},
+			event:          createTestEvent("test_agent", "not json", true),
+			wantStateDelta: map[string]any{},
+		},
+		{
+			name: "skips when output JSON does not match schema",
+			agentConfig: Config{
+				Name:         "test_agent",
+				OutputKey:    "result",
+				OutputSchema: mockOutputGenaiSchema(),
+			},
+			// "confidence" must be a number; a string fails validation.
+			event: createTestEvent(
+				"test_agent", `{"message": "hi", "confidence": "high"}`, true),
+			wantStateDelta: map[string]any{},
+		},
 	}
 
 	// Iterate over the test cases
