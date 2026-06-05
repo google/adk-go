@@ -200,6 +200,48 @@ func TestRunNode_WithUseAsOutput_ChildOutputBecomesParentOutput(t *testing.T) {
 	}
 }
 
+func TestRunNode_WithUseAsOutput_MessageAsOutputChildBecomesParentOutput(t *testing.T) {
+	// A delegated child whose message IS its output (NodeInfo.
+	// MessageAsOutput, no explicit Output — like an LlmAgent node)
+	// promotes its model text to the parent's terminal Output.
+	child := newMessageAsOutputNode("c", "child_text")
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil, WithUseAsOutput()); err != nil {
+				return "", err
+			}
+			return "parent_value", nil
+		},
+		NodeConfig{},
+	)
+	events := drainDynamic(t, n, "")
+	if got := parentTerminalOutput(t, events, "orch"); got != "child_text" {
+		t.Errorf("parent terminal Output = %v, want %q", got, "child_text")
+	}
+}
+
+func TestRunNode_WithUseAsOutput_MessageAsOutputEmptyTextIsValidOutput(t *testing.T) {
+	// Empty model text under MessageAsOutput is a valid output ("",
+	// not "no output"), matching adk-python. The parent's terminal
+	// Output must be the empty string, not nil.
+	child := newMessageAsOutputNode("c", "")
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil, WithUseAsOutput()); err != nil {
+				return "", err
+			}
+			return "parent_value", nil
+		},
+		NodeConfig{},
+	)
+	events := drainDynamic(t, n, "")
+	if got := parentTerminalOutput(t, events, "orch"); got != "" {
+		t.Errorf("parent terminal Output = %#v, want empty string (MessageAsOutput treats \"\" as a valid output)", got)
+	}
+}
+
 func TestRunNode_WithUseAsOutput_SecondDelegationReturnsError(t *testing.T) {
 	c1 := newStubNode("c1", "v1")
 	c2 := newStubNode("c2", "v2")

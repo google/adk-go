@@ -167,12 +167,10 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		if ev.RequestedInput != nil {
 			interrupted = true
 		}
-		if ev.Output != nil {
-			out = ev.Output
-			// A delegated child's output is re-emitted by the
-			// parent's terminal event; drop it here to avoid a
-			// duplicate. Partial/state-only events (Output ==
-			// nil) still propagate.
+		// A delegated child's output is re-emitted on the parent's
+		// terminal event, so drop it here to avoid a duplicate.
+		if childOut, ok := childEventOutput(ev); ok {
+			out = childOut
 			if opts.useAsOutput {
 				continue
 			}
