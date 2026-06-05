@@ -29,7 +29,6 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/agenttool"
 )
 
@@ -347,7 +346,7 @@ func createAgentWithModel(t *testing.T, inputSchema, outputSchema *genai.Schema,
 	return agent
 }
 
-func createToolContext(t *testing.T, testAgent agent.Agent) tool.Context {
+func createToolContext(t *testing.T, testAgent agent.Agent) agent.ToolContext {
 	t.Helper()
 
 	sessionService := session.InMemoryService()
@@ -364,5 +363,5 @@ func createToolContext(t *testing.T, testAgent agent.Agent) tool.Context {
 		Session: createResponse.Session,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", &session.EventActions{}, nil)
+	return agent.NewToolContext(ctx, "", &session.EventActions{}, nil)
 }

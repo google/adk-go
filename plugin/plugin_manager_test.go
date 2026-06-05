@@ -37,7 +37,7 @@ import (
 
 type testCase struct {
 	name                            string
-	tool                            func(tool.Context, map[string]any) (map[string]any, error)
+	tool                            func(agent.ToolContext, map[string]any) (map[string]any, error)
 	args                            map[string]any
 	beforeToolCallbacks             []llmagent.BeforeToolCallback
 	afterToolCallbacks              []llmagent.AfterToolCallback
@@ -52,7 +52,7 @@ func TestCallTool(t *testing.T) {
 	testCases := []testCase{
 		{
 			name: "tool runs successfully",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				return map[string]any{"result": "success"}, nil
 			},
 			args:                            map[string]any{"key": "value"},
@@ -61,7 +61,7 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "tool error",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				return nil, errors.New("tool error")
 			},
 			args: map[string]any{"key": "value"},
@@ -69,15 +69,15 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback returns result",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"result": "intercepted"}, nil
 				},
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"result": "2nd callback should not be called"}, nil
 				},
 			},
@@ -87,15 +87,15 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback returns error",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("before callback error")
 				},
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("unexpected error")
 				},
 			},
@@ -104,11 +104,11 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "after callback modifies result",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				return map[string]any{"result": "original"}, nil
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"result": "modified"}, nil
 				},
 			},
@@ -118,17 +118,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "after callback handles error and are run in symmetrical order",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				return nil, errors.New("tool error")
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if err != nil {
 						return map[string]any{"result": "error handled"}, nil
 					}
 					return nil, nil
 				},
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					t.Errorf("unexpected call to after tool callback")
 					return map[string]any{"result": "unexpected output"}, nil
 				},
@@ -138,14 +138,14 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "after callback returns error and are run in symmetrical order",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				return map[string]any{"result": "success"}, nil
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, errors.New("after callback error")
 				},
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					t.Errorf("unexpected call to after tool callback")
 					return nil, errors.New("unexpected error")
 				},
@@ -156,16 +156,16 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "no-op callbacks return func results",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				return map[string]any{"result": "success"}, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, nil
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, nil
 				},
 			},
@@ -174,17 +174,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback result passed to after callback",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"result": "from_before"}, nil
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if val, ok := result["result"]; !ok || val != "from_before" {
 						return nil, errors.New("unexpected result in after callback")
 					}
@@ -198,17 +198,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback error passed to after callback",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("error_from_before")
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_before" {
 						return nil, errors.New("unexpected error in after callback")
 					}
@@ -221,17 +221,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback error passed to on tool error callback",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("error_from_before")
 				},
 			},
 			onToolErrorCallbacks: []llmagent.OnToolErrorCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_before" {
 						return nil, errors.New("unexpected error in on tool error callback")
 					}
@@ -244,17 +244,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback error passed to on tool error callback and after tool called",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("error_from_before")
 				},
 			},
 			onToolErrorCallbacks: []llmagent.OnToolErrorCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_before" {
 						return nil, errors.New("unexpected error in on tool error callback")
 					}
@@ -262,7 +262,7 @@ func TestCallTool(t *testing.T) {
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if err != nil {
 						return nil, errors.New("unexpected error in after callback")
 					}
@@ -276,17 +276,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback error passed to on tool error callback and passed to after tool called",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("error_from_before")
 				},
 			},
 			onToolErrorCallbacks: []llmagent.OnToolErrorCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_before" {
 						return nil, errors.New("unexpected error in on tool error callback")
 					}
@@ -294,7 +294,7 @@ func TestCallTool(t *testing.T) {
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_on_tool_error" {
 						return nil, errors.New("unexpected error in after callback")
 					}
@@ -308,17 +308,17 @@ func TestCallTool(t *testing.T) {
 		},
 		{
 			name: "before callback error passed to on tool error callback and passed to after tool called and handled",
-			tool: func(ctx tool.Context, args map[string]any) (map[string]any, error) {
+			tool: func(ctx agent.ToolContext, args map[string]any) (map[string]any, error) {
 				t.Error("tool should not be called")
 				return nil, nil
 			},
 			beforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, errors.New("error_from_before")
 				},
 			},
 			onToolErrorCallbacks: []llmagent.OnToolErrorCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_before" {
 						return nil, errors.New("unexpected error in on tool error callback")
 					}
@@ -326,7 +326,7 @@ func TestCallTool(t *testing.T) {
 				},
 			},
 			afterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					if err == nil || err.Error() != "error_from_on_tool_error" {
 						return nil, errors.New("unexpected error in after tool callback")
 					}
@@ -387,7 +387,7 @@ func TestCallTool(t *testing.T) {
 			beforeToolCallbacksCalled := false
 			afterToolCallbacksCalled := false
 			onToolErrorCallbacks := []llmagent.OnToolErrorCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 					onToolErrorCallbacksCalled = true
 					if tc.dontRunOnErrorCanonicalCallback {
 						t.Error("on tool error should not be called")
@@ -396,7 +396,7 @@ func TestCallTool(t *testing.T) {
 				},
 			}
 			beforeToolCallbacks := []llmagent.BeforeToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					beforeToolCallbacksCalled = true
 					if tc.dontRunBeforeCanonicalCallback {
 						t.Error("before Tool Callback should not be called")
@@ -405,7 +405,7 @@ func TestCallTool(t *testing.T) {
 				},
 			}
 			afterToolCallbacks := []llmagent.AfterToolCallback{
-				func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					afterToolCallbacksCalled = true
 					if tc.dontRunAfterCanonicalCallback {
 						t.Error("after Tool Callback should not be called")
