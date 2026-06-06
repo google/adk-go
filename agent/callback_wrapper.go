@@ -152,11 +152,6 @@ func (c *callbackContextWrapper) RunID() string {
 	return c.context.RunID()
 }
 
-// NodeScheduler implements [Context].
-func (c *callbackContextWrapper) NodeScheduler() NodeScheduler {
-	return c.context.NodeScheduler()
-}
-
 // --- Selective invocation surface (Context wraps InvocationContext) ---
 
 // InvocationContext implements [Context].

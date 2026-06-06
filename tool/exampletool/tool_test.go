@@ -73,7 +73,6 @@ func (m *mockToolContext) ResumedInput(string) (any, bool)            { return n
 func (m *mockToolContext) ResumeInputs() map[string]any               { return nil }
 func (m *mockToolContext) Path() string                               { return "" }
 func (m *mockToolContext) RunID() string                              { return "" }
-func (m *mockToolContext) NodeScheduler() agent.NodeScheduler         { return nil }
 func (m *mockToolContext) WithContext(ctx context.Context) agent.Context {
 	cp := *m
 	cp.Context = ctx

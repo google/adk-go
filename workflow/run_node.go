@@ -20,6 +20,42 @@ import (
 	"google.golang.org/adk/agent"
 )
 
+// NodeScheduler schedules a dynamic child node from within a workflow
+// node body and returns the child's output. It is implemented by the
+// workflow scheduler and carried opaquely on an agent.Context (set via
+// agent.NewNodeContext, read back via the concrete
+// commonContext.NodeScheduler() any accessor). Keeping this type in
+// package workflow keeps scheduling concepts out of the public agent
+// API — mirrors adk-python's private _workflow_scheduler.
+//
+// child is a workflow node value (typed as any to match the agent-level
+// token boundary); the implementation type-asserts it to Node.
+type NodeScheduler interface {
+	ScheduleNode(parent agent.Context, child any, input any, opts NodeRunOptions) (any, error)
+}
+
+// NodeRunOptions are the resolved options for scheduling a dynamic child
+// node via NodeScheduler. Mirrors the keyword arguments of adk-python's
+// Context.run_node.
+type NodeRunOptions struct {
+	// RunID overrides the auto-generated child run identifier.
+	RunID string
+	// UseSubBranch derives a per-child sub-branch for event isolation.
+	UseSubBranch bool
+	// OverrideBranch replaces the inherited branch verbatim.
+	OverrideBranch string
+	// UseAsOutput promotes the child's output to the parent node's
+	// terminal output.
+	UseAsOutput bool
+}
+
+// nodeScheduled is the capability a node-bearing agent.Context exposes
+// (on the concrete commonContext, not on the public Context interface)
+// so RunNode can recover the opaque scheduler token.
+type nodeScheduled interface {
+	NodeScheduler() any
+}
+
 // RunNodeOption configures a single RunNode call.
 type RunNodeOption func(*runNodeOptions)
 
@@ -30,10 +66,9 @@ type runNodeOptions struct {
 	useAsOutput    bool
 }
 
-// toAgentOptions maps the resolved workflow options onto the
-// agent-level NodeRunOptions understood by agent.NodeScheduler.
-func (o runNodeOptions) toAgentOptions() agent.NodeRunOptions {
-	return agent.NodeRunOptions{
+// toNodeRunOptions maps the resolved workflow options onto NodeRunOptions.
+func (o runNodeOptions) toNodeRunOptions() NodeRunOptions {
+	return NodeRunOptions{
 		RunID:          o.customRunID,
 		UseSubBranch:   o.useSubBranch,
 		OverrideBranch: o.overrideBranch,
@@ -95,8 +130,8 @@ func WithOverrideBranch(branch string) RunNodeOption {
 
 // RunNode schedules child as a sub-node of the currently-executing
 // dynamic node and returns its typed output. ctx must be the
-// agent.Context passed into the enclosing dynamic node's body (its
-// NodeScheduler() must be non-nil).
+// agent.Context passed into the enclosing dynamic node's body (it must
+// carry a non-nil dynamic-node scheduler).
 //
 // On failure:
 //   - errors.Is(err, ErrNodeInterrupted): child paused for HITL.
@@ -107,8 +142,15 @@ func WithOverrideBranch(branch string) RunNodeOption {
 func RunNode[OUT any](ctx agent.Context, child Node, input any, opts ...RunNodeOption) (OUT, error) {
 	var zero OUT
 
-	sched := ctx.NodeScheduler()
-	if sched == nil {
+	// Recover the opaque scheduler token from the concrete context and
+	// assert it to the workflow scheduler type. A nil/absent token means
+	// this context is not a dynamic node body.
+	ns, ok := ctx.(nodeScheduled)
+	if !ok {
+		return zero, ErrInvalidRunNodeContext
+	}
+	sched, ok := ns.NodeScheduler().(NodeScheduler)
+	if !ok {
 		return zero, ErrInvalidRunNodeContext
 	}
 
@@ -117,7 +159,7 @@ func RunNode[OUT any](ctx agent.Context, child Node, input any, opts ...RunNodeO
 		opt(&o)
 	}
 
-	rawOut, err := sched.ScheduleNode(ctx, child, input, o.toAgentOptions())
+	rawOut, err := sched.ScheduleNode(ctx, child, input, o.toNodeRunOptions())
 	if err != nil {
 		return zero, err
 	}

@@ -160,7 +160,6 @@ func (c *testContext) ResumedInput(string) (any, bool)            { return nil, 
 func (c *testContext) ResumeInputs() map[string]any               { return nil }
 func (c *testContext) Path() string                               { return "" }
 func (c *testContext) RunID() string                              { return "" }
-func (c *testContext) NodeScheduler() agent.NodeScheduler         { return nil }
 func (c *testContext) WithContext(ctx context.Context) agent.Context {
 	cp := *c
 	cp.Context = ctx

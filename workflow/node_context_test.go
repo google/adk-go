@@ -94,7 +94,14 @@ func TestNodeContext_SchedulerStored(t *testing.T) {
 	if v, ok := c.ResumedInput("approval"); !ok || v != "yes" {
 		t.Errorf("ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
 	}
-	if c.NodeScheduler() != sub {
-		t.Errorf("NodeScheduler() pointer differs from supplied")
+	// The scheduler is carried as an opaque token, recovered via the
+	// concrete NodeScheduler() any accessor (not on the Context
+	// interface) — the same way RunNode reaches it.
+	ns, ok := c.(interface{ NodeScheduler() any })
+	if !ok {
+		t.Fatalf("node context does not expose NodeScheduler() any")
+	}
+	if ns.NodeScheduler() != any(sub) {
+		t.Errorf("NodeScheduler() token differs from supplied")
 	}
 }

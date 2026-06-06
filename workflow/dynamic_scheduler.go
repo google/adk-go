@@ -25,7 +25,7 @@ import (
 )
 
 // dynamicSubScheduler runs the children of one dynamic-node activation.
-// It implements agent.NodeScheduler so the unified Context can schedule
+// It implements NodeScheduler so the unified Context can schedule
 // dynamic children without the agent package importing workflow.
 type dynamicSubScheduler struct {
 	parentPath string
@@ -121,11 +121,10 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 	}
 }
 
-// ScheduleNode implements agent.NodeScheduler. It adapts the
-// agent-level call (child as any, agent.NodeRunOptions) onto the
-// internal runNode, so the typed workflow.RunNode helper and any
-// agent-level caller can schedule a dynamic child.
-func (s *dynamicSubScheduler) ScheduleNode(_ agent.Context, child any, input any, opts agent.NodeRunOptions) (any, error) {
+// ScheduleNode implements NodeScheduler. It adapts the call (child as
+// any, NodeRunOptions) onto the internal runNode, so the typed
+// workflow.RunNode helper can schedule a dynamic child.
+func (s *dynamicSubScheduler) ScheduleNode(_ agent.Context, child any, input any, opts NodeRunOptions) (any, error) {
 	node, ok := child.(Node)
 	if !ok {
 		return nil, fmt.Errorf("%w: child is %T, not a workflow.Node", ErrInvalidRunNodeContext, child)

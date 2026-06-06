@@ -507,7 +507,6 @@ func (m *MockCallbackContext) ResumedInput(string) (any, bool)            { retu
 func (m *MockCallbackContext) ResumeInputs() map[string]any               { return nil }
 func (m *MockCallbackContext) Path() string                               { return "" }
 func (m *MockCallbackContext) RunID() string                              { return "" }
-func (m *MockCallbackContext) NodeScheduler() agent.NodeScheduler         { return nil }
 func (m *MockCallbackContext) InvocationContext() agent.InvocationContext { return nil }
 func (m *MockCallbackContext) WithContext(context.Context) agent.Context  { return m }
 
@@ -553,7 +552,6 @@ func (m *MockToolContext) ResumedInput(string) (any, bool)            { return n
 func (m *MockToolContext) ResumeInputs() map[string]any               { return nil }
 func (m *MockToolContext) Path() string                               { return "" }
 func (m *MockToolContext) RunID() string                              { return "" }
-func (m *MockToolContext) NodeScheduler() agent.NodeScheduler         { return nil }
 func (m *MockToolContext) InvocationContext() agent.InvocationContext { return nil }
 func (m *MockToolContext) WithContext(context.Context) agent.Context  { return m }
 

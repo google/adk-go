@@ -89,18 +89,19 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 
 // NewNodeContext constructs the unified Context for a workflow graph
 // node activation. It wraps the node's InvocationContext and carries the
-// node surface (path, runID, resume inputs) plus the dynamic-node
-// scheduler. The returned value is a full Context (so node bodies get
-// state, artifacts, actions, and tool facilities) and also satisfies
-// InvocationContext.
+// node surface (path, runID, resume inputs) plus an opaque dynamic-node
+// scheduler token. The returned value is a full Context (so node bodies
+// get state, artifacts, actions, and tool facilities).
 //
 // path and runID are empty for top-level static activations. resumeInputs
-// may be nil. sched is nil unless this activation can schedule dynamic
-// children (i.e. a dynamic node body); RunNode rejects a nil scheduler.
+// may be nil. sched is an opaque token (concretely a
+// workflow.NodeScheduler) or nil when this activation cannot schedule
+// dynamic children; only package workflow interprets it. This is the
+// low-level constructor used by the workflow layer.
 //
 // This is the Go analog of adk-python's Context carrying _node_path,
 // _run_id, _resume_inputs, and _workflow_scheduler.
-func NewNodeContext(ic InvocationContext, path, runID string, resumeInputs map[string]any, sched NodeScheduler, actions *session.EventActions) Context {
+func NewNodeContext(ic InvocationContext, path, runID string, resumeInputs map[string]any, sched any, actions *session.EventActions) Context {
 	actions = prepareEventActions(actions)
 	return &commonContext{
 		Context:           ic,
@@ -148,7 +149,7 @@ type commonContext struct {
 	path          string
 	runID         string
 	resumeInputs  map[string]any
-	nodeScheduler NodeScheduler
+	nodeScheduler any
 }
 
 func (c *commonContext) AgentName() string {
@@ -244,9 +245,12 @@ func (c *commonContext) Path() string { return c.path }
 // RunID returns the workflow node run id, or "" outside a workflow.
 func (c *commonContext) RunID() string { return c.runID }
 
-// NodeScheduler returns the dynamic-node scheduler for this context, or
-// nil when this context does not belong to a dynamic workflow node body.
-func (c *commonContext) NodeScheduler() NodeScheduler { return c.nodeScheduler }
+// NodeScheduler returns the opaque dynamic-node scheduler token carried
+// by this context, or nil outside a dynamic workflow node body. The
+// token is set via NewNodeContext; only package workflow knows its
+// concrete type (workflow.NodeScheduler) and type-asserts it. It is
+// deliberately not on the Context interface — see context.go.
+func (c *commonContext) NodeScheduler() any { return c.nodeScheduler }
 
 // WithContext returns a copy of this Context with the embedded Go
 // context replaced, preserving the wrapper, its wrapped

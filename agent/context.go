@@ -251,39 +251,12 @@ type Context interface {
 	// executing workflow node, or "" outside a workflow (and for
 	// top-level static nodes).
 	RunID() string
-
-	// NodeScheduler returns the dynamic-node scheduler for this
-	// context, or nil when the context does not belong to a dynamic
-	// workflow node body. It is supplied opaquely by the workflow
-	// layer; the agent package never imports workflow. This mirrors
-	// adk-python's ScheduleDynamicNode stored on Context.
-	NodeScheduler() NodeScheduler
 }
 
-// NodeRunOptions are the resolved options for scheduling a dynamic
-// child node via [NodeScheduler]. It is a plain data type so the agent
-// package can describe the call without importing the workflow package.
-// Mirrors the keyword arguments of adk-python's Context.run_node.
-type NodeRunOptions struct {
-	// RunID overrides the auto-generated child run identifier.
-	RunID string
-	// UseSubBranch derives a per-child sub-branch for event isolation.
-	UseSubBranch bool
-	// OverrideBranch replaces the inherited branch verbatim.
-	OverrideBranch string
-	// UseAsOutput promotes the child's output to the parent node's
-	// terminal output.
-	UseAsOutput bool
-}
-
-// NodeScheduler schedules a dynamic child node from within a workflow
-// node body and returns the child's output. It is implemented by the
-// workflow layer and stored opaquely on a [Context] so that
-// agent-level code (and the typed workflow.RunNode helper) can trigger
-// child runs without the agent package importing workflow.
-//
-// child is a workflow node value (typed as any to avoid the import);
-// the workflow implementation type-asserts it.
-type NodeScheduler interface {
-	ScheduleNode(parent Context, child any, input any, opts NodeRunOptions) (any, error)
-}
+// The dynamic-node scheduler is intentionally NOT part of the public
+// Context interface: it is a workflow-only concern (the scheduler type
+// lives in package workflow). The agent layer only carries it as an
+// opaque token, set via NewNodeContext and read back by package
+// workflow through the concrete commonContext.NodeScheduler() accessor.
+// This keeps Context's public surface free of scheduling concepts,
+// mirroring adk-python where _workflow_scheduler is a private field.
