@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +48,17 @@ var (
 	// than one event whose Routes field is set. A node activation
 	// may emit at most one routing decision.
 	ErrMultipleRoutingEvents = errors.New("workflow: node produced multiple events with route tags; only one event per execution can specify routes")
+
+	// ErrMultipleTerminalOutputs is returned when a workflow run
+	// completes with more than one terminal node (a node with no
+	// outgoing edges) having actually produced an output. The
+	// workflow's output would then be ambiguous. This is a runtime
+	// check on the nodes that ran in a given activation — not a
+	// topological constraint — so fan-out and conditional-routing
+	// graphs with several terminal branches remain valid as long as
+	// at most one terminal branch yields output per run. Mirrors
+	// adk-python's Workflow._finalize.
+	ErrMultipleTerminalOutputs = errors.New("workflow: multiple terminal nodes produced output; a workflow must have at most one terminal output")
 )
 
 // scheduler drives a single Workflow.Run invocation. It owns the
@@ -605,7 +618,77 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	// panics the iterator.
 	if pendingErr != nil && !consumerGone {
 		yield(nil, pendingErr)
+		return
 	}
+
+	// Clean completion: enforce the single-terminal-output invariant.
+	// Skip when the run paused on an interrupt (the workflow has not
+	// truly finished). Mirrors adk-python's Workflow._finalize.
+	if !draining {
+		if err := s.finalize(); err != nil {
+			yield(nil, err)
+		}
+	}
+}
+
+// finalize enforces the at-most-one-terminal-output invariant after a
+// clean workflow completion. A terminal node is one with no outgoing
+// edges (excluding START). The check counts only terminal nodes that
+// actually produced an output in this run, so fan-out and
+// conditional-routing graphs with several terminal branches are valid
+// as long as at most one terminal branch yields output. Mirrors
+// adk-python's Workflow._finalize, which raises when more than one
+// terminal node has produced output.
+//
+// finalize is a no-op when the run paused on an interrupt: a workflow
+// waiting for human input has not finished, so its terminal output is
+// not yet determined.
+func (s *scheduler) finalize() error {
+	for _, ns := range s.state.Nodes {
+		if ns.Status == NodeWaiting {
+			return nil
+		}
+	}
+
+	var producers []string
+	for _, n := range s.terminalNodes() {
+		ns, ok := s.state.Nodes[n.Name()]
+		if !ok || ns.Status != NodeCompleted {
+			continue
+		}
+		if ns.Output != nil {
+			producers = append(producers, n.Name())
+		}
+	}
+
+	if len(producers) > 1 {
+		slices.Sort(producers)
+		return fmt.Errorf("%w: %s", ErrMultipleTerminalOutputs, strings.Join(producers, ", "))
+	}
+	return nil
+}
+
+// terminalNodes returns the nodes in the graph that have no outgoing
+// edges, excluding START. These are the candidates for the workflow's
+// terminal output.
+func (s *scheduler) terminalNodes() []Node {
+	seen := make(map[Node]struct{})
+	for from, edges := range s.graph.successors {
+		seen[from] = struct{}{}
+		for _, e := range edges {
+			seen[e.To] = struct{}{}
+		}
+	}
+	var terminals []Node
+	for n := range seen {
+		if n == Start {
+			continue
+		}
+		if len(s.graph.successors[n]) == 0 {
+			terminals = append(terminals, n)
+		}
+	}
+	return terminals
 }
 
 // defaultContentRole picks the role for node Content that left it

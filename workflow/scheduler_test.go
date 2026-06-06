@@ -115,9 +115,14 @@ func TestScheduler_FanOutConcurrency(t *testing.T) {
 		})
 	}
 
-	edges := make([]Edge, 0, fanOut)
+	// Fan out to a single JoinNode terminal so the graph has one
+	// terminal output (the join) and satisfies the scheduler's
+	// finalize check; the N blocking nodes still run concurrently.
+	join := NewJoinNode("join")
+	edges := make([]Edge, 0, 2*fanOut)
 	for _, n := range nodes {
 		edges = append(edges, Edge{From: Start, To: n})
+		edges = append(edges, Edge{From: n, To: join})
 	}
 	w := mustNew(t, edges)
 
@@ -974,4 +979,93 @@ func (n *progressThenSchemaOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*
 		ev.Output = n.output
 		yield(ev, nil)
 	}
+}
+
+// outputFnNode returns a FunctionNode that emits the given string as
+// its Event.Output. Used by the finalize tests as an
+// output-producing terminal.
+func outputFnNode(name, out string) *FunctionNode {
+	return NewFunctionNode(name,
+		func(ctx agent.Context, _ any) (string, error) {
+			return out, nil
+		}, defaultNodeConfig)
+}
+
+// noOutputNode records nothing and emits an event without Output. Used
+// by the finalize tests as a terminal that does not produce output.
+type noOutputNode struct {
+	BaseNode
+}
+
+func (n *noOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		yield(session.NewEvent(ctx.InvocationID()), nil)
+	}
+}
+
+// TestScheduler_Finalize_SingleTerminalOutput verifies the runtime
+// single-terminal-output invariant enforced by scheduler.finalize:
+//
+//   - exactly one terminal node producing output -> success;
+//   - several terminal nodes but at most one producing output (fan-out
+//     where only one leaf yields output) -> success;
+//   - more than one terminal node producing output -> error naming the
+//     offending terminals.
+//
+// Mirrors adk-python's Workflow._finalize, which counts terminal nodes
+// that actually produced output rather than rejecting the topology.
+func TestScheduler_Finalize_SingleTerminalOutput(t *testing.T) {
+	t.Run("single terminal output succeeds", func(t *testing.T) {
+		mockCtx := newMockCtx(t)
+		a := outputFnNode("a", "A")
+		w := mustNew(t, []Edge{{From: Start, To: a}})
+		drain(t, w.Run(mockCtx))
+	})
+
+	t.Run("multiple terminals but only one produces output succeeds", func(t *testing.T) {
+		mockCtx := newMockCtx(t)
+		// a, b, c all terminal; only a yields output.
+		a := outputFnNode("a", "A")
+		b := &noOutputNode{BaseNode: NewBaseNode("b", "", defaultNodeConfig)}
+		c := &noOutputNode{BaseNode: NewBaseNode("c", "", defaultNodeConfig)}
+		w := mustNew(t, []Edge{
+			{From: Start, To: a},
+			{From: Start, To: b},
+			{From: Start, To: c},
+		})
+		drain(t, w.Run(mockCtx))
+	})
+
+	t.Run("zero terminals producing output succeeds", func(t *testing.T) {
+		mockCtx := newMockCtx(t)
+		a := &noOutputNode{BaseNode: NewBaseNode("a", "", defaultNodeConfig)}
+		b := &noOutputNode{BaseNode: NewBaseNode("b", "", defaultNodeConfig)}
+		w := mustNew(t, []Edge{
+			{From: Start, To: a},
+			{From: Start, To: b},
+		})
+		drain(t, w.Run(mockCtx))
+	})
+
+	t.Run("multiple terminals producing output errors", func(t *testing.T) {
+		mockCtx := newMockCtx(t)
+		a := outputFnNode("a", "A")
+		b := outputFnNode("b", "B")
+		c := outputFnNode("c", "C")
+		w := mustNew(t, []Edge{
+			{From: Start, To: a},
+			{From: Start, To: b},
+			{From: Start, To: c},
+		})
+		err := drainErr(t, w.Run(mockCtx))
+		if !errors.Is(err, ErrMultipleTerminalOutputs) {
+			t.Fatalf("got error %v, want ErrMultipleTerminalOutputs", err)
+		}
+		// The error names all offending terminals.
+		for _, name := range []string{"a", "b", "c"} {
+			if !strings.Contains(err.Error(), name) {
+				t.Errorf("error %q does not name terminal %q", err.Error(), name)
+			}
+		}
+	})
 }

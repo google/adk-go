@@ -74,11 +74,17 @@ func TestScheduler_MultipleSuccessors_AssignsSubBranches(t *testing.T) {
 	b := branchRecorder("b", &mu, &seen)
 	c := branchRecorder("c", &mu, &seen)
 
-	// START fans out to a + b + c.
+	// START fans out to a + b + c, which fan in to a single join
+	// terminal (keeps the graph single-terminal-output; a/b/c branch
+	// assignments are unchanged by the downstream join).
+	join := NewJoinNode("join")
 	w := mustNew(t, []Edge{
 		{From: Start, To: a},
 		{From: Start, To: b},
 		{From: Start, To: c},
+		{From: a, To: join},
+		{From: b, To: join},
+		{From: c, To: join},
 	})
 
 	drain(t, w.Run(mockCtx))
@@ -109,10 +115,15 @@ func TestScheduler_FanOutChainedDeeperBranches(t *testing.T) {
 	b1 := branchRecorder("b1", &mu, &seen)
 	b2 := branchRecorder("b2", &mu, &seen)
 
+	// b1 and b2 fan in to a single join terminal so the graph has one
+	// terminal output; the join does not change b1/b2 sub-branches.
+	join := NewJoinNode("join")
 	w := mustNew(t, []Edge{
 		{From: Start, To: a}, // a stays on root (single successor)
 		{From: a, To: b1},    // a fans out: b1 and b2 get sub-branches
 		{From: a, To: b2},
+		{From: b1, To: join},
+		{From: b2, To: join},
 	})
 
 	drain(t, w.Run(mockCtx))
@@ -225,9 +236,14 @@ func TestScheduler_EventsAreBranchStamped(t *testing.T) {
 	a := branchRecorder("a", &mu, &seen)
 	b := branchRecorder("b", &mu, &seen)
 
+	// a and b fan in to a single join terminal (single-terminal-output);
+	// the test only inspects events authored by a and b.
+	join := NewJoinNode("join")
 	w := mustNew(t, []Edge{
 		{From: Start, To: a},
 		{From: Start, To: b},
+		{From: a, To: join},
+		{From: b, To: join},
 	})
 
 	events := drain(t, w.Run(mockCtx))
