@@ -309,6 +309,16 @@ type Config struct {
 	//
 	// NOTE: when this is set, agent can only reply and cannot use any tools,
 	// such as function tools, RAGs, agent transfer, etc.
+	//
+	// When set, the agent validates the model's final text against this
+	// schema and writes the parsed object (not the raw text) to
+	// state[OutputKey]. This is the LLM-generation layer of validation.
+	// When the agent is used inside a workflow via workflow.AgentNode,
+	// a second, independent layer validates the agent's yielded output
+	// at the workflow boundary; see the AgentNode documentation
+	// (google.golang.org/adk/workflow.AgentNode) for how the two layers
+	// interact and the recommended pattern of using the same schema for
+	// both.
 	OutputSchema *genai.Schema
 
 	// Callbacks are executed in the order they are provided.

@@ -28,8 +28,31 @@ import (
 	"google.golang.org/adk/session"
 )
 
-// AgentNode wraps a standard agent.Agent. Wrapped agents should emit their final output via
-// Event.Output to be propagated to successor nodes
+// AgentNode wraps a standard agent.Agent. Wrapped agents should emit
+// their final output via Event.Output to be propagated to successor
+// nodes.
+//
+// # Two-layer output validation
+//
+// When the wrapped agent is an LlmAgent, output can be validated at two
+// independent layers that serve different purposes and may use the same
+// schema value:
+//
+//   - LlmAgent.OutputSchema (the LLM-generation schema) instructs the
+//     model to generate matching JSON and is used by the agent to
+//     validate the model's text output before writing the parsed object
+//     to state[OutputKey]. This layer runs inside the agent, regardless
+//     of whether the agent is used in a workflow.
+//   - AgentNode's output schema (BaseNode.outputSchema, supplied via the
+//     Output type parameter or an explicit schema) is the
+//     workflow-boundary gate. The scheduler applies it through the
+//     default [BaseNode.ValidateOutput] to each event the agent yields,
+//     before forwarding the event to the next node in the graph.
+//
+// AgentNode does not override ValidateOutput; it inherits the BaseNode
+// default. The recommended pattern is to declare the same Go type at
+// both layers so the value the model generates validates cleanly at the
+// workflow boundary. See the package overview for a worked example.
 type AgentNode struct {
 	BaseNode
 	agent agent.Agent
