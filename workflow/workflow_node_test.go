@@ -176,8 +176,10 @@ func TestNestedWorkflow_MultipleTerminals(t *testing.T) {
 			gotErr = err
 		}
 	}
-	if !errors.Is(gotErr, ErrMultipleOutputs) {
-		t.Errorf("got error %v, want ErrMultipleOutputs", gotErr)
+	// Two terminals (b, c) each produce output, so the run finalize
+	// invariant fires first with ErrMultipleTerminalOutputs.
+	if !errors.Is(gotErr, ErrMultipleTerminalOutputs) {
+		t.Errorf("got error %v, want ErrMultipleTerminalOutputs", gotErr)
 	}
 }
 
