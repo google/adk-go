@@ -48,7 +48,7 @@ type Node interface {
 	// It returns the validated output (which might be coerced/parsed/transformed) or an error.
 	// The scheduler invokes it on every yielded event with a non-nil output, before forwarding it to the consumer.
 	ValidateOutput(output any) (any, error)
-	Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
+	Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error]
 }
 
 // Route defines the interface for matching execution results to edges.
@@ -131,7 +131,7 @@ func (s *startNode) ValidateOutput(output any) (any, error) {
 	return output, nil
 }
 
-func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (s *startNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
 

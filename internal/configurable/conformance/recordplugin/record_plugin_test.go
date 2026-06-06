@@ -496,6 +496,20 @@ func (m *MockCallbackContext) SearchMemory(ctx context.Context, query string) (*
 	return nil, fmt.Errorf("SearchMemory() is not supported for MockCallbackContext")
 }
 
+// InvocationContext surface (Context embeds InvocationContext after
+// context unification).
+func (m *MockCallbackContext) Agent() agent.Agent                                  { return nil }
+func (m *MockCallbackContext) Memory() agent.Memory                                { return nil }
+func (m *MockCallbackContext) Session() session.Session                            { return nil }
+func (m *MockCallbackContext) RunConfig() *agent.RunConfig                         { return nil }
+func (m *MockCallbackContext) EndInvocation()                                      {}
+func (m *MockCallbackContext) Ended() bool                                         { return false }
+func (m *MockCallbackContext) ResumedInput(string) (any, bool)                     { return nil, false }
+func (m *MockCallbackContext) Path() string                                        { return "" }
+func (m *MockCallbackContext) RunID() string                                       { return "" }
+func (m *MockCallbackContext) NodeScheduler() agent.NodeScheduler                  { return nil }
+func (m *MockCallbackContext) WithContext(context.Context) agent.InvocationContext { return m }
+
 var _ agent.CallbackContext = (*MockCallbackContext)(nil)
 
 type MockToolContext struct {
@@ -526,6 +540,20 @@ func (m *MockToolContext) Value(key any) any                                    
 func (m *MockToolContext) Deadline() (deadline time.Time, ok bool)              { return time.Time{}, false }
 func (m *MockToolContext) Done() <-chan struct{}                                { return nil }
 func (m *MockToolContext) Err() error                                           { return nil }
+
+// InvocationContext surface (Context embeds InvocationContext after
+// context unification).
+func (m *MockToolContext) Agent() agent.Agent                                  { return nil }
+func (m *MockToolContext) Memory() agent.Memory                                { return nil }
+func (m *MockToolContext) Session() session.Session                            { return nil }
+func (m *MockToolContext) RunConfig() *agent.RunConfig                         { return nil }
+func (m *MockToolContext) EndInvocation()                                      {}
+func (m *MockToolContext) Ended() bool                                         { return false }
+func (m *MockToolContext) ResumedInput(string) (any, bool)                     { return nil, false }
+func (m *MockToolContext) Path() string                                        { return "" }
+func (m *MockToolContext) RunID() string                                       { return "" }
+func (m *MockToolContext) NodeScheduler() agent.NodeScheduler                  { return nil }
+func (m *MockToolContext) WithContext(context.Context) agent.InvocationContext { return m }
 
 type MockTool struct {
 	NameVal string

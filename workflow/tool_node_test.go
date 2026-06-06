@@ -218,7 +218,7 @@ func TestToolNode_Run(t *testing.T) {
 			}
 
 			mockCtx := newMockCtx(t)
-			events := node.Run(mockCtx, tc.nodeInput)
+			events := node.Run(nodeCtx(mockCtx), tc.nodeInput)
 
 			var got string
 			count := 0

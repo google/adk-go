@@ -14,32 +14,63 @@
 
 package workflow
 
-import "context"
+import (
+	"context"
 
-// EXPERIMENTAL: temporary bridge that lets runnable tools recover
-// the surrounding NodeContext from a tool.Context value chain
-// without modifying the tool.Context interface. Will be removed
-// once the CallbackContext / ToolContext unification (see TODO in
-// node_context.go) lands.
-type nodeContextKey struct{}
+	"google.golang.org/adk/agent"
+)
 
-// WithNodeContext returns a derived Go context that carries nc under
-// an opaque key, recoverable via NodeContextFromGoContext from any
-// descendant context.Context. The scheduler calls this on every
-// per-node activation.
-func WithNodeContext(parent context.Context, nc NodeContext) context.Context {
-	if parent == nil || nc == nil {
-		return parent
-	}
-	return context.WithValue(parent, nodeContextKey{}, nc)
+// nodeBridge carries the per-node context plus the workflow-only state
+// that cannot live on agent.Context (the agent package must not import
+// workflow). It is stashed on the embedded Go context so that:
+//   - tools running inside an LlmAgent node can recover the node's
+//     agent.Context (and its NodeScheduler) via the value chain, and
+//   - a nested dynamic node can recover its parent's
+//     outputForAncestors chain.
+//
+// EXPERIMENTAL bridge introduced with context unification; it replaces
+// the former workflow.NodeContext interface.
+type nodeBridge struct {
+	ctx agent.Context
+	// outputForAncestors are the extra node paths this activation's
+	// output counts for, when this activation is itself a
+	// WithUseAsOutput child.
+	outputForAncestors []string
+	// resumeInputs are the re-entry resume payloads (keyed by
+	// InterruptID) propagated to dynamic children.
+	resumeInputs map[string]any
 }
 
-// NodeContextFromGoContext returns the NodeContext stashed by
-// WithNodeContext, or (nil, false) if none is present on ctx.
-func NodeContextFromGoContext(ctx context.Context) (NodeContext, bool) {
+type nodeContextKey struct{}
+
+// withNodeBridge returns a derived Go context carrying b under an opaque
+// key, recoverable via nodeBridgeFromGoContext from any descendant
+// context.Context. The scheduler calls this on every per-node activation.
+func withNodeBridge(parent context.Context, b *nodeBridge) context.Context {
+	if parent == nil || b == nil {
+		return parent
+	}
+	return context.WithValue(parent, nodeContextKey{}, b)
+}
+
+// nodeBridgeFromGoContext returns the nodeBridge stashed by
+// withNodeBridge, or (nil, false) if none is present on ctx.
+func nodeBridgeFromGoContext(ctx context.Context) (*nodeBridge, bool) {
 	if ctx == nil {
 		return nil, false
 	}
-	nc, ok := ctx.Value(nodeContextKey{}).(NodeContext)
-	return nc, ok
+	b, ok := ctx.Value(nodeContextKey{}).(*nodeBridge)
+	return b, ok
+}
+
+// NodeContextFromGoContext returns the workflow node's agent.Context
+// stashed on ctx, or (nil, false) if ctx is not running inside a
+// workflow node. Runnable tools use this to recover the surrounding
+// node context (e.g. to call RunNode) without a dedicated parameter.
+func NodeContextFromGoContext(ctx context.Context) (agent.Context, bool) {
+	b, ok := nodeBridgeFromGoContext(ctx)
+	if !ok {
+		return nil, false
+	}
+	return b.ctx, true
 }

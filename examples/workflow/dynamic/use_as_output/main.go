@@ -88,7 +88,7 @@ func main() {
 
 	orchestrate := workflow.NewDynamicNode[string, string](
 		"orchestrate",
-		func(nc workflow.NodeContext, topic string, _ func(*session.Event) error) (string, error) {
+		func(nc agent.Context, topic string, _ func(*session.Event) error) (string, error) {
 			draft, err := workflow.RunNode[string](nc, drafterNode, topic)
 			if err != nil {
 				return "", err

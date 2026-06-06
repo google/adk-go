@@ -385,22 +385,24 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	// result in branchOverride. Reversing would either lose the
 	// cancellation context or strip the branch override.
 	wrapped := withBranch(s.parentCtx.WithContext(nodeCtx), branch)
-	perNodeCtx := newNodeContext(wrapped, resumeInputs)
+	// Top-level static activations have no dynamic scheduler (nil) and
+	// no path/runID; RunNode rejects a nil scheduler.
+	perNodeCtx := agent.NewNodeContext(wrapped, "", "", resumeInputs, nil, nil)
 
-	// EXPERIMENTAL: stash perNodeCtx in the embedded context.Context
-	// so tools running inside an LlmAgent that is itself running as
-	// this node can recover the NodeContext via
-	// workflow.NodeContextFromGoContext. The value rides through
-	// every downstream NewInvocationContext / WithContext call by
-	// virtue of context.Context value-chain propagation.
-	//
-	// See WithNodeContext / NodeContextFromGoContext in
-	// node_context_bridge.go. Top-level static activations have
-	// subScheduler == nil, so RunNode will still reject them; the
-	// stash is harmless in that case.
-	perNodeCtx.InvocationContext = perNodeCtx.InvocationContext.WithContext(
-		WithNodeContext(perNodeCtx.InvocationContext, perNodeCtx),
-	)
+	// EXPERIMENTAL: stash the per-node context (and its resume inputs)
+	// on the embedded context.Context so tools running inside an
+	// LlmAgent that is itself running as this node can recover the node
+	// context via workflow.NodeContextFromGoContext. The value rides
+	// through every downstream NewInvocationContext / WithContext call
+	// by virtue of context.Context value-chain propagation. See
+	// node_context_bridge.go.
+	bridge := &nodeBridge{resumeInputs: resumeInputs}
+	perNodeCtx = perNodeCtx.WithContext(
+		withNodeBridge(perNodeCtx, bridge),
+	).(agent.Context)
+	// Point the bridge at the final (rewrapped) context so a recovery
+	// returns the same value the node runs with.
+	bridge.ctx = perNodeCtx
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
@@ -446,12 +448,15 @@ func runNode(
 	wg *sync.WaitGroup,
 	name string,
 	n Node,
-	ctx agent.InvocationContext,
+	ctx agent.Context,
 	input any,
 ) {
 	defer wg.Done()
 
-	span, ctx := startNodeSpan(ctx, n)
+	span, ic := startNodeSpan(ctx, n)
+	// startNodeSpan rewraps via WithContext, which preserves the
+	// concrete unified context; recover the agent.Context view.
+	ctx = ic.(agent.Context)
 	defer span.End()
 
 	// completion holds the final completionItem. It is sent in the

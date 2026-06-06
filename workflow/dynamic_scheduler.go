@@ -20,13 +20,16 @@ import (
 	"strings"
 	"sync"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
 
 // dynamicSubScheduler runs the children of one dynamic-node activation.
+// It implements agent.NodeScheduler so the unified Context can schedule
+// dynamic children without the agent package importing workflow.
 type dynamicSubScheduler struct {
 	parentPath string
-	parentCtx  NodeContext
+	parentCtx  agent.Context
 	emitUp     func(*session.Event) error
 
 	// outputForAncestors are the extra node paths this activation's
@@ -34,6 +37,11 @@ type dynamicSubScheduler struct {
 	// WithUseAsOutput child. A delegating child's event is stamped
 	// OutputFor=[childPath, parentPath, ...outputForAncestors].
 	outputForAncestors []string
+
+	// resumeInputs are the re-entry resume payloads (keyed by
+	// InterruptID) to propagate to children so HITL responses reach
+	// dynamic children. Nil on fresh activations and handoff resume.
+	resumeInputs map[string]any
 
 	// mu guards everything below. Never held across child.Run.
 	mu sync.Mutex
@@ -75,7 +83,7 @@ func (d *outputDelegation) reserve(childPath, childName string) (existingName st
 	return "", true
 }
 
-func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*session.Event) error) *dynamicSubScheduler {
+func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func(*session.Event) error) *dynamicSubScheduler {
 	s := &dynamicSubScheduler{
 		parentPath:      parentPath,
 		parentCtx:       parent,
@@ -111,6 +119,23 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 		// Last write wins, matching live execution order.
 		s.resultByPath[ev.NodeInfo.Path] = ev.Output
 	}
+}
+
+// ScheduleNode implements agent.NodeScheduler. It adapts the
+// agent-level call (child as any, agent.NodeRunOptions) onto the
+// internal runNode, so the typed workflow.RunNode helper and any
+// agent-level caller can schedule a dynamic child.
+func (s *dynamicSubScheduler) ScheduleNode(_ agent.Context, child any, input any, opts agent.NodeRunOptions) (any, error) {
+	node, ok := child.(Node)
+	if !ok {
+		return nil, fmt.Errorf("%w: child is %T, not a workflow.Node", ErrInvalidRunNodeContext, child)
+	}
+	return s.runNode(node, input, runNodeOptions{
+		customRunID:    opts.RunID,
+		useSubBranch:   opts.UseSubBranch,
+		overrideBranch: opts.OverrideBranch,
+		useAsOutput:    opts.UseAsOutput,
+	})
 }
 
 // runNode executes child once and classifies the outcome: HITL →
@@ -151,17 +176,24 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	if opts.useAsOutput {
 		childAncestors = append([]string{s.parentPath}, s.outputForAncestors...)
 	}
-	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
+	// Build the child's unified context: rebrand the branch on the
+	// parent's InvocationContext, then wrap as a node context carrying
+	// the child path/runID, inherited resume inputs, and this
+	// sub-scheduler (so a nested RunNode inside the child reaches it).
+	childIC := withBranch(s.parentCtx, childBranch)
+	childCtx := agent.NewNodeContext(childIC, childPath, runID, s.resumeInputs, s, nil)
 
-	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
-	// subScheduler) in the embedded context.Context so tools running
-	// inside an LlmAgent that is itself running as this dynamic
-	// child can recover the NodeContext via
-	// workflow.NodeContextFromGoContext. See
+	// EXPERIMENTAL: stash the child context (and its outputForAncestors
+	// chain) in the embedded context.Context so tools running inside an
+	// LlmAgent that is itself running as this dynamic child can recover
+	// the node context via workflow.NodeContextFromGoContext, and a
+	// nested dynamic node can recover the OutputFor chain. See
 	// scheduleResumedNode for the static-node equivalent.
-	childCtx.InvocationContext = childCtx.InvocationContext.WithContext(
-		WithNodeContext(childCtx.InvocationContext, childCtx),
-	)
+	bridge := &nodeBridge{outputForAncestors: childAncestors, resumeInputs: s.resumeInputs}
+	childCtx = childCtx.WithContext(
+		withNodeBridge(childCtx, bridge),
+	).(agent.Context)
+	bridge.ctx = childCtx
 
 	var (
 		out         any

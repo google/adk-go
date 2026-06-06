@@ -123,7 +123,7 @@ func TestWorkflowAgent_ReEntry_NoSuccessorBeforeOutput(t *testing.T) {
 func TestWorkflowAgent_ReEntry_DefaultModeIsHandoff(t *testing.T) {
 	var askerActivations atomic.Int32
 
-	asker := newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	asker := newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		askerActivations.Add(1)
 		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 			InterruptID: "decide",
@@ -214,7 +214,7 @@ func newReentryNode(name string, runFn func(agent.InvocationContext, any) iter.S
 	}
 }
 
-func (n *reentryNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *reentryNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return n.runFn(ctx, input)
 }
 

@@ -45,7 +45,7 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 // It intercepts events from the sub-workflow to ensure that only the final
 // output is yielded to the parent scheduler, preventing ErrMultipleOutputs
 // if intermediate steps also produced outputs.
-func (n *WorkflowNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		var lastOutput any
 		var pendingErr error

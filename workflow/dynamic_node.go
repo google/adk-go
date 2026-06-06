@@ -30,7 +30,7 @@ import (
 // DynamicFn is the orchestrator body of a dynamic node. emit publishes
 // mid-body events (state updates, HITL requests, progress); the return
 // value becomes the node's terminal Event.Output.
-type DynamicFn[IN, OUT any] = func(ctx NodeContext, in IN, emit func(*session.Event) error) (OUT, error)
+type DynamicFn[IN, OUT any] = func(ctx agent.Context, in IN, emit func(*session.Event) error) (OUT, error)
 
 type dynamicNode[IN, OUT any] struct {
 	BaseNode
@@ -96,28 +96,34 @@ func applyDynamicDefaults(cfg NodeConfig) NodeConfig {
 	return cfg
 }
 
-func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		parentNC, ok := ctx.(NodeContext)
-		if !ok {
-			yield(nil, fmt.Errorf("dynamic node %q: scheduler did not supply a NodeContext", n.Name()))
-			return
-		}
-
 		typedInput, err := n.coerceInput(input)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 
-		emit := makeEmit(yield, parentNC)
-		sub := newDynamicSubScheduler(parentNC, n.composePath(parentNC), emit)
-		// If this node is itself a delegating child, carry its OutputFor
-		// chain so its own delegating children extend it.
-		if p, ok := parentNC.(*nodeContext); ok {
-			sub.outputForAncestors = p.outputForAncestors
+		emit := makeEmit(yield, ctx)
+		sub := newDynamicSubScheduler(ctx, n.composePath(ctx), emit)
+		// Propagate resume payloads and the OutputFor chain from the
+		// bridge so HITL responses reach children and a delegating
+		// node's children extend the chain.
+		if b, ok := nodeBridgeFromGoContext(ctx); ok {
+			sub.resumeInputs = b.resumeInputs
+			sub.outputForAncestors = b.outputForAncestors
 		}
-		orchestratorCtx := newDynamicNodeContext(parentNC, sub.parentPath, "", sub, nil)
+		// The orchestrator body runs with a context whose NodeScheduler
+		// is this sub-scheduler; runID is empty (the node is not itself
+		// a sub-scheduler child). Stash a bridge pointing at this
+		// context so tools running inside the body recover a node
+		// context whose NodeScheduler can RunNode.
+		orchestratorCtx := agent.NewNodeContext(ctx, sub.parentPath, "", sub.resumeInputs, sub, nil)
+		obridge := &nodeBridge{resumeInputs: sub.resumeInputs, outputForAncestors: sub.outputForAncestors}
+		orchestratorCtx = orchestratorCtx.WithContext(
+			withNodeBridge(orchestratorCtx, obridge),
+		).(agent.Context)
+		obridge.ctx = orchestratorCtx
 
 		out, err := n.fn(orchestratorCtx, typedInput, emit)
 		if err != nil {
@@ -137,7 +143,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 			return
 		}
 
-		ev := session.NewEvent(parentNC.InvocationID())
+		ev := session.NewEvent(ctx.InvocationID())
 		ev.Output = out
 		ev.NodeInfo = &session.NodeInfo{Path: sub.parentPath}
 		// TODO(wolo): validate ev.Output against n.outputSchema,
@@ -166,7 +172,7 @@ func (n *dynamicNode[IN, OUT]) coerceInput(input any) (IN, error) {
 
 // composePath returns this dynamic node's own composite path. Top-level
 // activations get the bare Name(); nested dynamic nodes append.
-func (n *dynamicNode[IN, OUT]) composePath(parent NodeContext) string {
+func (n *dynamicNode[IN, OUT]) composePath(parent agent.Context) string {
 	if p := parent.Path(); p != "" {
 		return p + "/" + n.Name()
 	}
@@ -180,7 +186,7 @@ func (n *dynamicNode[IN, OUT]) composePath(parent NodeContext) string {
 // When yield returns false without ctx cancellation (no current
 // consumer triggers this, but the contract must not depend on it),
 // return context.Canceled as a stand-in.
-func makeEmit(yield func(*session.Event, error) bool, parentCtx NodeContext) func(*session.Event) error {
+func makeEmit(yield func(*session.Event, error) bool, parentCtx agent.Context) func(*session.Event) error {
 	return func(ev *session.Event) error {
 		if err := parentCtx.Err(); err != nil {
 			return err

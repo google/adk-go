@@ -61,7 +61,7 @@ func newAskName() *askName {
 	}
 }
 
-func (n *askName) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *askName) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 			InterruptID: "ask_name",
@@ -76,7 +76,7 @@ func main() {
 	ask := newAskName()
 
 	greeter := workflow.NewDynamicNode[string, string]("hitl_demo",
-		func(nc workflow.NodeContext, _ string, emit func(*session.Event) error) (string, error) {
+		func(nc agent.Context, _ string, emit func(*session.Event) error) (string, error) {
 			// Resume re-entry: the reply is in ResumedInput.
 			if reply, ok := nc.ResumedInput("ask_name"); ok {
 				name, _ := reply.(string)

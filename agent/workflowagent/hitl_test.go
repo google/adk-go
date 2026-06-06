@@ -239,7 +239,7 @@ func TestWorkflowAgent_FreshTurn_NotMistakenForResume(t *testing.T) {
 	// flip its own flag before the request is yielded, so the
 	// test can detect that the asker truly re-ran on turn 2.
 	makeAsker := func(flag *atomic.Bool) workflow.Node {
-		return newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+		return newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 			flag.Store(true)
 			yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 				InterruptID: "ask",
@@ -274,10 +274,9 @@ func TestWorkflowAgent_FreshTurn_NotMistakenForResume(t *testing.T) {
 func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 	const interruptID = "ask_name_dyn"
 
-	asker := newHitlNode("ask_name", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
-		nc, ok := ctx.(workflow.NodeContext)
-		if ok {
-			if resp, ok := nc.ResumedInput(interruptID); ok {
+	asker := newHitlNode("ask_name", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+		{
+			if resp, ok := ctx.ResumedInput(interruptID); ok {
 				ev := session.NewEvent(ctx.InvocationID())
 				ev.Output = resp
 				yield(ev, nil)
@@ -291,7 +290,7 @@ func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 	})
 
 	orchestrator := workflow.NewDynamicNode[string, string]("hitl_demo",
-		func(nc workflow.NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+		func(nc agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			out, err := workflow.RunNode[any](nc, asker, nil)
 			if err != nil {
 				// Pause: err is ErrNodeInterrupted (swallowed by dynamicNode.Run).
@@ -468,17 +467,17 @@ func (s *fakeSessionState) All() iter.Seq2[string, any] {
 // its own emission pattern.
 type hitlNode struct {
 	workflow.BaseNode
-	run func(ctx agent.InvocationContext, input any, yield func(*session.Event, error) bool)
+	run func(ctx agent.Context, input any, yield func(*session.Event, error) bool)
 }
 
-func newHitlNode(name string, run func(ctx agent.InvocationContext, input any, yield func(*session.Event, error) bool)) *hitlNode {
+func newHitlNode(name string, run func(ctx agent.Context, input any, yield func(*session.Event, error) bool)) *hitlNode {
 	return &hitlNode{
 		BaseNode: workflow.NewBaseNode(name, "", workflow.NodeConfig{}),
 		run:      run,
 	}
 }
 
-func (n *hitlNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *hitlNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.run(ctx, input, yield)
 	}
@@ -578,7 +577,7 @@ func resumeMessage(interruptID string, payload any) *genai.Content {
 // optional schema, then exits. This is the canonical "asker"
 // pattern: a node that pauses the workflow waiting for human input.
 func newAskerNode(interruptID, message string, schema *jsonschema.Schema) *hitlNode {
-	return newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	return newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 			InterruptID:    interruptID,
 			Message:        message,

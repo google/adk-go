@@ -97,7 +97,7 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 }
 
 // Run executes the function node with the given input and returns an iterator over events.
-func (n *FunctionNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *FunctionNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		output, err := n.fn(ctx, input)
 		if err != nil {

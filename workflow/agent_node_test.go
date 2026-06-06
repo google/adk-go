@@ -243,7 +243,7 @@ func TestAgentNode_Run(t *testing.T) {
 
 			mockCtx := newMockCtx(t)
 			mockCtx.sess = &mockSession{id: "test-session-id"} // Fix nil panic
-			events := node.Run(mockCtx, tc.nodeInput)
+			events := node.Run(nodeCtx(mockCtx), tc.nodeInput)
 
 			var got string
 			count := 0
@@ -423,7 +423,7 @@ func TestAgentNode_SynthesizesOutputFromModelText(t *testing.T) {
 		gotPartial *session.Event
 		gotFinal   *session.Event
 	)
-	for ev, err := range node.Run(mockCtx, "ignored") {
+	for ev, err := range node.Run(nodeCtx(mockCtx), "ignored") {
 		if err != nil {
 			t.Fatalf("node.Run: %v", err)
 		}

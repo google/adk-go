@@ -56,7 +56,7 @@ type inlineNode struct {
 	run func(agent.InvocationContext, any) iter.Seq2[*session.Event, error]
 }
 
-func (n *inlineNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *inlineNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return n.run(ctx, input)
 }
 

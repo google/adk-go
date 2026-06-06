@@ -80,7 +80,7 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 			}
 
 			mockCtx := &MockInvocationContext{sess: nil}
-			events := node.Run(mockCtx, tc.input)
+			events := node.Run(nodeCtx(mockCtx), tc.input)
 
 			count := 0
 			for ev, err := range events {
@@ -135,7 +135,7 @@ func TestFunctionNode_ValidateOutput(t *testing.T) {
 	mockCtx := &MockInvocationContext{sess: nil}
 	var got any
 	count := 0
-	for ev, err := range node.Run(mockCtx, Input{Value: "hello"}) {
+	for ev, err := range node.Run(nodeCtx(mockCtx), Input{Value: "hello"}) {
 		if err != nil {
 			t.Fatalf("Run returned unexpected error: %v", err)
 		}

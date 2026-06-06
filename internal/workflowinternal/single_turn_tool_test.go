@@ -224,9 +224,12 @@ func TestSingleTurnTool_Run_HappyPath(t *testing.T) {
 		gotErr    error
 	)
 	orchestrator := workflow.NewDynamicNode("orchestrator",
-		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
-			ic := ctx.WithContext(workflow.WithNodeContext(ctx, ctx))
-			toolCtx := agent.NewToolContext(ic, "fc-id", &session.EventActions{}, nil)
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (any, error) {
+			// ctx already carries the node bridge on its embedded Go
+			// context (stashed by the scheduler), so a tool context
+			// derived from it can recover the node context via
+			// workflow.NodeContextFromGoContext.
+			toolCtx := agent.NewToolContext(ctx, "fc-id", &session.EventActions{}, nil)
 			gotResult, gotErr = st.Run(toolCtx, map[string]any{"request": "hello"})
 			return nil, gotErr
 		},

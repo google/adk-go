@@ -423,7 +423,7 @@ func newRecordingNode(name string) *recordingNode {
 
 func (n *recordingNode) release() { close(n.released) }
 
-func (n *recordingNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *recordingNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		<-n.released
 		ev := session.NewEvent(ctx.InvocationID())
@@ -449,7 +449,7 @@ func newBlockingNode(name string, work func()) *blockingNode {
 	}
 }
 
-func (n *blockingNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *blockingNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.work()
 		ev := session.NewEvent(ctx.InvocationID())
@@ -471,7 +471,7 @@ func newErroringNode(name string, err error) *erroringNode {
 	}
 }
 
-func (n *erroringNode) Run(_ agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *erroringNode) Run(_ agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(nil, n.err)
 	}
@@ -493,7 +493,7 @@ func newCancelObservingNode(name string) *cancelObservingNode {
 // Config returns n.cfg, which tests may mutate after construction.
 func (n *cancelObservingNode) Config() NodeConfig { return n.cfg }
 
-func (n *cancelObservingNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *cancelObservingNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		<-ctx.Done()
 		n.cancelObserved.Store(true)
@@ -515,7 +515,7 @@ func newMultiOutputNode(name string, outputs []string) *multiOutputNode {
 	}
 }
 
-func (n *multiOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *multiOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for _, out := range n.outputs {
 			ev := session.NewEvent(ctx.InvocationID())
@@ -544,7 +544,7 @@ func newProgressThenOutputNode(name string, progressCount int, finalOutput strin
 	}
 }
 
-func (n *progressThenOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *progressThenOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for range n.progressCount {
 			ev := session.NewEvent(ctx.InvocationID())
@@ -639,7 +639,7 @@ func newRetryTestNode(name string, failCount int, cfg NodeConfig) *retryTestNode
 
 func (n *retryTestNode) Config() NodeConfig { return n.cfg }
 
-func (n *retryTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *retryTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		calls := n.calls.Add(1)
 		if int(calls) <= n.failCount {
@@ -764,7 +764,7 @@ func newSchemaValidatedNode(name string, schema *jsonschema.Resolved, output any
 	}
 }
 
-func (n *schemaValidatedNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *schemaValidatedNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Output = n.output
@@ -781,7 +781,7 @@ type progressThenSchemaOutputNode struct {
 	output   any
 }
 
-func (n *progressThenSchemaOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *progressThenSchemaOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for i := 0; i < n.progress; i++ {
 			ev := session.NewEvent(ctx.InvocationID())
@@ -811,7 +811,7 @@ type noOutputNode struct {
 	BaseNode
 }
 
-func (n *noOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *noOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(session.NewEvent(ctx.InvocationID()), nil)
 	}

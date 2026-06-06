@@ -16,13 +16,20 @@ package workflow
 
 import (
 	"testing"
+
+	"google.golang.org/adk/agent"
 )
+
+// These tests pin the workflow-node surface of the unified
+// agent.Context (built via agent.NewNodeContext): ResumedInput, Path,
+// and RunID. They replace the former tests of the removed
+// workflow.nodeContext type.
 
 func TestNodeContext_ResumedInput(t *testing.T) {
 	parent := newMockCtx(t)
 
 	t.Run("nil resumeInputs returns (nil, false)", func(t *testing.T) {
-		c := newNodeContext(parent, nil)
+		c := agent.NewNodeContext(parent, "", "", nil, nil, nil)
 		v, ok := c.ResumedInput("any_id")
 		if v != nil || ok {
 			t.Errorf("ResumedInput() = (%v, %v), want (nil, false)", v, ok)
@@ -30,17 +37,17 @@ func TestNodeContext_ResumedInput(t *testing.T) {
 	})
 
 	t.Run("populated resumeInputs returns matched payload", func(t *testing.T) {
-		c := newNodeContext(parent, map[string]any{
+		c := agent.NewNodeContext(parent, "", "", map[string]any{
 			"approval": "yes",
 			"comment":  "looks good",
-		})
+		}, nil, nil)
 		if v, ok := c.ResumedInput("approval"); !ok || v != "yes" {
 			t.Errorf("ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
 		}
 	})
 
 	t.Run("unmatched InterruptID returns (nil, false)", func(t *testing.T) {
-		c := newNodeContext(parent, map[string]any{"approval": "yes"})
+		c := agent.NewNodeContext(parent, "", "", map[string]any{"approval": "yes"}, nil, nil)
 		if v, ok := c.ResumedInput("missing"); v != nil || ok {
 			t.Errorf("ResumedInput(\"missing\") = (%v, %v), want (nil, false)", v, ok)
 		}
@@ -49,7 +56,7 @@ func TestNodeContext_ResumedInput(t *testing.T) {
 
 func TestNodeContext_PathAndRunID(t *testing.T) {
 	t.Run("top-level static returns empty", func(t *testing.T) {
-		c := newNodeContext(newMockCtx(t), nil)
+		c := agent.NewNodeContext(newMockCtx(t), "", "", nil, nil, nil)
 		if got := c.Path(); got != "" {
 			t.Errorf("Path() = %q, want empty", got)
 		}
@@ -59,8 +66,7 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 	})
 
 	t.Run("child populated from constructor", func(t *testing.T) {
-		parent := newNodeContext(newMockCtx(t), nil)
-		child := newDynamicNodeContext(parent, "wf/fixer@2", "2", nil, nil)
+		child := agent.NewNodeContext(newMockCtx(t), "wf/fixer@2", "2", nil, nil, nil)
 		if got, want := child.Path(), "wf/fixer@2"; got != want {
 			t.Errorf("Path() = %q, want %q", got, want)
 		}
@@ -70,8 +76,7 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 	})
 
 	t.Run("activation populated with empty runID", func(t *testing.T) {
-		parent := newNodeContext(newMockCtx(t), nil)
-		act := newDynamicNodeContext(parent, "city_workflow", "", nil, nil)
+		act := agent.NewNodeContext(newMockCtx(t), "city_workflow", "", nil, nil, nil)
 		if got, want := act.Path(), "city_workflow"; got != want {
 			t.Errorf("Path() = %q, want %q", got, want)
 		}
@@ -81,27 +86,15 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 	})
 }
 
-func TestNodeContext_DynamicInheritsResumeInputs(t *testing.T) {
-	parent := newNodeContext(newMockCtx(t), map[string]any{"approval": "yes"})
+func TestNodeContext_SchedulerStored(t *testing.T) {
 	sub := &dynamicSubScheduler{}
+	c := agent.NewNodeContext(newMockCtx(t), "wf/asker@1", "1",
+		map[string]any{"approval": "yes"}, sub, nil)
 
-	t.Run("child", func(t *testing.T) {
-		child := newDynamicNodeContext(parent, "wf/asker@1", "1", sub, nil)
-		if v, ok := child.ResumedInput("approval"); !ok || v != "yes" {
-			t.Errorf("child.ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
-		}
-		if child.subScheduler != sub {
-			t.Errorf("subScheduler pointer differs from supplied")
-		}
-	})
-
-	t.Run("activation", func(t *testing.T) {
-		act := newDynamicNodeContext(parent, "city_workflow", "", sub, nil)
-		if v, ok := act.ResumedInput("approval"); !ok || v != "yes" {
-			t.Errorf("act.ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
-		}
-		if act.subScheduler != sub {
-			t.Errorf("subScheduler pointer differs from supplied")
-		}
-	})
+	if v, ok := c.ResumedInput("approval"); !ok || v != "yes" {
+		t.Errorf("ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
+	}
+	if c.NodeScheduler() != sub {
+		t.Errorf("NodeScheduler() pointer differs from supplied")
+	}
 }

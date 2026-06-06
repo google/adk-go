@@ -93,7 +93,7 @@ func TestParallelWorker_Run(t *testing.T) {
 			}
 
 			mockCtx := newMockCtx(t)
-			events := pw.Run(mockCtx, tc.input)
+			events := pw.Run(nodeCtx(mockCtx), tc.input)
 
 			var gotOutput []any
 			var gotErr error
@@ -149,7 +149,7 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		for range pw.Run(mockCtx, input) {
+		for range pw.Run(nodeCtx(mockCtx), input) {
 		}
 		close(done)
 	}()
@@ -199,7 +199,7 @@ func TestParallelWorker_SuppressIntermediateEvents(t *testing.T) {
 	mockCtx := newMockCtx(t)
 	input := []any{1, 2}
 
-	events := pw.Run(mockCtx, input)
+	events := pw.Run(nodeCtx(mockCtx), input)
 
 	nonOutputCount := 0
 	hasAggregatedOutput := false
@@ -326,7 +326,7 @@ func TestParallelWorker_Retry(t *testing.T) {
 	mockCtx := newMockCtx(t)
 	input := []any{"a", "b"}
 
-	events := pw.Run(mockCtx, input)
+	events := pw.Run(nodeCtx(mockCtx), input)
 
 	var gotOutput []any
 	var gotErr error
@@ -389,7 +389,7 @@ func TestParallelWorker_FailFast(t *testing.T) {
 	mockCtx := newMockCtx(t)
 	input := []any{"a", "b", "c"}
 
-	events := pw.Run(mockCtx, input)
+	events := pw.Run(nodeCtx(mockCtx), input)
 
 	var gotErr error
 	for _, err := range events {
@@ -447,7 +447,7 @@ func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 	var hasFinalResult bool
 
 	go func() {
-		for ev, err := range pw.Run(mockCtx, input) {
+		for ev, err := range pw.Run(nodeCtx(mockCtx), input) {
 			if err != nil {
 				gotErr = err
 			}
@@ -508,7 +508,7 @@ func TestParallelWorker_ConcurrentMultiOutputOrder(t *testing.T) {
 	done := make(chan struct{})
 	var gotOutput []any
 	go func() {
-		events := pw.Run(mockCtx, input)
+		events := pw.Run(nodeCtx(mockCtx), input)
 		for ev, err := range events {
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
@@ -550,7 +550,7 @@ type delayedMultiOutputTestNode struct {
 	startedCh    chan struct{}
 }
 
-func (n *delayedMultiOutputTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *delayedMultiOutputTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		s := input.(string)
 

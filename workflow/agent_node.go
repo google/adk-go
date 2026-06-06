@@ -74,7 +74,7 @@ func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 }
 
 // Run implements the Node interface.
-func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		validatedInput, err := n.ValidateInput(input)
 		if err != nil {

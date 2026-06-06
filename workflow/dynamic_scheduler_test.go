@@ -189,9 +189,9 @@ func TestSubScheduler_RunNode_ErrorWinsOverInterrupt(t *testing.T) {
 
 func noopEmit(*session.Event) error { return nil }
 
-func newTopLevelCtx(t *testing.T) *nodeContext {
+func newTopLevelCtx(t *testing.T) agent.Context {
 	t.Helper()
-	return newNodeContext(newMockCtx(t), nil)
+	return agent.NewNodeContext(newMockCtx(t), "", "", nil, nil, nil)
 }
 
 // stubNode emits one Event{Output: out} and exits.
@@ -209,10 +209,8 @@ func newStubNode(name string, out any) *stubNode {
 	}
 }
 
-func (n *stubNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
-	if nc, ok := ctx.(NodeContext); ok {
-		n.lastPath = nc.Path()
-	}
+func (n *stubNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	n.lastPath = ctx.Path()
 	n.lastBranch = ctx.Branch()
 	out := n.out
 	return func(yield func(*session.Event, error) bool) {
@@ -235,7 +233,7 @@ func newMessageAsOutputNode(name, text string) *messageAsOutputNode {
 	}
 }
 
-func (n *messageAsOutputNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+func (n *messageAsOutputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
 	text := n.text
 	return func(yield func(*session.Event, error) bool) {
 		ev := &session.Event{NodeInfo: &session.NodeInfo{MessageAsOutput: true}}
@@ -260,7 +258,7 @@ func newRequestInputNode(name, msg string) *requestInputNode {
 	}
 }
 
-func (n *requestInputNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+func (n *requestInputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{
 			RequestedInput: &session.RequestInput{
@@ -278,7 +276,7 @@ func newInterruptThenFailNode(name string) *interruptThenFailNode {
 	return &interruptThenFailNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
 
-func (n *interruptThenFailNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+func (n *interruptThenFailNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if !yield(&session.Event{
 			RequestedInput: &session.RequestInput{InterruptID: "iid", Message: "ask"},

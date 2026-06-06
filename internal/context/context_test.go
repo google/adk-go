@@ -40,8 +40,11 @@ func TestCallbackContext(t *testing.T) {
 	if _, ok := callback.(agent.ReadonlyContext); !ok {
 		t.Errorf("CallbackContext(%+T) is unexpectedly not a ReadonlyContext", callback)
 	}
-	if got, ok := callback.(agent.InvocationContext); ok {
-		t.Errorf("CallbackContext(%+T) is unexpectedly an InvocationContext", got)
+	// After context unification, the unified agent.Context (aliased as
+	// CallbackContext) embeds InvocationContext, so a CallbackContext is
+	// expected to also satisfy InvocationContext.
+	if _, ok := callback.(agent.InvocationContext); !ok {
+		t.Errorf("CallbackContext(%+T) is unexpectedly not an InvocationContext", callback)
 	}
 }
 

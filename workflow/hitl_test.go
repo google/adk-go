@@ -40,7 +40,7 @@ func newHitlNode(name string, run func(ctx agent.InvocationContext, input any, y
 	}
 }
 
-func (n *hitlNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *hitlNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.run(ctx, input, yield)
 	}

@@ -17,10 +17,12 @@ package workflow
 import (
 	"context"
 	"testing"
+
+	"google.golang.org/adk/agent"
 )
 
-// TestWithNodeContext_SurvivesDerivedContext pins the core property
-// the bridge exists for: a NodeContext stashed via WithNodeContext
+// TestWithNodeBridge_SurvivesDerivedContext pins the core property
+// the bridge exists for: a node context stashed via withNodeBridge
 // must survive arbitrary downstream context.Context derivations
 // (context.WithCancel, context.WithValue, ...) because the
 // scheduler -> AgentNode -> LlmAgent -> Flow -> tool.Context chain
@@ -31,11 +33,11 @@ import (
 //
 // If this test regresses, NodeContextFromGoContext(toolCtx)
 // lookups in runnable tools will silently return (nil, false) at
-// runtime and the tools will fall back to their no-NodeContext
+// runtime and the tools will fall back to their no-node-context
 // path.
-func TestWithNodeContext_SurvivesDerivedContext(t *testing.T) {
-	sentinel := &nodeContext{}
-	parent := WithNodeContext(context.Background(), sentinel)
+func TestWithNodeBridge_SurvivesDerivedContext(t *testing.T) {
+	sentinel := agent.NewNodeContext(newMockCtx(t), "p", "1", nil, nil, nil)
+	parent := withNodeBridge(context.Background(), &nodeBridge{ctx: sentinel})
 
 	// Simulate a WithCancel (NewInvocationContext does effectively
 	// this when called with the per-node nodeCtx).
@@ -47,9 +49,9 @@ func TestWithNodeContext_SurvivesDerivedContext(t *testing.T) {
 
 	got, ok := NodeContextFromGoContext(derived)
 	if !ok {
-		t.Fatal("NodeContext lost across WithCancel + WithValue derivations")
+		t.Fatal("node context lost across WithCancel + WithValue derivations")
 	}
-	if got != NodeContext(sentinel) {
-		t.Errorf("Derived context returned wrong NodeContext: got %p, want %p", got, sentinel)
+	if got != sentinel {
+		t.Errorf("Derived context returned wrong node context: got %p, want %p", got, sentinel)
 	}
 }

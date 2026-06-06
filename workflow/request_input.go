@@ -57,7 +57,7 @@ const WorkflowInputFunctionCallName = "adk_request_input"
 //
 // Example:
 //
-//	func (n *MyNode) Run(ctx agent.InvocationContext, in any) iter.Seq2[*session.Event, error] {
+//	func (n *MyNode) Run(ctx agent.Context, in any) iter.Seq2[*session.Event, error] {
 //	    return func(yield func(*session.Event, error) bool) {
 //	        yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 //	            InterruptID: "human_review",

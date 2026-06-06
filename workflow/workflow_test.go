@@ -49,6 +49,13 @@ func newMockCtx(t *testing.T) *MockInvocationContext {
 	return &MockInvocationContext{Context: t.Context()}
 }
 
+// nodeCtx wraps an InvocationContext into the unified agent.Context
+// that Node.Run now expects, for tests that invoke a node's Run
+// directly (outside the scheduler).
+func nodeCtx(ic agent.InvocationContext) agent.Context {
+	return agent.NewNodeContext(ic, "", "", nil, nil, nil)
+}
+
 // newSeededMockCtx returns a mockCtx pre-loaded with a "seed" user
 // content part — the standard fixture for scheduler tests that need
 // an initial input flowing into Start.
@@ -100,7 +107,7 @@ func TestFunctionNode(t *testing.T) {
 	mockCtx := newMockCtx(t)
 
 	// Run the node
-	events := node.Run(mockCtx, "hello")
+	events := node.Run(nodeCtx(mockCtx), "hello")
 
 	count := 0
 	for ev, err := range events {
@@ -243,7 +250,7 @@ type CustomRouteNode struct {
 	onRun func()
 }
 
-func (n *CustomRouteNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *CustomRouteNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	if n.onRun != nil {
 		n.onRun()
 	}

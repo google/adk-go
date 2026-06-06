@@ -103,7 +103,7 @@ func runSequentialFanOut(t *testing.T, childName string, extraOpts []RunNodeOpti
 
 	orch := NewDynamicNode[any, []string](
 		"orch",
-		func(ctx NodeContext, _ any, _ func(*session.Event) error) ([]string, error) {
+		func(ctx agent.Context, _ any, _ func(*session.Event) error) ([]string, error) {
 			items := []string{"a", "b", "c"}
 			results := make([]string, len(items))
 			for i, item := range items {

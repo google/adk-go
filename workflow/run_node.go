@@ -14,7 +14,11 @@
 
 package workflow
 
-import "fmt"
+import (
+	"fmt"
+
+	"google.golang.org/adk/agent"
+)
 
 // RunNodeOption configures a single RunNode call.
 type RunNodeOption func(*runNodeOptions)
@@ -24,6 +28,17 @@ type runNodeOptions struct {
 	useSubBranch   bool
 	overrideBranch string
 	useAsOutput    bool
+}
+
+// toAgentOptions maps the resolved workflow options onto the
+// agent-level NodeRunOptions understood by agent.NodeScheduler.
+func (o runNodeOptions) toAgentOptions() agent.NodeRunOptions {
+	return agent.NodeRunOptions{
+		RunID:          o.customRunID,
+		UseSubBranch:   o.useSubBranch,
+		OverrideBranch: o.overrideBranch,
+		UseAsOutput:    o.useAsOutput,
+	}
 }
 
 // WithRunID overrides the auto-generated counter with a stable
@@ -80,7 +95,8 @@ func WithOverrideBranch(branch string) RunNodeOption {
 
 // RunNode schedules child as a sub-node of the currently-executing
 // dynamic node and returns its typed output. ctx must be the
-// NodeContext passed into the enclosing dynamic node's body.
+// agent.Context passed into the enclosing dynamic node's body (its
+// NodeScheduler() must be non-nil).
 //
 // On failure:
 //   - errors.Is(err, ErrNodeInterrupted): child paused for HITL.
@@ -88,11 +104,11 @@ func WithOverrideBranch(branch string) RunNodeOption {
 //     errors.As recovers *NodeRunError with diagnostics.
 //   - ErrInvalidRunNodeContext, ErrInvalidRunID: misuse.
 //   - ctx.Err(): parent cancellation.
-func RunNode[OUT any](ctx NodeContext, child Node, input any, opts ...RunNodeOption) (OUT, error) {
+func RunNode[OUT any](ctx agent.Context, child Node, input any, opts ...RunNodeOption) (OUT, error) {
 	var zero OUT
 
-	nc, ok := ctx.(*nodeContext)
-	if !ok || nc.subScheduler == nil {
+	sched := ctx.NodeScheduler()
+	if sched == nil {
 		return zero, ErrInvalidRunNodeContext
 	}
 
@@ -101,7 +117,7 @@ func RunNode[OUT any](ctx NodeContext, child Node, input any, opts ...RunNodeOpt
 		opt(&o)
 	}
 
-	rawOut, err := nc.subScheduler.runNode(child, input, o)
+	rawOut, err := sched.ScheduleNode(ctx, child, input, o.toAgentOptions())
 	if err != nil {
 		return zero, err
 	}

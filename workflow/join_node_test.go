@@ -156,7 +156,7 @@ func TestJoinNode_RunIsPassthrough(t *testing.T) {
 	n := NewJoinNode("join")
 
 	input := map[string]any{"a": "x", "b": 42}
-	events := drain(t, n.Run(mockCtx, input))
+	events := drain(t, n.Run(nodeCtx(mockCtx), input))
 
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(events))

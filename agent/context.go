@@ -136,9 +136,16 @@ type CallbackContext = Context
 // Human-in-the-Loop (HITL) confirmation flow.
 type ToolContext = Context
 
-// Context is a common context used both in callbacks (aliased as CallbackContext) and tool calls (aliased as ToolContext).
+// Context is a common context used both in callbacks (aliased as
+// CallbackContext) and tool calls (aliased as ToolContext), and as the
+// per-node context inside workflow Node.Run bodies. It embeds
+// InvocationContext so a single unified value exposes the full
+// invocation surface (Agent, Memory, Session, RunConfig, ...) in
+// addition to the callback/tool/workflow-node accessors. This mirrors
+// adk-python's Context, which wraps an InvocationContext.
 type Context interface {
 	ReadonlyContext
+	InvocationContext
 
 	// Callback context
 	Artifacts() Artifacts

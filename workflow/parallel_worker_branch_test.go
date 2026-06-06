@@ -49,7 +49,7 @@ func TestParallelWorker_PerItemSubBranch(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	events := pw.Run(mockCtx, []any{"a", "b", "c"})
+	events := pw.Run(nodeCtx(mockCtx), []any{"a", "b", "c"})
 	for _, err := range events {
 		if err != nil {
 			t.Fatalf("Run error: %v", err)
@@ -104,7 +104,7 @@ func TestParallelWorker_SubBranchUnderNonRootParent(t *testing.T) {
 	// "outer@1" (e.g. one branch of a static fan-out).
 	parentCtx := withBranch(newMockCtx(t), "outer@1")
 
-	events := pw.Run(parentCtx, []any{"x", "y"})
+	events := pw.Run(nodeCtx(parentCtx), []any{"x", "y"})
 	for _, err := range events {
 		if err != nil {
 			t.Fatalf("Run error: %v", err)
@@ -155,7 +155,7 @@ func TestParallelWorker_RetryKeepsSameBranch(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	var gotErr error
-	for _, runErr := range pw.Run(mockCtx, []any{"a"}) {
+	for _, runErr := range pw.Run(nodeCtx(mockCtx), []any{"a"}) {
 		if runErr != nil {
 			gotErr = runErr
 		}
