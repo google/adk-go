@@ -87,6 +87,33 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 	}
 }
 
+// NewNodeContext constructs the unified Context for a workflow graph
+// node activation. It wraps the node's InvocationContext and carries the
+// node surface (path, runID, resume inputs) plus the dynamic-node
+// scheduler. The returned value is a full Context (so node bodies get
+// state, artifacts, actions, and tool facilities) and also satisfies
+// InvocationContext.
+//
+// path and runID are empty for top-level static activations. resumeInputs
+// may be nil. sched is nil unless this activation can schedule dynamic
+// children (i.e. a dynamic node body); RunNode rejects a nil scheduler.
+//
+// This is the Go analog of adk-python's Context carrying _node_path,
+// _run_id, _resume_inputs, and _workflow_scheduler.
+func NewNodeContext(ic InvocationContext, path, runID string, resumeInputs map[string]any, sched NodeScheduler, actions *session.EventActions) Context {
+	actions = prepareEventActions(actions)
+	return &commonContext{
+		Context:           ic,
+		invocationContext: ic,
+		actions:           actions,
+		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
+		path:              path,
+		runID:             runID,
+		resumeInputs:      resumeInputs,
+		nodeScheduler:     sched,
+	}
+}
+
 func prepareEventActions(actions *session.EventActions) *session.EventActions {
 	if actions == nil {
 		return &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
@@ -115,6 +142,13 @@ type commonContext struct {
 	// Fields below are only populated by NewToolContext.
 	functionCallID   string
 	toolConfirmation *toolconfirmation.ToolConfirmation
+
+	// Fields below are only populated by NewNodeContext for workflow
+	// graph nodes. They are zero for plain tool/callback contexts.
+	path          string
+	runID         string
+	resumeInputs  map[string]any
+	nodeScheduler NodeScheduler
 }
 
 func (c *commonContext) AgentName() string {
@@ -189,35 +223,33 @@ func (c *commonContext) EndInvocation() { c.invocationContext.EndInvocation() }
 // Ended reports whether the underlying invocation has ended.
 func (c *commonContext) Ended() bool { return c.invocationContext.Ended() }
 
-// ResumedInput forwards to the underlying invocation. Plain tool/callback
-// contexts carry no resume payloads; workflow node contexts override the
-// wrapped InvocationContext to return real values.
+// ResumedInput returns the resume payload for a re-entry resume
+// activation keyed by interruptID. Workflow node contexts populate
+// resumeInputs; otherwise this falls back to the wrapped invocation.
 func (c *commonContext) ResumedInput(interruptID string) (any, bool) {
+	if c.resumeInputs != nil {
+		if v, ok := c.resumeInputs[interruptID]; ok {
+			return v, true
+		}
+	}
 	return c.invocationContext.ResumedInput(interruptID)
 }
 
-// Path returns the workflow node path, or "" outside a workflow. It
-// forwards to the wrapped InvocationContext when that value carries
-// node information (e.g. a workflow node context); plain tool/callback
-// contexts return "".
-func (c *commonContext) Path() string {
-	if p, ok := c.invocationContext.(interface{ Path() string }); ok {
-		return p.Path()
-	}
-	return ""
-}
+// Path returns the workflow node path, or "" outside a workflow.
+func (c *commonContext) Path() string { return c.path }
 
 // RunID returns the workflow node run id, or "" outside a workflow.
-func (c *commonContext) RunID() string {
-	if r, ok := c.invocationContext.(interface{ RunID() string }); ok {
-		return r.RunID()
-	}
-	return ""
-}
+func (c *commonContext) RunID() string { return c.runID }
+
+// NodeScheduler returns the dynamic-node scheduler for this context, or
+// nil when this context does not belong to a dynamic workflow node body.
+func (c *commonContext) NodeScheduler() NodeScheduler { return c.nodeScheduler }
 
 // WithContext returns a copy of this context with the embedded Go
-// context replaced, preserving the unified-context wrapper and its
-// wrapped InvocationContext.
+// context replaced, preserving the unified-context wrapper, its wrapped
+// InvocationContext, and any workflow-node state (path, runID,
+// resumeInputs, scheduler). Dropping these would break re-entry resume
+// and dynamic-node scheduling.
 func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
 	cp := *c
 	cp.Context = ctx

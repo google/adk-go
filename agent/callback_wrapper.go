@@ -152,4 +152,9 @@ func (c *callbackContextWrapper) RunID() string {
 	return c.context.RunID()
 }
 
+// NodeScheduler implements [Context].
+func (c *callbackContextWrapper) NodeScheduler() NodeScheduler {
+	return c.context.NodeScheduler()
+}
+
 var _ Context = (*callbackContextWrapper)(nil)
