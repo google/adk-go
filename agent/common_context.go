@@ -158,9 +158,72 @@ func (c *commonContext) UserID() string {
 }
 
 var (
-	_ CallbackContext = (*commonContext)(nil)
-	_ ToolContext     = (*commonContext)(nil)
+	_ CallbackContext   = (*commonContext)(nil)
+	_ ToolContext       = (*commonContext)(nil)
+	_ InvocationContext = (*commonContext)(nil)
 )
+
+// --- InvocationContext forwarding ----------------------------------------
+//
+// commonContext wraps an InvocationContext and, by forwarding the
+// remaining InvocationContext methods to it, also satisfies
+// InvocationContext. This lets a single unified Context value flow
+// wherever an InvocationContext is expected (e.g. workflow Node.Run),
+// matching adk-python's Context that wraps an InvocationContext.
+
+// Agent returns the agent of the underlying invocation.
+func (c *commonContext) Agent() Agent { return c.invocationContext.Agent() }
+
+// Memory returns the memory service of the underlying invocation.
+func (c *commonContext) Memory() Memory { return c.invocationContext.Memory() }
+
+// Session returns the session of the underlying invocation.
+func (c *commonContext) Session() session.Session { return c.invocationContext.Session() }
+
+// RunConfig returns the run configuration of the underlying invocation.
+func (c *commonContext) RunConfig() *RunConfig { return c.invocationContext.RunConfig() }
+
+// EndInvocation ends the underlying invocation.
+func (c *commonContext) EndInvocation() { c.invocationContext.EndInvocation() }
+
+// Ended reports whether the underlying invocation has ended.
+func (c *commonContext) Ended() bool { return c.invocationContext.Ended() }
+
+// ResumedInput forwards to the underlying invocation. Plain tool/callback
+// contexts carry no resume payloads; workflow node contexts override the
+// wrapped InvocationContext to return real values.
+func (c *commonContext) ResumedInput(interruptID string) (any, bool) {
+	return c.invocationContext.ResumedInput(interruptID)
+}
+
+// Path returns the workflow node path, or "" outside a workflow. It
+// forwards to the wrapped InvocationContext when that value carries
+// node information (e.g. a workflow node context); plain tool/callback
+// contexts return "".
+func (c *commonContext) Path() string {
+	if p, ok := c.invocationContext.(interface{ Path() string }); ok {
+		return p.Path()
+	}
+	return ""
+}
+
+// RunID returns the workflow node run id, or "" outside a workflow.
+func (c *commonContext) RunID() string {
+	if r, ok := c.invocationContext.(interface{ RunID() string }); ok {
+		return r.RunID()
+	}
+	return ""
+}
+
+// WithContext returns a copy of this context with the embedded Go
+// context replaced, preserving the unified-context wrapper and its
+// wrapped InvocationContext.
+func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
+	cp := *c
+	cp.Context = ctx
+	cp.invocationContext = c.invocationContext.WithContext(ctx)
+	return &cp
+}
 
 // --- ToolContext extensions ----------------------------------------------
 //

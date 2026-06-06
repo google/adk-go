@@ -197,4 +197,21 @@ type Context interface {
 	//     itself (e.g., invalid arguments, issue with the event system). The
 	//     request to ask the user has not been sent.
 	RequestConfirmation(hint string, payload any) error
+
+	// Workflow node section
+	//
+	// These accessors are meaningful when the context belongs to a
+	// workflow graph node (see the workflow package). For non-workflow
+	// callbacks and tools they return zero values.
+
+	// Path returns the composite path of the currently-executing
+	// workflow node, or "" outside a workflow (and for top-level static
+	// nodes). For dynamic children the form is
+	// "<parent_path>/<child_name>@<run_id>".
+	Path() string
+
+	// RunID returns the per-activation identifier of the currently-
+	// executing workflow node, or "" outside a workflow (and for
+	// top-level static nodes).
+	RunID() string
 }

@@ -142,4 +142,14 @@ func (c *callbackContextWrapper) Value(key any) any {
 	return c.context.Value(key)
 }
 
+// Path implements [Context].
+func (c *callbackContextWrapper) Path() string {
+	return c.context.Path()
+}
+
+// RunID implements [Context].
+func (c *callbackContextWrapper) RunID() string {
+	return c.context.RunID()
+}
+
 var _ Context = (*callbackContextWrapper)(nil)
