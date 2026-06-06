@@ -27,7 +27,6 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/loadartifactstool"
 )
 
@@ -278,7 +277,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	}
 }
 
-func createToolContext(t *testing.T) tool.Context {
+func createToolContext(t *testing.T) agent.ToolContext {
 	t.Helper()
 
 	artifacts := &artifactinternal.Artifacts{

@@ -435,7 +435,7 @@ func TestAgentTransfer_ProcessRequest(t *testing.T) {
 		x int
 	}
 	var req model.LLMRequest
-	handler := func(ctx tool.Context, input Input) (int, error) {
+	handler := func(ctx agent.ToolContext, input Input) (int, error) {
 		return input.x, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{

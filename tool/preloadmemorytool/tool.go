@@ -26,10 +26,10 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
-	"google.golang.org/adk/tool"
 )
 
 const preloadInstructions = `The following content is from your previous conversations with the user.
@@ -71,7 +71,7 @@ func (t *preloadMemoryTool) IsLongRunning() bool {
 
 // ProcessRequest processes the LLM request by searching memory using the user's
 // current query and injecting relevant past conversations into system instructions.
-func (t *preloadMemoryTool) ProcessRequest(ctx tool.Context, req *model.LLMRequest) error {
+func (t *preloadMemoryTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
 	userContent := ctx.UserContent()
 	if userContent == nil || len(userContent.Parts) == 0 ||
 		userContent.Parts[0] == nil || userContent.Parts[0].Text == "" {
