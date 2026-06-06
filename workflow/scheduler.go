@@ -396,7 +396,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	// through every downstream NewInvocationContext / WithContext call
 	// by virtue of context.Context value-chain propagation. See
 	// node_context_bridge.go.
-	bridge := &nodeBridge{resumeInputs: resumeInputs}
+	bridge := &nodeBridge{}
 	perNodeCtx = perNodeCtx.WithContext(
 		withNodeBridge(perNodeCtx, bridge),
 	).(agent.Context)

@@ -106,11 +106,12 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 
 		emit := makeEmit(yield, ctx)
 		sub := newDynamicSubScheduler(ctx, n.composePath(ctx), emit)
-		// Propagate resume payloads and the OutputFor chain from the
-		// bridge so HITL responses reach children and a delegating
-		// node's children extend the chain.
+		// Resume payloads ride on ctx; propagate them to children.
+		sub.resumeInputs = ctx.ResumeInputs()
+		// If this node is itself a delegating child, carry its OutputFor
+		// chain (recovered from the bridge) so its own delegating
+		// children extend it.
 		if b, ok := nodeBridgeFromGoContext(ctx); ok {
-			sub.resumeInputs = b.resumeInputs
 			sub.outputForAncestors = b.outputForAncestors
 		}
 		// The orchestrator body runs with a context whose NodeScheduler
@@ -119,7 +120,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 		// context so tools running inside the body recover a node
 		// context whose NodeScheduler can RunNode.
 		orchestratorCtx := agent.NewNodeContext(ctx.InvocationContext(), sub.parentPath, "", sub.resumeInputs, sub, nil)
-		obridge := &nodeBridge{resumeInputs: sub.resumeInputs, outputForAncestors: sub.outputForAncestors}
+		obridge := &nodeBridge{outputForAncestors: sub.outputForAncestors}
 		orchestratorCtx = orchestratorCtx.WithContext(
 			withNodeBridge(orchestratorCtx, obridge),
 		).(agent.Context)

@@ -166,6 +166,12 @@ type Context interface {
 	// interrupt id, or (nil, false). Populated for workflow nodes.
 	ResumedInput(interruptID string) (any, bool)
 
+	// ResumeInputs returns all re-entry resume payloads keyed by
+	// interrupt id (nil/empty outside a resume). Mirrors adk-python's
+	// Context.resume_inputs; used to propagate resume payloads to
+	// dynamically-scheduled child nodes.
+	ResumeInputs() map[string]any
+
 	// WithContext returns a copy of this Context with the embedded Go
 	// context replaced. Returns Context (not InvocationContext) so the
 	// unified type is preserved across cancellation/span wrapping.

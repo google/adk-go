@@ -34,11 +34,12 @@ type nodeBridge struct {
 	ctx agent.Context
 	// outputForAncestors are the extra node paths this activation's
 	// output counts for, when this activation is itself a
-	// WithUseAsOutput child.
+	// WithUseAsOutput child. This is workflow-only state that cannot
+	// live on agent.Context (the agent package must not import
+	// workflow). Resume inputs, by contrast, ride directly on
+	// agent.Context (ctx.ResumeInputs()), so they are not duplicated
+	// here.
 	outputForAncestors []string
-	// resumeInputs are the re-entry resume payloads (keyed by
-	// InterruptID) propagated to dynamic children.
-	resumeInputs map[string]any
 }
 
 type nodeContextKey struct{}

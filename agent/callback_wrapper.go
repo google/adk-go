@@ -184,6 +184,11 @@ func (c *callbackContextWrapper) ResumedInput(interruptID string) (any, bool) {
 	return c.context.ResumedInput(interruptID)
 }
 
+// ResumeInputs implements [Context].
+func (c *callbackContextWrapper) ResumeInputs() map[string]any {
+	return c.context.ResumeInputs()
+}
+
 // WithContext implements [Context]. It rewraps the underlying context
 // and preserves the callback-wrapper envelope.
 func (c *callbackContextWrapper) WithContext(ctx context.Context) Context {

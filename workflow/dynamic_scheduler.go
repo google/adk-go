@@ -189,7 +189,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// the node context via workflow.NodeContextFromGoContext, and a
 	// nested dynamic node can recover the OutputFor chain. See
 	// scheduleResumedNode for the static-node equivalent.
-	bridge := &nodeBridge{outputForAncestors: childAncestors, resumeInputs: s.resumeInputs}
+	bridge := &nodeBridge{outputForAncestors: childAncestors}
 	childCtx = childCtx.WithContext(
 		withNodeBridge(childCtx, bridge),
 	).(agent.Context)

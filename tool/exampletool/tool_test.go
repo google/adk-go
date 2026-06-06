@@ -70,6 +70,7 @@ func (m *mockToolContext) Session() session.Session                   { return n
 func (m *mockToolContext) RunConfig() *agent.RunConfig                { return nil }
 func (m *mockToolContext) Ended() bool                                { return false }
 func (m *mockToolContext) ResumedInput(string) (any, bool)            { return nil, false }
+func (m *mockToolContext) ResumeInputs() map[string]any               { return nil }
 func (m *mockToolContext) Path() string                               { return "" }
 func (m *mockToolContext) RunID() string                              { return "" }
 func (m *mockToolContext) NodeScheduler() agent.NodeScheduler         { return nil }

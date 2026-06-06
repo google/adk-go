@@ -157,6 +157,7 @@ func (c *testContext) Session() session.Session                   { return nil }
 func (c *testContext) RunConfig() *agent.RunConfig                { return nil }
 func (c *testContext) Ended() bool                                { return false }
 func (c *testContext) ResumedInput(string) (any, bool)            { return nil, false }
+func (c *testContext) ResumeInputs() map[string]any               { return nil }
 func (c *testContext) Path() string                               { return "" }
 func (c *testContext) RunID() string                              { return "" }
 func (c *testContext) NodeScheduler() agent.NodeScheduler         { return nil }

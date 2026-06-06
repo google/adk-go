@@ -234,6 +234,10 @@ func (c *commonContext) ResumedInput(interruptID string) (any, bool) {
 	return c.invocationContext.ResumedInput(interruptID)
 }
 
+// ResumeInputs returns all re-entry resume payloads keyed by interrupt
+// id, or nil outside a resume.
+func (c *commonContext) ResumeInputs() map[string]any { return c.resumeInputs }
+
 // Path returns the workflow node path, or "" outside a workflow.
 func (c *commonContext) Path() string { return c.path }
 
