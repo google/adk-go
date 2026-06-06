@@ -180,7 +180,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// parent's InvocationContext, then wrap as a node context carrying
 	// the child path/runID, inherited resume inputs, and this
 	// sub-scheduler (so a nested RunNode inside the child reaches it).
-	childIC := withBranch(s.parentCtx, childBranch)
+	childIC := withBranch(s.parentCtx.InvocationContext(), childBranch)
 	childCtx := agent.NewNodeContext(childIC, childPath, runID, s.resumeInputs, s, nil)
 
 	// EXPERIMENTAL: stash the child context (and its outputForAncestors

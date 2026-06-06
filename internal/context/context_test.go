@@ -40,11 +40,14 @@ func TestCallbackContext(t *testing.T) {
 	if _, ok := callback.(agent.ReadonlyContext); !ok {
 		t.Errorf("CallbackContext(%+T) is unexpectedly not a ReadonlyContext", callback)
 	}
-	// After context unification, the unified agent.Context (aliased as
-	// CallbackContext) embeds InvocationContext, so a CallbackContext is
-	// expected to also satisfy InvocationContext.
-	if _, ok := callback.(agent.InvocationContext); !ok {
-		t.Errorf("CallbackContext(%+T) is unexpectedly not an InvocationContext", callback)
+	// The unified agent.Context (aliased as CallbackContext) wraps an
+	// InvocationContext but is deliberately NOT itself an
+	// InvocationContext (parity with adk-python's Context). The two
+	// interfaces are now provably disjoint — their WithContext methods
+	// have different return types — so a CallbackContext exposes the
+	// wrapped invocation via InvocationContext() instead.
+	if callback.InvocationContext() != inv {
+		t.Errorf("CallbackContext.InvocationContext() did not return the wrapped invocation")
 	}
 }
 

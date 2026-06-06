@@ -157,12 +157,15 @@ func (c *callbackContextWrapper) NodeScheduler() NodeScheduler {
 	return c.context.NodeScheduler()
 }
 
-// --- InvocationContext forwarding (Context embeds InvocationContext) ---
+// --- Selective invocation surface (Context wraps InvocationContext) ---
+
+// InvocationContext implements [Context].
+func (c *callbackContextWrapper) InvocationContext() InvocationContext {
+	return c.context.InvocationContext()
+}
 
 // Agent implements [Context].
 func (c *callbackContextWrapper) Agent() Agent { return c.context.Agent() }
-
-// Artifacts is already defined above.
 
 // Memory implements [Context].
 func (c *callbackContextWrapper) Memory() Memory { return c.context.Memory() }
@@ -172,9 +175,6 @@ func (c *callbackContextWrapper) Session() session.Session { return c.context.Se
 
 // RunConfig implements [Context].
 func (c *callbackContextWrapper) RunConfig() *RunConfig { return c.context.RunConfig() }
-
-// EndInvocation implements [Context].
-func (c *callbackContextWrapper) EndInvocation() { c.context.EndInvocation() }
 
 // Ended implements [Context].
 func (c *callbackContextWrapper) Ended() bool { return c.context.Ended() }
@@ -186,13 +186,8 @@ func (c *callbackContextWrapper) ResumedInput(interruptID string) (any, bool) {
 
 // WithContext implements [Context]. It rewraps the underlying context
 // and preserves the callback-wrapper envelope.
-func (c *callbackContextWrapper) WithContext(ctx context.Context) InvocationContext {
-	inner := c.context.WithContext(ctx)
-	cc, ok := inner.(CallbackContext)
-	if !ok {
-		return inner
-	}
-	return &callbackContextWrapper{context: cc}
+func (c *callbackContextWrapper) WithContext(ctx context.Context) Context {
+	return &callbackContextWrapper{context: c.context.WithContext(ctx)}
 }
 
 var _ Context = (*callbackContextWrapper)(nil)

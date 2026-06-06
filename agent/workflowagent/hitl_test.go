@@ -241,7 +241,7 @@ func TestWorkflowAgent_FreshTurn_NotMistakenForResume(t *testing.T) {
 	makeAsker := func(flag *atomic.Bool) workflow.Node {
 		return newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 			flag.Store(true)
-			yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+			yield(workflow.NewRequestInputEvent(ctx.InvocationContext(), session.RequestInput{
 				InterruptID: "ask",
 				Message:     "?",
 			}), nil)
@@ -283,7 +283,7 @@ func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 				return
 			}
 		}
-		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+		yield(workflow.NewRequestInputEvent(ctx.InvocationContext(), session.RequestInput{
 			InterruptID: interruptID,
 			Message:     "What's your name?",
 		}), nil)
@@ -578,7 +578,7 @@ func resumeMessage(interruptID string, payload any) *genai.Content {
 // pattern: a node that pauses the workflow waiting for human input.
 func newAskerNode(interruptID, message string, schema *jsonschema.Schema) *hitlNode {
 	return newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
-		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+		yield(workflow.NewRequestInputEvent(ctx.InvocationContext(), session.RequestInput{
 			InterruptID:    interruptID,
 			Message:        message,
 			ResponseSchema: schema,

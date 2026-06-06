@@ -54,7 +54,7 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 		subCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
-		for ev, err := range n.subWorkflow.RunNode(ctx.WithContext(subCtx), input) {
+		for ev, err := range n.subWorkflow.RunNode(ctx.WithContext(subCtx).InvocationContext(), input) {
 			if err != nil {
 				pendingErr = err
 				// Signal the sub-workflow to stop execution. We use 'continue' instead of 'break'

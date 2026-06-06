@@ -123,7 +123,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 			// The wrapped node is a workflow node, so it receives a
 			// unified node context (no dynamic scheduler: parallel
 			// items cannot themselves spawn dynamic children here).
-			itemCtx := agent.NewNodeContext(withBranch(workerCtx, itemBranch), "", "", nil, nil, nil)
+			itemCtx := agent.NewNodeContext(withBranch(workerCtx.InvocationContext(), itemBranch), "", "", nil, nil, nil)
 			go n.runWorker(itemCtx, i, item, sem, resCh, &wg)
 		}
 

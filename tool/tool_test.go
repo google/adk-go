@@ -149,19 +149,18 @@ func (c *testContext) Branch() string                       { return "test-branc
 func (c *testContext) SessionID() string                    { return "test-session-id" }
 func (c *testContext) UserID() string                       { return "test-user-id" }
 
-// InvocationContext surface (Context embeds InvocationContext after
-// context unification).
-func (c *testContext) Agent() agent.Agent                 { return nil }
-func (c *testContext) Memory() agent.Memory               { return nil }
-func (c *testContext) Session() session.Session           { return nil }
-func (c *testContext) RunConfig() *agent.RunConfig        { return nil }
-func (c *testContext) EndInvocation()                     {}
-func (c *testContext) Ended() bool                        { return false }
-func (c *testContext) ResumedInput(string) (any, bool)    { return nil, false }
-func (c *testContext) Path() string                       { return "" }
-func (c *testContext) RunID() string                      { return "" }
-func (c *testContext) NodeScheduler() agent.NodeScheduler { return nil }
-func (c *testContext) WithContext(ctx context.Context) agent.InvocationContext {
+// Selective invocation surface (Context wraps an InvocationContext).
+func (c *testContext) InvocationContext() agent.InvocationContext { return nil }
+func (c *testContext) Agent() agent.Agent                         { return nil }
+func (c *testContext) Memory() agent.Memory                       { return nil }
+func (c *testContext) Session() session.Session                   { return nil }
+func (c *testContext) RunConfig() *agent.RunConfig                { return nil }
+func (c *testContext) Ended() bool                                { return false }
+func (c *testContext) ResumedInput(string) (any, bool)            { return nil, false }
+func (c *testContext) Path() string                               { return "" }
+func (c *testContext) RunID() string                              { return "" }
+func (c *testContext) NodeScheduler() agent.NodeScheduler         { return nil }
+func (c *testContext) WithContext(ctx context.Context) agent.Context {
 	cp := *c
 	cp.Context = ctx
 	return &cp

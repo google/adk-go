@@ -192,18 +192,20 @@ func (c *commonContext) UserID() string {
 }
 
 var (
-	_ CallbackContext   = (*commonContext)(nil)
-	_ ToolContext       = (*commonContext)(nil)
-	_ InvocationContext = (*commonContext)(nil)
+	_ CallbackContext = (*commonContext)(nil)
+	_ ToolContext     = (*commonContext)(nil)
 )
 
-// --- InvocationContext forwarding ----------------------------------------
+// --- Selective invocation surface ----------------------------------------
 //
-// commonContext wraps an InvocationContext and, by forwarding the
-// remaining InvocationContext methods to it, also satisfies
-// InvocationContext. This lets a single unified Context value flow
-// wherever an InvocationContext is expected (e.g. workflow Node.Run),
-// matching adk-python's Context that wraps an InvocationContext.
+// commonContext wraps an InvocationContext and re-exposes the parts of
+// it that node bodies, callbacks, and tools need, plus an accessor for
+// the full wrapped value. It is NOT itself an InvocationContext,
+// matching adk-python's Context (which wraps, but is not, an
+// InvocationContext).
+
+// InvocationContext returns the underlying invocation context.
+func (c *commonContext) InvocationContext() InvocationContext { return c.invocationContext }
 
 // Agent returns the agent of the underlying invocation.
 func (c *commonContext) Agent() Agent { return c.invocationContext.Agent() }
@@ -216,9 +218,6 @@ func (c *commonContext) Session() session.Session { return c.invocationContext.S
 
 // RunConfig returns the run configuration of the underlying invocation.
 func (c *commonContext) RunConfig() *RunConfig { return c.invocationContext.RunConfig() }
-
-// EndInvocation ends the underlying invocation.
-func (c *commonContext) EndInvocation() { c.invocationContext.EndInvocation() }
 
 // Ended reports whether the underlying invocation has ended.
 func (c *commonContext) Ended() bool { return c.invocationContext.Ended() }
@@ -245,12 +244,13 @@ func (c *commonContext) RunID() string { return c.runID }
 // nil when this context does not belong to a dynamic workflow node body.
 func (c *commonContext) NodeScheduler() NodeScheduler { return c.nodeScheduler }
 
-// WithContext returns a copy of this context with the embedded Go
-// context replaced, preserving the unified-context wrapper, its wrapped
+// WithContext returns a copy of this Context with the embedded Go
+// context replaced, preserving the wrapper, its wrapped
 // InvocationContext, and any workflow-node state (path, runID,
 // resumeInputs, scheduler). Dropping these would break re-entry resume
-// and dynamic-node scheduling.
-func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
+// and dynamic-node scheduling. The wrapped InvocationContext is also
+// rederived so its embedded Go context stays consistent.
+func (c *commonContext) WithContext(ctx context.Context) Context {
 	cp := *c
 	cp.Context = ctx
 	cp.invocationContext = c.invocationContext.WithContext(ctx)

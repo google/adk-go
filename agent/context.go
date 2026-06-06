@@ -138,14 +138,38 @@ type ToolContext = Context
 
 // Context is a common context used both in callbacks (aliased as
 // CallbackContext) and tool calls (aliased as ToolContext), and as the
-// per-node context inside workflow Node.Run bodies. It embeds
-// InvocationContext so a single unified value exposes the full
-// invocation surface (Agent, Memory, Session, RunConfig, ...) in
-// addition to the callback/tool/workflow-node accessors. This mirrors
-// adk-python's Context, which wraps an InvocationContext.
+// per-node context inside workflow Node.Run bodies.
+//
+// Like adk-python's Context, it wraps an InvocationContext (accessible
+// via InvocationContext()) and selectively exposes the parts of the
+// invocation surface that callbacks, tools, and workflow nodes need —
+// but it is deliberately NOT itself an InvocationContext, keeping the
+// developer-facing surface narrow.
 type Context interface {
 	ReadonlyContext
-	InvocationContext
+
+	// InvocationContext returns the underlying invocation context this
+	// Context wraps. Mirrors adk-python's get_invocation_context().
+	InvocationContext() InvocationContext
+
+	// Invocation surface selectively re-exposed for node bodies and
+	// callbacks (analogous to adk-python's Context properties). The
+	// remaining InvocationContext methods are reached via
+	// InvocationContext() when genuinely needed.
+	Agent() Agent
+	Memory() Memory
+	Session() session.Session
+	RunConfig() *RunConfig
+	Ended() bool
+
+	// ResumedInput returns the re-entry resume payload for the given
+	// interrupt id, or (nil, false). Populated for workflow nodes.
+	ResumedInput(interruptID string) (any, bool)
+
+	// WithContext returns a copy of this Context with the embedded Go
+	// context replaced. Returns Context (not InvocationContext) so the
+	// unified type is preserved across cancellation/span wrapping.
+	WithContext(ctx context.Context) Context
 
 	// Callback context
 	Artifacts() Artifacts

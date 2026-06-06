@@ -118,7 +118,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 		// a sub-scheduler child). Stash a bridge pointing at this
 		// context so tools running inside the body recover a node
 		// context whose NodeScheduler can RunNode.
-		orchestratorCtx := agent.NewNodeContext(ctx, sub.parentPath, "", sub.resumeInputs, sub, nil)
+		orchestratorCtx := agent.NewNodeContext(ctx.InvocationContext(), sub.parentPath, "", sub.resumeInputs, sub, nil)
 		obridge := &nodeBridge{resumeInputs: sub.resumeInputs, outputForAncestors: sub.outputForAncestors}
 		orchestratorCtx = orchestratorCtx.WithContext(
 			withNodeBridge(orchestratorCtx, obridge),

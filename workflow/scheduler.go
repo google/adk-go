@@ -453,10 +453,7 @@ func runNode(
 ) {
 	defer wg.Done()
 
-	span, ic := startNodeSpan(ctx, n)
-	// startNodeSpan rewraps via WithContext, which preserves the
-	// concrete unified context; recover the agent.Context view.
-	ctx = ic.(agent.Context)
+	span, ctx := startNodeSpan(ctx, n)
 	defer span.End()
 
 	// completion holds the final completionItem. It is sent in the
@@ -1072,11 +1069,11 @@ func aggregatePredecessorBranches(g *graph, state *RunState, target Node) []stri
 	return branches
 }
 
-func startNodeSpan(ctx agent.InvocationContext, n Node) (trace.Span, agent.InvocationContext) {
+func startNodeSpan(ctx agent.Context, n Node) (trace.Span, agent.Context) {
 	if n == Start {
 		// Don't create span for the Start node.
 		return noop.Span{}, ctx
 	}
-	spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationNode{Node: n})
+	spanCtx, span := telemetry.StartNodeSpan(ctx, ctx.InvocationContext(), telemetry.OperationNode{Node: n})
 	return span, ctx.WithContext(spanCtx)
 }

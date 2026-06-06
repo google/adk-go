@@ -125,7 +125,7 @@ func TestWorkflowAgent_ReEntry_DefaultModeIsHandoff(t *testing.T) {
 
 	asker := newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		askerActivations.Add(1)
-		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+		yield(workflow.NewRequestInputEvent(ctx.InvocationContext(), session.RequestInput{
 			InterruptID: "decide",
 			Message:     "?",
 		}), nil)
@@ -204,10 +204,10 @@ func TestWorkflowAgent_ReEntry_AccumulatesResumeInputs(t *testing.T) {
 // output).
 type reentryNode struct {
 	workflow.BaseNode
-	runFn func(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
+	runFn func(ctx agent.Context, input any) iter.Seq2[*session.Event, error]
 }
 
-func newReentryNode(name string, runFn func(agent.InvocationContext, any) iter.Seq2[*session.Event, error]) *reentryNode {
+func newReentryNode(name string, runFn func(agent.Context, any) iter.Seq2[*session.Event, error]) *reentryNode {
 	return &reentryNode{
 		BaseNode: workflow.NewBaseNode(name, "", workflow.NodeConfig{RerunOnResume: ptrTrue()}),
 		runFn:    runFn,
@@ -259,7 +259,7 @@ func (a *activations) count() int {
 // returns the subset that the scheduler currently exposes. Missing
 // IDs are omitted from the map so test assertions can compare
 // against literal map[string]any{"id": value} expectations.
-func snapshotResumed(ctx agent.InvocationContext, ids ...string) map[string]any {
+func snapshotResumed(ctx agent.Context, ids ...string) map[string]any {
 	out := map[string]any{}
 	for _, id := range ids {
 		if v, ok := ctx.ResumedInput(id); ok {
@@ -279,7 +279,7 @@ func snapshotResumed(ctx agent.InvocationContext, ids ...string) map[string]any 
 // question is next or maintaining a per-test activation counter.
 func askerForSequence(name string, ids []string, finalOutput any) (*reentryNode, *activations) {
 	acts := &activations{}
-	node := newReentryNode(name, func(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	node := newReentryNode(name, func(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 		return func(yield func(*session.Event, error) bool) {
 			resumed := snapshotResumed(ctx, ids...)
 			acts.record(input, resumed)
@@ -287,7 +287,7 @@ func askerForSequence(name string, ids []string, finalOutput any) (*reentryNode,
 			// Pause on the first id we haven't seen a response for.
 			for _, id := range ids {
 				if _, answered := resumed[id]; !answered {
-					yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+					yield(workflow.NewRequestInputEvent(ctx.InvocationContext(), session.RequestInput{
 						InterruptID: id,
 						Message:     id,
 					}), nil)

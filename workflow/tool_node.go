@@ -139,7 +139,7 @@ func (n *ToolNode) ValidateOutput(out any) (any, error) {
 func (n *ToolNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		eventActions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-		toolCtx := agent.NewToolContext(ctx, uuid.NewString(), eventActions, nil)
+		toolCtx := agent.NewToolContext(ctx.InvocationContext(), uuid.NewString(), eventActions, nil)
 
 		toolOutput, err := n.runTool(toolCtx, input)
 		if err != nil {

@@ -229,7 +229,7 @@ func TestSingleTurnTool_Run_HappyPath(t *testing.T) {
 			// context (stashed by the scheduler), so a tool context
 			// derived from it can recover the node context via
 			// workflow.NodeContextFromGoContext.
-			toolCtx := agent.NewToolContext(ctx, "fc-id", &session.EventActions{}, nil)
+			toolCtx := agent.NewToolContext(ctx.InvocationContext(), "fc-id", &session.EventActions{}, nil)
 			gotResult, gotErr = st.Run(toolCtx, map[string]any{"request": "hello"})
 			return nil, gotErr
 		},

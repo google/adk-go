@@ -62,19 +62,18 @@ func (m *mockToolContext) Branch() string                                       
 func (m *mockToolContext) SessionID() string                                    { return "mock_session" }
 func (m *mockToolContext) UserID() string                                       { return "mock_user" }
 
-// InvocationContext surface (Context embeds InvocationContext after
-// context unification).
-func (m *mockToolContext) Agent() agent.Agent                 { return nil }
-func (m *mockToolContext) Memory() agent.Memory               { return nil }
-func (m *mockToolContext) Session() session.Session           { return nil }
-func (m *mockToolContext) RunConfig() *agent.RunConfig        { return nil }
-func (m *mockToolContext) EndInvocation()                     {}
-func (m *mockToolContext) Ended() bool                        { return false }
-func (m *mockToolContext) ResumedInput(string) (any, bool)    { return nil, false }
-func (m *mockToolContext) Path() string                       { return "" }
-func (m *mockToolContext) RunID() string                      { return "" }
-func (m *mockToolContext) NodeScheduler() agent.NodeScheduler { return nil }
-func (m *mockToolContext) WithContext(ctx context.Context) agent.InvocationContext {
+// Selective invocation surface (Context wraps an InvocationContext).
+func (m *mockToolContext) InvocationContext() agent.InvocationContext { return nil }
+func (m *mockToolContext) Agent() agent.Agent                         { return nil }
+func (m *mockToolContext) Memory() agent.Memory                       { return nil }
+func (m *mockToolContext) Session() session.Session                   { return nil }
+func (m *mockToolContext) RunConfig() *agent.RunConfig                { return nil }
+func (m *mockToolContext) Ended() bool                                { return false }
+func (m *mockToolContext) ResumedInput(string) (any, bool)            { return nil, false }
+func (m *mockToolContext) Path() string                               { return "" }
+func (m *mockToolContext) RunID() string                              { return "" }
+func (m *mockToolContext) NodeScheduler() agent.NodeScheduler         { return nil }
+func (m *mockToolContext) WithContext(ctx context.Context) agent.Context {
 	cp := *m
 	cp.Context = ctx
 	return &cp
