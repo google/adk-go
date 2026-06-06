@@ -18,6 +18,7 @@ package launcher
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
@@ -113,4 +114,10 @@ type Config struct {
 	// different applications need different compaction, or must not share a
 	// summarizer, run them separately.
 	Compaction *compaction.Config
+
+	// HTTPMiddleware is applied in order to the HTTP handler before serving.
+	// Each entry wraps the handler returned by the previous one. The first
+	// middleware in the slice is the outermost (runs first on inbound requests).
+	// A nil or empty slice is a no-op; existing callers are unaffected.
+	HTTPMiddleware []func(http.Handler) http.Handler
 }
