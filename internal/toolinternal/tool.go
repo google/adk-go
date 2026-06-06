@@ -20,6 +20,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
@@ -27,15 +28,15 @@ import (
 type FunctionTool interface {
 	tool.Tool
 	Declaration() *genai.FunctionDeclaration
-	Run(ctx tool.Context, args any) (result map[string]any, err error)
+	Run(ctx agent.ToolContext, args any) (result map[string]any, err error)
 }
 
 type StreamingFunctionTool interface {
 	tool.Tool
 	Declaration() *genai.FunctionDeclaration
-	RunStream(ctx tool.Context, args any) iter.Seq2[string, error]
+	RunStream(ctx agent.ToolContext, args any) iter.Seq2[string, error]
 }
 
 type RequestProcessor interface {
-	ProcessRequest(ctx tool.Context, req *model.LLMRequest) error
+	ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error
 }

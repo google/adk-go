@@ -53,7 +53,7 @@ func main() {
 	counterTool, err := functiontool.NewStreaming(functiontool.Config{
 		Name:        "count_to",
 		Description: "Counts to a specified number, yielding each number with a delay.",
-	}, func(ctx tool.Context, args struct {
+	}, func(ctx agent.ToolContext, args struct {
 		N int `json:"n"`
 	},
 	) iter.Seq2[string, error] {
@@ -78,7 +78,7 @@ func main() {
 	stopTool, err := functiontool.New(functiontool.Config{
 		Name:        "stop_streaming",
 		Description: "Stops a running streaming function.",
-	}, func(ctx tool.Context, args struct {
+	}, func(ctx agent.ToolContext, args struct {
 		FunctionName string `json:"function_name"`
 	},
 	) (map[string]any, error) {
@@ -92,7 +92,7 @@ func main() {
 	checkDivisibleTool, err := functiontool.New(functiontool.Config{
 		Name:        "check_divisible",
 		Description: "Checks if a number is divisible by another number.",
-	}, func(ctx tool.Context, args struct {
+	}, func(ctx agent.ToolContext, args struct {
 		Number  int `json:"number"`
 		Divisor int `json:"divisor"`
 	},
