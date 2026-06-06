@@ -68,7 +68,7 @@ func main() {
 	type Output struct {
 		Poem string `json:"poem"`
 	}
-	handler := func(ctx tool.Context, input Input) (Output, error) {
+	handler := func(ctx agent.ToolContext, input Input) (Output, error) {
 		return Output{
 			Poem: strings.Repeat("A line of a poem,", input.LineCount) + "\n",
 		}, nil
