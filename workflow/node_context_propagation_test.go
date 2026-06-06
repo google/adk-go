@@ -24,14 +24,14 @@ import (
 )
 
 // End-to-end check that a child of a dynamic-node activation can
-// recover its own node context via NodeContextFromGoContext — the
+// recover its own node context via nodeContextFromGoContext — the
 // path runnable tools rely on to reach the sub-scheduler from
 // tool.Context.
 func TestNodeContextPropagation_DynamicChildEmbedsItself(t *testing.T) {
 	var captured agent.Context
 
 	inner := newFnNode("inner", func(ctx agent.Context) (any, error) {
-		nc, ok := NodeContextFromGoContext(ctx)
+		nc, ok := nodeContextFromGoContext(ctx)
 		if !ok {
 			t.Errorf("inner: node context not recovered from go context value")
 			return nil, nil
@@ -70,7 +70,7 @@ func TestNodeContextPropagation_StaticActivationStashed(t *testing.T) {
 	).(agent.Context)
 	bridge.ctx = perNodeCtx
 
-	nc, ok := NodeContextFromGoContext(perNodeCtx)
+	nc, ok := nodeContextFromGoContext(perNodeCtx)
 	if !ok {
 		t.Fatal("static activation did not stash node context on its own embedded context")
 	}

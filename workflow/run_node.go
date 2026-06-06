@@ -56,6 +56,30 @@ type nodeScheduled interface {
 	NodeScheduler() any
 }
 
+// schedulerFor recovers the dynamic-node scheduler reachable from ctx.
+// It first checks whether ctx itself carries one (a dynamic node body),
+// then falls back to the node context stashed on ctx's embedded Go
+// context (the case for a tool/callback context derived inside a node
+// body). Returns (nil, false) when ctx is not running inside a dynamic
+// node.
+func schedulerFor(ctx agent.Context) (NodeScheduler, bool) {
+	if ns, ok := ctx.(nodeScheduled); ok {
+		if s, ok := ns.NodeScheduler().(NodeScheduler); ok {
+			return s, true
+		}
+	}
+	// Fall back to the node context recovered from the Go context value
+	// chain (set by the scheduler / dynamic node on every activation).
+	if nc, ok := nodeContextFromGoContext(ctx); ok {
+		if ns, ok := nc.(nodeScheduled); ok {
+			if s, ok := ns.NodeScheduler().(NodeScheduler); ok {
+				return s, true
+			}
+		}
+	}
+	return nil, false
+}
+
 // RunNodeOption configures a single RunNode call.
 type RunNodeOption func(*runNodeOptions)
 
@@ -142,14 +166,12 @@ func WithOverrideBranch(branch string) RunNodeOption {
 func RunNode[OUT any](ctx agent.Context, child Node, input any, opts ...RunNodeOption) (OUT, error) {
 	var zero OUT
 
-	// Recover the opaque scheduler token from the concrete context and
-	// assert it to the workflow scheduler type. A nil/absent token means
-	// this context is not a dynamic node body.
-	ns, ok := ctx.(nodeScheduled)
-	if !ok {
-		return zero, ErrInvalidRunNodeContext
-	}
-	sched, ok := ns.NodeScheduler().(NodeScheduler)
+	// Recover the opaque scheduler token. Two cases:
+	//   1. ctx is itself a dynamic node body (carries the scheduler).
+	//   2. ctx is a tool/callback context derived inside a node body
+	//      (e.g. an LlmAgent tool). The node's scheduler-bearing context
+	//      is stashed on ctx's embedded Go context; recover it.
+	sched, ok := schedulerFor(ctx)
 	if !ok {
 		return zero, ErrInvalidRunNodeContext
 	}

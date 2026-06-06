@@ -71,17 +71,14 @@ func (t *SingleTurnTool) Run(toolCtx tool.Context, args any) (map[string]any, er
 		nodeInput = margs["request"]
 	}
 
-	nc, ok := workflow.NodeContextFromGoContext(toolCtx)
-	if !ok {
-		return nil, fmt.Errorf("failed to infer node context")
-	}
-
 	node, err := workflow.NewAgentNode(t.agent, workflow.NodeConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent node: %w", err)
 	}
 
-	result, err := workflow.RunNode[any](nc, node, nodeInput, workflow.WithUseSubBranch())
+	// toolCtx is a tool context derived inside the surrounding node
+	// body; RunNode recovers that node's scheduler internally.
+	result, err := workflow.RunNode[any](toolCtx, node, nodeInput, workflow.WithUseSubBranch())
 	if err != nil {
 		return nil, fmt.Errorf("failed to run agent node: %w", err)
 	}

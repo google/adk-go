@@ -64,11 +64,13 @@ func nodeBridgeFromGoContext(ctx context.Context) (*nodeBridge, bool) {
 	return b, ok
 }
 
-// NodeContextFromGoContext returns the workflow node's agent.Context
+// nodeContextFromGoContext returns the workflow node's agent.Context
 // stashed on ctx, or (nil, false) if ctx is not running inside a
-// workflow node. Runnable tools use this to recover the surrounding
-// node context (e.g. to call RunNode) without a dedicated parameter.
-func NodeContextFromGoContext(ctx context.Context) (agent.Context, bool) {
+// workflow node. RunNode uses this internally to recover the
+// surrounding node context (and thus its scheduler) when called with a
+// tool/callback context derived inside a node body. It is unexported:
+// the recovery is an implementation detail of RunNode, not public API.
+func nodeContextFromGoContext(ctx context.Context) (agent.Context, bool) {
 	b, ok := nodeBridgeFromGoContext(ctx)
 	if !ok {
 		return nil, false

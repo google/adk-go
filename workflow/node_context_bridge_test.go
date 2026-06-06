@@ -31,7 +31,7 @@ import (
 // Flow.handleFunctionCalls; the embedded context.Context in every
 // InvocationContext built along the path).
 //
-// If this test regresses, NodeContextFromGoContext(toolCtx)
+// If this test regresses, nodeContextFromGoContext(toolCtx)
 // lookups in runnable tools will silently return (nil, false) at
 // runtime and the tools will fall back to their no-node-context
 // path.
@@ -47,7 +47,7 @@ func TestWithNodeBridge_SurvivesDerivedContext(t *testing.T) {
 	// And a WithValue layer on top (telemetry span ctx does this).
 	derived = context.WithValue(derived, struct{ k string }{"span"}, "stub")
 
-	got, ok := NodeContextFromGoContext(derived)
+	got, ok := nodeContextFromGoContext(derived)
 	if !ok {
 		t.Fatal("node context lost across WithCancel + WithValue derivations")
 	}
