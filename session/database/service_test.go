@@ -15,6 +15,7 @@
 package database
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -46,7 +47,7 @@ func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	event := &session.Event{
 		ID:             "wf_event",
 		Author:         "agent",
-		NodeInfo:       &session.NodeInfo{Path: "ask_name"},
+		NodeInfo:       &session.NodeInfo{Path: "ask_name", MessageAsOutput: true, OutputFor: []string{"ask_name", "parent"}},
 		RequestedInput: &session.RequestInput{InterruptID: "ask_name", Message: "What's your name?"},
 		Routes:         []string{"route_a"},
 	}
@@ -65,6 +66,12 @@ func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	ev := evs.At(0)
 	if ev.NodeInfo == nil || ev.NodeInfo.Path != "ask_name" {
 		t.Errorf("NodeInfo not persisted: %#v", ev.NodeInfo)
+	}
+	if ev.NodeInfo != nil && !ev.NodeInfo.MessageAsOutput {
+		t.Errorf("NodeInfo.MessageAsOutput not persisted: %#v", ev.NodeInfo)
+	}
+	if ev.NodeInfo != nil && !slices.Equal(ev.NodeInfo.OutputFor, []string{"ask_name", "parent"}) {
+		t.Errorf("NodeInfo.OutputFor not persisted: %#v", ev.NodeInfo)
 	}
 	if ev.RequestedInput == nil || ev.RequestedInput.InterruptID != "ask_name" {
 		t.Errorf("RequestedInput not persisted: %#v", ev.RequestedInput)

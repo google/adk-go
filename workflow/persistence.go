@@ -200,11 +200,14 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node) (out
 			outputs[name] = ev.Output
 			// A delegated output (WithUseAsOutput) also counts for the
 			// static owners of the ancestor paths in OutputFor, so they
-			// recover their output without a re-emitted event.
-			for _, p := range ev.NodeInfo.OutputFor {
-				if owner := staticOwner(p); owner != name {
-					if _, ok := nodesByName[owner]; ok {
-						outputs[owner] = ev.Output
+			// recover their output without a re-emitted event. NodeInfo
+			// may be nil for non-workflow output events.
+			if ev.NodeInfo != nil {
+				for _, p := range ev.NodeInfo.OutputFor {
+					if owner := staticOwner(p); owner != name {
+						if _, ok := nodesByName[owner]; ok {
+							outputs[owner] = ev.Output
+						}
 					}
 				}
 			}
