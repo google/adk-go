@@ -93,7 +93,6 @@ func main() {
 			if err != nil {
 				return "", err
 			}
-			log.Println("Draft: ", len(draft))
 			if len(draft) <= maxDraftChars {
 				// Happy path: delegate so the sender's confirmation
 				// becomes orchestrate's output and flows downstream.
