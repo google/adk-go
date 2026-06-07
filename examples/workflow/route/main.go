@@ -88,7 +88,9 @@ func (n *routeByValueNode) Run(ctx agent.InvocationContext, input any) iter.Seq2
 		// IntRoute and MultiRoute[int] both compare against the
 		// stringified value, so emit it that way.
 		ev.Routes = []string{fmt.Sprint(value)}
-		ev.Actions.StateDelta["output"] = value
+		// Event.Output is the channel the engine reads to feed the
+		// successor node's typed input.
+		ev.Output = value
 		yield(ev, nil)
 	}
 }

@@ -93,11 +93,12 @@ func newRouteNode() *routeFromClassificationNode {
 
 func (n *routeFromClassificationNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		// Input is whatever the upstream LLMAgent wrote to
-		// StateDelta["output"] via OutputKey="output". For a
-		// well-behaved classifier that's a one-word string;
-		// other shapes get coerced via fmt.Sprint and then
-		// normalised to lowercase / trimmed.
+		// Input is the upstream classifier's final response text:
+		// AgentNode synthesizes it into Event.Output, which the
+		// scheduler hands to this node as input. For a well-behaved
+		// classifier that's a one-word string; other shapes get
+		// coerced via fmt.Sprint and then normalised to lowercase /
+		// trimmed.
 		category := strings.ToLower(strings.TrimSpace(fmt.Sprint(input)))
 		// Strip a trailing period in case the LLM ignored
 		// "no punctuation" — defensive.
@@ -163,10 +164,10 @@ func main() {
 		Model:       model,
 		Description: "classifies the user's message as question / exclamation / statement",
 		Instruction: classifierInstruction,
-		// OutputKey="output" is the magic that lets the
-		// classifier's reply flow into the workflow's
-		// per-activation StateDelta["output"], which the
-		// scheduler hands to the next node as its input.
+		// OutputKey persists the classifier's reply to session
+		// state under "output". It is optional for the routing data
+		// flow: AgentNode synthesizes the reply into Event.Output
+		// regardless, and the scheduler feeds that to the next node.
 		OutputKey: "output",
 	})
 	if err != nil {

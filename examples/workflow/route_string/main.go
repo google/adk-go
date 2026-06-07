@@ -79,7 +79,9 @@ func (n *classifyNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*se
 		category := classify(msg)
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Routes = []string{category}
-		ev.Actions.StateDelta["output"] = msg
+		// Event.Output is the channel the engine reads to feed the
+		// successor node's typed input.
+		ev.Output = msg
 		yield(ev, nil)
 	}
 }

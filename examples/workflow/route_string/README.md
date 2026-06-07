@@ -34,6 +34,6 @@ START → classify ─┬─ "question"    → answer_question
 
 | Concept | Where |
 |---|---|
-| Custom `BaseNode` emitting a routing event | `classifyNode` sets `Event.Routes = []string{category}` and `Event.Actions.StateDelta["output"] = msg` so downstream `FunctionNode`s get the original message as a typed `string` input |
+| Custom `BaseNode` emitting a routing event | `classifyNode` sets `Event.Routes = []string{category}` and `Event.Output = msg` so downstream `FunctionNode`s get the original message as a typed `string` input |
 | `StringRoute` matching a single value | three downstream edges, one per category |
 | Direct port of adk-python's `route/` sample, minus the LLM | classifier is a plain Go function instead of an `Agent` with `output_schema` |

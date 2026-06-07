@@ -53,7 +53,7 @@ START → classify (LLM) → route_by_classification ─┬─ "question"    →
 | Concept | Where |
 |---|---|
 | `workflow.NewAgentNode` wrapping an `LLMAgent` | `classifyNode := workflow.NewAgentNode(classifier, ...)` |
-| LLM output flowing into the workflow's "output" magic key | `LLMAgent.OutputKey = "output"` — the LLMAgent code at `agent/llmagent/llmagent.go:425-429` writes the final reply text there automatically |
+| LLM reply flowing to the next node | `AgentNode` synthesizes the classifier's final reply into `Event.Output`, which the scheduler feeds to the router as input; `LLMAgent.OutputKey = "output"` is optional here and only persists the reply to session state |
 | Custom `BaseNode` translating the LLM's free-form text into a route value | `routeFromClassificationNode` reads the classifier's reply, normalises it, and emits `Event.Routes` |
 | `StringRoute` matching one of three categories | three downstream edges, one per category |
 | Handler reading the original user message from `ctx.UserContent` | each handler calls `userMessage(ctx)` rather than receiving it as graph input — the routing node only forwards the classification, not the original text |
