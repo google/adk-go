@@ -13,12 +13,11 @@ HITL, no persistence — just routing.
 | `MultiRoute[int]` matching a set of ints | three downstream edges, one per range |
 | Random behaviour to exercise different paths between runs | `math/rand/v2` in `roll_die` |
 
-`FunctionNode` cannot today emit `Event.Routes` itself (its
-wrapper always builds a single output event from the return
-value), so the routing node drops down to a custom `BaseNode`.
-This is the same limitation called out in the HITL design doc's
-"Open question: should `FunctionNode` learn to emit Routes?"
-section.
+In adk-go, `FunctionNode` cannot emit `Event.Routes`: its wrapper
+always builds a single output event from the return value, so the
+routing node drops down to a custom `BaseNode`. (adk-python has no
+such split — a plain function node there can `yield Event(route=...)`
+directly.)
 
 ## Run it
 
