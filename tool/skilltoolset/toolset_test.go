@@ -79,6 +79,12 @@ func TestProcessRequest(t *testing.T) {
 			t.Errorf("ProcessRequest: got %q, want to contain %q", gotText, want)
 		}
 	}
+	if want := "`load_skill` tool with `name=\"<SKILL_NAME>\"`"; !strings.Contains(gotText, want) {
+		t.Errorf("ProcessRequest: got %q, want to contain %q", gotText, want)
+	}
+	if notWant := "`load_skill` tool with `skill_name=\"<SKILL_NAME>\"`"; strings.Contains(gotText, notWant) {
+		t.Errorf("ProcessRequest: got %q, want not to contain %q", gotText, notWant)
+	}
 }
 
 func TestProcessRequest_NoSkills(t *testing.T) {
