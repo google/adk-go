@@ -57,7 +57,7 @@ func (n *hitlAskerNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*s
 		// the successor receives it.
 		if response, ok := ctx.ResumedInput(n.interruptID); ok {
 			ev := session.NewEvent(ctx.InvocationID())
-			ev.Actions.StateDelta["output"] = response
+			ev.Output = response
 			yield(ev, nil)
 			return
 		}
