@@ -12,26 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Binary route_string is a minimal workflow sample that shows
-// string routing: a node classifies the user's message and emits
-// a routing event whose value is a category name; the engine
-// dispatches to one of three downstream branches via
-// workflow.StringRoute.
+// Command string demonstrates string routing with
+// workflow.StringRoute: a node classifies the user's message into a
+// category and the engine dispatches to one of three branches.
 //
-// No LLM, no HITL, no random — the smallest end-to-end
-// demonstration of workflow.StringRoute and the Event.Routes
-// contract.
-//
-//	go run ./examples/workflow/route_string/ console
-//
-//	User -> What time is it?
-//	Agent -> answering question: What time is it?
-//
-//	User -> The sky is blue.
-//	Agent -> commenting on statement: The sky is blue.
-//
-//	User -> Hello world!
-//	Agent -> reacting to exclamation: Hello world!
+//	go run ./examples/workflow/routing/string/ console
 package main
 
 import (
@@ -50,11 +35,9 @@ import (
 	"google.golang.org/adk/workflow"
 )
 
-// classifyNode inspects the user's message and emits an event
-// whose Routes carries one of "question", "statement", or
-// "exclamation". Cannot be a FunctionNode because FunctionNode
-// does not let its body set Event.Routes; see the corresponding
-// note in the route/ sample.
+// classifyNode emits the routing event. A FunctionNode can't set
+// Event.Routes from its body, so routing nodes drop down to
+// BaseNode.
 type classifyNode struct {
 	workflow.BaseNode
 }
@@ -86,9 +69,8 @@ func (n *classifyNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*se
 	}
 }
 
-// classify maps a message to a category by its last
-// non-whitespace character. Trivial logic — the point of the
-// sample is the routing primitive, not the classifier.
+// classify maps a message to a category by its terminal
+// punctuation.
 func classify(msg string) string {
 	trimmed := strings.TrimSpace(msg)
 	switch {

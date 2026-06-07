@@ -23,7 +23,7 @@ section.
 ## Run it
 
 ```sh
-go run ./examples/workflow/route/ console
+go run ./examples/workflow/routing/int/ console
 ```
 
 Type any message; the sample ignores it. Each turn rolls a fresh

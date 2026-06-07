@@ -12,33 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Binary route_llm is a workflow sample that uses an LLM to pick
-// the route. The LLM agent is wrapped via workflow.NewAgentNode
-// and writes its one-word classification into the workflow's
-// "output" magic state key (LLMAgent.OutputKey="output"). A
-// trivial routing node downstream reads that classification and
-// emits the corresponding Event.Routes value, dispatching to one
-// of three handlers via workflow.StringRoute.
-//
-// Mirrors the structure of adk-python's
-// contributing/workflow_samples/route/ sample (LLM classifier +
-// plain function emitting the routing event), the canonical
-// pattern for "use an LLM as the brain inside a graph that the
-// engine routes for you."
+// Command llm demonstrates LLM-driven routing: an LLM agent
+// classifies the user's message into one word, and a downstream
+// node turns that into an Event.Routes value dispatched via
+// workflow.StringRoute. This is the canonical "LLM as the brain,
+// engine does the routing" pattern.
 //
 // Requires GOOGLE_API_KEY in the environment.
 //
 //	export GOOGLE_API_KEY=...
-//	go run ./examples/workflow/route_llm/ console
-//
-//	User -> What time is it?
-//	Agent -> answering question: What time is it?
-//
-//	User -> Hello world!
-//	Agent -> reacting to exclamation: Hello world!
-//
-//	User -> The sky is blue.
-//	Agent -> commenting on statement: The sky is blue.
+//	go run ./examples/workflow/routing/llm/ console
 package main
 
 import (
@@ -72,11 +55,10 @@ const classifierInstruction = `Classify the user's message into one of three cat
 
 Answer with EXACTLY one word, lowercase, no punctuation: question, exclamation, or statement.`
 
-// routeFromClassificationNode reads the classifier's one-word
-// output, normalises it, and emits the corresponding routing
-// event. Cannot be a FunctionNode because FunctionNode does not
-// let its body set Event.Routes — same gap the route_string and
-// route samples already note.
+// routeFromClassificationNode turns the classifier's one-word
+// output into a routing event. A FunctionNode can't set
+// Event.Routes from its body, so routing nodes drop down to
+// BaseNode.
 type routeFromClassificationNode struct {
 	workflow.BaseNode
 }
@@ -93,21 +75,12 @@ func newRouteNode() *routeFromClassificationNode {
 
 func (n *routeFromClassificationNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		// Input is the upstream classifier's final response text:
-		// AgentNode synthesizes it into Event.Output, which the
-		// scheduler hands to this node as input. For a well-behaved
-		// classifier that's a one-word string; other shapes get
-		// coerced via fmt.Sprint and then normalised to lowercase /
-		// trimmed.
+		// input is the classifier's reply, normalised defensively
+		// in case the LLM ignored the one-word instruction.
 		category := strings.ToLower(strings.TrimSpace(fmt.Sprint(input)))
-		// Strip a trailing period in case the LLM ignored
-		// "no punctuation" — defensive.
 		category = strings.TrimRight(category, ".")
 		if category != "question" && category != "exclamation" && category != "statement" {
-			// Anything off-script falls through to "statement"
-			// so the workflow always lands on a handler. A
-			// stricter implementation could route to an error
-			// branch instead.
+			// Off-script replies fall through to a handler.
 			category = "statement"
 		}
 		ev := session.NewEvent(ctx.InvocationID())
@@ -128,12 +101,9 @@ func reactToExclamation(ctx agent.InvocationContext, _ any) (string, error) {
 	return "reacting to exclamation: " + userMessage(ctx), nil
 }
 
-// userMessage extracts the original user text from the
-// invocation context. Each handler reads it directly from
-// ctx.UserContent rather than threading it as graph input,
-// because the route node doesn't have it (it sees only the
-// classifier's one-word output) and forwarding it would mean
-// every routing handler taking a (message, classification) pair.
+// userMessage reads the original user text from ctx.UserContent.
+// Handlers read it here rather than as graph input, since the
+// route node forwards only the one-word classification.
 func userMessage(ctx agent.InvocationContext) string {
 	uc := ctx.UserContent()
 	if uc == nil {
@@ -201,18 +171,9 @@ func main() {
 		Name:        "llm_router",
 		Description: "asks an LLM to classify the user's message and routes to one of three handlers",
 		Edges:       edges,
-		// Register the wrapped LLM agent as a sub-agent so the
-		// runner's findAgentToRun (runner/runner.go:329-356)
-		// can resolve event.Author="classify" against the
-		// agent tree. Without it the runner logs a harmless
-		// "Event from an unknown agent: classify" warning on
-		// every turn — workflow nodes are not visible in the
-		// agent tree by default. The runner still routes the
-		// turn to llm_router as a whole because
-		// isTransferableAcrossAgentTree returns false when the
-		// chain to root contains a non-LLMAgent (the workflow
-		// wrapper itself), so this registration is purely for
-		// FindAgent's lookup.
+		// Register the wrapped LLM agent so the runner can resolve
+		// its event author; otherwise it logs a harmless "Event
+		// from an unknown agent: classify" on every turn.
 		SubAgents: []agent.Agent{classifier},
 	})
 	if err != nil {

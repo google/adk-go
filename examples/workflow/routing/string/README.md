@@ -8,7 +8,7 @@ terminal punctuation.
 ## Run it
 
 ```sh
-go run ./examples/workflow/route_string/ console
+go run ./examples/workflow/routing/string/ console
 ```
 
 ```text

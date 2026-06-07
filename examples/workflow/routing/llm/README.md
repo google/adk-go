@@ -19,7 +19,7 @@ export GOOGLE_API_KEY=<your-key>
 ## Run it
 
 ```sh
-go run ./examples/workflow/route_llm/ console
+go run ./examples/workflow/routing/llm/ console
 ```
 
 ```text

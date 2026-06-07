@@ -12,24 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Binary route is a minimal workflow sample that shows numeric
-// routing: a node generates a random integer 1..10, the next node
-// emits a routing event with that integer, and the engine
-// dispatches to one of three downstream branches based on the
-// value.
+// Command int demonstrates numeric routing with workflow.IntRoute /
+// workflow.MultiRoute: a node rolls a random integer 1..10 and the
+// engine dispatches to one of three branches based on the value.
 //
-// No LLM, no HITL, no persistence — the smallest end-to-end
-// demonstration of workflow.IntRoute / workflow.MultiRoute and
-// the Event.Routes contract. Run it a few times to see different
-// branches fire:
-//
-//	go run ./examples/workflow/route/ console
-//
-//	User -> hi
-//	Agent -> rolled 7 — handling MID range (4..7)
-//
-//	User -> hi
-//	Agent -> rolled 2 — handling LOW range (1..3)
+//	go run ./examples/workflow/routing/int/ console
 package main
 
 import (
@@ -48,21 +35,15 @@ import (
 	"google.golang.org/adk/workflow"
 )
 
-// rollDie returns a random integer in 1..10. Ignores the user
-// message — the input is irrelevant for this sample, the random
-// number is what drives the routing.
+// rollDie ignores the user message; the random number is what
+// drives the routing.
 func rollDie(_ agent.InvocationContext, _ string) (int, error) {
 	return rand.IntN(10) + 1, nil
 }
 
-// routeByValueNode emits an event whose Routes carries the
-// stringified upstream value. Cannot be a FunctionNode because
-// FunctionNode does not let its body set Event.Routes — see the
-// "Open question: should FunctionNode learn to emit Routes?"
-// section in the HITL design doc — so we drop down to BaseNode.
-//
-// Output is the same value as the input so successor nodes can
-// read it as their typed input.
+// routeByValueNode emits the routing event. A FunctionNode can't
+// set Event.Routes from its body, so routing nodes drop down to
+// BaseNode.
 type routeByValueNode struct {
 	workflow.BaseNode
 }
@@ -95,9 +76,6 @@ func (n *routeByValueNode) Run(ctx agent.InvocationContext, input any) iter.Seq2
 	}
 }
 
-// handleLow / handleMid / handleHigh are tiny FunctionNodes that
-// turn the integer into the agent's user-visible reply. The
-// engine wires them up via routes declared on the edges below.
 func handleLow(_ agent.InvocationContext, value int) (string, error) {
 	return fmt.Sprintf("rolled %d — handling LOW range (1..3)", value), nil
 }
@@ -126,10 +104,7 @@ func main() {
 	//                         ├─ {4, 5, 6, 7}   → handle_mid
 	//                         └─ {8, 9, 10}     → handle_high
 	//
-	// The first edge uses MultiRoute[int] to match a small set of
-	// integers; the others use the same primitive for the rest of
-	// the range. Could equivalently have used three IntRoute
-	// edges per branch, but MultiRoute keeps it compact.
+	// MultiRoute[int] matches a set of values per edge.
 	edges := workflow.Concat(
 		workflow.Chain(workflow.Start, rollNode, routeNode),
 		[]workflow.Edge{
