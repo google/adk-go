@@ -50,30 +50,42 @@ func newMockResponse(body string) *http.Response {
 
 func TestNewModel_MissingAPIKey(t *testing.T) {
 	t.Setenv(apiKeyEnvVar, "")
-	_, err := NewModel("MiniMax-M2.7")
+	_, err := NewModel(DefaultModel)
 	if err == nil {
 		t.Error("NewModel() should return an error when API key is missing")
 	}
 }
 
 func TestNewModel_WithAPIKey(t *testing.T) {
-	m, err := NewModel("MiniMax-M2.7", WithAPIKey("test-key"))
+	m, err := NewModel(DefaultModel, WithAPIKey("test-key"))
 	if err != nil {
 		t.Fatalf("NewModel() unexpected error: %v", err)
 	}
-	if m.Name() != "MiniMax-M2.7" {
-		t.Errorf("Name() = %q, want %q", m.Name(), "MiniMax-M2.7")
+	if m.Name() != DefaultModel {
+		t.Errorf("Name() = %q, want %q", m.Name(), DefaultModel)
 	}
 }
 
 func TestNewModel_FromEnvVar(t *testing.T) {
 	t.Setenv(apiKeyEnvVar, "env-key")
-	m, err := NewModel("MiniMax-M2.7")
+	m, err := NewModel(DefaultModel)
 	if err != nil {
 		t.Fatalf("NewModel() unexpected error: %v", err)
 	}
-	if m.Name() != "MiniMax-M2.7" {
-		t.Errorf("Name() = %q, want %q", m.Name(), "MiniMax-M2.7")
+	if m.Name() != DefaultModel {
+		t.Errorf("Name() = %q, want %q", m.Name(), DefaultModel)
+	}
+}
+
+func TestModelConstants(t *testing.T) {
+	if DefaultModel != "MiniMax-M3" {
+		t.Errorf("DefaultModel = %q, want MiniMax-M3", DefaultModel)
+	}
+	if M27Model != "MiniMax-M2.7" {
+		t.Errorf("M27Model = %q, want MiniMax-M2.7", M27Model)
+	}
+	if HighSpeedModel != "MiniMax-M2.7-highspeed" {
+		t.Errorf("HighSpeedModel = %q, want MiniMax-M2.7-highspeed", HighSpeedModel)
 	}
 }
 

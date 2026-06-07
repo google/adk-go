@@ -38,9 +38,12 @@ const (
 	// apiKeyEnvVar is the environment variable for the MiniMax API key.
 	apiKeyEnvVar = "MINIMAX_API_KEY"
 
-	// DefaultModel is the default MiniMax model.
-	DefaultModel = "MiniMax-M2.7"
-	// HighSpeedModel is a faster variant of the default model.
+	// DefaultModel is the default MiniMax model. M3 has a 512K context window,
+	// up to 128K max output, and supports image input.
+	DefaultModel = "MiniMax-M3"
+	// M27Model is the previous generation MiniMax model.
+	M27Model = "MiniMax-M2.7"
+	// HighSpeedModel is a low-latency variant of the previous generation model.
 	HighSpeedModel = "MiniMax-M2.7-highspeed"
 )
 
@@ -91,7 +94,7 @@ func WithHTTPClient(client *http.Client) Option {
 // model.LLM interface using the OpenAI-compatible MiniMax API.
 //
 // modelName should be one of the supported MiniMax model IDs, e.g.
-// "MiniMax-M2.7" or "MiniMax-M2.7-highspeed".
+// "MiniMax-M3" (default), "MiniMax-M2.7" or "MiniMax-M2.7-highspeed".
 //
 // The API key is read from the MINIMAX_API_KEY environment variable if not
 // provided via WithAPIKey.
