@@ -80,7 +80,7 @@ func main() {
 	// mail API here.
 	senderNode := workflow.NewFunctionNode(
 		"sender",
-		func(_ agent.InvocationContext, approvedDraft string) (string, error) {
+		func(_ agent.Context, approvedDraft string) (string, error) {
 			return "EMAIL SENT — " + approvedDraft, nil
 		},
 		workflow.NodeConfig{},
@@ -113,7 +113,7 @@ func main() {
 
 	report := workflow.NewFunctionNode(
 		"report",
-		func(_ agent.InvocationContext, orchestrateOutput string) (string, error) {
+		func(_ agent.Context, orchestrateOutput string) (string, error) {
 			return "REPORT: " + strings.TrimSpace(orchestrateOutput), nil
 		},
 		workflow.NodeConfig{},
@@ -122,7 +122,11 @@ func main() {
 	wa, err := workflowagent.New(workflowagent.Config{
 		Name:        "use_as_output_sample",
 		Description: "Conditional dispatch: send-or-revise email workflow.",
-		Edges:       workflow.Chain(workflow.Start, orchestrate, report),
+		// Register the wrapped LlmAgents so the runner can resolve
+		// their event authors; the sender is a FunctionNode, not an
+		// agent.Agent, so it is not listed here.
+		SubAgents: []agent.Agent{drafterAgent, reviserAgent},
+		Edges:     workflow.Chain(workflow.Start, orchestrate, report),
 	})
 	if err != nil {
 		log.Fatalf("workflowagent.New: %v", err)
