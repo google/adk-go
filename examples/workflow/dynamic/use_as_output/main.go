@@ -122,7 +122,11 @@ func main() {
 	wa, err := workflowagent.New(workflowagent.Config{
 		Name:        "use_as_output_sample",
 		Description: "Conditional dispatch: send-or-revise email workflow.",
-		Edges:       workflow.Chain(workflow.Start, orchestrate, report),
+		// Register the wrapped LlmAgents so the runner can resolve
+		// their event authors; the sender is a FunctionNode, not an
+		// agent.Agent, so it is not listed here.
+		SubAgents: []agent.Agent{drafterAgent, reviserAgent},
+		Edges:     workflow.Chain(workflow.Start, orchestrate, report),
 	})
 	if err != nil {
 		log.Fatalf("workflowagent.New: %v", err)
