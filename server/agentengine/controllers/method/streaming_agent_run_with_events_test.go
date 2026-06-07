@@ -63,7 +63,7 @@ func TestDecodeStreamingAgentRunWithEventsRequest(t *testing.T) {
 	payload := []byte(`{
 		"class_method": "streaming_agent_run_with_events",
 		"input": {
-			"request_json": "{\"message\":{\"role\":\"user\",\"parts\":[{\"text\":\"Hi\"}]},\"session_id\":\"projects/619863079366/locations/global/collections/default_collection/engines/launchpad-secchot/sessions/18317904751077773933\",\"user_id\":\"jan@example.com\"}"
+			"request_json": "{\"message\":{\"role\":\"user\",\"parts\":[{\"text\":\"Hi\"}]},\"session_id\":\"projects/111111111111/locations/global/collections/default_collection/engines/test-engine/sessions/12345678901234567890\",\"user_id\":\"test-user@example.com\"}"
 		}
 	}`)
 	var req models.StreamingAgentRunWithEventsRequest
@@ -77,8 +77,8 @@ func TestDecodeStreamingAgentRunWithEventsRequest(t *testing.T) {
 	}
 
 	want := &models.StreamingAgentRunWithEventsRunRequest{
-		UserID:    "jan@example.com",
-		SessionID: "projects/619863079366/locations/global/collections/default_collection/engines/launchpad-secchot/sessions/18317904751077773933",
+		UserID:    "test-user@example.com",
+		SessionID: "projects/111111111111/locations/global/collections/default_collection/engines/test-engine/sessions/12345678901234567890",
 		Message: genai.Content{
 			Role:  "user",
 			Parts: []*genai.Part{{Text: "Hi"}},
@@ -97,8 +97,8 @@ func TestEnsureBackendSession_CreateBackendSession(t *testing.T) {
 	sessionService := session.InMemoryService()
 	handler := NewStreamingAgentRunWithEventsHandler(&launcher.Config{SessionService: sessionService}, "app", "streaming_agent_run_with_events", "async_stream")
 	req := &models.StreamingAgentRunWithEventsRunRequest{
-		UserID:    "jan@example.com",
-		SessionID: "projects/619863079366/locations/global/collections/default_collection/engines/launchpad-secchot/sessions/1737792313033595937",
+		UserID:    "test-user@example.com",
+		SessionID: "projects/111111111111/locations/global/collections/default_collection/engines/test-engine/sessions/12345678901234567890",
 	}
 	requestedSessionID := req.SessionID
 
@@ -111,7 +111,7 @@ func TestEnsureBackendSession_CreateBackendSession(t *testing.T) {
 
 	got, err := sessionService.Get(t.Context(), &session.GetRequest{
 		AppName:   "app",
-		UserID:    "jan@example.com",
+		UserID:    "test-user@example.com",
 		SessionID: req.SessionID,
 	})
 	if err != nil {
@@ -149,8 +149,8 @@ func TestEnsureBackendSession_ReuseReturnedBackendSession(t *testing.T) {
 func TestStreamJSONL_AgentSpaceResponseEnvelope(t *testing.T) {
 	const (
 		appName           = "app"
-		userID            = "jan@example.com"
-		externalSessionID = "projects/619863079366/locations/global/collections/default_collection/engines/launchpad-secchot/sessions/5383754056151277294"
+		userID            = "test-user@example.com"
+		externalSessionID = "projects/111111111111/locations/global/collections/default_collection/engines/test-engine/sessions/12345678901234567890"
 	)
 
 	a, err := llmagent.New(llmagent.Config{
@@ -207,8 +207,8 @@ func TestStreamJSONL_AgentSpaceResponseEnvelope(t *testing.T) {
 func TestStreamJSONL_AgentSpaceAcceptsReturnedBackendSessionID(t *testing.T) {
 	const (
 		appName           = "app"
-		userID            = "jan@example.com"
-		externalSessionID = "projects/619863079366/locations/global/collections/default_collection/engines/launchpad-secchot/sessions/17538412265490363072"
+		userID            = "test-user@example.com"
+		externalSessionID = "projects/111111111111/locations/global/collections/default_collection/engines/test-engine/sessions/12345678901234567890"
 	)
 
 	a, err := llmagent.New(llmagent.Config{
@@ -279,8 +279,8 @@ func TestStreamJSONL_AgentSpaceAcceptsReturnedBackendSessionID(t *testing.T) {
 func TestStreamJSONL_AgentSpaceUsesNonStreamingMode(t *testing.T) {
 	const (
 		appName           = "app"
-		userID            = "jan@example.com"
-		externalSessionID = "projects/619863079366/locations/global/collections/default_collection/engines/launchpad-secchot/sessions/8130118279508262912"
+		userID            = "test-user@example.com"
+		externalSessionID = "projects/111111111111/locations/global/collections/default_collection/engines/test-engine/sessions/12345678901234567890"
 	)
 
 	a, err := llmagent.New(llmagent.Config{
@@ -328,7 +328,7 @@ func TestStreamJSONL_AgentSpaceUsesNonStreamingMode(t *testing.T) {
 }
 
 func TestStreamingAgentRunWithEventsHandlerMetadata(t *testing.T) {
-	handler := NewStreamingAgentRunWithEventsHandler(nil, "", "streaming_agent_run_with_events", "stream")
+	handler := NewStreamingAgentRunWithEventsHandler(nil, "", "streaming_agent_run_with_events", "async_stream")
 
 	got, err := handler.Metadata()
 	if err != nil {
@@ -336,7 +336,7 @@ func TestStreamingAgentRunWithEventsHandlerMetadata(t *testing.T) {
 	}
 
 	want := map[string]any{
-		"api_mode": "stream",
+		"api_mode": "async_stream",
 		"name":     "streaming_agent_run_with_events",
 		"parameters": map[string]any{
 			"properties": map[string]any{

@@ -205,12 +205,18 @@ func (s *streamingAgentRunWithEventsHandler) Metadata() (*structpb.Struct, error
 		},
 		"description": `Streams responses asynchronously from the ADK application.
 
-In general, you should use async_stream_query instead, as it has a more
-structured API. This method is primarily meant for invocation from Gemini Enterprise.
+This method is primarily meant for invocation from Gemini Enterprise.
 
 Args:
     request_json (str):
-        Required. The request to stream responses for.
+        Required. A JSON-encoded request object with:
+        - user_id (str): Required. The user ID to run the agent for.
+        - session_id (str): Optional. The session ID. Gemini Enterprise may
+          send its Discovery Engine session resource on the first turn; later
+          turns should use the backend ADK session ID returned in the response.
+        - message (Content): Required. The user message, using the genai
+          Content JSON shape, for example:
+          {"role":"user","parts":[{"text":"Hi"}]}
 
 `,
 	})

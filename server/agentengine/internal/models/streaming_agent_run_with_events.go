@@ -28,6 +28,7 @@ type StreamingAgentRunWithEventsRequest struct {
 }
 
 // StreamingAgentRunWithEventsInput wraps the actual request payload as JSON.
+// RequestJSON is a JSON-encoded StreamingAgentRunWithEventsRunRequest.
 type StreamingAgentRunWithEventsInput struct {
 	RequestJSON string `json:"request_json"`
 }
