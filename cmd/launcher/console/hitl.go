@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/adk/workflow"
 )
 
@@ -77,6 +78,8 @@ func renderInterruptPrompt(p pendingInterrupt) {
 	switch p.name {
 	case workflow.WorkflowInputFunctionCallName:
 		renderWorkflowInputPrompt(p.args)
+	case toolconfirmation.FunctionCallName:
+		renderToolConfirmationPrompt(p.args)
 	default:
 		renderGenericInterruptPrompt(p.name, p.args)
 	}
@@ -93,6 +96,8 @@ func buildInterruptResponse(p pendingInterrupt, userInput string) *genai.Part {
 	switch p.name {
 	case workflow.WorkflowInputFunctionCallName:
 		response = workflowInputResponseFromUserInput(line)
+	case toolconfirmation.FunctionCallName:
+		response = toolConfirmationResponseFromUserInput(line)
 	default:
 		response = genericResponseFromUserInput(line)
 	}
@@ -152,6 +157,39 @@ func workflowInputResponseFromUserInput(line string) map[string]any {
 		return map[string]any{"payload": parsed}
 	}
 	return map[string]any{"payload": line}
+}
+
+// renderToolConfirmationPrompt prints the tool-confirmation
+// prompt, falling back to the original tool name when no hint is
+// provided.
+func renderToolConfirmationPrompt(args map[string]any) {
+	hint := ""
+	if tc, ok := args["toolConfirmation"].(map[string]any); ok {
+		hint, _ = tc["hint"].(string)
+	}
+	if hint == "" {
+		originalName := "unknown"
+		if oc, err := toolconfirmation.OriginalCallFrom(&genai.FunctionCall{Args: args}); err == nil && oc.Name != "" {
+			originalName = oc.Name
+		}
+		hint = "Confirm " + originalName + "?"
+	}
+	fmt.Printf("Agent -> %s\n", hint)
+	fmt.Println("  Type 'yes' to confirm, anything else to reject.")
+}
+
+// toolConfirmationResponseFromUserInput maps yes-ish answers
+// (y/yes/true/confirm, case-insensitive) to {"confirmed": true};
+// everything else (including blank lines) maps to
+// {"confirmed": false}.
+func toolConfirmationResponseFromUserInput(line string) map[string]any {
+	answer := strings.TrimSpace(strings.ToLower(line))
+	switch answer {
+	case "y", "yes", "true", "confirm":
+		return map[string]any{"confirmed": true}
+	default:
+		return map[string]any{"confirmed": false}
+	}
 }
 
 // renderGenericInterruptPrompt is the fallback for HITL kinds the

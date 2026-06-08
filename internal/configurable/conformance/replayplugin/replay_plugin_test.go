@@ -16,6 +16,7 @@ package replayplugin_test
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"os"
 	"path/filepath"
@@ -490,20 +491,32 @@ type MockCallbackContext struct {
 	agentName    string
 }
 
-func (m *MockCallbackContext) State() session.State                    { return m.state }
-func (m *MockCallbackContext) ReadonlyState() session.ReadonlyState    { return m.state }
-func (m *MockCallbackContext) InvocationID() string                    { return m.invocationID }
-func (m *MockCallbackContext) AgentName() string                       { return m.agentName }
-func (m *MockCallbackContext) AppName() string                         { return "mock-app" }
-func (m *MockCallbackContext) Branch() string                          { return "" }
-func (m *MockCallbackContext) SessionID() string                       { return "mock-session-id" }
-func (m *MockCallbackContext) UserID() string                          { return "mock-user" }
-func (m *MockCallbackContext) UserContent() *genai.Content             { return nil }
-func (m *MockCallbackContext) Artifacts() agent.Artifacts              { return nil }
-func (m *MockCallbackContext) Value(key any) any                       { return nil }
-func (m *MockCallbackContext) Deadline() (deadline time.Time, ok bool) { return time.Time{}, false }
-func (m *MockCallbackContext) Done() <-chan struct{}                   { return nil }
-func (m *MockCallbackContext) Err() error                              { return nil }
+func (m *MockCallbackContext) State() session.State                                 { return m.state }
+func (m *MockCallbackContext) ReadonlyState() session.ReadonlyState                 { return m.state }
+func (m *MockCallbackContext) InvocationID() string                                 { return m.invocationID }
+func (m *MockCallbackContext) AgentName() string                                    { return m.agentName }
+func (m *MockCallbackContext) AppName() string                                      { return "mock-app" }
+func (m *MockCallbackContext) Branch() string                                       { return "" }
+func (m *MockCallbackContext) SessionID() string                                    { return "mock-session-id" }
+func (m *MockCallbackContext) UserID() string                                       { return "mock-user" }
+func (m *MockCallbackContext) UserContent() *genai.Content                          { return nil }
+func (m *MockCallbackContext) Artifacts() agent.Artifacts                           { return nil }
+func (m *MockCallbackContext) Value(key any) any                                    { return nil }
+func (m *MockCallbackContext) Deadline() (deadline time.Time, ok bool)              { return time.Time{}, false }
+func (m *MockCallbackContext) Done() <-chan struct{}                                { return nil }
+func (m *MockCallbackContext) Err() error                                           { return nil }
+func (m *MockCallbackContext) Actions() *session.EventActions                       { return nil }
+func (m *MockCallbackContext) FunctionCallID() string                               { return "" }
+func (m *MockCallbackContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+func (m *MockCallbackContext) RequestConfirmation(hint string, payload any) error {
+	return fmt.Errorf("RequestConfirmation() is not supported for MockCallbackContext")
+}
+
+func (m *MockCallbackContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	return nil, fmt.Errorf("SearchMemory() is not supported for MockCallbackContext")
+}
+
+var _ agent.CallbackContext = (*MockCallbackContext)(nil)
 
 // MockToolContext
 type MockToolContext struct {

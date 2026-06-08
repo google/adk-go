@@ -45,11 +45,6 @@ var (
 	// than one event whose Routes field is set. A node activation
 	// may emit at most one routing decision.
 	ErrMultipleRoutingEvents = errors.New("workflow: node produced multiple events with route tags; only one event per execution can specify routes")
-
-	// ErrMultipleInputRequests is returned when a node yields more
-	// than one event whose RequestedInput field is set. A node
-	// activation may issue at most one human-input request.
-	ErrMultipleInputRequests = errors.New("workflow: node produced multiple events with RequestedInput; only one human-input request per execution is allowed")
 )
 
 // scheduler drives a single Workflow.Run invocation. It owns the
@@ -129,12 +124,16 @@ type pendingActivation struct {
 // without overwriting the first value, and the consumer surfaces
 // the error at completion.
 type nodeRun struct {
-	routingEvent *session.Event        // at most one; multiple is an error
-	output       any                   // single Event.Output; nil if hasOutput is false
-	hasOutput    bool                  // distinguishes "no output yet" from "output was nil"
-	inputRequest *session.RequestInput // at most one human-input request; multiple is an error
-	err          error                 // set on duplicate output, duplicate routing event, or duplicate input request
-	branch       string                // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
+	routingEvent *session.Event // at most one; multiple is an error
+	output       any            // single Event.Output; nil if hasOutput is false
+	hasOutput    bool           // distinguishes "no output yet" from "output was nil"
+	err          error          // set on duplicate output or duplicate routing event
+	branch       string         // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
+
+	// interruptIDs are unresolved long-running tool call IDs raised by
+	// the node's events. A non-empty set at completion parks the node
+	// in NodeWaiting. Mirrors adk-python's Context._interrupt_ids.
+	interruptIDs map[string]struct{}
 }
 
 // recordErr stores err as the accumulator's first error. Subsequent
@@ -156,18 +155,27 @@ func (nr *nodeRun) setRoutingEvent(ev *session.Event, nodeName string) {
 	nr.routingEvent = ev
 }
 
-// setInputRequest stores req as the node's single in-flight
-// human-input request. A second call records
-// ErrMultipleInputRequests instead of overwriting; the consumer
-// surfaces the error at completion and the node ends up
-// NodeFailed (the waiting branch is gated on nr.err == nil so a
-// node that requested twice does not silently park).
-func (nr *nodeRun) setInputRequest(req *session.RequestInput, nodeName string) {
-	if nr.inputRequest != nil {
-		nr.recordErr(fmt.Errorf("%w: node %q", ErrMultipleInputRequests, nodeName))
+// trackInterrupts accumulates the node's long-running tool call IDs.
+//
+// It does NOT resolve an interrupt from a FunctionResponse seen in the
+// same run: that is the tool's own initial "pending" response, not the
+// reply. The real reply arrives on a later turn — a fresh run that does
+// not re-raise the call, so its interrupt set is empty and the node
+// completes. Mirrors adk-python: the long-running call ends the turn
+// and the pause persists until a new invocation answers it.
+func (nr *nodeRun) trackInterrupts(ev *session.Event) {
+	if ev == nil {
 		return
 	}
-	nr.inputRequest = req
+	for _, id := range ev.LongRunningToolIDs {
+		if id == "" {
+			continue
+		}
+		if nr.interruptIDs == nil {
+			nr.interruptIDs = map[string]struct{}{}
+		}
+		nr.interruptIDs[id] = struct{}{}
+	}
 }
 
 // setOutput stores out as the node's single output value. A second
@@ -189,9 +197,17 @@ type queueItem interface{ isQueueItem() }
 // consumer. nodeName is required so the consumer can correlate the
 // event with the right nodeRun without relying on channel-FIFO-
 // per-task semantics (which Go channels do not provide).
+//
+// processed, when non-nil, is a back-pressure handshake: the producing
+// goroutine blocks until the consumer closes it (after the event is
+// yielded and persisted), so a non-partial function-response is in the
+// session before the node's flow rebuilds the next model request.
+// Mirrors adk-python's enqueue_event/processed_signal handshake. Nil
+// for partial events, which are fire-and-forget.
 type eventItem struct {
-	nodeName string
-	ev       *session.Event
+	nodeName  string
+	ev        *session.Event
+	processed chan struct{}
 }
 
 func (eventItem) isQueueItem() {}
@@ -445,11 +461,26 @@ func runNode(
 			completion.err = err
 			return
 		}
+		// Block on non-partial events until the consumer has persisted
+		// them (see eventItem.processed). Partial events are
+		// fire-and-forget.
+		var processed chan struct{}
+		if ev != nil && !ev.LLMResponse.Partial {
+			processed = make(chan struct{})
+		}
 		select {
-		case out <- eventItem{nodeName: name, ev: ev}:
+		case out <- eventItem{nodeName: name, ev: ev, processed: processed}:
 		case <-ctx.Done():
 			completion.err = ctx.Err()
 			return
+		}
+		if processed != nil {
+			select {
+			case <-processed:
+			case <-ctx.Done():
+				completion.err = ctx.Err()
+				return
+			}
 		}
 	}
 	// If the node's iter returned cleanly but the context was
@@ -523,6 +554,12 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 					s.cancelAll()
 				}
 			}
+			// Release the producer's handshake now that the event is
+			// yielded and persisted. Always signal — even when
+			// draining — so a blocked producer does not leak.
+			if it.processed != nil {
+				close(it.processed)
+			}
 		case completionItem:
 			err := s.handleCompletion(it, !draining)
 			if err != nil && pendingErr == nil {
@@ -586,11 +623,23 @@ func (s *scheduler) handleEvent(it eventItem) {
 		path = it.ev.NodeInfo.Path
 	}
 	isDescendant := path != "" && path != it.nodeName
-	if it.ev.RequestedInput != nil {
-		nr.setInputRequest(it.ev.RequestedInput, it.nodeName)
-	}
+	// Track long-running interrupts before the descendant
+	// short-circuit so a dynamic child's pause is promoted to the
+	// parent node (a RequestInput pause rides on LongRunningToolIDs).
+	nr.trackInterrupts(it.ev)
 	if isDescendant {
 		return
+	}
+	// Stamp the node name onto the event so history rehydration can
+	// attribute it back to this node. Static nodes leave Path empty
+	// (the node name is not otherwise on the event — Author is the
+	// workflow agent, not the node). Matches adk-python, which sets
+	// node_info.path on every event and attributes by it.
+	if path == "" {
+		if it.ev.NodeInfo == nil {
+			it.ev.NodeInfo = &session.NodeInfo{}
+		}
+		it.ev.NodeInfo.Path = it.nodeName
 	}
 	if it.ev.Routes != nil {
 		nr.setRoutingEvent(it.ev, it.nodeName)
@@ -664,14 +713,22 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 		return nr.err
 	}
 
-	// Happy path: decide between NodeWaiting (a recorded human-
-	// input request) or NodeCompleted. The waiting branch fires
-	// regardless of the scheduleSuccessors flag — a request that
-	// survived the run must be observable in RunState even when
-	// the consumer is draining, so the caller can persist it.
-	if nr != nil && nr.inputRequest != nil {
+	// Happy path: decide between NodeWaiting (an open interrupt) or
+	// NodeCompleted. The waiting branch fires regardless of the
+	// scheduleSuccessors flag — an interrupt that survived the run
+	// must be observable in RunState even when the consumer is
+	// draining.
+	//
+	// Long-running-tool pause (incl. RequestInput, which rides on
+	// LongRunningToolIDs): park WAITING with the open interrupt IDs
+	// so resume can match a human's FunctionResponse back to this
+	// node. Mirrors adk-python _handle_completion.
+	if nr != nil && len(nr.interruptIDs) > 0 {
 		ns.Status = NodeWaiting
-		ns.PendingRequest = nr.inputRequest
+		ns.Interrupts = ns.Interrupts[:0]
+		for id := range nr.interruptIDs {
+			ns.Interrupts = append(ns.Interrupts, id)
+		}
 		return nil
 	}
 
