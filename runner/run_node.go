@@ -45,22 +45,21 @@ func isLlmAgent(a agent.Agent) bool {
 	return ok
 }
 
-// buildRunnerNode wraps an agent as the workflow node that the node
-// runtime drives, dispatching on the agent kind (the Go counterpart of
-// adk-python's build_node). Only LlmAgent is supported today; other agent
-// kinds will dispatch here as they gain node wrappers.
+// buildRunnerNode wraps any agent as the workflow node that the node
+// runtime drives (Go counterpart of adk-python's build_node). All agent
+// kinds share the same wrapper; see newAgentNode.
 func buildRunnerNode(a agent.Agent) (workflow.Node, error) {
-	if isLlmAgent(a) {
-		return newLlmAgentNode(a), nil
+	if a == nil {
+		return nil, fmt.Errorf("node runtime: agent cannot be nil")
 	}
-	return nil, fmt.Errorf("node runtime: unsupported agent type %T", a)
+	return newAgentNode(a), nil
 }
 
-// runNode drives an LlmAgent through the workflow engine by wrapping it
+// runNode drives an agent through the workflow engine by wrapping it
 // in a single-node workflow (START -> node), reusing the agent path's
 // session/plugin/persist pipeline. The wrapping node bridges the agent's
 // HITL (long-running tools, which emit LongRunningToolIDs) into a
-// workflow pause; see newLlmAgentNode. Go equivalent of adk-python
+// workflow pause; see newAgentNode. Go equivalent of adk-python
 // Runner._run_node_async.
 func (r *Runner) runNode(
 	ctx context.Context,

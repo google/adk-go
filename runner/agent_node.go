@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// This file is the agent-node wrapper: it turns an LlmAgent into a
-// workflow node and runs its body, forwarding the agent's events. It is
-// the Go counterpart of adk-python's workflow/_llm_agent_wrapper.py and
-// holds no runner-side orchestration (session/plugin/persist wiring and
-// resume-input extraction live in run_node.go).
+// This file is the agent-node wrapper: it turns any agent.Agent into a
+// workflow node and runs its body, forwarding the agent's events.
+// Loosely follows adk-python's _llm_agent_wrapper.py, but agent-agnostic.
+// Runner-side orchestration lives in run_node.go.
 
 package runner
 
@@ -34,40 +33,31 @@ import (
 
 var rerunOnResume = true
 
-// newLlmAgentNode wraps an LlmAgent as a dynamic workflow node.
+// newAgentNode wraps any agent.Agent as a dynamic workflow node.
 //
-// It is dynamic (not static) so its body gets a NodeContext whose
-// sub-scheduler can later delegate transfer_to_agent / request_task to a
-// child llmAgentNode through the event queue; the current body does not
-// delegate yet and forwards the agent's events verbatim.
-//
-// HITL rides on LongRunningToolIDs (matching adk-python): the scheduler
-// parks the node (NodeWaiting) when an event carries unresolved IDs, with
-// no synthetic RequestInput. On a later turn the human's FunctionResponse
-// is matched back by ID and the node re-runs (RerunOnResume), continuing
-// from history.
-func newLlmAgentNode(a agent.Agent) workflow.Node {
-	// RerunOnResume = re-entry mode: on resume the node re-runs and reads
-	// the reply from history rather than handing it to a successor (it has
-	// none). IN/OUT are any: seed input is the user content (nil on
-	// resume), output is the agent's final text.
-	//
-	// EmitsOwnSpan: the wrapped agent's Run already emits an invoke_agent
-	// span, so the scheduler must not add an invoke_node wrapper — the
-	// span tree stays invoke_agent > generate_content like the direct
-	// agent path (and adk-python's intended node dispatch), without the
-	// redundant outer span.
-	return workflow.NewDynamicNode[any, any](
-		a.Name(),
-		runLlmAgentNodeBody(a),
-		workflow.NodeConfig{RerunOnResume: &rerunOnResume, EmitsOwnSpan: true},
-	)
+// Dynamic so the body gets a NodeContext whose sub-scheduler can later
+// delegate transfer_to_agent / request_task; today it forwards events
+// verbatim. HITL rides on LongRunningToolIDs (matching adk-python): the
+// node parks on unresolved IDs and re-runs (RerunOnResume) when the
+// matching FunctionResponse arrives, continuing from history.
+func newAgentNode(a agent.Agent) workflow.Node {
+	cfg := workflow.NodeConfig{
+		// EmitsOwnSpan: the agent's Run already emits invoke_agent, so the
+		// scheduler must not add a redundant invoke_node wrapper.
+		EmitsOwnSpan: true,
+	}
+	// RerunOnResume defaults to true only for LlmAgent (matching
+	// adk-python's build_node); other kinds keep the engine default.
+	if isLlmAgent(a) {
+		cfg.RerunOnResume = &rerunOnResume
+	}
+	return workflow.NewDynamicNode[any, any](a.Name(), runAgentNodeBody(a), cfg)
 }
 
-// runLlmAgentNodeBody returns the dynamic-node body that drives the
+// runAgentNodeBody returns the dynamic-node body that drives the
 // wrapped agent for one activation, emitting its events through emit and
 // returning the agent's final text as the node output.
-func runLlmAgentNodeBody(a agent.Agent) workflow.DynamicFn[any, any] {
+func runAgentNodeBody(a agent.Agent) workflow.DynamicFn[any, any] {
 	return func(ctx workflow.NodeContext, input any, emit func(*session.Event) error) (any, error) {
 		// On resume, input is the ORIGINAL user text; re-feeding it would
 		// loop (model calls the long-running tool again). So pass no user
