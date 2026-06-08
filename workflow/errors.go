@@ -39,6 +39,8 @@ var (
 	// per activation.
 	ErrParallelHITLUnsupported = errors.New("workflow: parallel HITL is not supported")
 
+	// ErrInputValidation indicates that the node input did not pass validation.
+	ErrInputValidation = errors.New("workflow: input validation failed")
 	// ErrOutputAlreadyDelegated rejects a second WithUseAsOutput
 	// child in the same parent activation.
 	ErrOutputAlreadyDelegated = errors.New("workflow: parent already has a use_as_output child")
