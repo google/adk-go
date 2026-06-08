@@ -153,12 +153,10 @@ type NodeInfo struct {
 	// node_info.message_as_output.
 	MessageAsOutput bool `json:"messageAsOutput,omitempty"`
 
-	// OutputFor lists the node paths this event's output counts for:
-	// the emitting node plus any WithUseAsOutput delegating ancestors.
-	// A delegating child's single event carries the output for the
-	// whole delegation chain, so resume can attribute it to each
-	// ancestor without the parents re-emitting. Mirrors adk-python's
-	// node_info.output_for.
+	// OutputFor lists the node paths this event's Output counts for: the
+	// emitter plus any WithUseAsOutput delegating ancestors, so one event
+	// stands in for a whole delegation chain rather than each level
+	// re-emitting a duplicate. Mirrors adk-python's node_info.output_for.
 	OutputFor []string `json:"outputFor,omitempty"`
 }
 

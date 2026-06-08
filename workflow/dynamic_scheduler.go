@@ -30,10 +30,9 @@ type dynamicSubScheduler struct {
 	emitUp     func(*session.Event) error
 
 	// outputForAncestors are the delegating-ancestor paths this
-	// activation's output also counts for, set when this dynamic node
-	// is itself a WithUseAsOutput child. A delegating child's event is
-	// stamped OutputFor = [childPath, parentPath, ...these]. Mirrors
-	// adk-python's Context._output_for_ancestors.
+	// activation's output also counts for, set when this dynamic node is
+	// itself a WithUseAsOutput child. Mirrors adk-python's
+	// Context._output_for_ancestors.
 	outputForAncestors []string
 
 	// mu guards everything below. Never held across child.Run.
@@ -51,10 +50,9 @@ type dynamicSubScheduler struct {
 // outputDelegation is the at-most-one WithUseAsOutput delegation for a
 // parent activation. claim is set eagerly on the first delegating child
 // and never cleared within the activation (matching adk-python's
-// _output_delegated); a second delegating child is rejected. A fresh
-// sub-scheduler is built per activation, so there is nothing to reset
-// across turns. hasValue is the source of truth for readability because
-// nil is a valid delegated value.
+// _output_delegated); a second delegating child is rejected. hasValue
+// (not value != nil) is the source of truth, since nil is a valid
+// delegated value.
 //
 // Methods require the enclosing scheduler's mu to be held.
 type outputDelegation struct {
@@ -168,9 +166,8 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	}
 
 	childBranch := deriveChildBranch(s.parentCtx.Branch(), name, runID, opts.useSubBranch, opts.overrideBranch)
-	// A delegating child inherits this node's delegation chain so that,
-	// if the child is itself a dynamic node delegating further, its
-	// events are stamped OutputFor for every ancestor up the chain.
+	// A delegating child extends the chain: its own delegating children
+	// must count their output for this parent and its ancestors too.
 	var childAncestors []string
 	if opts.useAsOutput {
 		childAncestors = append([]string{s.parentPath}, s.outputForAncestors...)
@@ -217,19 +214,13 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		if ev.RequestedInput != nil {
 			interrupted = true
 		}
-		// Capture the child's output for the RunNode return value. The
-		// event itself is always emitted up: a delegating
-		// (WithUseAsOutput) child carries the output on its own event
-		// and the parent suppresses its terminal event (full
-		// suppression, matching adk-python).
 		if childOut, ok := childEventOutput(ev); ok {
 			out = childOut
-			// Stamp OutputFor on the output-bearing event: its own
-			// path plus, for a delegating child, this node's path and
-			// any further ancestors. Resume attributes the output to
-			// each listed node. A nested dynamic child that already
-			// stamped its own chain keeps it (mirrors _enrich_event's
-			// output_for = [node_path] + ancestors).
+			// Stamp OutputFor so resume can attribute the output: the
+			// emitter's own path plus, under delegation, this parent and
+			// its ancestors (the parent then suppresses its own terminal
+			// event). Mirrors adk-python _enrich_event. A nested child
+			// that already stamped its chain keeps it.
 			if ev.NodeInfo.OutputFor == nil {
 				outputFor := []string{ev.NodeInfo.Path}
 				if opts.useAsOutput {

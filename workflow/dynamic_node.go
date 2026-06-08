@@ -125,10 +125,9 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 			return
 		}
 
-		// Full suppression: when a WithUseAsOutput child delegated this
-		// node's output, the child already emitted it on its own event
-		// (stamped for this node), so the parent emits no duplicate
-		// terminal event. Mirrors adk-python's _output_delegated.
+		// A WithUseAsOutput child already emitted this output on its own
+		// event (stamped for this node), so emit no duplicate terminal
+		// event. Mirrors adk-python's _output_delegated.
 		if _, delegated := sub.delegatedOutput(); delegated {
 			return
 		}

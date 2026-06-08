@@ -206,10 +206,9 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node) (out
 			continue
 		}
 		outputs[name] = out
-		// A delegated output also counts for the static nodes owning
-		// the ancestor paths in OutputFor, so a delegating ancestor
-		// recovers its output on resume without re-emitting (mirrors
-		// adk-python's output_for attribution).
+		// A delegated output also counts for the static owners of the
+		// OutputFor paths, so a delegating ancestor recovers it on resume
+		// without re-emitting. Mirrors adk-python's output_for.
 		if ev.NodeInfo != nil {
 			for _, p := range ev.NodeInfo.OutputFor {
 				owner := staticNodeName(p)
