@@ -177,16 +177,57 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
-		agentToRun, err := r.findAgentToRun(storedSession, msg)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-
 		// Node path: an LlmAgent runs through the ADK 2.0 node runtime
 		// (the Go equivalent of adk-python's _run_node_async, reached for
 		// an LlmAgent root).
-		if isLlmAgent(agentToRun) {
+
+		if isLlmAgent(r.rootAgent) {
+			llmInternalAgent, ok := r.rootAgent.(llminternal.Agent)
+			if !ok {
+				yield(nil, fmt.Errorf("agent %s is not an LlmAgent", r.rootAgent.Name()))
+				return
+			}
+
+			llmInternalState := llminternal.Reveal(llmInternalAgent)
+
+			if llmInternalState.Mode == "" {
+				// LlmAgent as root agent must have chat mode.
+				llmInternalState.Mode = llminternal.ModeChat
+			}
+
+			if llmInternalState.Mode != llminternal.ModeChat {
+				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), llmInternalState.Mode))
+				return
+			}
+
+			hasTaskSubAgent := func() bool {
+				for _, subAgent := range r.rootAgent.SubAgents() {
+					if !isLlmAgent(subAgent) {
+						continue
+					}
+					llmInternalSubAgent := llminternal.Reveal(subAgent.(llminternal.Agent))
+					if llmInternalSubAgent.Mode == llminternal.ModeTask {
+						return true
+					}
+				}
+				return false
+			}
+
+			var agentToRun agent.Agent
+
+			// when the chat coordinator has task-mode sub-agents,
+			// the wrapper handles delegation via ctx.run_node. Don't let
+			// the legacy sub-agent picker bypass the coordinator on resume.
+			if hasTaskSubAgent() {
+				agentToRun = r.rootAgent
+			} else {
+				agentToRun, err = r.findAgentToRun(storedSession, msg)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+			}
+
 			r.runNode(ctx, storedSession, agentToRun, msg, cfg, options, yield)
 			return
 		}
@@ -221,7 +262,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			Artifacts:   artifacts,
 			Memory:      memoryImpl,
 			Session:     storedSession,
-			Agent:       agentToRun,
+			Agent:       r.rootAgent,
 			UserContent: msg,
 			RunConfig:   &cfg,
 		})
@@ -253,7 +294,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		for event, err := range agentToRun.Run(ctx) {
+		for event, err := range r.rootAgent.Run(ctx) {
 			if err != nil {
 				if !yield(event, err) {
 					return
