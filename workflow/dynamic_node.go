@@ -119,6 +119,12 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 
 		out, err := n.fn(orchestratorCtx, typedInput, emit)
 		if err != nil {
+			// WaitForOutput park emitted no interrupt event, so surface
+			// the sentinel for the scheduler to park the parent.
+			if errors.Is(err, ErrNodeWaitingForOutput) {
+				yield(nil, err)
+				return
+			}
 			// HITL: the RequestedInput was already forwarded upstream;
 			// swallow the sentinel so the engine sees only the pause event.
 			if errors.Is(err, ErrNodeInterrupted) {

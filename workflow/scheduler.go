@@ -458,7 +458,11 @@ func runNode(
 		if r := recover(); r != nil {
 			completion.err = fmt.Errorf("node %q panicked: %v", name, r)
 		}
-		if completion.err != nil && !errors.Is(completion.err, context.Canceled) {
+		// ErrNodeWaitingForOutput is a pause, not a failure: don't mark
+		// the span as errored.
+		if completion.err != nil &&
+			!errors.Is(completion.err, context.Canceled) &&
+			!errors.Is(completion.err, ErrNodeWaitingForOutput) {
 			span.RecordError(completion.err)
 			span.SetStatus(codes.Error, completion.err.Error())
 		}
@@ -736,6 +740,12 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleSuccessors bool)
 	if errors.Is(it.err, context.Canceled) {
 		ns.Status = NodeCancelled
 		return nil // sibling cancellation; not the original error
+	}
+	// WaitForOutput park: a pause, not a failure, and with no interrupt
+	// ID. Mirrors adk-python's wait_for_output WAITING state.
+	if errors.Is(it.err, ErrNodeWaitingForOutput) {
+		ns.Status = NodeWaiting
+		return nil
 	}
 	if it.err != nil {
 		currentNode := s.nodesByName[it.nodeName]
