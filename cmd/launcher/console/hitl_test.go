@@ -161,6 +161,55 @@ func TestCollectPendingInterrupts_DetectionByLongRunningToolIDs(t *testing.T) {
 				{id: "int-2", name: "x", args: nil},
 			},
 		},
+		{
+			// SSE streaming emits the same function-call event
+			// repeatedly (partial chunks + a final aggregated
+			// event), each carrying the same LongRunningToolIDs.
+			// The interrupt must surface exactly once, from the
+			// final event, so the console queues a single prompt.
+			name: "duplicate call ID across partial and final events dedups to one",
+			events: []*session.Event{
+				{
+					LongRunningToolIDs: []string{"dup-1"},
+					LLMResponse: model.LLMResponse{
+						Partial: true,
+						Content: &genai.Content{
+							Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "dup-1", Name: "ask", Args: map[string]any{"a": float64(1)}}}},
+						},
+					},
+				},
+				{
+					LongRunningToolIDs: []string{"dup-1"},
+					LLMResponse: model.LLMResponse{
+						Partial: false,
+						Content: &genai.Content{
+							Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "dup-1", Name: "ask", Args: map[string]any{"a": float64(1)}}}},
+						},
+					},
+				},
+			},
+			want: []pendingInterrupt{
+				{id: "dup-1", name: "ask", args: map[string]any{"a": float64(1)}},
+			},
+		},
+		{
+			// A partial-only event must never surface an
+			// interrupt on its own; the settled prompt always
+			// comes from the final aggregated event.
+			name: "partial-only event does not surface an interrupt",
+			events: []*session.Event{
+				{
+					LongRunningToolIDs: []string{"p-1"},
+					LLMResponse: model.LLMResponse{
+						Partial: true,
+						Content: &genai.Content{
+							Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "p-1", Name: "ask"}}},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
