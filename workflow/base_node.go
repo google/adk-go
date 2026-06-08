@@ -79,3 +79,18 @@ func (b BaseNode) OutputSchema() *jsonschema.Resolved { return b.outputSchema }
 func (b BaseNode) ValidateInput(in any) (any, error) {
 	return defaultValidateInput(in, b.inputSchema)
 }
+
+// ValidateOutput validates the output against the node's output schema.
+func (b BaseNode) ValidateOutput(out any) (any, error) {
+	return defaultValidateOutput(out, b.outputSchema)
+}
+
+func defaultValidateOutput(out any, schema *jsonschema.Resolved) (any, error) {
+	if schema == nil {
+		return out, nil
+	}
+	if err := schema.Validate(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

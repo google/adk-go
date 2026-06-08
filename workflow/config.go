@@ -82,6 +82,13 @@ type NodeConfig struct {
 	// means the node is bounded only by the parent invocation
 	// context's deadline, if any.
 	Timeout time.Duration
+
+	// EmitsOwnSpan, when true, tells the scheduler not to wrap the node
+	// in an "invoke_node" telemetry span because the node body already
+	// starts its own span (e.g. an LlmAgent node whose wrapped agent
+	// emits "invoke_agent"). This keeps the span tree consistent with
+	// the direct agent path and adk-python.
+	EmitsOwnSpan bool
 }
 
 // RetryConfig defines the parameters for retrying a failed node.

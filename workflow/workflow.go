@@ -44,6 +44,10 @@ type Node interface {
 	// It returns the validated input (which might be coerced/parsed/transformed) or an error.
 	// It will be called by the scheduler before Run on every activation.
 	ValidateInput(input any) (any, error)
+	// ValidateOutput validates and optionally coerces/transforms an output emitted by the node.
+	// It returns the validated output (which might be coerced/parsed/transformed) or an error.
+	// The scheduler invokes it on every yielded event with a non-nil output, before forwarding it to the consumer.
+	ValidateOutput(output any) (any, error)
 	Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
 }
 
@@ -122,6 +126,10 @@ func (s *startNode) InputSchema() *jsonschema.Resolved  { return nil }
 func (s *startNode) OutputSchema() *jsonschema.Resolved { return nil }
 func (s *startNode) ValidateInput(input any) (any, error) {
 	return input, nil
+}
+
+func (s *startNode) ValidateOutput(output any) (any, error) {
+	return output, nil
 }
 
 func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
@@ -252,38 +260,7 @@ func (w *Workflow) RunNode(ctx agent.InvocationContext, input any) iter.Seq2[*se
 
 		// All goroutines have returned; ensure no leak.
 		s.wg.Wait()
-
-		// Persist the run state so a follow-up turn can call
-		// Workflow.Resume with the recovered NodeWaiting set.
-		// Emitted as a session.Event with StateDelta so the
-		// surrounding event-append pipeline can propagate it to
-		// storage; see NewRunStateEvent for why a direct
-		// State.Set is not sufficient.
-		yieldRunStateEvent(ctx, w.name, s.state, yield)
 	}
-}
-
-// yieldRunStateEvent emits a session.Event carrying the workflow's
-// serialised RunState in Actions.StateDelta. No-op when the
-// workflow is anonymous (no name → no persistence) or when the
-// caller has stopped consuming the iterator. See NewRunStateEvent
-// for why the state must be delivered as an event rather than via
-// a direct State.Set call.
-func yieldRunStateEvent(
-	ctx agent.InvocationContext,
-	workflowName string,
-	state *RunState,
-	yield func(*session.Event, error) bool,
-) {
-	ev, err := NewRunStateEvent(ctx.InvocationID(), workflowName, state)
-	if err != nil {
-		yield(nil, err)
-		return
-	}
-	if ev == nil {
-		return
-	}
-	yield(ev, nil)
 }
 
 // userInput extracts the workflow's seed input from the

@@ -125,10 +125,20 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 			return
 		}
 
+		// nil output: nothing to emit as a terminal event — the body
+		// either produced no output or already carried it on a content
+		// event.
+		if any(out) == nil {
+			return
+		}
 		ev := session.NewEvent(parentNC.InvocationID())
-		ev.Output = out
+		if delegated, ok := sub.delegatedOutput(); ok {
+			ev.Output = delegated
+		} else {
+			ev.Output = out
+		}
 		ev.NodeInfo = &session.NodeInfo{Path: sub.parentPath}
-		// TODO(wolo): validate out against n.outputSchema before yielding,
+		// TODO(wolo): validate ev.Output against n.outputSchema,
 		// mirroring function_node.go:87-92.
 		yield(ev, nil)
 	}

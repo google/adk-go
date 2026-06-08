@@ -503,6 +503,12 @@ func TestDefaultValidateInput(t *testing.T) {
 			schema: stringSchema,
 			want:   "hello",
 		},
+		{
+			name:          "valid JSON object missing required field",
+			data:          `{"x":1}`,
+			schema:        structSchema,
+			wantErrSubstr: "missing properties",
+		},
 	}
 
 	for _, tt := range tests {

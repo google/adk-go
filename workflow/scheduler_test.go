@@ -27,9 +27,10 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
-	"google.golang.org/genai"
 )
 
 // TestScheduler_LinearChain verifies that a linear graph
@@ -688,7 +689,7 @@ func TestScheduler_InputValidationFailure(t *testing.T) {
 		}, intSchema, nil),
 	}
 	w := mustNew(t, []Edge{{From: Start, To: node}})
-	
+
 	var runErr error
 	for _, err := range w.Run(mockCtx) {
 		if err != nil {
@@ -715,8 +716,8 @@ func TestScheduler_InputValidationFailure(t *testing.T) {
 
 type validationTestNode struct {
 	BaseNode
-	runInput any
-	calls    atomic.Int32
+	runInput  any
+	calls     atomic.Int32
 	validates atomic.Int32
 }
 
@@ -734,4 +735,3 @@ func (n *validationTestNode) Run(ctx agent.InvocationContext, input any) iter.Se
 		yield(ev, nil)
 	}
 }
-
