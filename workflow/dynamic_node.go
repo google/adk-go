@@ -125,6 +125,14 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 			return
 		}
 
+		// Full suppression: when a WithUseAsOutput child delegated this
+		// node's output, the child already emitted it on its own event
+		// (stamped for this node), so the parent emits no duplicate
+		// terminal event. Mirrors adk-python's _output_delegated.
+		if _, delegated := sub.delegatedOutput(); delegated {
+			return
+		}
+
 		// nil output: nothing to emit as a terminal event — the body
 		// either produced no output or already carried it on a content
 		// event.
@@ -132,11 +140,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 			return
 		}
 		ev := session.NewEvent(parentNC.InvocationID())
-		if delegated, ok := sub.delegatedOutput(); ok {
-			ev.Output = delegated
-		} else {
-			ev.Output = out
-		}
+		ev.Output = out
 		ev.NodeInfo = &session.NodeInfo{Path: sub.parentPath}
 		// TODO(wolo): validate ev.Output against n.outputSchema,
 		// mirroring function_node.go:87-92.

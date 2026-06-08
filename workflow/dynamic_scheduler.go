@@ -186,22 +186,25 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		// Stamp NodeInfo.Path so the top scheduler scopes the
 		// child's Output/Routes to the child (not the parent's
 		// accumulator). RequestedInput is promoted to the parent —
-		// see scheduler.handleEvent. Skip if the child already
-		// stamped NodeInfo (nested dynamic node yielding its own
-		// terminal event, dynamic_node.go).
+		// see scheduler.handleEvent. A child may set NodeInfo without
+		// a Path (e.g. MessageAsOutput), so fill the Path when empty
+		// rather than only when NodeInfo is nil; a nested dynamic node
+		// that already set its own Path keeps it.
 		if ev.NodeInfo == nil {
 			ev.NodeInfo = &session.NodeInfo{Path: childPath}
+		} else if ev.NodeInfo.Path == "" {
+			ev.NodeInfo.Path = childPath
 		}
 		if ev.RequestedInput != nil {
 			interrupted = true
 		}
-		// A delegated child's output is re-emitted on the parent's
-		// terminal event, so drop it here to avoid a duplicate.
+		// Capture the child's output for the RunNode return value. The
+		// event itself is always emitted up: a delegating
+		// (WithUseAsOutput) child carries the output on its own event
+		// and the parent suppresses its terminal event (full
+		// suppression, matching adk-python).
 		if childOut, ok := childEventOutput(ev); ok {
 			out = childOut
-			if opts.useAsOutput {
-				continue
-			}
 		}
 		if err := s.emitUp(ev); err != nil {
 			return nil, &NodeRunError{

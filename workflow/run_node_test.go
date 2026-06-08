@@ -191,12 +191,13 @@ func TestRunNode_WithUseAsOutput_ChildOutputBecomesParentOutput(t *testing.T) {
 		NodeConfig{},
 	)
 	events := drainDynamic(t, n, "")
-	if got := parentTerminalOutput(t, events, "orch"); got != "child_value" {
-		t.Errorf("parent terminal Output = %v, want %q", got, "child_value")
+	// Full suppression: the delegated output is carried on the child's
+	// own event; the parent emits no terminal event.
+	if got := outputBearingPaths(events); !reflect.DeepEqual(got, []string{"orch/c@1"}) {
+		t.Errorf("paths of events with Output = %v, want exactly [\"orch/c@1\"]", got)
 	}
-	// Delegated child must not emit a duplicate output event.
-	if got := outputBearingPaths(events); !reflect.DeepEqual(got, []string{"orch"}) {
-		t.Errorf("paths of events with Output = %v, want exactly [\"orch\"]", got)
+	if got := parentTerminalOutput(t, events, "orch/c@1"); got != "child_value" {
+		t.Errorf("delegated child Output = %v, want %q", got, "child_value")
 	}
 }
 
@@ -216,8 +217,10 @@ func TestRunNode_WithUseAsOutput_MessageAsOutputChildBecomesParentOutput(t *test
 		NodeConfig{},
 	)
 	events := drainDynamic(t, n, "")
-	if got := parentTerminalOutput(t, events, "orch"); got != "child_text" {
-		t.Errorf("parent terminal Output = %v, want %q", got, "child_text")
+	// Full suppression: the child's own event carries the output (via
+	// MessageAsOutput); the parent emits nothing.
+	if got, ok := derivedOutputAtPath(events, "orch/c@1"); !ok || got != "child_text" {
+		t.Errorf("delegated child derived output = %v (ok=%v), want %q", got, ok, "child_text")
 	}
 }
 
@@ -237,8 +240,8 @@ func TestRunNode_WithUseAsOutput_MessageAsOutputEmptyTextIsValidOutput(t *testin
 		NodeConfig{},
 	)
 	events := drainDynamic(t, n, "")
-	if got := parentTerminalOutput(t, events, "orch"); got != "" {
-		t.Errorf("parent terminal Output = %#v, want empty string (MessageAsOutput treats \"\" as a valid output)", got)
+	if got, ok := derivedOutputAtPath(events, "orch/c@1"); !ok || got != "" {
+		t.Errorf("delegated child derived output = %#v (ok=%v), want empty string", got, ok)
 	}
 }
 
@@ -298,8 +301,10 @@ func TestRunNode_WithRunID_AndUseAsOutput_IdempotentReplay(t *testing.T) {
 	if got := child.runCount(); got != 1 {
 		t.Errorf("child.Run invocations = %d, want 1", got)
 	}
-	if got := parentTerminalOutput(t, events, "orch"); got != "delegated_value" {
-		t.Errorf("parent terminal Output = %v, want %q", got, "delegated_value")
+	// Full suppression: the child's event carries the delegated output;
+	// the cached replay re-emits nothing and the parent stays silent.
+	if got, ok := derivedOutputAtPath(events, "orch/c@stable-id"); !ok || got != "delegated_value" {
+		t.Errorf("delegated child output = %v (ok=%v), want %q", got, ok, "delegated_value")
 	}
 }
 
@@ -388,6 +393,18 @@ func outputBearingPaths(events []*session.Event) []string {
 
 // parentTerminalOutput returns the Output of the last event
 // stamped with parentPath.
+// derivedOutputAtPath returns the output the event at nodePath carries,
+// via childEventOutput (explicit Output or MessageAsOutput-derived).
+func derivedOutputAtPath(events []*session.Event, nodePath string) (any, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
+			return childEventOutput(ev)
+		}
+	}
+	return nil, false
+}
+
 func parentTerminalOutput(t *testing.T, events []*session.Event, parentPath string) any {
 	t.Helper()
 	for i := len(events) - 1; i >= 0; i-- {
