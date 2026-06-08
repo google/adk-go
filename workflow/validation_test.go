@@ -504,10 +504,10 @@ func TestDefaultValidateInput(t *testing.T) {
 			want:   "hello",
 		},
 		{
-      name: "valid JSON object missing required field",
-      data: `{"x":1}`,
-      schema: structSchema,
-      wantErrSubstr: "missing properties", 
+			name:          "valid JSON object missing required field",
+			data:          `{"x":1}`,
+			schema:        structSchema,
+			wantErrSubstr: "missing properties",
 		},
 	}
 
