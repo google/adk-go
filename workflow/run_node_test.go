@@ -199,6 +199,40 @@ func TestRunNode_WithUseAsOutput_ChildOutputBecomesParentOutput(t *testing.T) {
 	if got := parentTerminalOutput(t, events, "orch/c@1"); got != "child_value" {
 		t.Errorf("delegated child Output = %v, want %q", got, "child_value")
 	}
+	// The child event is stamped OutputFor with its own path plus the
+	// delegating parent, so resume attributes the output to both.
+	if got := outputForAtPath(events, "orch/c@1"); !reflect.DeepEqual(got, []string{"orch/c@1", "orch"}) {
+		t.Errorf("OutputFor = %v, want [orch/c@1 orch]", got)
+	}
+}
+
+func TestRunNode_WithUseAsOutput_MultiLevelStampsAllAncestors(t *testing.T) {
+	// grandchild delegates up through child to the top orchestrator;
+	// the single output event is stamped for the whole chain.
+	grandchild := newStubNode("gc", "deep_value")
+	child := NewDynamicNode[string, string](
+		"mid",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			return RunNode[string](ctx, grandchild, nil, WithUseAsOutput())
+		},
+		NodeConfig{},
+	)
+	top := NewDynamicNode[string, string](
+		"top",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			return RunNode[string](ctx, child, nil, WithUseAsOutput())
+		},
+		NodeConfig{},
+	)
+	events := drainDynamic(t, top, "")
+	// One output event, carried on the grandchild, suppressing both
+	// delegating ancestors.
+	if got := outputBearingPaths(events); !reflect.DeepEqual(got, []string{"top/mid@1/gc@1"}) {
+		t.Errorf("output-bearing paths = %v, want [top/mid@1/gc@1]", got)
+	}
+	if got := outputForAtPath(events, "top/mid@1/gc@1"); !reflect.DeepEqual(got, []string{"top/mid@1/gc@1", "top/mid@1", "top"}) {
+		t.Errorf("OutputFor = %v, want [top/mid@1/gc@1 top/mid@1 top]", got)
+	}
 }
 
 func TestRunNode_WithUseAsOutput_MessageAsOutputChildBecomesParentOutput(t *testing.T) {
@@ -393,6 +427,17 @@ func outputBearingPaths(events []*session.Event) []string {
 
 // parentTerminalOutput returns the Output of the last event
 // stamped with parentPath.
+// outputForAtPath returns NodeInfo.OutputFor of the event at nodePath.
+func outputForAtPath(events []*session.Event, nodePath string) []string {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
+			return ev.NodeInfo.OutputFor
+		}
+	}
+	return nil
+}
+
 // derivedOutputAtPath returns the output the event at nodePath carries,
 // via childEventOutput (explicit Output or MessageAsOutput-derived).
 func derivedOutputAtPath(events []*session.Event, nodePath string) (any, bool) {

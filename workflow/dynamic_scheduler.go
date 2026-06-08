@@ -29,6 +29,13 @@ type dynamicSubScheduler struct {
 	parentCtx  NodeContext
 	emitUp     func(*session.Event) error
 
+	// outputForAncestors are the delegating-ancestor paths this
+	// activation's output also counts for, set when this dynamic node
+	// is itself a WithUseAsOutput child. A delegating child's event is
+	// stamped OutputFor = [childPath, parentPath, ...these]. Mirrors
+	// adk-python's Context._output_for_ancestors.
+	outputForAncestors []string
+
 	// mu guards everything below. Never held across child.Run.
 	mu sync.Mutex
 	// runCountByChild seeds the auto-counter per child name; the
@@ -86,12 +93,17 @@ func (d *outputDelegation) output() (any, bool) {
 }
 
 func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*session.Event) error) *dynamicSubScheduler {
+	var ancestors []string
+	if p, ok := parent.(*nodeContext); ok {
+		ancestors = p.outputForAncestors
+	}
 	s := &dynamicSubScheduler{
-		parentPath:      parentPath,
-		parentCtx:       parent,
-		emitUp:          emitUp,
-		runCountByChild: map[string]int{},
-		resultByPath:    map[string]any{},
+		parentPath:         parentPath,
+		parentCtx:          parent,
+		emitUp:             emitUp,
+		outputForAncestors: ancestors,
+		runCountByChild:    map[string]int{},
+		resultByPath:       map[string]any{},
 	}
 	s.rehydrateCache()
 	return s
@@ -156,7 +168,14 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	}
 
 	childBranch := deriveChildBranch(s.parentCtx.Branch(), name, runID, opts.useSubBranch, opts.overrideBranch)
-	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s)
+	// A delegating child inherits this node's delegation chain so that,
+	// if the child is itself a dynamic node delegating further, its
+	// events are stamped OutputFor for every ancestor up the chain.
+	var childAncestors []string
+	if opts.useAsOutput {
+		childAncestors = append([]string{s.parentPath}, s.outputForAncestors...)
+	}
+	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
 
 	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
 	// subScheduler) in the embedded context.Context so tools running
@@ -205,6 +224,20 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		// suppression, matching adk-python).
 		if childOut, ok := childEventOutput(ev); ok {
 			out = childOut
+			// Stamp OutputFor on the output-bearing event: its own
+			// path plus, for a delegating child, this node's path and
+			// any further ancestors. Resume attributes the output to
+			// each listed node. A nested dynamic child that already
+			// stamped its own chain keeps it (mirrors _enrich_event's
+			// output_for = [node_path] + ancestors).
+			if ev.NodeInfo.OutputFor == nil {
+				outputFor := []string{ev.NodeInfo.Path}
+				if opts.useAsOutput {
+					outputFor = append(outputFor, s.parentPath)
+					outputFor = append(outputFor, s.outputForAncestors...)
+				}
+				ev.NodeInfo.OutputFor = outputFor
+			}
 		}
 		if err := s.emitUp(ev); err != nil {
 			return nil, &NodeRunError{

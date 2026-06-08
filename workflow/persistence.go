@@ -201,8 +201,25 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node) (out
 		// so a message-as-output node recovers its output on resume
 		// (mirrors adk-python _reconstruct_node_states'
 		// use_message_as_output branch).
-		if out, ok := childEventOutput(ev); ok {
-			outputs[name] = out
+		out, ok := childEventOutput(ev)
+		if !ok {
+			continue
+		}
+		outputs[name] = out
+		// A delegated output also counts for the static nodes owning
+		// the ancestor paths in OutputFor, so a delegating ancestor
+		// recovers its output on resume without re-emitting (mirrors
+		// adk-python's output_for attribution).
+		if ev.NodeInfo != nil {
+			for _, p := range ev.NodeInfo.OutputFor {
+				owner := staticNodeName(p)
+				if owner == name {
+					continue
+				}
+				if _, known := nodesByName[owner]; known {
+					outputs[owner] = out
+				}
+			}
 		}
 	}
 	return outputs, completed
@@ -404,13 +421,18 @@ func firstUserInput(events session.Events) any {
 // LlmAgent node path, where Author == node name and no path is set.
 func eventNodeName(ev *session.Event) string {
 	if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
-		path := ev.NodeInfo.Path
-		if i := strings.IndexByte(path, '/'); i >= 0 {
-			return path[:i]
-		}
-		return path
+		return staticNodeName(ev.NodeInfo.Path)
 	}
 	return ev.Author
+}
+
+// staticNodeName returns the static graph node owning a node path: the
+// first segment of a composite "parent/child@run" path.
+func staticNodeName(path string) string {
+	if i := strings.IndexByte(path, '/'); i >= 0 {
+		return path[:i]
+	}
+	return path
 }
 
 // frPart returns the FunctionResponse on a part if present and keyed.
