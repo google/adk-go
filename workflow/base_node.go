@@ -16,8 +16,6 @@ package workflow
 
 import (
 	"github.com/google/jsonschema-go/jsonschema"
-
-	"google.golang.org/adk/internal/typeutil"
 )
 
 // BaseNode provides identity and a default Config implementation for
@@ -80,13 +78,6 @@ func (b BaseNode) OutputSchema() *jsonschema.Resolved { return b.outputSchema }
 // ValidateInput validates and coerces the input using the node's input schema.
 func (b BaseNode) ValidateInput(in any) (any, error) {
 	return defaultValidateInput(in, b.inputSchema)
-}
-
-func defaultValidateInput(in any, schema *jsonschema.Resolved) (any, error) {
-	if schema == nil {
-		return in, nil
-	}
-	return typeutil.ConvertToWithJSONSchema[any, any](in, schema)
 }
 
 // ValidateOutput validates the output against the node's output schema.
