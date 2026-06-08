@@ -41,8 +41,20 @@ type pendingInterrupt struct {
 // returns them in order of appearance.
 func collectPendingInterrupts(events []*session.Event) []pendingInterrupt {
 	var out []pendingInterrupt
+	// seen dedups by call ID: in SSE streaming mode the same
+	// function-call event can be emitted multiple times (partial
+	// chunks plus the final aggregated event), each carrying the
+	// same LongRunningToolIDs. Without dedup the console would
+	// queue one prompt per duplicate and consume the user's reply
+	// against a phantom interrupt instead of resuming the run.
+	seen := map[string]struct{}{}
 	for _, ev := range events {
 		if ev == nil || len(ev.LongRunningToolIDs) == 0 {
+			continue
+		}
+		// Skip partial streaming chunks; only the final aggregated
+		// event represents a settled interrupt.
+		if ev.LLMResponse.Partial {
 			continue
 		}
 		lr := map[string]struct{}{}
@@ -61,6 +73,10 @@ func collectPendingInterrupts(events []*session.Event) []pendingInterrupt {
 			if _, isInterrupt := lr[fc.ID]; !isInterrupt {
 				continue
 			}
+			if _, dup := seen[fc.ID]; dup {
+				continue
+			}
+			seen[fc.ID] = struct{}{}
 			out = append(out, pendingInterrupt{
 				id:   fc.ID,
 				name: fc.Name,
