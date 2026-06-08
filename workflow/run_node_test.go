@@ -17,6 +17,7 @@ package workflow
 import (
 	"errors"
 	"iter"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -177,6 +178,43 @@ func TestRunNode_WithOverrideBranch_Empty_TreatedAsNoOverride(t *testing.T) {
 	}
 }
 
+func TestRunNode_WithUseAsOutput_ChildOutputBecomesParentOutput(t *testing.T) {
+	child := newStubNode("c", "child_value")
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil, WithUseAsOutput()); err != nil {
+				return "", err
+			}
+			return "parent_value", nil
+		},
+		NodeConfig{},
+	)
+	events := drainDynamic(t, n, "")
+	if got := parentTerminalOutput(t, events, "orch"); got != "child_value" {
+		t.Errorf("parent terminal Output = %v, want %q", got, "child_value")
+	}
+	// Delegated child must not emit a duplicate output event.
+	if got := outputBearingPaths(events); !reflect.DeepEqual(got, []string{"orch"}) {
+		t.Errorf("paths of events with Output = %v, want exactly [\"orch\"]", got)
+	}
+}
+
+func TestRunNode_WithUseAsOutput_SecondDelegationReturnsError(t *testing.T) {
+	c1 := newStubNode("c1", "v1")
+	c2 := newStubNode("c2", "v2")
+	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
+		if _, err := RunNode[string](ctx, c1, nil, WithUseAsOutput()); err != nil {
+			return "", err
+		}
+		_, err := RunNode[string](ctx, c2, nil, WithUseAsOutput())
+		return "", err
+	})
+	if !errors.Is(err, ErrOutputAlreadyDelegated) {
+		t.Errorf("err = %v, want errors.Is ErrOutputAlreadyDelegated", err)
+	}
+}
+
 func TestRunNode_WithRunID_IdempotentReplay(t *testing.T) {
 	child := newCountingStubNode("c", "the_value")
 	got1, got2 := "", ""
@@ -194,6 +232,32 @@ func TestRunNode_WithRunID_IdempotentReplay(t *testing.T) {
 	}
 	if got := child.runCount(); got != 1 {
 		t.Errorf("child.Run invocations = %d, want 1", got)
+	}
+}
+
+func TestRunNode_WithRunID_AndUseAsOutput_IdempotentReplay(t *testing.T) {
+	child := newCountingStubNode("c", "delegated_value")
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil,
+				WithRunID("stable-id"), WithUseAsOutput()); err != nil {
+				return "", err
+			}
+			if _, err := RunNode[string](ctx, child, nil,
+				WithRunID("stable-id"), WithUseAsOutput()); err != nil {
+				return "", err
+			}
+			return "parent_value", nil
+		},
+		NodeConfig{},
+	)
+	events := drainDynamic(t, n, "")
+	if got := child.runCount(); got != 1 {
+		t.Errorf("child.Run invocations = %d, want 1", got)
+	}
+	if got := parentTerminalOutput(t, events, "orch"); got != "delegated_value" {
+		t.Errorf("parent terminal Output = %v, want %q", got, "delegated_value")
 	}
 }
 
@@ -245,7 +309,8 @@ func runInOrchestratorWithErr[OUT any](t *testing.T, orchestratorFn func(NodeCon
 		got    OUT
 		gotErr error
 	)
-	n := NewDynamicNode[string, OUT]("orch",
+	n := NewDynamicNode[string, OUT](
+		"orch",
 		func(ctx NodeContext, _ string, _ func(*session.Event) error) (OUT, error) {
 			got, gotErr = orchestratorFn(ctx)
 			if gotErr != nil {
@@ -260,6 +325,37 @@ func runInOrchestratorWithErr[OUT any](t *testing.T, orchestratorFn func(NodeCon
 		return got, runErr
 	}
 	return got, gotErr
+}
+
+// outputBearingPaths returns NodeInfo.Path of every event whose
+// Output is non-nil, preserving order.
+func outputBearingPaths(events []*session.Event) []string {
+	var paths []string
+	for _, ev := range events {
+		if ev.Output == nil {
+			continue
+		}
+		var path string
+		if ev.NodeInfo != nil {
+			path = ev.NodeInfo.Path
+		}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+// parentTerminalOutput returns the Output of the last event
+// stamped with parentPath.
+func parentTerminalOutput(t *testing.T, events []*session.Event, parentPath string) any {
+	t.Helper()
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.NodeInfo != nil && ev.NodeInfo.Path == parentPath {
+			return ev.Output
+		}
+	}
+	t.Fatalf("no event with NodeInfo.Path == %q found among %d events", parentPath, len(events))
+	return nil
 }
 
 // countingStubNode is a stubNode that counts Run invocations so
