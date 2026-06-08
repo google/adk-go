@@ -443,4 +443,10 @@ func TestAgentNode_SynthesizesOutputFromModelText(t *testing.T) {
 	if got, want := gotFinal.Output, "Hello, world!"; got != want {
 		t.Errorf("final event Output = %v, want %q", got, want)
 	}
+	if gotFinal.NodeInfo == nil || !gotFinal.NodeInfo.MessageAsOutput {
+		t.Errorf("final event NodeInfo.MessageAsOutput = %v, want true", gotFinal.NodeInfo)
+	}
+	if gotPartial.NodeInfo != nil && gotPartial.NodeInfo.MessageAsOutput {
+		t.Errorf("partial event MessageAsOutput = true, want false/unset")
+	}
 }

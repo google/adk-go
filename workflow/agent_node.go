@@ -142,6 +142,11 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 // reply instead of the zero value. Empty model text yields an empty
 // "" output (a value, not "no output"), matching adk-python and
 // messageAsOutput; non-model events are left untouched.
+//
+// It also stamps NodeInfo.MessageAsOutput so readers (live and
+// resume) know this event's output was derived from the model
+// message, mirroring adk-python's process_llm_agent_output which
+// sets event.output and node_info.message_as_output together.
 func synthesizeAgentOutput(event *session.Event) {
 	if event == nil || event.Output != nil {
 		return
@@ -151,6 +156,10 @@ func synthesizeAgentOutput(event *session.Event) {
 	}
 	if text, ok := messageText(event); ok {
 		event.Output = text
+		if event.NodeInfo == nil {
+			event.NodeInfo = &session.NodeInfo{}
+		}
+		event.NodeInfo.MessageAsOutput = true
 	}
 }
 
