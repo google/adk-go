@@ -456,7 +456,13 @@ func runNode(
 		out <- completion
 	}()
 
-	for ev, err := range n.Run(ctx, input) {
+	validated, err := n.ValidateInput(input)
+	if err != nil {
+		completion.err = fmt.Errorf("%w for node %q: %w", ErrInputValidation, name, err)
+		return
+	}
+
+	for ev, err := range n.Run(ctx, validated) {
 		if err != nil {
 			completion.err = err
 			return

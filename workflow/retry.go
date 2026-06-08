@@ -61,7 +61,11 @@ func ShouldRetry(cfg *RetryConfig, err error, failedAttempts int) bool {
 		return false
 	}
 	if cfg.ShouldRetry != nil {
+		// If a custom retry predicate is explicitly provided, we honor it.
+		// This allows users to override the default behavior and retry validation errors if desired.
 		return cfg.ShouldRetry(err)
 	}
-	return true // Default to true if not specified
+	// By default, we do not retry input validation errors because the input is deterministic
+	// per activation. Retrying would just loop on the same failure.
+	return defaultShouldRetry(err)
 }
