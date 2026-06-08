@@ -93,76 +93,102 @@ func (w *Workflow) Resume(
 			resp any
 		}
 		var deferredHandoffs []deferredHandoff
-
-		// Pass 1: dispatch every waiting asker matched by
-		// responses (handoff → defer; re-entry → reschedule now).
 		scheduled := 0
+
+		// Act on each node the rehydration reconstructed, but only
+		// for interrupts answered in THIS turn (present in responses).
+		// Gating on the current turn's responses keeps Resume
+		// idempotent: a duplicate turn whose responses target an
+		// already-consumed interrupt reschedules nothing. Mirrors
+		// adk-python gating _extract_resume_output on ctx.resume_inputs.
 		for name, ns := range state.Nodes {
-			if ns.Status != NodeWaiting || ns.PendingRequest == nil {
-				continue
-			}
-			resp, ok := responses[ns.PendingRequest.InterruptID]
-			if !ok {
-				continue
-			}
-
-			// Schema validation: surface a typed error and leave
-			// the node parked so the caller can retry.
-			if ns.PendingRequest.ResponseSchema != nil {
-				validated, err := validateResumeResponse(resp, ns.PendingRequest.ResponseSchema)
-				if err != nil {
-					if !yield(nil, fmt.Errorf("%w: node %q: %w", ErrInvalidResumeResponse, name, err)) {
-						return
-					}
-					continue
-				}
-				resp = validated
-			}
-
 			node := s.nodesByName[name]
 			if node == nil {
 				continue
 			}
 
-			// Snapshot InterruptID before consuming PendingRequest;
-			// re-entry mode passes it through resumeInputs.
-			interruptID := ns.PendingRequest.InterruptID
+			// Which of this node's interrupts were answered this turn?
+			answeredNow := false
+			for id := range ns.ResumedInputs {
+				if _, ok := responses[id]; ok {
+					answeredNow = true
+					break
+				}
+			}
+			// WAITING nodes whose response arrived this turn but is not
+			// yet in history (the runner node path passes responses
+			// directly): fold it into ResumedInputs after validation.
+			freshMatched := map[string]any{}
+			if ns.Status == NodeWaiting {
+				schemaErr := false
+				for _, id := range ns.Interrupts {
+					resp, ok := responses[id]
+					if !ok {
+						continue
+					}
+					if sc := ns.interruptSchemas[id]; sc != nil {
+						validated, err := validateResumeResponse(resp, sc)
+						if err != nil {
+							if !yield(nil, fmt.Errorf("%w: node %q: %w", ErrInvalidResumeResponse, name, err)) {
+								return
+							}
+							schemaErr = true
+							break
+						}
+						resp = validated
+					}
+					freshMatched[id] = resp
+				}
+				if schemaErr {
+					continue
+				}
+			}
+			if !answeredNow && len(freshMatched) == 0 {
+				continue
+			}
 
-			// Consume PendingRequest before scheduling. A duplicate
-			// Resume with the same InterruptID will skip this node
-			// because PendingRequest is now nil.
-			ns.PendingRequest = nil
-			ns.Status = NodePending
-
+			reenter := false
 			if r := node.Config().RerunOnResume; r != nil && *r {
-				// Re-entry mode: re-activate the asker with its
-				// original input; the response is delivered via
-				// ctx.ResumedInput(InterruptID), not via the
-				// input parameter. Successors fire only when the
-				// re-entry activation produces an output.
-				//
-				// Accumulate into ns.ResumedInputs so a node that
-				// yields multiple RequestInputs across resume
-				// cycles sees every prior response, not just the
-				// most recent one. The map is cleared when the
-				// node transitions to NodeCompleted.
+				reenter = true
+			}
+
+			if reenter || ns.Status == NodePending {
+				// Re-entry: re-activate with the resolved responses
+				// delivered via ctx.ResumedInput.
 				if ns.ResumedInputs == nil {
 					ns.ResumedInputs = map[string]any{}
 				}
-				ns.ResumedInputs[interruptID] = resp
+				for id, resp := range freshMatched {
+					ns.ResumedInputs[id] = resp
+				}
+				ns.Status = NodePending
 				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.Branch, ns.ResumedInputs)
+				scheduled++
 			} else {
-				// Handoff mode: promote the asker as if it had
-				// emitted resp as its output. Recording Output
-				// lets the join barrier read it back without a
-				// special case for "completed via resume".
+				// Handoff: the response is the asker's output for its
+				// successors; the asker does not re-run.
+				out := ns.Output
+				if len(freshMatched) > 0 {
+					out = resumeOutput(freshMatched)
+				}
 				ns.Status = NodeCompleted
-				ns.Output = resp
+				ns.Output = out
+				ns.Interrupts = nil
 				deferredHandoffs = append(deferredHandoffs, deferredHandoff{
-					node: node, resp: resp,
+					node: node, resp: out,
 				})
+				// A matched asker is itself an effective resume even
+				// when terminal (no successors to count in Pass 2):
+				// without this a single-asker workflow would wrongly
+				// report ErrNothingToResume. answeredThisTurn gates on
+				// the response being new this turn (rehydration sets it
+				// from resolvedCount), so a duplicate resume stays a
+				// no-op. freshMatched covers the runner-direct path
+				// where the response is not yet in history.
+				if ns.answeredThisTurn || len(freshMatched) > 0 {
+					scheduled++
+				}
 			}
-			scheduled++
 		}
 
 		// Pass 2: walk successors of the deferred handoffs.
@@ -183,7 +209,14 @@ func (w *Workflow) Resume(
 				parentBranch = ns.Branch
 			}
 			for _, succ := range findSuccessors(s.graph, s.state, h.node, h.resp, nil, parentBranch) {
+				// Skip a successor that already produced output on a
+				// prior turn: re-triggering it would re-run completed
+				// work (a duplicate resume). Keeps Resume idempotent.
+				if state.completed[succ.node.Name()] {
+					continue
+				}
 				s.scheduleNode(succ.node, succ.input, succ.triggeredBy, succ.branch)
+				scheduled++
 			}
 		}
 
@@ -194,13 +227,20 @@ func (w *Workflow) Resume(
 
 		s.run(yield)
 		s.wg.Wait()
-
-		// Persist the post-resume state via a session.Event with
-		// StateDelta. If new nodes paused during this Resume the
-		// next turn will see them; if the run completed the state
-		// reflects that too.
-		yieldRunStateEvent(ctx, w.name, s.state, yield)
 	}
+}
+
+// resumeOutput collapses a node's matched interrupt responses into a
+// single handoff output: one response forwards its value directly,
+// several forward the whole map. Mirrors adk-python
+// _extract_resume_output.
+func resumeOutput(matched map[string]any) any {
+	if len(matched) == 1 {
+		for _, v := range matched {
+			return v
+		}
+	}
+	return matched
 }
 
 // validateResumeResponse coerces resp into the type described by
