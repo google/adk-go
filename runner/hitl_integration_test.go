@@ -313,6 +313,90 @@ func TestRunner_WorkflowHITL_FunctionResponseRoutedByID(t *testing.T) {
 	}
 }
 
+// TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume is the
+// end-to-end acceptance scenario for dynamic-workflow resume/dedup +
+// HITL (b/515644762): a dynamic orchestrator runs two children
+// sequentially via RunNode. The first completes; the second requests
+// human input and suspends the whole parent. On resume the parent
+// body re-executes from the top, and the contract requires:
+//   - the first RunNode returns the cached output (the first child
+//     does NOT run again), and
+//   - the second RunNode observes the user's response and the parent
+//     completes with its final value.
+func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
+	ctx := context.Background()
+
+	const interruptID = "approval"
+
+	var firstChildRuns atomic.Int32
+	firstChild := workflow.NewFunctionNode(
+		"first_child",
+		func(ctx agent.InvocationContext, input string) (string, error) {
+			firstChildRuns.Add(1)
+			return "X:" + input, nil
+		},
+		workflow.NodeConfig{},
+	)
+
+	// secondChild pauses on a long-running interrupt the first time
+	// and emits the resumed response as its output on re-entry.
+	secondChild := newHitlAsker("second_child", interruptID, true /*rerun*/)
+
+	var parentOutput atomic.Value
+	orchestrator := workflow.NewDynamicNode[string, string](
+		"orchestrate",
+		func(nc workflow.NodeContext, input string, _ func(*session.Event) error) (string, error) {
+			// Stable run IDs so the cache correlates the same child
+			// across the fresh turn and the resume re-execution.
+			x, err := workflow.RunNode[string](nc, firstChild, input, workflow.WithRunID("c1"))
+			if err != nil {
+				return "", err
+			}
+			y, err := workflow.RunNode[any](nc, secondChild, nil, workflow.WithRunID("c2"))
+			if err != nil {
+				// Pause: ErrNodeInterrupted (swallowed by dynamicNode.Run).
+				return "", err
+			}
+			decision, _ := y.(string)
+			out := x + "|Y:" + decision
+			parentOutput.Store(out)
+			return out, nil
+		},
+		workflow.NodeConfig{},
+	)
+
+	r, userID, sessionID := newRunnerForWorkflow(t, workflow.Chain(workflow.Start, orchestrator))
+
+	// Turn 1: first child completes, second child suspends.
+	turn1 := drainRunner(t, r.Run(
+		ctx, userID, sessionID,
+		genai.NewContentFromText("draft", genai.RoleUser),
+		agent.RunConfig{},
+	))
+	callID, callName := findLongRunningInterrupt(turn1)
+	if callID != interruptID {
+		t.Fatalf("turn 1 interrupt ID = %q, want %q; events:\n%s", callID, interruptID, debugEvents(turn1))
+	}
+	if got := firstChildRuns.Load(); got != 1 {
+		t.Fatalf("first child ran %d times on turn 1, want 1", got)
+	}
+
+	// Turn 2: resume with the human's response. The parent re-runs
+	// from the top; the first child must be served from cache.
+	drainRunner(t, r.Run(
+		ctx, userID, sessionID,
+		resumeContent(callID, callName, "yes"),
+		agent.RunConfig{},
+	))
+
+	if got := firstChildRuns.Load(); got != 1 {
+		t.Errorf("first child ran %d times total, want 1 (re-entry must serve it from cache, not re-execute)", got)
+	}
+	if got, want := parentOutput.Load(), "X:draft|Y:yes"; got != want {
+		t.Errorf("parent output = %v, want %q (cached first child + resumed second child)", got, want)
+	}
+}
+
 // debugEvents formats a slice of session.Event into a human-readable
 // summary used in test failure messages.
 func debugEvents(events []*session.Event) string {
