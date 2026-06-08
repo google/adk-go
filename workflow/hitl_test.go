@@ -157,12 +157,11 @@ func TestScheduler_HitlNode_PreservesExplicitInterruptID(t *testing.T) {
 	}
 }
 
-// TestScheduler_HitlNode_MultipleRequestsFails verifies the
-// single-request-per-activation invariant: a node yielding two
-// RequestedInput events surfaces ErrMultipleInputRequests at
-// completion and is treated as failed, so it does not silently
-// park in NodeWaiting.
-func TestScheduler_HitlNode_MultipleRequestsFails(t *testing.T) {
+// TestScheduler_HitlNode_MultipleRequestsPark verifies a node may
+// raise more than one interrupt in a single activation: both are
+// recorded on NodeState.Interrupts and the node parks NodeWaiting
+// (matching adk-python, which accumulates a set of interrupt IDs).
+func TestScheduler_HitlNode_MultipleRequestsPark(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 
 	asker := newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
@@ -172,9 +171,19 @@ func TestScheduler_HitlNode_MultipleRequestsFails(t *testing.T) {
 
 	w := mustNew(t, []Edge{{From: Start, To: asker}})
 
-	gotErr := drainErr(t, w.Run(mockCtx))
-	if !errors.Is(gotErr, ErrMultipleInputRequests) {
-		t.Errorf("Run error = %v, want ErrMultipleInputRequests (node must fail, not park)", gotErr)
+	// drain fails the test on any error; multiple interrupts must
+	// park cleanly rather than surface an error. Both pause events
+	// carry their interrupt on LongRunningToolIDs — the signal the
+	// scheduler accumulates and history rehydration reads back.
+	events := drain(t, w.Run(mockCtx))
+	got := map[string]bool{}
+	for _, ev := range events {
+		for _, id := range ev.LongRunningToolIDs {
+			got[id] = true
+		}
+	}
+	if !got["first"] || !got["second"] {
+		t.Errorf("long-running interrupts = %v, want both first and second", got)
 	}
 }
 
