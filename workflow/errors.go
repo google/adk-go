@@ -38,6 +38,10 @@ var (
 	// activation interrupting concurrently — at most one pending HITL
 	// per activation.
 	ErrParallelHITLUnsupported = errors.New("workflow: parallel HITL is not supported")
+
+	// ErrOutputAlreadyDelegated rejects a second WithUseAsOutput
+	// child in the same parent activation.
+	ErrOutputAlreadyDelegated = errors.New("workflow: parent already has a use_as_output child")
 )
 
 // NodeRunError wraps a sentinel with the failing child's identity.
