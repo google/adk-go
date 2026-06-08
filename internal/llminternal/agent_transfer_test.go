@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -47,6 +48,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 	}
 
 	check := func(t *testing.T, curAgent, root agent.Agent, wantParent string, wantAgents, unwantAgents []string) {
+		t.Helper()
 		req := &model.LLMRequest{}
 
 		parents, err := parentmap.New(root)
@@ -117,6 +119,22 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			})
 		}) {
 			t.Errorf("instruction does not include subagents, got: %s", strings.Join(instructions, "\n"))
+		}
+		if len(wantAgents) > 0 {
+			transferTool, ok := gotTool.(*llminternal.TransferToAgentTool)
+			if !ok {
+				t.Fatalf("failed to type convert tool %v, got %T", wantToolName, gotTool)
+			}
+			declaration := transferTool.Declaration()
+			gotEnums := slices.Clone(declaration.Parameters.Properties["agent_name"].Enum)
+			wantEnums := slices.Clone(wantAgents)
+			// Add parent to the list of agents to transfer to, if not already present.
+			if wantParent != "" && !slices.Contains(wantAgents, wantParent) {
+				wantEnums = append(wantEnums, wantParent)
+			}
+			if diff := cmp.Diff(wantEnums, gotEnums, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+				t.Fatalf("failed to set agent_name enums (-want, +got): %v", diff)
+			}
 		}
 		if len(unwantAgents) > 0 && slices.ContainsFunc(instructions, func(s string) bool {
 			return slices.ContainsFunc(unwantAgents, func(unwanted string) bool {
@@ -417,7 +435,7 @@ func TestAgentTransfer_ProcessRequest(t *testing.T) {
 		x int
 	}
 	var req model.LLMRequest
-	handler := func(ctx tool.Context, input Input) (int, error) {
+	handler := func(ctx agent.ToolContext, input Input) (int, error) {
 		return input.x, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{
@@ -453,7 +471,7 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		curTool := &llminternal.TransferToAgentTool{}
 
 		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-		ctx := toolinternal.NewToolContext(invCtx, "", &session.EventActions{}, nil)
+		ctx := agent.NewToolContext(invCtx, "", &session.EventActions{}, nil)
 
 		wantAgentName := "TestAgent"
 		args := map[string]any{"agent_name": wantAgentName}
@@ -479,7 +497,7 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				curTool := &llminternal.TransferToAgentTool{}
-				ctx := toolinternal.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil, nil)
+				ctx := agent.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil, nil)
 				if got, err := curTool.Run(ctx, tc.args); err == nil {
 					t.Fatalf("Run(%v) = (%v, %v), want error", tc.args, got, err)
 				}

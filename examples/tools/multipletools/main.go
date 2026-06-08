@@ -42,7 +42,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-lite", &genai.ClientConfig{
 		APIKey: os.Getenv("GOOGLE_API_KEY"),
 	})
 	if err != nil {
@@ -68,7 +68,7 @@ func main() {
 	type Output struct {
 		Poem string `json:"poem"`
 	}
-	handler := func(ctx tool.Context, input Input) (Output, error) {
+	handler := func(ctx agent.ToolContext, input Input) (Output, error) {
 		return Output{
 			Poem: strings.Repeat("A line of a poem,", input.LineCount) + "\n",
 		}, nil

@@ -111,7 +111,10 @@ func TestExecutor_Execute(t *testing.T) {
 			wantEvents: []a2a.Event{
 				newFinalStatusUpdate(
 					task, a2a.TaskStateFailed,
-					a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.NewTextPart("failed to create a session: session creation failed")),
+					a2a.NewMessageForTask(a2a.MessageRoleAgent, task, &a2a.Part{
+						Content:  a2a.Text("failed to create a session: session creation failed"),
+						Metadata: map[string]any{metadataIsErrMessageKey: true},
+					}),
 				),
 			},
 		},
@@ -180,7 +183,10 @@ func TestExecutor_Execute(t *testing.T) {
 				a2a.NewArtifactEvent(task, a2a.NewTextPart("Hello")),
 				newFinalStatusUpdate(
 					task, a2a.TaskStateFailed,
-					a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.NewTextPart("agent run failed: OOF")),
+					a2a.NewMessageForTask(a2a.MessageRoleAgent, task, &a2a.Part{
+						Content:  a2a.Text("agent run failed: OOF"),
+						Metadata: map[string]any{metadataIsErrMessageKey: true},
+					}),
 				),
 			},
 		},

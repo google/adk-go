@@ -310,7 +310,7 @@ type OnModelErrorCallback func(ctx agent.CallbackContext, llmRequest *model.LLMR
 //
 // To modify tool arguments and still run the tool,
 // update args in place and return (nil, nil).
-type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
+type BeforeToolCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error)
 
 // AfterToolCallback is a function type executed after a tool's Run method has completed,
 // regardless of whether the tool returned a result or an error.
@@ -319,13 +319,13 @@ type BeforeToolCallback func(ctx tool.Context, tool tool.Tool, args map[string]a
 // If a callback returns a non-nil result or an error:
 //   - execution of remaining callbacks stops
 //   - the returned result and/or error is used as the final tool output
-type AfterToolCallback func(ctx tool.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
+type AfterToolCallback func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
 // OnToolErrorCallback that is called when receiving an error response from tool execution.
 //
 // If it returns non-nil LLMResponse or error, the actual model response/error
 // is replaced with the returned response/error.
-type OnToolErrorCallback func(ctx tool.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
+type OnToolErrorCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
 
 // IncludeContents controls what parts of prior conversation history is received by llmagent.
 type IncludeContents string
@@ -391,6 +391,49 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			}
 		}
 	}
+}
+
+func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:    ctx.Artifacts(),
+		Memory:       ctx.Memory(),
+		Session:      ctx.Session(),
+		Branch:       ctx.Branch(),
+		Agent:        a,
+		UserContent:  ctx.UserContent(),
+		RunConfig:    ctx.RunConfig(),
+		InvocationID: ctx.InvocationID(),
+	})
+
+	f := &llminternal.Flow{
+		Model:                 a.model,
+		RequestProcessors:     llminternal.DefaultRequestProcessors,
+		ResponseProcessors:    llminternal.DefaultResponseProcessors,
+		BeforeModelCallbacks:  a.beforeModelCallbacks,
+		AfterModelCallbacks:   a.afterModelCallbacks,
+		OnModelErrorCallbacks: a.onModelErrorCallbacks,
+		BeforeToolCallbacks:   a.beforeToolCallbacks,
+		AfterToolCallbacks:    a.afterToolCallbacks,
+		OnToolErrorCallbacks:  a.onToolErrorCallbacks,
+	}
+
+	sess, innerIter, err := f.RunLive(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	wrappedIter := func(yield func(*session.Event, error) bool) {
+		for ev, err := range innerIter {
+			if err == nil {
+				a.maybeSaveOutputToState(ev)
+			}
+			if !yield(ev, err) {
+				return
+			}
+		}
+	}
+
+	return sess, wrappedIter, nil
 }
 
 // maybeSaveOutputToState saves the model output to state if needed. skip if the event

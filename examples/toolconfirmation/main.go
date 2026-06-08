@@ -79,7 +79,7 @@ var (
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-2.5-flash", &genai.ClientConfig{})
+	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-lite", &genai.ClientConfig{})
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
@@ -126,7 +126,7 @@ func main() {
 }
 
 // requestVacationDays simulates the *initiation* of a long-running ticket creation task.
-func requestVacationDays(ctx tool.Context, args RequestVacationArgs) (*RequestVacationResults, error) {
+func requestVacationDays(ctx agent.ToolContext, args RequestVacationArgs) (*RequestVacationResults, error) {
 	log.Printf("TOOL_EXEC: 'requestVacationDays' called with days: %d for user %s (Call ID: %s)\n", args.Days, args.UserID, ctx.FunctionCallID())
 
 	if args.Days <= 0 {
