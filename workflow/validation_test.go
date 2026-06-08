@@ -49,9 +49,9 @@ func TestUniqueNames(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			nodeA := &dummyNode{name: tc.setup.aName}
-			nodeB := &dummyNode{name: tc.setup.bName}
-			nodeC := &dummyNode{name: tc.setup.cName}
+			nodeA := newDummyNode(tc.setup.aName)
+			nodeB := newDummyNode(tc.setup.bName)
+			nodeC := newDummyNode(tc.setup.cName)
 			edges := []Edge{
 				{From: nodeA, To: nodeB},
 				{From: nodeB, To: nodeC},
@@ -79,8 +79,8 @@ func TestStartNodePresent(t *testing.T) {
 		{
 			name: "with start node",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -90,8 +90,8 @@ func TestStartNodePresent(t *testing.T) {
 		{
 			name: "no start node",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: nodeA, To: nodeB},
 				}
@@ -123,8 +123,8 @@ func TestStartNodeNoIncomingEdges(t *testing.T) {
 		{
 			name: "start node with no incoming edges",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -134,8 +134,8 @@ func TestStartNodeNoIncomingEdges(t *testing.T) {
 		{
 			name: "start node has incoming edges",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: nodeA, To: Start},
 					{From: Start, To: nodeB},
@@ -160,8 +160,8 @@ func TestStartNodeNoIncomingEdges(t *testing.T) {
 }
 
 func TestDuplicateEdges(t *testing.T) {
-	nodeA := &dummyNode{name: "A"}
-	nodeB := &dummyNode{name: "B"}
+	nodeA := newDummyNode("A")
+	nodeB := newDummyNode("B")
 	tests := []struct {
 		name      string
 		edges     []Edge
@@ -204,9 +204,9 @@ func TestDuplicateEdges(t *testing.T) {
 }
 
 func TestDefaultRoute(t *testing.T) {
-	nodeA := &dummyNode{name: "A"}
-	nodeB := &dummyNode{name: "B"}
-	nodeC := &dummyNode{name: "C"}
+	nodeA := newDummyNode("A")
+	nodeB := newDummyNode("B")
+	nodeC := newDummyNode("C")
 	tests := []struct {
 		name      string
 		edges     []Edge
@@ -233,9 +233,9 @@ func TestDefaultRoute(t *testing.T) {
 }
 
 func TestConnectivity(t *testing.T) {
-	nodeA := &dummyNode{name: "A"}
-	nodeB := &dummyNode{name: "B"}
-	nodeC := &dummyNode{name: "C"}
+	nodeA := newDummyNode("A")
+	nodeB := newDummyNode("B")
+	nodeC := newDummyNode("C")
 	tests := []struct {
 		name           string
 		edges          []Edge
@@ -283,8 +283,8 @@ func TestValidateCycles(t *testing.T) {
 		{
 			name: "no cycles",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -295,10 +295,10 @@ func TestValidateCycles(t *testing.T) {
 		{
 			name: "no cycles diamond graph",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
-				nodeC := &dummyNode{name: "C"}
-				nodeD := &dummyNode{name: "D"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
+				nodeC := newDummyNode("C")
+				nodeD := newDummyNode("D")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -312,8 +312,8 @@ func TestValidateCycles(t *testing.T) {
 		{
 			name: "only conditional cycle",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -325,10 +325,10 @@ func TestValidateCycles(t *testing.T) {
 		{
 			name: "both conditional and unconditional cycles",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
-				nodeC := &dummyNode{name: "C"}
-				nodeD := &dummyNode{name: "D"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
+				nodeC := newDummyNode("C")
+				nodeD := newDummyNode("D")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -343,8 +343,8 @@ func TestValidateCycles(t *testing.T) {
 		{
 			name: "cycle with default route",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -374,7 +374,7 @@ func TestValidateCycles(t *testing.T) {
 
 func TestValidateSubWorkflowNames(t *testing.T) {
 	// Create a valid sub-workflow
-	subWf, err := New("inner_wf", []Edge{{From: Start, To: &dummyNode{name: "A"}}})
+	subWf, err := New("inner_wf", []Edge{{From: Start, To: newDummyNode("A")}})
 	if err != nil {
 		t.Fatalf("failed to create sub-workflow: %v", err)
 	}

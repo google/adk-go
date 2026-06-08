@@ -233,7 +233,11 @@ func TestToolNode_Run(t *testing.T) {
 			}
 
 			mockCtx := newMockCtx(t)
-			events := node.Run(mockCtx, tc.nodeInput)
+			validatedInput, err := node.ValidateInput(tc.nodeInput)
+			if err != nil {
+				t.Fatalf("ValidateInput failed: %v", err)
+			}
+			events := node.Run(mockCtx, validatedInput)
 
 			var got string
 			count := 0

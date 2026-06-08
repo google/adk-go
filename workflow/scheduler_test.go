@@ -205,7 +205,7 @@ func TestScheduler_NodeTimeout(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 
 	slow := newCancelObservingNode("slow")
-	slow.cfg = NodeConfig{Timeout: 50 * time.Millisecond}
+	slow.config = NodeConfig{Timeout: 50 * time.Millisecond}
 
 	w := mustNew(t, []Edge{{From: Start, To: slow}})
 
@@ -380,16 +380,12 @@ func (n *erroringNode) Run(_ agent.InvocationContext, _ any) iter.Seq2[*session.
 // cancellation and timeout behaviour.
 type cancelObservingNode struct {
 	BaseNode
-	cfg            NodeConfig
 	cancelObserved atomic.Bool
 }
 
 func newCancelObservingNode(name string) *cancelObservingNode {
 	return &cancelObservingNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
-
-// Config returns n.cfg, which tests may mutate after construction.
-func (n *cancelObservingNode) Config() NodeConfig { return n.cfg }
 
 func (n *cancelObservingNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
@@ -524,18 +520,14 @@ type retryTestNode struct {
 	BaseNode
 	failCount int
 	calls     atomic.Int32
-	cfg       NodeConfig
 }
 
 func newRetryTestNode(name string, failCount int, cfg NodeConfig) *retryTestNode {
 	return &retryTestNode{
 		BaseNode:  NewBaseNode(name, "", cfg),
 		failCount: failCount,
-		cfg:       cfg,
 	}
 }
-
-func (n *retryTestNode) Config() NodeConfig { return n.cfg }
 
 func (n *retryTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
