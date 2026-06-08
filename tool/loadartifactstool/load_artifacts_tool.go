@@ -128,6 +128,9 @@ func (t *artifactsTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequ
 }
 
 func (t *artifactsTool) appendInitialInstructions(ctx agent.ToolContext, req *model.LLMRequest) error {
+	if ctx.Artifacts() == nil {
+		return fmt.Errorf("artifact service is not configured; the load_artifacts tool requires an artifact service to be set up")
+	}
 	resp, err := ctx.Artifacts().List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", err)
@@ -179,6 +182,10 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.ToolContext, 
 	}
 	if len(artifactNames) == 0 {
 		return nil
+	}
+
+	if ctx.Artifacts() == nil {
+		return fmt.Errorf("artifact service is not configured; the load_artifacts tool requires an artifact service to be set up")
 	}
 
 	results := make([]*genai.Content, len(artifactNames))
