@@ -238,8 +238,11 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			SkipSummarization:          event.Actions.SkipSummarization,
 		},
 		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
+		Routes:             slices.Clone(event.Routes),
+		RequestedInput:     event.RequestedInput,
 		LLMResponse:        event.LLMResponse,
 		Output:             event.Output,
+		NodeInfo:           event.NodeInfo,
 	}
 
 	// update the in-memory session service
