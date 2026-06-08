@@ -81,6 +81,8 @@ type storageEvent struct {
 	LongRunningToolIDsJSON dynamicJSON
 	RoutesJSON             dynamicJSON
 	OutputJSON             dynamicJSON
+	NodeInfoJSON           dynamicJSON
+	RequestedInputJSON     dynamicJSON
 	Branch                 *string
 	Timestamp              time.Time `gorm:"precision:6"`
 
@@ -151,6 +153,22 @@ func createStorageEvent(session session.Session, event *session.Event) (*storage
 			return nil, fmt.Errorf("failed to marshal output: %w", err)
 		}
 		storageEv.OutputJSON = outputJSON
+	}
+
+	if event.NodeInfo != nil {
+		nodeInfoJSON, err := json.Marshal(event.NodeInfo)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal node info: %w", err)
+		}
+		storageEv.NodeInfoJSON = nodeInfoJSON
+	}
+
+	if event.RequestedInput != nil {
+		reqInputJSON, err := json.Marshal(event.RequestedInput)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal requested input: %w", err)
+		}
+		storageEv.RequestedInputJSON = reqInputJSON
 	}
 
 	// Handle optional fields by taking the address of the value.
@@ -282,6 +300,20 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		}
 	}
 
+	var nodeInfo *session.NodeInfo
+	if se.NodeInfoJSON != nil {
+		if err := json.Unmarshal([]byte(se.NodeInfoJSON), &nodeInfo); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal node info: %w", err)
+		}
+	}
+
+	var requestedInput *session.RequestInput
+	if se.RequestedInputJSON != nil {
+		if err := json.Unmarshal([]byte(se.RequestedInputJSON), &requestedInput); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal requested input: %w", err)
+		}
+	}
+
 	// --- Handle simple pointer fields (dereference or use zero value) ---
 	// Use the helper to safely get the value or its zero-value default
 	branch := derefOrZero(se.Branch)
@@ -302,6 +334,8 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		Routes:             routes,
 		Branch:             branch,
 		Output:             output,
+		NodeInfo:           nodeInfo,
+		RequestedInput:     requestedInput,
 		LLMResponse: model.LLMResponse{
 			Content:           content,
 			GroundingMetadata: groundingMetadata,

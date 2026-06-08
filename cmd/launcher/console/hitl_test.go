@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/adk/workflow"
 )
 
@@ -53,8 +54,9 @@ func captureStdout(t *testing.T, f func()) string {
 // verifies the detection contract: an event is a HITL prompt
 // iff it has a non-empty LongRunningToolIDs and one of its
 // content parts is a FunctionCall whose ID is in that set. The
-// function name is not the discriminator — workflow input and
-// any future kind all flow through the same detection path.
+// function name is not the discriminator — workflow input,
+// tool confirmation, and any future kind all flow through the
+// same detection path.
 func TestCollectPendingInterrupts_DetectionByLongRunningToolIDs(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -117,6 +119,28 @@ func TestCollectPendingInterrupts_DetectionByLongRunningToolIDs(t *testing.T) {
 			},
 			want: []pendingInterrupt{
 				{id: "int-1", name: workflow.WorkflowInputFunctionCallName, args: map[string]any{"message": "ok?"}},
+			},
+		},
+		{
+			name: "tool confirmation on Event.LLMResponse.Content is detected",
+			events: []*session.Event{
+				{
+					LongRunningToolIDs: []string{"conf-1"},
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{
+									ID:   "conf-1",
+									Name: toolconfirmation.FunctionCallName,
+									Args: map[string]any{"toolConfirmation": map[string]any{"hint": "really delete?"}},
+								},
+							}},
+						},
+					},
+				},
+			},
+			want: []pendingInterrupt{
+				{id: "conf-1", name: toolconfirmation.FunctionCallName, args: map[string]any{"toolConfirmation": map[string]any{"hint": "really delete?"}}},
 			},
 		},
 		{
@@ -249,6 +273,41 @@ func TestBuildInterruptResponse_WorkflowInput(t *testing.T) {
 			if !reflect.DeepEqual(part.FunctionResponse.Response, tc.wantResponse) {
 				t.Errorf("Response = %#v, want %#v",
 					part.FunctionResponse.Response, tc.wantResponse)
+			}
+		})
+	}
+}
+
+// TestBuildInterruptResponse_ToolConfirmation verifies the
+// tool-confirmation dispatch: positive answers map to
+// {"confirmed": true}, everything else (including blank lines)
+// to {"confirmed": false}, case-insensitive.
+func TestBuildInterruptResponse_ToolConfirmation(t *testing.T) {
+	tests := []struct {
+		userInput string
+		wantValue bool
+	}{
+		{"yes\n", true},
+		{"YES\n", true},
+		{" Yes \n", true},
+		{"y\n", true},
+		{"true\n", true},
+		{"confirm\n", true},
+		{"no\n", false},
+		{"n\n", false},
+		{"\n", false},
+		{"anything else\n", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.userInput, func(t *testing.T) {
+			p := pendingInterrupt{id: "c", name: toolconfirmation.FunctionCallName}
+			part := buildInterruptResponse(p, tc.userInput)
+			confirmed, ok := part.FunctionResponse.Response["confirmed"]
+			if !ok {
+				t.Fatalf("Response missing 'confirmed'; got %v", part.FunctionResponse.Response)
+			}
+			if confirmed != tc.wantValue {
+				t.Errorf("confirmed = %v, want %v", confirmed, tc.wantValue)
 			}
 		})
 	}
