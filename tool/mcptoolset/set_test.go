@@ -111,7 +111,8 @@ func TestMCPToolSet(t *testing.T) {
 
 	wantEvents := []*session.Event{
 		{
-			Author: "weather_time_agent",
+			Author:   "weather_time_agent",
+			NodeInfo: &session.NodeInfo{Path: "weather_time_agent"},
 			LLMResponse: model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
@@ -128,7 +129,8 @@ func TestMCPToolSet(t *testing.T) {
 			},
 		},
 		{
-			Author: "weather_time_agent",
+			Author:   "weather_time_agent",
+			NodeInfo: &session.NodeInfo{Path: "weather_time_agent"},
 			LLMResponse: model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{
@@ -146,7 +148,8 @@ func TestMCPToolSet(t *testing.T) {
 			},
 		},
 		{
-			Author: "weather_time_agent",
+			Author:   "weather_time_agent",
+			NodeInfo: &session.NodeInfo{Path: "weather_time_agent"},
 			LLMResponse: model.LLMResponse{
 				Content: &genai.Content{
 					Parts: []*genai.Part{

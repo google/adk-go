@@ -528,8 +528,9 @@ func (s *scheduler) cancelAll() {
 // Workflow.Run); it is the only mutator of state.Nodes and the
 // node-side accumulators.
 func (s *scheduler) run(yield func(*session.Event, error) bool) {
-	var pendingErr error // first non-nil node error; surfaced after drain
-	draining := false    // true once cancelAll has run; remaining queue items are drained without yielding or scheduling new successors
+	var pendingErr error  // first non-nil node error; surfaced after drain
+	draining := false     // true once cancelAll has run; remaining queue items are drained without yielding or scheduling new successors
+	consumerGone := false // true once the caller broke the range loop; no further yield is allowed
 
 	doneChan := s.parentCtx.Done()
 
@@ -551,6 +552,7 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 			if !draining {
 				if !yield(it.ev, nil) {
 					draining = true
+					consumerGone = true
 					s.cancelAll()
 				}
 			}
@@ -583,9 +585,10 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	}
 
 	// All goroutines have returned and pushed their final events.
-	// Surface the first error to the caller, unless we're already
-	// draining.
-	if pendingErr != nil {
+	// Surface the first error to the caller — but not if the caller
+	// already broke the range loop, since yielding after a false return
+	// panics the iterator.
+	if pendingErr != nil && !consumerGone {
 		yield(nil, pendingErr)
 	}
 }
@@ -947,6 +950,12 @@ func aggregatePredecessorBranches(g *graph, state *RunState, target Node) []stri
 func startNodeSpan(ctx agent.InvocationContext, n Node) (trace.Span, agent.InvocationContext) {
 	if n == Start {
 		// Don't create span for the Start node.
+		return noop.Span{}, ctx
+	}
+	if n.Config().EmitsOwnSpan {
+		// The node body starts its own span (e.g. an LlmAgent node's
+		// wrapped agent emits invoke_agent); don't add an invoke_node
+		// wrapper around it.
 		return noop.Span{}, ctx
 	}
 	spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationNode{Node: n})
