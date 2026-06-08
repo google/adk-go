@@ -27,6 +27,11 @@ import (
 var (
 	_ Node = (*startNode)(nil)
 	_ Node = (*FunctionNode)(nil)
+	_ Node = (*AgentNode)(nil)
+	_ Node = (*ToolNode)(nil)
+	_ Node = (*JoinNode)(nil)
+	_ Node = (*ParallelWorker)(nil)
+	_ Node = (*WorkflowNode)(nil)
 )
 
 func TestNewBaseNode_RoundTrip(t *testing.T) {
@@ -130,6 +135,16 @@ func TestBaseNode_NilSchemas(t *testing.T) {
 	if diff := cmp.Diff(input, got); diff != "" {
 		t.Errorf("ValidateInput mismatch (-want +got):\n%s", diff)
 	}
+
+	// ValidateOutput with nil schema is a passthrough.
+	output := map[string]any{"value": "world"}
+	gotOut, err := b.ValidateOutput(output)
+	if err != nil {
+		t.Fatalf("ValidateOutput failed: %v", err)
+	}
+	if diff := cmp.Diff(output, gotOut); diff != "" {
+		t.Errorf("ValidateOutput mismatch (-want +got):\n%s", diff)
+	}
 }
 
 func TestBaseNode_WithSchemas(t *testing.T) {
@@ -171,5 +186,22 @@ func TestBaseNode_WithSchemas(t *testing.T) {
 	_, err = b.ValidateInput(invalidInput)
 	if err == nil {
 		t.Error("expected ValidateInput to fail on invalid input type, but succeeded")
+	}
+
+	// Valid output is returned unchanged.
+	output := map[string]any{"value": "world"}
+	gotOut, err := b.ValidateOutput(output)
+	if err != nil {
+		t.Fatalf("ValidateOutput failed on valid output: %v", err)
+	}
+	if diff := cmp.Diff(output, gotOut); diff != "" {
+		t.Errorf("ValidateOutput mismatch (-want +got):\n%s", diff)
+	}
+
+	// Invalid output fails validation.
+	invalidOutput := map[string]any{"value": 123}
+	_, err = b.ValidateOutput(invalidOutput)
+	if err == nil {
+		t.Error("expected ValidateOutput to fail on invalid output type, but succeeded")
 	}
 }

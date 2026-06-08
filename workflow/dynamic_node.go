@@ -125,6 +125,12 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 			return
 		}
 
+		// nil output: nothing to emit as a terminal event — the body
+		// either produced no output or already carried it on a content
+		// event.
+		if any(out) == nil {
+			return
+		}
 		ev := session.NewEvent(parentNC.InvocationID())
 		if delegated, ok := sub.delegatedOutput(); ok {
 			ev.Output = delegated
