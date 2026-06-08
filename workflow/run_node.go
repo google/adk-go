@@ -23,6 +23,7 @@ type runNodeOptions struct {
 	customRunID    string
 	useSubBranch   bool
 	overrideBranch string
+	useAsOutput    bool
 }
 
 // WithRunID overrides the auto-generated counter with a stable
@@ -52,6 +53,14 @@ func WithRunID(id string) RunNodeOption {
 // and the sub-branch segment is appended to it.
 func WithUseSubBranch() RunNodeOption {
 	return func(o *runNodeOptions) { o.useSubBranch = true }
+}
+
+// WithUseAsOutput promotes this child's output to the parent
+// dynamic node's terminal Output, discarding the value returned by
+// the orchestrator body. At most one delegating child per parent
+// activation; a second one fails with ErrOutputAlreadyDelegated.
+func WithUseAsOutput() RunNodeOption {
+	return func(o *runNodeOptions) { o.useAsOutput = true }
 }
 
 // WithOverrideBranch replaces the inherited branch verbatim,
