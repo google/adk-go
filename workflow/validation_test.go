@@ -594,3 +594,129 @@ func TestSchemaIsString(t *testing.T) {
 		})
 	}
 }
+
+func TestStaticSchemaValidation(t *testing.T) {
+	type schemaTypeA struct {
+		X int    `json:"x"`
+		Y string `json:"y"`
+	}
+	type schemaTypeB struct {
+		Val string `json:"val"`
+	}
+
+	schemaA, err := jsonschema.For[schemaTypeA](nil)
+	if err != nil {
+		t.Fatalf("failed to create schemaA: %v", err)
+	}
+	schemaAResolved, err := schemaA.Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schemaA: %v", err)
+	}
+
+	schemaB, err := jsonschema.For[schemaTypeB](nil)
+	if err != nil {
+		t.Fatalf("failed to create schemaB: %v", err)
+	}
+	schemaBResolved, err := schemaB.Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schemaB: %v", err)
+	}
+
+	// Schema A with custom PropertyOrder
+	schemaA1 := &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"foo": {Type: "string"},
+			"bar": {Type: "integer"},
+		},
+		PropertyOrder: []string{"foo", "bar"},
+	}
+	schemaA1Resolved, err := schemaA1.Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schemaA1: %v", err)
+	}
+
+	schemaA2 := &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"foo": {Type: "string"},
+			"bar": {Type: "integer"},
+		},
+		PropertyOrder: []string{"bar", "foo"},
+	}
+	schemaA2Resolved, err := schemaA2.Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schemaA2: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		edges          func() []Edge
+		expectErrorMsg string
+	}{
+		{
+			name: "same Go type -> success",
+			edges: func() []Edge {
+				nodeA := &dummyNode{BaseNode: NewBaseNodeWithSchemas("A", "", NodeConfig{}, nil, schemaAResolved)}
+				nodeB := &dummyNode{BaseNode: NewBaseNodeWithSchemas("B", "", NodeConfig{}, schemaAResolved, nil)}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+				}
+			},
+		},
+		{
+			name: "different Go types -> error",
+			edges: func() []Edge {
+				nodeA := &dummyNode{BaseNode: NewBaseNodeWithSchemas("A", "", NodeConfig{}, nil, schemaAResolved)}
+				nodeB := &dummyNode{BaseNode: NewBaseNodeWithSchemas("B", "", NodeConfig{}, schemaBResolved, nil)}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+				}
+			},
+			expectErrorMsg: "schema mismatch on edge A -> B",
+		},
+		{
+			name: "only one endpoint has schema -> success",
+			edges: func() []Edge {
+				nodeA := &dummyNode{BaseNode: NewBaseNodeWithSchemas("A", "", NodeConfig{}, nil, schemaAResolved)}
+				nodeB := &dummyNode{BaseNode: NewBaseNodeWithSchemas("B", "", NodeConfig{}, nil, nil)}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+				}
+			},
+		},
+		{
+			name: "differ only in PropertyOrder -> success",
+			edges: func() []Edge {
+				nodeA := &dummyNode{BaseNode: NewBaseNodeWithSchemas("A", "", NodeConfig{}, nil, schemaA1Resolved)}
+				nodeB := &dummyNode{BaseNode: NewBaseNodeWithSchemas("B", "", NodeConfig{}, schemaA2Resolved, nil)}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New("test_wf", tc.edges())
+			if tc.expectErrorMsg != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.expectErrorMsg)
+				}
+				if !strings.Contains(err.Error(), tc.expectErrorMsg) {
+					t.Errorf("expected error to contain %q, got: %v", tc.expectErrorMsg, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("expected no error, got: %v", err)
+				}
+			}
+		})
+	}
+}
+

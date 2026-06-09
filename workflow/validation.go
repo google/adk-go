@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -149,6 +150,9 @@ func validateWorkflow(workflow *graph) error {
 		return err
 	}
 	if err := validateCycles(workflow); err != nil {
+		return err
+	}
+	if err := validateStaticSchemas(workflow); err != nil {
 		return err
 	}
 	return nil
@@ -331,4 +335,36 @@ func schemaIsString(s *jsonschema.Resolved) bool {
 		}
 	}
 	return false
+}
+
+func validateStaticSchemas(g *graph) error {
+	for _, edge := range g.allEdges() {
+		outResolved := edge.From.OutputSchema()
+		inResolved := edge.To.InputSchema()
+		if outResolved == nil || inResolved == nil {
+			continue // validate only when both ends declare schemas (Python parity)
+		}
+		eq, err := schemasEqualCanonical(outResolved.Schema(), inResolved.Schema())
+		if err != nil {
+			return fmt.Errorf("comparing schemas on edge %s->%s: %w",
+				edge.From.Name(), edge.To.Name(), err)
+		}
+		if !eq {
+			return fmt.Errorf("graph validation failed: schema mismatch on edge %s -> %s",
+				edge.From.Name(), edge.To.Name())
+		}
+	}
+	return nil
+}
+
+func schemasEqualCanonical(a, b *jsonschema.Schema) (bool, error) {
+	ac, err := canonicalSchemaJSON(a)
+	if err != nil {
+		return false, err
+	}
+	bc, err := canonicalSchemaJSON(b)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(ac, bc), nil
 }
