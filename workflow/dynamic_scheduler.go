@@ -174,6 +174,16 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	}
 	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
 
+	// Explicit scope wins over the node-path default; absent both,
+	// inherit. Matches adk-python _compute_isolation_scope_for_node.
+	childScope := childCtx.IsolationScope()
+	if opts.overrideIsolationScope != "" {
+		childScope = opts.overrideIsolationScope
+	} else if opts.scopeFromNodePath {
+		childScope = childPath
+	}
+	childCtx.InvocationContext = withIsolationScope(childCtx.InvocationContext, childScope)
+
 	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
 	// subScheduler) in the embedded context.Context so tools running
 	// inside an LlmAgent that is itself running as this dynamic
@@ -210,6 +220,11 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			ev.NodeInfo = &session.NodeInfo{Path: childPath}
 		} else if ev.NodeInfo.Path == "" {
 			ev.NodeInfo.Path = childPath
+		}
+		// Tag the event for scope filtering; mirrors adk-python
+		// NodeRunner._enrich_event.
+		if childScope != "" && ev.IsolationScope == "" {
+			ev.IsolationScope = childScope
 		}
 		if ev.RequestedInput != nil {
 			interrupted = true
