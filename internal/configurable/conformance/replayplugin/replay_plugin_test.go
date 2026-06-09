@@ -473,6 +473,7 @@ func (m *MockInvocationContext) Agent() agent.Agent                             
 func (m *MockInvocationContext) Artifacts() agent.Artifacts                              { return nil }
 func (m *MockInvocationContext) Memory() agent.Memory                                    { return nil }
 func (m *MockInvocationContext) Branch() string                                          { return "" }
+func (m *MockInvocationContext) IsolationScope() string                                  { return "" }
 func (m *MockInvocationContext) UserContent() *genai.Content                             { return nil }
 func (m *MockInvocationContext) RunConfig() *agent.RunConfig                             { return nil } // Use context? No, RunConfig struct.
 func (m *MockInvocationContext) EndInvocation()                                          {}

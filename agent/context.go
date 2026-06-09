@@ -86,6 +86,11 @@ type InvocationContext interface {
 	// Applicable to parallel agent because its sub-agents run concurrently.
 	Branch() string
 
+	// IsolationScope of the invocation context. When set, the agent's LLM
+	// prompt history includes only session events whose IsolationScope
+	// matches exactly. Empty means unscoped.
+	IsolationScope() string
+
 	// UserContent that started this invocation.
 	UserContent() *genai.Content
 
