@@ -107,6 +107,11 @@ type Event struct {
 	// Branch is used when multiple sub-agent shouldn't see their peer agents'
 	// conversation history.
 	Branch string
+	// IsolationScope, when set, restricts which agent contexts include this
+	// event in LLM prompt history: an event is visible only when
+	// event.IsolationScope equals the agent's isolation scope (exact match;
+	// empty sees only empty). Empty for non-scoped events.
+	IsolationScope string `json:"isolationScope,omitempty"`
 	// Author is the name of the event's author
 	Author string
 
