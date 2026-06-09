@@ -247,16 +247,64 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 	}
 }
 
+// TestContentsRequestProcessor_IncludeContentsNone_IsolationScopePivot
+// guards the include_contents="none" pivot against an out-of-scope
+// event: a scoped event must not be chosen as the turn start, otherwise
+// the unscoped agent would see an empty/truncated turn. Mirrors
+// adk-python's _should_include_event_in_context gate in
+// _get_current_turn_contents.
+func TestContentsRequestProcessor_IncludeContentsNone_IsolationScopePivot(t *testing.T) {
+	t.Parallel()
+	events := []*session.Event{
+		{
+			Author: "user",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("unscoped turn", "user"),
+			},
+		},
+		{
+			Author:         "user",
+			IsolationScope: "task-1",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("scoped task", "user"),
+			},
+		},
+	}
+	testAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:            "testAgent",
+		Model:           &testModel{},
+		IncludeContents: "none",
+	}))
+	// Unscoped agent: the trailing scoped event must be skipped as the
+	// pivot, so the unscoped user turn is what the agent sees.
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:   testAgent,
+		Session: &fakeSession{events: events},
+	})
+
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("contentsRequestProcessor failed: %v", err)
+		}
+	}
+	want := []*genai.Content{genai.NewContentFromText("unscoped turn", "user")}
+	if diff := cmp.Diff(want, req.Contents); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestContentsRequestProcessor(t *testing.T) {
 	const agentName = "testAgent"
 	testModel := &testModel{}
 
 	t.Parallel()
 	testCases := []struct {
-		name   string
-		branch string
-		events []*session.Event
-		want   []*genai.Content
+		name           string
+		branch         string
+		isolationScope string
+		events         []*session.Event
+		want           []*genai.Content
 	}{
 		{
 			name:   "NilEvent",
@@ -396,6 +444,60 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 		},
 		{
+			// Isolation scope is exact-match (unlike branch, where empty
+			// is universally visible): a scoped agent sees ONLY events
+			// with the same scope, not unscoped ones.
+			name:           "FilterByIsolationScope_Scoped",
+			isolationScope: "task-1",
+			events: []*session.Event{
+				{
+					Author:         "user",
+					IsolationScope: "task-1",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("in task 1", "user"),
+					},
+				},
+				{
+					Author:         "user",
+					IsolationScope: "task-2",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("in task 2", "user"),
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("unscoped", "user"),
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("in task 1", "user"),
+			},
+		},
+		{
+			// An unscoped agent (empty scope) sees ONLY unscoped events.
+			name: "FilterByIsolationScope_Unscoped",
+			events: []*session.Event{
+				{
+					Author:         "user",
+					IsolationScope: "task-1",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("in task 1", "user"),
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("unscoped", "user"),
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("unscoped", "user"),
+			},
+		},
+		{
 			name: "AuthEvent",
 			events: []*session.Event{
 				{
@@ -469,8 +571,9 @@ func TestContentsRequestProcessor(t *testing.T) {
 			}))
 
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
-				Agent:  testAgent,
-				Branch: tc.branch,
+				Agent:          testAgent,
+				Branch:         tc.branch,
+				IsolationScope: tc.isolationScope,
 				Session: &fakeSession{
 					events: tc.events,
 				},

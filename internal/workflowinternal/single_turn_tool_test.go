@@ -327,6 +327,7 @@ func (c *fakeInvocationContext) Memory() agent.Memory            { return nil }
 func (c *fakeInvocationContext) Session() session.Session        { return c.sess }
 func (c *fakeInvocationContext) InvocationID() string            { return "test-invocation-id" }
 func (c *fakeInvocationContext) Branch() string                  { return "" }
+func (c *fakeInvocationContext) IsolationScope() string          { return "" }
 func (c *fakeInvocationContext) UserContent() *genai.Content     { return nil }
 func (c *fakeInvocationContext) RunConfig() *agent.RunConfig     { return nil }
 func (c *fakeInvocationContext) EndInvocation()                  {}

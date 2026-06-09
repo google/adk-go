@@ -87,6 +87,7 @@ type storageEvent struct {
 	NodeInfoJSON           dynamicJSON
 	RequestedInputJSON     dynamicJSON
 	Branch                 *string
+	IsolationScope         *string
 	Timestamp              time.Time `gorm:"precision:6"`
 
 	// Fields from llm_response
@@ -178,6 +179,9 @@ func createStorageEvent(session session.Session, event *session.Event) (*storage
 	// An empty string from the event becomes a nil pointer in storage.
 	if event.Branch != "" {
 		storageEv.Branch = &event.Branch
+	}
+	if event.IsolationScope != "" {
+		storageEv.IsolationScope = &event.IsolationScope
 	}
 	if event.ErrorCode != "" {
 		storageEv.ErrorCode = &event.ErrorCode
@@ -320,6 +324,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 	// --- Handle simple pointer fields (dereference or use zero value) ---
 	// Use the helper to safely get the value or its zero-value default
 	branch := derefOrZero(se.Branch)
+	isolationScope := derefOrZero(se.IsolationScope)
 	errorCode := derefOrZero(se.ErrorCode)
 	errorMessage := derefOrZero(se.ErrorMessage)
 	partial := derefOrZero(se.Partial)
@@ -336,6 +341,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		LongRunningToolIDs: toolIDs,
 		Routes:             routes,
 		Branch:             branch,
+		IsolationScope:     isolationScope,
 		Output:             output,
 		NodeInfo:           nodeInfo,
 		RequestedInput:     requestedInput,
