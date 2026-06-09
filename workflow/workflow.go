@@ -115,17 +115,12 @@ type Edge struct {
 }
 
 // Start is a sentinel node used to indicate the entry point of the workflow.
-var Start Node = &startNode{}
+var Start Node = &startNode{
+	BaseNode: NewBaseNode("START", "Start node", NodeConfig{}),
+}
 
-type startNode struct{}
-
-func (s *startNode) Name() string                       { return "START" }
-func (s *startNode) Description() string                { return "Start node" }
-func (s *startNode) Config() NodeConfig                 { return NodeConfig{} }
-func (s *startNode) InputSchema() *jsonschema.Resolved  { return nil }
-func (s *startNode) OutputSchema() *jsonschema.Resolved { return nil }
-func (s *startNode) ValidateInput(input any) (any, error) {
-	return input, nil
+type startNode struct {
+	BaseNode
 }
 
 func (s *startNode) ValidateOutput(output any) (any, error) {

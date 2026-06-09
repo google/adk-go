@@ -15,7 +15,10 @@
 package workflow
 
 import (
+	"fmt"
 	"iter"
+
+	"github.com/google/jsonschema-go/jsonschema"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
@@ -40,6 +43,18 @@ func NewJoinNode(name string) *JoinNode {
 	return &JoinNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
 
+// NewJoinNodeWithSchema returns a JoinNode with the given name and input schema.
+//
+// The input schema is applied to each predecessor's output individually when validation is performed,
+// rather than being applied to the combined map structure itself.
+//
+// If a predecessor's output is nil, validation is bypassed and the nil value is preserved.
+func NewJoinNodeWithSchema(name string, schema *jsonschema.Resolved) *JoinNode {
+	return &JoinNode{
+		BaseNode: NewBaseNodeWithSchemas(name, "", NodeConfig{}, schema, nil),
+	}
+}
+
 // Run satisfies the Node interface. See JoinNode for the
 // aggregation contract.
 func (n *JoinNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
@@ -48,4 +63,27 @@ func (n *JoinNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessio
 		event.Output = input
 		yield(event, nil)
 	}
+}
+
+// ValidateInput overrides BaseNode.ValidateInput. Instead of validating the
+// aggregated map as a single value, it validates each predecessor's output
+// individually against the node's InputSchema.
+func (n *JoinNode) ValidateInput(input any) (any, error) {
+	schema := n.InputSchema()
+	if schema == nil {
+		return input, nil
+	}
+	if m, ok := input.(map[string]any); ok {
+		out := make(map[string]any, len(m))
+		for predName, v := range m {
+			validated, err := defaultValidateInput(v, schema)
+			if err != nil {
+				return nil, fmt.Errorf("predecessor %q: %w", predName, err)
+			}
+			out[predName] = validated
+		}
+		return out, nil
+	}
+	// Fallback — 1-predecessor case or unexpected shape — fall back to default.
+	return n.BaseNode.ValidateInput(input)
 }

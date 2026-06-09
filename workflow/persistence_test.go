@@ -52,7 +52,7 @@ func modelEvent(path, text string, messageAsOutput bool) *session.Event {
 // Resume derives output from the model message when an event is
 // flagged MessageAsOutput with no explicit Output (adk-python parity).
 func TestCollectNodeOutputs_MessageAsOutput(t *testing.T) {
-	nodes := map[string]Node{"talky": &dummyNode{name: "talky"}}
+	nodes := map[string]Node{"talky": newDummyNode("talky")}
 
 	events := sliceEvents{modelEvent("talky", "Hello, world!", true)}
 
@@ -67,7 +67,7 @@ func TestCollectNodeOutputs_MessageAsOutput(t *testing.T) {
 }
 
 func TestCollectNodeOutputs_MessageNotFlagged(t *testing.T) {
-	nodes := map[string]Node{"talky": &dummyNode{name: "talky"}}
+	nodes := map[string]Node{"talky": newDummyNode("talky")}
 
 	events := sliceEvents{modelEvent("talky", "Hello, world!", false)}
 
@@ -79,7 +79,7 @@ func TestCollectNodeOutputs_MessageNotFlagged(t *testing.T) {
 }
 
 func TestCollectNodeOutputs_ExplicitOutputWins(t *testing.T) {
-	nodes := map[string]Node{"talky": &dummyNode{name: "talky"}}
+	nodes := map[string]Node{"talky": newDummyNode("talky")}
 
 	ev := modelEvent("talky", "from message", true)
 	ev.Output = "explicit"
@@ -97,8 +97,8 @@ func TestCollectNodeOutputs_ExplicitOutputWins(t *testing.T) {
 // it without re-emitting (adk-python output_for parity).
 func TestCollectNodeOutputs_OutputForAttributesAncestors(t *testing.T) {
 	nodes := map[string]Node{
-		"child": &dummyNode{name: "child"},
-		"outer": &dummyNode{name: "outer"},
+		"child": newDummyNode("child"),
+		"outer": newDummyNode("outer"),
 	}
 
 	ev := &session.Event{

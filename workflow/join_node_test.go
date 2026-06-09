@@ -17,7 +17,10 @@ package workflow
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
+
+	"github.com/google/jsonschema-go/jsonschema"
 
 	"google.golang.org/adk/agent"
 )
@@ -228,4 +231,101 @@ func inputRecorder(name string, seen *any) *FunctionNode {
 			*seen = input
 			return "done", nil
 		}, defaultNodeConfig)
+}
+
+func TestJoinNode_ValidateInput(t *testing.T) {
+	stringSchema, err := (&jsonschema.Schema{Type: "string"}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve string schema: %v", err)
+	}
+
+	joinWithSchema := NewJoinNodeWithSchema("join", stringSchema)
+
+	joinWithoutSchema := NewJoinNode("join")
+
+	tests := []struct {
+		name    string
+		node    *JoinNode
+		input   any
+		want    any
+		wantErr string
+	}{
+		{
+			name: "all match schema",
+			node: joinWithSchema,
+			input: map[string]any{
+				"pred1": "val1",
+				"pred2": "val2",
+				"pred3": "val3",
+			},
+			want: map[string]any{
+				"pred1": "val1",
+				"pred2": "val2",
+				"pred3": "val3",
+			},
+		},
+		{
+			name: "one fails validation",
+			node: joinWithSchema,
+			input: map[string]any{
+				"pred1": "val1",
+				"pred2": 42,
+				"pred3": "val3",
+			},
+			wantErr: `predecessor "pred2":`,
+		},
+		{
+			name:  "not a map falls back",
+			node:  joinWithSchema,
+			input: "raw string value",
+			want:  "raw string value",
+		},
+		{
+			name: "nil value in map",
+			node: joinWithSchema,
+			input: map[string]any{
+				"pred1": nil,
+			},
+			want: map[string]any{
+				"pred1": nil,
+			},
+		},
+		{
+			name:  "empty map",
+			node:  joinWithSchema,
+			input: map[string]any{},
+			want:  map[string]any{},
+		},
+		{
+			name: "nil schema returns as-is",
+			node: joinWithoutSchema,
+			input: map[string]any{
+				"pred1": 42,
+			},
+			want: map[string]any{
+				"pred1": 42,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.node.ValidateInput(tc.input)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("ValidateInput() got = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
 }

@@ -88,12 +88,7 @@ func NewToolNode(t tool.Tool, cfg NodeConfig) (*ToolNode, error) {
 
 func (n *ToolNode) runTool(toolCtx agent.ToolContext, input any) (any, error) {
 	runnable := n.tool.(runnableTool)
-	toolInput, err := n.ValidateInput(input)
-	if err != nil {
-		return nil, fmt.Errorf("converting input for tool %q: %w", n.tool.Name(), err)
-	}
-
-	output, err := runnable.Run(toolCtx, toolInput)
+	output, err := runnable.Run(toolCtx, input)
 	if err != nil {
 		return nil, fmt.Errorf("tool %q execution failed: %w", n.tool.Name(), err)
 	}
