@@ -53,7 +53,7 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 				events = append(events, e)
 			}
 		}
-		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), events)
+		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), ctx.IsolationScope(), events)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -64,7 +64,7 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 
 // buildContentsDefault returns the contents for the LLM request by applying
 // filtering, rearrangement, and content processing to the given events.
-func buildContentsDefault(agentName, invocationBranch string, events []*session.Event) ([]*genai.Content, error) {
+func buildContentsDefault(agentName, invocationBranch, isolationScope string, events []*session.Event) ([]*genai.Content, error) {
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
 	for _, ev := range events {
@@ -81,6 +81,13 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 		// Skip events that do not belong to the current branch.
 		// TODO: can we use a richer type for branch (e.g. []string) instead of using string prefix test?
 		if !eventBelongsToBranch(invocationBranch, ev) {
+			continue
+		}
+		// Skip events outside the agent's isolation scope. Unlike branch
+		// (where empty is universally visible), isolation scope is an
+		// exact match: a scoped agent sees only its own scope, an
+		// unscoped agent sees only unscoped events.
+		if ev.IsolationScope != isolationScope {
 			continue
 		}
 		if shouldExcludeEvent(ev) {
@@ -498,17 +505,23 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 //
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
-func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*session.Event) ([]*genai.Content, error) {
+func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope string, events []*session.Event) ([]*genai.Content, error) {
 	// Find the latest event that starts the current turn and process from there
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
+		// An out-of-scope event cannot start this agent's turn: it is
+		// invisible to the agent, so skip it as a pivot (matching
+		// adk-python's _should_include_event_in_context gate here).
+		if event.IsolationScope != isolationScope {
+			continue
+		}
 		if event.Author == "user" || isOtherAgentReply(agentName, event) {
-			return buildContentsDefault(agentName, branch, events[i:])
+			return buildContentsDefault(agentName, branch, isolationScope, events[i:])
 		}
 	}
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
 	// but that may be a bug.
-	return buildContentsDefault(agentName, branch, events)
+	return buildContentsDefault(agentName, branch, isolationScope, events)
 }
 
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
@@ -597,12 +610,13 @@ func cloneEvent(e *session.Event) *session.Event {
 
 	// 1. Create a new Event instance
 	newEvent := &session.Event{
-		ID:           e.ID,
-		Timestamp:    e.Timestamp,
-		InvocationID: e.InvocationID,
-		Branch:       e.Branch,
-		Author:       e.Author,
-		Actions:      e.Actions,
+		ID:             e.ID,
+		Timestamp:      e.Timestamp,
+		InvocationID:   e.InvocationID,
+		Branch:         e.Branch,
+		IsolationScope: e.IsolationScope,
+		Author:         e.Author,
+		Actions:        e.Actions,
 	}
 
 	// 2. Deep copy the LongRunningToolIDs slice
