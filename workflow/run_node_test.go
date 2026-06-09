@@ -371,7 +371,110 @@ func TestRunNode_SequentialFanOut_PerSibling_DistinctBranches(t *testing.T) {
 	}
 }
 
+func TestRunNode_IsolationScopeFromNodePath(t *testing.T) {
+	// WithIsolationScopeFromNodePath scopes the child under its full
+	// node path on both the child context and its emitted events, so a
+	// task-mode node is isolated from peers (b/514866119).
+	child := newStubNode("c", "v")
+	events := drainDynamic(t, NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil, WithIsolationScopeFromNodePath()); err != nil {
+				return "", err
+			}
+			return "", nil
+		},
+		NodeConfig{},
+	), "")
+
+	if got, want := child.lastScope, "orch/c@1"; got != want {
+		t.Errorf("child ctx IsolationScope = %q, want %q", got, want)
+	}
+	if got := isolationScopeAtPath(events, "orch/c@1"); got != "orch/c@1" {
+		t.Errorf("emitted event IsolationScope = %q, want %q", got, "orch/c@1")
+	}
+}
+
+func TestRunNode_IsolationScope_Explicit(t *testing.T) {
+	child := newStubNode("c", "v")
+	events := drainDynamic(t, NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil, WithIsolationScope("fc-123")); err != nil {
+				return "", err
+			}
+			return "", nil
+		},
+		NodeConfig{},
+	), "")
+
+	if got, want := child.lastScope, "fc-123"; got != want {
+		t.Errorf("child ctx IsolationScope = %q, want %q", got, want)
+	}
+	if got := isolationScopeAtPath(events, "orch/c@1"); got != "fc-123" {
+		t.Errorf("emitted event IsolationScope = %q, want %q", got, "fc-123")
+	}
+}
+
+func TestRunNode_ExplicitScopeTakesPrecedenceOverNodePath(t *testing.T) {
+	child := newStubNode("c", "v")
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		_, err := RunNode[string](ctx, child, nil,
+			WithIsolationScope("fc-123"), WithIsolationScopeFromNodePath())
+		return "", err
+	})
+	if got, want := child.lastScope, "fc-123"; got != want {
+		t.Errorf("child ctx IsolationScope = %q, want %q (explicit must win)", got, want)
+	}
+}
+
+func TestRunNode_NoIsolationScope_InheritsParent(t *testing.T) {
+	// Without a scope option the child inherits the parent's scope,
+	// which is empty for an unscoped orchestrator.
+	child := newStubNode("c", "v")
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		_, err := RunNode[string](ctx, child, nil)
+		return "", err
+	})
+	if got := child.lastScope; got != "" {
+		t.Errorf("child ctx IsolationScope = %q, want empty (inherited)", got)
+	}
+}
+
+func TestRunNode_IsolationScope_DistinctPerNodePath(t *testing.T) {
+	// Two children sharing a name but at distinct run positions get
+	// distinct scopes, the uniqueness guarantee from b/514866119.
+	child := newStubNode("c", "v")
+	var scopes []string
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		if _, err := RunNode[string](ctx, child, nil, WithIsolationScopeFromNodePath()); err != nil {
+			return "", err
+		}
+		scopes = append(scopes, child.lastScope)
+		if _, err := RunNode[string](ctx, child, nil, WithIsolationScopeFromNodePath()); err != nil {
+			return "", err
+		}
+		scopes = append(scopes, child.lastScope)
+		return "", nil
+	})
+	if want := []string{"orch/c@1", "orch/c@2"}; !reflect.DeepEqual(scopes, want) {
+		t.Errorf("scopes = %v, want %v", scopes, want)
+	}
+}
+
 // --- test helpers ---
+
+// isolationScopeAtPath returns the IsolationScope of the last event
+// stamped with nodePath.
+func isolationScopeAtPath(events []*session.Event, nodePath string) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
+			return ev.IsolationScope
+		}
+	}
+	return ""
+}
 
 // runInOrchestrator drives orchestratorFn inside a dynamic node so that
 // the RunNode calls inside have a valid NodeContext + sub-scheduler.

@@ -450,3 +450,54 @@ func TestAgentNode_SynthesizesOutputFromModelText(t *testing.T) {
 		t.Errorf("partial event MessageAsOutput = true, want false/unset")
 	}
 }
+
+func TestAgentNode_StampsIsolationScopeOnEvents(t *testing.T) {
+	var gotAgentScope string
+	wrapped, err := agent.New(agent.Config{
+		Name: "scoped",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			gotAgentScope = ctx.IsolationScope()
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx.InvocationID())
+				ev.Output = "v"
+				yield(ev, nil)
+				// An event that already carries a scope is left untouched.
+				pre := session.NewEvent(ctx.InvocationID())
+				pre.IsolationScope = "preset"
+				yield(pre, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	node, err := NewAgentNode(wrapped, NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+
+	mockCtx := newMockCtx(t)
+	mockCtx.sess = &mockSession{id: "test-session-id"}
+	mockCtx.isolationScope = "scope-x"
+
+	var events []*session.Event
+	for ev, err := range node.Run(mockCtx, "ignored") {
+		if err != nil {
+			t.Fatalf("node.Run: %v", err)
+		}
+		events = append(events, ev)
+	}
+
+	if gotAgentScope != "scope-x" {
+		t.Errorf("agent ctx IsolationScope = %q, want %q", gotAgentScope, "scope-x")
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+	if events[0].IsolationScope != "scope-x" {
+		t.Errorf("event[0] IsolationScope = %q, want %q", events[0].IsolationScope, "scope-x")
+	}
+	if events[1].IsolationScope != "preset" {
+		t.Errorf("event[1] IsolationScope = %q, want %q (preset must be kept)", events[1].IsolationScope, "preset")
+	}
+}
