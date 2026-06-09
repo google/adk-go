@@ -91,3 +91,30 @@ func TestCollectNodeOutputs_ExplicitOutputWins(t *testing.T) {
 		t.Errorf("outputs[talky] = %#v, want %q", got, want)
 	}
 }
+
+// A delegated child's output is attributed on resume to the static
+// owners of every path in OutputFor, so a delegating ancestor recovers
+// it without re-emitting (adk-python output_for parity).
+func TestCollectNodeOutputs_OutputForAttributesAncestors(t *testing.T) {
+	nodes := map[string]Node{
+		"child": &dummyNode{name: "child"},
+		"outer": &dummyNode{name: "outer"},
+	}
+
+	ev := &session.Event{
+		Output: "delegated",
+		NodeInfo: &session.NodeInfo{
+			Path:      "child/gc@1",
+			OutputFor: []string{"child/gc@1", "outer/child@1"},
+		},
+	}
+
+	outputs, _ := collectNodeOutputs(sliceEvents{ev}, nodes)
+
+	if got, want := outputs["child"], "delegated"; got != want {
+		t.Errorf("outputs[child] = %#v, want %q", got, want)
+	}
+	if got, want := outputs["outer"], "delegated"; got != want {
+		t.Errorf("outputs[outer] = %#v, want %q (ancestor not attributed)", got, want)
+	}
+}
