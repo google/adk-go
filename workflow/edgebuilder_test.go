@@ -19,16 +19,14 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/google/jsonschema-go/jsonschema"
-
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
 
 func TestEdgeBuilder(t *testing.T) {
-	nodeA := &dummyNode{name: "A"}
-	nodeB := &dummyNode{name: "B"}
-	nodeC := &dummyNode{name: "C"}
+	nodeA := &dummyNode{BaseNode: NewBaseNode("A", "", NodeConfig{})}
+	nodeB := &dummyNode{BaseNode: NewBaseNode("B", "", NodeConfig{})}
+	nodeC := &dummyNode{BaseNode: NewBaseNode("C", "", NodeConfig{})}
 
 	tests := []struct {
 		name     string
@@ -117,16 +115,11 @@ func TestEdgeBuilder(t *testing.T) {
 
 // dummyNode is a minimal implementation of Node for testing purposes.
 type dummyNode struct {
-	name string
+	BaseNode
 }
 
-func (n *dummyNode) Name() string                       { return n.name }
-func (n *dummyNode) Description() string                { return "" }
-func (n *dummyNode) Config() NodeConfig                 { return NodeConfig{} }
-func (n *dummyNode) InputSchema() *jsonschema.Resolved  { return nil }
-func (n *dummyNode) OutputSchema() *jsonschema.Resolved { return nil }
-func (n *dummyNode) ValidateInput(input any) (any, error) {
-	return input, nil
+func newDummyNode(name string) *dummyNode {
+	return &dummyNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
 
 func (n *dummyNode) ValidateOutput(output any) (any, error) {
