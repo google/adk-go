@@ -42,8 +42,9 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			// Do nothing.
 			return // In python, no error is yielded.
 		}
+		state := llmAgent.internal()
 		fn := buildContentsDefault // "" or "default".
-		if llmAgent.internal().IncludeContents == "none" {
+		if state.IncludeContents == "none" {
 			// Include current turn context only (no conversation history)
 			fn = buildContentsCurrentTurnContextOnly
 		}
@@ -53,7 +54,8 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 				events = append(events, e)
 			}
 		}
-		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), ctx.IsolationScope(), events)
+		isSingleTurn := state.Mode == ModeSingleTurn
+		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), ctx.IsolationScope(), events, isSingleTurn, ctx.UserContent())
 		if err != nil {
 			yield(nil, err)
 			return
@@ -64,7 +66,7 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 
 // buildContentsDefault returns the contents for the LLM request by applying
 // filtering, rearrangement, and content processing to the given events.
-func buildContentsDefault(agentName, invocationBranch, isolationScope string, events []*session.Event) ([]*genai.Content, error) {
+func buildContentsDefault(agentName, invocationBranch, isolationScope string, events []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
 	for _, ev := range events {
@@ -176,6 +178,19 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 
 		utils.RemoveClientFunctionCallID(content)
 		contents = append(contents, content)
+	}
+
+	// For scoped agents (task / single_turn), prepend a synthetic user
+	// content built from the originating FC's args. The FC lives in an
+	// UNSCOPED parent event (e.g. the coordinator's task-delegation FC)
+	// which the strict isolation filter above just excluded, so we
+	// re-derive it directly from the (pre-filter) events slice we were
+	// handed. This becomes the agent's first turn: "your task is X"
+	// instead of starting cold from the system instruction only.
+	if isolationScope != "" {
+		if leading := buildTaskInputUserContent(events, isolationScope, isSingleTurn, userContent); leading != nil {
+			contents = append([]*genai.Content{leading}, contents...)
+		}
 	}
 	return contents, nil
 }
@@ -505,7 +520,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 //
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
-func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope string, events []*session.Event) ([]*genai.Content, error) {
+func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope string, events []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
 	// Find the latest event that starts the current turn and process from there
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
@@ -516,12 +531,12 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 			continue
 		}
 		if event.Author == "user" || isOtherAgentReply(agentName, event) {
-			return buildContentsDefault(agentName, branch, isolationScope, events[i:])
+			return buildContentsDefault(agentName, branch, isolationScope, events[i:], isSingleTurn, userContent)
 		}
 	}
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
 	// but that may be a bug.
-	return buildContentsDefault(agentName, branch, isolationScope, events)
+	return buildContentsDefault(agentName, branch, isolationScope, events, isSingleTurn, userContent)
 }
 
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
@@ -601,6 +616,73 @@ func shouldExcludeEvent(ev *session.Event) bool {
 		}
 	}
 	return false
+}
+
+// SingleTurnNudge is appended as a second user-content text part for
+// single_turn agents.
+const SingleTurnNudge = "Important: You will not receive any user replies or clarifications." +
+	" Complete the task using only the information provided above."
+
+// buildTaskInputUserContent finds the originating task-delegation FC in
+// events and converts its args into a user-role Content for use as the
+// first turn of a scoped (task / single_turn) agent.
+//
+// A task agent runs under isolation_scope == <fc_id>, where fc_id
+// matches the FunctionCall.ID that delegated to it. The FC itself
+// lives on a parent (coordinator) event that is filtered out of the
+// agent's view by the strict isolation_scope match, so this helper
+// rebuilds it here.
+//
+// When no matching FC is found (workflow-node task case — task agent
+// dispatched directly by a Workflow, not via FC delegation), falls
+// back to userContent (set on the InvocationContext by the wrapper to
+// the rendered node input). Returns nil if neither source yields
+// content.
+//
+// When isSingleTurn is true, appends singleTurnNudge as an additional
+// user-content text part.
+func buildTaskInputUserContent(events []*session.Event, isolationScope string, isSingleTurn bool, userContent *genai.Content) *genai.Content {
+	if isolationScope == "" {
+		return nil
+	}
+	for _, ev := range events {
+		content := utils.Content(ev)
+		if content == nil || len(content.Parts) == 0 {
+			continue
+		}
+		for _, p := range content.Parts {
+			if p == nil || p.FunctionCall == nil {
+				continue
+			}
+			fc := p.FunctionCall
+			if fc.ID != isolationScope || len(fc.Args) == 0 {
+				continue
+			}
+			// Render args as JSON — the same shape an LLM would emit.
+			text, err := json.Marshal(fc.Args)
+			var argText string
+			if err != nil {
+				argText = fmt.Sprint(fc.Args)
+			} else {
+				argText = string(text)
+			}
+			parts := []*genai.Part{{Text: argText}}
+			if isSingleTurn {
+				parts = append(parts, &genai.Part{Text: SingleTurnNudge})
+			}
+			return &genai.Content{Role: genai.RoleUser, Parts: parts}
+		}
+	}
+
+	if userContent == nil || len(userContent.Parts) == 0 {
+		return nil
+	}
+	parts := make([]*genai.Part, 0, len(userContent.Parts)+1)
+	parts = append(parts, userContent.Parts...)
+	if isSingleTurn {
+		parts = append(parts, &genai.Part{Text: SingleTurnNudge})
+	}
+	return &genai.Content{Role: genai.RoleUser, Parts: parts}
 }
 
 func cloneEvent(e *session.Event) *session.Event {
