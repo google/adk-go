@@ -200,6 +200,7 @@ type stubNode struct {
 	out        any
 	lastPath   string
 	lastBranch string
+	lastScope  string
 }
 
 func newStubNode(name string, out any) *stubNode {
@@ -214,6 +215,7 @@ func (n *stubNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Ev
 		n.lastPath = nc.Path()
 	}
 	n.lastBranch = ctx.Branch()
+	n.lastScope = ctx.IsolationScope()
 	out := n.out
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{Output: out}, nil)
