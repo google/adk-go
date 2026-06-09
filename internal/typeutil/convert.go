@@ -55,6 +55,26 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 	return typed, nil
 }
 
+// ValidateWithJSONSchema validates a Go value against a resolved schema by
+// first converting it to its JSON-decoded form to avoid struct validation issues.
+func ValidateWithJSONSchema(v any, resolvedSchema *jsonschema.Resolved) error {
+	if resolvedSchema == nil {
+		return nil
+	}
+	rawArgs, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	var decoded any
+	if err := json.Unmarshal(rawArgs, &decoded); err != nil {
+		return err
+	}
+	if decoded == nil && schemaExpectsObject(resolvedSchema) {
+		decoded = map[string]any{}
+	}
+	return resolvedSchema.Validate(decoded)
+}
+
 // schemaExpectsObject reports whether the resolved schema's root type
 // is (or includes) "object". Used to decide whether a JSON `null`
 // input should be treated as an empty object for validation.
