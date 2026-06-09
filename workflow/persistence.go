@@ -196,8 +196,13 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node) (out
 			continue
 		}
 		completed[name] = true
-		if ev.Output != nil {
-			outputs[name] = ev.Output
+		// Prefer an explicit Output; otherwise derive it from the
+		// model message when the event is flagged MessageAsOutput,
+		// so a message-as-output node recovers its output on resume
+		// (mirrors adk-python _reconstruct_node_states'
+		// use_message_as_output branch).
+		if out, ok := childEventOutput(ev); ok {
+			outputs[name] = out
 		}
 	}
 	return outputs, completed
