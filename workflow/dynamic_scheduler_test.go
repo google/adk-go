@@ -288,3 +288,41 @@ func (n *interruptThenFailNode) Run(agent.InvocationContext, any) iter.Seq2[*ses
 		yield(nil, errors.New("boom"))
 	}
 }
+
+// waitForOutputNode has WaitForOutput=true and emits a state-only event
+// (no Output), modeling an LlmAgent task/chat node that has not yet
+// produced its final output.
+type waitForOutputNode struct{ BaseNode }
+
+func newWaitForOutputNode(name string) *waitForOutputNode {
+	t := true
+	return &waitForOutputNode{BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: &t})}
+}
+
+func (n *waitForOutputNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		yield(&session.Event{}, nil) // state-only: no Output, no RequestedInput
+	}
+}
+
+// waitForOutputWithValueNode has WaitForOutput=true and does emit an
+// Output, so RunNode must complete it normally.
+type waitForOutputWithValueNode struct {
+	BaseNode
+	out any
+}
+
+func newWaitForOutputWithValueNode(name string, out any) *waitForOutputWithValueNode {
+	t := true
+	return &waitForOutputWithValueNode{
+		BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: &t}),
+		out:      out,
+	}
+}
+
+func (n *waitForOutputWithValueNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+	out := n.out
+	return func(yield func(*session.Event, error) bool) {
+		yield(&session.Event{Output: out}, nil)
+	}
+}
