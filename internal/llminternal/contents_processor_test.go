@@ -15,6 +15,7 @@
 package llminternal_test
 
 import (
+	"encoding/json"
 	"iter"
 	"slices"
 	"strings"
@@ -289,6 +290,141 @@ func TestContentsRequestProcessor_IncludeContentsNone_IsolationScopePivot(t *tes
 		}
 	}
 	want := []*genai.Content{genai.NewContentFromText("unscoped turn", "user")}
+	if diff := cmp.Diff(want, req.Contents); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestContentsRequestProcessor_TaskInputFromOriginatingFC(t *testing.T) {
+	t.Parallel()
+	const taskAgentName = "taskAgent"
+	const coordName = "coord"
+	const fcID = "fc-1"
+	args := map[string]any{"goal": "summarize"}
+	events := []*session.Event{
+		{
+			Author: coordName,
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+						ID: fcID, Name: taskAgentName, Args: args,
+					}}},
+				},
+			},
+		},
+		{
+			Author:         taskAgentName,
+			IsolationScope: fcID,
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("working on it", "model"),
+			},
+		},
+	}
+
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	t.Run("task mode prepends FC args without nudge", func(t *testing.T) {
+		taskAgent := utils.Must(llmagent.New(llmagent.Config{
+			Name:  taskAgentName,
+			Model: &testModel{},
+			Mode:  llmagent.ModeTask,
+		}))
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			Agent:          taskAgent,
+			IsolationScope: fcID,
+			Session:        &fakeSession{events: events},
+		})
+		req := &model.LLMRequest{}
+		for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			if err != nil {
+				t.Fatalf("contentsRequestProcessor failed: %v", err)
+			}
+		}
+		want := []*genai.Content{
+			{Role: genai.RoleUser, Parts: []*genai.Part{{Text: string(argsJSON)}}},
+			genai.NewContentFromText("working on it", "model"),
+		}
+		if diff := cmp.Diff(want, req.Contents); diff != "" {
+			t.Errorf("contents mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("single_turn mode appends nudge after FC args", func(t *testing.T) {
+		stAgent := utils.Must(llmagent.New(llmagent.Config{
+			Name:            taskAgentName,
+			Model:           &testModel{},
+			Mode:            llmagent.ModeSingleTurn,
+			IncludeContents: "none",
+		}))
+		ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			Agent:          stAgent,
+			IsolationScope: fcID,
+			Session:        &fakeSession{events: events},
+		})
+		req := &model.LLMRequest{}
+		for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			if err != nil {
+				t.Fatalf("contentsRequestProcessor failed: %v", err)
+			}
+		}
+		wantLeading := &genai.Content{
+			Role: genai.RoleUser,
+			Parts: []*genai.Part{
+				{Text: string(argsJSON)},
+				{Text: llminternal.SingleTurnNudge},
+			},
+		}
+		if len(req.Contents) == 0 {
+			t.Fatal("expected at least one content; got none")
+		}
+		if diff := cmp.Diff(wantLeading, req.Contents[0]); diff != "" {
+			t.Errorf("leading content mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestContentsRequestProcessor_TaskInputFromUserContentFallback(t *testing.T) {
+	t.Parallel()
+	const taskAgentName = "taskAgent"
+	const scope = "wf:node-1"
+	userInput := genai.NewContentFromText("do the thing", genai.RoleUser)
+
+	// Session has no event carrying a FunctionCall with ID == scope.
+	events := []*session.Event{
+		{
+			Author:         taskAgentName,
+			IsolationScope: scope,
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("ack", "model"),
+			},
+		},
+	}
+
+	taskAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:  taskAgentName,
+		Model: &testModel{},
+		Mode:  llmagent.ModeTask,
+	}))
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:          taskAgent,
+		IsolationScope: scope,
+		UserContent:    userInput,
+		Session:        &fakeSession{events: events},
+	})
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("contentsRequestProcessor failed: %v", err)
+		}
+	}
+	want := []*genai.Content{
+		{Role: genai.RoleUser, Parts: userInput.Parts},
+		genai.NewContentFromText("ack", "model"),
+	}
 	if diff := cmp.Diff(want, req.Contents); diff != "" {
 		t.Errorf("contents mismatch (-want +got):\n%s", diff)
 	}
