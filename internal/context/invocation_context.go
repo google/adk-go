@@ -29,8 +29,9 @@ type InvocationContextParams struct {
 	Memory    agent.Memory
 	Session   session.Session
 
-	Branch string
-	Agent  agent.Agent
+	Branch         string
+	IsolationScope string
+	Agent          agent.Agent
 
 	UserContent                 *genai.Content
 	RunConfig                   *agent.RunConfig
@@ -65,6 +66,10 @@ func (c *InvocationContext) Agent() agent.Agent {
 
 func (c *InvocationContext) Branch() string {
 	return c.params.Branch
+}
+
+func (c *InvocationContext) IsolationScope() string {
+	return c.params.IsolationScope
 }
 
 func (c *InvocationContext) InvocationID() string {

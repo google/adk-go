@@ -51,6 +51,7 @@ func (t *TaskAgentTool) Declaration() *genai.FunctionDeclaration {
 func (t *TaskAgentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, error) {
 	// Framework handles task delegation dispatch directly via the wrapper.
 	// TODO: add _defer_response logic.
+	// TODO: dispatch via RunNode with WithIsolationScope(fcID) and WithRunID(fcID).
 	return nil, nil
 }
 
