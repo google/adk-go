@@ -1289,6 +1289,7 @@ func (m *mockInvocationContext) Agent() agent.Agent              { return nil }
 func (m *mockInvocationContext) Artifacts() agent.Artifacts      { return nil }
 func (m *mockInvocationContext) Memory() agent.Memory            { return nil }
 func (m *mockInvocationContext) Branch() string                  { return "" }
+func (m *mockInvocationContext) IsolationScope() string          { return "" }
 func (m *mockInvocationContext) RunConfig() *agent.RunConfig     { return nil }
 func (m *mockInvocationContext) Ended() bool                     { return false }
 func (m *mockInvocationContext) EndInvocation()                  {}

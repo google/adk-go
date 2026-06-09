@@ -53,7 +53,8 @@ func Test_databaseService_CreateUsesProviders(t *testing.T) {
 
 // TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip guards that
 // the storage layer serializes/deserializes the workflow event fields
-// (NodeInfo, RequestedInput, Routes); dropping them breaks HITL resume.
+// (NodeInfo, RequestedInput, Routes, IsolationScope); dropping them
+// breaks HITL resume and scope-isolated history.
 func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	ctx := t.Context()
 	s := emptyService(t)
@@ -69,6 +70,7 @@ func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 		NodeInfo:       &session.NodeInfo{Path: "ask_name"},
 		RequestedInput: &session.RequestInput{InterruptID: "ask_name", Message: "What's your name?"},
 		Routes:         []string{"route_a"},
+		IsolationScope: "task-1",
 	}
 	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
 		t.Fatalf("AppendEvent: %v", err)
@@ -91,6 +93,9 @@ func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	}
 	if len(ev.Routes) != 1 || ev.Routes[0] != "route_a" {
 		t.Errorf("Routes not persisted: %#v", ev.Routes)
+	}
+	if ev.IsolationScope != "task-1" {
+		t.Errorf("IsolationScope not persisted: got %q, want %q", ev.IsolationScope, "task-1")
 	}
 }
 
