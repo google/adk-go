@@ -145,11 +145,6 @@ type Event struct {
 
 // NodeInfo carries the per-event metadata identifying which node in
 // a workflow activation emitted it.
-//
-// TODO(wolo): adk-python's NodeInfo also has OutputFor []string, which
-// attributes one event's output to its delegating ancestors. adk-go
-// re-emits on the parent instead; add it if multi-level delegation
-// resume needs python-equivalent de-dup.
 type NodeInfo struct {
 	// Path is the composite path of the emitting node within its
 	// workflow activation. Empty for top-level static nodes;
@@ -164,6 +159,12 @@ type NodeInfo struct {
 	// node output from the event's model text. Mirrors adk-python's
 	// node_info.message_as_output.
 	MessageAsOutput bool `json:"messageAsOutput,omitempty"`
+
+	// OutputFor lists the node paths this event's Output counts for: the
+	// emitter plus any WithUseAsOutput delegating ancestors, so one event
+	// stands in for a whole delegation chain rather than each level
+	// re-emitting a duplicate. Mirrors adk-python's node_info.output_for.
+	OutputFor []string `json:"outputFor,omitempty"`
 }
 
 // RequestInput describes a single human-in-the-loop prompt emitted
