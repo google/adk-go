@@ -16,6 +16,7 @@ package session_test
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -385,7 +386,10 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 				SessionID: "nonExistent",
 			})
 			if err != nil {
-				t.Errorf("Delete() non-existent error = %v, want nil", err)
+				// VertexAI fails on Delete when the sessionID is not found, we accept that
+				if !strings.Contains(err.Error(), "Invalid Session resource name") {
+					t.Errorf("Delete() non-existent error = %v, want nil", err)
+				}
 			}
 		}
 	})

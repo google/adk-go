@@ -31,17 +31,23 @@ import (
 	"google.golang.org/adk/session/session_test"
 )
 
+// if you want to test it for yourself, you can regenerate all by running
+// `UPDATE_REPLAYS=true go test --run ./... -v`
+// You need a GCP project with enabled Agent Platform API
+// and some deployed Agent Engine instances
+// To deploy an instance of an application to Agent Engine you can run
+// `go run ./cmd/adkgo/adkgo.go  deploy agentengine -e ./examples/agentengine/main.go  -p YOUR-PROJECT -r us-central1 -d . -s "Test01" `
 const (
-	ProjectID = "adk-go-test"
+	ProjectID = "adk-go-e2e"
 	Location  = "us-central1"
-	EngineId  = "5576569044451983360"
-	EngineId2 = "8602987994044956672"
+	EngineId  = "1491331942182813696"
+	EngineId2 = "6857370898194759680"
 	UserID    = "test-user"
 )
 
 func Test_vertexaiService(t *testing.T) {
 	opts := session_test.SuiteOptions{
-		SupportsUserProvidedSessionID: false,
+		SupportsUserProvidedSessionID: true,
 		ProvidesServerAssignedEventID: true,
 		AppName:                       EngineId,
 	} // VertexAI forbids custom IDs
