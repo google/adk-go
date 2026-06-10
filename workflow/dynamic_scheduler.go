@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
 
@@ -46,6 +47,36 @@ type dynamicSubScheduler struct {
 	resultByPath map[string]any
 	delegation   outputDelegation
 }
+
+// DelegatedOutput implements [agent.DynamicSubScheduler].
+func (s *dynamicSubScheduler) DelegatedOutput() (any, bool) {
+	return s.delegatedOutput()
+}
+
+// OutputForAncestors implements [agent.DynamicSubScheduler].
+func (s *dynamicSubScheduler) OutputForAncestors() []string {
+	return s.outputForAncestors
+}
+
+// ParentPath implements [agent.DynamicSubScheduler].
+func (s *dynamicSubScheduler) ParentPath() string {
+	return s.parentPath
+}
+
+// RunNode implements [agent.DynamicSubScheduler].
+func (s *dynamicSubScheduler) RunNode(child any, input any, opts any) (any, error) {
+	childNode, ok := child.(Node)
+	if !ok {
+		return nil, fmt.Errorf("got child %T, want Node", child)
+	}
+	options, ok := opts.(runNodeOptions)
+	if !ok {
+		return nil, fmt.Errorf("got opts %T, want runNodeOptions", opts)
+	}
+	return s.runNode(childNode, input, options)
+}
+
+var _ agent.DynamicSubScheduler = (*dynamicSubScheduler)(nil)
 
 // outputDelegation is the at-most-one WithUseAsOutput delegation for a
 // parent activation. claim is set eagerly on the first delegating child
@@ -90,11 +121,8 @@ func (d *outputDelegation) output() (any, bool) {
 	return d.value, d.hasValue
 }
 
-func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*session.Event) error) *dynamicSubScheduler {
-	var ancestors []string
-	if p, ok := parent.(*nodeContext); ok {
-		ancestors = p.outputForAncestors
-	}
+func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func(*session.Event) error) agent.DynamicSubScheduler {
+	ancestors := parent.SubScheduler().OutputForAncestors()
 	s := &dynamicSubScheduler{
 		parentPath:         parentPath,
 		parentCtx:          parent,
@@ -182,7 +210,8 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	} else if opts.scopeFromNodePath {
 		childScope = childPath
 	}
-	childCtx.InvocationContext = withIsolationScope(childCtx.InvocationContext, childScope)
+	iCtx := withIsolationScope(childCtx.InvocationContext(), childScope)
+	childCtx.SetInvocationContext(iCtx)
 
 	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
 	// subScheduler) in the embedded context.Context so tools running
@@ -190,9 +219,10 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// child can recover the NodeContext via
 	// workflow.NodeContextFromGoContext. See
 	// scheduleResumedNode for the static-node equivalent.
-	childCtx.InvocationContext = childCtx.InvocationContext.WithContext(
-		WithNodeContext(childCtx.InvocationContext, childCtx),
+	iCtx2 := childCtx.InvocationContext().WithContext(
+		WithNodeContext(childCtx.InvocationContext(), childCtx),
 	)
+	childCtx.SetInvocationContext(iCtx2)
 
 	var (
 		out         any

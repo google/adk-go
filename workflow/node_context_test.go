@@ -16,8 +16,6 @@ package workflow
 
 import (
 	"testing"
-
-	"google.golang.org/adk/agent"
 )
 
 func TestNodeContext_ResumedInput(t *testing.T) {
@@ -85,7 +83,7 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 
 func TestNodeContext_DynamicInheritsResumeInputs(t *testing.T) {
 	parent := newNodeContext(newMockCtx(t), map[string]any{"approval": "yes"})
-	sub := agent.NewDynamicSubScheduler(nil, "", nil)
+	sub := newDynamicSubScheduler(nil, "", nil)
 
 	t.Run("child", func(t *testing.T) {
 		child := newDynamicNodeContext(parent, "wf/asker@1", "1", sub, nil)

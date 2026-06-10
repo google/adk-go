@@ -290,27 +290,3 @@ func (n *failingNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event
 		yield(nil, n.err)
 	}
 }
-
-// requestInputNode emits one RequestedInput event and exits cleanly.
-type requestInputNode struct {
-	BaseNode
-	message string
-}
-
-func newRequestInputNode(name, msg string) *requestInputNode {
-	return &requestInputNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{}),
-		message:  msg,
-	}
-}
-
-func (n *requestInputNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		yield(&session.Event{
-			RequestedInput: &session.RequestInput{
-				InterruptID: "iid-1",
-				Message:     n.message,
-			},
-		}, nil)
-	}
-}

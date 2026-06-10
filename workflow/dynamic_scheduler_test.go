@@ -119,7 +119,7 @@ func TestSubScheduler_RunNode_FreshExecution(t *testing.T) {
 		return nil
 	})
 
-	out, err := sub.runNode(child, "world", runNodeOptions{})
+	out, err := sub.RunNode(child, "world", runNodeOptions{})
 	if err != nil {
 		t.Fatalf("runNode: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestSubScheduler_RunNode_CustomIDInPath(t *testing.T) {
 	child := newStubNode("processor", nil)
 	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
 
-	if _, err := sub.runNode(child, nil, runNodeOptions{customRunID: "order-42"}); err != nil {
+	if _, err := sub.RunNode(child, nil, runNodeOptions{customRunID: "order-42"}); err != nil {
 		t.Fatalf("runNode: %v", err)
 	}
 	// The child must have observed its NodeContext populated with the
@@ -156,7 +156,7 @@ func TestSubScheduler_RunNode_HITLReturnsInterrupted(t *testing.T) {
 		return nil
 	})
 
-	_, err := sub.runNode(child, nil, runNodeOptions{})
+	_, err := sub.RunNode(child, nil, runNodeOptions{})
 	if !errors.Is(err, ErrNodeInterrupted) {
 		t.Fatalf("err = %v, want ErrNodeInterrupted", err)
 	}
@@ -176,7 +176,7 @@ func TestSubScheduler_RunNode_ErrorWinsOverInterrupt(t *testing.T) {
 	child := newInterruptThenFailNode("flaky")
 	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
 
-	_, err := sub.runNode(child, nil, runNodeOptions{})
+	_, err := sub.RunNode(child, nil, runNodeOptions{})
 	if !errors.Is(err, ErrNodeFailed) {
 		t.Errorf("err = %v, want ErrNodeFailed", err)
 	}
@@ -191,7 +191,7 @@ func TestSubScheduler_RunNode_ErrorWinsOverInterrupt(t *testing.T) {
 
 func noopEmit(*session.Event) error { return nil }
 
-func newTopLevelCtx(t *testing.T) *nodeContext {
+func newTopLevelCtx(t *testing.T) agent.Context {
 	t.Helper()
 	return newNodeContext(newMockCtx(t), nil)
 }
