@@ -36,7 +36,7 @@ func newGraph(edges []Edge) *graph {
 	return &graph{successors: succ, predecessors: pred}
 }
 
-// allEdges returns all unique edges in the graph.
+// allEdges returns all edges in the graph.
 func (g *graph) allEdges() []Edge {
 	var edges []Edge
 	for _, succs := range g.successors {

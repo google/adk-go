@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package workflow
+package utils
 
 import (
 	"bytes"
@@ -25,7 +25,7 @@ import (
 // canonicalSchemaJSON marshals the schema to JSON, parses it back, and
 // re-emits it with object keys sorted alphabetically (recursively).
 // Arrays are preserved in their original order.
-func canonicalSchemaJSON(s *jsonschema.Schema) ([]byte, error) {
+func CanonicalSchemaJSON(s *jsonschema.Schema) ([]byte, error) {
 	raw, err := json.Marshal(s)
 	if err != nil {
 		return nil, err

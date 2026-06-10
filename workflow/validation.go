@@ -25,6 +25,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 
 	"google.golang.org/adk/internal/typeutil"
+	"google.golang.org/adk/internal/utils"
 )
 
 // ErrDuplicateNodeName is returned when an edge set contains two
@@ -358,11 +359,11 @@ func validateStaticSchemas(g *graph) error {
 }
 
 func schemasEqualCanonical(a, b *jsonschema.Schema) (bool, error) {
-	ac, err := canonicalSchemaJSON(a)
+	ac, err := utils.CanonicalSchemaJSON(a)
 	if err != nil {
 		return false, err
 	}
-	bc, err := canonicalSchemaJSON(b)
+	bc, err := utils.CanonicalSchemaJSON(b)
 	if err != nil {
 		return false, err
 	}

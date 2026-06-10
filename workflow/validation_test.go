@@ -603,6 +603,10 @@ func TestStaticSchemaValidation(t *testing.T) {
 	type schemaTypeB struct {
 		Val string `json:"val"`
 	}
+	type schemaTypeC struct {
+		X int    `json:"x"`
+		Y string `json:"y"`
+	}
 
 	schemaA, err := jsonschema.For[schemaTypeA](nil)
 	if err != nil {
@@ -620,6 +624,15 @@ func TestStaticSchemaValidation(t *testing.T) {
 	schemaBResolved, err := schemaB.Resolve(nil)
 	if err != nil {
 		t.Fatalf("failed to resolve schemaB: %v", err)
+	}
+
+	schemaC, err := jsonschema.For[schemaTypeC](nil)
+	if err != nil {
+		t.Fatalf("failed to create schemaC: %v", err)
+	}
+	schemaCResolved, err := schemaC.Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schemaC: %v", err)
 	}
 
 	// Schema A with custom PropertyOrder
@@ -696,6 +709,17 @@ func TestStaticSchemaValidation(t *testing.T) {
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
+				}
+			},
+		},
+		{
+			name: "different types having the same fields -> success",
+			edges: func() []Edge {
+				nodeA := &dummyNode{BaseNode: NewBaseNodeWithSchemas("A", "", NodeConfig{}, nil, schemaAResolved)}
+				nodeC := &dummyNode{BaseNode: NewBaseNodeWithSchemas("C", "", NodeConfig{}, schemaCResolved, nil)}
+				return []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeC},
 				}
 			},
 		},
