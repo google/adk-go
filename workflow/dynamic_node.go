@@ -111,7 +111,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 		}
 
 		emit := makeEmit(yield, parentNC)
-		sub := agent.NewDynamicSubScheduler(parentNC, n.composePath(parentNC), emit)
+		sub := newDynamicSubScheduler(parentNC, n.composePath(parentNC), emit)
 		orchestratorCtx := newDynamicNodeContext(parentNC, sub.ParentPath(), "", sub, sub.OutputForAncestors())
 
 		// Re-stash orchestratorCtx (carries a live subScheduler) into the

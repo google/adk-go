@@ -14,13 +14,6 @@
 
 package agent
 
-import (
-	"strings"
-	"sync"
-
-	"google.golang.org/adk/session"
-)
-
 type DynamicSubScheduler interface {
 	RunNode(any, any, any) (any, error)
 	ParentPath() string
@@ -28,109 +21,109 @@ type DynamicSubScheduler interface {
 	DelegatedOutput() (any, bool)
 }
 
-func NewDynamicSubScheduler(parent Context, parentPath string, emitUp func(*session.Event) error) *dynamicSubScheduler {
-	var ancestors []string
-	if p, ok := parent.(*commonContext); ok {
-		ancestors = p.outputForAncestors
-	}
-	s := &dynamicSubScheduler{
-		parentPath:         parentPath,
-		parentCtx:          parent,
-		emitUp:             emitUp,
-		outputForAncestors: ancestors,
-		runCountByChild:    map[string]int{},
-		resultByPath:       map[string]any{},
-	}
-	s.rehydrateCache()
-	return s
-}
+// func NewDynamicSubScheduler(parent Context, parentPath string, emitUp func(*session.Event) error) *dynamicSubScheduler {
+// 	var ancestors []string
+// 	if p, ok := parent.(*commonContext); ok {
+// 		ancestors = p.outputForAncestors
+// 	}
+// 	s := &dynamicSubScheduler{
+// 		parentPath:         parentPath,
+// 		parentCtx:          parent,
+// 		emitUp:             emitUp,
+// 		outputForAncestors: ancestors,
+// 		runCountByChild:    map[string]int{},
+// 		resultByPath:       map[string]any{},
+// 	}
+// 	s.rehydrateCache()
+// 	return s
+// }
 
-// rehydrateCache repopulates resultByPath from session history so a
-// resumed orchestrator (which re-runs from the top) serves already
-// completed children from cache instead of re-executing them. Each
-// child's terminal event carries its childPath in NodeInfo.Path and a
-// non-nil Output; keyed by childPath, so only stable WithRunID calls
-// hit (auto-counter ids regenerate per activation and miss).
-func (s *dynamicSubScheduler) rehydrateCache() {
-	sess := s.parentCtx.Session()
-	if sess == nil {
-		return
-	}
-	prefix := s.parentPath + "/"
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for ev := range sess.Events().All() {
-		if ev == nil || ev.Output == nil || ev.NodeInfo == nil {
-			continue
-		}
-		if !strings.HasPrefix(ev.NodeInfo.Path, prefix) {
-			continue
-		}
-		// Last write wins, matching live execution order.
-		s.resultByPath[ev.NodeInfo.Path] = ev.Output
-	}
-}
+// // rehydrateCache repopulates resultByPath from session history so a
+// // resumed orchestrator (which re-runs from the top) serves already
+// // completed children from cache instead of re-executing them. Each
+// // child's terminal event carries its childPath in NodeInfo.Path and a
+// // non-nil Output; keyed by childPath, so only stable WithRunID calls
+// // hit (auto-counter ids regenerate per activation and miss).
+// func (s *dynamicSubScheduler) rehydrateCache() {
+// 	sess := s.parentCtx.Session()
+// 	if sess == nil {
+// 		return
+// 	}
+// 	prefix := s.parentPath + "/"
+// 	s.mu.Lock()
+// 	defer s.mu.Unlock()
+// 	for ev := range sess.Events().All() {
+// 		if ev == nil || ev.Output == nil || ev.NodeInfo == nil {
+// 			continue
+// 		}
+// 		if !strings.HasPrefix(ev.NodeInfo.Path, prefix) {
+// 			continue
+// 		}
+// 		// Last write wins, matching live execution order.
+// 		s.resultByPath[ev.NodeInfo.Path] = ev.Output
+// 	}
+// }
 
-func (s *dynamicSubScheduler) DelegatedOutput() (any, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.delegation.output()
-}
+// func (s *dynamicSubScheduler) DelegatedOutput() (any, bool) {
+// 	s.mu.Lock()
+// 	defer s.mu.Unlock()
+// 	return s.delegation.output()
+// }
 
-var _ DynamicSubScheduler = (*dynamicSubScheduler)(nil)
+// var _ DynamicSubScheduler = (*dynamicSubScheduler)(nil)
 
-// dynamicSubScheduler runs the children of one dynamic-node activation.
-type dynamicSubScheduler struct {
-	parentPath string
-	parentCtx  Context
-	emitUp     func(*session.Event) error
+// // dynamicSubScheduler runs the children of one dynamic-node activation.
+// type dynamicSubScheduler struct {
+// 	parentPath string
+// 	parentCtx  Context
+// 	emitUp     func(*session.Event) error
 
-	// outputForAncestors are the delegating-ancestor paths this
-	// activation's output also counts for, set when this dynamic node is
-	// itself a WithUseAsOutput child. Mirrors adk-python's
-	// Context._output_for_ancestors.
-	outputForAncestors []string
+// 	// outputForAncestors are the delegating-ancestor paths this
+// 	// activation's output also counts for, set when this dynamic node is
+// 	// itself a WithUseAsOutput child. Mirrors adk-python's
+// 	// Context._output_for_ancestors.
+// 	outputForAncestors []string
 
-	// mu guards everything below. Never held across child.Run.
-	mu sync.Mutex
-	// runCountByChild seeds the auto-counter per child name; the
-	// n-th invocation gets runID strconv.Itoa(n).
-	runCountByChild map[string]int
-	// resultByPath caches successful child outputs keyed by
-	// childPath ("<parentPath>/<name>@<runID>"). Failures and HITL
-	// interrupts are not cached.
-	resultByPath map[string]any
-	delegation   outputDelegation
-}
+// 	// mu guards everything below. Never held across child.Run.
+// 	mu sync.Mutex
+// 	// runCountByChild seeds the auto-counter per child name; the
+// 	// n-th invocation gets runID strconv.Itoa(n).
+// 	runCountByChild map[string]int
+// 	// resultByPath caches successful child outputs keyed by
+// 	// childPath ("<parentPath>/<name>@<runID>"). Failures and HITL
+// 	// interrupts are not cached.
+// 	resultByPath map[string]any
+// 	delegation   outputDelegation
+// }
 
-func (d *dynamicSubScheduler) ParentPath() string {
-	return d.parentPath
-}
+// func (d *dynamicSubScheduler) ParentPath() string {
+// 	return d.parentPath
+// }
 
-func (d *dynamicSubScheduler) OutputForAncestors() []string {
-	return d.outputForAncestors
-}
+// func (d *dynamicSubScheduler) OutputForAncestors() []string {
+// 	return d.outputForAncestors
+// }
 
-// RunNode implements [DynamicSubScheduler].
-func (d *dynamicSubScheduler) RunNode(any, any, any) (any, error) {
-	panic("unimplemented")
-}
+// // // RunNode implements [DynamicSubScheduler].
+// // func (d *dynamicSubScheduler) RunNode(any, any, any) (any, error) {
+// // 	panic("unimplemented")
+// // }
 
-// outputDelegation is the at-most-one WithUseAsOutput delegation for a
-// parent activation. claim is set eagerly on the first delegating child
-// and never cleared within the activation (matching adk-python's
-// _output_delegated); a second delegating child is rejected. hasValue
-// (not value != nil) is the source of truth, since nil is a valid
-// delegated value.
-//
-// Methods require the enclosing scheduler's mu to be held.
-type outputDelegation struct {
-	claimed   bool
-	childPath string
-	childName string
-	value     any
-	hasValue  bool
-}
+// // outputDelegation is the at-most-one WithUseAsOutput delegation for a
+// // parent activation. claim is set eagerly on the first delegating child
+// // and never cleared within the activation (matching adk-python's
+// // _output_delegated); a second delegating child is rejected. hasValue
+// // (not value != nil) is the source of truth, since nil is a valid
+// // delegated value.
+// //
+// // Methods require the enclosing scheduler's mu to be held.
+// type outputDelegation struct {
+// 	claimed   bool
+// 	childPath string
+// 	childName string
+// 	value     any
+// 	hasValue  bool
+// }
 
 // // reserve claims the delegation for childPath. Re-claiming the same
 // // childPath is a no-op (supports WithRunID replay). On conflict the
@@ -155,9 +148,9 @@ type outputDelegation struct {
 // 	d.hasValue = true
 // }
 
-func (d *outputDelegation) output() (any, bool) {
-	return d.value, d.hasValue
-}
+// func (d *outputDelegation) output() (any, bool) {
+// 	return d.value, d.hasValue
+// }
 
 // // runNode executes child once and classifies the outcome: HITL →
 // // ErrNodeInterrupted, runtime failure → ErrNodeFailed. A child that
