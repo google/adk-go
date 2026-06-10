@@ -91,6 +91,26 @@ func (p *inputRequiredProcessor) process(ctx context.Context, event *session.Eve
 			ev := a2a.NewStatusUpdateEvent(p.reqCtx, a2a.TaskStateInputRequired, msg)
 			p.event = ev
 		}
+
+		// For input-required tasks, include remaining parts (like text messages) in the status message
+		// instead of sending them as artifacts, to maintain compatibility with adk-python/adk-web
+		if len(remainingParts) > 0 {
+			remainingA2AParts, err := p.convertParts(ctx, event, remainingParts, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert remaining parts to A2A parts: %w", err)
+			}
+			p.event.Status.Message.Parts = append(p.event.Status.Message.Parts, remainingA2AParts...)
+			remainingParts = nil
+		}
+	} else if p.event != nil && len(remainingParts) > 0 {
+		// If we've already created an input-required event, add all subsequent parts to it
+		// instead of sending them as artifacts, to maintain compatibility with adk-python/adk-web
+		remainingA2AParts, err := p.convertParts(ctx, event, remainingParts, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert parts to A2A parts: %w", err)
+		}
+		p.event.Status.Message.Parts = append(p.event.Status.Message.Parts, remainingA2AParts...)
+		remainingParts = nil
 	}
 
 	if len(remainingParts) == len(resp.Content.Parts) {
