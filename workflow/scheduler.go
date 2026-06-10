@@ -385,9 +385,10 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	// node_context_bridge.go. Top-level static activations have
 	// subScheduler == nil, so RunNode will still reject them; the
 	// stash is harmless in that case.
-	perNodeCtx.InvocationContext = perNodeCtx.InvocationContext.WithContext(
-		WithNodeContext(perNodeCtx.InvocationContext, perNodeCtx),
+	perNodeCtxFinal := perNodeCtx.InvocationContext().WithContext(
+		WithNodeContext(perNodeCtx.InvocationContext(), perNodeCtx),
 	)
+	perNodeCtx.SetInvocationContext(perNodeCtxFinal)
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning

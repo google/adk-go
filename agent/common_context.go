@@ -28,6 +28,30 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Context {
+	return &commonContext{
+		Context:           parent,
+		invocationContext: parent,
+		resumeInputs:      resumeInputs,
+	}
+}
+
+func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubScheduler, outputForAncestors []string) Context {
+	var inherited map[string]any
+	if p, ok := parent.(*commonContext); ok {
+		inherited = p.resumeInputs
+	}
+	return &commonContext{
+		Context:            parent,
+		invocationContext:  parent,
+		resumeInputs:       inherited,
+		path:               path,
+		runID:              runID,
+		subScheduler:       sub,
+		outputForAncestors: outputForAncestors,
+	}
+}
+
 // NewCallbackContext returns CallbackContext initialized with provided actions.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
 func NewCallbackContext(ic InvocationContext, actions *session.EventActions) CallbackContext {
@@ -115,6 +139,78 @@ type commonContext struct {
 	// Fields below are only populated by NewToolContext.
 	functionCallID   string
 	toolConfirmation *toolconfirmation.ToolConfirmation
+
+	// Fields below are used by NodeContext
+	// resumeInputs are keyed by InterruptID. Nil on fresh activations
+	// and on handoff resume.
+	resumeInputs map[string]any
+
+	// path and runID are populated for dynamic children, empty for
+	// top-level static activations.
+	path  string
+	runID string
+
+	// subScheduler is non-nil only when this context belongs to a
+	// dynamic-node activation; RunNode uses it to schedule children.
+	subScheduler DynamicSubScheduler
+
+	// outputForAncestors are the delegating-ancestor paths carried
+	// into this activation when it runs as a WithUseAsOutput child;
+	// its dynamic sub-scheduler reads them to stamp OutputFor.
+	outputForAncestors []string
+}
+
+func (c *commonContext) SubScheduler() DynamicSubScheduler {
+	return c.subScheduler
+}
+
+// Path implements [Context].
+func (c *commonContext) Path() string {
+	return c.path
+}
+
+// RunID implements [Context].
+func (c *commonContext) RunID() string {
+	return c.runID
+}
+
+// withBranch returns ctx wrapped with branch as its Branch().
+// Implemented as a small adapter that overrides only Branch() and
+// delegates the rest of the interface to the embedded ctx.
+func withBranch(ctx Context, branch string) Context {
+	if ctx.Branch() == branch {
+		return ctx
+	}
+	return &branchOverride{Context: ctx, branch: branch}
+}
+
+// branchOverride wraps an InvocationContext and overrides Branch().
+// All other interface methods delegate to the embedded value.
+//
+// WithContext is overridden so the branch survives a subsequent
+// context-cancellation wrap. Without this, a caller that does
+// ctx.WithContext(cancelCtx) would get an InvocationContext whose
+// Branch() returns the inner ctx's branch (empty), silently
+// losing the override.
+type branchOverride struct {
+	Context
+	branch string
+}
+
+func (b *branchOverride) Branch() string { return b.branch }
+
+// WithBranch implements [Context].
+func (c *commonContext) WithBranch(branch string) Context {
+	ctx := withBranch(c, branch)
+	return &commonContext{
+		Context:            ctx,
+		invocationContext:  ctx,
+		resumeInputs:       c.resumeInputs,
+		path:               c.path,
+		runID:              c.runID,
+		subScheduler:       c.subScheduler,
+		outputForAncestors: c.outputForAncestors,
+	}
 }
 
 // Agent implements [InvocationContext].
@@ -210,6 +306,7 @@ func (c *commonContext) UserID() string {
 }
 
 var (
+	_ Context           = (*commonContext)(nil)
 	_ CallbackContext   = (*commonContext)(nil)
 	_ ToolContext       = (*commonContext)(nil)
 	_ InvocationContext = (*commonContext)(nil)
@@ -272,6 +369,14 @@ func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 	// false (hasFunctionResponses == true), causing the loop to continue.
 	c.actions.SkipSummarization = true
 	return nil
+}
+
+func (c *commonContext) SetInvocationContext(ic InvocationContext) {
+	c.invocationContext = ic
+}
+
+func (c *commonContext) InvocationContext() InvocationContext {
+	return c.invocationContext
 }
 
 // callbackContextState is a session.State implementation backed by the

@@ -111,8 +111,8 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 		}
 
 		emit := makeEmit(yield, parentNC)
-		sub := newDynamicSubScheduler(parentNC, n.composePath(parentNC), emit)
-		orchestratorCtx := newDynamicNodeContext(parentNC, sub.parentPath, "", sub, sub.outputForAncestors)
+		sub := agent.NewDynamicSubScheduler(parentNC, n.composePath(parentNC), emit)
+		orchestratorCtx := newDynamicNodeContext(parentNC, sub.ParentPath(), "", sub, sub.OutputForAncestors())
 
 		// Re-stash orchestratorCtx (carries a live subScheduler) into the
 		// embedded context.Context so a tool running inside an LlmAgent that
@@ -136,7 +136,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 		// A WithUseAsOutput child already emitted this output on its own
 		// event (stamped for this node), so emit no duplicate terminal
 		// event. Mirrors adk-python's _output_delegated.
-		if _, delegated := sub.delegatedOutput(); delegated {
+		if _, delegated := sub.DelegatedOutput(); delegated {
 			return
 		}
 
@@ -148,7 +148,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 		}
 		ev := session.NewEvent(parentNC.InvocationID())
 		ev.Output = out
-		ev.NodeInfo = &session.NodeInfo{Path: sub.parentPath}
+		ev.NodeInfo = &session.NodeInfo{Path: sub.ParentPath()}
 		// TODO(wolo): validate ev.Output against n.outputSchema,
 		// mirroring function_node.go:87-92.
 		yield(ev, nil)

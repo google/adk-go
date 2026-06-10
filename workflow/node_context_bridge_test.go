@@ -17,6 +17,8 @@ package workflow
 import (
 	"context"
 	"testing"
+
+	"google.golang.org/adk/agent"
 )
 
 // TestWithNodeContext_SurvivesDerivedContext pins the core property
@@ -34,7 +36,7 @@ import (
 // runtime and the tools will fall back to their no-NodeContext
 // path.
 func TestWithNodeContext_SurvivesDerivedContext(t *testing.T) {
-	sentinel := &nodeContext{}
+	sentinel := agent.NewNodeContext(nil, nil)
 	parent := WithNodeContext(context.Background(), sentinel)
 
 	// Simulate a WithCancel (NewInvocationContext does effectively

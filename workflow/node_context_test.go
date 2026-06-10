@@ -16,6 +16,8 @@ package workflow
 
 import (
 	"testing"
+
+	"google.golang.org/adk/agent"
 )
 
 func TestNodeContext_ResumedInput(t *testing.T) {
@@ -83,14 +85,14 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 
 func TestNodeContext_DynamicInheritsResumeInputs(t *testing.T) {
 	parent := newNodeContext(newMockCtx(t), map[string]any{"approval": "yes"})
-	sub := &dynamicSubScheduler{}
+	sub := agent.NewDynamicSubScheduler(nil, "", nil)
 
 	t.Run("child", func(t *testing.T) {
 		child := newDynamicNodeContext(parent, "wf/asker@1", "1", sub, nil)
 		if v, ok := child.ResumedInput("approval"); !ok || v != "yes" {
 			t.Errorf("child.ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
 		}
-		if child.subScheduler != sub {
+		if child.SubScheduler() != sub {
 			t.Errorf("subScheduler pointer differs from supplied")
 		}
 	})
@@ -100,7 +102,7 @@ func TestNodeContext_DynamicInheritsResumeInputs(t *testing.T) {
 		if v, ok := act.ResumedInput("approval"); !ok || v != "yes" {
 			t.Errorf("act.ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
 		}
-		if act.subScheduler != sub {
+		if act.SubScheduler() != sub {
 			t.Errorf("subScheduler pointer differs from supplied")
 		}
 	})

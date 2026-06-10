@@ -67,9 +67,10 @@ func TestNodeContextPropagation_StaticActivationStashed(t *testing.T) {
 	// sequence; avoids the full scheduler loop.
 	parent := newMockCtx(t)
 	perNodeCtx := newNodeContext(parent.WithContext(context.Background()), nil)
-	perNodeCtx.InvocationContext = perNodeCtx.InvocationContext.WithContext(
-		WithNodeContext(perNodeCtx.InvocationContext, perNodeCtx),
+	ctx := perNodeCtx.InvocationContext().WithContext(
+		WithNodeContext(perNodeCtx.InvocationContext(), perNodeCtx),
 	)
+	perNodeCtx.SetInvocationContext(ctx)
 
 	nc, ok := NodeContextFromGoContext(perNodeCtx)
 	if !ok {

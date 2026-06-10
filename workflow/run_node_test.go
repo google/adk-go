@@ -26,6 +26,34 @@ import (
 	"google.golang.org/adk/session"
 )
 
+// stubNode emits one Event{Output: out} and exits.
+type stubNode struct {
+	BaseNode
+	out        any
+	lastPath   string
+	lastBranch string
+	lastScope  string
+}
+
+func newStubNode(name string, out any) *stubNode {
+	return &stubNode{
+		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		out:      out,
+	}
+}
+
+func (n *stubNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+	if nc, ok := ctx.(NodeContext); ok {
+		n.lastPath = nc.Path()
+	}
+	n.lastBranch = ctx.Branch()
+	n.lastScope = ctx.IsolationScope()
+	out := n.out
+	return func(yield func(*session.Event, error) bool) {
+		yield(&session.Event{Output: out}, nil)
+	}
+}
+
 func TestRunNode_ErrInvalidRunNodeContext_OnStaticContext(t *testing.T) {
 	ctx := newNodeContext(newMockCtx(t), nil) // no subScheduler attached
 	_, err := RunNode[string](ctx, newStubNode("c", "x"), nil)

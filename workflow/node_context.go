@@ -15,72 +15,69 @@
 package workflow
 
 import (
-	"context"
-
 	"google.golang.org/adk/agent"
 )
 
-// NodeContext is the per-node context seen inside Node.Run and inside
-// dynamic-node orchestrator bodies. It extends agent.InvocationContext
-// with workflow-specific accessors.
-//
-// TODO(wolo): unify with the in-flight context-unification work
-// (CallbackContext / ToolContext series).
-type NodeContext interface {
-	agent.InvocationContext
+type NodeContext = agent.Context
 
-	// ResumedInput returns the response payload for a re-entry resume
-	// activation keyed by InterruptID, or (nil, false) otherwise.
-	ResumedInput(interruptID string) (any, bool)
+// // NodeContext is the per-node context seen inside Node.Run and inside
+// // dynamic-node orchestrator bodies. It extends agent.InvocationContext
+// // with workflow-specific accessors.
+// //
+// // TODO(wolo): unify with the in-flight context-unification work
+// // (CallbackContext / ToolContext series).
+// type NodeContext interface {
+// 	// agent.InvocationContext
 
-	// Path returns the composite path of the currently-executing node.
-	// Empty for top-level static nodes; "<parent_path>/<child_name>@<run_id>"
-	// for dynamic children.
-	Path() string
+// 	// ResumedInput returns the response payload for a re-entry resume
+// 	// activation keyed by InterruptID, or (nil, false) otherwise.
+// 	ResumedInput(interruptID string) (any, bool)
 
-	// RunID returns the per-invocation identifier. Empty for top-level
-	// static nodes; auto-counter or user-supplied via WithRunID for
-	// dynamic children.
-	RunID() string
+// 	// Path returns the composite path of the currently-executing node.
+// 	// Empty for top-level static nodes; "<parent_path>/<child_name>@<run_id>"
+// 	// for dynamic children.
+// 	Path() string
 
-	// WithBranch returns a NodeContext whose Branch() returns the
-	// given value; all other fields (path, runID, subScheduler,
-	// resumeInputs, embedded InvocationContext) are preserved.
-	WithBranch(branch string) NodeContext
-}
+// 	// RunID returns the per-invocation identifier. Empty for top-level
+// 	// static nodes; auto-counter or user-supplied via WithRunID for
+// 	// dynamic children.
+// 	RunID() string
 
-// nodeContext is the unexported NodeContext implementation.
-type nodeContext struct {
-	agent.InvocationContext
+// 	// WithBranch returns a NodeContext whose Branch() returns the
+// 	// given value; all other fields (path, runID, subScheduler,
+// 	// resumeInputs, embedded InvocationContext) are preserved.
+// 	WithBranch(branch string) NodeContext
+// }
 
-	// resumeInputs are keyed by InterruptID. Nil on fresh activations
-	// and on handoff resume.
-	resumeInputs map[string]any
+// // nodeContext is the unexported NodeContext implementation.
+// type nodeContext struct {
+// 	agent.InvocationContext
 
-	// path and runID are populated for dynamic children, empty for
-	// top-level static activations.
-	path  string
-	runID string
+// 	// resumeInputs are keyed by InterruptID. Nil on fresh activations
+// 	// and on handoff resume.
+// 	resumeInputs map[string]any
 
-	// subScheduler is non-nil only when this context belongs to a
-	// dynamic-node activation; RunNode uses it to schedule children.
-	subScheduler *dynamicSubScheduler
+// 	// path and runID are populated for dynamic children, empty for
+// 	// top-level static activations.
+// 	path  string
+// 	runID string
 
-	// outputForAncestors are the delegating-ancestor paths carried
-	// into this activation when it runs as a WithUseAsOutput child;
-	// its dynamic sub-scheduler reads them to stamp OutputFor.
-	outputForAncestors []string
-}
+// 	// subScheduler is non-nil only when this context belongs to a
+// 	// dynamic-node activation; RunNode uses it to schedule children.
+// 	subScheduler *dynamicSubScheduler
+
+// 	// outputForAncestors are the delegating-ancestor paths carried
+// 	// into this activation when it runs as a WithUseAsOutput child;
+// 	// its dynamic sub-scheduler reads them to stamp OutputFor.
+// 	outputForAncestors []string
+// }
 
 // Compile-time: *nodeContext implements NodeContext.
-var _ NodeContext = (*nodeContext)(nil)
+// var _ NodeContext = (*nodeContext)(nil)
 
 // newNodeContext wraps parent for a top-level (static) activation.
-func newNodeContext(parent agent.InvocationContext, resumeInputs map[string]any) *nodeContext {
-	return &nodeContext{
-		InvocationContext: parent,
-		resumeInputs:      resumeInputs,
-	}
+func newNodeContext(parent agent.InvocationContext, resumeInputs map[string]any) agent.Context {
+	return agent.NewNodeContext(parent, resumeInputs)
 }
 
 // newDynamicNodeContext wraps parent for either a dynamic-node
@@ -90,58 +87,47 @@ func newNodeContext(parent agent.InvocationContext, resumeInputs map[string]any)
 // dynamic node's own activation passes runID="" — it is not itself a
 // sub-scheduler child. Child inherits resumeInputs so HITL responses
 // reach dynamic children.
-func newDynamicNodeContext(parent NodeContext, path, runID string, sub *dynamicSubScheduler, outputForAncestors []string) *nodeContext {
-	var inherited map[string]any
-	if p, ok := parent.(*nodeContext); ok {
-		inherited = p.resumeInputs
-	}
-	return &nodeContext{
-		InvocationContext:  parent,
-		resumeInputs:       inherited,
-		path:               path,
-		runID:              runID,
-		subScheduler:       sub,
-		outputForAncestors: outputForAncestors,
-	}
+func newDynamicNodeContext(parent NodeContext, path, runID string, sub agent.DynamicSubScheduler, outputForAncestors []string) agent.Context {
+	return agent.NewDynamicNodeContext(parent, path, runID, sub, outputForAncestors)
 }
 
-func (c *nodeContext) ResumedInput(interruptID string) (any, bool) {
-	if c.resumeInputs == nil {
-		return nil, false
-	}
-	v, ok := c.resumeInputs[interruptID]
-	return v, ok
-}
+// func (c *nodeContext) ResumedInput(interruptID string) (any, bool) {
+// 	if c.resumeInputs == nil {
+// 		return nil, false
+// 	}
+// 	v, ok := c.resumeInputs[interruptID]
+// 	return v, ok
+// }
 
-func (c *nodeContext) Path() string  { return c.path }
-func (c *nodeContext) RunID() string { return c.runID }
+// func (c *nodeContext) Path() string  { return c.path }
+// func (c *nodeContext) RunID() string { return c.runID }
 
-func (c *nodeContext) WithBranch(branch string) NodeContext {
-	// Reuse the package-level withBranch helper to swap Branch on
-	// the underlying InvocationContext; preserve the NodeContext
-	// envelope (path, runID, resumeInputs, subScheduler) unchanged.
-	return &nodeContext{
-		InvocationContext: withBranch(c.InvocationContext, branch),
-		resumeInputs:      c.resumeInputs,
-		path:              c.path,
-		runID:             c.runID,
-		subScheduler:      c.subScheduler,
-	}
-}
+// func (c *nodeContext) WithBranch(branch string) NodeContext {
+// 	// Reuse the package-level withBranch helper to swap Branch on
+// 	// the underlying InvocationContext; preserve the NodeContext
+// 	// envelope (path, runID, resumeInputs, subScheduler) unchanged.
+// 	return &nodeContext{
+// 		InvocationContext: withBranch(c.InvocationContext, branch),
+// 		resumeInputs:      c.resumeInputs,
+// 		path:              c.path,
+// 		runID:             c.runID,
+// 		subScheduler:      c.subScheduler,
+// 	}
+// }
 
-// WithContext preserves the nodeContext wrapper when callers derive
-// a new context from this one (e.g. when the scheduler attaches an
-// OpenTelemetry span context). Without this override, the base
-// invocationContext.WithContext would return a *invocationContext
-// and silently drop the resumeInputs map, breaking re-entry resume
-// activations and any other workflow-specific accessors.
-func (c *nodeContext) WithContext(ctx context.Context) agent.InvocationContext {
-	return &nodeContext{
-		InvocationContext:  c.InvocationContext.WithContext(ctx),
-		resumeInputs:       c.resumeInputs,
-		path:               c.path,
-		runID:              c.runID,
-		subScheduler:       c.subScheduler,
-		outputForAncestors: c.outputForAncestors,
-	}
-}
+// // WithContext preserves the nodeContext wrapper when callers derive
+// // a new context from this one (e.g. when the scheduler attaches an
+// // OpenTelemetry span context). Without this override, the base
+// // invocationContext.WithContext would return a *invocationContext
+// // and silently drop the resumeInputs map, breaking re-entry resume
+// // activations and any other workflow-specific accessors.
+// func (c *nodeContext) WithContext(ctx context.Context) agent.InvocationContext {
+// 	return &nodeContext{
+// 		InvocationContext:  c.InvocationContext.WithContext(ctx),
+// 		resumeInputs:       c.resumeInputs,
+// 		path:               c.path,
+// 		runID:              c.runID,
+// 		subScheduler:       c.subScheduler,
+// 		outputForAncestors: c.outputForAncestors,
+// 	}
+// }
