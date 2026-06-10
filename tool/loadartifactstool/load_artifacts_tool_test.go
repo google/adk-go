@@ -277,6 +277,61 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_OtherFunctionCall(t *testing
 	}
 }
 
+func TestLoadArtifactsTool_ProcessRequest_NilArtifacts(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+
+	tc := createToolContextWithNilArtifacts(t)
+
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	err := requestProcessor.ProcessRequest(tc, &model.LLMRequest{})
+	if err == nil {
+		t.Fatal("Expected error when Artifacts is nil, got nil")
+	}
+	if !strings.Contains(err.Error(), "artifact service is not configured") {
+		t.Errorf("Expected error about artifact service not configured, got: %v", err)
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_NilArtifacts_LoadFunctionCall(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+
+	tc := createToolContextWithNilArtifacts(t)
+
+	functionResponse := &genai.FunctionResponse{
+		Name: "load_artifacts",
+		Response: map[string]any{
+			"artifact_names": []string{"doc1.txt"},
+		},
+	}
+	llmRequest := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: "model",
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse(functionResponse.Name, functionResponse.Response),
+				},
+			},
+		},
+	}
+
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	if err == nil {
+		t.Fatal("Expected error when Artifacts is nil, got nil")
+	}
+	if !strings.Contains(err.Error(), "artifact service is not configured") {
+		t.Errorf("Expected error about artifact service not configured, got: %v", err)
+	}
+}
+
 func createToolContext(t *testing.T) agent.ToolContext {
 	t.Helper()
 
@@ -290,6 +345,14 @@ func createToolContext(t *testing.T) agent.ToolContext {
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 		Artifacts: artifacts,
 	})
+
+	return agent.NewToolContext(ctx, "", nil, nil)
+}
+
+func createToolContextWithNilArtifacts(t *testing.T) agent.ToolContext {
+	t.Helper()
+
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 
 	return agent.NewToolContext(ctx, "", nil, nil)
 }

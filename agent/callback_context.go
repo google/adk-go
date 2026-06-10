@@ -47,11 +47,15 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Cal
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
 func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) CallbackContext {
 	actions = prepareEventActions(actions)
+	var artifacts Artifacts
+	if ic.Artifacts() != nil {
+		artifacts = &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions}
+	}
 	cc := &callbackContext{
 		Context:           ic,
 		invocationContext: ic,
 		actions:           actions,
-		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
+		artifacts:         artifacts,
 	}
 	return cc
 }
@@ -69,11 +73,15 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 		functionCallID = uuid.NewString()
 	}
 	actions = prepareEventActions(actions)
+	var artifacts Artifacts
+	if ic.Artifacts() != nil {
+		artifacts = &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions}
+	}
 	return &callbackContext{
 		Context:           ic,
 		invocationContext: ic,
 		actions:           actions,
-		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
+		artifacts:         artifacts,
 		functionCallID:    functionCallID,
 		toolConfirmation:  confirmation,
 	}
