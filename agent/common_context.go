@@ -117,6 +117,58 @@ type commonContext struct {
 	toolConfirmation *toolconfirmation.ToolConfirmation
 }
 
+// Agent implements [InvocationContext].
+func (c *commonContext) Agent() Agent {
+	return c.invocationContext.Agent()
+}
+
+// EndInvocation implements [InvocationContext].
+func (c *commonContext) EndInvocation() {
+	c.invocationContext.EndInvocation()
+}
+
+// Ended implements [InvocationContext].
+func (c *commonContext) Ended() bool {
+	return c.invocationContext.Ended()
+}
+
+// IsolationScope implements [InvocationContext].
+func (c *commonContext) IsolationScope() string {
+	return c.invocationContext.IsolationScope()
+}
+
+// Memory implements [InvocationContext].
+func (c *commonContext) Memory() Memory {
+	return c.invocationContext.Memory()
+}
+
+// ResumedInput implements [InvocationContext].
+func (c *commonContext) ResumedInput(interruptID string) (any, bool) {
+	return c.invocationContext.ResumedInput(interruptID)
+}
+
+// RunConfig implements [InvocationContext].
+func (c *commonContext) RunConfig() *RunConfig {
+	return c.invocationContext.RunConfig()
+}
+
+// Session implements [InvocationContext].
+func (c *commonContext) Session() session.Session {
+	return c.invocationContext.Session()
+}
+
+// WithContext implements [InvocationContext].
+func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
+	return &commonContext{
+		Context:           ctx,
+		invocationContext: c.invocationContext.WithContext(ctx),
+		artifacts:         c.artifacts,
+		actions:           c.actions,
+		functionCallID:    c.functionCallID,
+		toolConfirmation:  c.toolConfirmation,
+	}
+}
+
 func (c *commonContext) AgentName() string {
 	return c.invocationContext.Agent().Name()
 }
@@ -158,8 +210,10 @@ func (c *commonContext) UserID() string {
 }
 
 var (
-	_ CallbackContext = (*commonContext)(nil)
-	_ ToolContext     = (*commonContext)(nil)
+	_ CallbackContext   = (*commonContext)(nil)
+	_ ToolContext       = (*commonContext)(nil)
+	_ InvocationContext = (*commonContext)(nil)
+	_ ReadonlyContext   = (*commonContext)(nil)
 )
 
 // --- ToolContext extensions ----------------------------------------------
