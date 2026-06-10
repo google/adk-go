@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
+	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/typeutil"
 )
 
@@ -63,6 +64,9 @@ func validateNodes(edges []Edge) error {
 		return err
 	}
 	if err := validateStartNodeNoIncoming(edges); err != nil {
+		return err
+	}
+	if err := validateNoTaskModeGraphNodes(edges); err != nil {
 		return err
 	}
 	return nil
@@ -151,6 +155,50 @@ func validateWorkflow(workflow *graph) error {
 	if err := validateCycles(workflow); err != nil {
 		return err
 	}
+	return nil
+}
+
+// validateNoTaskModeGraphNodes rejects task-mode LlmAgents that appear
+// as static workflow graph nodes.
+//
+// Task-mode agents are multi-turn — they pause for user replies and
+// expect the original node_input (the task brief) to remain visible
+// across re-dispatches. The workflow scheduler currently overwrites
+// node_input with the latest user message on every re-entry, so the
+// task brief is lost and the agent loses context. Until the scheduler
+// preserves the originating node_input on resume, task agents may only
+// be used:
+//
+//   - as chat sub-agents of an LlmAgent coordinator (FC delegation via
+//     workflowinternal.TaskAgentTool / dispatchTaskFC), or
+//   - dispatched dynamically via workflow.RunNode from a function/
+//     dynamic node — never as static graph nodes.
+func validateNoTaskModeGraphNodes(edges []Edge) error {
+	allNodes := make(map[Node]bool)
+	for _, e := range edges {
+		allNodes[e.From] = true
+		allNodes[e.To] = true
+	}
+
+	for node := range allNodes {
+		agentNode, ok := node.(*AgentNode)
+		if !ok {
+			continue
+		}
+		llmA, ok := agentNode.agent.(llminternal.Agent)
+		if !ok || llmA == nil {
+			continue
+		}
+
+		if llminternal.Reveal(llmA).Mode == llminternal.ModeTask {
+			return fmt.Errorf(
+				"Agent %q has mode='task' and cannot be used as a workflow graph node. Use a chat coordinator with task sub-agents, or "+
+					"dispatch dynamically via RunNode from a function node",
+				node.Name(),
+			)
+		}
+	}
+
 	return nil
 }
 
