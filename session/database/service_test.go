@@ -31,6 +31,90 @@ func Test_databaseService(t *testing.T) {
 	})
 }
 
+func TestNewSessionServiceFromDB(t *testing.T) {
+	t.Run("nil db returns error", func(t *testing.T) {
+		_, err := NewSessionServiceFromDB(nil)
+		if err == nil {
+			t.Fatal("expected error for nil db, got nil")
+		}
+	})
+
+	t.Run("valid db creates service", func(t *testing.T) {
+		db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+		if err != nil {
+			t.Fatalf("failed to open sqlite: %v", err)
+		}
+		svc, err := NewSessionServiceFromDB(db)
+		if err != nil {
+			t.Fatalf("NewSessionServiceFromDB() error = %v, want nil", err)
+		}
+		if svc == nil {
+			t.Fatal("NewSessionServiceFromDB() returned nil service")
+		}
+	})
+
+	t.Run("shares db connection", func(t *testing.T) {
+		db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+		if err != nil {
+			t.Fatalf("failed to open sqlite: %v", err)
+		}
+		svc, err := NewSessionServiceFromDB(db)
+		if err != nil {
+			t.Fatalf("NewSessionServiceFromDB() error = %v", err)
+		}
+		dbSvc, ok := svc.(*databaseService)
+		if !ok {
+			t.Fatalf("expected *databaseService, got %T", svc)
+		}
+		if dbSvc.db != db {
+			t.Error("NewSessionServiceFromDB() did not use the provided *gorm.DB")
+		}
+	})
+}
+
+func Test_databaseServiceFromDB(t *testing.T) {
+	opts := session_test.SuiteOptions{SupportsUserProvidedSessionID: true}
+	session_test.RunServiceTests(t, opts, func(t *testing.T) session.Service {
+		return emptyServiceFromDB(t)
+	})
+}
+
+func emptyServiceFromDB(t *testing.T) *databaseService {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{PrepareStmt: true})
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+	svc, err := NewSessionServiceFromDB(db)
+	if err != nil {
+		t.Fatalf("NewSessionServiceFromDB() failed: %v", err)
+	}
+	if err := AutoMigrate(svc); err != nil {
+		t.Fatalf("AutoMigrate failed: %v", err)
+	}
+	dbSvc := svc.(*databaseService)
+	t.Cleanup(func() {
+		modelsToDelete := []any{&storageEvent{}, &storageSession{}, &storageUserState{}, &storageAppState{}}
+		for _, model := range modelsToDelete {
+			stmt := &gorm.Statement{DB: dbSvc.db}
+			if err := stmt.Parse(model); err != nil {
+				t.Errorf("failed to parse model: %v", err)
+				continue
+			}
+			if err := dbSvc.db.Exec(`DELETE FROM ` + stmt.Table + ` WHERE true`).Error; err != nil {
+				t.Errorf("failed to delete from %s: %v", stmt.Table, err)
+			}
+		}
+		sqlDB, err := dbSvc.db.DB()
+		if err != nil {
+			t.Errorf("failed to get *sql.DB: %v", err)
+			return
+		}
+		sqlDB.Close()
+	})
+	return dbSvc
+}
+
 func emptyService(t *testing.T) *databaseService {
 	t.Helper()
 	gormConfig := &gorm.Config{
