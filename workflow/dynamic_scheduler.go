@@ -48,6 +48,11 @@ type dynamicSubScheduler struct {
 	delegation   outputDelegation
 }
 
+// ResolveByRunID implements [agent.DynamicSubScheduler].
+func (s *dynamicSubScheduler) ResolveByRunID(childName string, custom string) (string, error) {
+	return s.resolveRunID(childName, custom)
+}
+
 // DelegatedOutput implements [agent.DynamicSubScheduler].
 func (s *dynamicSubScheduler) DelegatedOutput() (any, bool) {
 	return s.delegatedOutput()

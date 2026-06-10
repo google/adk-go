@@ -19,6 +19,7 @@ type DynamicSubScheduler interface {
 	ParentPath() string
 	OutputForAncestors() []string
 	DelegatedOutput() (any, bool)
+	ResolveByRunID(childName, custom string) (string, error)
 }
 
 // func NewDynamicSubScheduler(parent Context, parentPath string, emitUp func(*session.Event) error) *dynamicSubScheduler {

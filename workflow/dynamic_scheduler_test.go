@@ -61,7 +61,7 @@ func TestSubScheduler_Counter_AutoIncrementsPerChildName(t *testing.T) {
 	sub := newDynamicSubScheduler(newTopLevelCtx(t), "parent", noopEmit)
 
 	for i := 1; i <= 3; i++ {
-		got, err := sub.resolveRunID("childA", "")
+		got, err := sub.ResolveByRunID("childA", "")
 		if err != nil {
 			t.Fatalf("resolveRunID childA #%d: %v", i, err)
 		}
@@ -70,7 +70,7 @@ func TestSubScheduler_Counter_AutoIncrementsPerChildName(t *testing.T) {
 		}
 	}
 	// Independent counter per child name.
-	got, _ := sub.resolveRunID("childB", "")
+	got, _ := sub.ResolveByRunID("childB", "")
 	if got != "1" {
 		t.Errorf("childB first invocation got %q, want \"1\"", got)
 	}
@@ -86,7 +86,7 @@ func TestSubScheduler_Counter_ConcurrentSafe(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			id, err := sub.resolveRunID("worker", "")
+			id, err := sub.ResolveByRunID("worker", "")
 			if err != nil {
 				t.Errorf("resolveRunID: %v", err)
 				return
@@ -102,10 +102,10 @@ func TestSubScheduler_Counter_ConcurrentSafe(t *testing.T) {
 func TestSubScheduler_Counter_CustomIDDoesNotIncrement(t *testing.T) {
 	sub := newDynamicSubScheduler(newTopLevelCtx(t), "parent", noopEmit)
 
-	if _, err := sub.resolveRunID("c", "order-1"); err != nil {
+	if _, err := sub.ResolveByRunID("c", "order-1"); err != nil {
 		t.Fatalf("custom id: %v", err)
 	}
-	got, _ := sub.resolveRunID("c", "")
+	got, _ := sub.ResolveByRunID("c", "")
 	if got != "1" {
 		t.Errorf("auto id after custom got %q, want \"1\" (custom must not bump counter)", got)
 	}
