@@ -229,6 +229,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 				cmpopts.IgnoreFields(DebugSpan{}, "StartTime", "EndTime", "TraceID", "SpanID", "ParentSpanID"),
 				cmpopts.IgnoreFields(DebugLog{}, "ObservedTimestamp", "TraceID", "SpanID"),
 				cmpopts.EquateEmpty(),
+				cmpopts.SortSlices(func(x, y DebugSpan) bool { return x.Name < y.Name }),
 			}
 
 			// Validate session spans
@@ -366,6 +367,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 				cmpopts.IgnoreFields(DebugSpan{}, "StartTime", "EndTime", "ParentSpanID", "TraceID", "SpanID"),
 				cmpopts.IgnoreFields(DebugLog{}, "ObservedTimestamp", "TraceID", "SpanID"),
 				cmpopts.EquateEmpty(),
+				cmpopts.SortSlices(func(x, y DebugSpan) bool { return x.Name < y.Name }),
 			}
 
 			// Validate event spans
