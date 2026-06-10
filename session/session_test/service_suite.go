@@ -22,6 +22,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
@@ -87,7 +89,7 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			req := &session.CreateRequest{
 				AppName:   testAppName,
 				UserID:    "testUserID",
-				SessionID: "testSessionID",
+				SessionID: "test-session-id",
 				State: map[string]any{
 					"k": float64(5),
 				},
@@ -385,7 +387,14 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 				SessionID: "nonExistent",
 			})
 			if err != nil {
-				t.Errorf("Delete() non-existent error = %v, want nil", err)
+				if st, ok := status.FromError(err); ok {
+					// VertexAI fails on Delete when the sessionID is not found, we accept that
+					if st.Code() != codes.InvalidArgument {
+						t.Errorf("Delete() non-existent gRPC code = %v, want InvalidArgument", st.Code())
+					}
+				} else {
+					t.Errorf("Delete() non-existent error = %v, want nil or gRPC InvalidArgument", err)
+				}
 			}
 		}
 	})
