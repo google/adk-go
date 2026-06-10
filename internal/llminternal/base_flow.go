@@ -1151,7 +1151,15 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				}
 			}
 
-			// TODO: handle long-running tool.
+			if result == nil {
+				if d, ok := curTool.(toolinternal.ResponseDeferrer); ok && d.DefersResponse() {
+					return
+				}
+				if curTool != nil && curTool.IsLongRunning() {
+					return
+				}
+			}
+
 			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
