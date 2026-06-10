@@ -45,7 +45,12 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 
 		// Set OutputSchema directly if no tools are present or native combo support exists.
 		// Otherwise, OutputSchemaRequestProcessor will be used to provide a tool-based workaround.
-		if state.OutputSchema != nil && !needOutputSchemaProcessor(state) {
+		//
+		// Task-mode agents skip OutputSchema configuration entirely:
+		// structured output for tasks is collected via the FinishTaskTool's
+		// declaration (the model emits the value inside the finish_task
+		// FC args, not as a structured text response).
+		if state.Mode != ModeTask && state.OutputSchema != nil && !needOutputSchemaProcessor(state) {
 			req.Config.ResponseSchema = state.OutputSchema
 			req.Config.ResponseMIMEType = "application/json"
 		}

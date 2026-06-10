@@ -101,6 +101,39 @@ func TestIdentityRequestProcessor(t *testing.T) {
 				"Your internal name is \"append_agent\".",
 			},
 		},
+		{
+			name: "SkipsForSingleTurnMode",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{
+					Name:        "single_turn_agent",
+					Description: "A single-shot worker.",
+				})),
+				s: &State{Mode: ModeSingleTurn},
+			},
+			wantNoSI: true,
+		},
+		{
+			name: "EmittedForChatMode",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "chat_agent"})),
+				s:     &State{Mode: ModeChat},
+			},
+			wantContains: []string{
+				"You are an agent.",
+				"Your internal name is \"chat_agent\".",
+			},
+		},
+		{
+			name: "EmittedForTaskMode",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "task_agent"})),
+				s:     &State{Mode: ModeTask},
+			},
+			wantContains: []string{
+				"You are an agent.",
+				"Your internal name is \"task_agent\".",
+			},
+		},
 	}
 
 	for _, tt := range tests {
