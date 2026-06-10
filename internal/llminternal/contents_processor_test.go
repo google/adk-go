@@ -295,6 +295,52 @@ func TestContentsRequestProcessor_IncludeContentsNone_IsolationScopePivot(t *tes
 	}
 }
 
+// TestContentsRequestProcessor_StrictIsolationFilterExcludesForeignScope
+// verifies that the contents from the different scope are not included
+// in the content for LLM.
+func TestContentsRequestProcessor_StrictIsolationFilterExcludesForeignScope(t *testing.T) {
+	t.Parallel()
+	const myScope = "task-mine"
+	events := []*session.Event{
+		// Foreign-scoped user event: must be filtered out.
+		{
+			Author:         "user",
+			IsolationScope: "garbage-scope",
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("foreign payload", "user"),
+			},
+		},
+		// In-scope user event: must reach the LLM.
+		{
+			Author:         "user",
+			IsolationScope: myScope,
+			LLMResponse: model.LLMResponse{
+				Content: genai.NewContentFromText("my task brief", "user"),
+			},
+		},
+	}
+	testAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:  "scopedAgent",
+		Model: &testModel{},
+	}))
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:          testAgent,
+		IsolationScope: myScope,
+		Session:        &fakeSession{events: events},
+	})
+
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("contentsRequestProcessor failed: %v", err)
+		}
+	}
+	want := []*genai.Content{genai.NewContentFromText("my task brief", "user")}
+	if diff := cmp.Diff(want, req.Contents); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestContentsRequestProcessor_TaskInputFromOriginatingFC(t *testing.T) {
 	t.Parallel()
 	const taskAgentName = "taskAgent"
