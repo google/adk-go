@@ -96,7 +96,7 @@ func newWorkflowAgent(ctx context.Context, data []byte, configPath string) (agen
 		return nil, fmt.Errorf("failed to parse workflow edges: %w", err)
 	}
 
-	wf, err := workflow.New(cfg.Name, edges)
+	wf, err := workflow.New(cfg.Name, edges, workflow.WithMaxConcurrency(cfg.MaxConcurrency))
 	if err != nil {
 		return nil, fmt.Errorf("failed to build workflow: %w", err)
 	}
