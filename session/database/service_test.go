@@ -31,6 +31,54 @@ func Test_databaseService(t *testing.T) {
 	})
 }
 
+// TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip guards that
+// the storage layer serializes/deserializes the workflow event fields
+// (NodeInfo, RequestedInput, Routes, IsolationScope); dropping them
+// breaks HITL resume and scope-isolated history.
+func TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	event := &session.Event{
+		ID:             "wf_event",
+		Author:         "agent",
+		NodeInfo:       &session.NodeInfo{Path: "ask_name"},
+		RequestedInput: &session.RequestInput{InterruptID: "ask_name", Message: "What's your name?"},
+		Routes:         []string{"route_a"},
+		IsolationScope: "task-1",
+	}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	evs := got.Session.Events()
+	if evs.Len() != 1 {
+		t.Fatalf("got %d events, want 1", evs.Len())
+	}
+	ev := evs.At(0)
+	if ev.NodeInfo == nil || ev.NodeInfo.Path != "ask_name" {
+		t.Errorf("NodeInfo not persisted: %#v", ev.NodeInfo)
+	}
+	if ev.RequestedInput == nil || ev.RequestedInput.InterruptID != "ask_name" {
+		t.Errorf("RequestedInput not persisted: %#v", ev.RequestedInput)
+	}
+	if len(ev.Routes) != 1 || ev.Routes[0] != "route_a" {
+		t.Errorf("Routes not persisted: %#v", ev.Routes)
+	}
+	if ev.IsolationScope != "task-1" {
+		t.Errorf("IsolationScope not persisted: got %q, want %q", ev.IsolationScope, "task-1")
+	}
+}
+
 func emptyService(t *testing.T) *databaseService {
 	t.Helper()
 	gormConfig := &gorm.Config{

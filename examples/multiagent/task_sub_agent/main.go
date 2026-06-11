@@ -68,7 +68,7 @@ type PlaceOrderOutput struct {
 }
 
 // placeOrder mocks an order placement operation.
-func placeOrder(_ tool.Context, in PlaceOrderInput) (PlaceOrderOutput, error) {
+func placeOrder(_ agent.ToolContext, in PlaceOrderInput) (PlaceOrderOutput, error) {
 	totalItems := 0
 	for _, item := range in.Orders {
 		totalItems += item.Quantity
@@ -87,7 +87,7 @@ type ConfirmationOutput struct {
 }
 
 // confirmation confirms proceeding with the order.
-func confirmation(_ tool.Context, _ ConfirmationInput) (ConfirmationOutput, error) {
+func confirmation(_ agent.ToolContext, _ ConfirmationInput) (ConfirmationOutput, error) {
 	return ConfirmationOutput{Result: "Proceeding with order."}, nil
 }
 

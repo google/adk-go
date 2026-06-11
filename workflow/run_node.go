@@ -20,9 +20,12 @@ import "fmt"
 type RunNodeOption func(*runNodeOptions)
 
 type runNodeOptions struct {
-	customRunID    string
-	useSubBranch   bool
-	overrideBranch string
+	customRunID            string
+	useSubBranch           bool
+	overrideBranch         string
+	useAsOutput            bool
+	overrideIsolationScope string
+	scopeFromNodePath      bool
 }
 
 // WithRunID overrides the auto-generated counter with a stable
@@ -54,6 +57,14 @@ func WithUseSubBranch() RunNodeOption {
 	return func(o *runNodeOptions) { o.useSubBranch = true }
 }
 
+// WithUseAsOutput promotes this child's output to the parent
+// dynamic node's terminal Output, discarding the value returned by
+// the orchestrator body. At most one delegating child per parent
+// activation; a second one fails with ErrOutputAlreadyDelegated.
+func WithUseAsOutput() RunNodeOption {
+	return func(o *runNodeOptions) { o.useAsOutput = true }
+}
+
 // WithOverrideBranch replaces the inherited branch verbatim,
 // regardless of WithUseSubBranch. Useful for nested dispatch
 // patterns (e.g. chat coordinator → task agent) where the parent
@@ -67,6 +78,21 @@ func WithUseSubBranch() RunNodeOption {
 // root.
 func WithOverrideBranch(branch string) RunNodeOption {
 	return func(o *runNodeOptions) { o.overrideBranch = branch }
+}
+
+// WithIsolationScope tags the child and its emitted events with scope,
+// restricting the child's LLM history to matching events (see
+// session.Event.IsolationScope). Empty means no scope.
+func WithIsolationScope(scope string) RunNodeOption {
+	return func(o *runNodeOptions) { o.overrideIsolationScope = scope }
+}
+
+// WithIsolationScopeFromNodePath scopes the child under its own node
+// path. The full path (not just "<name>@<run_id>") keeps scopes unique
+// across nested workflows and reused node names. This is the task-mode
+// LlmAgent case. WithIsolationScope, if also set, takes precedence.
+func WithIsolationScopeFromNodePath() RunNodeOption {
+	return func(o *runNodeOptions) { o.scopeFromNodePath = true }
 }
 
 // RunNode schedules child as a sub-node of the currently-executing

@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/adk/workflow"
 )
 
@@ -40,8 +41,20 @@ type pendingInterrupt struct {
 // returns them in order of appearance.
 func collectPendingInterrupts(events []*session.Event) []pendingInterrupt {
 	var out []pendingInterrupt
+	// seen dedups by call ID: in SSE streaming mode the same
+	// function-call event can be emitted multiple times (partial
+	// chunks plus the final aggregated event), each carrying the
+	// same LongRunningToolIDs. Without dedup the console would
+	// queue one prompt per duplicate and consume the user's reply
+	// against a phantom interrupt instead of resuming the run.
+	seen := map[string]struct{}{}
 	for _, ev := range events {
 		if ev == nil || len(ev.LongRunningToolIDs) == 0 {
+			continue
+		}
+		// Skip partial streaming chunks; only the final aggregated
+		// event represents a settled interrupt.
+		if ev.LLMResponse.Partial {
 			continue
 		}
 		lr := map[string]struct{}{}
@@ -60,6 +73,10 @@ func collectPendingInterrupts(events []*session.Event) []pendingInterrupt {
 			if _, isInterrupt := lr[fc.ID]; !isInterrupt {
 				continue
 			}
+			if _, dup := seen[fc.ID]; dup {
+				continue
+			}
+			seen[fc.ID] = struct{}{}
 			out = append(out, pendingInterrupt{
 				id:   fc.ID,
 				name: fc.Name,
@@ -77,6 +94,8 @@ func renderInterruptPrompt(p pendingInterrupt) {
 	switch p.name {
 	case workflow.WorkflowInputFunctionCallName:
 		renderWorkflowInputPrompt(p.args)
+	case toolconfirmation.FunctionCallName:
+		renderToolConfirmationPrompt(p.args)
 	default:
 		renderGenericInterruptPrompt(p.name, p.args)
 	}
@@ -93,6 +112,8 @@ func buildInterruptResponse(p pendingInterrupt, userInput string) *genai.Part {
 	switch p.name {
 	case workflow.WorkflowInputFunctionCallName:
 		response = workflowInputResponseFromUserInput(line)
+	case toolconfirmation.FunctionCallName:
+		response = toolConfirmationResponseFromUserInput(line)
 	default:
 		response = genericResponseFromUserInput(line)
 	}
@@ -152,6 +173,39 @@ func workflowInputResponseFromUserInput(line string) map[string]any {
 		return map[string]any{"payload": parsed}
 	}
 	return map[string]any{"payload": line}
+}
+
+// renderToolConfirmationPrompt prints the tool-confirmation
+// prompt, falling back to the original tool name when no hint is
+// provided.
+func renderToolConfirmationPrompt(args map[string]any) {
+	hint := ""
+	if tc, ok := args["toolConfirmation"].(map[string]any); ok {
+		hint, _ = tc["hint"].(string)
+	}
+	if hint == "" {
+		originalName := "unknown"
+		if oc, err := toolconfirmation.OriginalCallFrom(&genai.FunctionCall{Args: args}); err == nil && oc.Name != "" {
+			originalName = oc.Name
+		}
+		hint = "Confirm " + originalName + "?"
+	}
+	fmt.Printf("Agent -> %s\n", hint)
+	fmt.Println("  Type 'yes' to confirm, anything else to reject.")
+}
+
+// toolConfirmationResponseFromUserInput maps yes-ish answers
+// (y/yes/true/confirm, case-insensitive) to {"confirmed": true};
+// everything else (including blank lines) maps to
+// {"confirmed": false}.
+func toolConfirmationResponseFromUserInput(line string) map[string]any {
+	answer := strings.TrimSpace(strings.ToLower(line))
+	switch answer {
+	case "y", "yes", "true", "confirm":
+		return map[string]any{"confirmed": true}
+	default:
+		return map[string]any{"confirmed": false}
+	}
 }
 
 // renderGenericInterruptPrompt is the fallback for HITL kinds the

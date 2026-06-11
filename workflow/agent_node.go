@@ -109,15 +109,16 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 		// fan-out, and the LLM flow's history filter scopes events
 		// by branch prefix.
 		params := internalcontext.InvocationContextParams{
-			Artifacts:     ctx.Artifacts(),
-			Memory:        ctx.Memory(),
-			Session:       ctx.Session(),
-			Branch:        ctx.Branch(),
-			Agent:         n.agent,
-			UserContent:   userContent,
-			RunConfig:     ctx.RunConfig(),
-			EndInvocation: ctx.Ended(),
-			InvocationID:  ctx.InvocationID(),
+			Artifacts:      ctx.Artifacts(),
+			Memory:         ctx.Memory(),
+			Session:        ctx.Session(),
+			Branch:         ctx.Branch(),
+			IsolationScope: ctx.IsolationScope(),
+			Agent:          n.agent,
+			UserContent:    userContent,
+			RunConfig:      ctx.RunConfig(),
+			EndInvocation:  ctx.Ended(),
+			InvocationID:   ctx.InvocationID(),
 		}
 		agentCtx := internalcontext.NewInvocationContext(ctx, params)
 
@@ -129,6 +130,13 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 
 			synthesizeAgentOutput(event)
 
+			// Tag the event for scope filtering (mirrors adk-python
+			// NodeRunner._enrich_event). The scheduler stamps delegated
+			// child events; this covers the direct agent-wrapper path.
+			if sc := ctx.IsolationScope(); sc != "" && event.IsolationScope == "" {
+				event.IsolationScope = sc
+			}
+
 			// TODO: add output validation
 			if !yield(event, nil) {
 				return
@@ -139,7 +147,14 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 
 // synthesizeAgentOutput sets Event.Output from concatenated model
 // text on final model responses so RunNode returns the agent's
-// reply instead of the zero value.
+// reply instead of the zero value. Empty model text yields an empty
+// "" output (a value, not "no output"), matching adk-python and
+// messageAsOutput; non-model events are left untouched.
+//
+// It also stamps NodeInfo.MessageAsOutput so readers (live and
+// resume) know this event's output was derived from the model
+// message, mirroring adk-python's process_llm_agent_output which
+// sets event.output and node_info.message_as_output together.
 func synthesizeAgentOutput(event *session.Event) {
 	if event == nil || event.Output != nil {
 		return
@@ -147,9 +162,25 @@ func synthesizeAgentOutput(event *session.Event) {
 	if !event.IsFinalResponse() {
 		return
 	}
+	if text, ok := messageText(event); ok {
+		event.Output = text
+		if event.NodeInfo == nil {
+			event.NodeInfo = &session.NodeInfo{}
+		}
+		event.NodeInfo.MessageAsOutput = true
+	}
+}
+
+// messageText concatenates the non-thought model text of an event. ok
+// is false when the event carries no model content, distinguishing it
+// from a model message with empty text.
+func messageText(event *session.Event) (text string, ok bool) {
+	if event == nil {
+		return "", false
+	}
 	content := event.LLMResponse.Content
 	if content == nil || content.Role != "model" {
-		return
+		return "", false
 	}
 	var b []byte
 	for _, p := range content.Parts {
@@ -158,8 +189,19 @@ func synthesizeAgentOutput(event *session.Event) {
 		}
 		b = append(b, p.Text...)
 	}
-	if len(b) == 0 {
-		return
+	return string(b), true
+}
+
+// childEventOutput returns the output an event carries: its Output, or
+// the model text when MessageAsOutput is set.
+func childEventOutput(event *session.Event) (any, bool) {
+	if event.Output != nil {
+		return event.Output, true
 	}
-	event.Output = string(b)
+	if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput {
+		if text, ok := messageText(event); ok {
+			return text, true
+		}
+	}
+	return nil, false
 }

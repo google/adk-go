@@ -25,6 +25,9 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/jsonschema-go/jsonschema"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
@@ -54,6 +57,28 @@ func TestScheduler_LinearChain(t *testing.T) {
 	gotOutputs := outputsOf(gotEvents)
 	if diff := cmp.Diff(wantOutputs, gotOutputs); diff != "" {
 		t.Errorf("outputs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestScheduler_MessageAsOutput_FeedsSuccessor verifies that a node
+// whose message IS its output (NodeInfo.MessageAsOutput, no explicit
+// Event.Output) has its model text derived as the node output and fed
+// to the successor as input.
+func TestScheduler_MessageAsOutput_FeedsSuccessor(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	a := newMessageAsOutputNode("A", "hello")
+	b := newRecordingNode("B")
+	b.release()
+
+	w := mustNew(t, Chain(Start, a, b))
+
+	gotEvents := drain(t, w.Run(mockCtx))
+
+	// B echoes "<input>:B"; the input must be A's derived output.
+	got := outputsOf(gotEvents)
+	if len(got) != 1 || got[0] != "hello:B" {
+		t.Errorf("outputs = %v, want [\"hello:B\"] (A's message text fed to B)", got)
 	}
 }
 
@@ -202,7 +227,7 @@ func TestScheduler_NodeTimeout(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 
 	slow := newCancelObservingNode("slow")
-	slow.cfg = NodeConfig{Timeout: 50 * time.Millisecond}
+	slow.config = NodeConfig{Timeout: 50 * time.Millisecond}
 
 	w := mustNew(t, []Edge{{From: Start, To: slow}})
 
@@ -377,16 +402,12 @@ func (n *erroringNode) Run(_ agent.InvocationContext, _ any) iter.Seq2[*session.
 // cancellation and timeout behaviour.
 type cancelObservingNode struct {
 	BaseNode
-	cfg            NodeConfig
 	cancelObserved atomic.Bool
 }
 
 func newCancelObservingNode(name string) *cancelObservingNode {
 	return &cancelObservingNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
-
-// Config returns n.cfg, which tests may mutate after construction.
-func (n *cancelObservingNode) Config() NodeConfig { return n.cfg }
 
 func (n *cancelObservingNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
@@ -521,18 +542,14 @@ type retryTestNode struct {
 	BaseNode
 	failCount int
 	calls     atomic.Int32
-	cfg       NodeConfig
 }
 
 func newRetryTestNode(name string, failCount int, cfg NodeConfig) *retryTestNode {
 	return &retryTestNode{
 		BaseNode:  NewBaseNode(name, "", cfg),
 		failCount: failCount,
-		cfg:       cfg,
 	}
 }
-
-func (n *retryTestNode) Config() NodeConfig { return n.cfg }
 
 func (n *retryTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
@@ -641,5 +658,94 @@ func TestScheduler_RetryCancelled(t *testing.T) {
 
 	if got := n.calls.Load(); got != 1 {
 		t.Errorf("node calls = %d, want 1 (retry should not have triggered)", got)
+	}
+}
+
+func TestScheduler_InputValidationSuccess(t *testing.T) {
+	intSchema, err := (&jsonschema.Schema{Type: "integer"}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schema: %v", err)
+	}
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "123"}}}
+	node := &validationTestNode{
+		BaseNode: NewBaseNodeWithSchemas("val_node", "", NodeConfig{}, intSchema, nil),
+	}
+	w := mustNew(t, []Edge{{From: Start, To: node}})
+	events := drain(t, w.Run(mockCtx))
+
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	// JSON numbers unmarshal as float64 when unmarshaled into any
+	if got, ok := node.runInput.(float64); !ok || got != 123.0 {
+		t.Errorf("expected node to receive validated float64(123.0), got %T(%v)", node.runInput, node.runInput)
+	}
+}
+
+func TestScheduler_InputValidationFailure(t *testing.T) {
+	intSchema, err := (&jsonschema.Schema{Type: "integer"}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schema: %v", err)
+	}
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "not-an-integer"}}}
+	node := &validationTestNode{
+		BaseNode: NewBaseNodeWithSchemas("val_node", "", NodeConfig{
+			RetryConfig: &RetryConfig{
+				MaxAttempts:   3,
+				InitialDelay:  1 * time.Millisecond,
+				BackoffFactor: 1.0,
+				Jitter:        0.0,
+			},
+		}, intSchema, nil),
+	}
+	w := mustNew(t, []Edge{{From: Start, To: node}})
+
+	var runErr error
+	for _, err := range w.Run(mockCtx) {
+		if err != nil {
+			runErr = err
+			break
+		}
+	}
+
+	if runErr == nil {
+		t.Fatal("expected validation error, got none")
+	}
+	if !errors.Is(runErr, ErrInputValidation) {
+		t.Errorf("expected run error to wrap ErrInputValidation, got: %v", runErr)
+	}
+
+	if got := node.calls.Load(); got != 0 {
+		t.Errorf("node calls = %d, want 0", got)
+	}
+
+	if got := node.validates.Load(); got != 1 {
+		t.Errorf("node validates = %d, want 1 (meaning no retries)", got)
+	}
+}
+
+type validationTestNode struct {
+	BaseNode
+	runInput  any
+	calls     atomic.Int32
+	validates atomic.Int32
+}
+
+func (n *validationTestNode) ValidateInput(input any) (any, error) {
+	n.validates.Add(1)
+	return n.BaseNode.ValidateInput(input)
+}
+
+func (n *validationTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		n.calls.Add(1)
+		n.runInput = input
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Output = "ok"
+		yield(ev, nil)
 	}
 }

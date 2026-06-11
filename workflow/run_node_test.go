@@ -17,6 +17,7 @@ package workflow
 import (
 	"errors"
 	"iter"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -177,6 +178,122 @@ func TestRunNode_WithOverrideBranch_Empty_TreatedAsNoOverride(t *testing.T) {
 	}
 }
 
+func TestRunNode_WithUseAsOutput_ChildOutputBecomesParentOutput(t *testing.T) {
+	child := newStubNode("c", "child_value")
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil, WithUseAsOutput()); err != nil {
+				return "", err
+			}
+			return "parent_value", nil
+		},
+		NodeConfig{},
+	)
+	events := drainDynamic(t, n, "")
+	// Full suppression: the delegated output is carried on the child's
+	// own event; the parent emits no terminal event.
+	if got := outputBearingPaths(events); !reflect.DeepEqual(got, []string{"orch/c@1"}) {
+		t.Errorf("paths of events with Output = %v, want exactly [\"orch/c@1\"]", got)
+	}
+	if got := parentTerminalOutput(t, events, "orch/c@1"); got != "child_value" {
+		t.Errorf("delegated child Output = %v, want %q", got, "child_value")
+	}
+	// The child event is stamped OutputFor with its own path plus the
+	// delegating parent, so resume attributes the output to both.
+	if got := outputForAtPath(events, "orch/c@1"); !reflect.DeepEqual(got, []string{"orch/c@1", "orch"}) {
+		t.Errorf("OutputFor = %v, want [orch/c@1 orch]", got)
+	}
+}
+
+func TestRunNode_WithUseAsOutput_MultiLevelStampsAllAncestors(t *testing.T) {
+	// grandchild delegates up through child to the top orchestrator;
+	// the single output event is stamped for the whole chain.
+	grandchild := newStubNode("gc", "deep_value")
+	child := NewDynamicNode[string, string](
+		"mid",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			return RunNode[string](ctx, grandchild, nil, WithUseAsOutput())
+		},
+		NodeConfig{},
+	)
+	top := NewDynamicNode[string, string](
+		"top",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			return RunNode[string](ctx, child, nil, WithUseAsOutput())
+		},
+		NodeConfig{},
+	)
+	events := drainDynamic(t, top, "")
+	// One output event, carried on the grandchild, suppressing both
+	// delegating ancestors.
+	if got := outputBearingPaths(events); !reflect.DeepEqual(got, []string{"top/mid@1/gc@1"}) {
+		t.Errorf("output-bearing paths = %v, want [top/mid@1/gc@1]", got)
+	}
+	if got := outputForAtPath(events, "top/mid@1/gc@1"); !reflect.DeepEqual(got, []string{"top/mid@1/gc@1", "top/mid@1", "top"}) {
+		t.Errorf("OutputFor = %v, want [top/mid@1/gc@1 top/mid@1 top]", got)
+	}
+}
+
+func TestRunNode_WithUseAsOutput_MessageAsOutputChildBecomesParentOutput(t *testing.T) {
+	// A delegated child whose message IS its output (NodeInfo.
+	// MessageAsOutput, no explicit Output — like an LlmAgent node)
+	// promotes its model text to the parent's terminal Output.
+	child := newMessageAsOutputNode("c", "child_text")
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil, WithUseAsOutput()); err != nil {
+				return "", err
+			}
+			return "parent_value", nil
+		},
+		NodeConfig{},
+	)
+	events := drainDynamic(t, n, "")
+	// Full suppression: the child's own event carries the output (via
+	// MessageAsOutput); the parent emits nothing.
+	if got, ok := derivedOutputAtPath(events, "orch/c@1"); !ok || got != "child_text" {
+		t.Errorf("delegated child derived output = %v (ok=%v), want %q", got, ok, "child_text")
+	}
+}
+
+func TestRunNode_WithUseAsOutput_MessageAsOutputEmptyTextIsValidOutput(t *testing.T) {
+	// Empty model text under MessageAsOutput is a valid output ("",
+	// not "no output"), matching adk-python. The parent's terminal
+	// Output must be the empty string, not nil.
+	child := newMessageAsOutputNode("c", "")
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil, WithUseAsOutput()); err != nil {
+				return "", err
+			}
+			return "parent_value", nil
+		},
+		NodeConfig{},
+	)
+	events := drainDynamic(t, n, "")
+	if got, ok := derivedOutputAtPath(events, "orch/c@1"); !ok || got != "" {
+		t.Errorf("delegated child derived output = %#v (ok=%v), want empty string", got, ok)
+	}
+}
+
+func TestRunNode_WithUseAsOutput_SecondDelegationReturnsError(t *testing.T) {
+	c1 := newStubNode("c1", "v1")
+	c2 := newStubNode("c2", "v2")
+	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
+		if _, err := RunNode[string](ctx, c1, nil, WithUseAsOutput()); err != nil {
+			return "", err
+		}
+		_, err := RunNode[string](ctx, c2, nil, WithUseAsOutput())
+		return "", err
+	})
+	if !errors.Is(err, ErrOutputAlreadyDelegated) {
+		t.Errorf("err = %v, want errors.Is ErrOutputAlreadyDelegated", err)
+	}
+}
+
 func TestRunNode_WithRunID_IdempotentReplay(t *testing.T) {
 	child := newCountingStubNode("c", "the_value")
 	got1, got2 := "", ""
@@ -194,6 +311,34 @@ func TestRunNode_WithRunID_IdempotentReplay(t *testing.T) {
 	}
 	if got := child.runCount(); got != 1 {
 		t.Errorf("child.Run invocations = %d, want 1", got)
+	}
+}
+
+func TestRunNode_WithRunID_AndUseAsOutput_IdempotentReplay(t *testing.T) {
+	child := newCountingStubNode("c", "delegated_value")
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil,
+				WithRunID("stable-id"), WithUseAsOutput()); err != nil {
+				return "", err
+			}
+			if _, err := RunNode[string](ctx, child, nil,
+				WithRunID("stable-id"), WithUseAsOutput()); err != nil {
+				return "", err
+			}
+			return "parent_value", nil
+		},
+		NodeConfig{},
+	)
+	events := drainDynamic(t, n, "")
+	if got := child.runCount(); got != 1 {
+		t.Errorf("child.Run invocations = %d, want 1", got)
+	}
+	// Full suppression: the child's event carries the delegated output;
+	// the cached replay re-emits nothing and the parent stays silent.
+	if got, ok := derivedOutputAtPath(events, "orch/c@stable-id"); !ok || got != "delegated_value" {
+		t.Errorf("delegated child output = %v (ok=%v), want %q", got, ok, "delegated_value")
 	}
 }
 
@@ -226,7 +371,110 @@ func TestRunNode_SequentialFanOut_PerSibling_DistinctBranches(t *testing.T) {
 	}
 }
 
+func TestRunNode_IsolationScopeFromNodePath(t *testing.T) {
+	// WithIsolationScopeFromNodePath scopes the child under its full
+	// node path on both the child context and its emitted events, so a
+	// task-mode node is isolated from peers (b/514866119).
+	child := newStubNode("c", "v")
+	events := drainDynamic(t, NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil, WithIsolationScopeFromNodePath()); err != nil {
+				return "", err
+			}
+			return "", nil
+		},
+		NodeConfig{},
+	), "")
+
+	if got, want := child.lastScope, "orch/c@1"; got != want {
+		t.Errorf("child ctx IsolationScope = %q, want %q", got, want)
+	}
+	if got := isolationScopeAtPath(events, "orch/c@1"); got != "orch/c@1" {
+		t.Errorf("emitted event IsolationScope = %q, want %q", got, "orch/c@1")
+	}
+}
+
+func TestRunNode_IsolationScope_Explicit(t *testing.T) {
+	child := newStubNode("c", "v")
+	events := drainDynamic(t, NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			if _, err := RunNode[string](ctx, child, nil, WithIsolationScope("fc-123")); err != nil {
+				return "", err
+			}
+			return "", nil
+		},
+		NodeConfig{},
+	), "")
+
+	if got, want := child.lastScope, "fc-123"; got != want {
+		t.Errorf("child ctx IsolationScope = %q, want %q", got, want)
+	}
+	if got := isolationScopeAtPath(events, "orch/c@1"); got != "fc-123" {
+		t.Errorf("emitted event IsolationScope = %q, want %q", got, "fc-123")
+	}
+}
+
+func TestRunNode_ExplicitScopeTakesPrecedenceOverNodePath(t *testing.T) {
+	child := newStubNode("c", "v")
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		_, err := RunNode[string](ctx, child, nil,
+			WithIsolationScope("fc-123"), WithIsolationScopeFromNodePath())
+		return "", err
+	})
+	if got, want := child.lastScope, "fc-123"; got != want {
+		t.Errorf("child ctx IsolationScope = %q, want %q (explicit must win)", got, want)
+	}
+}
+
+func TestRunNode_NoIsolationScope_InheritsParent(t *testing.T) {
+	// Without a scope option the child inherits the parent's scope,
+	// which is empty for an unscoped orchestrator.
+	child := newStubNode("c", "v")
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		_, err := RunNode[string](ctx, child, nil)
+		return "", err
+	})
+	if got := child.lastScope; got != "" {
+		t.Errorf("child ctx IsolationScope = %q, want empty (inherited)", got)
+	}
+}
+
+func TestRunNode_IsolationScope_DistinctPerNodePath(t *testing.T) {
+	// Two children sharing a name but at distinct run positions get
+	// distinct scopes, the uniqueness guarantee from b/514866119.
+	child := newStubNode("c", "v")
+	var scopes []string
+	runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		if _, err := RunNode[string](ctx, child, nil, WithIsolationScopeFromNodePath()); err != nil {
+			return "", err
+		}
+		scopes = append(scopes, child.lastScope)
+		if _, err := RunNode[string](ctx, child, nil, WithIsolationScopeFromNodePath()); err != nil {
+			return "", err
+		}
+		scopes = append(scopes, child.lastScope)
+		return "", nil
+	})
+	if want := []string{"orch/c@1", "orch/c@2"}; !reflect.DeepEqual(scopes, want) {
+		t.Errorf("scopes = %v, want %v", scopes, want)
+	}
+}
+
 // --- test helpers ---
+
+// isolationScopeAtPath returns the IsolationScope of the last event
+// stamped with nodePath.
+func isolationScopeAtPath(events []*session.Event, nodePath string) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
+			return ev.IsolationScope
+		}
+	}
+	return ""
+}
 
 // runInOrchestrator drives orchestratorFn inside a dynamic node so that
 // the RunNode calls inside have a valid NodeContext + sub-scheduler.
@@ -245,7 +493,8 @@ func runInOrchestratorWithErr[OUT any](t *testing.T, orchestratorFn func(NodeCon
 		got    OUT
 		gotErr error
 	)
-	n := NewDynamicNode[string, OUT]("orch",
+	n := NewDynamicNode[string, OUT](
+		"orch",
 		func(ctx NodeContext, _ string, _ func(*session.Event) error) (OUT, error) {
 			got, gotErr = orchestratorFn(ctx)
 			if gotErr != nil {
@@ -260,6 +509,60 @@ func runInOrchestratorWithErr[OUT any](t *testing.T, orchestratorFn func(NodeCon
 		return got, runErr
 	}
 	return got, gotErr
+}
+
+// outputBearingPaths returns NodeInfo.Path of every event whose
+// Output is non-nil, preserving order.
+func outputBearingPaths(events []*session.Event) []string {
+	var paths []string
+	for _, ev := range events {
+		if ev.Output == nil {
+			continue
+		}
+		var path string
+		if ev.NodeInfo != nil {
+			path = ev.NodeInfo.Path
+		}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+// parentTerminalOutput returns the Output of the last event
+// stamped with parentPath.
+// outputForAtPath returns NodeInfo.OutputFor of the event at nodePath.
+func outputForAtPath(events []*session.Event, nodePath string) []string {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
+			return ev.NodeInfo.OutputFor
+		}
+	}
+	return nil
+}
+
+// derivedOutputAtPath returns the output the event at nodePath carries,
+// via childEventOutput (explicit Output or MessageAsOutput-derived).
+func derivedOutputAtPath(events []*session.Event, nodePath string) (any, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
+			return childEventOutput(ev)
+		}
+	}
+	return nil, false
+}
+
+func parentTerminalOutput(t *testing.T, events []*session.Event, parentPath string) any {
+	t.Helper()
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.NodeInfo != nil && ev.NodeInfo.Path == parentPath {
+			return ev.Output
+		}
+	}
+	t.Fatalf("no event with NodeInfo.Path == %q found among %d events", parentPath, len(events))
+	return nil
 }
 
 // countingStubNode is a stubNode that counts Run invocations so
