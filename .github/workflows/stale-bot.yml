@@ -1,0 +1,66 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: ADK Go Stale Issue Auditor
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Audit only this issue number (blank = all stale candidates)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Log intended actions without modifying issues'
+        required: false
+        type: boolean
+        default: true
+
+  schedule:
+    # 06:00 UTC daily.
+    - cron: '0 6 * * *'
+
+jobs:
+  audit-stale-issues:
+    # Guard so forks don't run the bot. Update if the canonical repo differs.
+    if: github.repository == 'google/adk-go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Run stale-issue auditor
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          LLM_MODEL_NAME: gemini-3.5-flash
+          CONCURRENCY_LIMIT: '3'
+          DRY_RUN: ${{ inputs.dry_run }}
+          # Comma-separated maintainer logins. The default github-actions[bot]
+          # token is repo-scoped and cannot read org team membership at runtime,
+          # so this mirrors the @google/adk-go-maintainers-team and must be kept
+          # in sync manually:
+          # https://github.com/orgs/google/teams/adk-go-maintainers-team
+          MAINTAINERS: 'baptmont,dpasiukevich,foxfrikses,hanorik,hyangah,jjsasha63,karolpiotrowicz,kdroste-google,mazas-google,wolo-lab,yarolegovich'
+        run: go run -mod=readonly ./examples/githubstalebot ${{ inputs.issue && format('-issue={0}', inputs.issue) || '' }}

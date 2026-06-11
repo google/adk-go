@@ -36,7 +36,12 @@ require (
 	rsc.io/ordered v1.1.1
 )
 
-require github.com/hashicorp/golang-lru/v2 v2.0.7
+require (
+	github.com/google/go-github/v66 v66.0.0
+	github.com/hashicorp/golang-lru/v2 v2.0.7
+)
+
+require github.com/google/go-querystring v1.1.0 // indirect
 
 require (
 	github.com/a2aproject/a2a-go/v2 v2.3.1
