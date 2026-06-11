@@ -97,7 +97,7 @@ func newFnNode(name string, fn func(NodeContext) (any, error)) *fnNode {
 	}
 }
 
-func (n *fnNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *fnNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// dynamic_scheduler passes *nodeContext as agent.InvocationContext.
 		nc, ok := ctx.(NodeContext)

@@ -41,7 +41,7 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 	tests := []struct {
 		name         string
 		nodeName     string
-		fn           func(ctx agent.InvocationContext, input Input) (map[string]any, error)
+		fn           func(ctx agent.Context, input Input) (map[string]any, error)
 		inputSchema  *jsonschema.Schema
 		outputSchema *jsonschema.Schema
 		input        any
@@ -52,7 +52,7 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 		{
 			name:     "Success",
 			nodeName: "upper",
-			fn: func(ctx agent.InvocationContext, input Input) (map[string]any, error) {
+			fn: func(ctx agent.Context, input Input) (map[string]any, error) {
 				return map[string]any{"result": strings.ToUpper(input.Value)}, nil
 			},
 			inputSchema:  mustSchema[Input](t),
@@ -64,7 +64,7 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 		{
 			name:     "NilInput",
 			nodeName: "nil_test",
-			fn: func(ctx agent.InvocationContext, input Input) (map[string]any, error) {
+			fn: func(ctx agent.Context, input Input) (map[string]any, error) {
 				if input.Value == "" {
 					return map[string]any{"result": "zero"}, nil
 				}
@@ -79,7 +79,7 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 		{
 			name:     "ValidationError",
 			nodeName: "test",
-			fn: func(ctx agent.InvocationContext, input Input) (map[string]any, error) {
+			fn: func(ctx agent.Context, input Input) (map[string]any, error) {
 				return map[string]any{"result": "not-an-int"}, nil
 			},
 			inputSchema:  mustSchema[Input](t),
@@ -98,7 +98,8 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 			}
 
 			mockCtx := &MockInvocationContext{sess: nil}
-			events := node.Run(mockCtx, tc.input)
+			exCtx := agent.NewNodeContext(mockCtx, nil)
+			events := node.Run(exCtx, tc.input)
 
 			count := 0
 			for ev, err := range events {
@@ -306,8 +307,9 @@ func TestNewFunctionNodeFromState(t *testing.T) {
 				state: &mockStateForTest{data: tc.stateData},
 			}
 			mockCtx := &MockInvocationContext{sess: mockSess}
+			exCtx := agent.NewNodeContext(mockCtx, nil)
 
-			events := node.Run(mockCtx, tc.input)
+			events := node.Run(exCtx, tc.input)
 
 			var lastErr error
 			var output any

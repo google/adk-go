@@ -1241,8 +1241,9 @@ func TestLLMAgent_WorkflowIntegration_OutputPropagatesToSuccessor(t *testing.T) 
 		Context: runCtx,
 		sess:    &mockSession{id: "test-session-id"},
 	}
+	exCtx := agent.NewNodeContext(mockCtx, nil)
 
-	events := w.Run(mockCtx)
+	events := w.Run(exCtx)
 	for ev, err := range events {
 		if err != nil {
 			t.Fatalf("workflow run failed: %v", err)

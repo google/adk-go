@@ -52,7 +52,7 @@ func newClassifyNode() *classifyNode {
 	}
 }
 
-func (n *classifyNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *classifyNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		msg, ok := input.(string)
 		if !ok {

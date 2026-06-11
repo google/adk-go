@@ -170,7 +170,8 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		})
 		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
-		ctx := &invocationContext{
+
+		ic := &invocationContext{
 			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
 			artifacts: ctx.Artifacts(),
@@ -184,31 +185,33 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			runConfig:      ctx.RunConfig(),
 			endInvocation:  ctx.Ended(),
 		}
-		event, err := runBeforeAgentCallbacks(ctx)
+		event, err := runBeforeAgentCallbacks(ic)
 		if event != nil || err != nil {
 			if !yield(event, err) {
 				return
 			}
 		}
 
-		if ctx.Ended() {
+		if ic.Ended() {
 			return
 		}
 
-		for event, err := range a.run(ctx) {
+		nodeCtx := NewNodeContext(ic, nil)
+
+		for event, err := range a.run(nodeCtx) {
 			if event != nil && event.Author == "" {
-				event.Author = getAuthorForEvent(ctx, event)
+				event.Author = getAuthorForEvent(ic, event)
 			}
 			if !yield(event, err) {
 				return
 			}
 		}
 
-		if ctx.Ended() {
+		if ic.Ended() {
 			return
 		}
 
-		event, err = runAfterAgentCallbacks(ctx)
+		event, err = runAfterAgentCallbacks(ic)
 		if event != nil || err != nil {
 			yield(event, err)
 		}

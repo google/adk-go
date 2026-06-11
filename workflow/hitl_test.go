@@ -30,17 +30,17 @@ import (
 // then error, etc.).
 type hitlNode struct {
 	BaseNode
-	run func(ctx agent.InvocationContext, input any, yield func(*session.Event, error) bool)
+	run func(ctx agent.Context, input any, yield func(*session.Event, error) bool)
 }
 
-func newHitlNode(name string, run func(ctx agent.InvocationContext, input any, yield func(*session.Event, error) bool)) *hitlNode {
+func newHitlNode(name string, run func(ctx agent.Context, input any, yield func(*session.Event, error) bool)) *hitlNode {
 	return &hitlNode{
 		BaseNode: NewBaseNode(name, "", defaultNodeConfig),
 		run:      run,
 	}
 }
 
-func (n *hitlNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *hitlNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.run(ctx, input, yield)
 	}
@@ -71,14 +71,14 @@ func TestScheduler_HitlNode_PausesAndForwardsRequest(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 
 	var downstreamRan atomic.Bool
-	asker := newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	asker := newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		yield(NewRequestInputEvent(ctx, session.RequestInput{
 			InterruptID: "human_review",
 			Message:     "Please approve",
 			Payload:     "the draft",
 		}), nil)
 	})
-	downstream := newHitlNode("downstream", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	downstream := newHitlNode("downstream", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		downstreamRan.Store(true)
 	})
 
@@ -115,7 +115,7 @@ func TestScheduler_HitlNode_PausesAndForwardsRequest(t *testing.T) {
 func TestScheduler_HitlNode_AutoGeneratesInterruptID(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 
-	asker := newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	asker := newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		// InterruptID intentionally left empty.
 		yield(NewRequestInputEvent(ctx, session.RequestInput{
 			Message: "approve?",
@@ -139,7 +139,7 @@ func TestScheduler_HitlNode_AutoGeneratesInterruptID(t *testing.T) {
 func TestScheduler_HitlNode_PreservesExplicitInterruptID(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 
-	asker := newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	asker := newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		yield(NewRequestInputEvent(ctx, session.RequestInput{
 			InterruptID: "stable-id-42",
 			Message:     "approve?",
@@ -164,7 +164,7 @@ func TestScheduler_HitlNode_PreservesExplicitInterruptID(t *testing.T) {
 func TestScheduler_HitlNode_MultipleRequestsPark(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 
-	asker := newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	asker := newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		yield(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "first"}), nil)
 		yield(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "second"}), nil)
 	})
@@ -196,7 +196,7 @@ func TestScheduler_HitlNode_ErrorAfterRequestFails(t *testing.T) {
 	mockCtx := newSeededMockCtx(t)
 
 	wantErr := errors.New("downstream of request")
-	asker := newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	asker := newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		yield(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "ignored"}), nil)
 		yield(nil, wantErr)
 	})
@@ -220,18 +220,18 @@ func TestScheduler_HitlNode_ConcurrentBranches_PausesOnlyWhenAllNonRunning(t *te
 	var hitlDownstreamRan atomic.Bool
 	var plainDownstreamRan atomic.Bool
 
-	hitlAsker := newHitlNode("hitl_asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	hitlAsker := newHitlNode("hitl_asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		yield(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "ask"}), nil)
 	})
-	hitlDownstream := newHitlNode("hitl_downstream", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	hitlDownstream := newHitlNode("hitl_downstream", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		hitlDownstreamRan.Store(true)
 	})
-	plainNode := newHitlNode("plain", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	plainNode := newHitlNode("plain", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Output = "done"
 		yield(ev, nil)
 	})
-	plainDownstream := newHitlNode("plain_downstream", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	plainDownstream := newHitlNode("plain_downstream", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		plainDownstreamRan.Store(true)
 	})
 

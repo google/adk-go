@@ -243,7 +243,8 @@ func TestAgentNode_Run(t *testing.T) {
 
 			mockCtx := newMockCtx(t)
 			mockCtx.sess = &mockSession{id: "test-session-id"} // Fix nil panic
-			events := node.Run(mockCtx, tc.nodeInput)
+			runCtx := agent.NewNodeContext(mockCtx, nil)
+			events := node.Run(runCtx, tc.nodeInput)
 
 			var got string
 			count := 0
@@ -342,7 +343,7 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 			}
 
 			// Connect to a function node.
-			functionNode := NewFunctionNode[Output, int]("plus_one", func(ctx agent.InvocationContext, in Output) (int, error) {
+			functionNode := NewFunctionNode[Output, int]("plus_one", func(ctx agent.Context, in Output) (int, error) {
 				return in.Result + 1, nil
 			}, NodeConfig{})
 
@@ -351,7 +352,7 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 
 			t.Run("WorkflowExecution", func(t *testing.T) {
 				// Use a seed node to pass the struct input to agentNode
-				seedNode := NewFunctionNode("seed", func(ctx agent.InvocationContext, input any) (*Input, error) {
+				seedNode := NewFunctionNode("seed", func(ctx agent.Context, input any) (*Input, error) {
 					return &Input{Val: tc.input}, nil
 				}, NodeConfig{})
 
@@ -419,11 +420,12 @@ func TestAgentNode_SynthesizesOutputFromModelText(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session-id"}
+	nc := agent.NewNodeContext(mockCtx, nil)
 	var (
 		gotPartial *session.Event
 		gotFinal   *session.Event
 	)
-	for ev, err := range node.Run(mockCtx, "ignored") {
+	for ev, err := range node.Run(nc, "ignored") {
 		if err != nil {
 			t.Fatalf("node.Run: %v", err)
 		}
@@ -479,9 +481,10 @@ func TestAgentNode_StampsIsolationScopeOnEvents(t *testing.T) {
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session-id"}
 	mockCtx.isolationScope = "scope-x"
+	exCtx := agent.NewNodeContext(mockCtx, nil)
 
 	var events []*session.Event
-	for ev, err := range node.Run(mockCtx, "ignored") {
+	for ev, err := range node.Run(exCtx, "ignored") {
 		if err != nil {
 			t.Fatalf("node.Run: %v", err)
 		}

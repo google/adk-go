@@ -620,7 +620,7 @@ func newCountingStubNode(name string, out any) *countingStubNode {
 	return &countingStubNode{stubNode: newStubNode(name, out)}
 }
 
-func (n *countingStubNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *countingStubNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	n.mu.Lock()
 	n.calls++
 	n.mu.Unlock()

@@ -94,7 +94,7 @@ func runSequentialFanOut(t *testing.T, childName string, extraOpts []RunNodeOpti
 	var seenBranches []string
 	peekerNode := NewFunctionNode(
 		childName,
-		func(ctx agent.InvocationContext, input string) (string, error) {
+		func(ctx agent.Context, input string) (string, error) {
 			t.Logf("Branch: %v", ctx.Branch())
 			seenBranches = append(seenBranches, ctx.Branch())
 			return input, nil

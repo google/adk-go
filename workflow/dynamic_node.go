@@ -96,7 +96,7 @@ func applyDynamicDefaults(cfg NodeConfig) NodeConfig {
 	return cfg
 }
 
-func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		parentNC, ok := ctx.(NodeContext)
 		if !ok {

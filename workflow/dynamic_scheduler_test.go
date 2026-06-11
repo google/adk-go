@@ -212,7 +212,7 @@ func newStubNode(name string, out any) *stubNode {
 	}
 }
 
-func (n *stubNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *stubNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	if nc, ok := ctx.(NodeContext); ok {
 		n.lastPath = nc.Path()
 	}
@@ -279,7 +279,7 @@ func newMessageAsOutputNode(name, text string) *messageAsOutputNode {
 	}
 }
 
-func (n *messageAsOutputNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+func (n *messageAsOutputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
 	text := n.text
 	return func(yield func(*session.Event, error) bool) {
 		ev := &session.Event{NodeInfo: &session.NodeInfo{MessageAsOutput: true}}
@@ -304,7 +304,7 @@ func newRequestInputNode(name, msg string) *requestInputNode {
 	}
 }
 
-func (n *requestInputNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+func (n *requestInputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{
 			RequestedInput: &session.RequestInput{

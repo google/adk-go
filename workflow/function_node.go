@@ -151,7 +151,7 @@ func NewFunctionNodeFromState[Params, OUT any](
 		return nil, fmt.Errorf("resolving output schema: %w", err)
 	}
 
-	wrappedFn := func(ctx agent.InvocationContext, input any) (any, error) {
+	wrappedFn := func(ctx agent.Context, input any) (any, error) {
 		sessionState := ctx.Session().State()
 		stateMap := make(map[string]any)
 

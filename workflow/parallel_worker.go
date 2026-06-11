@@ -68,11 +68,12 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 // aggregated into a list, and the final result will be a multi dimensional list.
 //
 // Intermediate non-output events emitted by the wrapped node are suppressed.
-func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		cancelCtx, cancelFunc := context.WithCancel(ctx)
 		defer cancelFunc()
-		workerCtx := ctx.WithContext(cancelCtx)
+		wCtx := ctx.WithContext(cancelCtx)
+		workerCtx := agent.NewNodeContext(wCtx, nil)
 
 		v := reflect.ValueOf(input)
 		if v.Kind() != reflect.Slice {
@@ -120,7 +121,8 @@ func (n *ParallelWorker) Run(ctx agent.InvocationContext, input any) iter.Seq2[*
 			}
 
 			itemBranch := deriveSubBranch(parentBranch, wrappedName+"@"+strconv.Itoa(i+1))
-			itemCtx := withBranch(workerCtx, itemBranch)
+			itemCtx := workerCtx.WithBranch(itemBranch)
+			// itemCtx := withBranch(workerCtx, itemBranch)
 			go n.runWorker(itemCtx, i, item, sem, resCh, &wg)
 		}
 
@@ -166,7 +168,7 @@ type workerResult struct {
 	err   error
 }
 
-func (n *ParallelWorker) runWorker(ctx agent.InvocationContext, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup) {
+func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer func() {
 		if sem != nil {

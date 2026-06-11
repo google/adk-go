@@ -134,7 +134,7 @@ func (s *startNode) ValidateOutput(output any) (any, error) {
 	return output, nil
 }
 
-func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (s *startNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
 
@@ -257,12 +257,13 @@ func (w *Workflow) Name() string {
 // when nodes complete. The consumer is the only mutator of the
 // per-node lifecycle map and of session state.
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	return w.RunNode(ctx, userInput(ctx))
+	c := agent.NewNodeContext(ctx, nil)
+	return w.RunNode(c, userInput(c))
 }
 
 // RunNode drives the workflow with the given input.
 // This is used by WorkflowNode to run nested workflows.
-func (w *Workflow) RunNode(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (w *Workflow) RunNode(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		s := newScheduler(ctx, w.graph, w.maxConcurrency)
 		// Seed: schedule START with the supplied input.
@@ -280,7 +281,7 @@ func (w *Workflow) RunNode(ctx agent.InvocationContext, input any) iter.Seq2[*se
 // userInput extracts the workflow's seed input from the
 // InvocationContext's UserContent. Concatenates all text parts;
 // returns nil for an empty UserContent.
-func userInput(ctx agent.InvocationContext) any {
+func userInput(ctx agent.Context) any {
 	uc := ctx.UserContent()
 	if uc == nil {
 		return nil
