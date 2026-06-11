@@ -230,7 +230,14 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			interrupted = true
 		}
 		if childOut, ok := childEventOutput(ev); ok {
-			out = childOut
+			validated, err := validateAndStampOutput(child, childOut, ev)
+			if err != nil {
+				return nil, &NodeRunError{
+					ChildName: name, ChildPath: childPath, RunID: runID,
+					Cause: err,
+				}
+			}
+			out = validated
 			// Stamp OutputFor so resume can attribute the output: the
 			// emitter's own path plus, under delegation, this parent and
 			// its ancestors (the parent then suppresses its own terminal

@@ -654,7 +654,20 @@ func (s *scheduler) handleEvent(it eventItem) {
 		nr.setRoutingEvent(it.ev, it.nodeName)
 	}
 	if out, ok := childEventOutput(it.ev); ok {
-		nr.setOutput(out, it.nodeName)
+		n := s.nodesByName[it.nodeName]
+		if n == nil {
+			// handleEvent only runs for registered nodes; a miss means
+			// the registry is out of sync. Fail rather than forward
+			// unvalidated.
+			nr.recordErr(fmt.Errorf("%w: output validation: node %q not found in graph", ErrNodeFailed, it.nodeName))
+			return
+		}
+		validated, err := validateAndStampOutput(n, out, it.ev)
+		if err != nil {
+			nr.recordErr(err)
+			return
+		}
+		nr.setOutput(validated, it.nodeName)
 	}
 }
 

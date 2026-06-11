@@ -502,6 +502,66 @@ func TestAgentNode_StampsIsolationScopeOnEvents(t *testing.T) {
 	}
 }
 
+// TestAgentNode_StructuredOutputProjectedViaValidation verifies the
+// end-to-end path that makes the validation fallback reachable: an
+// AgentNode with a structured output schema yields JSON model text,
+// and ValidateOutput projects it onto the schema.
+func TestAgentNode_StructuredOutputProjectedViaValidation(t *testing.T) {
+	wrapped, err := agent.New(agent.Config{
+		Name: "json-talky",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				final := session.NewEvent(ctx.InvocationID())
+				final.LLMResponse.Content = &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: `{"value":"hello"}`}},
+				}
+				yield(final, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	outSchema, err := jsonschema.For[testSchemaInput](nil)
+	if err != nil {
+		t.Fatalf("jsonschema.For: %v", err)
+	}
+	node, err := NewAgentNodeWithSchemas(wrapped, nil, outSchema, NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNodeWithSchemas: %v", err)
+	}
+
+	mockCtx := newMockCtx(t)
+	mockCtx.sess = &mockSession{id: "test-session-id"}
+	var gotFinal *session.Event
+	for ev, err := range node.Run(mockCtx, "ignored") {
+		if err != nil {
+			t.Fatalf("node.Run: %v", err)
+		}
+		if !ev.LLMResponse.Partial {
+			gotFinal = ev
+		}
+	}
+	if gotFinal == nil {
+		t.Fatal("missing final event")
+	}
+
+	// AgentNode itself only synthesizes the raw text; the projection
+	// onto the schema happens in ValidateOutput.
+	got, err := node.ValidateOutput(gotFinal.Output)
+	if err != nil {
+		t.Fatalf("ValidateOutput: %v", err)
+	}
+	gotMap, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("ValidateOutput returned %T, want map[string]any", got)
+	}
+	if gotMap["value"] != "hello" {
+		t.Errorf("got %v, want value=hello", gotMap)
+	}
+}
+
 func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
 	myAgent, err := agent.New(agent.Config{
 		Name: "text_only_agent",
