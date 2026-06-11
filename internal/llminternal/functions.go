@@ -63,7 +63,7 @@ func generateRequestConfirmationEvent(
 		}
 
 		requestConfirmationFC := &genai.FunctionCall{
-			ID:   utils.GenerateFunctionCallID(),
+			ID:   utils.GenerateFunctionCallID(invocationContext),
 			Name: toolconfirmation.FunctionCallName,
 			Args: args,
 		}
@@ -79,7 +79,7 @@ func generateRequestConfirmationEvent(
 		return nil
 	}
 
-	ev := session.NewEvent(invocationContext.InvocationID())
+	ev := session.NewEventWithContext(invocationContext, invocationContext.InvocationID())
 	ev.Author = invocationContext.Agent().Name()
 	ev.Branch = invocationContext.Branch()
 	ev.LLMResponse = model.LLMResponse{

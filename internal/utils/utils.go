@@ -15,13 +15,14 @@
 package utils
 
 import (
+	"context"
 	"strings"
 
-	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/platform"
 	"google.golang.org/adk/session"
 )
 
@@ -33,17 +34,19 @@ const afFunctionCallIDPrefix = "adk-"
 // Since the ID field is optional, some models don't fill the field, but
 // the LLMAgent depends on the IDs to map FunctionCall and FunctionResponse events
 // in the event stream.
-func PopulateClientFunctionCallID(c *genai.Content) {
+func PopulateClientFunctionCallID(ctx context.Context, c *genai.Content) {
 	for _, fn := range FunctionCalls(c) {
 		if fn.ID == "" {
-			fn.ID = GenerateFunctionCallID()
+			fn.ID = GenerateFunctionCallID(ctx)
 		}
 	}
 }
 
-// GenerateFunctionCallID generates a new function call ID.
-func GenerateFunctionCallID() string {
-	return afFunctionCallIDPrefix + uuid.NewString()
+// GenerateFunctionCallID generates a new function call ID. The ID is obtained
+// through the platform package, so a UUID provider installed on ctx (see
+// platform.WithUUIDProvider) controls it.
+func GenerateFunctionCallID(ctx context.Context) string {
+	return afFunctionCallIDPrefix + platform.NewUUID(ctx)
 }
 
 // RemoveClientFunctionCallID removes the function call ID field that was set
