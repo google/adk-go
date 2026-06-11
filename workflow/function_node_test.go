@@ -137,6 +137,40 @@ func mustSchema[T any](t *testing.T) *jsonschema.Schema {
 	return s
 }
 
+func TestFunctionNodeDirectEventPropagation(t *testing.T) {
+	fn := func(ctx agent.InvocationContext, input string) (*session.Event, error) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Output = input + " processed"
+		ev.Routes = []string{"CUSTOM_ROUTE"}
+		return ev, nil
+	}
+
+	node := NewFunctionNode[string, *session.Event]("event_proc", fn, defaultNodeConfig)
+	mockCtx := &MockInvocationContext{sess: nil}
+
+	events := node.Run(mockCtx, "hello")
+
+	var yieldedEvents []*session.Event
+	for ev, err := range events {
+		if err != nil {
+			t.Fatalf("unexpected error running node: %v", err)
+		}
+		yieldedEvents = append(yieldedEvents, ev)
+	}
+
+	if len(yieldedEvents) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(yieldedEvents))
+	}
+
+	ev := yieldedEvents[0]
+	if ev.Output != "hello processed" {
+		t.Errorf("expected Output 'hello processed', got %v", ev.Output)
+	}
+	if len(ev.Routes) != 1 || ev.Routes[0] != "CUSTOM_ROUTE" {
+		t.Errorf("expected Routes ['CUSTOM_ROUTE'], got %v", ev.Routes)
+	}
+}
+
 func TestNewFunctionNodeFromState(t *testing.T) {
 	type TwoFieldParams struct {
 		Foo string `state:"foo_key"`
