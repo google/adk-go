@@ -36,6 +36,15 @@ func newGraph(edges []Edge) *graph {
 	return &graph{successors: succ, predecessors: pred}
 }
 
+// allEdges returns all edges in the graph.
+func (g *graph) allEdges() []Edge {
+	var edges []Edge
+	for _, succs := range g.successors {
+		edges = append(edges, succs...)
+	}
+	return edges
+}
+
 // successorsOf returns the outgoing edges for a node.
 // Returns nil if n has no outgoing edges
 // (including the case where n is not in the graph at all). The

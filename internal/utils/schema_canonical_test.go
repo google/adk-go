@@ -52,17 +52,17 @@ func TestCanonicalSchemaJSON_PropertyOrder(t *testing.T) {
 		},
 	}
 
-	out1, err := canonicalSchemaJSON(schema1)
+	out1, err := CanonicalSchemaJSON(schema1)
 	if err != nil {
 		t.Fatalf("failed to canonicalize schema1: %v", err)
 	}
 
-	out2, err := canonicalSchemaJSON(schema2)
+	out2, err := CanonicalSchemaJSON(schema2)
 	if err != nil {
 		t.Fatalf("failed to canonicalize schema2: %v", err)
 	}
 
-	out3, err := canonicalSchemaJSON(schema3)
+	out3, err := CanonicalSchemaJSON(schema3)
 	if err != nil {
 		t.Fatalf("failed to canonicalize schema3: %v", err)
 	}
