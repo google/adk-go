@@ -105,6 +105,7 @@ func (m *MockInvocationContext) Memory() agent.Memory            { return nil }
 func (m *MockInvocationContext) Branch() string                  { return "" }
 func (m *MockInvocationContext) RunConfig() *agent.RunConfig     { return nil }
 func (m *MockInvocationContext) Ended() bool                     { return false }
+func (m *MockInvocationContext) IsolationScope() string          { return "" }
 func (m *MockInvocationContext) EndInvocation()                  {}
 func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
 	cp := *m
