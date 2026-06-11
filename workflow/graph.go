@@ -62,3 +62,19 @@ func (g *graph) successorsOf(n Node) []Edge {
 func (g *graph) predecessorsOf(n Node) []Edge {
 	return g.predecessors[n]
 }
+
+// allNodes returns all nodes in the graph.
+func (g *graph) allNodes() []Node {
+	nodes := make(map[Node]bool)
+	for n := range g.successors {
+		nodes[n] = true
+	}
+	for n := range g.predecessors {
+		nodes[n] = true
+	}
+	var res []Node
+	for n := range nodes {
+		res = append(res, n)
+	}
+	return res
+}
