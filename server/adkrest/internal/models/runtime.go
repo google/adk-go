@@ -33,10 +33,6 @@ type RunAgentRequest struct {
 
 	StateDelta *map[string]any `json:"stateDelta,omitempty"`
 
-	// FunctionCallEventID is sent by the web UI when answering a
-	// long-running function call (HITL / OAuth). Strict decoding
-	// (DisallowUnknownFields) would otherwise 400 the request. It is
-	// accepted but not yet read by the runner.
 	FunctionCallEventID *string `json:"functionCallEventId,omitempty"`
 }
 

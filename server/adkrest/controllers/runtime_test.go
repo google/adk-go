@@ -239,9 +239,6 @@ func TestRunSSEHandler(t *testing.T) {
 	}
 }
 
-// TestDecodeRequestBody_AcceptsFunctionCallEventID verifies the
-// web UI's functionCallEventId field decodes instead of being
-// rejected by DisallowUnknownFields.
 func TestDecodeRequestBody_AcceptsFunctionCallEventID(t *testing.T) {
 	body := `{
 		"appName": "a",
@@ -261,8 +258,6 @@ func TestDecodeRequestBody_AcceptsFunctionCallEventID(t *testing.T) {
 	}
 }
 
-// TestDecodeRequestBody_RejectsUnknownFields keeps strict decoding
-// for typo safety on legitimately unknown fields.
 func TestDecodeRequestBody_RejectsUnknownFields(t *testing.T) {
 	body := `{
 		"appName": "a",
