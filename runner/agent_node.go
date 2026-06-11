@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/workflow"
 )
@@ -51,47 +52,114 @@ func newAgentNode(a agent.Agent) workflow.Node {
 	if isLlmAgent(a) {
 		cfg.RerunOnResume = &rerunOnResume
 	}
-	return workflow.NewDynamicNode[any, any](a.Name(), runAgentNodeBody(a), cfg)
+	return workflow.NewDynamicNode(a.Name(), runAgentNodeBody(a), cfg)
 }
 
 // runAgentNodeBody returns the dynamic-node body that drives the
 // wrapped agent for one activation, emitting its events through emit and
 // returning the agent's final text as the node output.
+//
+// For an LlmAgent, the body delegates to workflowinternal.RunLLMAgentAsNode
+// to pick up mode-aware behaviour (chat-mode task delegation loop, task-mode
+// finish_task sniffing, single_turn seeding + output post-processing).
+// For any other agent kind, events are forwarded verbatim and HITL rides
+// on LongRunningToolIDs.
 func runAgentNodeBody(a agent.Agent) workflow.DynamicFn[any, any] {
 	return func(ctx workflow.NodeContext, input any, emit func(*session.Event) error) (any, error) {
 		// On resume, input is the ORIGINAL user text; re-feeding it would
-		// loop (model calls the long-running tool again). So pass no user
-		// content and let the agent continue from history.
+		// loop (model calls the long-running tool again). So pass no
+		// input on resume and let the agent continue from history.
 		resolved := answeredOpenInterrupts(ctx.Session())
+		isResume := len(resolved) > 0
 
-		var userContent *genai.Content
-		if len(resolved) == 0 {
-			userContent = inputToUserContent(input) // fresh turn
+		if isLlmAgent(a) {
+			return runLlmAgentBody(a, ctx, input, isResume, emit)
 		}
-
-		agentCtx := newAgentContext(ctx, a, userContent)
-
-		// Forward events verbatim. LongRunningToolIDs is the pause
-		// signal: return ErrNodeInterrupted so the node parks (NodeWaiting)
-		// without a terminal event. Otherwise return nil — like
-		// adk-python's chat mode, a root agent sets no Output.
-		paused := false
-		for event, err := range a.Run(agentCtx) {
-			if err != nil {
-				return nil, err
-			}
-			if len(event.LongRunningToolIDs) > 0 {
-				paused = true
-			}
-			if emitErr := emit(event); emitErr != nil {
-				return nil, emitErr
-			}
-		}
-		if paused {
-			return nil, workflow.ErrNodeInterrupted
-		}
-		return nil, nil
+		return runGenericAgentBody(a, ctx, input, isResume, emit)
 	}
+}
+
+// runLlmAgentBody drives an LlmAgent through the workflowinternal
+// wrapper, which dispatches per Mode (chat/task/single_turn). HITL still
+// pauses the node via LongRunningToolIDs (the wrapper forwards those
+// events verbatim from the agent); on pause the body returns
+// ErrNodeInterrupted so the node parks in NodeWaiting.
+func runLlmAgentBody(
+	a agent.Agent,
+	ctx workflow.NodeContext,
+	input any,
+	isResume bool,
+	emit func(*session.Event) error,
+) (any, error) {
+	var nodeInput any
+	if !isResume {
+		nodeInput = input
+	}
+
+	// Drain the wrapper's iterator. Output is set on emitted events by
+	// the wrapper for single_turn (model reply) and task (finish_task FR)
+	// modes; the dynamic-node return value mirrors adk-python where a
+	// root chat coordinator sets no Output.
+	paused := false
+	var lastOutput any
+	for event, err := range workflowinternal.RunLLMAgentAsNode(a, ctx, nodeInput) {
+		if err != nil {
+			// The wrapper bubbles ErrNodeInterrupted up from a task
+			// delegation's RunNode call when a sub-agent paused. The
+			// scheduler honors it as a HITL pause (same as the
+			// LongRunningToolIDs path below) and parks the node.
+			return nil, err
+		}
+		if event == nil {
+			continue
+		}
+		if len(event.LongRunningToolIDs) > 0 {
+			paused = true
+		}
+		if event.Output != nil {
+			lastOutput = event.Output
+		}
+		if emitErr := emit(event); emitErr != nil {
+			return nil, emitErr
+		}
+	}
+	if paused {
+		return nil, workflow.ErrNodeInterrupted
+	}
+	return lastOutput, nil
+}
+
+// runGenericAgentBody is the pre-existing agent-agnostic loop: forward
+// events verbatim, park on LongRunningToolIDs, no output.
+func runGenericAgentBody(
+	a agent.Agent,
+	ctx workflow.NodeContext,
+	input any,
+	isResume bool,
+	emit func(*session.Event) error,
+) (any, error) {
+	var userContent *genai.Content
+	if !isResume {
+		userContent = inputToUserContent(input) // fresh turn
+	}
+	agentCtx := newAgentContext(ctx, a, userContent)
+
+	paused := false
+	for event, err := range a.Run(agentCtx) {
+		if err != nil {
+			return nil, err
+		}
+		if len(event.LongRunningToolIDs) > 0 {
+			paused = true
+		}
+		if emitErr := emit(event); emitErr != nil {
+			return nil, emitErr
+		}
+	}
+	if paused {
+		return nil, workflow.ErrNodeInterrupted
+	}
+	return nil, nil
 }
 
 // answeredOpenInterrupts returns the long-running interrupt IDs that a
