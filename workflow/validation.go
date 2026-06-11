@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/typeutil"
+	"google.golang.org/adk/session"
 )
 
 // ErrDuplicateNodeName is returned when an edge set contains two
@@ -142,7 +143,7 @@ func validateStartNodeNoIncoming(edges []Edge) error {
 }
 
 // validateWorkflow executes a set of workflow validation checks.
-func validateWorkflow(workflow *graph) error {
+func validateWorkflow(workflow *graph, schema *jsonschema.Resolved) error {
 	if err := validateUniqueEdges(workflow); err != nil {
 		return err
 	}
@@ -153,6 +154,9 @@ func validateWorkflow(workflow *graph) error {
 		return err
 	}
 	if err := validateCycles(workflow); err != nil {
+		return err
+	}
+	if err := validateStateSchemaConsistency(workflow, schema); err != nil {
 		return err
 	}
 	return nil
@@ -252,16 +256,8 @@ func validateConnectivity(workflow *graph) error {
 
 	traverse(Start)
 
-	allNodes := make(map[Node]bool)
-	for node, edges := range workflow.successors {
-		allNodes[node] = true
-		for _, edge := range edges {
-			allNodes[edge.To] = true
-		}
-	}
-
 	var unreachable []string
-	for node := range allNodes {
+	for _, node := range workflow.allNodes() {
 		if !visited[node] {
 			unreachable = append(unreachable, node.Name())
 		}
@@ -379,4 +375,42 @@ func schemaIsString(s *jsonschema.Resolved) bool {
 		}
 	}
 	return false
+}
+
+// validateStateSchemaConsistency checks that all nodes in the graph that reference state fields
+// have those fields declared in the workflow's state schema.
+func validateStateSchemaConsistency(g *graph, schema *jsonschema.Resolved) error {
+	if schema == nil {
+		return nil
+	}
+	schemaFields := extractFieldNames(schema)
+
+	for _, n := range g.allNodes() {
+		spa, ok := n.(StateParamsAware)
+		if !ok {
+			continue
+		}
+		for _, fieldName := range spa.StateFieldNames() {
+			if strings.HasPrefix(fieldName, session.KeyPrefixApp) ||
+				strings.HasPrefix(fieldName, session.KeyPrefixUser) ||
+				strings.HasPrefix(fieldName, session.KeyPrefixTemp) {
+				continue
+			}
+			if !slices.Contains(schemaFields, fieldName) {
+				return fmt.Errorf("node %q references state field %q which is not declared in StateSchema (declared: %v)", n.Name(), fieldName, schemaFields)
+			}
+		}
+	}
+	return nil
+}
+
+func extractFieldNames(schema *jsonschema.Resolved) []string {
+	var fields []string
+	if schema != nil && schema.Schema() != nil && schema.Schema().Properties != nil {
+		for k := range schema.Schema().Properties {
+			fields = append(fields, k)
+		}
+	}
+	slices.Sort(fields)
+	return fields
 }

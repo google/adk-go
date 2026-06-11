@@ -51,6 +51,13 @@ type Node interface {
 	Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
 }
 
+// StateParamsAware is implemented by nodes that bind their parameters
+// from ctx.state. Used by Workflow's static state-schema validation
+// to detect mismatches between declared state fields and node consumers.
+type StateParamsAware interface {
+	StateFieldNames() []string
+}
+
 // Route defines the interface for matching execution results to edges.
 type Route interface {
 	Matches(event *session.Event) bool
@@ -144,6 +151,9 @@ type Workflow struct {
 	// may run concurrently within a single Run invocation. 0
 	// (the default) means unlimited. Set via WithMaxConcurrency.
 	maxConcurrency int
+
+	// stateSchema holds the state schema for the workflow.
+	stateSchema *jsonschema.Resolved
 }
 
 // Option configures a Workflow at construction time. Pass options
@@ -155,6 +165,7 @@ type Option func(*workflowOptions)
 // engine defaults".
 type workflowOptions struct {
 	maxConcurrency int
+	stateSchema    *jsonschema.Resolved
 }
 
 // WithMaxConcurrency caps how many graph-scheduled nodes may run
@@ -170,6 +181,13 @@ func WithMaxConcurrency(n int) Option {
 			n = 0
 		}
 		o.maxConcurrency = n
+	}
+}
+
+// WithStateSchema sets the state schema for the workflow.
+func WithStateSchema(s *jsonschema.Resolved) Option {
+	return func(o *workflowOptions) {
+		o.stateSchema = s
 	}
 }
 
@@ -203,18 +221,19 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	// loaded RunState in Resume; today a name collision or a
 	// graph evolution between deploys silently corrupts the
 	// resume path.
-	graph := newGraph(edges)
-	if err := validateWorkflow(graph); err != nil {
-		return nil, err
-	}
 	var o workflowOptions
 	for _, opt := range opts {
 		opt(&o)
+	}
+	graph := newGraph(edges)
+	if err := validateWorkflow(graph, o.stateSchema); err != nil {
+		return nil, err
 	}
 	return &Workflow{
 		graph:          graph,
 		name:           name,
 		maxConcurrency: o.maxConcurrency,
+		stateSchema:    o.stateSchema,
 	}, nil
 }
 
