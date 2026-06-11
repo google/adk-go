@@ -32,6 +32,24 @@ type RunAgentRequest struct {
 	Streaming bool `json:"streaming,omitempty"`
 
 	StateDelta *map[string]any `json:"stateDelta,omitempty"`
+
+	// FunctionCallEventID, InvocationID, and CustomMetadata are
+	// accepted for adk-python API parity (the bundled web UI sends
+	// FunctionCallEventID on every HITL response) but not yet wired
+	// into the runner. The strict JSON decoder
+	// (decodeRequestBody.DisallowUnknownFields) would otherwise
+	// reject any request carrying them with a 400.
+
+	// FunctionCallEventID identifies the upstream FunctionCall event
+	// a long-running response is answering (e.g. OAuth callbacks).
+	FunctionCallEventID *string `json:"functionCallEventId,omitempty"`
+
+	// InvocationID lets clients pin a resume to a specific
+	// invocation. Currently informational.
+	InvocationID *string `json:"invocationId,omitempty"`
+
+	// CustomMetadata is opaque, runner-passed metadata.
+	CustomMetadata *map[string]any `json:"customMetadata,omitempty"`
 }
 
 // AssertRunAgentRequestRequired checks if the required fields are not zero-ed

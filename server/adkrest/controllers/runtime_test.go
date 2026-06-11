@@ -238,3 +238,53 @@ func TestRunSSEHandler(t *testing.T) {
 		})
 	}
 }
+
+// TestDecodeRequestBody_AcceptsAdkPythonFields locks in the
+// adk-python API parity fields on RunAgentRequest. The bundled
+// web UI sends functionCallEventId on every HITL response and
+// invocationId / customMetadata on some flows; without these
+// fields on the struct, DisallowUnknownFields would return 400
+// for a perfectly normal browser request.
+func TestDecodeRequestBody_AcceptsAdkPythonFields(t *testing.T) {
+	body := `{
+		"appName": "a",
+		"userId": "u",
+		"sessionId": "s",
+		"newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+		"functionCallEventId": "fce-1",
+		"invocationId": "inv-1",
+		"customMetadata": {"k": "v"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBufferString(body))
+
+	got, err := decodeRequestBody(req)
+	if err != nil {
+		t.Fatalf("decodeRequestBody: unexpected error: %v", err)
+	}
+	if got.FunctionCallEventID == nil || *got.FunctionCallEventID != "fce-1" {
+		t.Errorf("FunctionCallEventID = %v, want %q", got.FunctionCallEventID, "fce-1")
+	}
+	if got.InvocationID == nil || *got.InvocationID != "inv-1" {
+		t.Errorf("InvocationID = %v, want %q", got.InvocationID, "inv-1")
+	}
+	if got.CustomMetadata == nil || (*got.CustomMetadata)["k"] != "v" {
+		t.Errorf("CustomMetadata = %v, want {k: v}", got.CustomMetadata)
+	}
+}
+
+// TestDecodeRequestBody_RejectsUnknownFields keeps strict decoding
+// for typo safety on legitimately unknown fields.
+func TestDecodeRequestBody_RejectsUnknownFields(t *testing.T) {
+	body := `{
+		"appName": "a",
+		"userId": "u",
+		"sessionId": "s",
+		"newMessage": {},
+		"totallyMadeUpField": 123
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBufferString(body))
+
+	if _, err := decodeRequestBody(req); err == nil {
+		t.Errorf("decodeRequestBody: expected error for unknown field, got nil")
+	}
+}
