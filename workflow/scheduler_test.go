@@ -750,10 +750,8 @@ func (n *validationTestNode) Run(ctx agent.InvocationContext, input any) iter.Se
 	}
 }
 
-// roleTestNode emits one event whose Content has Parts but no Role,
-// mimicking FunctionNode / BaseNode-derived nodes that build Content
-// directly. The scheduler must stamp Role="model" so clients (e.g.
-// the web UI) render it.
+// roleTestNode emits an event whose Content has Parts but no Role,
+// like FunctionNode / BaseNode-derived nodes that build Content directly.
 type roleTestNode struct {
 	BaseNode
 }

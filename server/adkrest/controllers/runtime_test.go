@@ -239,12 +239,9 @@ func TestRunSSEHandler(t *testing.T) {
 	}
 }
 
-// TestDecodeRequestBody_AcceptsAdkPythonFields locks in the
-// adk-python API parity fields on RunAgentRequest. The bundled
-// web UI sends functionCallEventId on every HITL response and
-// invocationId / customMetadata on some flows; without these
-// fields on the struct, DisallowUnknownFields would return 400
-// for a perfectly normal browser request.
+// TestDecodeRequestBody_AcceptsAdkPythonFields verifies the
+// adk-python parity fields decode instead of being rejected by
+// DisallowUnknownFields.
 func TestDecodeRequestBody_AcceptsAdkPythonFields(t *testing.T) {
 	body := `{
 		"appName": "a",

@@ -628,11 +628,9 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev.Branch == "" && nr.branch != "" {
 		it.ev.Branch = nr.branch
 	}
-	// Stamp Content.Role for nodes that built Content without it
-	// (FunctionNode and BaseNode-derived nodes set Parts but not
-	// Role). adk's convention is that every model-authored Content
-	// carries Role="model"; clients such as the web UI rely on it to
-	// render the event. Done before the descendant short-circuit so
+	// Default Content.Role to "model" for nodes that left it empty
+	// (FunctionNode/BaseNode set Parts but not Role); clients like
+	// the web UI rely on it. Before the descendant short-circuit so
 	// dynamic children are covered too.
 	if it.ev.Content != nil && it.ev.Content.Role == "" {
 		it.ev.Content.Role = genai.RoleModel
