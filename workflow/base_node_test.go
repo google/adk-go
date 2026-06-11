@@ -424,3 +424,66 @@ func TestDefaultValidateOutput_StringFallback(t *testing.T) {
 		}
 	})
 }
+
+// TestDefaultValidateOutput_MultiTypeRoot covers schemas whose root
+// declares multiple allowed types via the Types list rather than the
+// single Type field. A *genai.Content input always fails direct
+// validation (it is an object, not a JSON scalar), forcing the model-text
+// fallback; that fallback must recognize a "string" member in Types so
+// the projected text is returned instead of being forced through JSON
+// parsing.
+func TestDefaultValidateOutput_MultiTypeRoot(t *testing.T) {
+	t.Run("string_or_null_returns_projected_text", func(t *testing.T) {
+		// {"type": ["string", "null"]} must accept the model text via the
+		// string member. Before checking Types, the fallback treated the
+		// root as non-string and JSON-parsed the text, failing on plain
+		// text like "plain text".
+		schema, err := (&jsonschema.Schema{Types: []string{"string", "null"}}).Resolve(nil)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		content := &genai.Content{Parts: []*genai.Part{{Text: "plain text"}}}
+		got, err := defaultValidateOutput(content, schema)
+		if err != nil {
+			t.Fatalf("defaultValidateOutput failed: %v", err)
+		}
+		if got != "plain text" {
+			t.Errorf("got %q, want %q", got, "plain text")
+		}
+	})
+
+	t.Run("string_or_integer_returns_projected_text", func(t *testing.T) {
+		// With "string" among the allowed types, numeric model text is
+		// returned as the string "42" (the string member matches first),
+		// not JSON-parsed into a number.
+		schema, err := (&jsonschema.Schema{Types: []string{"string", "integer"}}).Resolve(nil)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		content := &genai.Content{Parts: []*genai.Part{{Text: "42"}}}
+		got, err := defaultValidateOutput(content, schema)
+		if err != nil {
+			t.Fatalf("defaultValidateOutput failed: %v", err)
+		}
+		if got != "42" {
+			t.Errorf("got %v (%T), want %q", got, got, "42")
+		}
+	})
+
+	t.Run("non_string_members_still_parse_json", func(t *testing.T) {
+		// When the root permits only non-string types, the fallback must
+		// keep JSON-parsing the text rather than returning it raw.
+		schema, err := (&jsonschema.Schema{Types: []string{"integer", "null"}}).Resolve(nil)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		content := &genai.Content{Parts: []*genai.Part{{Text: "42"}}}
+		got, err := defaultValidateOutput(content, schema)
+		if err != nil {
+			t.Fatalf("defaultValidateOutput failed: %v", err)
+		}
+		if got != float64(42) {
+			t.Errorf("got %v (%T), want 42", got, got)
+		}
+	})
+}

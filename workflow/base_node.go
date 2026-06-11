@@ -17,6 +17,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -166,13 +167,16 @@ func projectTextOntoSchema(s string, schema *jsonschema.Resolved) (any, bool) {
 	return parsed, true
 }
 
-// rootSchemaIsString reports whether schema's root type is "string".
+// rootSchemaIsString reports whether schema's root permits the "string"
+// type, via either the single Type field or the Types list. The two are
+// mutually exclusive in jsonschema.Schema, so checking both covers a root
+// like {"type": ["string", "null"]}.
 func rootSchemaIsString(schema *jsonschema.Resolved) bool {
 	root := schema.Schema()
 	if root == nil {
 		return false
 	}
-	return root.Type == "string"
+	return root.Type == "string" || slices.Contains(root.Types, "string")
 }
 
 // validateAndStampOutput runs n.ValidateOutput on out and, on success,
