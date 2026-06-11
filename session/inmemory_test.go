@@ -15,6 +15,7 @@
 package session_test
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,6 +77,76 @@ func Test_inMemoryService_CreateConcurrentAccess(t *testing.T) {
 	if errorCount.Load() != expectedErrors {
 		t.Errorf("expected %d 'already exists' errors, but got %d", expectedErrors, errorCount.Load())
 	}
+}
+
+// TestInMemoryState_All_ConcurrentSet is a regression test for the concurrent map
+// panic described in https://github.com/google/adk-go/issues/561.
+//
+// state.All() previously unlocked the mutex between each iteration step, allowing
+// concurrent Set() calls to mutate the map while it was being ranged over,
+// triggering a fatal "concurrent map iteration and map write" panic.
+//
+// The fix snapshots the map under the lock (maps.Clone) before iterating.
+// This test races All() against concurrent Set() calls to verify no panic occurs.
+// Run with: go test -race ./session/...
+func TestInMemoryState_All_ConcurrentSet(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+
+	resp, err := svc.Create(ctx, &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user",
+		State:   map[string]any{"k0": 0},
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	sess := resp.Session
+
+	const writers = 8
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	// Concurrent writers: append events that update state.
+	wg.Add(writers)
+	for w := range writers {
+		go func(w int) {
+			defer wg.Done()
+			<-start
+			for i := range iterations {
+				ev := &session.Event{
+					Timestamp: time.Now(),
+					Actions: session.EventActions{
+						StateDelta: map[string]any{
+							fmt.Sprintf("w%d_k%d", w, i): i,
+						},
+					},
+				}
+				if err := svc.AppendEvent(ctx, sess, ev); err != nil {
+					// Stale session errors are expected under concurrent writes; ignore.
+					_ = err
+				}
+			}
+		}(w)
+	}
+
+	// Concurrent reader: iterate all state entries.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range iterations {
+			for k, v := range sess.State().All() {
+				_ = k
+				_ = v
+			}
+		}
+	}()
+
+	close(start)
+	wg.Wait()
 }
 
 func TestInMemorySession_AppendEvent_Deadlock(t *testing.T) {
