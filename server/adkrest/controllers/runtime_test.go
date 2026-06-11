@@ -239,18 +239,16 @@ func TestRunSSEHandler(t *testing.T) {
 	}
 }
 
-// TestDecodeRequestBody_AcceptsAdkPythonFields verifies the
-// adk-python parity fields decode instead of being rejected by
-// DisallowUnknownFields.
-func TestDecodeRequestBody_AcceptsAdkPythonFields(t *testing.T) {
+// TestDecodeRequestBody_AcceptsFunctionCallEventID verifies the
+// web UI's functionCallEventId field decodes instead of being
+// rejected by DisallowUnknownFields.
+func TestDecodeRequestBody_AcceptsFunctionCallEventID(t *testing.T) {
 	body := `{
 		"appName": "a",
 		"userId": "u",
 		"sessionId": "s",
 		"newMessage": {"role": "user", "parts": [{"text": "hi"}]},
-		"functionCallEventId": "fce-1",
-		"invocationId": "inv-1",
-		"customMetadata": {"k": "v"}
+		"functionCallEventId": "fce-1"
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBufferString(body))
 
@@ -260,12 +258,6 @@ func TestDecodeRequestBody_AcceptsAdkPythonFields(t *testing.T) {
 	}
 	if got.FunctionCallEventID == nil || *got.FunctionCallEventID != "fce-1" {
 		t.Errorf("FunctionCallEventID = %v, want %q", got.FunctionCallEventID, "fce-1")
-	}
-	if got.InvocationID == nil || *got.InvocationID != "inv-1" {
-		t.Errorf("InvocationID = %v, want %q", got.InvocationID, "inv-1")
-	}
-	if got.CustomMetadata == nil || (*got.CustomMetadata)["k"] != "v" {
-		t.Errorf("CustomMetadata = %v, want {k: v}", got.CustomMetadata)
 	}
 }
 

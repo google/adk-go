@@ -33,12 +33,11 @@ type RunAgentRequest struct {
 
 	StateDelta *map[string]any `json:"stateDelta,omitempty"`
 
-	// The fields below are accepted for adk-python API parity (the
-	// web UI sends FunctionCallEventID on HITL responses); strict
-	// decoding would otherwise 400 them. Not yet wired into the runner.
-	FunctionCallEventID *string         `json:"functionCallEventId,omitempty"`
-	InvocationID        *string         `json:"invocationId,omitempty"`
-	CustomMetadata      *map[string]any `json:"customMetadata,omitempty"`
+	// FunctionCallEventID is sent by the web UI when answering a
+	// long-running function call (HITL / OAuth). Strict decoding
+	// (DisallowUnknownFields) would otherwise 400 the request. It is
+	// accepted but not yet read by the runner.
+	FunctionCallEventID *string `json:"functionCallEventId,omitempty"`
 }
 
 // AssertRunAgentRequestRequired checks if the required fields are not zero-ed
