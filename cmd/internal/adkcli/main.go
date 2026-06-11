@@ -49,6 +49,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error registering functions: %v", err)
 	}
+	err = conformance.RegisterNodeFunctions()
+	if err != nil {
+		log.Fatalf("Error registering node functions: %v", err)
+	}
 
 	fmt.Printf("🔍 Scanning for 'root_agent.yaml' in: %s\n", cwd)
 

@@ -34,6 +34,7 @@ type ToolNode struct {
 	tool tool.Tool
 }
 
+// runnableTool is the internal interface that Node uses to invoke tools.
 type runnableTool interface {
 	Run(ctx agent.ToolContext, args any) (map[string]any, error)
 }
