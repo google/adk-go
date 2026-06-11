@@ -16,7 +16,9 @@ package runner_test
 
 import (
 	"context"
+	"fmt"
 	"iter"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -400,84 +402,42 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
 // debugEvents formats a slice of session.Event into a human-readable
 // summary used in test failure messages.
 func debugEvents(events []*session.Event) string {
-	out := ""
+	var b strings.Builder
 	for i, ev := range events {
 		if ev == nil {
-			out += "  <nil>\n"
+			b.WriteString("  <nil>\n")
 			continue
 		}
-		out += eventLine(i, ev)
+		fmt.Fprintf(&b, "  [%02d] [%s]\n", i, strings.Join(eventFields(ev), " "))
 	}
-	return out
+	return b.String()
 }
 
-func eventLine(i int, ev *session.Event) string {
-	line := ""
-	parts := []string{}
+// eventFields returns the non-empty, human-readable fields of an event
+// for use in debugEvents.
+func eventFields(ev *session.Event) []string {
+	var fields []string
 	if ev.Author != "" {
-		parts = append(parts, "author="+ev.Author)
+		fields = append(fields, "author="+ev.Author)
 	}
 	if len(ev.LongRunningToolIDs) > 0 {
-		parts = append(parts, "lrt="+joinIDs(ev.LongRunningToolIDs))
+		fields = append(fields, "lrt="+strings.Join(ev.LongRunningToolIDs, ","))
 	}
 	if ev.RequestedInput != nil {
-		parts = append(parts, "requested_input.id="+ev.RequestedInput.InterruptID)
+		fields = append(fields, "requested_input.id="+ev.RequestedInput.InterruptID)
 	}
-	if ev.Content != nil {
-		for _, p := range ev.Content.Parts {
-			if p.FunctionCall != nil {
-				parts = append(parts, "fc="+p.FunctionCall.Name+":"+p.FunctionCall.ID)
-			}
-			if p.FunctionResponse != nil {
-				parts = append(parts, "fr="+p.FunctionResponse.Name+":"+p.FunctionResponse.ID)
-			}
-			if p.Text != "" {
-				parts = append(parts, "text="+p.Text)
-			}
+	if ev.Content == nil {
+		return fields
+	}
+	for _, p := range ev.Content.Parts {
+		switch {
+		case p.FunctionCall != nil:
+			fields = append(fields, fmt.Sprintf("fc=%s:%s", p.FunctionCall.Name, p.FunctionCall.ID))
+		case p.FunctionResponse != nil:
+			fields = append(fields, fmt.Sprintf("fr=%s:%s", p.FunctionResponse.Name, p.FunctionResponse.ID))
+		case p.Text != "":
+			fields = append(fields, "text="+p.Text)
 		}
 	}
-	for j, s := range parts {
-		if j == 0 {
-			line += "  ["
-		} else {
-			line += " "
-		}
-		line += s
-	}
-	if line != "" {
-		line += "]"
-	}
-	return formatIndex(i) + line + "\n"
-}
-
-func joinIDs(ids []string) string {
-	out := ""
-	for i, s := range ids {
-		if i > 0 {
-			out += ","
-		}
-		out += s
-	}
-	return out
-}
-
-func formatIndex(i int) string {
-	switch {
-	case i < 10:
-		return "  [0" + itoa(i) + "]"
-	default:
-		return "  [" + itoa(i) + "]"
-	}
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	out := ""
-	for i > 0 {
-		out = string(rune('0'+i%10)) + out
-		i /= 10
-	}
-	return out
+	return fields
 }
