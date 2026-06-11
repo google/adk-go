@@ -324,6 +324,75 @@ func must[T agent.Agent](a T, err error) T {
 	return a
 }
 
+// TestBuildRunnerNode_AllAgentKinds verifies buildRunnerNode wraps every
+// agent kind (not just LlmAgent) and names the node after the agent.
+func TestBuildRunnerNode_AllAgentKinds(t *testing.T) {
+	t.Parallel()
+
+	noop := func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {}
+	}
+
+	tests := []struct {
+		name  string
+		agent agent.Agent
+	}{
+		{
+			name:  "llm_agent",
+			agent: must(llmagent.New(llmagent.Config{Name: "llm_agent", Model: &noopModel{}})),
+		},
+		{
+			name:  "custom_agent",
+			agent: must(agent.New(agent.Config{Name: "custom_agent", Run: noop})),
+		},
+		{
+			name: "agent_with_subagents",
+			agent: must(agent.New(agent.Config{
+				Name: "agent_with_subagents",
+				Run:  noop,
+				SubAgents: []agent.Agent{
+					must(agent.New(agent.Config{Name: "child", Run: noop})),
+				},
+			})),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node, err := buildRunnerNode(tc.agent)
+			if err != nil {
+				t.Fatalf("buildRunnerNode(%T) error = %v, want nil", tc.agent, err)
+			}
+			if node == nil {
+				t.Fatalf("buildRunnerNode(%T) returned nil node", tc.agent)
+			}
+			if got, want := node.Name(), tc.agent.Name(); got != want {
+				t.Errorf("node.Name() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestBuildRunnerNode_NilAgent verifies buildRunnerNode rejects a nil
+// agent instead of panicking later in the node runtime.
+func TestBuildRunnerNode_NilAgent(t *testing.T) {
+	t.Parallel()
+
+	if _, err := buildRunnerNode(nil); err == nil {
+		t.Error("buildRunnerNode(nil) error = nil, want non-nil")
+	}
+}
+
+// noopModel is a minimal model.LLM used to construct LlmAgents in tests
+// that never call the model.
+type noopModel struct{}
+
+func (noopModel) Name() string { return "noop" }
+
+func (noopModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {}
+}
+
 func createSession(t *testing.T, ctx context.Context, sessionID, appName, userID string, events []*session.Event) session.Session {
 	t.Helper()
 

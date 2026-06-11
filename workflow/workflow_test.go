@@ -37,8 +37,9 @@ var defaultNodeConfig = NodeConfig{}
 // context.Context so child cancellation works.
 type MockInvocationContext struct {
 	context.Context
-	sess        session.Session
-	userContent *genai.Content
+	sess           session.Session
+	userContent    *genai.Content
+	isolationScope string
 }
 
 // newMockCtx returns a fresh MockInvocationContext backed by
@@ -79,6 +80,7 @@ func (m *MockInvocationContext) Agent() agent.Agent              { return nil }
 func (m *MockInvocationContext) Artifacts() agent.Artifacts      { return nil }
 func (m *MockInvocationContext) Memory() agent.Memory            { return nil }
 func (m *MockInvocationContext) Branch() string                  { return "" }
+func (m *MockInvocationContext) IsolationScope() string          { return m.isolationScope }
 func (m *MockInvocationContext) RunConfig() *agent.RunConfig     { return nil }
 func (m *MockInvocationContext) Ended() bool                     { return false }
 func (m *MockInvocationContext) EndInvocation()                  {}

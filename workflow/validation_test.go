@@ -18,6 +18,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 func TestUniqueNames(t *testing.T) {
@@ -45,9 +49,9 @@ func TestUniqueNames(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			nodeA := &dummyNode{name: tc.setup.aName}
-			nodeB := &dummyNode{name: tc.setup.bName}
-			nodeC := &dummyNode{name: tc.setup.cName}
+			nodeA := newDummyNode(tc.setup.aName)
+			nodeB := newDummyNode(tc.setup.bName)
+			nodeC := newDummyNode(tc.setup.cName)
 			edges := []Edge{
 				{From: nodeA, To: nodeB},
 				{From: nodeB, To: nodeC},
@@ -75,8 +79,8 @@ func TestStartNodePresent(t *testing.T) {
 		{
 			name: "with start node",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -86,8 +90,8 @@ func TestStartNodePresent(t *testing.T) {
 		{
 			name: "no start node",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: nodeA, To: nodeB},
 				}
@@ -119,8 +123,8 @@ func TestStartNodeNoIncomingEdges(t *testing.T) {
 		{
 			name: "start node with no incoming edges",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -130,8 +134,8 @@ func TestStartNodeNoIncomingEdges(t *testing.T) {
 		{
 			name: "start node has incoming edges",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: nodeA, To: Start},
 					{From: Start, To: nodeB},
@@ -156,8 +160,8 @@ func TestStartNodeNoIncomingEdges(t *testing.T) {
 }
 
 func TestDuplicateEdges(t *testing.T) {
-	nodeA := &dummyNode{name: "A"}
-	nodeB := &dummyNode{name: "B"}
+	nodeA := newDummyNode("A")
+	nodeB := newDummyNode("B")
 	tests := []struct {
 		name      string
 		edges     []Edge
@@ -200,9 +204,9 @@ func TestDuplicateEdges(t *testing.T) {
 }
 
 func TestDefaultRoute(t *testing.T) {
-	nodeA := &dummyNode{name: "A"}
-	nodeB := &dummyNode{name: "B"}
-	nodeC := &dummyNode{name: "C"}
+	nodeA := newDummyNode("A")
+	nodeB := newDummyNode("B")
+	nodeC := newDummyNode("C")
 	tests := []struct {
 		name      string
 		edges     []Edge
@@ -229,9 +233,9 @@ func TestDefaultRoute(t *testing.T) {
 }
 
 func TestConnectivity(t *testing.T) {
-	nodeA := &dummyNode{name: "A"}
-	nodeB := &dummyNode{name: "B"}
-	nodeC := &dummyNode{name: "C"}
+	nodeA := newDummyNode("A")
+	nodeB := newDummyNode("B")
+	nodeC := newDummyNode("C")
 	tests := []struct {
 		name           string
 		edges          []Edge
@@ -279,8 +283,8 @@ func TestValidateCycles(t *testing.T) {
 		{
 			name: "no cycles",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -291,10 +295,10 @@ func TestValidateCycles(t *testing.T) {
 		{
 			name: "no cycles diamond graph",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
-				nodeC := &dummyNode{name: "C"}
-				nodeD := &dummyNode{name: "D"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
+				nodeC := newDummyNode("C")
+				nodeD := newDummyNode("D")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -308,8 +312,8 @@ func TestValidateCycles(t *testing.T) {
 		{
 			name: "only conditional cycle",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -321,10 +325,10 @@ func TestValidateCycles(t *testing.T) {
 		{
 			name: "both conditional and unconditional cycles",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
-				nodeC := &dummyNode{name: "C"}
-				nodeD := &dummyNode{name: "D"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
+				nodeC := newDummyNode("C")
+				nodeD := newDummyNode("D")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -339,8 +343,8 @@ func TestValidateCycles(t *testing.T) {
 		{
 			name: "cycle with default route",
 			edges: func() []Edge {
-				nodeA := &dummyNode{name: "A"}
-				nodeB := &dummyNode{name: "B"}
+				nodeA := newDummyNode("A")
+				nodeB := newDummyNode("B")
 				return []Edge{
 					{From: Start, To: nodeA},
 					{From: nodeA, To: nodeB},
@@ -370,7 +374,7 @@ func TestValidateCycles(t *testing.T) {
 
 func TestValidateSubWorkflowNames(t *testing.T) {
 	// Create a valid sub-workflow
-	subWf, err := New("inner_wf", []Edge{{From: Start, To: &dummyNode{name: "A"}}})
+	subWf, err := New("inner_wf", []Edge{{From: Start, To: newDummyNode("A")}})
 	if err != nil {
 		t.Fatalf("failed to create sub-workflow: %v", err)
 	}
@@ -410,6 +414,182 @@ func TestValidateSubWorkflowNames(t *testing.T) {
 				}
 			} else if err != nil {
 				t.Errorf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDefaultValidateInput(t *testing.T) {
+	// Set up schemas
+	intSchema, err := (&jsonschema.Schema{Type: "integer"}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve integer schema: %v", err)
+	}
+
+	enumSchema, err := (&jsonschema.Schema{
+		Type: "string",
+		Enum: []any{"yes", "no"},
+	}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve enum schema: %v", err)
+	}
+
+	structSchemaRaw, err := jsonschema.For[testValidationStruct](nil)
+	if err != nil {
+		t.Fatalf("failed to generate struct schema: %v", err)
+	}
+	structSchema, err := structSchemaRaw.Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve struct schema: %v", err)
+	}
+
+	stringSchema, err := (&jsonschema.Schema{Type: "string"}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve string schema: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		data          any
+		schema        *jsonschema.Resolved
+		want          any
+		wantErrSubstr string
+	}{
+		{
+			name:   "nil schema returns data as-is",
+			data:   "hello",
+			schema: nil,
+			want:   "hello",
+		},
+		{
+			name:   "nil data returns nil",
+			data:   nil,
+			schema: intSchema,
+			want:   nil,
+		},
+		{
+			name:   "string integer parsed as JSON integer",
+			data:   "123",
+			schema: intSchema,
+			want:   float64(123), // JSON numbers unmarshal as float64 in any
+		},
+		{
+			name:   "string matching enum element (raw fallback)",
+			data:   "yes",
+			schema: enumSchema,
+			want:   "yes",
+		},
+		{
+			name:          "plain text string failing integer schema",
+			data:          "plain text",
+			schema:        intSchema,
+			wantErrSubstr: "loading",
+		},
+		{
+			name: "map coerced to struct type via standard schema validation/conversion",
+			data: map[string]any{
+				"x": 42,
+				"y": "hello",
+			},
+			schema: structSchema,
+			want: map[string]any{
+				"x": float64(42),
+				"y": "hello",
+			},
+		},
+		{
+			name:   "string matching string schema does not attempt JSON parse",
+			data:   "hello",
+			schema: stringSchema,
+			want:   "hello",
+		},
+		{
+			name:          "valid JSON object missing required field",
+			data:          `{"x":1}`,
+			schema:        structSchema,
+			wantErrSubstr: "missing properties",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := defaultValidateInput(tt.data, tt.schema)
+			if tt.wantErrSubstr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErrSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if diff := cmp.Diff(tt.want, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("defaultValidateInput() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+type testValidationStruct struct {
+	X int    `json:"x"`
+	Y string `json:"y"`
+}
+
+func TestSchemaIsString(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema *jsonschema.Schema
+		want   bool
+	}{
+		{
+			name:   "nil schema",
+			schema: nil,
+			want:   false,
+		},
+		{
+			name: "type string",
+			schema: &jsonschema.Schema{
+				Type: "string",
+			},
+			want: true,
+		},
+		{
+			name: "type integer",
+			schema: &jsonschema.Schema{
+				Type: "integer",
+			},
+			want: false,
+		},
+		{
+			name: "types with string",
+			schema: &jsonschema.Schema{
+				Types: []string{"integer", "string"},
+			},
+			want: true,
+		},
+		{
+			name: "types without string",
+			schema: &jsonschema.Schema{
+				Types: []string{"integer", "boolean"},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var resolved *jsonschema.Resolved
+			if tt.schema != nil {
+				var err error
+				resolved, err = tt.schema.Resolve(nil)
+				if err != nil {
+					t.Fatalf("failed to resolve schema: %v", err)
+				}
+			}
+			got := schemaIsString(resolved)
+			if got != tt.want {
+				t.Errorf("schemaIsString() = %v, want %v", got, tt.want)
 			}
 		})
 	}

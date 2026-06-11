@@ -15,10 +15,16 @@
 package workflow
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/google/jsonschema-go/jsonschema"
+
+	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/typeutil"
 )
 
 // ErrDuplicateNodeName is returned when an edge set contains two
@@ -58,6 +64,9 @@ func validateNodes(edges []Edge) error {
 		return err
 	}
 	if err := validateStartNodeNoIncoming(edges); err != nil {
+		return err
+	}
+	if err := validateNoTaskModeGraphNodes(edges); err != nil {
 		return err
 	}
 	return nil
@@ -146,6 +155,50 @@ func validateWorkflow(workflow *graph) error {
 	if err := validateCycles(workflow); err != nil {
 		return err
 	}
+	return nil
+}
+
+// validateNoTaskModeGraphNodes rejects task-mode LlmAgents that appear
+// as static workflow graph nodes.
+//
+// Task-mode agents are multi-turn — they pause for user replies and
+// expect the original node_input (the task brief) to remain visible
+// across re-dispatches. The workflow scheduler currently overwrites
+// node_input with the latest user message on every re-entry, so the
+// task brief is lost and the agent loses context. Until the scheduler
+// preserves the originating node_input on resume, task agents may only
+// be used:
+//
+//   - as chat sub-agents of an LlmAgent coordinator (FC delegation via
+//     workflowinternal.TaskAgentTool / dispatchTaskFC), or
+//   - dispatched dynamically via workflow.RunNode from a function/
+//     dynamic node — never as static graph nodes.
+func validateNoTaskModeGraphNodes(edges []Edge) error {
+	allNodes := make(map[Node]bool)
+	for _, e := range edges {
+		allNodes[e.From] = true
+		allNodes[e.To] = true
+	}
+
+	for node := range allNodes {
+		agentNode, ok := node.(*AgentNode)
+		if !ok {
+			continue
+		}
+		llmA, ok := agentNode.agent.(llminternal.Agent)
+		if !ok || llmA == nil {
+			continue
+		}
+
+		if llminternal.Reveal(llmA).Mode == llminternal.ModeTask {
+			return fmt.Errorf(
+				"Agent %q has mode='task' and cannot be used as a workflow graph node. Use a chat coordinator with task sub-agents, or "+
+					"dispatch dynamically via RunNode from a function node",
+				node.Name(),
+			)
+		}
+	}
+
 	return nil
 }
 
@@ -265,4 +318,65 @@ func validateCycles(workflow *graph) error {
 	}
 
 	return nil
+}
+
+// defaultValidateInput validates data against schema. When data is a
+// string and the schema expects a non-string shape, it first tries to
+// parse the string as JSON. If parsing or validation fails, it falls
+// back to validating the raw string (useful for enum/literal schemas).
+// If both attempts fail, it returns the error from standard schema
+// validation.
+func defaultValidateInput(data any, schema *jsonschema.Resolved) (any, error) {
+	if schema == nil {
+		return data, nil
+	}
+	if data == nil {
+		return nil, nil
+	}
+	// Bypasses ConvertToWithJSONSchema for all string inputs since ConvertToWithJSONSchema
+	// expects the value to marshal into map[string]any for validation, which fails for string types.
+	if text, ok := data.(string); ok {
+		if !schemaIsString(schema) {
+			// Step 1: try JSON parse
+			var parsed any
+			if err := json.Unmarshal([]byte(text), &parsed); err == nil {
+				if err := schema.Validate(parsed); err == nil {
+					return parsed, nil
+				}
+			}
+			// Step 2: raw string may match an enum/literal schema
+			if err := schema.Validate(text); err == nil {
+				return text, nil
+			}
+			// Step 3: fall through to standard validation (which will return an error)
+		} else {
+			// If schema expects string, validate the raw string directly.
+			if err := schema.Validate(text); err != nil {
+				return nil, err
+			}
+			return text, nil
+		}
+	}
+	return typeutil.ConvertToWithJSONSchema[any, any](data, schema)
+}
+
+// schemaIsString reports whether the resolved schema expects a JSON
+// string at the top level.
+func schemaIsString(s *jsonschema.Resolved) bool {
+	if s == nil {
+		return false
+	}
+	schema := s.Schema()
+	if schema == nil {
+		return false
+	}
+	if schema.Type == "string" {
+		return true
+	}
+	for _, t := range schema.Types {
+		if t == "string" {
+			return true
+		}
+	}
+	return false
 }

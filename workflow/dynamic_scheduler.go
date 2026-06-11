@@ -29,6 +29,12 @@ type dynamicSubScheduler struct {
 	parentCtx  NodeContext
 	emitUp     func(*session.Event) error
 
+	// outputForAncestors are the delegating-ancestor paths this
+	// activation's output also counts for, set when this dynamic node is
+	// itself a WithUseAsOutput child. Mirrors adk-python's
+	// Context._output_for_ancestors.
+	outputForAncestors []string
+
 	// mu guards everything below. Never held across child.Run.
 	mu sync.Mutex
 	// runCountByChild seeds the auto-counter per child name; the
@@ -38,15 +44,92 @@ type dynamicSubScheduler struct {
 	// childPath ("<parentPath>/<name>@<runID>"). Failures and HITL
 	// interrupts are not cached.
 	resultByPath map[string]any
+	delegation   outputDelegation
+}
+
+// outputDelegation is the at-most-one WithUseAsOutput delegation for a
+// parent activation. claim is set eagerly on the first delegating child
+// and never cleared within the activation (matching adk-python's
+// _output_delegated); a second delegating child is rejected. hasValue
+// (not value != nil) is the source of truth, since nil is a valid
+// delegated value.
+//
+// Methods require the enclosing scheduler's mu to be held.
+type outputDelegation struct {
+	claimed   bool
+	childPath string
+	childName string
+	value     any
+	hasValue  bool
+}
+
+// reserve claims the delegation for childPath. Re-claiming the same
+// childPath is a no-op (supports WithRunID replay). On conflict the
+// existing holder's name is returned for error reporting.
+func (d *outputDelegation) reserve(childPath, childName string) (existingName string, ok bool) {
+	if d.claimed && d.childPath != childPath {
+		return d.childName, false
+	}
+	d.claimed = true
+	d.childPath = childPath
+	d.childName = childName
+	return "", true
+}
+
+// commit publishes value for the claiming child. Mismatched childPath is
+// silently dropped rather than clobbering another child's delegation.
+func (d *outputDelegation) commit(childPath string, value any) {
+	if !d.claimed || d.childPath != childPath {
+		return
+	}
+	d.value = value
+	d.hasValue = true
+}
+
+func (d *outputDelegation) output() (any, bool) {
+	return d.value, d.hasValue
 }
 
 func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*session.Event) error) *dynamicSubScheduler {
-	return &dynamicSubScheduler{
-		parentPath:      parentPath,
-		parentCtx:       parent,
-		emitUp:          emitUp,
-		runCountByChild: map[string]int{},
-		resultByPath:    map[string]any{},
+	var ancestors []string
+	if p, ok := parent.(*nodeContext); ok {
+		ancestors = p.outputForAncestors
+	}
+	s := &dynamicSubScheduler{
+		parentPath:         parentPath,
+		parentCtx:          parent,
+		emitUp:             emitUp,
+		outputForAncestors: ancestors,
+		runCountByChild:    map[string]int{},
+		resultByPath:       map[string]any{},
+	}
+	s.rehydrateCache()
+	return s
+}
+
+// rehydrateCache repopulates resultByPath from session history so a
+// resumed orchestrator (which re-runs from the top) serves already
+// completed children from cache instead of re-executing them. Each
+// child's terminal event carries its childPath in NodeInfo.Path and a
+// non-nil Output; keyed by childPath, so only stable WithRunID calls
+// hit (auto-counter ids regenerate per activation and miss).
+func (s *dynamicSubScheduler) rehydrateCache() {
+	sess := s.parentCtx.Session()
+	if sess == nil {
+		return
+	}
+	prefix := s.parentPath + "/"
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ev := range sess.Events().All() {
+		if ev == nil || ev.Output == nil || ev.NodeInfo == nil {
+			continue
+		}
+		if !strings.HasPrefix(ev.NodeInfo.Path, prefix) {
+			continue
+		}
+		// Last write wins, matching live execution order.
+		s.resultByPath[ev.NodeInfo.Path] = ev.Output
 	}
 }
 
@@ -67,12 +150,39 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	}
 	childPath := s.parentPath + "/" + name + "@" + runID
 
+	// Claim before child.Run so a sibling WithUseAsOutput fails fast
+	// rather than after the child finishes. The claim is not rolled back
+	// on interrupt/failure: the orchestrator body ends on the sentinel
+	// and resume rebuilds a fresh sub-scheduler.
+	if err := s.claimDelegation(childPath, name, opts.useAsOutput); err != nil {
+		return nil, err
+	}
+
+	// Cached (WithRunID replay): the child already ran, so publish its
+	// output for the delegation immediately.
 	if cached, ok := s.lookupCachedOutput(childPath); ok {
+		s.commitDelegation(childPath, cached)
 		return cached, nil
 	}
 
 	childBranch := deriveChildBranch(s.parentCtx.Branch(), name, runID, opts.useSubBranch, opts.overrideBranch)
-	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s)
+	// A delegating child extends the chain: its own delegating children
+	// must count their output for this parent and its ancestors too.
+	var childAncestors []string
+	if opts.useAsOutput {
+		childAncestors = append([]string{s.parentPath}, s.outputForAncestors...)
+	}
+	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
+
+	// Explicit scope wins over the node-path default; absent both,
+	// inherit. Matches adk-python _compute_isolation_scope_for_node.
+	childScope := childCtx.IsolationScope()
+	if opts.overrideIsolationScope != "" {
+		childScope = opts.overrideIsolationScope
+	} else if opts.scopeFromNodePath {
+		childScope = childPath
+	}
+	childCtx.InvocationContext = withIsolationScope(childCtx.InvocationContext, childScope)
 
 	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
 	// subScheduler) in the embedded context.Context so tools running
@@ -102,17 +212,38 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		// Stamp NodeInfo.Path so the top scheduler scopes the
 		// child's Output/Routes to the child (not the parent's
 		// accumulator). RequestedInput is promoted to the parent —
-		// see scheduler.handleEvent. Skip if the child already
-		// stamped NodeInfo (nested dynamic node yielding its own
-		// terminal event, dynamic_node.go).
+		// see scheduler.handleEvent. A child may set NodeInfo without
+		// a Path (e.g. MessageAsOutput), so fill the Path when empty
+		// rather than only when NodeInfo is nil; a nested dynamic node
+		// that already set its own Path keeps it.
 		if ev.NodeInfo == nil {
 			ev.NodeInfo = &session.NodeInfo{Path: childPath}
+		} else if ev.NodeInfo.Path == "" {
+			ev.NodeInfo.Path = childPath
+		}
+		// Tag the event for scope filtering; mirrors adk-python
+		// NodeRunner._enrich_event.
+		if childScope != "" && ev.IsolationScope == "" {
+			ev.IsolationScope = childScope
 		}
 		if ev.RequestedInput != nil {
 			interrupted = true
 		}
-		if ev.Output != nil {
-			out = ev.Output
+		if childOut, ok := childEventOutput(ev); ok {
+			out = childOut
+			// Stamp OutputFor so resume can attribute the output: the
+			// emitter's own path plus, under delegation, this parent and
+			// its ancestors (the parent then suppresses its own terminal
+			// event). Mirrors adk-python _enrich_event. A nested child
+			// that already stamped its chain keeps it.
+			if ev.NodeInfo.OutputFor == nil {
+				outputFor := []string{ev.NodeInfo.Path}
+				if opts.useAsOutput {
+					outputFor = append(outputFor, s.parentPath)
+					outputFor = append(outputFor, s.outputForAncestors...)
+				}
+				ev.NodeInfo.OutputFor = outputFor
+			}
 		}
 		if err := s.emitUp(ev); err != nil {
 			return nil, &NodeRunError{
@@ -132,6 +263,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	}
 
 	s.storeCachedOutput(childPath, out)
+	s.commitDelegation(childPath, out) // no-op unless this child claimed the delegation
 	return out, nil
 }
 
@@ -146,6 +278,39 @@ func (s *dynamicSubScheduler) storeCachedOutput(childPath string, out any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.resultByPath[childPath] = out
+}
+
+// claimDelegation reserves the at-most-one output delegation when
+// useAsOutput is set, mapping a conflict to NodeRunError. It is a no-op
+// (nil) when useAsOutput is false.
+func (s *dynamicSubScheduler) claimDelegation(childPath, childName string, useAsOutput bool) error {
+	if !useAsOutput {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.delegation.reserve(childPath, childName)
+	if !ok {
+		return &NodeRunError{
+			ChildName: childName,
+			ChildPath: childPath,
+			Cause: fmt.Errorf("%w: %s already delegates to %s",
+				ErrOutputAlreadyDelegated, s.parentPath, existing),
+		}
+	}
+	return nil
+}
+
+func (s *dynamicSubScheduler) commitDelegation(childPath string, value any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.delegation.commit(childPath, value)
+}
+
+func (s *dynamicSubScheduler) delegatedOutput() (any, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.delegation.output()
 }
 
 // resolveRunID validates a user-supplied id, or returns the next

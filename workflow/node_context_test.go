@@ -60,7 +60,7 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 
 	t.Run("child populated from constructor", func(t *testing.T) {
 		parent := newNodeContext(newMockCtx(t), nil)
-		child := newDynamicNodeContext(parent, "wf/fixer@2", "2", nil)
+		child := newDynamicNodeContext(parent, "wf/fixer@2", "2", nil, nil)
 		if got, want := child.Path(), "wf/fixer@2"; got != want {
 			t.Errorf("Path() = %q, want %q", got, want)
 		}
@@ -71,7 +71,7 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 
 	t.Run("activation populated with empty runID", func(t *testing.T) {
 		parent := newNodeContext(newMockCtx(t), nil)
-		act := newDynamicNodeContext(parent, "city_workflow", "", nil)
+		act := newDynamicNodeContext(parent, "city_workflow", "", nil, nil)
 		if got, want := act.Path(), "city_workflow"; got != want {
 			t.Errorf("Path() = %q, want %q", got, want)
 		}
@@ -86,7 +86,7 @@ func TestNodeContext_DynamicInheritsResumeInputs(t *testing.T) {
 	sub := &dynamicSubScheduler{}
 
 	t.Run("child", func(t *testing.T) {
-		child := newDynamicNodeContext(parent, "wf/asker@1", "1", sub)
+		child := newDynamicNodeContext(parent, "wf/asker@1", "1", sub, nil)
 		if v, ok := child.ResumedInput("approval"); !ok || v != "yes" {
 			t.Errorf("child.ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
 		}
@@ -96,7 +96,7 @@ func TestNodeContext_DynamicInheritsResumeInputs(t *testing.T) {
 	})
 
 	t.Run("activation", func(t *testing.T) {
-		act := newDynamicNodeContext(parent, "city_workflow", "", sub)
+		act := newDynamicNodeContext(parent, "city_workflow", "", sub, nil)
 		if v, ok := act.ResumedInput("approval"); !ok || v != "yes" {
 			t.Errorf("act.ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
 		}

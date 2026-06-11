@@ -21,6 +21,8 @@ import (
 	"sync"
 	"testing"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
@@ -198,6 +200,7 @@ type stubNode struct {
 	out        any
 	lastPath   string
 	lastBranch string
+	lastScope  string
 }
 
 func newStubNode(name string, out any) *stubNode {
@@ -212,9 +215,37 @@ func (n *stubNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Ev
 		n.lastPath = nc.Path()
 	}
 	n.lastBranch = ctx.Branch()
+	n.lastScope = ctx.IsolationScope()
 	out := n.out
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{Output: out}, nil)
+	}
+}
+
+// messageAsOutputNode emits a final model-text event whose content IS
+// its output (NodeInfo.MessageAsOutput set, Event.Output nil), like an
+// LlmAgent node in single_turn mode.
+type messageAsOutputNode struct {
+	BaseNode
+	text string
+}
+
+func newMessageAsOutputNode(name, text string) *messageAsOutputNode {
+	return &messageAsOutputNode{
+		BaseNode: NewBaseNode(name, "", NodeConfig{}),
+		text:     text,
+	}
+}
+
+func (n *messageAsOutputNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+	text := n.text
+	return func(yield func(*session.Event, error) bool) {
+		ev := &session.Event{NodeInfo: &session.NodeInfo{MessageAsOutput: true}}
+		ev.LLMResponse.Content = &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{Text: text}},
+		}
+		yield(ev, nil)
 	}
 }
 

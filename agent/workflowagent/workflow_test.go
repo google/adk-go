@@ -98,6 +98,7 @@ func (m *MockInvocationContext) Value(key any) any {
 func (m *MockInvocationContext) Artifacts() agent.Artifacts      { return nil }
 func (m *MockInvocationContext) Memory() agent.Memory            { return nil }
 func (m *MockInvocationContext) Branch() string                  { return "" }
+func (m *MockInvocationContext) IsolationScope() string          { return "" }
 func (m *MockInvocationContext) RunConfig() *agent.RunConfig     { return nil }
 func (m *MockInvocationContext) Ended() bool                     { return false }
 func (m *MockInvocationContext) EndInvocation()                  {}
