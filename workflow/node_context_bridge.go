@@ -14,32 +14,30 @@
 
 package workflow
 
-import "context"
+// // EXPERIMENTAL: temporary bridge that lets runnable tools recover
+// // the surrounding NodeContext from a tool.Context value chain
+// // without modifying the tool.Context interface. Will be removed
+// // once the CallbackContext / ToolContext unification (see TODO in
+// // node_context.go) lands.
+// type nodeContextKey struct{}
 
-// EXPERIMENTAL: temporary bridge that lets runnable tools recover
-// the surrounding NodeContext from a tool.Context value chain
-// without modifying the tool.Context interface. Will be removed
-// once the CallbackContext / ToolContext unification (see TODO in
-// node_context.go) lands.
-type nodeContextKey struct{}
+// // WithNodeContext returns a derived Go context that carries nc under
+// // an opaque key, recoverable via NodeContextFromGoContext from any
+// // descendant context.Context. The scheduler calls this on every
+// // per-node activation.
+// func WithNodeContext(parent context.Context, nc NodeContext) agent.Context {
+// 	if parent == nil || nc == nil {
+// 		return parent
+// 	}
+// 	return context.WithValue(parent, nodeContextKey{}, nc)
+// }
 
-// WithNodeContext returns a derived Go context that carries nc under
-// an opaque key, recoverable via NodeContextFromGoContext from any
-// descendant context.Context. The scheduler calls this on every
-// per-node activation.
-func WithNodeContext(parent context.Context, nc NodeContext) context.Context {
-	if parent == nil || nc == nil {
-		return parent
-	}
-	return context.WithValue(parent, nodeContextKey{}, nc)
-}
-
-// NodeContextFromGoContext returns the NodeContext stashed by
-// WithNodeContext, or (nil, false) if none is present on ctx.
-func NodeContextFromGoContext(ctx context.Context) (NodeContext, bool) {
-	if ctx == nil {
-		return nil, false
-	}
-	nc, ok := ctx.Value(nodeContextKey{}).(NodeContext)
-	return nc, ok
-}
+// // NodeContextFromGoContext returns the NodeContext stashed by
+// // WithNodeContext, or (nil, false) if none is present on ctx.
+// func NodeContextFromGoContext(ctx context.Context) (NodeContext, bool) {
+// 	if ctx == nil {
+// 		return nil, false
+// 	}
+// 	nc, ok := ctx.Value(nodeContextKey{}).(NodeContext)
+// 	return nc, ok
+// }

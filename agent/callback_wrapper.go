@@ -121,6 +121,12 @@ func (c *callbackContextWrapper) WithContext(ctx context.Context) InvocationCont
 	return nil
 }
 
+// WithAgentContext implements [Context].
+func (c *callbackContextWrapper) WithAgentContext(ctx context.Context) Context {
+	log.Print("WithAgentContext() is not supported for CallbackContext")
+	return nil
+}
+
 // ToolContext-related: emit logs and return empty data
 
 // Actions implements [Context].

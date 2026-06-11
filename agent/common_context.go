@@ -197,19 +197,20 @@ type branchOverride struct {
 	branch string
 }
 
-func (b *branchOverride) Branch() string { return b.branch }
+func (b *branchOverride) Branch() string {
+	return b.branch
+}
 
 // WithBranch implements [Context].
 func (c *commonContext) WithBranch(branch string) Context {
 	ctx := withBranch(c, branch)
 	return &commonContext{
-		Context:            ctx,
-		invocationContext:  ctx,
-		resumeInputs:       c.resumeInputs,
-		path:               c.path,
-		runID:              c.runID,
-		subScheduler:       c.subScheduler,
-		outputForAncestors: c.outputForAncestors,
+		Context:           ctx,
+		invocationContext: ctx,
+		resumeInputs:      c.resumeInputs,
+		path:              c.path,
+		runID:             c.runID,
+		subScheduler:      c.subScheduler,
 	}
 }
 
@@ -255,9 +256,23 @@ func (c *commonContext) Session() session.Session {
 
 // WithContext implements [InvocationContext].
 func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
+	panic("Should not be used")
+	// newCtx := c.invocationContext.WithContext(ctx)
+	// return &commonContext{
+	// 	Context:           newCtx,
+	// 	invocationContext: newCtx,
+	// 	artifacts:         c.artifacts,
+	// 	actions:           c.actions,
+	// 	functionCallID:    c.functionCallID,
+	// 	toolConfirmation:  c.toolConfirmation,
+	// }
+}
+
+func (c *commonContext) WithAgentContext(ctx context.Context) Context {
+	newCtx := c.invocationContext.WithContext(ctx)
 	return &commonContext{
-		Context:           ctx,
-		invocationContext: c.invocationContext.WithContext(ctx),
+		Context:           newCtx,
+		invocationContext: newCtx,
 		artifacts:         c.artifacts,
 		actions:           c.actions,
 		functionCallID:    c.functionCallID,
@@ -373,6 +388,7 @@ func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 
 func (c *commonContext) SetInvocationContext(ic InvocationContext) {
 	c.invocationContext = ic
+	c.Context = ic
 }
 
 func (c *commonContext) InvocationContext() InvocationContext {

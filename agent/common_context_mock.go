@@ -196,5 +196,10 @@ func (c *ContextMock) WithContext(ctx context.Context) InvocationContext {
 	return nil
 }
 
+// WithContext implements [Context].
+func (c *ContextMock) WithAgentContext(ctx context.Context) Context {
+	return nil
+}
+
 var _ Context = (*ContextMock)(nil)
 var _ InvocationContext = (*ContextMock)(nil)

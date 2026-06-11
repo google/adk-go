@@ -95,6 +95,7 @@ func runSequentialFanOut(t *testing.T, childName string, extraOpts []RunNodeOpti
 	peekerNode := NewFunctionNode(
 		childName,
 		func(ctx agent.InvocationContext, input string) (string, error) {
+			t.Logf("Branch: %v", ctx.Branch())
 			seenBranches = append(seenBranches, ctx.Branch())
 			return input, nil
 		},
@@ -110,6 +111,8 @@ func runSequentialFanOut(t *testing.T, childName string, extraOpts []RunNodeOpti
 				opts := append([]RunNodeOption{
 					WithRunID(fmt.Sprintf("custom-%d", i+1)),
 				}, extraOpts...)
+				t.Logf("ctx: %+v", ctx)
+				t.Logf("ctx.InvocationContext: %+v", ctx.InvocationContext())
 				out, err := RunNode[string](ctx, peekerNode, item, opts...)
 				if err != nil {
 					return nil, err

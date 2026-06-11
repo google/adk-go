@@ -230,4 +230,6 @@ type Context interface {
 	InvocationContext() InvocationContext
 
 	SetInvocationContext(InvocationContext)
+
+	WithAgentContext(ctx context.Context) Context
 }
