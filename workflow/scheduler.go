@@ -434,7 +434,7 @@ func runNode(
 	wg *sync.WaitGroup,
 	name string,
 	n Node,
-	ctx agent.InvocationContext,
+	ctx agent.Context,
 	input any,
 ) {
 	defer wg.Done()
@@ -967,7 +967,7 @@ func aggregatePredecessorBranches(g *graph, state *RunState, target Node) []stri
 	return branches
 }
 
-func startNodeSpan(ctx agent.InvocationContext, n Node) (trace.Span, agent.InvocationContext) {
+func startNodeSpan(ctx agent.Context, n Node) (trace.Span, agent.Context) {
 	if n == Start {
 		// Don't create span for the Start node.
 		return noop.Span{}, ctx
@@ -979,5 +979,5 @@ func startNodeSpan(ctx agent.InvocationContext, n Node) (trace.Span, agent.Invoc
 		return noop.Span{}, ctx
 	}
 	spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationNode{Node: n})
-	return span, ctx.WithContext(spanCtx)
+	return span, ctx.WithAgentContext(spanCtx)
 }

@@ -57,7 +57,7 @@ func NewJoinNodeWithSchema(name string, schema *jsonschema.Resolved) *JoinNode {
 
 // Run satisfies the Node interface. See JoinNode for the
 // aggregation contract.
-func (n *JoinNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *JoinNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		event := session.NewEvent(ctx.InvocationID())
 		event.Output = input
