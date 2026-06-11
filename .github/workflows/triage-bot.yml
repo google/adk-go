@@ -1,0 +1,69 @@
+name: ADK Go Issue Triaging Agent
+
+on:
+  # Triage a new issue as soon as it is opened.
+  issues:
+    types: [opened]
+  # Sweep the backlog periodically (bounded by ISSUE_COUNT, newest first).
+  schedule:
+    - cron: '0 */6 * * *'
+  # Manual runs default to dry-run so they never mutate by accident.
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Triage only this issue number (blank = sweep).'
+        required: false
+        type: string
+      dry_run:
+        description: 'Log intended actions without modifying issues.'
+        required: false
+        type: boolean
+        default: true
+
+# Serialize runs so the scheduled sweep and per-issue runs do not overlap.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+# Never run the bot on forks.
+jobs:
+  triage:
+    if: github.repository == 'google/adk-go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Run triaging agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          LLM_MODEL_NAME: gemini-3.5-flash
+          ISSUE_COUNT: '3'
+          # Scheduled and opened events act; manual dispatch defaults to dry-run.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          # Untrusted inputs are passed via env (never interpolated into the
+          # script) and validated as numeric below, to avoid shell injection.
+          EVENT_ISSUE: ${{ github.event.issue.number }}
+          INPUT_ISSUE: ${{ inputs.issue }}
+        run: |
+          set -euo pipefail
+          ISSUE="${EVENT_ISSUE:-${INPUT_ISSUE:-}}"
+          if [[ -n "${ISSUE}" ]]; then
+            if [[ "${ISSUE}" =~ ^[0-9]+$ ]]; then
+              go run -mod=readonly ./examples/githubtriagebot "-issue=${ISSUE}"
+            else
+              echo "Ignoring non-numeric issue input: ${ISSUE}" >&2
+              exit 1
+            fi
+          else
+            go run -mod=readonly ./examples/githubtriagebot
+          fi
