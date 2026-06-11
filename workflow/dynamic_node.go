@@ -112,7 +112,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 
 		emit := makeEmit(yield, parentNC)
 		sub := newDynamicSubScheduler(parentNC, n.composePath(parentNC), emit)
-		orchestratorCtx := newDynamicNodeContext(parentNC, sub.parentPath, "", sub)
+		orchestratorCtx := newDynamicNodeContext(parentNC, sub.parentPath, "", sub, sub.outputForAncestors)
 
 		out, err := n.fn(orchestratorCtx, typedInput, emit)
 		if err != nil {
@@ -125,10 +125,23 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 			return
 		}
 
+		// A WithUseAsOutput child already emitted this output on its own
+		// event (stamped for this node), so emit no duplicate terminal
+		// event. Mirrors adk-python's _output_delegated.
+		if _, delegated := sub.delegatedOutput(); delegated {
+			return
+		}
+
+		// nil output: nothing to emit as a terminal event — the body
+		// either produced no output or already carried it on a content
+		// event.
+		if any(out) == nil {
+			return
+		}
 		ev := session.NewEvent(parentNC.InvocationID())
 		ev.Output = out
 		ev.NodeInfo = &session.NodeInfo{Path: sub.parentPath}
-		// TODO(wolo): validate out against n.outputSchema before yielding,
+		// TODO(wolo): validate ev.Output against n.outputSchema,
 		// mirroring function_node.go:87-92.
 		yield(ev, nil)
 	}
@@ -152,11 +165,14 @@ func (n *dynamicNode[IN, OUT]) coerceInput(input any) (IN, error) {
 	return typed, nil
 }
 
-// composePath returns this dynamic node's own composite path. Top-level
-// activations get the bare Name(); nested dynamic nodes append.
+// composePath returns this dynamic node's own composite path. When this
+// node runs as a dynamic child, the scheduler already created its
+// context with the full child path ("<parent>/<name>@<runID>"), so that
+// path is used as-is. A top-level activation has no parent path and
+// gets the bare Name().
 func (n *dynamicNode[IN, OUT]) composePath(parent NodeContext) string {
 	if p := parent.Path(); p != "" {
-		return p + "/" + n.Name()
+		return p
 	}
 	return n.Name()
 }

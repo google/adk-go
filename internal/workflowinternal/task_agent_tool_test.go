@@ -66,6 +66,17 @@ func TestTaskAgentTool_Metadata(t *testing.T) {
 	if tt.IsLongRunning() {
 		t.Errorf("IsLongRunning() = true, want false")
 	}
+	if !tt.DefersResponse() {
+		t.Errorf("DefersResponse() = false, want true")
+	}
+	result, err := tt.Run(nil, nil)
+	if err != nil {
+		t.Errorf("Run() returned err = %v, want nil", err)
+	}
+	if result != nil {
+		t.Errorf("Run() = %v, want nil (Run must be a no-op so the "+
+			"DefersResponse gate skips auto-FR build)", result)
+	}
 }
 
 func TestTaskAgentTool_Declaration(t *testing.T) {

@@ -31,10 +31,7 @@ import (
 type retryLoopTestNode struct {
 	BaseNode
 	calls atomic.Int32
-	cfg   NodeConfig
 }
-
-func (n *retryLoopTestNode) Config() NodeConfig { return n.cfg }
 
 func (n *retryLoopTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
@@ -71,7 +68,6 @@ func TestScheduler_RetryLoop(t *testing.T) {
 
 	nodeA := &retryLoopTestNode{
 		BaseNode: NewBaseNode("A", "", cfg),
-		cfg:      cfg,
 	}
 
 	nodeFinish := newRecordingNode("Finish")

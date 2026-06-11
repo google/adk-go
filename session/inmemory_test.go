@@ -78,6 +78,51 @@ func Test_inMemoryService_CreateConcurrentAccess(t *testing.T) {
 	}
 }
 
+// TestInMemorySession_AppendEvent_WorkflowFieldsRoundTrip guards that
+// AppendEvent persists the workflow event fields (NodeInfo,
+// RequestedInput, Routes) — workflow resume rehydrates node state from
+// them, and a manual event copy that drops them breaks HITL resume.
+func TestInMemorySession_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess := createResp.Session
+
+	event := &session.Event{
+		ID:             "wf_event",
+		Author:         "agent",
+		NodeInfo:       &session.NodeInfo{Path: "ask_name"},
+		RequestedInput: &session.RequestInput{InterruptID: "ask_name", Message: "What's your name?"},
+		Routes:         []string{"route_a"},
+	}
+	if err := service.AppendEvent(ctx, sess, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	got, err := service.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: sess.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	evs := got.Session.Events()
+	if evs.Len() != 1 {
+		t.Fatalf("got %d events, want 1", evs.Len())
+	}
+	ev := evs.At(0)
+	if ev.NodeInfo == nil || ev.NodeInfo.Path != "ask_name" {
+		t.Errorf("NodeInfo not persisted: %#v", ev.NodeInfo)
+	}
+	if ev.RequestedInput == nil || ev.RequestedInput.InterruptID != "ask_name" {
+		t.Errorf("RequestedInput not persisted: %#v", ev.RequestedInput)
+	}
+	if len(ev.Routes) != 1 || ev.Routes[0] != "route_a" {
+		t.Errorf("Routes not persisted: %#v", ev.Routes)
+	}
+}
+
 func TestInMemorySession_AppendEvent_Deadlock(t *testing.T) {
 	ctx := t.Context()
 	service := session.InMemoryService()
