@@ -124,12 +124,6 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
 	}
 
-	if t.skipSummarization {
-		if actions := toolCtx.Actions(); actions != nil {
-			actions.SkipSummarization = true
-		}
-	}
-
 	var agentInputSchema *genai.Schema
 	llmAgent, ok := t.agent.(llminternal.Agent)
 	isLllmAgent := (ok && llmAgent != nil)
