@@ -87,7 +87,7 @@ type scheduler struct {
 	eventQueue chan queueItem
 	wg         sync.WaitGroup
 
-	parentCtx agent.InvocationContext
+	parentCtx agent.Context
 
 	// maxConcurrency caps len(runsByName); 0 disables the cap.
 	// When at the cap, scheduleResumedNode enqueues into
@@ -242,7 +242,7 @@ func (retryItem) isQueueItem() {}
 // reached, and the consumer drains the queue via
 // tryDispatchPending as in-flight nodes complete. 0 disables the
 // cap (unlimited).
-func newScheduler(parent agent.InvocationContext, g *graph, maxConcurrency int) *scheduler {
+func newScheduler(parent agent.Context, g *graph, maxConcurrency int) *scheduler {
 	return &scheduler{
 		state:          NewRunState(),
 		graph:          g,
@@ -371,8 +371,15 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	// the underlying InvocationContext; withBranch then wraps the
 	// result in branchOverride. Reversing would either lose the
 	// cancellation context or strip the branch override.
-	wrapped := withBranch(s.parentCtx.WithContext(nodeCtx), branch)
-	perNodeCtx := newNodeContext(wrapped, resumeInputs)
+
+	if s.parentCtx == nil {
+		panic("nil parent context")
+	}
+	perNodeCtx := s.parentCtx.WithAgentContext(nodeCtx)
+	perNodeCtx = perNodeCtx.WithBranch(branch)
+
+	// wrapped := withBranch(s.parentCtx.WithContext(nodeCtx), branch)
+	perNodeCtx = newNodeContext(perNodeCtx, resumeInputs)
 
 	// EXPERIMENTAL: stash perNodeCtx in the embedded context.Context
 	// so tools running inside an LlmAgent that is itself running as

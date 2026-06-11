@@ -72,8 +72,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 	return func(yield func(*session.Event, error) bool) {
 		cancelCtx, cancelFunc := context.WithCancel(ctx)
 		defer cancelFunc()
-		wCtx := ctx.WithContext(cancelCtx)
-		workerCtx := agent.NewNodeContext(wCtx, nil)
+		workerCtx := ctx.WithAgentContext(cancelCtx)
 
 		v := reflect.ValueOf(input)
 		if v.Kind() != reflect.Slice {

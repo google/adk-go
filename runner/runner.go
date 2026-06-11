@@ -258,7 +258,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		ctx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 			Artifacts:   artifacts,
 			Memory:      memoryImpl,
 			Session:     storedSession,
@@ -266,6 +266,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			UserContent: msg,
 			RunConfig:   &cfg,
 		})
+		ctx := agent.NewCallbackContext(ic, nil)
 		ctx, _, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {
 			yield(nil, err)
@@ -575,7 +576,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	}, wrappedIter, nil
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.InvocationContext, *session.Event, error) {
+func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.Context, *session.Event, error) {
 	if msg == nil {
 		return ctx, nil, nil
 	}
@@ -587,7 +588,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 		if modifiedMsg != nil {
 			msg = modifiedMsg
 			// update ctx user message
-			ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 				Artifacts:    ctx.Artifacts(),
 				Memory:       ctx.Memory(),
 				Session:      ctx.Session(),
@@ -596,6 +597,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 				RunConfig:    ctx.RunConfig(),
 				InvocationID: ctx.InvocationID(),
 			})
+			ctx = agent.NewCallbackContext(ic, nil)
 		}
 	}
 

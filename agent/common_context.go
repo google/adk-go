@@ -269,10 +269,20 @@ func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
 }
 
 func (c *commonContext) WithAgentContext(ctx context.Context) Context {
-	newCtx := c.invocationContext.WithContext(ctx)
+	var ic InvocationContext
+	if c, ok := ctx.(InvocationContext); ok {
+		ic = c
+	} else {
+		ic = &invocationContext{
+			Context: ctx,
+		}
+	}
+
+	//TODO: other fields???
+	// newCtx := agent.NewNodeContext(ctx, nil)
 	return &commonContext{
-		Context:           newCtx,
-		invocationContext: newCtx,
+		Context:           ic,
+		invocationContext: ic,
 		artifacts:         c.artifacts,
 		actions:           c.actions,
 		functionCallID:    c.functionCallID,
