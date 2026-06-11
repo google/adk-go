@@ -137,7 +137,9 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 				event.IsolationScope = sc
 			}
 
-			// TODO: add output validation
+			// The output schema (if any) is applied by the scheduler via
+			// ValidateOutput; synthesizeAgentOutput leaves the raw model
+			// text for defaultValidateOutput to project onto the schema.
 			if !yield(event, nil) {
 				return
 			}

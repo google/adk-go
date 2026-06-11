@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -746,6 +747,123 @@ func (n *validationTestNode) Run(ctx agent.InvocationContext, input any) iter.Se
 		n.runInput = input
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Output = "ok"
+		yield(ev, nil)
+	}
+}
+
+// TestScheduler_ValidateOutput_ValidPasses verifies that a node whose
+// yielded output conforms to its output_schema is forwarded unchanged.
+func TestScheduler_ValidateOutput_ValidPasses(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	schema := resolveTestSchema[testSchemaInput](t)
+	n := newSchemaValidatedNode("n", schema, map[string]any{"value": "hello"})
+
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	events := drain(t, w.Run(mockCtx))
+	if got, want := len(events), 1; got != want {
+		t.Fatalf("event count = %d, want %d", got, want)
+	}
+	gotMap, ok := events[0].Output.(map[string]any)
+	if !ok {
+		t.Fatalf("Output type = %T, want map[string]any", events[0].Output)
+	}
+	if gotMap["value"] != "hello" {
+		t.Errorf("Output[value] = %v, want %q", gotMap["value"], "hello")
+	}
+}
+
+// TestScheduler_ValidateOutput_InvalidEndsActivation verifies that
+// output failing the schema fails the node with an ErrNodeFailed
+// (same wrapping as the dynamic scheduler).
+func TestScheduler_ValidateOutput_InvalidEndsActivation(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	schema := resolveTestSchema[testSchemaInput](t)
+	n := newSchemaValidatedNode("n", schema, map[string]any{"value": 123})
+
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	gotErr := drainErr(t, w.Run(mockCtx))
+	if gotErr == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !errors.Is(gotErr, ErrNodeFailed) {
+		t.Errorf("err = %v, want errors.Is(err, ErrNodeFailed)", gotErr)
+	}
+	if wantSubstr := `output validation failed for node "n"`; !strings.Contains(gotErr.Error(), wantSubstr) {
+		t.Errorf("error = %q, want substring %q", gotErr.Error(), wantSubstr)
+	}
+}
+
+// TestScheduler_ValidateOutput_NoOutputSkipsValidation verifies that
+// events without Output (progress events) are forwarded without
+// invoking ValidateOutput, even under a schema that would reject nil.
+func TestScheduler_ValidateOutput_NoOutputSkipsValidation(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	schema := resolveTestSchema[testSchemaInput](t)
+	n := &progressThenSchemaOutputNode{
+		BaseNode: NewBaseNodeWithSchemas("n", "", NodeConfig{}, nil, schema),
+		progress: 3,
+		output:   map[string]any{"value": "hello"},
+	}
+
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	events := drain(t, w.Run(mockCtx))
+	if got, want := len(events), 4; got != want {
+		t.Fatalf("event count = %d, want %d", got, want)
+	}
+	for i := 0; i < 3; i++ {
+		if events[i].Output != nil {
+			t.Errorf("event %d Output = %v, want nil (progress)", i, events[i].Output)
+		}
+	}
+	if events[3].Output == nil {
+		t.Errorf("last event Output = nil, want validated map")
+	}
+}
+
+// schemaValidatedNode yields one event whose Output is the supplied
+// value; its BaseNode carries an output schema so the scheduler runs
+// ValidateOutput on the yielded value.
+type schemaValidatedNode struct {
+	BaseNode
+	output any
+}
+
+func newSchemaValidatedNode(name string, schema *jsonschema.Resolved, output any) *schemaValidatedNode {
+	return &schemaValidatedNode{
+		BaseNode: NewBaseNodeWithSchemas(name, "", NodeConfig{}, nil, schema),
+		output:   output,
+	}
+}
+
+func (n *schemaValidatedNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Output = n.output
+		yield(ev, nil)
+	}
+}
+
+// progressThenSchemaOutputNode yields `progress` output-less events
+// followed by one carrying `output`, to verify the scheduler skips
+// ValidateOutput on output-less events.
+type progressThenSchemaOutputNode struct {
+	BaseNode
+	progress int
+	output   any
+}
+
+func (n *progressThenSchemaOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		for i := 0; i < n.progress; i++ {
+			if !yield(session.NewEvent(ctx.InvocationID()), nil) {
+				return
+			}
+		}
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Output = n.output
 		yield(ev, nil)
 	}
 }

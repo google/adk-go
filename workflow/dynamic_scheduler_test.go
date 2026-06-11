@@ -18,9 +18,11 @@ import (
 	"errors"
 	"iter"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -220,6 +222,46 @@ func (n *stubNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Ev
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{Output: out}, nil)
 	}
+}
+
+// newSchemaStubNode returns a stubNode carrying an output schema so the
+// dynamic sub-scheduler invokes ValidateOutput on its yielded output.
+func newSchemaStubNode(name string, schema *jsonschema.Resolved, out any) *stubNode {
+	return &stubNode{
+		BaseNode: NewBaseNodeWithSchemas(name, "", NodeConfig{}, nil, schema),
+		out:      out,
+	}
+}
+
+func TestSubScheduler_RunNode_ValidatesOutput(t *testing.T) {
+	schema := resolveTestSchema[testSchemaInput](t)
+
+	t.Run("valid_passes", func(t *testing.T) {
+		child := newSchemaStubNode("ok", schema, map[string]any{"value": "hi"})
+		sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+
+		out, err := sub.runNode(child, nil, runNodeOptions{})
+		if err != nil {
+			t.Fatalf("runNode: %v", err)
+		}
+		gotMap, ok := out.(map[string]any)
+		if !ok || gotMap["value"] != "hi" {
+			t.Errorf("output = %v, want map value=hi", out)
+		}
+	})
+
+	t.Run("invalid_fails", func(t *testing.T) {
+		child := newSchemaStubNode("bad", schema, map[string]any{"value": 123})
+		sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+
+		_, err := sub.runNode(child, nil, runNodeOptions{})
+		if !errors.Is(err, ErrNodeFailed) {
+			t.Fatalf("err = %v, want ErrNodeFailed", err)
+		}
+		if !strings.Contains(err.Error(), "output validation failed") {
+			t.Errorf("err = %q, want substring %q", err.Error(), "output validation failed")
+		}
+	})
 }
 
 // messageAsOutputNode emits a final model-text event whose content IS
