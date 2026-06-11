@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/telemetry"
@@ -626,6 +627,13 @@ func (s *scheduler) handleEvent(it eventItem) {
 	// keep it.
 	if it.ev.Branch == "" && nr.branch != "" {
 		it.ev.Branch = nr.branch
+	}
+	// Default Content.Role to "model" for nodes that left it empty
+	// (FunctionNode/BaseNode set Parts but not Role); clients like
+	// the web UI rely on it. Before the descendant short-circuit so
+	// dynamic children are covered too.
+	if it.ev.Content != nil && it.ev.Content.Role == "" {
+		it.ev.Content.Role = genai.RoleModel
 	}
 	var path string
 	if it.ev.NodeInfo != nil {

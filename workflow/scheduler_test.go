@@ -749,3 +749,70 @@ func (n *validationTestNode) Run(ctx agent.InvocationContext, input any) iter.Se
 		yield(ev, nil)
 	}
 }
+
+// roleTestNode emits an event whose Content has Parts but no Role,
+// like FunctionNode / BaseNode-derived nodes that build Content directly.
+type roleTestNode struct {
+	BaseNode
+}
+
+func (n *roleTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Output = "hi"
+		// Content with Parts but deliberately no Role.
+		ev.Content = &genai.Content{Parts: []*genai.Part{{Text: "hi"}}}
+		yield(ev, nil)
+	}
+}
+
+// TestScheduler_StampsContentRole verifies the scheduler fills
+// Content.Role with "model" for node events that left it empty,
+// while leaving an explicitly-set role untouched.
+func TestScheduler_StampsContentRole(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	node := &roleTestNode{BaseNode: NewBaseNode("emitter", "", defaultNodeConfig)}
+	w := mustNew(t, []Edge{{From: Start, To: node}})
+
+	var sawContent bool
+	for _, ev := range drain(t, w.Run(mockCtx)) {
+		if ev == nil || ev.Content == nil {
+			continue
+		}
+		sawContent = true
+		if ev.Content.Role != genai.RoleModel {
+			t.Errorf("Content.Role = %q, want %q", ev.Content.Role, genai.RoleModel)
+		}
+	}
+	if !sawContent {
+		t.Fatal("no event with Content observed")
+	}
+}
+
+// preRoledNode sets an explicit non-model role to confirm the
+// scheduler does not overwrite a role the node already chose.
+type preRoledNode struct {
+	BaseNode
+}
+
+func (n *preRoledNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Content = &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "x"}}}
+		yield(ev, nil)
+	}
+}
+
+func TestScheduler_PreservesExplicitContentRole(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	node := &preRoledNode{BaseNode: NewBaseNode("preroled", "", defaultNodeConfig)}
+	w := mustNew(t, []Edge{{From: Start, To: node}})
+
+	for _, ev := range drain(t, w.Run(mockCtx)) {
+		if ev != nil && ev.Content != nil && ev.Content.Role != "user" {
+			t.Errorf("Content.Role = %q, want it preserved as %q", ev.Content.Role, "user")
+		}
+	}
+}
