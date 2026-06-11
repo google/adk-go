@@ -501,3 +501,49 @@ func TestAgentNode_StampsIsolationScopeOnEvents(t *testing.T) {
 		t.Errorf("event[1] IsolationScope = %q, want %q (preset must be kept)", events[1].IsolationScope, "preset")
 	}
 }
+
+func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
+	myAgent, err := agent.New(agent.Config{
+		Name: "text_only_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				event := session.NewEvent(ctx.InvocationID())
+				// Model response with plain text, but no Output set
+				event.Content = &genai.Content{
+					Parts: []*genai.Part{
+						{Text: "This is "},
+						{Text: "the output text."},
+					},
+					Role: "model",
+				}
+				yield(event, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	node, err := NewAgentNode(myAgent, defaultNodeConfig)
+	if err != nil {
+		t.Fatalf("failed to create AgentNode: %v", err)
+	}
+
+	mockCtx := newMockCtx(t)
+	mockCtx.sess = &mockSession{id: "test-session"}
+	events := node.Run(mockCtx, nil)
+
+	var finalOutput any
+	for ev, err := range events {
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+		if ev.Output != nil {
+			finalOutput = ev.Output
+		}
+	}
+
+	if got, want := finalOutput, "This is the output text."; got != want {
+		t.Errorf("expected automatically extracted output %q, got %q", want, got)
+	}
+}
