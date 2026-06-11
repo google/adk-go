@@ -83,15 +83,15 @@ func classify(msg string) string {
 	}
 }
 
-func answerQuestion(_ agent.InvocationContext, msg string) (string, error) {
+func answerQuestion(_ agent.Context, msg string) (string, error) {
 	return "answering question: " + msg, nil
 }
 
-func commentOnStatement(_ agent.InvocationContext, msg string) (string, error) {
+func commentOnStatement(_ agent.Context, msg string) (string, error) {
 	return "commenting on statement: " + msg, nil
 }
 
-func reactToExclamation(_ agent.InvocationContext, msg string) (string, error) {
+func reactToExclamation(_ agent.Context, msg string) (string, error) {
 	return "reacting to exclamation: " + msg, nil
 }
 

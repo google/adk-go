@@ -69,7 +69,7 @@ func main() {
 		RetryConfig: workflow.DefaultRetryConfig(),
 	}
 
-	initNode := workflow.NewFunctionNode("init", func(ctx agent.InvocationContext, _ string) (string, error) {
+	initNode := workflow.NewFunctionNode("init", func(ctx agent.Context, _ string) (string, error) {
 		ctx.Session().State().Set("a", "init")
 		return "init done", nil
 	}, nodeConfig)
@@ -79,7 +79,7 @@ func main() {
 		log.Fatalf("failed to create poem node: %v", err)
 	}
 
-	workerA := workflow.NewFunctionNode("workerA", func(ctx agent.InvocationContext, _ string) (string, error) {
+	workerA := workflow.NewFunctionNode("workerA", func(ctx agent.Context, _ string) (string, error) {
 		i := 10
 		for i > 0 {
 			v, err := ctx.Session().State().Get("a")
@@ -90,7 +90,7 @@ func main() {
 		return "WorkerA done", nil
 	}, nodeConfig)
 
-	workerB := workflow.NewFunctionNode("workerB", func(ctx agent.InvocationContext, _ string) (string, error) {
+	workerB := workflow.NewFunctionNode("workerB", func(ctx agent.Context, _ string) (string, error) {
 		i := 10
 		for i > 0 {
 			if i == 5 {
