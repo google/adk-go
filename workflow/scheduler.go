@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/telemetry"
@@ -626,6 +627,15 @@ func (s *scheduler) handleEvent(it eventItem) {
 	// keep it.
 	if it.ev.Branch == "" && nr.branch != "" {
 		it.ev.Branch = nr.branch
+	}
+	// Stamp Content.Role for nodes that built Content without it
+	// (FunctionNode and BaseNode-derived nodes set Parts but not
+	// Role). adk's convention is that every model-authored Content
+	// carries Role="model"; clients such as the web UI rely on it to
+	// render the event. Done before the descendant short-circuit so
+	// dynamic children are covered too.
+	if it.ev.Content != nil && it.ev.Content.Role == "" {
+		it.ev.Content.Role = genai.RoleModel
 	}
 	var path string
 	if it.ev.NodeInfo != nil {
