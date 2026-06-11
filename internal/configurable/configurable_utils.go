@@ -69,6 +69,10 @@ func init() {
 	if err := Register("SequentialAgent", newSequentialAgent); err != nil {
 		panic(err)
 	}
+	if err := Register("Workflow", newWorkflowAgent); err != nil {
+		panic(err)
+	}
+
 	err := RegisterToolFactory("exit_loop", func(_ context.Context, _ map[string]any) (tool.Tool, error) {
 		return exitlooptool.New()
 	})
