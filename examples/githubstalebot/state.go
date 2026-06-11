@@ -15,6 +15,7 @@
 package main
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -254,7 +255,7 @@ func computeIssueState(raw *rawIssue, selfLogin string, maintainers []string, st
 
 	daysSinceActivity := now.Sub(st.LastActivity).Hours() / 24
 
-	isStale := contains(labels, staleLabel)
+	isStale := slices.Contains(labels, staleLabel)
 	daysSinceStaleLabel := 0.0
 	if isStale {
 		if len(staleLabelTimes) > 0 {
@@ -316,15 +317,6 @@ func toSet(xs []string) map[string]bool {
 		m[x] = true
 	}
 	return m
-}
-
-func contains(xs []string, target string) bool {
-	for _, x := range xs {
-		if x == target {
-			return true
-		}
-	}
-	return false
 }
 
 func latest(ts []time.Time) time.Time {

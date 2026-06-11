@@ -48,8 +48,11 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.Owner != "google" || cfg.Repo != "adk-go" {
 		t.Errorf("Owner/Repo = %q/%q, want google/adk-go", cfg.Owner, cfg.Repo)
 	}
-	if cfg.StaleAfter != 168*time.Hour || cfg.CloseAfter != 168*time.Hour {
-		t.Errorf("thresholds = %v/%v, want 168h/168h", cfg.StaleAfter, cfg.CloseAfter)
+	if cfg.StaleAfter != 14*24*time.Hour {
+		t.Errorf("StaleAfter = %v, want 336h (14d)", cfg.StaleAfter)
+	}
+	if cfg.CloseAfter != 7*24*time.Hour {
+		t.Errorf("CloseAfter = %v, want 168h (7d)", cfg.CloseAfter)
 	}
 	if cfg.Concurrency != 3 {
 		t.Errorf("Concurrency = %d, want 3", cfg.Concurrency)

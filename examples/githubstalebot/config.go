@@ -43,12 +43,12 @@ type Config struct {
 	// Model is the Gemini model name used for reasoning.
 	Model string
 
-	// StaleAfter is the inactivity duration after a maintainer's question
-	// before an issue is marked stale.
+	// StaleAfter is how long an issue may sit waiting on the author (after a
+	// maintainer's request) before it is marked stale. Default: 14 days.
 	StaleAfter time.Duration
 
-	// CloseAfter is the inactivity duration after an issue is marked stale
-	// before it is closed.
+	// CloseAfter is how long an issue may remain stale (after the warning
+	// comment) before it is closed. Default: 7 days.
 	CloseAfter time.Duration
 
 	// StaleLabel and RequestClarificationLabel are the label names the bot
@@ -93,8 +93,8 @@ func loadConfig(args []string) (*Config, error) {
 		GitHubToken:               os.Getenv("GITHUB_TOKEN"),
 		GeminiAPIKey:              firstNonEmpty(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")),
 		Model:                     getenv("LLM_MODEL_NAME", "gemini-3.5-flash"),
-		StaleAfter:                envHours("STALE_HOURS_THRESHOLD", 168*time.Hour),
-		CloseAfter:                envHours("CLOSE_HOURS_AFTER_STALE_THRESHOLD", 168*time.Hour),
+		StaleAfter:                envHours("STALE_HOURS_THRESHOLD", 14*24*time.Hour),
+		CloseAfter:                envHours("CLOSE_HOURS_AFTER_STALE_THRESHOLD", 7*24*time.Hour),
 		StaleLabel:                getenv("STALE_LABEL_NAME", "stale"),
 		RequestClarificationLabel: getenv("REQUEST_CLARIFICATION_LABEL", "request clarification"),
 		Maintainers:               splitList(os.Getenv("MAINTAINERS")),

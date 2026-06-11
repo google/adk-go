@@ -43,8 +43,8 @@ For each candidate issue the agent:
 | `REPO` | `adk-go` | Repository name. |
 | `MAINTAINERS` | _(empty)_ | Comma-separated maintainer logins. The default `github-actions[bot]` token is repo-scoped and can read neither collaborators nor org **team** membership at runtime, so the maintainer set is supplied here. Mirror it from [`@google/adk-go-maintainers-team`](https://github.com/orgs/google/teams/adk-go-maintainers-team) and keep it in sync manually. |
 | `LLM_MODEL_NAME` | `gemini-3.5-flash` | Gemini model. |
-| `STALE_HOURS_THRESHOLD` | `168` | Hours of inactivity after a maintainer question before marking stale. |
-| `CLOSE_HOURS_AFTER_STALE_THRESHOLD` | `168` | Hours stale before closing. |
+| `STALE_HOURS_THRESHOLD` | `336` (14 days) | Hours an issue may wait on the author after a maintainer's request before it is marked stale. |
+| `CLOSE_HOURS_AFTER_STALE_THRESHOLD` | `168` (7 days) | Hours an issue may remain stale (after the warning comment) before closing. |
 | `STALE_LABEL_NAME` | `stale` | Label applied to stale issues (must already exist). |
 | `REQUEST_CLARIFICATION_LABEL` | `request clarification` | Label added when a maintainer's question marks an issue stale (must already exist). |
 | `CONCURRENCY_LIMIT` | `3` | Issues audited in parallel. |
