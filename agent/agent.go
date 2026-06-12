@@ -185,7 +185,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			runConfig:      ctx.RunConfig(),
 			endInvocation:  ctx.Ended(),
 		}
-		event, err := runBeforeAgentCallbacks(ic)
+		nodeCtx := NewNodeContext(ic, nil)
+
+		event, err := runBeforeAgentCallbacks(nodeCtx)
 		if event != nil || err != nil {
 			if !yield(event, err) {
 				return
@@ -195,8 +197,6 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		if ic.Ended() {
 			return
 		}
-
-		nodeCtx := NewNodeContext(ic, nil)
 
 		for event, err := range a.run(nodeCtx) {
 			if event != nil && event.Author == "" {
