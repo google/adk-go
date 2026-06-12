@@ -31,116 +31,8 @@ import (
 	"google.golang.org/adk/workflow"
 )
 
-// hitlAskerNode is the pause point in the scenarios: it requests human
-// input, then on re-entry emits the resumed response as its output.
-type hitlAskerNode struct {
-	workflow.BaseNode
-	interruptID string
-}
-
-func newHitlAsker(name, interruptID string, rerunOnResume bool) *hitlAskerNode {
-	cfg := workflow.NodeConfig{}
-	if rerunOnResume {
-		t := true
-		cfg.RerunOnResume = &t
-	}
-	return &hitlAskerNode{
-		BaseNode:    workflow.NewBaseNode(name, "", cfg),
-		interruptID: interruptID,
-	}
-}
-
-func (n *hitlAskerNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		// On re-entry, hand the response to the successor as output.
-		if response, ok := ctx.ResumedInput(n.interruptID); ok {
-			ev := session.NewEvent(ctx.InvocationID())
-			ev.Output = response
-			yield(ev, nil)
-			return
-		}
-		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
-			InterruptID: n.interruptID,
-			Message:     "please decide",
-			Payload:     input,
-		}), nil)
-	}
-}
-
-// findLongRunningInterrupt returns the ID and name of the first
-// FunctionCall flagged in its event's LongRunningToolIDs, or empty
-// strings if none. This is how adk-python's CLI detects a HITL pause.
-func findLongRunningInterrupt(events []*session.Event) (id, name string) {
-	for _, ev := range events {
-		if ev == nil || len(ev.LongRunningToolIDs) == 0 || ev.Content == nil {
-			continue
-		}
-		for _, p := range ev.Content.Parts {
-			fc := p.FunctionCall
-			if fc == nil {
-				continue
-			}
-			if slices.Contains(ev.LongRunningToolIDs, fc.ID) {
-				return fc.ID, fc.Name
-			}
-		}
-	}
-	return "", ""
-}
-
-// drainRunner collects all events from a run, failing on any error.
-func drainRunner(t *testing.T, seq iter.Seq2[*session.Event, error]) []*session.Event {
-	t.Helper()
-	var out []*session.Event
-	for ev, err := range seq {
-		if err != nil {
-			t.Fatalf("runner yielded error: %v", err)
-		}
-		out = append(out, ev)
-	}
-	return out
-}
-
-// resumeContent builds the user-side Content that resumes a
-// previously-paused workflow: a single FunctionResponse part whose
-// ID/name match the interrupt's FunctionCall, and whose response
-// payload is wrapped under the "payload" key (the wire shape the
-// workflow agent expects when decoding a resume response).
-func resumeContent(callID, callName string, payload any) *genai.Content {
-	return &genai.Content{
-		Role: genai.RoleUser,
-		Parts: []*genai.Part{{
-			FunctionResponse: &genai.FunctionResponse{
-				ID:   callID,
-				Name: callName,
-				Response: map[string]any{
-					"payload": payload,
-				},
-			},
-		}},
-	}
-}
-
 // workflowAgentName is also the Author stamped on the events the agent emits.
 const workflowAgentName = "test_workflow"
-
-// newWorkflowRunner builds a runner driving a workflow agent over the
-// given edges, with its session pre-created.
-func newWorkflowRunner(t *testing.T, edges []workflow.Edge) *runner.Runner {
-	t.Helper()
-
-	wfAgent, err := workflowagent.New(workflowagent.Config{
-		Name:  workflowAgentName,
-		Edges: edges,
-	})
-	if err != nil {
-		t.Fatalf("workflowagent.New() error = %v", err)
-	}
-
-	svc := session.InMemoryService()
-	newNodeTestSession(t, t.Context(), svc)
-	return newNodeTestRunner(t, wfAgent, svc)
-}
 
 // TestRunner_WorkflowHITL_Roundtrip_Handoff exercises the full
 // happy-path round-trip through a real runner: turn 1 pauses with
@@ -367,6 +259,114 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
 	if got, want := parentOutput.Load(), "X:draft|Y:yes"; got != want {
 		t.Errorf("parent output = %v, want %q (cached first child + resumed second child)", got, want)
 	}
+}
+
+// newWorkflowRunner builds a runner driving a workflow agent over the
+// given edges, with its session pre-created.
+func newWorkflowRunner(t *testing.T, edges []workflow.Edge) *runner.Runner {
+	t.Helper()
+
+	wfAgent, err := workflowagent.New(workflowagent.Config{
+		Name:  workflowAgentName,
+		Edges: edges,
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New() error = %v", err)
+	}
+
+	svc := session.InMemoryService()
+	newNodeTestSession(t, t.Context(), svc)
+	return newNodeTestRunner(t, wfAgent, svc)
+}
+
+// hitlAskerNode is the pause point in the scenarios: it requests human
+// input, then on re-entry emits the resumed response as its output.
+type hitlAskerNode struct {
+	workflow.BaseNode
+	interruptID string
+}
+
+func newHitlAsker(name, interruptID string, rerunOnResume bool) *hitlAskerNode {
+	cfg := workflow.NodeConfig{}
+	if rerunOnResume {
+		t := true
+		cfg.RerunOnResume = &t
+	}
+	return &hitlAskerNode{
+		BaseNode:    workflow.NewBaseNode(name, "", cfg),
+		interruptID: interruptID,
+	}
+}
+
+func (n *hitlAskerNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		// On re-entry, hand the response to the successor as output.
+		if response, ok := ctx.ResumedInput(n.interruptID); ok {
+			ev := session.NewEvent(ctx.InvocationID())
+			ev.Output = response
+			yield(ev, nil)
+			return
+		}
+		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+			InterruptID: n.interruptID,
+			Message:     "please decide",
+			Payload:     input,
+		}), nil)
+	}
+}
+
+// resumeContent builds the user-side Content that resumes a
+// previously-paused workflow: a single FunctionResponse part whose
+// ID/name match the interrupt's FunctionCall, and whose response
+// payload is wrapped under the "payload" key (the wire shape the
+// workflow agent expects when decoding a resume response).
+func resumeContent(callID, callName string, payload any) *genai.Content {
+	return &genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:   callID,
+				Name: callName,
+				Response: map[string]any{
+					"payload": payload,
+				},
+			},
+		}},
+	}
+}
+
+// findLongRunningInterrupt returns the ID and name of the first
+// FunctionCall flagged in its event's LongRunningToolIDs, or empty
+// strings if none. This is how adk-python's CLI detects a HITL pause.
+func findLongRunningInterrupt(events []*session.Event) (id, name string) {
+	for _, ev := range events {
+		if ev == nil || len(ev.LongRunningToolIDs) == 0 || ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			fc := p.FunctionCall
+			if fc == nil {
+				continue
+			}
+			if slices.Contains(ev.LongRunningToolIDs, fc.ID) {
+				return fc.ID, fc.Name
+			}
+		}
+	}
+	return "", ""
+}
+
+// drainRunner collects all events from a run, failing on any error.
+func drainRunner(t *testing.T, seq iter.Seq2[*session.Event, error]) []*session.Event {
+	t.Helper()
+	var out []*session.Event
+	for ev, err := range seq {
+		if err != nil {
+			t.Fatalf("runner yielded error: %v", err)
+		}
+		out = append(out, ev)
+	}
+	return out
 }
 
 // debugEvents renders events for test failure messages.
