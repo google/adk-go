@@ -21,6 +21,8 @@ import (
 	"os"
 	"time"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagent"
 	"google.golang.org/adk/cmd/launcher"
@@ -28,7 +30,6 @@ import (
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/session/vertexai"
 	"google.golang.org/adk/workflow"
-	"google.golang.org/genai"
 )
 
 func main() {

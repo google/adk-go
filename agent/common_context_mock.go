@@ -18,14 +18,14 @@ import (
 	"context"
 	"time"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool/toolconfirmation"
-	"google.golang.org/genai"
 )
 
-type ContextMock struct {
-}
+type ContextMock struct{}
 
 // WithAgentCancel implements [Context].
 func (c *ContextMock) WithAgentCancel() (Context, context.CancelFunc) {
@@ -144,7 +144,6 @@ func (c *ContextMock) RunConfig() *RunConfig {
 // RunID implements [Context].
 func (c *ContextMock) RunID() string {
 	return ""
-
 }
 
 // SearchMemory implements [Context].
@@ -215,5 +214,7 @@ func (c *ContextMock) OutputForAncestors() []string {
 	return nil
 }
 
-var _ Context = (*ContextMock)(nil)
-var _ InvocationContext = (*ContextMock)(nil)
+var (
+	_ Context           = (*ContextMock)(nil)
+	_ InvocationContext = (*ContextMock)(nil)
+)

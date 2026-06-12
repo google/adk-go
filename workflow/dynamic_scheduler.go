@@ -49,7 +49,7 @@ type dynamicSubScheduler struct {
 }
 
 // ResolveByRunID implements [agent.DynamicSubScheduler].
-func (s *dynamicSubScheduler) ResolveByRunID(childName string, custom string) (string, error) {
+func (s *dynamicSubScheduler) ResolveByRunID(childName, custom string) (string, error) {
 	return s.resolveRunID(childName, custom)
 }
 
@@ -69,7 +69,7 @@ func (s *dynamicSubScheduler) ParentPath() string {
 }
 
 // RunNode implements [agent.DynamicSubScheduler].
-func (s *dynamicSubScheduler) RunNode(child any, input any, opts any) (any, error) {
+func (s *dynamicSubScheduler) RunNode(child, input, opts any) (any, error) {
 	childNode, ok := child.(Node)
 	if !ok {
 		return nil, fmt.Errorf("got child %T, want Node", child)
