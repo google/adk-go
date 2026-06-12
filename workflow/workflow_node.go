@@ -15,7 +15,6 @@
 package workflow
 
 import (
-	"context"
 	"iter"
 
 	"google.golang.org/adk/agent"
@@ -51,7 +50,8 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 		var pendingErr error
 
 		// Create a cancellable context to signal the sub-workflow to stop on error or break.
-		subCtx, cancel := context.WithCancel(ctx)
+		subCtx, cancel := ctx.WithAgentCancel()
+		// subCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		ctx = ctx.WithAgentContext(subCtx)
 

@@ -363,7 +363,6 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 		cancel  context.CancelFunc
 	)
 	if cfg.Timeout > 0 {
-		// nodeCtx, cancel = context.WithTimeout(s.parentCtx, cfg.Timeout)
 		nodeCtx, cancel = s.parentCtx.WithAgentTimeout(cfg.Timeout)
 	} else {
 		nodeCtx, cancel = s.parentCtx.WithAgentCancel()

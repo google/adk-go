@@ -15,7 +15,6 @@
 package workflow
 
 import (
-	"context"
 	"fmt"
 	"iter"
 	"reflect"
@@ -70,7 +69,8 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 // Intermediate non-output events emitted by the wrapped node are suppressed.
 func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		cancelCtx, cancelFunc := context.WithCancel(ctx)
+		// cancelCtx, cancelFunc := context.WithCancel(ctx)
+		cancelCtx, cancelFunc := ctx.WithAgentCancel()
 		defer cancelFunc()
 		workerCtx := ctx.WithAgentContext(cancelCtx)
 

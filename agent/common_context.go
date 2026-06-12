@@ -268,16 +268,17 @@ func (c *commonContext) Session() session.Session {
 
 // WithContext implements [InvocationContext].
 func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
-	//panic("Should not be used")
-	newCtx := c.invocationContext.WithContext(ctx)
-	return &commonContext{
-		Context:           newCtx,
-		invocationContext: newCtx,
-		artifacts:         c.artifacts,
-		actions:           c.actions,
-		functionCallID:    c.functionCallID,
-		toolConfirmation:  c.toolConfirmation,
-	}
+	return c.WithAgentContext(ctx)
+	// //panic("Should not be used")
+	// newCtx := c.invocationContext.WithContext(ctx)
+	// return &commonContext{
+	// 	Context:           newCtx,
+	// 	invocationContext: newCtx,
+	// 	artifacts:         c.artifacts,
+	// 	actions:           c.actions,
+	// 	functionCallID:    c.functionCallID,
+	// 	toolConfirmation:  c.toolConfirmation,
+	// }
 }
 
 func (c *commonContext) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
