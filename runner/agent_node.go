@@ -25,9 +25,9 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
-	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/workflow"
 )
@@ -59,7 +59,7 @@ func newAgentNode(a agent.Agent) workflow.Node {
 // wrapped agent for one activation, emitting its events through emit and
 // returning the agent's final text as the node output.
 //
-// For an LlmAgent, the body delegates to workflowinternal.RunLLMAgentAsNode
+// For an LlmAgent, the body delegates to llmagent.RunLLMAgentAsNode
 // to pick up mode-aware behaviour (chat-mode task delegation loop, task-mode
 // finish_task sniffing, single_turn seeding + output post-processing).
 // For any other agent kind, events are forwarded verbatim and HITL rides
@@ -79,7 +79,7 @@ func runAgentNodeBody(a agent.Agent) workflow.DynamicFn[any, any] {
 	}
 }
 
-// runLlmAgentBody drives an LlmAgent through the workflowinternal
+// runLlmAgentBody drives an LlmAgent through the llmagent
 // wrapper, which dispatches per Mode (chat/task/single_turn). HITL still
 // pauses the node via LongRunningToolIDs (the wrapper forwards those
 // events verbatim from the agent); on pause the body returns
@@ -102,7 +102,7 @@ func runLlmAgentBody(
 	// root chat coordinator sets no Output.
 	paused := false
 	var lastOutput any
-	for event, err := range workflowinternal.RunLLMAgentAsNode(a, ctx, nodeInput) {
+	for event, err := range llmagent.RunLLMAgentAsNode(a, ctx, nodeInput) {
 		if err != nil {
 			// The wrapper bubbles ErrNodeInterrupted up from a task
 			// delegation's RunNode call when a sub-agent paused. The

@@ -123,7 +123,17 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		agentCtx := internalcontext.NewInvocationContext(ctx, params)
 		exCtx := agent.NewNodeContext(agentCtx, nil)
 
-		for event, err := range n.agent.Run(exCtx) {
+		type NodeRunner interface {
+			RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
+		}
+
+		runner, ok := n.agent.(NodeRunner)
+		if !ok {
+			yield(nil, fmt.Errorf("agent %q does not implement NodeRunner", n.agent.Name()))
+			return
+		}
+
+		for event, err := range runner.RunNode(exCtx, validatedInput) {
 			if err != nil {
 				yield(nil, err)
 				return
