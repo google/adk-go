@@ -98,18 +98,29 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 // so all callback-context semantics (state delta tracking, artifact delta
 // tracking, etc.) apply, plus the tool-specific extensions on ToolContext.
 func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) ToolContext {
+	var res commonContext
+	ctx, ok := ic.(*commonContext)
+	if ok {
+		// copy fields
+		res = *ctx
+	} else {
+		res = commonContext{
+			Context:           ic,
+			invocationContext: ic,
+		}
+	}
+
 	if functionCallID == "" {
 		functionCallID = uuid.NewString()
 	}
 	actions = prepareEventActions(actions)
-	return &commonContext{
-		Context:           ic,
-		invocationContext: ic,
-		actions:           actions,
-		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
-		functionCallID:    functionCallID,
-		toolConfirmation:  confirmation,
-	}
+
+	res.actions = actions
+	res.functionCallID = functionCallID
+	res.toolConfirmation = confirmation
+	res.artifacts = &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions}
+
+	return &res
 }
 
 func prepareEventActions(actions *session.EventActions) *session.EventActions {
