@@ -35,8 +35,8 @@ import (
 
 // classifyAndRoute emits a routing event keyed on the message
 // category; returning nil suppresses the default terminal event.
-func classifyAndRoute(nc agent.Context, msg string, emit func(*session.Event) error) (any, error) {
-	ev := session.NewEvent(nc.InvocationID())
+func classifyAndRoute(ctx agent.Context, msg string, emit func(*session.Event) error) (any, error) {
+	ev := session.NewEvent(ctx.InvocationID())
 	ev.Routes = []string{classify(msg)}
 	ev.Output = msg // feeds the successor's typed input
 	if err := emit(ev); err != nil {
