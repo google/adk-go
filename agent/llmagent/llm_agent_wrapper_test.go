@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package workflowinternal_test
+package llmagent_test
 
 import (
 	"context"
@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	. "google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/model"
@@ -65,11 +66,11 @@ func TestDispatchTaskFC_IsolationScope(t *testing.T) {
 			},
 		},
 	}
-	taskAgent, err := llmagent.New(llmagent.Config{
+	taskAgent, err := New(Config{
 		Name:        taskName,
 		Description: "Solves a delegated task.",
 		Model:       taskLLM,
-		Mode:        llmagent.ModeTask,
+		Mode:        ModeTask,
 	})
 	if err != nil {
 		t.Fatalf("llmagent.New(task): %v", err)
@@ -101,10 +102,10 @@ func TestDispatchTaskFC_IsolationScope(t *testing.T) {
 			},
 		},
 	}
-	coord, err := llmagent.New(llmagent.Config{
+	coord, err := New(Config{
 		Name:      coordName,
 		Model:     coordLLM,
-		Mode:      llmagent.ModeChat,
+		Mode:      ModeChat,
 		SubAgents: []agent.Agent{taskAgent},
 	})
 	if err != nil {
@@ -232,9 +233,9 @@ func newStubNodeContext(t *testing.T, a agent.Agent, isolationScope string) *stu
 	}
 }
 
-func makeLLMAgent(t *testing.T, name string, opts ...func(*llmagent.Config)) agent.Agent {
+func makeLLMAgent(t *testing.T, name string, opts ...func(*Config)) agent.Agent {
 	t.Helper()
-	cfg := llmagent.Config{
+	cfg := Config{
 		Name:        name,
 		Description: "test agent",
 		Model:       &scriptedLLM{},
@@ -242,23 +243,23 @@ func makeLLMAgent(t *testing.T, name string, opts ...func(*llmagent.Config)) age
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	a, err := llmagent.New(cfg)
+	a, err := New(cfg)
 	if err != nil {
 		t.Fatalf("llmagent.New(%q): %v", name, err)
 	}
 	return a
 }
 
-func withMode(m llmagent.Mode) func(*llmagent.Config) {
-	return func(c *llmagent.Config) { c.Mode = m }
+func withMode(m Mode) func(*Config) {
+	return func(c *Config) { c.Mode = m }
 }
 
-func withOutputSchema(s *genai.Schema) func(*llmagent.Config) {
-	return func(c *llmagent.Config) { c.OutputSchema = s }
+func withOutputSchema(s *genai.Schema) func(*Config) {
+	return func(c *Config) { c.OutputSchema = s }
 }
 
-func withOutputKey(k string) func(*llmagent.Config) {
-	return func(c *llmagent.Config) { c.OutputKey = k }
+func withOutputKey(k string) func(*Config) {
+	return func(c *Config) { c.OutputKey = k }
 }
 
 // =============================================================================
@@ -273,9 +274,9 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 
 	t.Run("nil nodeInput returns nil", func(t *testing.T) {
 		t.Parallel()
-		a := makeLLMAgent(t, "x", withMode(llmagent.ModeSingleTurn))
+		a := makeLLMAgent(t, "x", withMode(ModeSingleTurn))
 		ctx := newStubNodeContext(t, a, "")
-		if got := workflowinternal.PrepareLLMAgentInput(a, ctx, nil); got != nil {
+		if got := PrepareLLMAgentInput(a, ctx, nil); got != nil {
 			t.Errorf("PrepareLLMAgentInput(nil) = %v, want nil", got)
 		}
 	})
@@ -287,34 +288,34 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx := newStubNodeContext(t, a, "")
-		if got := workflowinternal.PrepareLLMAgentInput(a, ctx, "ignored"); got != nil {
+		if got := PrepareLLMAgentInput(a, ctx, "ignored"); got != nil {
 			t.Errorf("PrepareLLMAgentInput on non-LlmAgent = %v, want nil", got)
 		}
 	})
 
 	t.Run("chat mode returns nil (no seeding)", func(t *testing.T) {
 		t.Parallel()
-		a := makeLLMAgent(t, "chat", withMode(llmagent.ModeChat))
+		a := makeLLMAgent(t, "chat", withMode(ModeChat))
 		ctx := newStubNodeContext(t, a, "")
-		if got := workflowinternal.PrepareLLMAgentInput(a, ctx, "input"); got != nil {
+		if got := PrepareLLMAgentInput(a, ctx, "input"); got != nil {
 			t.Errorf("PrepareLLMAgentInput on chat-mode = %v, want nil", got)
 		}
 	})
 
 	t.Run("task mode returns nil (FC-driven, no seeding)", func(t *testing.T) {
 		t.Parallel()
-		a := makeLLMAgent(t, "task", withMode(llmagent.ModeTask))
+		a := makeLLMAgent(t, "task", withMode(ModeTask))
 		ctx := newStubNodeContext(t, a, "")
-		if got := workflowinternal.PrepareLLMAgentInput(a, ctx, "input"); got != nil {
+		if got := PrepareLLMAgentInput(a, ctx, "input"); got != nil {
 			t.Errorf("PrepareLLMAgentInput on task-mode = %v, want nil", got)
 		}
 	})
 
 	t.Run("single_turn + string input yields user-role text part", func(t *testing.T) {
 		t.Parallel()
-		a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
+		a := makeLLMAgent(t, "st", withMode(ModeSingleTurn))
 		ctx := newStubNodeContext(t, a, "")
-		got := workflowinternal.PrepareLLMAgentInput(a, ctx, "hello there")
+		got := PrepareLLMAgentInput(a, ctx, "hello there")
 		if got == nil {
 			t.Fatal("PrepareLLMAgentInput returned nil; want non-nil event")
 		}
@@ -331,13 +332,13 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 
 	t.Run("single_turn + *genai.Content reuses parts and forces role=user", func(t *testing.T) {
 		t.Parallel()
-		a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
+		a := makeLLMAgent(t, "st", withMode(ModeSingleTurn))
 		ctx := newStubNodeContext(t, a, "")
 		input := &genai.Content{
 			Role:  "model", // deliberately wrong; must be forced to user
 			Parts: []*genai.Part{{Text: "part one"}, {Text: "part two"}},
 		}
-		got := workflowinternal.PrepareLLMAgentInput(a, ctx, input)
+		got := PrepareLLMAgentInput(a, ctx, input)
 		if got == nil {
 			t.Fatal("expected non-nil event")
 		}
@@ -351,10 +352,10 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 
 	t.Run("single_turn + struct input is JSON-marshalled", func(t *testing.T) {
 		t.Parallel()
-		a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
+		a := makeLLMAgent(t, "st", withMode(ModeSingleTurn))
 		ctx := newStubNodeContext(t, a, "")
 		input := map[string]any{"task": "summarize", "limit": 5}
-		got := workflowinternal.PrepareLLMAgentInput(a, ctx, input)
+		got := PrepareLLMAgentInput(a, ctx, input)
 		if got == nil {
 			t.Fatal("expected non-nil event")
 		}
@@ -371,10 +372,10 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 
 	t.Run("single_turn + IsolationScope on ctx propagates to event", func(t *testing.T) {
 		t.Parallel()
-		a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
+		a := makeLLMAgent(t, "st", withMode(ModeSingleTurn))
 		const scope = "iso-scope-xyz"
 		ctx := newStubNodeContext(t, a, scope)
-		got := workflowinternal.PrepareLLMAgentInput(a, ctx, "hello")
+		got := PrepareLLMAgentInput(a, ctx, "hello")
 		if got == nil {
 			t.Fatal("expected non-nil event")
 		}
@@ -385,9 +386,9 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 
 	t.Run("single_turn + empty IsolationScope leaves event scope empty", func(t *testing.T) {
 		t.Parallel()
-		a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
+		a := makeLLMAgent(t, "st", withMode(ModeSingleTurn))
 		ctx := newStubNodeContext(t, a, "")
-		got := workflowinternal.PrepareLLMAgentInput(a, ctx, "hello")
+		got := PrepareLLMAgentInput(a, ctx, "hello")
 		if got == nil {
 			t.Fatal("expected non-nil event")
 		}
@@ -403,7 +404,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 	t.Run("nil event is no-op", func(t *testing.T) {
 		t.Parallel()
 		a := makeLLMAgent(t, "x")
-		if err := workflowinternal.ProcessLLMAgentOutput(a, nil, nil); err != nil {
+		if err := ProcessLLMAgentOutput(a, nil); err != nil {
 			t.Errorf("err = %v, want nil", err)
 		}
 	})
@@ -421,7 +422,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				},
 			},
 		}
-		if err := workflowinternal.ProcessLLMAgentOutput(a, nil, ev); err != nil {
+		if err := ProcessLLMAgentOutput(a, ev); err != nil {
 			t.Fatal(err)
 		}
 		if ev.Output != nil {
@@ -444,7 +445,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				},
 			},
 		}
-		if err := workflowinternal.ProcessLLMAgentOutput(a, nil, ev); err != nil {
+		if err := ProcessLLMAgentOutput(a, ev); err != nil {
 			t.Fatal(err)
 		}
 		if ev.Output != nil {
@@ -463,7 +464,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				},
 			},
 		}
-		if err := workflowinternal.ProcessLLMAgentOutput(a, nil, ev); err != nil {
+		if err := ProcessLLMAgentOutput(a, ev); err != nil {
 			t.Fatal(err)
 		}
 		if ev.Output != nil {
@@ -482,7 +483,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "hi"}}},
 			},
 		}
-		if err := workflowinternal.ProcessLLMAgentOutput(a, nil, ev); err != nil {
+		if err := ProcessLLMAgentOutput(a, ev); err != nil {
 			t.Fatal(err)
 		}
 		if ev.Output != nil {
@@ -498,7 +499,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "the answer"}}},
 			},
 		}
-		if err := workflowinternal.ProcessLLMAgentOutput(a, nil, ev); err != nil {
+		if err := ProcessLLMAgentOutput(a, ev); err != nil {
 			t.Fatal(err)
 		}
 		if got, want := ev.Output, any("the answer"); got != want {
@@ -527,7 +528,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				},
 			},
 		}
-		if err := workflowinternal.ProcessLLMAgentOutput(a, nil, ev); err != nil {
+		if err := ProcessLLMAgentOutput(a, ev); err != nil {
 			t.Fatal(err)
 		}
 		if got, want := ev.Output, any("real answer continued"); got != want {
@@ -544,7 +545,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "value"}}},
 			},
 		}
-		if err := workflowinternal.ProcessLLMAgentOutput(a, nil, ev); err != nil {
+		if err := ProcessLLMAgentOutput(a, ev); err != nil {
 			t.Fatal(err)
 		}
 		if got, want := ev.Actions.StateDelta[key], any("value"); got != want {
@@ -569,7 +570,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				},
 			},
 		}
-		if err := workflowinternal.ProcessLLMAgentOutput(a, nil, ev); err != nil {
+		if err := ProcessLLMAgentOutput(a, ev); err != nil {
 			t.Fatalf("err = %v, want nil", err)
 		}
 		got, ok := ev.Output.(map[string]any)
@@ -599,7 +600,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				},
 			},
 		}
-		err := workflowinternal.ProcessLLMAgentOutput(a, nil, ev)
+		err := ProcessLLMAgentOutput(a, ev)
 		if err == nil {
 			t.Fatal("err = nil, want a schema validation error")
 		}
@@ -620,7 +621,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				},
 			},
 		}
-		if err := workflowinternal.ProcessLLMAgentOutput(a, nil, ev); err != nil {
+		if err := ProcessLLMAgentOutput(a, ev); err != nil {
 			t.Fatal(err)
 		}
 		if ev.Output != nil {
@@ -640,7 +641,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "ok"}}},
 			},
 		}
-		if err := workflowinternal.ProcessLLMAgentOutput(a, nil, ev); err != nil {
+		if err := ProcessLLMAgentOutput(a, ev); err != nil {
 			t.Fatal(err)
 		}
 		if ev.NodeInfo.Path != "outer/inner" {
@@ -664,7 +665,7 @@ func TestRunLLMAgentAsNode_NonLLMAgent_Errors(t *testing.T) {
 
 	var gotErr error
 	var gotEvents int
-	for ev, err := range workflowinternal.RunLLMAgentAsNode(a, ctx, nil) {
+	for ev, err := range llmagent.RunLLMAgentAsNode(a, ctx, nil) {
 		if err != nil {
 			gotErr = err
 		}
@@ -686,11 +687,11 @@ func TestRunLLMAgentAsNode_NonLLMAgent_Errors(t *testing.T) {
 // TestRunLLMAgentAsNode_UnsupportedMode_Errors covers mode value validation.
 func TestRunLLMAgentAsNode_UnsupportedMode_Errors(t *testing.T) {
 	t.Parallel()
-	a := makeLLMAgent(t, "x", withMode(llmagent.Mode("bogus")))
+	a := makeLLMAgent(t, "x", withMode(Mode("bogus")))
 	ctx := newStubNodeContext(t, a, "")
 
 	var gotErr error
-	for _, err := range workflowinternal.RunLLMAgentAsNode(a, ctx, nil) {
+	for _, err := range RunLLMAgentAsNode(a, ctx, nil) {
 		if err != nil {
 			gotErr = err
 		}
@@ -732,8 +733,8 @@ func TestRunLLMAgentAsNode_Task_HappyPath(t *testing.T) {
 		}},
 	}
 	taskAgent := makeLLMAgent(t, taskName,
-		withMode(llmagent.ModeTask),
-		func(c *llmagent.Config) { c.Model = taskLLM },
+		withMode(ModeTask),
+		func(c *Config) { c.Model = taskLLM },
 	)
 	coordLLM := &scriptedLLM{
 		turns: []*model.LLMResponse{
@@ -757,10 +758,10 @@ func TestRunLLMAgentAsNode_Task_HappyPath(t *testing.T) {
 			},
 		},
 	}
-	coord, err := llmagent.New(llmagent.Config{
+	coord, err := New(Config{
 		Name:      coordName,
 		Model:     coordLLM,
-		Mode:      llmagent.ModeChat,
+		Mode:      ModeChat,
 		SubAgents: []agent.Agent{taskAgent},
 	})
 	if err != nil {
@@ -873,8 +874,8 @@ func TestChatRoot_TwoTaskSubAgents_Sequential(t *testing.T) {
 			}},
 		}
 		return makeLLMAgent(t, name,
-			withMode(llmagent.ModeTask),
-			func(c *llmagent.Config) { c.Model = llm },
+			withMode(ModeTask),
+			func(c *Config) { c.Model = llm },
 		)
 	}
 	subA := makeTaskAgent(nameA)
@@ -892,10 +893,10 @@ func TestChatRoot_TwoTaskSubAgents_Sequential(t *testing.T) {
 			}},
 		},
 	}
-	coord, err := llmagent.New(llmagent.Config{
+	coord, err := New(Config{
 		Name:      coordName,
 		Model:     coordLLM,
-		Mode:      llmagent.ModeChat,
+		Mode:      ModeChat,
 		SubAgents: []agent.Agent{subA, subB},
 	})
 	if err != nil {
@@ -968,9 +969,9 @@ func TestChatTask_ValidationErrorDrivesRetry(t *testing.T) {
 		doneText: "should not be reached",
 	}
 	taskAgent := makeLLMAgent(t, taskName,
-		withMode(llmagent.ModeTask),
+		withMode(ModeTask),
 		withOutputSchema(schema),
-		func(c *llmagent.Config) { c.Model = taskLLM },
+		func(c *Config) { c.Model = taskLLM },
 	)
 
 	coordLLM := &scriptedLLM{
@@ -982,10 +983,10 @@ func TestChatTask_ValidationErrorDrivesRetry(t *testing.T) {
 			}},
 		},
 	}
-	coord, err := llmagent.New(llmagent.Config{
+	coord, err := New(Config{
 		Name:      coordName,
 		Model:     coordLLM,
-		Mode:      llmagent.ModeChat,
+		Mode:      ModeChat,
 		SubAgents: []agent.Agent{taskAgent},
 	})
 	if err != nil {
@@ -1064,8 +1065,8 @@ func TestChatCoordinator_ResumesUnresolvedTaskFC(t *testing.T) {
 		}},
 	}
 	taskAgent := makeLLMAgent(t, taskName,
-		withMode(llmagent.ModeTask),
-		func(c *llmagent.Config) { c.Model = taskLLM },
+		withMode(ModeTask),
+		func(c *Config) { c.Model = taskLLM },
 	)
 
 	// Coordinator LLM:
@@ -1096,10 +1097,10 @@ func TestChatCoordinator_ResumesUnresolvedTaskFC(t *testing.T) {
 			}},
 		},
 	}
-	coord, err := llmagent.New(llmagent.Config{
+	coord, err := New(Config{
 		Name:      coordName,
 		Model:     coordLLM,
-		Mode:      llmagent.ModeChat,
+		Mode:      ModeChat,
 		SubAgents: []agent.Agent{taskAgent},
 	})
 	if err != nil {

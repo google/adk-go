@@ -37,7 +37,7 @@
 //     transferred-to sub-agent's first response. See the package
 //     comment block in runChat below for why this differs from
 //     adk-python's "exit-and-re-pick-next-turn" model.
-package workflowinternal
+package llmagent
 
 import (
 	"encoding/json"
@@ -52,6 +52,7 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -59,7 +60,7 @@ import (
 )
 
 // RunLLMAgentAsNode runs an LlmAgent as a workflow node.
-func RunLLMAgentAsNode(a agent.Agent, ctx workflow.NodeContext, nodeInput any) iter.Seq2[*session.Event, error] {
+func RunLLMAgentAsNode(a agent.Agent, ctx agent.InvocationContext, nodeInput any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		llmA, ok := a.(llminternal.Agent)
 		if !ok || llmA == nil {
@@ -123,18 +124,18 @@ func RunLLMAgentAsNode(a agent.Agent, ctx workflow.NodeContext, nodeInput any) i
 
 		switch state.Mode {
 		case llminternal.ModeSingleTurn:
-			runSingleTurn(a, ctx, ic, yield)
+			runSingleTurn(a, ic, yield)
 		case llminternal.ModeChat:
-			runChat(a, ctx, ic, yield)
+			runChat(a, ic, yield)
 		case llminternal.ModeTask:
-			runTask(a, ctx, ic, yield)
+			runTask(a, ic, yield)
 		}
 	}
 }
 
 // PrepareLLMAgentInput returns the seeded user-role event for the
 // single_turn agent's first turn.
-func PrepareLLMAgentInput(a agent.Agent, ctx workflow.NodeContext, nodeInput any) *session.Event {
+func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput any) *session.Event {
 	if nodeInput == nil {
 		return nil
 	}
@@ -175,7 +176,7 @@ func PrepareLLMAgentInput(a agent.Agent, ctx workflow.NodeContext, nodeInput any
 //
 // Returns an error iff OutputSchema validation fails on a non-empty
 // model reply; the caller (runSingleTurn) propagates it.
-func ProcessLLMAgentOutput(a agent.Agent, ctx workflow.NodeContext, ev *session.Event) error {
+func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 	if ev == nil {
 		return nil
 	}
@@ -207,11 +208,12 @@ func ProcessLLMAgentOutput(a agent.Agent, ctx workflow.NodeContext, ev *session.
 
 	var output any
 	if state.OutputSchema != nil {
-		if trimmed := strings.TrimSpace(text); trimmed != "" {
-			parsed, err := utils.ValidateOutputSchema(trimmed, state.OutputSchema)
-			if err != nil {
-				return fmt.Errorf("LlmAgent %q output failed schema validation: %w", a.Name(), err)
-			}
+		parsed, err := utils.ValidateOutputSchema(text, state.OutputSchema)
+		if err != nil {
+			// TODO: we should return error, once output_schema with tools is supported. As right now there's no guarantee that the actual LLM output will be compliant with set output_schema.
+			//log.Default().Printf("LlmAgent %q output validation failed: %v", a.Name(), err)
+			output = text
+		} else {
 			output = parsed
 		}
 	} else {
@@ -240,7 +242,7 @@ func extractFinishTaskFC(ev *session.Event) *genai.FunctionCall {
 		return nil
 	}
 	for _, fc := range utils.FunctionCalls(ev.Content) {
-		if fc != nil && fc.Name == FinishTaskToolName {
+		if fc != nil && fc.Name == workflowinternal.FinishTaskToolName {
 			return fc
 		}
 	}
@@ -257,7 +259,7 @@ func isFinishTaskSuccessFR(ev *session.Event) bool {
 		return false
 	}
 	for _, fr := range utils.FunctionResponses(ev.Content) {
-		if fr == nil || fr.Name != FinishTaskToolName {
+		if fr == nil || fr.Name != workflowinternal.FinishTaskToolName {
 			continue
 		}
 		if fr.Response == nil {
@@ -268,7 +270,7 @@ func isFinishTaskSuccessFR(ev *session.Event) bool {
 			return false
 		}
 		s, ok := v.(string)
-		return ok && s == FinishTaskSuccessResult
+		return ok && s == workflowinternal.FinishTaskSuccessResult
 	}
 	return false
 }
@@ -350,17 +352,17 @@ func isTaskDelegationTool(toolsDict map[string]tool.Tool, name string) bool {
 	if !ok {
 		return false
 	}
-	_, ok = t.(*TaskAgentTool)
+	_, ok = t.(*workflowinternal.TaskAgentTool)
 	return ok
 }
 
-func findFinishTaskTool(a agent.Agent) *FinishTaskTool {
+func findFinishTaskTool(a agent.Agent) *workflowinternal.FinishTaskTool {
 	llmA, ok := a.(llminternal.Agent)
 	if !ok || llmA == nil {
 		return nil
 	}
 	for _, t := range llminternal.Reveal(llmA).Tools {
-		if ft, ok := t.(*FinishTaskTool); ok {
+		if ft, ok := t.(*workflowinternal.FinishTaskTool); ok {
 			return ft
 		}
 	}
@@ -456,13 +458,13 @@ func nodeInputToContent(nodeInput any) *genai.Content {
 
 // runSingleTurn drives Agent.Run for a single round and post-processes
 // each event so the terminal Output is set on the model reply.
-func runSingleTurn(a agent.Agent, _ workflow.NodeContext, ic agent.InvocationContext, yield func(*session.Event, error) bool) {
+func runSingleTurn(a agent.Agent, ic agent.InvocationContext, yield func(*session.Event, error) bool) {
 	for ev, err := range a.Run(ic) {
 		if err != nil {
 			yield(nil, err)
 			return
 		}
-		if perr := ProcessLLMAgentOutput(a, nil, ev); perr != nil {
+		if perr := ProcessLLMAgentOutput(a, ev); perr != nil {
 			yield(nil, perr)
 			return
 		}
@@ -484,11 +486,17 @@ func runSingleTurn(a agent.Agent, _ workflow.NodeContext, ic agent.InvocationCon
 //     round.
 //  3. Re-enter Agent.Run after each dispatch round; the loop ends when
 //     the LLM finishes without delegating.
-func runChat(a agent.Agent, ctx workflow.NodeContext, ic agent.InvocationContext, yield func(*session.Event, error) bool) {
+func runChat(a agent.Agent, ic agent.InvocationContext, yield func(*session.Event, error) bool) {
 	toolsDict := safeCanonicalToolsDict(a)
 
+	nodeCtx, ok := workflow.NodeContextFromGoContext(ic)
+	if !ok {
+		yield(nil, fmt.Errorf("runChat: failed to recover NodeContext from InvocationContext"))
+		return
+	}
+
 	dispatchAndYield := func(fc *genai.FunctionCall) (ok bool) {
-		out, err := dispatchTaskFC(a, fc, ctx)
+		out, err := dispatchTaskFC(a, fc, nodeCtx)
 		if err != nil {
 			// HITL pause propagates as ErrNodeInterrupted; bubble it
 			// up so the outer scheduler can park the coordinator.
@@ -499,7 +507,7 @@ func runChat(a agent.Agent, ctx workflow.NodeContext, ic agent.InvocationContext
 	}
 
 	// Step 1: pre-LLM scan for unresolved task FCs from prior turns.
-	for _, fc := range findUnresolvedTaskDelegations(ctx.Session(), a.Name(), toolsDict) {
+	for _, fc := range findUnresolvedTaskDelegations(nodeCtx.Session(), a.Name(), toolsDict) {
 		if !dispatchAndYield(fc) {
 			return
 		}
@@ -576,7 +584,7 @@ func runChat(a agent.Agent, ctx workflow.NodeContext, ic agent.InvocationContext
 // declaration mirrors the agent's OutputSchema: for wrapped primitives
 // the value lives at the wrapper key; for object schemas it's at the
 // top level of args.
-func runTask(a agent.Agent, _ workflow.NodeContext, ic agent.InvocationContext, yield func(*session.Event, error) bool) {
+func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Event, error) bool) {
 	finishTool := findFinishTaskTool(a)
 	var pendingFCArgs map[string]any
 	for ev, err := range a.Run(ic) {
