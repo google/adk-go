@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -69,6 +70,11 @@ func (m *audioMockInvocationContext) Artifacts() agent.Artifacts { return m.arti
 func (m *audioMockInvocationContext) Session() session.Session   { return m.session }
 func (m *audioMockInvocationContext) InvocationID() string       { return m.invocationID }
 func (m *audioMockInvocationContext) Agent() agent.Agent         { return m.agentObj }
+
+func (m *audioMockInvocationContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (m *audioMockInvocationContext) Done() <-chan struct{}       { return nil }
+func (m *audioMockInvocationContext) Err() error                  { return nil }
+func (m *audioMockInvocationContext) Value(any) any               { return nil }
 
 type audioMockAgent struct {
 	agent.Agent
@@ -250,10 +256,10 @@ func TestAudioCacheManager(t *testing.T) {
 			mgr := NewAudioCacheManager()
 
 			for _, in := range tt.inputs {
-				mgr.CacheInput(in.data, in.mime)
+				mgr.CacheInput(context.Background(), in.data, in.mime)
 			}
 			for _, out := range tt.outputs {
-				mgr.CacheOutput(out.data, out.mime)
+				mgr.CacheOutput(context.Background(), out.data, out.mime)
 			}
 
 			mockArt := &audioMockArtifacts{}

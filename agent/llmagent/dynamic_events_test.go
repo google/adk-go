@@ -33,7 +33,7 @@ func TestSessionEvents_YieldedPresence(t *testing.T) {
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				// 1. Yield a test event
-				testEvent := session.NewEvent(ctx.InvocationID())
+				testEvent := session.NewEventWithContext(ctx, ctx.InvocationID())
 				testEvent.Content = genai.NewContentFromText("Initial test event", genai.RoleModel)
 				if !yield(testEvent, nil) {
 					return
@@ -53,7 +53,7 @@ func TestSessionEvents_YieldedPresence(t *testing.T) {
 				}
 
 				// 3. Yield the result of the check
-				resultEvent := session.NewEvent(ctx.InvocationID())
+				resultEvent := session.NewEventWithContext(ctx, ctx.InvocationID())
 				if found {
 					resultEvent.Content = genai.NewContentFromText("Found initial event in session", genai.RoleModel)
 				} else {
