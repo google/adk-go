@@ -31,8 +31,8 @@ import (
 	"google.golang.org/adk/workflow"
 )
 
-// hitlAskerNode emits a single RequestInput event and exits. Used
-// as the pause point in integration scenarios.
+// hitlAskerNode is the pause point in the scenarios: it requests human
+// input, then on re-entry emits the resumed response as its output.
 type hitlAskerNode struct {
 	workflow.BaseNode
 	interruptID string
@@ -52,9 +52,7 @@ func newHitlAsker(name, interruptID string, rerunOnResume bool) *hitlAskerNode {
 
 func (n *hitlAskerNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		// In re-entry mode the same node may be re-activated with
-		// the response; emit the response as an output event so
-		// the successor receives it.
+		// On re-entry, hand the response to the successor as output.
 		if response, ok := ctx.ResumedInput(n.interruptID); ok {
 			ev := session.NewEvent(ctx.InvocationID())
 			ev.Output = response
@@ -69,12 +67,9 @@ func (n *hitlAskerNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*s
 	}
 }
 
-// findLongRunningInterrupt walks events for the first interrupt
-// signalled the way the runner's generic dispatch detects it: an
-// event with a non-empty LongRunningToolIDs whose IDs match a
-// FunctionCall in the same event. Returns the matched call's name
-// and ID, or ("", "") when none is found. This mirrors how
-// adk-python's CLI detects HITL pauses.
+// findLongRunningInterrupt returns the ID and name of the first
+// FunctionCall flagged in its event's LongRunningToolIDs, or empty
+// strings if none. This is how adk-python's CLI detects a HITL pause.
 func findLongRunningInterrupt(events []*session.Event) (id, name string) {
 	for _, ev := range events {
 		if ev == nil || len(ev.LongRunningToolIDs) == 0 || ev.Content == nil {
@@ -93,8 +88,7 @@ func findLongRunningInterrupt(events []*session.Event) (id, name string) {
 	return "", ""
 }
 
-// drainRunner consumes a runner.Run iterator into a slice. Fails
-// the test on any non-nil error.
+// drainRunner collects all events from a run, failing on any error.
 func drainRunner(t *testing.T, seq iter.Seq2[*session.Event, error]) []*session.Event {
 	t.Helper()
 	var out []*session.Event
@@ -127,13 +121,11 @@ func resumeContent(callID, callName string, payload any) *genai.Content {
 	}
 }
 
-// workflowAgentName is the agent name used by the test workflow agent;
-// it doubles as the Author stamped on the events it emits.
+// workflowAgentName is also the Author stamped on the events the agent emits.
 const workflowAgentName = "test_workflow"
 
 // newWorkflowRunner builds a runner driving a workflow agent over the
-// given edges, with its session pre-created. It reuses the package's
-// shared runner/session helpers and the nodeTest* identifiers.
+// given edges, with its session pre-created.
 func newWorkflowRunner(t *testing.T, edges []workflow.Edge) *runner.Runner {
 	t.Helper()
 
@@ -172,9 +164,7 @@ func TestRunner_WorkflowHITL_Roundtrip_Handoff(t *testing.T) {
 
 	r := newWorkflowRunner(t, workflow.Chain(workflow.Start, asker, handler))
 
-	// Turn 1: fresh user message; expect the runner to forward
-	// the asker's RequestInput event with a FunctionCall part
-	// keyed in LongRunningToolIDs, then naturally end the iter.
+	// Turn 1: fresh message; the workflow pauses at the asker.
 	turn1 := drainRunner(t, r.Run(
 		ctx, nodeTestUser, nodeTestSession,
 		userText("draft"),
@@ -289,16 +279,12 @@ func TestRunner_WorkflowHITL_FunctionResponseRoutedByID(t *testing.T) {
 	}
 
 	// Turn 2: resume; the runner must locate the workflow agent by
-	// matching FunctionResponse.ID against the prior call's ID in
-	// session events.
+	// matching FunctionResponse.ID against the prior call's ID.
 	turn2 := drainRunner(t, r.Run(
 		ctx, nodeTestUser, nodeTestSession,
 		resumeContent(callID, callName, "ok"),
 		agent.RunConfig{},
 	))
-	// Successful resume is signalled by the absence of another
-	// interrupt and by the iter completing without error (asserted
-	// inside drainRunner).
 	if id, _ := findLongRunningInterrupt(turn2); id != "" {
 		t.Errorf("turn 2 produced a fresh interrupt instead of resuming; id=%q", id)
 	}
@@ -329,9 +315,7 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
 		workflow.NodeConfig{},
 	)
 
-	// secondChild pauses on a long-running interrupt the first time
-	// and emits the resumed response as its output on re-entry.
-	secondChild := newHitlAsker("second_child", interruptID, true /*rerun*/)
+	secondChild := newHitlAsker("second_child", interruptID, true /*rerunOnResume*/)
 
 	var parentOutput atomic.Value
 	orchestrator := workflow.NewDynamicNode[string, string](
@@ -358,7 +342,6 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
 
 	r := newWorkflowRunner(t, workflow.Chain(workflow.Start, orchestrator))
 
-	// Turn 1: first child completes, second child suspends.
 	turn1 := drainRunner(t, r.Run(
 		ctx, nodeTestUser, nodeTestSession,
 		userText("draft"),
@@ -372,8 +355,6 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
 		t.Fatalf("first child ran %d times on turn 1, want 1", got)
 	}
 
-	// Turn 2: resume with the human's response. The parent re-runs
-	// from the top; the first child must be served from cache.
 	drainRunner(t, r.Run(
 		ctx, nodeTestUser, nodeTestSession,
 		resumeContent(callID, callName, "yes"),
@@ -388,8 +369,7 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
 	}
 }
 
-// debugEvents formats a slice of session.Event into a human-readable
-// summary used in test failure messages.
+// debugEvents renders events for test failure messages.
 func debugEvents(events []*session.Event) string {
 	var b strings.Builder
 	for i, ev := range events {
@@ -402,8 +382,7 @@ func debugEvents(events []*session.Event) string {
 	return b.String()
 }
 
-// eventFields returns the non-empty, human-readable fields of an event
-// for use in debugEvents.
+// eventFields returns the event's non-empty fields, one token each.
 func eventFields(ev *session.Event) []string {
 	var fields []string
 	if ev.Author != "" {
