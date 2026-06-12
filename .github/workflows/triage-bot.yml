@@ -1,0 +1,45 @@
+name: Issue Triaging Agent
+
+# Thin caller: the bot's code lives in google/adk-samples
+# (go/github-bots/issue-triage). This workflow only supplies adk-go's triggers,
+# permissions, and the model secret; the reusable workflow runs in this repo's
+# context, so the built-in GITHUB_TOKEN writes to adk-go.
+#
+# NOTE: pin the `uses:` ref to the merged commit SHA of the adk-samples reusable
+# workflow (replace `@main`) once https://github.com/google/adk-samples/pull/2079
+# lands, and add a `GEMINI_API_KEY` repository secret.
+
+on:
+  issues:
+    types: [opened]
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Triage only this issue number (blank = sweep).'
+        required: false
+        type: string
+      dry_run:
+        description: 'Log intended actions without modifying issues.'
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    if: github.repository == 'google/adk-go'
+    permissions:
+      issues: write
+      contents: read
+    uses: google/adk-samples/.github/workflows/go-issue-triage.yml@main
+    with:
+      issue_number: ${{ github.event.issue.number || inputs.issue }}
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      issue_count: '3'
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
