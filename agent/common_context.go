@@ -308,30 +308,30 @@ func (c *commonContext) WithAgentCancel() (Context, context.CancelFunc) {
 }
 
 func (c *commonContext) WithAgentContext(ctx context.Context) Context {
-	var ic InvocationContext
+	res := *c
 	if c, ok := ctx.(InvocationContext); ok {
-		ic = c
+		res.Context = c
+		res.invocationContext = c
 	} else {
-		ic = &invocationContext{
-			Context: ctx,
-		}
+		res.Context = ctx
 	}
+	return &res
 
-	//TODO: other fields???
-	// newCtx := agent.NewNodeContext(ctx, nil)
-	return &commonContext{
-		Context:            ic,
-		invocationContext:  ic,
-		artifacts:          c.artifacts,
-		actions:            c.actions,
-		functionCallID:     c.functionCallID,
-		toolConfirmation:   c.toolConfirmation,
-		resumeInputs:       c.resumeInputs,
-		path:               c.path,
-		runID:              c.runID,
-		subScheduler:       c.subScheduler,
-		outputForAncestors: c.outputForAncestors,
-	}
+	// //TODO: other fields???
+	// // newCtx := agent.NewNodeContext(ctx, nil)
+	// return &commonContext{
+	// 	Context:            ic,
+	// 	invocationContext:  ic,
+	// 	artifacts:          c.artifacts,
+	// 	actions:            c.actions,
+	// 	functionCallID:     c.functionCallID,
+	// 	toolConfirmation:   c.toolConfirmation,
+	// 	resumeInputs:       c.resumeInputs,
+	// 	path:               c.path,
+	// 	runID:              c.runID,
+	// 	subScheduler:       c.subScheduler,
+	// 	outputForAncestors: c.outputForAncestors,
+	// }
 }
 
 func (c *commonContext) OutputForAncestors() []string {
