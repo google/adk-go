@@ -186,6 +186,9 @@ func hasFunctionCalls(resp *model.LLMResponse) bool {
 		if part.FunctionCall != nil {
 			return true
 		}
+		if part.ToolCall != nil {
+			return true
+		}
 	}
 	return false
 }
@@ -196,6 +199,9 @@ func hasFunctionResponses(resp *model.LLMResponse) bool {
 	}
 	for _, part := range resp.Content.Parts {
 		if part.FunctionResponse != nil {
+			return true
+		}
+		if part.ToolResponse != nil {
 			return true
 		}
 	}

@@ -83,6 +83,15 @@ func FunctionCalls(c *genai.Content) (ret []*genai.FunctionCall) {
 		if p.FunctionCall != nil {
 			ret = append(ret, p.FunctionCall)
 		}
+		if p.ToolCall != nil && string(p.ToolCall.ToolType) == "function_call" {
+			// Convert server-side ToolCall into a legacy FunctionCall format
+			// so the rest of the ADK logic continues functioning transparently.
+			ret = append(ret, &genai.FunctionCall{
+				ID:   p.ToolCall.ID,
+				Name: p.ToolCall.Args["name"].(string),
+				Args: p.ToolCall.Args["args"].(map[string]any),
+			})
+		}
 	}
 	return ret
 }
@@ -95,6 +104,13 @@ func FunctionResponses(c *genai.Content) (ret []*genai.FunctionResponse) {
 	for _, p := range c.Parts {
 		if p.FunctionResponse != nil {
 			ret = append(ret, p.FunctionResponse)
+		}
+		if p.ToolResponse != nil && string(p.ToolResponse.ToolType) == "function_call" {
+			ret = append(ret, &genai.FunctionResponse{
+				ID:       p.ToolResponse.ID,
+				Name:     p.ToolResponse.Response["name"].(string),
+				Response: p.ToolResponse.Response["response"].(map[string]any),
+			})
 		}
 	}
 	return ret
