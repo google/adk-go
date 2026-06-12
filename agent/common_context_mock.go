@@ -211,5 +211,9 @@ func (c *ContextMock) WithAgentContext(ctx context.Context) Context {
 	return nil
 }
 
+func (c *ContextMock) OutputForAncestors() []string {
+	return nil
+}
+
 var _ Context = (*ContextMock)(nil)
 var _ InvocationContext = (*ContextMock)(nil)

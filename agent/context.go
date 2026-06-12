@@ -235,4 +235,6 @@ type Context interface {
 	WithAgentContext(ctx context.Context) Context
 	WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc)
 	WithAgentCancel() (Context, context.CancelFunc)
+
+	OutputForAncestors() []string
 }

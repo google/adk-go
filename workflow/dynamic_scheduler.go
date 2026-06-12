@@ -129,10 +129,7 @@ func (d *outputDelegation) output() (any, bool) {
 func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func(*session.Event) error) agent.DynamicSubScheduler {
 	ancestors := []string{}
 	if parent != nil {
-		sub := parent.SubScheduler()
-		if sub != nil {
-			ancestors = sub.OutputForAncestors()
-		}
+		ancestors = parent.OutputForAncestors()
 	}
 	s := &dynamicSubScheduler{
 		parentPath:         parentPath,

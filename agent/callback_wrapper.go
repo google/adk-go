@@ -176,6 +176,11 @@ func (c *callbackContextWrapper) ToolConfirmation() *toolconfirmation.ToolConfir
 	return nil
 }
 
+func (c *callbackContextWrapper) OutputForAncestors() []string {
+	log.Print("OutputForAncestors() is not supported for CallbackContext")
+	return nil
+}
+
 // non ToolContext-related - call embedded context.
 
 // AgentName implements [Context].

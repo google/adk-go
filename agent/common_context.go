@@ -334,6 +334,13 @@ func (c *commonContext) WithAgentContext(ctx context.Context) Context {
 	}
 }
 
+func (c *commonContext) OutputForAncestors() []string {
+	if c.outputForAncestors == nil {
+		return nil
+	}
+	return c.outputForAncestors
+}
+
 func (c *commonContext) AgentName() string {
 	return c.invocationContext.Agent().Name()
 }
