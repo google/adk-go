@@ -114,6 +114,14 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 		sub := newDynamicSubScheduler(parentNC, n.composePath(parentNC), emit)
 		orchestratorCtx := newDynamicNodeContext(parentNC, sub.parentPath, "", sub, sub.outputForAncestors)
 
+		// Re-stash orchestratorCtx (carries a live subScheduler) into the
+		// embedded context.Context so a tool running inside an LlmAgent that
+		// is itself this node's body can recover a RunNode-capable
+		// NodeContext via NodeContextFromGoContext.
+		orchestratorCtx.InvocationContext = orchestratorCtx.InvocationContext.WithContext(
+			WithNodeContext(orchestratorCtx.InvocationContext, orchestratorCtx),
+		)
+
 		out, err := n.fn(orchestratorCtx, typedInput, emit)
 		if err != nil {
 			// HITL: the RequestedInput was already forwarded upstream;
