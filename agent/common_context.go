@@ -347,7 +347,10 @@ func (c *commonContext) State() session.State {
 }
 
 func (c *commonContext) Artifacts() Artifacts {
-	return c.artifacts
+	if c.artifacts != nil {
+		return c.artifacts
+	}
+	return c.invocationContext.Artifacts()
 }
 
 func (c *commonContext) InvocationID() string {

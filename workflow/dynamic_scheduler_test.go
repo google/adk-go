@@ -322,7 +322,7 @@ func newInterruptThenFailNode(name string) *interruptThenFailNode {
 	return &interruptThenFailNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
 
-func (n *interruptThenFailNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+func (n *interruptThenFailNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if !yield(&session.Event{
 			RequestedInput: &session.RequestInput{InterruptID: "iid", Message: "ask"},
