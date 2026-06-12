@@ -217,12 +217,17 @@ func (b *branchOverride) Branch() string {
 func (c *commonContext) WithBranch(branch string) Context {
 	ctx := withBranch(c, branch)
 	return &commonContext{
-		Context:           ctx,
-		invocationContext: ctx,
-		resumeInputs:      c.resumeInputs,
-		path:              c.path,
-		runID:             c.runID,
-		subScheduler:      c.subScheduler,
+		Context:            ctx,
+		invocationContext:  ctx,
+		resumeInputs:       c.resumeInputs,
+		path:               c.path,
+		runID:              c.runID,
+		subScheduler:       c.subScheduler,
+		artifacts:          c.artifacts,
+		actions:            c.actions,
+		functionCallID:     c.functionCallID,
+		toolConfirmation:   c.toolConfirmation,
+		outputForAncestors: c.outputForAncestors,
 	}
 }
 
@@ -253,6 +258,11 @@ func (c *commonContext) Memory() Memory {
 
 // ResumedInput implements [InvocationContext].
 func (c *commonContext) ResumedInput(interruptID string) (any, bool) {
+	if c.resumeInputs != nil {
+		if v, ok := c.resumeInputs[interruptID]; ok {
+			return v, true
+		}
+	}
 	return c.invocationContext.ResumedInput(interruptID)
 }
 
@@ -310,12 +320,17 @@ func (c *commonContext) WithAgentContext(ctx context.Context) Context {
 	//TODO: other fields???
 	// newCtx := agent.NewNodeContext(ctx, nil)
 	return &commonContext{
-		Context:           ic,
-		invocationContext: ic,
-		artifacts:         c.artifacts,
-		actions:           c.actions,
-		functionCallID:    c.functionCallID,
-		toolConfirmation:  c.toolConfirmation,
+		Context:            ic,
+		invocationContext:  ic,
+		artifacts:          c.artifacts,
+		actions:            c.actions,
+		functionCallID:     c.functionCallID,
+		toolConfirmation:   c.toolConfirmation,
+		resumeInputs:       c.resumeInputs,
+		path:               c.path,
+		runID:              c.runID,
+		subScheduler:       c.subScheduler,
+		outputForAncestors: c.outputForAncestors,
 	}
 }
 
