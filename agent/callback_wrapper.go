@@ -139,6 +139,112 @@ func (c *callbackContextWrapper) WithAgentContext(ctx context.Context) Context {
 	return nil
 }
 
+// WithAgentCancel implements [Context].
+func (c *callbackContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
+	log.Print("WithAgentCancel() is not supported for CallbackContext")
+	return nil, nil
+}
+
+// WithAgentTimeout implements [Context].
+func (c *callbackContextWrapper) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
+	log.Print("WithAgentTimeout() is not supported for CallbackContext")
+	return nil, nil
+}
+
+// InvocationContext implements [Context].
+func (c *callbackContextWrapper) InvocationContext() InvocationContext {
+	log.Print("InvocationContext() is not supported for CallbackContext")
+	return nil
+}
+
+// SetInvocationContext implements [Context].
+func (c *callbackContextWrapper) SetInvocationContext(InvocationContext) {
+	log.Print("SetInvocationContext() is not supported for CallbackContext")
+}
+
+// SubScheduler implements [Context].
+func (c *callbackContextWrapper) SubScheduler() DynamicSubScheduler {
+	log.Print("SubScheduler() is not supported for CallbackContext")
+	return nil
+}
+
+// Agent implements [Context].
+func (c *callbackContextWrapper) Agent() Agent {
+	log.Print("Agent() is not supported for CallbackContext")
+	return nil
+}
+
+// EndInvocation implements [Context].
+func (c *callbackContextWrapper) EndInvocation() {
+	log.Print("EndInvocation() is not supported for CallbackContext")
+}
+
+// Ended implements [Context].
+func (c *callbackContextWrapper) Ended() bool {
+	log.Print("Ended() is not supported for CallbackContext")
+	return false
+}
+
+// IsolationScope implements [Context].
+func (c *callbackContextWrapper) IsolationScope() string {
+	log.Print("IsolationScope() is not supported for CallbackContext")
+	return ""
+}
+
+// Memory implements [Context].
+func (c *callbackContextWrapper) Memory() Memory {
+	log.Print("Memory() is not supported for CallbackContext")
+	return nil
+}
+
+// Path implements [Context].
+func (c *callbackContextWrapper) Path() string {
+	log.Print("Path() is not supported for CallbackContext")
+	return ""
+}
+
+// ResumedInput implements [Context].
+func (c *callbackContextWrapper) ResumedInput(interruptID string) (any, bool) {
+	log.Print("ResumedInput() is not supported for CallbackContext")
+	return nil, false
+}
+
+// RunConfig implements [Context].
+func (c *callbackContextWrapper) RunConfig() *RunConfig {
+	log.Print("RunConfig() is not supported for CallbackContext")
+	return nil
+}
+
+// RunID implements [Context].
+func (c *callbackContextWrapper) RunID() string {
+	log.Print("RunID() is not supported for CallbackContext")
+	return ""
+}
+
+// Session implements [Context].
+func (c *callbackContextWrapper) Session() session.Session {
+	log.Print("Session() is not supported for CallbackContext")
+	return nil
+}
+
+// WithBranch implements [Context].
+func (c *callbackContextWrapper) WithBranch(branch string) Context {
+	log.Print("WithBranch() is not supported for CallbackContext")
+	return nil
+}
+
+// WithContext implements [Context].
+func (c *callbackContextWrapper) WithContext(ctx context.Context) InvocationContext {
+	log.Print("WithContext() is not supported for CallbackContext")
+	return nil
+}
+
+// WithAgentContext implements [Context].
+func (c *callbackContextWrapper) WithAgentContext(ctx context.Context) Context {
+	log.Print("WithAgentContext() is not supported for CallbackContext")
+	return nil
+}
+
 // ToolContext-related: emit logs and return empty data
 
 // Actions implements [Context].
