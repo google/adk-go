@@ -98,21 +98,15 @@ func applyDynamicDefaults(cfg NodeConfig) NodeConfig {
 
 func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		parentNC, ok := ctx.(NodeContext)
-		if !ok {
-			yield(nil, fmt.Errorf("dynamic node %q: scheduler did not supply a NodeContext", n.Name()))
-			return
-		}
-
 		typedInput, err := n.coerceInput(input)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 
-		emit := makeEmit(yield, parentNC)
-		sub := newDynamicSubScheduler(parentNC, n.composePath(parentNC), emit)
-		orchestratorCtx := newDynamicNodeContext(parentNC, sub.ParentPath(), "", sub, sub.OutputForAncestors())
+		emit := makeEmit(yield, ctx)
+		sub := newDynamicSubScheduler(ctx, n.composePath(ctx), emit)
+		orchestratorCtx := newDynamicNodeContext(ctx, sub.ParentPath(), "", sub, sub.OutputForAncestors())
 
 		// Re-stash orchestratorCtx (carries a live subScheduler) into the
 		// embedded context.Context so a tool running inside an LlmAgent that

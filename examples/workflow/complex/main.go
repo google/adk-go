@@ -45,7 +45,10 @@ func main() {
 				ev1.Content = &genai.Content{
 					Parts: []*genai.Part{{Text: "the first line of the poem"}},
 				}
-				ic.Session().State().Set("firstLine", "done")
+				err := ic.Session().State().Set("firstLine", "done")
+				if err != nil {
+					log.Printf("failed to set state for firstLine: %v", err)
+				}
 				if !yield(ev1, nil) {
 					return
 				}
@@ -55,7 +58,10 @@ func main() {
 				ev2.Content = &genai.Content{
 					Parts: []*genai.Part{{Text: "the second line of the poem"}},
 				}
-				ic.Session().State().Set("secondLine", "done")
+				err = ic.Session().State().Set("secondLine", "done")
+				if err != nil {
+					log.Printf("failed to set state for secondLine: %v", err)
+				}
 				if !yield(ev2, nil) {
 					return
 				}
@@ -71,7 +77,11 @@ func main() {
 	}
 
 	initNode := workflow.NewFunctionNode("init", func(ctx agent.Context, _ string) (string, error) {
-		ctx.Session().State().Set("a", "init")
+		err := ctx.Session().State().Set("a", "init")
+		if err != nil {
+			log.Printf("failed to set state for a: %v", err)
+			return "", err
+		}
 		return "init done", nil
 	}, nodeConfig)
 
