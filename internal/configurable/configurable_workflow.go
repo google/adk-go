@@ -353,5 +353,5 @@ func castNodeFunction(name string, fn any) (func(agent.Context, any) (any, error
 		}, nil
 	}
 
-	return nil, fmt.Errorf("registered node function %q has unsupported signature. Must be func(agent.InvocationContext, any) (any, error) or func(agent.InvocationContext, string) (string, error)", name)
+	return nil, fmt.Errorf("registered node function %q has unsupported signature. Must be func(agent.Context, any) (any, error) or func(agent.Context, string) (string, error)", name)
 }
