@@ -61,7 +61,7 @@ func newAskName() *askName {
 	}
 }
 
-func (n *askName) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *askName) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 			InterruptID: "ask_name",

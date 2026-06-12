@@ -1066,7 +1066,8 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
 					if liveSess != nil {
 						result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
-						cancelCtx, cancel := context.WithCancel(toolCtx)
+						cancelCtx, cancel := toolCtx.WithAgentCancel()
+						// cancelCtx, cancel := context.WithCancel(toolCtx)
 						cancelToolCtx := &cancelledToolContext{
 							ToolContext: toolCtx,
 							cancelCtx:   cancelCtx,

@@ -65,7 +65,7 @@ func (m *mockWorkflowSession) LastUpdateTime() time.Time { return time.Now() }
 
 func TestNestedWorkflow(t *testing.T) {
 	// Create inner workflow edges
-	innerFn := func(ctx agent.InvocationContext, input string) (string, error) {
+	innerFn := func(ctx agent.Context, input string) (string, error) {
 		return input + "-inner", nil
 	}
 	innerNode := NewFunctionNode("inner_node", innerFn, defaultNodeConfig)
@@ -77,7 +77,7 @@ func TestNestedWorkflow(t *testing.T) {
 		t.Fatalf("failed to create workflow node: %v", err)
 	}
 
-	outerFn := func(ctx agent.InvocationContext, input string) (string, error) {
+	outerFn := func(ctx agent.Context, input string) (string, error) {
 		return input + "-outer", nil
 	}
 	outerNode := NewFunctionNode("outer_node", outerFn, defaultNodeConfig)
@@ -110,10 +110,10 @@ func TestNestedWorkflow(t *testing.T) {
 
 func TestNestedWorkflow_MultipleOutputs(t *testing.T) {
 	// Create inner workflow edges with two nodes producing outputs
-	innerFn1 := func(ctx agent.InvocationContext, input string) (string, error) {
+	innerFn1 := func(ctx agent.Context, input string) (string, error) {
 		return input + "-inner1", nil
 	}
-	innerFn2 := func(ctx agent.InvocationContext, input string) (string, error) {
+	innerFn2 := func(ctx agent.Context, input string) (string, error) {
 		return input + "-inner2", nil
 	}
 	innerNode1 := NewFunctionNode("inner_node1", innerFn1, defaultNodeConfig)
@@ -154,7 +154,7 @@ func TestNestedWorkflow_MultipleOutputs(t *testing.T) {
 
 func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 	// Create inner workflow edges
-	nestedStateUpdater := func(ctx agent.InvocationContext, input string) (string, error) {
+	nestedStateUpdater := func(ctx agent.Context, input string) (string, error) {
 		err := ctx.Session().State().Set("my_key", "my_value")
 		if err != nil {
 			return "", err
@@ -170,7 +170,7 @@ func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 	}
 
 	// Create outer workflow
-	outerStateReader := func(ctx agent.InvocationContext, input string) (string, error) {
+	outerStateReader := func(ctx agent.Context, input string) (string, error) {
 		val, err := ctx.Session().State().Get("my_key")
 		if err != nil {
 			return "", err
@@ -215,7 +215,7 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 	// and the outer workflow that should be cancelled.
 	ch := make(chan struct{})
 	started := make(chan struct{})
-	waitingFn := func(ctx agent.InvocationContext, input string) (string, error) {
+	waitingFn := func(ctx agent.Context, input string) (string, error) {
 		close(started)
 		select {
 		case <-ctx.Done():
@@ -265,7 +265,7 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 
 func TestNestedWorkflow_ErrorPropagation(t *testing.T) {
 	// Create inner workflow with a node that fails
-	failingFn := func(ctx agent.InvocationContext, input string) (string, error) {
+	failingFn := func(ctx agent.Context, input string) (string, error) {
 		return "", errors.New("intentional failure")
 	}
 	failingNode := NewFunctionNode("failing_node", failingFn, defaultNodeConfig)

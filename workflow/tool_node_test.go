@@ -237,7 +237,8 @@ func TestToolNode_Run(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ValidateInput failed: %v", err)
 			}
-			events := node.Run(mockCtx, validatedInput)
+			exCtx := agent.NewNodeContext(mockCtx, nil)
+			events := node.Run(exCtx, validatedInput)
 
 			var got string
 			count := 0
@@ -317,7 +318,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 			}
 
 			// Connect to a function node.
-			functionNode := NewFunctionNode[Output, int]("plus_one", func(ctx agent.InvocationContext, in Output) (int, error) {
+			functionNode := NewFunctionNode[Output, int]("plus_one", func(ctx agent.Context, in Output) (int, error) {
 				return in.Result + 1, nil
 			}, defaultNodeConfig)
 
@@ -326,7 +327,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 			t.Run("WorkflowExecution", func(t *testing.T) {
 				// Use a seed node to pass the struct input to toolNode,
 				// since Workflow.Run currently only passes strings from UserContent.
-				seedNode := NewFunctionNode("seed", func(ctx agent.InvocationContext, input any) (*Input, error) {
+				seedNode := NewFunctionNode("seed", func(ctx agent.Context, input any) (*Input, error) {
 					return &Input{Val: tc.input}, nil
 				}, defaultNodeConfig)
 

@@ -126,6 +126,6 @@ func (n *dummyNode) ValidateOutput(output any) (any, error) {
 	return output, nil
 }
 
-func (n *dummyNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *dummyNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
