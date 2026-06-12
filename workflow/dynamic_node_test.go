@@ -195,7 +195,7 @@ func TestDynamicNode_TerminalOutputEvent(t *testing.T) {
 // the pair as "multiple outputs per activation".
 func TestDynamicNode_Integration_ChildAndParentOutputs(t *testing.T) {
 	helloNode := NewFunctionNode("hello_node",
-		func(_ agent.InvocationContext, _ string) (string, error) {
+		func(_ agent.Context, _ string) (string, error) {
 			return "Hello World", nil
 		},
 		NodeConfig{},
@@ -285,7 +285,7 @@ func newFailingNode(name string, err error) *failingNode {
 	}
 }
 
-func (n *failingNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+func (n *failingNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(nil, n.err)
 	}

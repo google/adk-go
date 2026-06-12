@@ -1224,7 +1224,7 @@ func TestLLMAgent_WorkflowIntegration_OutputPropagatesToSuccessor(t *testing.T) 
 
 	// 4. Chain(Start, agentNode, fnNode), where fnNode asserts on input
 	var gotInput any
-	fnNode := workflow.NewFunctionNode("receiver", func(ctx agent.InvocationContext, in any) (any, error) {
+	fnNode := workflow.NewFunctionNode("receiver", func(ctx agent.Context, in any) (any, error) {
 		gotInput = in
 		return nil, nil
 	}, workflow.NodeConfig{})
@@ -1241,8 +1241,9 @@ func TestLLMAgent_WorkflowIntegration_OutputPropagatesToSuccessor(t *testing.T) 
 		Context: runCtx,
 		sess:    &mockSession{id: "test-session-id"},
 	}
+	exCtx := agent.NewNodeContext(mockCtx, nil)
 
-	events := w.Run(mockCtx)
+	events := w.Run(exCtx)
 	for ev, err := range events {
 		if err != nil {
 			t.Fatalf("workflow run failed: %v", err)

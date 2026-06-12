@@ -123,7 +123,7 @@ func TestWorkflowAgent_ReEntry_NoSuccessorBeforeOutput(t *testing.T) {
 func TestWorkflowAgent_ReEntry_DefaultModeIsHandoff(t *testing.T) {
 	var askerActivations atomic.Int32
 
-	asker := newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	asker := newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		askerActivations.Add(1)
 		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 			InterruptID: "decide",
@@ -204,17 +204,17 @@ func TestWorkflowAgent_ReEntry_AccumulatesResumeInputs(t *testing.T) {
 // output).
 type reentryNode struct {
 	workflow.BaseNode
-	runFn func(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
+	runFn func(ctx agent.Context, input any) iter.Seq2[*session.Event, error]
 }
 
-func newReentryNode(name string, runFn func(agent.InvocationContext, any) iter.Seq2[*session.Event, error]) *reentryNode {
+func newReentryNode(name string, runFn func(agent.Context, any) iter.Seq2[*session.Event, error]) *reentryNode {
 	return &reentryNode{
 		BaseNode: workflow.NewBaseNode(name, "", workflow.NodeConfig{RerunOnResume: ptrTrue()}),
 		runFn:    runFn,
 	}
 }
 
-func (n *reentryNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *reentryNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return n.runFn(ctx, input)
 }
 
@@ -279,7 +279,7 @@ func snapshotResumed(ctx agent.InvocationContext, ids ...string) map[string]any 
 // question is next or maintaining a per-test activation counter.
 func askerForSequence(name string, ids []string, finalOutput any) (*reentryNode, *activations) {
 	acts := &activations{}
-	node := newReentryNode(name, func(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	node := newReentryNode(name, func(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 		return func(yield func(*session.Event, error) bool) {
 			resumed := snapshotResumed(ctx, ids...)
 			acts.record(input, resumed)

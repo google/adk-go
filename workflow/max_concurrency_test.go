@@ -113,7 +113,7 @@ func TestMaxConcurrency_PendingDispatchedFIFO(t *testing.T) {
 		i := i
 		nodes[i] = NewFunctionNode(
 			fmt.Sprintf("N%d", i),
-			func(ctx agent.InvocationContext, input any) (string, error) {
+			func(ctx agent.Context, input any) (string, error) {
 				starts[i] = order.Add(1)
 				return "ok", nil
 			},
@@ -144,7 +144,7 @@ func TestMaxConcurrency_RetryRespectsLimit(t *testing.T) {
 
 	var flakyCalls atomic.Int32
 	flaky := NewFunctionNode("flaky",
-		func(ctx agent.InvocationContext, input any) (string, error) {
+		func(ctx agent.Context, input any) (string, error) {
 			defer bumpPeak(&inFlight, &peak)()
 			// Hold long enough that, if the cap were broken, a
 			// sibling could sneak in.
@@ -165,7 +165,7 @@ func TestMaxConcurrency_RetryRespectsLimit(t *testing.T) {
 		},
 	)
 	stable := NewFunctionNode("stable",
-		func(ctx agent.InvocationContext, input any) (string, error) {
+		func(ctx agent.Context, input any) (string, error) {
 			defer bumpPeak(&inFlight, &peak)()
 			time.Sleep(20 * time.Millisecond)
 			return "ok", nil

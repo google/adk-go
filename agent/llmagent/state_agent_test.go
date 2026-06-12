@@ -660,6 +660,8 @@ func (m *mockToolset) ProcessRequest(ctx agent.ToolContext, req *model.LLMReques
 func (m *mockToolset) Name() string                                         { return "test_toolset" }
 func (m *mockToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) { return nil, nil }
 
+var _ tool.Toolset = &mockToolset{}
+
 func TestAgentToolsetPreprocessEffect(t *testing.T) {
 	var capturedReq *model.LLMRequest
 	ctx := t.Context()

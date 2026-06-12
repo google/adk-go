@@ -105,7 +105,7 @@ func (m *MockInvocationContext) EndInvocation()                  {}
 func (m *MockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
 
 func TestWorkflowAgent(t *testing.T) {
-	upperFn := func(ctx agent.InvocationContext, input any) (string, error) {
+	upperFn := func(ctx agent.Context, input any) (string, error) {
 		s, ok := input.(string)
 		if !ok {
 			return "", fmt.Errorf("expected string input")
@@ -113,7 +113,7 @@ func TestWorkflowAgent(t *testing.T) {
 		return strings.ToUpper(s), nil
 	}
 
-	suffixFn := func(ctx agent.InvocationContext, input string) (string, error) {
+	suffixFn := func(ctx agent.Context, input string) (string, error) {
 		return input + " done", nil
 	}
 

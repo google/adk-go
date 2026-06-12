@@ -36,7 +36,7 @@ func main() {
 	// Child node: returns a greeting. Equivalent to the Python
 	// @node(name="hello_node") def my_node(node_input): return "Hello World".
 	helloNode := workflow.NewFunctionNode("hello_node",
-		func(_ agent.InvocationContext, _ string) (string, error) {
+		func(_ agent.Context, _ string) (string, error) {
 			return "Hello World", nil
 		},
 		workflow.NodeConfig{},

@@ -196,7 +196,7 @@ func (r *Runner) newNodeInvocationContext(
 	agentToRun agent.Agent,
 	msg *genai.Content,
 	cfg agent.RunConfig,
-) agent.InvocationContext {
+) agent.Context {
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 		StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
@@ -223,7 +223,7 @@ func (r *Runner) newNodeInvocationContext(
 		}
 	}
 
-	return icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:   artifacts,
 		Memory:      memoryImpl,
 		Session:     storedSession,
@@ -231,6 +231,8 @@ func (r *Runner) newNodeInvocationContext(
 		UserContent: msg,
 		RunConfig:   &cfg,
 	})
+	resCtx := agent.NewNodeContext(ic, nil)
+	return resCtx
 }
 
 // buildResumeResponses maps msg's function responses to interruptID ->

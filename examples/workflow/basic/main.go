@@ -32,14 +32,14 @@ func main() {
 
 	// 1. Define functions for nodes
 	// The first node will receive the user message as input (string).
-	upperFn := func(ctx agent.InvocationContext, input string) (string, error) {
+	upperFn := func(ctx agent.Context, input string) (string, error) {
 		if input == "" {
 			return "No input received", nil
 		}
 		return strings.ToUpper(input), nil
 	}
 
-	suffixFn := func(ctx agent.InvocationContext, input string) (string, error) {
+	suffixFn := func(ctx agent.Context, input string) (string, error) {
 		return input + " IS AWESOME!", nil
 	}
 
