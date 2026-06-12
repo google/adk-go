@@ -53,21 +53,21 @@ import (
 // cover that).
 type inlineNode struct {
 	workflow.BaseNode
-	run func(agent.InvocationContext, any) iter.Seq2[*session.Event, error]
+	run func(agent.Context, any) iter.Seq2[*session.Event, error]
 }
 
-func (n *inlineNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *inlineNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return n.run(ctx, input)
 }
 
-func mkNode(name, desc string, run func(agent.InvocationContext, any) iter.Seq2[*session.Event, error]) *inlineNode {
+func mkNode(name, desc string, run func(agent.Context, any) iter.Seq2[*session.Event, error]) *inlineNode {
 	return &inlineNode{BaseNode: workflow.NewBaseNode(name, desc, workflow.NodeConfig{}), run: run}
 }
 
 // askName pauses the workflow with a RequestInput asking for the
 // user's name. The handoff resume delivers the reply as the next
 // node's input.
-func askName(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func askName(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 			InterruptID: "ask_name",
@@ -79,7 +79,7 @@ func askName(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error
 // greet receives the user's reply (as plain text) and yields one
 // event with the greeting as both the workflow output (StateDelta)
 // and Content (so the console launcher prints it).
-func greet(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func greet(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		name, _ := input.(string)
 		if name == "" {

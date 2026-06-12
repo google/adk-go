@@ -52,10 +52,10 @@ func TestTelemetrySchema_WorkflowChain(t *testing.T) {
 		sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExp)),
 	))
 
-	upperFn := func(_ agent.InvocationContext, in string) (string, error) {
+	upperFn := func(_ agent.Context, in string) (string, error) {
 		return strings.ToUpper(in), nil
 	}
-	suffixFn := func(_ agent.InvocationContext, in string) (string, error) {
+	suffixFn := func(_ agent.Context, in string) (string, error) {
 		return in + " IS AWESOME!", nil
 	}
 

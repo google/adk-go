@@ -37,7 +37,7 @@ import (
 
 // rollDie ignores the user message; the random number is what
 // drives the routing.
-func rollDie(_ agent.InvocationContext, _ string) (int, error) {
+func rollDie(_ agent.Context, _ string) (int, error) {
 	return rand.IntN(10) + 1, nil
 }
 
@@ -58,7 +58,7 @@ func newRouteByValueNode() *routeByValueNode {
 	}
 }
 
-func (n *routeByValueNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *routeByValueNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		value, ok := input.(int)
 		if !ok {
@@ -76,15 +76,15 @@ func (n *routeByValueNode) Run(ctx agent.InvocationContext, input any) iter.Seq2
 	}
 }
 
-func handleLow(_ agent.InvocationContext, value int) (string, error) {
+func handleLow(_ agent.Context, value int) (string, error) {
 	return fmt.Sprintf("rolled %d — handling LOW range (1..3)", value), nil
 }
 
-func handleMid(_ agent.InvocationContext, value int) (string, error) {
+func handleMid(_ agent.Context, value int) (string, error) {
 	return fmt.Sprintf("rolled %d — handling MID range (4..7)", value), nil
 }
 
-func handleHigh(_ agent.InvocationContext, value int) (string, error) {
+func handleHigh(_ agent.Context, value int) (string, error) {
 	return fmt.Sprintf("rolled %d — handling HIGH range (8..10)", value), nil
 }
 

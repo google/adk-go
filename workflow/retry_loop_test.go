@@ -33,7 +33,7 @@ type retryLoopTestNode struct {
 	calls atomic.Int32
 }
 
-func (n *retryLoopTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *retryLoopTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		calls := n.calls.Add(1)
 
