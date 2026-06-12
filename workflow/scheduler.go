@@ -363,9 +363,10 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 		cancel  context.CancelFunc
 	)
 	if cfg.Timeout > 0 {
-		nodeCtx, cancel = context.WithTimeout(s.parentCtx, cfg.Timeout)
+		// nodeCtx, cancel = context.WithTimeout(s.parentCtx, cfg.Timeout)
+		nodeCtx, cancel = s.parentCtx.WithAgentTimeout(cfg.Timeout)
 	} else {
-		nodeCtx, cancel = context.WithCancel(s.parentCtx)
+		nodeCtx, cancel = s.parentCtx.WithAgentCancel()
 	}
 	// Order matters: WithContext sets up per-node cancellation on
 	// the underlying InvocationContext; withBranch then wraps the

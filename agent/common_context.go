@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/genai"
@@ -256,16 +257,32 @@ func (c *commonContext) Session() session.Session {
 
 // WithContext implements [InvocationContext].
 func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
-	panic("Should not be used")
-	// newCtx := c.invocationContext.WithContext(ctx)
-	// return &commonContext{
-	// 	Context:           newCtx,
-	// 	invocationContext: newCtx,
-	// 	artifacts:         c.artifacts,
-	// 	actions:           c.actions,
-	// 	functionCallID:    c.functionCallID,
-	// 	toolConfirmation:  c.toolConfirmation,
-	// }
+	//panic("Should not be used")
+	newCtx := c.invocationContext.WithContext(ctx)
+	return &commonContext{
+		Context:           newCtx,
+		invocationContext: newCtx,
+		artifacts:         c.artifacts,
+		actions:           c.actions,
+		functionCallID:    c.functionCallID,
+		toolConfirmation:  c.toolConfirmation,
+	}
+}
+
+func (c *commonContext) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
+	// copy & modify
+	res := *c
+	newC, cancelFunc := context.WithTimeout(res.Context, timeout)
+	res.Context = newC
+	return &res, cancelFunc
+}
+
+func (c *commonContext) WithAgentCancel() (Context, context.CancelFunc) {
+	// copy & modify
+	res := *c
+	newC, cancelFunc := context.WithCancel(res.Context)
+	res.Context = newC
+	return &res, cancelFunc
 }
 
 func (c *commonContext) WithAgentContext(ctx context.Context) Context {
@@ -417,6 +434,17 @@ func (c *callbackContextState) Get(key string) (any, error) {
 			return val, nil
 		}
 	}
+	if c.ctx.invocationContext == nil {
+		return nil, fmt.Errorf("cannot get key %q from state: invocation context is nil", key)
+	}
+	s := c.ctx.invocationContext.Session()
+	if s == nil {
+		return nil, fmt.Errorf("cannot get key %q from state: session is nil", key)
+	}
+	state := s.State()
+	if state == nil {
+		return nil, fmt.Errorf("cannot get key %q from state: state is nil", key)
+	}
 	return c.ctx.invocationContext.Session().State().Get(key)
 }
 
@@ -424,6 +452,18 @@ func (c *callbackContextState) Set(key string, val any) error {
 	if c.ctx.actions != nil && c.ctx.actions.StateDelta != nil {
 		c.ctx.actions.StateDelta[key] = val
 	}
+	if c.ctx.invocationContext == nil {
+		return fmt.Errorf("cannot set key %q to state: invocation context is nil", key)
+	}
+	s := c.ctx.invocationContext.Session()
+	if s == nil {
+		return fmt.Errorf("cannot set key %q to state: session is nil", key)
+	}
+	state := s.State()
+	if state == nil {
+		return fmt.Errorf("cannot set key %q to state: state is nil", key)
+	}
+
 	return c.ctx.invocationContext.Session().State().Set(key, val)
 }
 

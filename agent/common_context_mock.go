@@ -27,6 +27,16 @@ import (
 type ContextMock struct {
 }
 
+// WithAgentCancel implements [Context].
+func (c *ContextMock) WithAgentCancel() (Context, context.CancelFunc) {
+	return nil, nil
+}
+
+// WithAgentTimeout implements [Context].
+func (c *ContextMock) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
+	return nil, nil
+}
+
 // Actions implements [Context].
 func (c *ContextMock) Actions() *session.EventActions {
 	return nil

@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -232,4 +233,6 @@ type Context interface {
 	SetInvocationContext(InvocationContext)
 
 	WithAgentContext(ctx context.Context) Context
+	WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc)
+	WithAgentCancel() (Context, context.CancelFunc)
 }

@@ -35,7 +35,7 @@ func (a *testAgent) Description() string {
 	panic("not implemented")
 }
 
-func (a *testAgent) Run(InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *testAgent) Run(Context) iter.Seq2[*session.Event, error] {
 	panic("not implemented")
 }
 

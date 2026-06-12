@@ -33,6 +33,18 @@ type callbackContextWrapper struct {
 	context CallbackContext
 }
 
+// WithAgentCancel implements [Context].
+func (c *callbackContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
+	log.Print("WithAgentCancel() is not supported for CallbackContext")
+	return nil, nil
+}
+
+// WithAgentTimeout implements [Context].
+func (c *callbackContextWrapper) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
+	log.Print("WithAgentTimeout() is not supported for CallbackContext")
+	return nil, nil
+}
+
 // InvocationContext implements [Context].
 func (c *callbackContextWrapper) InvocationContext() InvocationContext {
 	log.Print("InvocationContext() is not supported for CallbackContext")
