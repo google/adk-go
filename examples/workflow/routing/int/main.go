@@ -22,7 +22,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"iter"
 	"log"
 	"math/rand/v2"
 	"os"
@@ -41,39 +40,22 @@ func rollDie(_ agent.Context, _ string) (int, error) {
 	return rand.IntN(10) + 1, nil
 }
 
-// routeByValueNode emits the routing event. A FunctionNode can't
-// set Event.Routes from its body, so routing nodes drop down to
-// BaseNode.
-type routeByValueNode struct {
-	workflow.BaseNode
-}
-
-func newRouteByValueNode() *routeByValueNode {
-	return &routeByValueNode{
-		BaseNode: workflow.NewBaseNode(
-			"route_by_value",
-			"emits a routing event keyed on the upstream integer",
-			workflow.NodeConfig{},
-		),
+// routeByValue emits a routing event keyed on the upstream integer.
+// Setting Event.Routes requires emitting a custom event, which an
+// emitting FunctionNode can do; returning nil suppresses the default
+// terminal event so this single emit carries both the route and the
+// output.
+func routeByValue(ctx agent.Context, value int, emit func(*session.Event) error) (any, error) {
+	ev := session.NewEvent(ctx.InvocationID())
+	// IntRoute and MultiRoute[int] both compare against the
+	// stringified value, so emit it that way.
+	ev.Routes = []string{fmt.Sprint(value)}
+	// Event.Output feeds the successor node's typed input.
+	ev.Output = value
+	if err := emit(ev); err != nil {
+		return nil, err
 	}
-}
-
-func (n *routeByValueNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		value, ok := input.(int)
-		if !ok {
-			yield(nil, fmt.Errorf("route_by_value: expected int input, got %T", input))
-			return
-		}
-		ev := session.NewEvent(ctx.InvocationID())
-		// IntRoute and MultiRoute[int] both compare against the
-		// stringified value, so emit it that way.
-		ev.Routes = []string{fmt.Sprint(value)}
-		// Event.Output is the channel the engine reads to feed the
-		// successor node's typed input.
-		ev.Output = value
-		yield(ev, nil)
-	}
+	return nil, nil
 }
 
 func handleLow(_ agent.Context, value int) (string, error) {
@@ -92,7 +74,7 @@ func main() {
 	ctx := context.Background()
 
 	rollNode := workflow.NewFunctionNode("roll_die", rollDie, workflow.NodeConfig{})
-	routeNode := newRouteByValueNode()
+	routeNode := workflow.NewEmittingFunctionNode("route_by_value", routeByValue, workflow.NodeConfig{})
 	lowNode := workflow.NewFunctionNode("handle_low", handleLow, workflow.NodeConfig{})
 	midNode := workflow.NewFunctionNode("handle_mid", handleMid, workflow.NodeConfig{})
 	highNode := workflow.NewFunctionNode("handle_high", handleHigh, workflow.NodeConfig{})

@@ -15,13 +15,16 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
@@ -374,4 +377,176 @@ type mockSessionForTest struct {
 
 func (m *mockSessionForTest) State() session.State {
 	return m.state
+}
+
+// A body that emits a RequestInput and returns ErrNodeInterrupted
+// pauses the workflow: the prompt is forwarded and the successor does
+// not run.
+func TestEmittingFunctionNode_HitlPausesAndForwardsRequest(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	var downstreamRan atomic.Bool
+	asker := NewEmittingFunctionNode("asker", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		if err := emit(NewRequestInputEvent(ctx, session.RequestInput{
+			InterruptID: "human_review",
+			Message:     "Please approve",
+			Payload:     "the draft",
+		})); err != nil {
+			return nil, err
+		}
+		return nil, ErrNodeInterrupted
+	}, defaultNodeConfig)
+	downstream := newHitlNode("downstream", func(_ agent.Context, _ any, _ func(*session.Event, error) bool) {
+		downstreamRan.Store(true)
+	})
+
+	w := mustNew(t, []Edge{
+		{From: Start, To: asker},
+		{From: asker, To: downstream},
+	})
+
+	events := drain(t, w.Run(mockCtx))
+
+	if downstreamRan.Load() {
+		t.Error("downstream node ran; HITL pause must suppress successor scheduling")
+	}
+	req, count := findRequestedInputEvent(events)
+	if count != 1 {
+		t.Fatalf("expected exactly 1 RequestedInput event, got %d", count)
+	}
+	if got, want := req.RequestedInput.InterruptID, "human_review"; got != want {
+		t.Errorf("InterruptID = %q, want %q", got, want)
+	}
+	if got, want := req.RequestedInput.Message, "Please approve"; got != want {
+		t.Errorf("Message = %q, want %q", got, want)
+	}
+	if got, want := req.RequestedInput.Payload, "the draft"; got != want {
+		t.Errorf("Payload = %v, want %q", got, want)
+	}
+}
+
+// When the body emits a RequestInput without an InterruptID, the
+// engine assigns one so the resume can still be correlated.
+func TestEmittingFunctionNode_AutoGeneratesInterruptID(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	asker := NewEmittingFunctionNode("asker", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		if err := emit(NewRequestInputEvent(ctx, session.RequestInput{Message: "approve?"})); err != nil {
+			return nil, err
+		}
+		return nil, ErrNodeInterrupted
+	}, defaultNodeConfig)
+	w := mustNew(t, []Edge{{From: Start, To: asker}})
+
+	events := drain(t, w.Run(mockCtx))
+	req, count := findRequestedInputEvent(events)
+	if count != 1 {
+		t.Fatalf("expected 1 RequestedInput event, got %d", count)
+	}
+	if req.RequestedInput.InterruptID == "" {
+		t.Error("InterruptID is empty; engine must auto-generate when caller omits it")
+	}
+}
+
+// Two RequestInputs emitted in a single activation both register on
+// the parked node, so either response can resume it.
+func TestEmittingFunctionNode_MultipleRequestsPark(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	asker := NewEmittingFunctionNode("asker", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		if err := emit(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "first"})); err != nil {
+			return nil, err
+		}
+		if err := emit(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "second"})); err != nil {
+			return nil, err
+		}
+		return nil, ErrNodeInterrupted
+	}, defaultNodeConfig)
+
+	w := mustNew(t, []Edge{{From: Start, To: asker}})
+	events := drain(t, w.Run(mockCtx))
+
+	got := map[string]bool{}
+	for _, ev := range events {
+		for _, id := range ev.LongRunningToolIDs {
+			got[id] = true
+		}
+	}
+	if !got["first"] || !got["second"] {
+		t.Errorf("long-running interrupts = %v, want both first and second", got)
+	}
+}
+
+// A non-sentinel error returned after emitting a RequestInput fails
+// the node; the recorded request must not turn the failure into a
+// clean pause.
+func TestEmittingFunctionNode_ErrorAfterRequestFails(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	wantErr := errors.New("downstream of request")
+	asker := NewEmittingFunctionNode("asker", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		if err := emit(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "ignored"})); err != nil {
+			return nil, err
+		}
+		return nil, wantErr
+	}, defaultNodeConfig)
+	w := mustNew(t, []Edge{{From: Start, To: asker}})
+
+	gotErr := drainErr(t, w.Run(mockCtx))
+	if !errors.Is(gotErr, wantErr) {
+		t.Errorf("Run error = %v, want %v (failure must take precedence over the recorded request)", gotErr, wantErr)
+	}
+}
+
+// A body can emit intermediate content-only events and still return a
+// terminal output: both events surface and the successor runs (no
+// pause). Intermediate events leave Output unset to respect the
+// scheduler's single-output-per-node invariant.
+func TestEmittingFunctionNode_EmitProgressBeforeOutput(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	var downstreamRan atomic.Bool
+	worker := NewEmittingFunctionNode("worker", func(ctx agent.Context, _ any, emit func(*session.Event) error) (string, error) {
+		progress := session.NewEvent(ctx.InvocationID())
+		progress.Content = &genai.Content{Parts: []*genai.Part{{Text: "tick"}}}
+		if err := emit(progress); err != nil {
+			return "", err
+		}
+		return "done", nil
+	}, defaultNodeConfig)
+	downstream := newHitlNode("downstream", func(_ agent.Context, _ any, _ func(*session.Event, error) bool) {
+		downstreamRan.Store(true)
+	})
+
+	w := mustNew(t, []Edge{
+		{From: Start, To: worker},
+		{From: worker, To: downstream},
+	})
+	events := drain(t, w.Run(mockCtx))
+
+	if !downstreamRan.Load() {
+		t.Error("downstream did not run; emit without ErrNodeInterrupted must not pause")
+	}
+	var sawProgress, sawDone bool
+	for _, ev := range events {
+		if ev == nil {
+			continue
+		}
+		if ev.Content != nil {
+			for _, p := range ev.Content.Parts {
+				if p != nil && p.Text == "tick" {
+					sawProgress = true
+				}
+			}
+		}
+		if s, ok := ev.Output.(string); ok && s == "done" {
+			sawDone = true
+		}
+	}
+	if !sawProgress {
+		t.Error(`did not observe progress event with Content text "tick"`)
+	}
+	if !sawDone {
+		t.Error(`did not observe terminal event with Output="done"`)
+	}
 }
