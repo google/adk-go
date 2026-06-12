@@ -196,13 +196,26 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 				streamingMode = defaultStreamingMode
 			}
 
-			fmt.Print("\nAgent -> ")
+			// "Agent -> " is printed lazily on the first byte
+			// of agent output (text or error). Turns that emit
+			// no text (e.g. ones ending purely on a long-running
+			// FunctionCall like a HITL RequestInput) would
+			// otherwise leave a stray empty "Agent -> " line
+			// before the interrupt prompt takes over.
+			agentPrefixPrinted := false
+			printAgentPrefix := func() {
+				if !agentPrefixPrinted {
+					fmt.Print("\nAgent -> ")
+					agentPrefixPrinted = true
+				}
+			}
 			prevText := ""
 			var collectedEvents []*session.Event
 			for event, err := range r.Run(ctx, userID, sess.ID(), userMsg, agent.RunConfig{
 				StreamingMode: streamingMode,
 			}) {
 				if err != nil {
+					printAgentPrefix()
 					fmt.Printf("\nAGENT_ERROR: %v\n", err)
 				} else {
 					collectedEvents = append(collectedEvents, event)
@@ -214,14 +227,19 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 					for _, p := range event.LLMResponse.Content.Parts {
 						text += p.Text
 					}
+					if text == "" {
+						continue
+					}
 
 					if streamingMode != agent.StreamingModeSSE {
+						printAgentPrefix()
 						fmt.Print(text)
 						continue
 					}
 
 					// In SSE mode, always print partial responses and capture them.
 					if !event.IsFinalResponse() {
+						printAgentPrefix()
 						fmt.Print(text)
 						prevText += text
 						continue
@@ -229,6 +247,7 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 					// Only print final response if it doesn't match previously captured text.
 					if text != prevText {
+						printAgentPrefix()
 						fmt.Print(text)
 					}
 
@@ -238,9 +257,15 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 
 			// If the turn paused on any long-running interrupts,
 			// render the first prompt; the next stdin read will
-			// be its answer.
+			// be its answer. Insert a separating newline only
+			// when the agent actually printed something — for a
+			// pure-interrupt turn the prompt should follow the
+			// previous "User -> " line directly.
 			pendingInterrupts = collectPendingInterrupts(collectedEvents)
 			if len(pendingInterrupts) > 0 {
+				if agentPrefixPrinted {
+					fmt.Println()
+				}
 				fmt.Println()
 				renderInterruptPrompt(pendingInterrupts[0])
 				continue
