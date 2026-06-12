@@ -15,9 +15,9 @@
 package runner_test
 
 import (
-	"context"
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -36,7 +36,6 @@ import (
 type hitlAskerNode struct {
 	workflow.BaseNode
 	interruptID string
-	rerun       bool
 }
 
 func newHitlAsker(name, interruptID string, rerunOnResume bool) *hitlAskerNode {
@@ -48,7 +47,6 @@ func newHitlAsker(name, interruptID string, rerunOnResume bool) *hitlAskerNode {
 	return &hitlAskerNode{
 		BaseNode:    workflow.NewBaseNode(name, "", cfg),
 		interruptID: interruptID,
-		rerun:       rerunOnResume,
 	}
 }
 
@@ -82,16 +80,12 @@ func findLongRunningInterrupt(events []*session.Event) (id, name string) {
 		if ev == nil || len(ev.LongRunningToolIDs) == 0 || ev.Content == nil {
 			continue
 		}
-		lrIDs := map[string]struct{}{}
-		for _, lr := range ev.LongRunningToolIDs {
-			lrIDs[lr] = struct{}{}
-		}
 		for _, p := range ev.Content.Parts {
 			fc := p.FunctionCall
 			if fc == nil {
 				continue
 			}
-			if _, ok := lrIDs[fc.ID]; ok {
+			if slices.Contains(ev.LongRunningToolIDs, fc.ID) {
 				return fc.ID, fc.Name
 			}
 		}
@@ -116,11 +110,11 @@ func drainRunner(t *testing.T, seq iter.Seq2[*session.Event, error]) []*session.
 // resumeContent builds the user-side Content that resumes a
 // previously-paused workflow: a single FunctionResponse part whose
 // ID/name match the interrupt's FunctionCall, and whose response
-// payload is wrapped under "payload" (the wire shape decoded by
-// workflowagent.decodeWorkflowInputResponse).
+// payload is wrapped under the "payload" key (the wire shape the
+// workflow agent expects when decoding a resume response).
 func resumeContent(callID, callName string, payload any) *genai.Content {
 	return &genai.Content{
-		Role: string(genai.RoleUser),
+		Role: genai.RoleUser,
 		Parts: []*genai.Part{{
 			FunctionResponse: &genai.FunctionResponse{
 				ID:   callID,
@@ -133,31 +127,27 @@ func resumeContent(callID, callName string, payload any) *genai.Content {
 	}
 }
 
-// newRunnerForWorkflow assembles a runner with a workflow agent
-// backed by an in-memory session service. Returns the runner plus
-// the user/session IDs to pass into Run.
-func newRunnerForWorkflow(t *testing.T, edges []workflow.Edge) (r *runner.Runner, userID, sessionID string) {
+// workflowAgentName is the agent name used by the test workflow agent;
+// it doubles as the Author stamped on the events it emits.
+const workflowAgentName = "test_workflow"
+
+// newWorkflowRunner builds a runner driving a workflow agent over the
+// given edges, with its session pre-created. It reuses the package's
+// shared runner/session helpers and the nodeTest* identifiers.
+func newWorkflowRunner(t *testing.T, edges []workflow.Edge) *runner.Runner {
 	t.Helper()
 
 	wfAgent, err := workflowagent.New(workflowagent.Config{
-		Name:  "test_workflow",
+		Name:  workflowAgentName,
 		Edges: edges,
 	})
 	if err != nil {
-		t.Fatalf("workflowagent.New: %v", err)
+		t.Fatalf("workflowagent.New() error = %v", err)
 	}
 
-	sessionService := session.InMemoryService()
-	r, err = runner.New(runner.Config{
-		AppName:           "test_app",
-		Agent:             wfAgent,
-		SessionService:    sessionService,
-		AutoCreateSession: true,
-	})
-	if err != nil {
-		t.Fatalf("runner.New: %v", err)
-	}
-	return r, "test_user", "test_session"
+	svc := session.InMemoryService()
+	newNodeTestSession(t, t.Context(), svc)
+	return newNodeTestRunner(t, wfAgent, svc)
 }
 
 // TestRunner_WorkflowHITL_Roundtrip_Handoff exercises the full
@@ -166,9 +156,9 @@ func newRunnerForWorkflow(t *testing.T, edges []workflow.Edge) (r *runner.Runner
 // the interrupt's call ID and the workflow finishes by routing the
 // response to the asker's successor as its input.
 func TestRunner_WorkflowHITL_Roundtrip_Handoff(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
-	asker := newHitlAsker("asker", "", false /*rerun*/)
+	asker := newHitlAsker("asker", "", false /*rerunOnResume*/)
 
 	var handlerInput atomic.Value
 	handler := workflow.NewFunctionNode(
@@ -180,14 +170,14 @@ func TestRunner_WorkflowHITL_Roundtrip_Handoff(t *testing.T) {
 		workflow.NodeConfig{},
 	)
 
-	r, userID, sessionID := newRunnerForWorkflow(t, workflow.Chain(workflow.Start, asker, handler))
+	r := newWorkflowRunner(t, workflow.Chain(workflow.Start, asker, handler))
 
 	// Turn 1: fresh user message; expect the runner to forward
 	// the asker's RequestInput event with a FunctionCall part
 	// keyed in LongRunningToolIDs, then naturally end the iter.
 	turn1 := drainRunner(t, r.Run(
-		ctx, userID, sessionID,
-		genai.NewContentFromText("draft", genai.RoleUser),
+		ctx, nodeTestUser, nodeTestSession,
+		userText("draft"),
 		agent.RunConfig{},
 	))
 
@@ -203,12 +193,11 @@ func TestRunner_WorkflowHITL_Roundtrip_Handoff(t *testing.T) {
 	}
 
 	// Turn 2: resume by sending a FunctionResponse with the
-	// captured ID. The runner's generic findAgentToRun routes
-	// this back to the same workflow agent, which detects the
-	// resume in workflowAgent.detectResume and dispatches to
-	// Workflow.Resume.
+	// captured ID. The runner routes this back to the same
+	// workflow agent (matching the response to the prior call by
+	// ID), which detects the resume and continues the workflow.
 	turn2 := drainRunner(t, r.Run(
-		ctx, userID, sessionID,
+		ctx, nodeTestUser, nodeTestSession,
 		resumeContent(callID, callName, "approve"),
 		agent.RunConfig{},
 	))
@@ -226,9 +215,9 @@ func TestRunner_WorkflowHITL_Roundtrip_Handoff(t *testing.T) {
 // the asker which observes the response via ResumedInput and emits
 // it as an output event for the successor.
 func TestRunner_WorkflowHITL_Roundtrip_ReEntry(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
-	asker := newHitlAsker("asker", "approval", true /*rerun*/)
+	asker := newHitlAsker("asker", "approval", true /*rerunOnResume*/)
 
 	var handlerInput atomic.Value
 	handler := workflow.NewFunctionNode(
@@ -240,11 +229,11 @@ func TestRunner_WorkflowHITL_Roundtrip_ReEntry(t *testing.T) {
 		workflow.NodeConfig{},
 	)
 
-	r, userID, sessionID := newRunnerForWorkflow(t, workflow.Chain(workflow.Start, asker, handler))
+	r := newWorkflowRunner(t, workflow.Chain(workflow.Start, asker, handler))
 
 	turn1 := drainRunner(t, r.Run(
-		ctx, userID, sessionID,
-		genai.NewContentFromText("draft", genai.RoleUser),
+		ctx, nodeTestUser, nodeTestSession,
+		userText("draft"),
 		agent.RunConfig{},
 	))
 	callID, callName := findLongRunningInterrupt(turn1)
@@ -253,7 +242,7 @@ func TestRunner_WorkflowHITL_Roundtrip_ReEntry(t *testing.T) {
 	}
 
 	drainRunner(t, r.Run(
-		ctx, userID, sessionID,
+		ctx, nodeTestUser, nodeTestSession,
 		resumeContent(callID, callName, "yes"),
 		agent.RunConfig{},
 	))
@@ -269,15 +258,15 @@ func TestRunner_WorkflowHITL_Roundtrip_ReEntry(t *testing.T) {
 // is what determines which agent gets re-invoked. Pinning this
 // behaviour against accidental regression in runner.findAgentToRun.
 func TestRunner_WorkflowHITL_FunctionResponseRoutedByID(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	asker := newHitlAsker("asker", "", false)
 
-	r, userID, sessionID := newRunnerForWorkflow(t, workflow.Chain(workflow.Start, asker))
+	r := newWorkflowRunner(t, workflow.Chain(workflow.Start, asker))
 
 	turn1 := drainRunner(t, r.Run(
-		ctx, userID, sessionID,
-		genai.NewContentFromText("x", genai.RoleUser),
+		ctx, nodeTestUser, nodeTestSession,
+		userText("x"),
 		agent.RunConfig{},
 	))
 	callID, callName := findLongRunningInterrupt(turn1)
@@ -295,15 +284,15 @@ func TestRunner_WorkflowHITL_FunctionResponseRoutedByID(t *testing.T) {
 			break
 		}
 	}
-	if authoredBy != "test_workflow" {
-		t.Errorf("interrupt event Author = %q, want %q (used by findAgentToRun)", authoredBy, "test_workflow")
+	if authoredBy != workflowAgentName {
+		t.Errorf("interrupt event Author = %q, want %q (used to route the resume back to the right agent)", authoredBy, workflowAgentName)
 	}
 
-	// Turn 2: resume; the runner must locate test_workflow by
-	// matching FunctionResponse.ID against the prior call's ID
-	// in session events.
+	// Turn 2: resume; the runner must locate the workflow agent by
+	// matching FunctionResponse.ID against the prior call's ID in
+	// session events.
 	turn2 := drainRunner(t, r.Run(
-		ctx, userID, sessionID,
+		ctx, nodeTestUser, nodeTestSession,
 		resumeContent(callID, callName, "ok"),
 		agent.RunConfig{},
 	))
@@ -326,7 +315,7 @@ func TestRunner_WorkflowHITL_FunctionResponseRoutedByID(t *testing.T) {
 //   - the second RunNode observes the user's response and the parent
 //     completes with its final value.
 func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 
 	const interruptID = "approval"
 
@@ -367,12 +356,12 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
 		workflow.NodeConfig{},
 	)
 
-	r, userID, sessionID := newRunnerForWorkflow(t, workflow.Chain(workflow.Start, orchestrator))
+	r := newWorkflowRunner(t, workflow.Chain(workflow.Start, orchestrator))
 
 	// Turn 1: first child completes, second child suspends.
 	turn1 := drainRunner(t, r.Run(
-		ctx, userID, sessionID,
-		genai.NewContentFromText("draft", genai.RoleUser),
+		ctx, nodeTestUser, nodeTestSession,
+		userText("draft"),
 		agent.RunConfig{},
 	))
 	callID, callName := findLongRunningInterrupt(turn1)
@@ -386,7 +375,7 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
 	// Turn 2: resume with the human's response. The parent re-runs
 	// from the top; the first child must be served from cache.
 	drainRunner(t, r.Run(
-		ctx, userID, sessionID,
+		ctx, nodeTestUser, nodeTestSession,
 		resumeContent(callID, callName, "yes"),
 		agent.RunConfig{},
 	))
