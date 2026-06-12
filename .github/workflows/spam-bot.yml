@@ -1,0 +1,51 @@
+name: Spam Detection Agent
+
+# Thin caller: the bot's code lives in google/adk-samples
+# (go/github-bots/spam-detection). This workflow only supplies adk-go's triggers,
+# permissions, the maintainer list, and the model secret; the reusable workflow
+# runs in this repo's context, so the built-in GITHUB_TOKEN writes to adk-go.
+#
+# NOTE: pin the `uses:` ref to the merged commit SHA of the adk-samples reusable
+# workflow (replace `@main`) once https://github.com/google/adk-samples/pull/2082
+# lands, and add a `GEMINI_API_KEY` repository secret. Keep `maintainers` in sync
+# with the ADK Go team (whose comments are trusted and never reviewed for spam).
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: '30 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Review only this issue number (blank = sweep).'
+        required: false
+        type: string
+      dry_run:
+        description: 'Log intended actions without modifying issues.'
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  spam:
+    # Skip comments on pull requests (PRs are issues too, but the bot only
+    # moderates issues; the reusable workflow would fetch and skip them anyway).
+    if: github.repository == 'google/adk-go' && (github.event_name != 'issue_comment' || github.event.issue.pull_request == null)
+    permissions:
+      issues: write
+      contents: read
+    uses: google/adk-samples/.github/workflows/go-spam-detection.yml@main
+    with:
+      issue_number: ${{ github.event.issue.number || inputs.issue }}
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      issue_count: '3'
+      maintainers: 'wolo-lab,foxfrikses,dpasiukevich,hanorik,kdroste-google,jjsasha63,baptmont,karolpiotrowicz'
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
