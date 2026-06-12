@@ -30,7 +30,7 @@ import (
 // nodeFunctionRegistry stores pre-registered custom node functions.
 // nodeRegistry caches resolved workflow nodes.
 var (
-	nodeFunctionRegistry = make(map[string]func(agent.InvocationContext, any) (any, error))
+	nodeFunctionRegistry = make(map[string]func(agent.Context, any) (any, error))
 	nodeRegistry         = make(map[string]workflow.Node)
 )
 
@@ -334,13 +334,13 @@ func resolveNodeFromYAML(ctx context.Context, parentPath, ref, absPath string) (
 }
 
 // castNodeFunction normalizes function signatures to a standard non-generic workflow function.
-func castNodeFunction(name string, fn any) (func(agent.InvocationContext, any) (any, error), error) {
-	if typed, ok := fn.(func(agent.InvocationContext, any) (any, error)); ok {
+func castNodeFunction(name string, fn any) (func(agent.Context, any) (any, error), error) {
+	if typed, ok := fn.(func(agent.Context, any) (any, error)); ok {
 		return typed, nil
 	}
 
-	if strFn, ok := fn.(func(agent.InvocationContext, string) (string, error)); ok {
-		return func(ctx agent.InvocationContext, input any) (any, error) {
+	if strFn, ok := fn.(func(agent.Context, string) (string, error)); ok {
+		return func(ctx agent.Context, input any) (any, error) {
 			var s string
 			if input != nil {
 				if val, ok := input.(string); ok {

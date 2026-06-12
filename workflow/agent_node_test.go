@@ -537,8 +537,9 @@ func TestAgentNode_StructuredOutputProjectedViaValidation(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session-id"}
+	exCtx := agent.NewNodeContext(mockCtx, nil)
 	var gotFinal *session.Event
-	for ev, err := range node.Run(mockCtx, "ignored") {
+	for ev, err := range node.Run(exCtx, "ignored") {
 		if err != nil {
 			t.Fatalf("node.Run: %v", err)
 		}
@@ -594,7 +595,8 @@ func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session"}
-	events := node.Run(mockCtx, nil)
+	exCtx := agent.NewNodeContext(mockCtx, nil)
+	events := node.Run(exCtx, nil)
 
 	var finalOutput any
 	for ev, err := range events {

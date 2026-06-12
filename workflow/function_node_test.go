@@ -139,7 +139,7 @@ func mustSchema[T any](t *testing.T) *jsonschema.Schema {
 }
 
 func TestFunctionNodeDirectEventPropagation(t *testing.T) {
-	fn := func(ctx agent.InvocationContext, input string) (*session.Event, error) {
+	fn := func(ctx agent.Context, input string) (*session.Event, error) {
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Output = input + " processed"
 		ev.Routes = []string{"CUSTOM_ROUTE"}
@@ -148,8 +148,9 @@ func TestFunctionNodeDirectEventPropagation(t *testing.T) {
 
 	node := NewFunctionNode[string, *session.Event]("event_proc", fn, defaultNodeConfig)
 	mockCtx := &MockInvocationContext{sess: nil}
+	exCtx := agent.NewNodeContext(mockCtx, nil)
 
-	events := node.Run(mockCtx, "hello")
+	events := node.Run(exCtx, "hello")
 
 	var yieldedEvents []*session.Event
 	for ev, err := range events {

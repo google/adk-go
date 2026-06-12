@@ -838,7 +838,7 @@ func newSchemaValidatedNode(name string, schema *jsonschema.Resolved, output any
 	}
 }
 
-func (n *schemaValidatedNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *schemaValidatedNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Output = n.output
@@ -855,7 +855,7 @@ type progressThenSchemaOutputNode struct {
 	output   any
 }
 
-func (n *progressThenSchemaOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *progressThenSchemaOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for i := 0; i < n.progress; i++ {
 			if !yield(session.NewEvent(ctx.InvocationID()), nil) {

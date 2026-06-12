@@ -240,7 +240,7 @@ func TestSubScheduler_RunNode_ValidatesOutput(t *testing.T) {
 		child := newSchemaStubNode("ok", schema, map[string]any{"value": "hi"})
 		sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
 
-		out, err := sub.runNode(child, nil, runNodeOptions{})
+		out, err := sub.RunNode(child, nil, runNodeOptions{})
 		if err != nil {
 			t.Fatalf("runNode: %v", err)
 		}
@@ -254,7 +254,7 @@ func TestSubScheduler_RunNode_ValidatesOutput(t *testing.T) {
 		child := newSchemaStubNode("bad", schema, map[string]any{"value": 123})
 		sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
 
-		_, err := sub.runNode(child, nil, runNodeOptions{})
+		_, err := sub.RunNode(child, nil, runNodeOptions{})
 		if !errors.Is(err, ErrNodeFailed) {
 			t.Fatalf("err = %v, want ErrNodeFailed", err)
 		}
