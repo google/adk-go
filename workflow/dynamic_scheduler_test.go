@@ -213,9 +213,7 @@ func newStubNode(name string, out any) *stubNode {
 }
 
 func (n *stubNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
-	if nc, ok := ctx.(NodeContext); ok {
-		n.lastPath = nc.Path()
-	}
+	n.lastPath = ctx.Path()
 	n.lastBranch = ctx.Branch()
 	n.lastScope = ctx.IsolationScope()
 	out := n.out

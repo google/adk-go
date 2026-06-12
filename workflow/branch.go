@@ -171,8 +171,10 @@ func (o *isolationScopeOverride) IsolationScope() string { return o.scope }
 // WithContext preserves the scope override through context-cancellation
 // wrapping.
 func (o *isolationScopeOverride) WithAgentContext(ctx context.Context) agent.Context {
+	ic := o.Context.WithContext(ctx)
+	nc := agent.NewNodeContext(ic, nil)
 	return &isolationScopeOverride{
-		Context: o.WithAgentContext(ctx),
+		Context: nc,
 		scope:   o.scope,
 	}
 }

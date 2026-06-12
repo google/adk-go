@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"log"
 	"os"
@@ -105,7 +106,10 @@ func main() {
 		i := 10
 		for i > 0 {
 			if i == 5 {
-				ctx.Session().State().Set("a", "workerB")
+				err := ctx.Session().State().Set("a", "workerB")
+				if err != nil {
+					return "", fmt.Errorf("failed to set state for a: %v", err)
+				}
 			}
 			v, err := ctx.Session().State().Get("a")
 			log.Printf("WorkerB: v, err= %v, %v", v, err)

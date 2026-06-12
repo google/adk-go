@@ -15,15 +15,12 @@
 package workflow
 
 import (
-	"errors"
 	"iter"
 	"testing"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
-
-var errFnNodeNeedsNodeContext = errors.New("fnNode: ctx is not a NodeContext")
 
 // End-to-end check that a child of a dynamic-node activation can
 // recover its own NodeContext via NodeContextFromGoContext — the
