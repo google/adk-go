@@ -205,6 +205,9 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		})
 		ctx, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {
+			if r.pluginManager != nil {
+				err = r.pluginManager.RunOnPipelineErrorCallback(ctx, err)
+			}
 			yield(nil, err)
 			return
 		}
@@ -216,6 +219,9 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			defer pluginManager.RunAfterRunCallback(ctx)
 
 			earlyExitResult, err := pluginManager.RunBeforeRunCallback(ctx)
+			if err != nil {
+				err = pluginManager.RunOnPipelineErrorCallback(ctx, err)
+			}
 			if earlyExitResult != nil || err != nil {
 				earlyExitEvent := session.NewEvent(ctx.InvocationID())
 				earlyExitEvent.Author = "user"
@@ -233,8 +239,13 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 		for event, err := range agentToRun.Run(ctx) {
 			if err != nil {
-				if !yield(event, err) {
-					return
+				if pluginManager != nil {
+					err = pluginManager.RunOnPipelineErrorCallback(ctx, err)
+				}
+				if err != nil {
+					if !yield(event, err) {
+						return
+					}
 				}
 				continue
 			}
@@ -242,8 +253,11 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			if pluginManager != nil {
 				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
 				if err != nil {
-					if !yield(nil, err) {
-						return
+					err = pluginManager.RunOnPipelineErrorCallback(ctx, err)
+					if err != nil {
+						if !yield(nil, err) {
+							return
+						}
 					}
 					continue
 				}
@@ -403,6 +417,9 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	if r.pluginManager != nil {
 		earlyExitResult, err := r.pluginManager.RunBeforeRunCallback(iCtx)
 		if err != nil {
+			err = r.pluginManager.RunOnPipelineErrorCallback(iCtx, err)
+		}
+		if err != nil {
 			return nil, nil, err
 		}
 		if earlyExitResult != nil {
@@ -424,6 +441,9 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 	agentSess, innerIter, err := lAgent.RunLive(iCtx)
 	if err != nil {
+		if r.pluginManager != nil {
+			err = r.pluginManager.RunOnPipelineErrorCallback(iCtx, err)
+		}
 		return nil, nil, err
 	}
 
@@ -437,8 +457,13 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 		for event, err := range innerIter {
 			if err != nil {
-				if !yield(nil, err) {
-					return
+				if r.pluginManager != nil {
+					err = r.pluginManager.RunOnPipelineErrorCallback(iCtx, err)
+				}
+				if err != nil {
+					if !yield(nil, err) {
+						return
+					}
 				}
 				continue
 			}
@@ -446,8 +471,11 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			if r.pluginManager != nil {
 				modifiedEvent, pluginErr := r.pluginManager.RunOnEventCallback(iCtx, event)
 				if pluginErr != nil {
-					if !yield(nil, pluginErr) {
-						return
+					pluginErr = r.pluginManager.RunOnPipelineErrorCallback(iCtx, pluginErr)
+					if pluginErr != nil {
+						if !yield(nil, pluginErr) {
+							return
+						}
 					}
 					continue
 				}
@@ -676,3 +704,11 @@ func hasInlineData(event *session.Event) bool {
 	}
 	return false
 }
+
+// ClearPlugins clears all registered plugins from the runner's plugin manager.
+func (r *Runner) ClearPlugins() {
+	if r.pluginManager != nil {
+		r.pluginManager.ClearPlugins()
+	}
+}
+
