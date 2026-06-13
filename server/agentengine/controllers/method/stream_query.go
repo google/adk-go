@@ -204,7 +204,10 @@ func (s *streamQueryHandler) run(ctx context.Context, req *models.StreamQueryReq
 		return nil, fmt.Errorf("failed to create runner: %v", err)
 	}
 
-	return r.Run(ctx, req.Input.UserID, req.Input.SessionID, message, agent.RunConfig{
+	// Bind the runner to the authenticated caller identity.
+	effectiveUserID := resolveUserID(ctx, req.Input.UserID)
+
+	return r.Run(ctx, effectiveUserID, req.Input.SessionID, message, agent.RunConfig{
 		StreamingMode: agent.StreamingModeSSE,
 	}), nil
 }
