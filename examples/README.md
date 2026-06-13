@@ -23,17 +23,19 @@ Most examples can be run using the Go command:
 go run ./examples/<example-name>/main.go console
 
 # Run with REST API server
-go run ./examples/<example-name>/main.go restapi
+go run ./examples/<example-name>/main.go web api
 
-# Run with Agent-to-Agent (A2A) protocol
-go run ./examples/<example-name>/main.go a2a
+# Run with Agent-to-Agent (A2A) protocol server
+go run ./examples/<example-name>/main.go web a2a
 
-# Run with Web UI
-go run ./examples/<example-name>/main.go webui
+# Run with the Web UI (served alongside the REST API)
+go run ./examples/<example-name>/main.go web api webui
 
 # Get help for available commands
 go run ./examples/<example-name>/main.go help
 ```
+
+The `web` launcher hosts one or more sub-servers (`api`, `a2a`, `webui`). The Web UI is served by the `api` server, so `web api webui` is required to bring it up.
 
 Before running examples, ensure you have:
 
@@ -60,20 +62,23 @@ go run ./examples/quickstart/main.go console
 
 ### [a2a](./a2a)
 
-Demonstrates the Agent-to-Agent (A2A) protocol integration. Shows:
+Demonstrates the Agent-to-Agent (A2A) protocol integration. The example
+internally starts an A2A server exposing a weather agent, then connects to it
+as a remote agent. Shows:
 
-- Setting up A2A server and client
-- Remote agent communication
+- Serving an agent over the A2A protocol
+- Consuming a remote agent through `remoteagent.NewA2A`
 - Multi-agent collaboration
 
-**Run it:**
+**Run it** (the in-process A2A server starts automatically; run it in any mode):
 
 ```bash
-# Start the A2A server
-go run ./examples/a2a/main.go a2a
+# Interactive console talking to the remote agent
+go run ./examples/a2a/main.go console
 
-# In another terminal, connect as client
-go run ./examples/a2a/main.go a2a --client
+# Or expose the remote agent over A2A / the Web UI
+go run ./examples/a2a/main.go web a2a
+go run ./examples/a2a/main.go web api webui
 ```
 
 ### [mcp](./mcp)
@@ -90,16 +95,19 @@ Model Context Protocol (MCP) integration example. Features:
 
 Web-based agent interface example. Demonstrates:
 
-- Building web UI for agents
+- Building a web UI for agents
 - Artifact handling (code, text, images)
 - Interactive agent conversations
 
 **Run it:**
 
 ```bash
-go run ./examples/web/main.go webui
+go run ./examples/web/main.go web api webui
 # Open http://localhost:8080 in your browser
 ```
+
+> **Note:** The Web UI is not unique to this example — any example can be
+> launched with `web api webui` to get the same interface.
 
 ## Tool Examples
 
@@ -147,9 +155,11 @@ Iterative workflow pattern with loops.
 
 ### [workflowagents/sequentialCode](./workflowagents/sequentialCode)
 
-Code-defined sequential workflow (vs configuration-based).
+A sequential workflow that writes code, chaining sub-agents that generate,
+review, and refactor code in order.
 
-**Use case:** Complex workflows requiring programmatic control.
+**Use case:** Multi-stage code-generation pipelines where each agent builds on
+the previous agent's output (writer → reviewer → refactorer).
 
 ## Advanced Examples
 
@@ -174,18 +184,17 @@ The ADK launcher provides a flexible way to run agents in different modes. Most 
 
 ```go
 l := full.NewLauncher()
-err = l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
-if err != nil {
-    log.Fatalf("run failed: %v\n\n%s", err, l.FormatSyntax())
+if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+    log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
 }
 ```
 
 The `full.NewLauncher()` includes all major launch modes:
 
 - **console**: Interactive command-line interface
-- **restapi**: REST API server for HTTP requests
-- **a2a**: Agent-to-Agent protocol server
-- **webui**: Web-based user interface (can run standalone or with restapi/a2a)
+- **web api**: REST API server for HTTP requests
+- **web a2a**: Agent-to-Agent protocol server
+- **web api webui**: Web-based user interface (served by the `api` server)
 
 ### Production Launcher
 
@@ -195,10 +204,10 @@ l := prod.NewLauncher()
 
 The `prod.NewLauncher()` includes only production-ready modes:
 
-- **restapi**: REST API server
-- **a2a**: Agent-to-Agent protocol
+- **web api**: REST API server
+- **web a2a**: Agent-to-Agent protocol
 
-Use this for production deployments where console and webui are not needed.
+Use this for production deployments where console and the Web UI are not needed.
 
 ### Getting Help
 
@@ -216,25 +225,31 @@ Many examples use these environment variables:
 
 - `GOOGLE_API_KEY`: Gemini API key for model access
 - `GOOGLE_CLOUD_PROJECT`: GCP project ID (for Vertex AI)
-- `PORT`: Server port (default: 8080)
+
+The server port is not read from an environment variable. Instead, pass the
+`-port` flag to the `web` launcher (default: `8080`):
+
+```bash
+go run ./examples/<example-name>/main.go web api -port 9090
+```
 
 ### Configuration
 
 Examples typically follow this structure:
 
 ```go
-// 1. Create agent configuration
-config := adk.Config{
-    AgentCreator: func(ctx context.Context) (agent.Agent, error) {
-        // Agent setup
-    },
+// 1. Create your agent, then wrap it in a launcher config
+config := &launcher.Config{
+    AgentLoader: agent.NewSingleLoader(myAgent),
 }
 
 // 2. Create and configure launcher
 l := full.NewLauncher()
 
-// 3. Parse and run
-err := l.ParseAndRun(ctx, config, os.Args[1:], universal.ErrorOnUnparsedArgs)
+// 3. Parse arguments and run
+if err := l.Execute(ctx, config, os.Args[1:]); err != nil {
+    log.Fatalf("run failed: %v\n\n%s", err, l.CommandLineSyntax())
+}
 ```
 
 ## Contributing
