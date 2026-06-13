@@ -222,7 +222,7 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 	lastContent := lastEvent.LLMResponse.Content
 	var textParts []string
 	for _, part := range lastContent.Parts {
-		if part != nil && part.Text != "" {
+		if part != nil && part.Text != "" && !part.Thought {
 			textParts = append(textParts, part.Text)
 		}
 	}
