@@ -637,3 +637,33 @@ func toGoValue(v log.Value) any {
 		return nil
 	}
 }
+
+func TestGetGenAICaptureMessageContent(t *testing.T) {
+	const envVar = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
+
+	tests := []struct {
+		name   string
+		env    string // "" means unset
+		setter bool
+		want   bool
+	}{
+		{name: "both unset/false", env: "", setter: false, want: false},
+		{name: "env true", env: "true", setter: false, want: true},
+		{name: "setter true", env: "", setter: true, want: true},
+		{name: "either true wins (OR)", env: "true", setter: false, want: true},
+		{name: "env non-true ignored, setter wins", env: "false", setter: true, want: true},
+		{name: "env non-true and setter false", env: "false", setter: false, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envVar, tc.env)
+			original := genAICaptureMessageContent.Load()
+			SetGenAICaptureMessageContent(tc.setter)
+			t.Cleanup(func() { SetGenAICaptureMessageContent(original) })
+
+			if got := getGenAICaptureMessageContent(); got != tc.want {
+				t.Errorf("getGenAICaptureMessageContent() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -17,6 +17,7 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"sync/atomic"
 
@@ -29,16 +30,31 @@ import (
 	"google.golang.org/adk/model"
 )
 
-// genAICaptureMessageContent is true if message content should be elided. False by default.
+// captureMessageContentEnvVar is the OpenTelemetry-spec env var that controls
+// whether ADK emits full message content in log records (true) or elides it for
+// privacy (anything else, including unset). Defined by
+// https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/.
+const captureMessageContentEnvVar = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
+
+// genAICaptureMessageContent is set by the deprecated SetGenAICaptureMessageContent.
 var genAICaptureMessageContent atomic.Bool
 
-// SetGenAICaptureMessageContent sets whether message content should be elided.
+// SetGenAICaptureMessageContent sets whether message content should be captured.
+//
+// Deprecated: set the OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT env var
+// instead. This setter is retained temporarily to ease migration and will be
+// removed in a future release.
 func SetGenAICaptureMessageContent(capture bool) {
 	genAICaptureMessageContent.Store(capture)
 }
 
-// getGenAICaptureMessageContent returns whether message content should be elided.
+// getGenAICaptureMessageContent reports whether message content should be
+// captured in log records. Capturing is enabled if either the env var is set to
+// "true" or the deprecated setter enabled it.
 func getGenAICaptureMessageContent() bool {
+	if strings.TrimSpace(os.Getenv(captureMessageContentEnvVar)) == "true" {
+		return true
+	}
 	return genAICaptureMessageContent.Load()
 }
 
