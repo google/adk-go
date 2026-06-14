@@ -26,7 +26,7 @@ import (
 
 // generateRequestConfirmationEvent creates a new Event containing
 // adk_request_confirmation function calls based on the requested confirmations.
-// NOTE: The trigger for this in ADK Go is usually a agent.ToolContext.RequestConfirmation call,
+// NOTE: The trigger for this in ADK Go is usually a agent.Context.RequestConfirmation call,
 // not parsing a function_response_event like in the Python example.
 // This function assumes you have a list of confirmations to process.
 func generateRequestConfirmationEvent(

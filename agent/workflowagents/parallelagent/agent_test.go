@@ -298,7 +298,7 @@ func createAgentWithGemini(t *testing.T, name string) agent.Agent {
 			Name:        fmt.Sprintf("search_tool_%s", name),
 			Description: "Search for information on the web",
 		},
-		func(ctx agent.ToolContext, args struct{ Query string }) (string, error) {
+		func(ctx agent.Context, args struct{ Query string }) (string, error) {
 			return fmt.Sprintf("search result for '%s' from %s", args.Query, name), nil
 		},
 	)
@@ -311,7 +311,7 @@ func createAgentWithGemini(t *testing.T, name string) agent.Agent {
 			Name:        fmt.Sprintf("analyze_tool_%s", name),
 			Description: "Analyze data and return insights",
 		},
-		func(ctx agent.ToolContext, args struct{ Data string }) (string, error) {
+		func(ctx agent.Context, args struct{ Data string }) (string, error) {
 			return fmt.Sprintf("analysis result for '%s' from %s", args.Data, name), nil
 		},
 	)
@@ -483,7 +483,7 @@ func TestParallelAgent_StateSync(t *testing.T) {
 			}
 		},
 		AfterAgentCallbacks: []agent.AfterAgentCallback{
-			func(c agent.CallbackContext) (*genai.Content, error) {
+			func(c agent.Context) (*genai.Content, error) {
 				gotValue, gotErr = c.State().Get("test_key")
 				return nil, nil
 			},
