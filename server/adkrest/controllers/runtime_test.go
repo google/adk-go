@@ -239,3 +239,37 @@ func TestRunSSEHandler(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeRequestBody_AcceptsFunctionCallEventID(t *testing.T) {
+	body := `{
+		"appName": "a",
+		"userId": "u",
+		"sessionId": "s",
+		"newMessage": {"role": "user", "parts": [{"text": "hi"}]},
+		"functionCallEventId": "fce-1"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBufferString(body))
+
+	got, err := decodeRequestBody(req)
+	if err != nil {
+		t.Fatalf("decodeRequestBody: unexpected error: %v", err)
+	}
+	if got.FunctionCallEventID == nil || *got.FunctionCallEventID != "fce-1" {
+		t.Errorf("FunctionCallEventID = %v, want %q", got.FunctionCallEventID, "fce-1")
+	}
+}
+
+func TestDecodeRequestBody_RejectsUnknownFields(t *testing.T) {
+	body := `{
+		"appName": "a",
+		"userId": "u",
+		"sessionId": "s",
+		"newMessage": {},
+		"totallyMadeUpField": 123
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBufferString(body))
+
+	if _, err := decodeRequestBody(req); err == nil {
+		t.Errorf("decodeRequestBody: expected error for unknown field, got nil")
+	}
+}
