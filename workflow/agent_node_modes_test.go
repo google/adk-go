@@ -12,19 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package tool
+package workflow_test
 
 import (
-	"google.golang.org/adk/agent"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool/toolconfirmation"
+	"testing"
+
+	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/workflow"
 )
 
-// NewToolContext constructs a ToolContext for a tool execution.
-//
-// Deprecated: use agent.NewToolContext directly. This wrapper exists only
-// to minimize churn during the migration and will be removed in a future
-// release.
-func NewToolContext(ic agent.InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) agent.Context {
-	return agent.NewToolContext(ic, functionCallID, actions, confirmation)
+func TestNewAgentNode_NameInheritedFromAgent(t *testing.T) {
+	t.Parallel()
+	const agentName = "my_inner_agent"
+	a, err := llmagent.New(llmagent.Config{Name: agentName, Mode: llmagent.ModeChat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := node.Name(), agentName; got != want {
+		t.Errorf("node.Name() = %q, want %q (must inherit from wrapped agent)", got, want)
+	}
 }

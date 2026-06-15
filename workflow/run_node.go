@@ -113,6 +113,9 @@ func RunNode[OUT any](ctx agent.Context, child Node, input any, opts ...RunNodeO
 	var zero OUT
 
 	ss := ctx.SubScheduler()
+	if ss == nil {
+		return zero, ErrInvalidRunNodeContext
+	}
 
 	var o runNodeOptions
 	for _, opt := range opts {

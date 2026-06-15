@@ -31,7 +31,7 @@ func (m *mockTool) Description() string { return "" }
 func (m *mockTool) IsLongRunning() bool { return false }
 
 type mockContext struct {
-	agent.ToolContext
+	agent.Context
 	invocationID string
 }
 

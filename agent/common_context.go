@@ -55,7 +55,7 @@ func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubSch
 
 // NewCallbackContext returns CallbackContext initialized with provided actions.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
-func NewCallbackContext(ic InvocationContext, actions *session.EventActions) CallbackContext {
+func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Context {
 	actions = prepareEventActions(actions)
 	cc := &commonContext{
 		Context:           ic,
@@ -74,7 +74,7 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Cal
 // the returned context's Artifacts().Save(...) wrapper records each saved artifact's version into the underlying
 // EventActions.ArtifactDelta so the resulting Event reflects the saves.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
-func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) CallbackContext {
+func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) Context {
 	actions = prepareEventActions(actions)
 	cc := &commonContext{
 		Context:           ic,
@@ -97,7 +97,7 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 // backed by the same *callbackContext implementation used for CallbackContext,
 // so all callback-context semantics (state delta tracking, artifact delta
 // tracking, etc.) apply, plus the tool-specific extensions on ToolContext.
-func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) ToolContext {
+func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
 	var res commonContext
 	ctx, ok := ic.(*commonContext)
 	if ok {
@@ -172,8 +172,32 @@ type commonContext struct {
 	outputForAncestors []string
 }
 
+// subSchedulerKey keys the sub-scheduler in the embedded context value
+// chain, so it survives re-wrapping that drops the struct field.
+type subSchedulerKey struct{}
+
+// WithSubScheduler stashes sub in ctx's value chain for SubScheduler()
+// to recover after re-wrapping. Returns ctx unchanged if sub is nil.
+func WithSubScheduler(ctx context.Context, sub DynamicSubScheduler) context.Context {
+	if sub == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, subSchedulerKey{}, sub)
+}
+
+// SubScheduler returns the sub-scheduler RunNode uses to schedule
+// children, or nil outside a dynamic-node activation. The struct field
+// is the fast path for a freshly built dynamic-node context (and takes
+// precedence); the embedded context value is the fallback that survives
+// context re-wrapping by agents and the LLM flow.
 func (c *commonContext) SubScheduler() DynamicSubScheduler {
-	return c.subScheduler
+	if c.subScheduler != nil {
+		return c.subScheduler
+	}
+	if sub, ok := c.Value(subSchedulerKey{}).(DynamicSubScheduler); ok {
+		return sub
+	}
+	return nil
 }
 
 // Path implements [Context].
@@ -386,8 +410,6 @@ func (c *commonContext) UserID() string {
 
 var (
 	_ Context           = (*commonContext)(nil)
-	_ CallbackContext   = (*commonContext)(nil)
-	_ ToolContext       = (*commonContext)(nil)
 	_ InvocationContext = (*commonContext)(nil)
 	_ ReadonlyContext   = (*commonContext)(nil)
 )

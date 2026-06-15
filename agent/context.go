@@ -134,15 +134,21 @@ type ReadonlyContext interface {
 }
 
 // CallbackContext is passed to user callbacks during agent execution.
+//
+// Deprecated: use [Context] directly. This alias exists only to ease the
+// migration to the unified context and will be removed in a future release.
 type CallbackContext = Context
 
-// ToolContext is the context passed to a tool when it is called. It extends
-// CallbackContext with tool-specific facilities: access to the originating
-// function call, mutable event actions, long-term memory search, and the
-// Human-in-the-Loop (HITL) confirmation flow.
+// ToolContext is the context passed to a tool when it is called.
+//
+// Deprecated: use [Context] directly. This alias exists only to ease the
+// migration to the unified context and will be removed in a future release.
 type ToolContext = Context
 
-// Context is a common context used both in callbacks (aliased as CallbackContext) and tool calls (aliased as ToolContext).
+// Context is the unified context passed to user callbacks during agent
+// execution and to tools when they are called. It provides access to the
+// originating function call, mutable event actions, long-term memory search,
+// and the Human-in-the-Loop (HITL) confirmation flow.
 type Context interface {
 	ReadonlyContext
 	InvocationContext

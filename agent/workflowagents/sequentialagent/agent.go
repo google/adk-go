@@ -137,7 +137,7 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 	taskCompletedTool, err := functiontool.New(functiontool.Config{
 		Name:        "task_completed",
 		Description: "Signals that the agent has successfully completed the user's question or task.",
-	}, func(ctx agent.ToolContext, args taskCompletedArgs) (taskCompletedResults, error) {
+	}, func(ctx agent.Context, args taskCompletedArgs) (taskCompletedResults, error) {
 		return taskCompletedResults{Result: "Task completion signaled."}, nil
 	})
 	if err != nil {

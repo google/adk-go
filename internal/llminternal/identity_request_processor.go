@@ -32,6 +32,9 @@ func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		if llmAgent == nil {
 			return // do nothing.
 		}
+		if llmAgent.internal().Mode == ModeSingleTurn {
+			return
+		}
 
 		parts := []string{fmt.Sprintf("You are an agent. Your internal name is %q.", ctx.Agent().Name())}
 		if description := ctx.Agent().Description(); description != "" {

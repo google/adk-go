@@ -27,6 +27,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/model"
@@ -260,6 +261,87 @@ func TestSingleTurnTool_Run_HappyPath(t *testing.T) {
 	want := map[string]any{"result": wantOutput}
 	if diff := cmp.Diff(want, gotResult); diff != "" {
 		t.Errorf("SingleTurnTool.Run result diff (-want +got):\n%s", diff)
+	}
+}
+
+// TestSingleTurnTool_Run_SurvivesContextRewrap runs the tool inside a
+// node body that re-wraps the context before handing it to the agent, as
+// the runner's agent-node wrapper does. It checks the sub-scheduler
+// survives the re-wrap (so RunNode works) and that the sub-agent's output
+// reaches the node's event stream.
+func TestSingleTurnTool_Run_SurvivesContextRewrap(t *testing.T) {
+	const wantOutput = "world"
+
+	sub, err := agent.New(agent.Config{
+		Name:        "echo_agent",
+		Description: "Yields a single fixed-output event.",
+		Run: func(_ agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(&session.Event{Output: wantOutput}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(sub): %v", err)
+	}
+	st := newSingleTurnTool(t, sub)
+
+	var (
+		gotResult map[string]any
+		gotErr    error
+	)
+	// Body mirrors runner.runAgentNodeBody: re-wrap ctx, then re-stash
+	// the sub-scheduler in the value chain before building the tool context.
+	orchestrator := workflow.NewDynamicNode("orchestrator",
+		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
+			agentCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+				Session:      ctx.Session(),
+				InvocationID: ctx.InvocationID(),
+			})
+			if s := ctx.SubScheduler(); s != nil {
+				agentCtx = agentCtx.WithContext(agent.WithSubScheduler(agentCtx, s))
+			}
+			toolCtx := agent.NewToolContext(agentCtx, "fc-id", &session.EventActions{}, nil)
+			gotResult, gotErr = st.Run(toolCtx, map[string]any{"request": "hello"})
+			return nil, gotErr
+		},
+		workflow.NodeConfig{},
+	)
+
+	w, err := workflow.New("root", workflow.Chain(workflow.Start, orchestrator))
+	if err != nil {
+		t.Fatalf("workflow.New: %v", err)
+	}
+
+	sessResp, err := session.InMemoryService().Create(t.Context(), &session.CreateRequest{
+		AppName:   "test_app",
+		UserID:    "test_user",
+		SessionID: "test_session",
+	})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+
+	ic := &fakeInvocationContext{Context: t.Context(), sess: sessResp.Session}
+	var sawSubOutput bool
+	for ev, err := range w.Run(ic) {
+		if err != nil {
+			t.Fatalf("workflow.Run error: %v", err)
+		}
+		if ev != nil && ev.Output == wantOutput {
+			sawSubOutput = true
+		}
+	}
+
+	if gotErr != nil {
+		t.Fatalf("SingleTurnTool.Run err = %v, want nil", gotErr)
+	}
+	want := map[string]any{"result": wantOutput}
+	if diff := cmp.Diff(want, gotResult); diff != "" {
+		t.Errorf("SingleTurnTool.Run result diff (-want +got):\n%s", diff)
+	}
+	if !sawSubOutput {
+		t.Errorf("sub-agent output %q did not reach the session events", wantOutput)
 	}
 }
 

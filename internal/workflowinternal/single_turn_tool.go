@@ -54,7 +54,7 @@ func (t *SingleTurnTool) IsLongRunning() bool {
 	return false
 }
 
-func (t *SingleTurnTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, error) {
+func (t *SingleTurnTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("single turn tool expects map[string]any arguments, got %T", args)
@@ -70,11 +70,6 @@ func (t *SingleTurnTool) Run(toolCtx agent.ToolContext, args any) (map[string]an
 	} else {
 		nodeInput = margs["request"]
 	}
-
-	// nc, ok := workflow.NodeContextFromGoContext(toolCtx)
-	// if !ok {
-	// 	return nil, fmt.Errorf("failed to infer node context")
-	// }
 
 	node, err := workflow.NewAgentNode(t.agent, workflow.NodeConfig{})
 	if err != nil {
@@ -97,7 +92,7 @@ func (t *SingleTurnTool) Declaration() *genai.FunctionDeclaration {
 	return t.funcDeclaration
 }
 
-func (t *SingleTurnTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (t *SingleTurnTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 
