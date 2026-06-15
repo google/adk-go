@@ -41,7 +41,7 @@ type SimpleArgs struct {
 	Num int
 }
 
-func okFunc(_ agent.ToolContext, _ SimpleArgs) (string, error) {
+func okFunc(_ agent.Context, _ SimpleArgs) (string, error) {
 	return "ok", nil
 }
 

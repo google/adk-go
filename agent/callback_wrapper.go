@@ -30,7 +30,7 @@ import (
 // callbackContextWrapper is used to emit log entries for unexpected calls - those
 // related to ToolContext when Context is used as callback context
 type callbackContextWrapper struct {
-	context CallbackContext
+	context Context
 }
 
 // WithAgentCancel implements [Context].

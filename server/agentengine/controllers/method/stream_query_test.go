@@ -43,7 +43,7 @@ func TestSimpleText(t *testing.T) {
 	a, err := llmagent.New(llmagent.Config{
 		Name: "Echo",
 		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
-			func(cc agent.CallbackContext) (*genai.Content, error) {
+			func(cc agent.Context) (*genai.Content, error) {
 				return cc.UserContent(), nil
 			},
 		},

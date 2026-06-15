@@ -42,7 +42,7 @@ type SecureActionResult struct {
 	Executed bool `json:"executed"`
 }
 
-func secureActionFunc(ctx agent.ToolContext, input SecureActionArgs) (SecureActionResult, error) {
+func secureActionFunc(ctx agent.Context, input SecureActionArgs) (SecureActionResult, error) {
 	return SecureActionResult{Executed: true}, nil
 }
 

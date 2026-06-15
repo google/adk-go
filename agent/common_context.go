@@ -55,7 +55,7 @@ func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubSch
 
 // NewCallbackContext returns CallbackContext initialized with provided actions.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
-func NewCallbackContext(ic InvocationContext, actions *session.EventActions) CallbackContext {
+func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Context {
 	actions = prepareEventActions(actions)
 	cc := &commonContext{
 		Context:           ic,
@@ -74,7 +74,7 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Cal
 // the returned context's Artifacts().Save(...) wrapper records each saved artifact's version into the underlying
 // EventActions.ArtifactDelta so the resulting Event reflects the saves.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
-func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) CallbackContext {
+func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) Context {
 	actions = prepareEventActions(actions)
 	cc := &commonContext{
 		Context:           ic,
@@ -97,7 +97,7 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 // backed by the same *callbackContext implementation used for CallbackContext,
 // so all callback-context semantics (state delta tracking, artifact delta
 // tracking, etc.) apply, plus the tool-specific extensions on ToolContext.
-func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) ToolContext {
+func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
 	var res commonContext
 	ctx, ok := ic.(*commonContext)
 	if ok {
@@ -386,8 +386,6 @@ func (c *commonContext) UserID() string {
 
 var (
 	_ Context           = (*commonContext)(nil)
-	_ CallbackContext   = (*commonContext)(nil)
-	_ ToolContext       = (*commonContext)(nil)
 	_ InvocationContext = (*commonContext)(nil)
 	_ ReadonlyContext   = (*commonContext)(nil)
 )

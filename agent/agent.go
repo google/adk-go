@@ -126,7 +126,7 @@ type Memory interface {
 // its run.
 // If it returns non-nil content or error, the agent run will be skipped and a
 // new event will be created.
-type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)
+type BeforeAgentCallback func(Context) (*genai.Content, error)
 
 // AfterAgentCallback is a function that is called after the agent has completed
 // its run.
@@ -134,7 +134,7 @@ type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)
 //
 // The callback will be skipped also if EndInvocation was called before or
 // BeforeAgentCallbacks returned non-nil results.
-type AfterAgentCallback func(CallbackContext) (*genai.Content, error)
+type AfterAgentCallback func(Context) (*genai.Content, error)
 
 type agent struct {
 	agentinternal.State
@@ -444,8 +444,8 @@ func pluginManagerFromContext(ctx context.Context) pluginManager {
 }
 
 type pluginManager interface {
-	RunBeforeAgentCallback(cctx CallbackContext) (*genai.Content, error)
-	RunAfterAgentCallback(cctx CallbackContext) (*genai.Content, error)
+	RunBeforeAgentCallback(cctx Context) (*genai.Content, error)
+	RunAfterAgentCallback(cctx Context) (*genai.Content, error)
 }
 
 var _ InvocationContext = (*invocationContext)(nil)
