@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -133,17 +134,24 @@ type ReadonlyContext interface {
 }
 
 // CallbackContext is passed to user callbacks during agent execution.
+//
+// Deprecated: use [Context] directly. This alias exists only to ease the
+// migration to the unified context and will be removed in a future release.
 type CallbackContext = Context
 
-// ToolContext is the context passed to a tool when it is called. It extends
-// CallbackContext with tool-specific facilities: access to the originating
-// function call, mutable event actions, long-term memory search, and the
-// Human-in-the-Loop (HITL) confirmation flow.
+// ToolContext is the context passed to a tool when it is called.
+//
+// Deprecated: use [Context] directly. This alias exists only to ease the
+// migration to the unified context and will be removed in a future release.
 type ToolContext = Context
 
-// Context is a common context used both in callbacks (aliased as CallbackContext) and tool calls (aliased as ToolContext).
+// Context is the unified context passed to user callbacks during agent
+// execution and to tools when they are called. It provides access to the
+// originating function call, mutable event actions, long-term memory search,
+// and the Human-in-the-Loop (HITL) confirmation flow.
 type Context interface {
 	ReadonlyContext
+	InvocationContext
 
 	// Callback context
 	Artifacts() Artifacts
@@ -202,4 +210,37 @@ type Context interface {
 	//     itself (e.g., invalid arguments, issue with the event system). The
 	//     request to ask the user has not been sent.
 	RequestConfirmation(hint string, payload any) error
+
+	// NodeContext section
+
+	// ResumedInput returns the response payload for a re-entry resume
+	// activation keyed by InterruptID, or (nil, false) otherwise.
+	ResumedInput(interruptID string) (any, bool)
+
+	// Path returns the composite path of the currently-executing node.
+	// Empty for top-level static nodes; "<parent_path>/<child_name>@<run_id>"
+	// for dynamic children.
+	Path() string
+
+	// RunID returns the per-invocation identifier. Empty for top-level
+	// static nodes; auto-counter or user-supplied via WithRunID for
+	// dynamic children.
+	RunID() string
+
+	// WithBranch returns a NodeContext whose Branch() returns the
+	// given value; all other fields (path, runID, subScheduler,
+	// resumeInputs, embedded InvocationContext) are preserved.
+	WithBranch(branch string) Context
+
+	SubScheduler() DynamicSubScheduler
+
+	InvocationContext() InvocationContext
+
+	SetInvocationContext(InvocationContext)
+
+	WithAgentContext(ctx context.Context) Context
+	WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc)
+	WithAgentCancel() (Context, context.CancelFunc)
+
+	OutputForAncestors() []string
 }

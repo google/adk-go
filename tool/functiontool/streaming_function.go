@@ -32,7 +32,7 @@ import (
 )
 
 // StreamingFunc represents a Go function that streams results.
-type StreamingFunc[TArgs any] func(agent.ToolContext, TArgs) iter.Seq2[string, error]
+type StreamingFunc[TArgs any] func(agent.Context, TArgs) iter.Seq2[string, error]
 
 // NewStreaming creates a new streaming tool.
 func NewStreaming[TArgs any](cfg Config, handler StreamingFunc[TArgs]) (tool.Tool, error) {
@@ -100,7 +100,7 @@ func (f *streamingFunctionTool[TArgs]) IsLongRunning() bool {
 }
 
 // ProcessRequest packs the function tool's declaration into the LLM request.
-func (f *streamingFunctionTool[TArgs]) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (f *streamingFunctionTool[TArgs]) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, f)
 }
 
@@ -127,7 +127,7 @@ func (f *streamingFunctionTool[TArgs]) Declaration() *genai.FunctionDeclaration 
 }
 
 // RunStream executes the tool with the provided context and yields events.
-func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.ToolContext, args any) iter.Seq2[string, error] {
+func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		defer func() {
 			if r := recover(); r != nil {

@@ -15,7 +15,6 @@
 package workflow
 
 import (
-	"context"
 	"iter"
 
 	"google.golang.org/adk/agent"
@@ -45,16 +44,18 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 // It intercepts events from the sub-workflow to ensure that only the final
 // output is yielded to the parent scheduler, preventing ErrMultipleOutputs
 // if intermediate steps also produced outputs.
-func (n *WorkflowNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		var lastOutput any
 		var pendingErr error
 
 		// Create a cancellable context to signal the sub-workflow to stop on error or break.
-		subCtx, cancel := context.WithCancel(ctx)
+		subCtx, cancel := ctx.WithAgentCancel()
+		// subCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
+		ctx = ctx.WithAgentContext(subCtx)
 
-		for ev, err := range n.subWorkflow.RunNode(ctx.WithContext(subCtx), input) {
+		for ev, err := range n.subWorkflow.RunNode(ctx, input) {
 			if err != nil {
 				pendingErr = err
 				// Signal the sub-workflow to stop execution. We use 'continue' instead of 'break'

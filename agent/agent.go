@@ -126,7 +126,7 @@ type Memory interface {
 // its run.
 // If it returns non-nil content or error, the agent run will be skipped and a
 // new event will be created.
-type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)
+type BeforeAgentCallback func(Context) (*genai.Content, error)
 
 // AfterAgentCallback is a function that is called after the agent has completed
 // its run.
@@ -134,7 +134,7 @@ type BeforeAgentCallback func(CallbackContext) (*genai.Content, error)
 //
 // The callback will be skipped also if EndInvocation was called before or
 // BeforeAgentCallbacks returned non-nil results.
-type AfterAgentCallback func(CallbackContext) (*genai.Content, error)
+type AfterAgentCallback func(Context) (*genai.Content, error)
 
 type agent struct {
 	agentinternal.State
@@ -170,7 +170,8 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		})
 		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
-		ctx := &invocationContext{
+
+		ic := &invocationContext{
 			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
 			artifacts: ctx.Artifacts(),
@@ -184,31 +185,33 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			runConfig:      ctx.RunConfig(),
 			endInvocation:  ctx.Ended(),
 		}
-		event, err := runBeforeAgentCallbacks(ctx)
+		nodeCtx := NewNodeContext(ic, nil)
+
+		event, err := runBeforeAgentCallbacks(nodeCtx)
 		if event != nil || err != nil {
 			if !yield(event, err) {
 				return
 			}
 		}
 
-		if ctx.Ended() {
+		if ic.Ended() {
 			return
 		}
 
-		for event, err := range a.run(ctx) {
+		for event, err := range a.run(nodeCtx) {
 			if event != nil && event.Author == "" {
-				event.Author = getAuthorForEvent(ctx, event)
+				event.Author = getAuthorForEvent(ic, event)
 			}
 			if !yield(event, err) {
 				return
 			}
 		}
 
-		if ctx.Ended() {
+		if ic.Ended() {
 			return
 		}
 
-		event, err = runAfterAgentCallbacks(ctx)
+		event, err = runAfterAgentCallbacks(ic)
 		if event != nil || err != nil {
 			yield(event, err)
 		}
@@ -441,8 +444,8 @@ func pluginManagerFromContext(ctx context.Context) pluginManager {
 }
 
 type pluginManager interface {
-	RunBeforeAgentCallback(cctx CallbackContext) (*genai.Content, error)
-	RunAfterAgentCallback(cctx CallbackContext) (*genai.Content, error)
+	RunBeforeAgentCallback(cctx Context) (*genai.Content, error)
+	RunAfterAgentCallback(cctx Context) (*genai.Content, error)
 }
 
 var _ InvocationContext = (*invocationContext)(nil)

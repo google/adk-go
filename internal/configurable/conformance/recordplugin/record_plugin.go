@@ -83,7 +83,7 @@ func (p *recordPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, e
 	return nil, err
 }
 
-func (p *recordPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+func (p *recordPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	on, err := p.isRecordModeOn(ctx.State())
 	if err != nil || !on {
 		return nil, nil
@@ -101,7 +101,7 @@ func (p *recordPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequ
 	return nil, nil
 }
 
-func (p *recordPlugin) afterModel(ctx agent.CallbackContext, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
+func (p *recordPlugin) afterModel(ctx agent.Context, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
 	on, recordErr := p.isRecordModeOn(ctx.State())
 	if recordErr != nil || !on {
 		return nil, nil
@@ -126,7 +126,7 @@ func (p *recordPlugin) afterModel(ctx agent.CallbackContext, resp *model.LLMResp
 	return nil, nil
 }
 
-func (p *recordPlugin) beforeTool(ctx agent.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
+func (p *recordPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	on, err := p.isRecordModeOn(ctx.State())
 	if err != nil || !on {
 		return nil, nil
@@ -147,7 +147,7 @@ func (p *recordPlugin) beforeTool(ctx agent.ToolContext, t tool.Tool, args map[s
 	return nil, nil
 }
 
-func (p *recordPlugin) afterTool(ctx agent.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func (p *recordPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	on, recordErr := p.isRecordModeOn(ctx.State())
 	if recordErr != nil || !on {
 		return nil, nil

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -188,14 +189,14 @@ func TestScheduler_CallerBreakStopsScheduling(t *testing.T) {
 
 	var bRan, cRan atomic.Bool
 
-	a := NewFunctionNode("A", func(ctx agent.InvocationContext, input any) (string, error) {
+	a := NewFunctionNode("A", func(ctx agent.Context, input any) (string, error) {
 		return "a-out", nil
 	}, defaultNodeConfig)
-	b := NewFunctionNode("B", func(ctx agent.InvocationContext, input any) (string, error) {
+	b := NewFunctionNode("B", func(ctx agent.Context, input any) (string, error) {
 		bRan.Store(true)
 		return "b-out", nil
 	}, defaultNodeConfig)
-	c := NewFunctionNode("C", func(ctx agent.InvocationContext, input any) (string, error) {
+	c := NewFunctionNode("C", func(ctx agent.Context, input any) (string, error) {
 		cRan.Store(true)
 		return "c-out", nil
 	}, defaultNodeConfig)
@@ -343,7 +344,7 @@ func newRecordingNode(name string) *recordingNode {
 
 func (n *recordingNode) release() { close(n.released) }
 
-func (n *recordingNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *recordingNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		<-n.released
 		ev := session.NewEvent(ctx.InvocationID())
@@ -369,7 +370,7 @@ func newBlockingNode(name string, work func()) *blockingNode {
 	}
 }
 
-func (n *blockingNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *blockingNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.work()
 		ev := session.NewEvent(ctx.InvocationID())
@@ -391,7 +392,7 @@ func newErroringNode(name string, err error) *erroringNode {
 	}
 }
 
-func (n *erroringNode) Run(_ agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *erroringNode) Run(_ agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(nil, n.err)
 	}
@@ -409,7 +410,7 @@ func newCancelObservingNode(name string) *cancelObservingNode {
 	return &cancelObservingNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
 
-func (n *cancelObservingNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *cancelObservingNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		<-ctx.Done()
 		n.cancelObserved.Store(true)
@@ -431,7 +432,7 @@ func newMultiOutputNode(name string, outputs []string) *multiOutputNode {
 	}
 }
 
-func (n *multiOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *multiOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for _, out := range n.outputs {
 			ev := session.NewEvent(ctx.InvocationID())
@@ -460,7 +461,7 @@ func newProgressThenOutputNode(name string, progressCount int, finalOutput strin
 	}
 }
 
-func (n *progressThenOutputNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
+func (n *progressThenOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for range n.progressCount {
 			ev := session.NewEvent(ctx.InvocationID())
@@ -551,7 +552,7 @@ func newRetryTestNode(name string, failCount int, cfg NodeConfig) *retryTestNode
 	}
 }
 
-func (n *retryTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *retryTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		calls := n.calls.Add(1)
 		if int(calls) <= n.failCount {
@@ -740,7 +741,7 @@ func (n *validationTestNode) ValidateInput(input any) (any, error) {
 	return n.BaseNode.ValidateInput(input)
 }
 
-func (n *validationTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *validationTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.calls.Add(1)
 		n.runInput = input
@@ -756,12 +757,107 @@ type roleTestNode struct {
 	BaseNode
 }
 
-func (n *roleTestNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *roleTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Output = "hi"
 		// Content with Parts but deliberately no Role.
 		ev.Content = &genai.Content{Parts: []*genai.Part{{Text: "hi"}}}
+		yield(ev, nil)
+	}
+}
+
+// TestScheduler_ValidateOutput_ValidPasses verifies that a node whose
+// yielded output conforms to its output_schema is forwarded unchanged.
+func TestScheduler_ValidateOutput_ValidPasses(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	schema := resolveTestSchema[testSchemaInput](t)
+	n := newSchemaValidatedNode("n", schema, map[string]any{"value": "hello"})
+
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	events := drain(t, w.Run(mockCtx))
+	if got, want := len(events), 1; got != want {
+		t.Fatalf("event count = %d, want %d", got, want)
+	}
+	gotMap, ok := events[0].Output.(map[string]any)
+	if !ok {
+		t.Fatalf("Output type = %T, want map[string]any", events[0].Output)
+	}
+	if gotMap["value"] != "hello" {
+		t.Errorf("Output[value] = %v, want %q", gotMap["value"], "hello")
+	}
+}
+
+// TestScheduler_ValidateOutput_InvalidEndsActivation verifies that
+// output failing the schema fails the node with an ErrNodeFailed
+// (same wrapping as the dynamic scheduler).
+func TestScheduler_ValidateOutput_InvalidEndsActivation(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	schema := resolveTestSchema[testSchemaInput](t)
+	n := newSchemaValidatedNode("n", schema, map[string]any{"value": 123})
+
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	gotErr := drainErr(t, w.Run(mockCtx))
+	if gotErr == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if !errors.Is(gotErr, ErrNodeFailed) {
+		t.Errorf("err = %v, want errors.Is(err, ErrNodeFailed)", gotErr)
+	}
+	if wantSubstr := `output validation failed for node "n"`; !strings.Contains(gotErr.Error(), wantSubstr) {
+		t.Errorf("error = %q, want substring %q", gotErr.Error(), wantSubstr)
+	}
+}
+
+// TestScheduler_ValidateOutput_NoOutputSkipsValidation verifies that
+// events without Output (progress events) are forwarded without
+// invoking ValidateOutput, even under a schema that would reject nil.
+func TestScheduler_ValidateOutput_NoOutputSkipsValidation(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	schema := resolveTestSchema[testSchemaInput](t)
+	n := &progressThenSchemaOutputNode{
+		BaseNode: NewBaseNodeWithSchemas("n", "", NodeConfig{}, nil, schema),
+		progress: 3,
+		output:   map[string]any{"value": "hello"},
+	}
+
+	w := mustNew(t, []Edge{{From: Start, To: n}})
+
+	events := drain(t, w.Run(mockCtx))
+	if got, want := len(events), 4; got != want {
+		t.Fatalf("event count = %d, want %d", got, want)
+	}
+	for i := 0; i < 3; i++ {
+		if events[i].Output != nil {
+			t.Errorf("event %d Output = %v, want nil (progress)", i, events[i].Output)
+		}
+	}
+	if events[3].Output == nil {
+		t.Errorf("last event Output = nil, want validated map")
+	}
+}
+
+// schemaValidatedNode yields one event whose Output is the supplied
+// value; its BaseNode carries an output schema so the scheduler runs
+// ValidateOutput on the yielded value.
+type schemaValidatedNode struct {
+	BaseNode
+	output any
+}
+
+func newSchemaValidatedNode(name string, schema *jsonschema.Resolved, output any) *schemaValidatedNode {
+	return &schemaValidatedNode{
+		BaseNode: NewBaseNodeWithSchemas(name, "", NodeConfig{}, nil, schema),
+		output:   output,
+	}
+}
+
+func (n *schemaValidatedNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Output = n.output
 		yield(ev, nil)
 	}
 }
@@ -796,7 +892,7 @@ type preRoledNode struct {
 	BaseNode
 }
 
-func (n *preRoledNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *preRoledNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Content = &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "x"}}}
@@ -824,7 +920,7 @@ type funcResponseNode struct {
 	BaseNode
 }
 
-func (n *funcResponseNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *funcResponseNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Content = &genai.Content{Parts: []*genai.Part{{
@@ -855,5 +951,27 @@ func TestScheduler_StampsFunctionResponseRoleUser(t *testing.T) {
 	}
 	if !sawContent {
 		t.Fatal("no event with Content observed")
+	}
+}
+
+// progressThenSchemaOutputNode yields `progress` output-less events
+// followed by one carrying `output`, to verify the scheduler skips
+// ValidateOutput on output-less events.
+type progressThenSchemaOutputNode struct {
+	BaseNode
+	progress int
+	output   any
+}
+
+func (n *progressThenSchemaOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		for i := 0; i < n.progress; i++ {
+			if !yield(session.NewEvent(ctx.InvocationID()), nil) {
+				return
+			}
+		}
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Output = n.output
+		yield(ev, nil)
 	}
 }

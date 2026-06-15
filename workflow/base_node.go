@@ -15,7 +15,15 @@
 package workflow
 
 import (
+	"encoding/json"
+	"fmt"
+	"slices"
+	"strings"
+
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/session"
 )
 
 // BaseNode provides identity and a default Config implementation for
@@ -85,12 +93,104 @@ func (b BaseNode) ValidateOutput(out any) (any, error) {
 	return defaultValidateOutput(out, b.outputSchema)
 }
 
+// defaultValidateOutput backs BaseNode.ValidateOutput. Framework
+// control values (*session.Event, *session.RequestInput) bypass the
+// schema — they ride through Event.Output but are not user payloads.
+// When direct validation fails on model text (a string, or a
+// *genai.Content built by synthesizeAgentOutput), projectTextOntoSchema
+// retries via the schema; on total failure the original error wins so
+// downstream parse details don't mask the real mismatch. Mirrors
+// adk-python _validate_output_data.
 func defaultValidateOutput(out any, schema *jsonschema.Resolved) (any, error) {
-	if schema == nil {
+	if schema == nil || out == nil {
 		return out, nil
 	}
-	if err := schema.Validate(out); err != nil {
-		return nil, err
+	switch out.(type) {
+	case *session.Event, *session.RequestInput:
+		return out, nil
 	}
-	return out, nil
+	err := schema.Validate(out)
+	if err == nil {
+		return out, nil
+	}
+	if text, ok := modelText(out); ok {
+		if v, ok := projectTextOntoSchema(text, schema); ok {
+			return v, nil
+		}
+	}
+	return nil, err
+}
+
+// modelText returns the model text carried by an output value: the
+// string itself, or the non-thought text parts of a *genai.Content
+// concatenated. Skipping thought parts mirrors messageText so
+// validation sees the same text the agent surfaces as output.
+func modelText(out any) (string, bool) {
+	switch v := out.(type) {
+	case string:
+		return v, true
+	case *genai.Content:
+		var text strings.Builder
+		for _, part := range v.Parts {
+			if part != nil && part.Text != "" && !part.Thought {
+				text.WriteString(part.Text)
+			}
+		}
+		return text.String(), true
+	default:
+		return "", false
+	}
+}
+
+// projectTextOntoSchema projects model text onto schema: return it
+// directly for a string schema (after re-validating so per-string
+// constraints like minLength or pattern still apply), otherwise
+// JSON-parse and re-validate. ok is false when no valid value can be
+// produced, leaving error reporting to the caller.
+func projectTextOntoSchema(s string, schema *jsonschema.Resolved) (any, bool) {
+	if rootSchemaIsString(schema) {
+		if err := schema.Validate(s); err != nil {
+			return nil, false
+		}
+		return s, true
+	}
+	if strings.TrimSpace(s) == "" {
+		return nil, false
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+		return nil, false
+	}
+	if err := schema.Validate(parsed); err != nil {
+		return nil, false
+	}
+	return parsed, true
+}
+
+// rootSchemaIsString reports whether schema's root permits the "string"
+// type, via either the single Type field or the Types list. The two are
+// mutually exclusive in jsonschema.Schema, so checking both covers a root
+// like {"type": ["string", "null"]}.
+func rootSchemaIsString(schema *jsonschema.Resolved) bool {
+	root := schema.Schema()
+	if root == nil {
+		return false
+	}
+	return root.Type == "string" || slices.Contains(root.Types, "string")
+}
+
+// validateAndStampOutput runs n.ValidateOutput on out and, on success,
+// stamps the validated value back onto ev.Output when it rode there
+// (MessageAsOutput-derived values stay off the event). Errors wrap
+// both ErrNodeFailed and the underlying validation error so callers
+// can match either sentinel via errors.Is/errors.As.
+func validateAndStampOutput(n Node, out any, ev *session.Event) (any, error) {
+	validated, err := n.ValidateOutput(out)
+	if err != nil {
+		return nil, fmt.Errorf("%w: output validation failed for node %q: %w", ErrNodeFailed, n.Name(), err)
+	}
+	if ev.Output != nil {
+		ev.Output = validated
+	}
+	return validated, nil
 }

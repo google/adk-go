@@ -83,7 +83,7 @@ func (t *mcpTool) IsLongRunning() bool {
 	return false
 }
 
-func (t *mcpTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (t *mcpTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 
@@ -91,7 +91,7 @@ func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
 	return t.funcDeclaration
 }
 
-func (t *mcpTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
+func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
 			return nil, fmt.Errorf("error tool %q %w", t.Name(), tool.ErrConfirmationRejected)

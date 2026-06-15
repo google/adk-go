@@ -71,7 +71,7 @@ var ErrNothingToResume = errors.New("workflow: no waiting node matched the suppl
 // mistargeted submission. An empty responses map (or nil state)
 // is treated as a clean no-op with no error.
 func (w *Workflow) Resume(
-	ctx agent.InvocationContext,
+	ctx agent.Context,
 	state *RunState,
 	responses map[string]any,
 ) iter.Seq2[*session.Event, error] {

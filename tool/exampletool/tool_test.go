@@ -17,6 +17,7 @@ package exampletool
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -32,8 +33,29 @@ import (
 // --- mockToolContext ---
 
 type mockToolContext struct {
+	agent.ContextMock // inherit mocking responses
 	context.Context
 	userContent *genai.Content
+}
+
+// Deadline implements [agent.Context].
+func (m *mockToolContext) Deadline() (deadline time.Time, ok bool) {
+	return m.Context.Deadline()
+}
+
+// Done implements [agent.Context].
+func (m *mockToolContext) Done() <-chan struct{} {
+	return m.Context.Done()
+}
+
+// Err implements [agent.Context].
+func (m *mockToolContext) Err() error {
+	return m.Context.Err()
+}
+
+// Value implements [agent.Context].
+func (m *mockToolContext) Value(key any) any {
+	return m.Context.Value(key)
 }
 
 func (m *mockToolContext) UserContent() *genai.Content {
@@ -50,17 +72,32 @@ func (m *mockToolContext) Actions() *session.EventActions {
 func (m *mockToolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	return nil, nil
 }
-func (m *mockToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
-func (m *mockToolContext) RequestConfirmation(hint string, payload any) error   { return nil }
-func (m *mockToolContext) AgentName() string                                    { return "mock_agent" }
-func (m *mockToolContext) ReadonlyState() session.ReadonlyState                 { return nil }
-func (m *mockToolContext) State() session.State                                 { return nil }
-func (m *mockToolContext) Artifacts() agent.Artifacts                           { return nil }
-func (m *mockToolContext) InvocationID() string                                 { return "mock_invocation" }
-func (m *mockToolContext) AppName() string                                      { return "mock_app" }
-func (m *mockToolContext) Branch() string                                       { return "mock_branch" }
-func (m *mockToolContext) SessionID() string                                    { return "mock_session" }
-func (m *mockToolContext) UserID() string                                       { return "mock_user" }
+func (m *mockToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation    { return nil }
+func (m *mockToolContext) RequestConfirmation(hint string, payload any) error      { return nil }
+func (m *mockToolContext) AgentName() string                                       { return "mock_agent" }
+func (m *mockToolContext) ReadonlyState() session.ReadonlyState                    { return nil }
+func (m *mockToolContext) State() session.State                                    { return nil }
+func (m *mockToolContext) Artifacts() agent.Artifacts                              { return nil }
+func (m *mockToolContext) InvocationID() string                                    { return "mock_invocation" }
+func (m *mockToolContext) AppName() string                                         { return "mock_app" }
+func (m *mockToolContext) Branch() string                                          { return "mock_branch" }
+func (m *mockToolContext) SessionID() string                                       { return "mock_session" }
+func (m *mockToolContext) UserID() string                                          { return "mock_user" }
+func (m *mockToolContext) Agent() agent.Agent                                      { return nil }
+func (m *mockToolContext) Memory() agent.Memory                                    { return nil }
+func (m *mockToolContext) IsolationScope() string                                  { return "" }
+func (m *mockToolContext) RunConfig() *agent.RunConfig                             { return nil } // Use context? No, RunConfig struct.
+func (m *mockToolContext) EndInvocation()                                          {}
+func (m *mockToolContext) Ended() bool                                             { return false }
+func (m *mockToolContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
+func (m *mockToolContext) ResumedInput(string) (any, bool)                         { return nil, false }
+func (m *mockToolContext) Path() string                                            { return "" }
+func (m *mockToolContext) RunID() string                                           { return "" }
+func (m *mockToolContext) Session() session.Session                                { return nil }
+func (m *mockToolContext) SubScheduler() agent.DynamicSubScheduler                 { return nil }
+func (m *mockToolContext) WithBranch(branch string) agent.Context                  { return nil }
+
+var _ agent.Context = (*mockToolContext)(nil)
 
 // --- Tests ---
 

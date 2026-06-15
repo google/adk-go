@@ -88,7 +88,7 @@ type scheduler struct {
 	eventQueue chan queueItem
 	wg         sync.WaitGroup
 
-	parentCtx agent.InvocationContext
+	parentCtx agent.Context
 
 	// maxConcurrency caps len(runsByName); 0 disables the cap.
 	// When at the cap, scheduleResumedNode enqueues into
@@ -243,7 +243,7 @@ func (retryItem) isQueueItem() {}
 // reached, and the consumer drains the queue via
 // tryDispatchPending as in-flight nodes complete. 0 disables the
 // cap (unlimited).
-func newScheduler(parent agent.InvocationContext, g *graph, maxConcurrency int) *scheduler {
+func newScheduler(parent agent.Context, g *graph, maxConcurrency int) *scheduler {
 	return &scheduler{
 		state:          NewRunState(),
 		graph:          g,
@@ -364,16 +364,23 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 		cancel  context.CancelFunc
 	)
 	if cfg.Timeout > 0 {
-		nodeCtx, cancel = context.WithTimeout(s.parentCtx, cfg.Timeout)
+		nodeCtx, cancel = s.parentCtx.WithAgentTimeout(cfg.Timeout)
 	} else {
-		nodeCtx, cancel = context.WithCancel(s.parentCtx)
+		nodeCtx, cancel = s.parentCtx.WithAgentCancel()
 	}
 	// Order matters: WithContext sets up per-node cancellation on
 	// the underlying InvocationContext; withBranch then wraps the
 	// result in branchOverride. Reversing would either lose the
 	// cancellation context or strip the branch override.
-	wrapped := withBranch(s.parentCtx.WithContext(nodeCtx), branch)
-	perNodeCtx := newNodeContext(wrapped, resumeInputs)
+
+	if s.parentCtx == nil {
+		panic("nil parent context")
+	}
+	perNodeCtx := s.parentCtx.WithAgentContext(nodeCtx)
+	perNodeCtx = perNodeCtx.WithBranch(branch)
+
+	// wrapped := withBranch(s.parentCtx.WithContext(nodeCtx), branch)
+	perNodeCtx = newNodeContext(perNodeCtx, resumeInputs)
 
 	// EXPERIMENTAL: stash perNodeCtx in the embedded context.Context
 	// so tools running inside an LlmAgent that is itself running as
@@ -385,10 +392,11 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	// See WithNodeContext / NodeContextFromGoContext in
 	// node_context_bridge.go. Top-level static activations have
 	// subScheduler == nil, so RunNode will still reject them; the
-	// stash is harmless in that case.
-	perNodeCtx.InvocationContext = perNodeCtx.InvocationContext.WithContext(
-		WithNodeContext(perNodeCtx.InvocationContext, perNodeCtx),
-	)
+	// // stash is harmless in that case.
+	// perNodeCtxFinal := perNodeCtx.InvocationContext().WithContext(
+	// 	WithNodeContext(perNodeCtx.InvocationContext(), perNodeCtx),
+	// )
+	// perNodeCtx.SetInvocationContext(perNodeCtxFinal)
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
@@ -434,7 +442,7 @@ func runNode(
 	wg *sync.WaitGroup,
 	name string,
 	n Node,
-	ctx agent.InvocationContext,
+	ctx agent.Context,
 	input any,
 ) {
 	defer wg.Done()
@@ -674,7 +682,20 @@ func (s *scheduler) handleEvent(it eventItem) {
 		nr.setRoutingEvent(it.ev, it.nodeName)
 	}
 	if out, ok := childEventOutput(it.ev); ok {
-		nr.setOutput(out, it.nodeName)
+		n := s.nodesByName[it.nodeName]
+		if n == nil {
+			// handleEvent only runs for registered nodes; a miss means
+			// the registry is out of sync. Fail rather than forward
+			// unvalidated.
+			nr.recordErr(fmt.Errorf("%w: output validation: node %q not found in graph", ErrNodeFailed, it.nodeName))
+			return
+		}
+		validated, err := validateAndStampOutput(n, out, it.ev)
+		if err != nil {
+			nr.recordErr(err)
+			return
+		}
+		nr.setOutput(validated, it.nodeName)
 	}
 }
 
@@ -973,7 +994,7 @@ func aggregatePredecessorBranches(g *graph, state *RunState, target Node) []stri
 	return branches
 }
 
-func startNodeSpan(ctx agent.InvocationContext, n Node) (trace.Span, agent.InvocationContext) {
+func startNodeSpan(ctx agent.Context, n Node) (trace.Span, agent.Context) {
 	if n == Start {
 		// Don't create span for the Start node.
 		return noop.Span{}, ctx
@@ -985,5 +1006,5 @@ func startNodeSpan(ctx agent.InvocationContext, n Node) (trace.Span, agent.Invoc
 		return noop.Span{}, ctx
 	}
 	spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationNode{Node: n})
-	return span, ctx.WithContext(spanCtx)
+	return span, ctx.WithAgentContext(spanCtx)
 }

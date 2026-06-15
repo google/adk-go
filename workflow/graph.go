@@ -36,6 +36,15 @@ func newGraph(edges []Edge) *graph {
 	return &graph{successors: succ, predecessors: pred}
 }
 
+// allEdges returns all edges in the graph.
+func (g *graph) allEdges() []Edge {
+	var edges []Edge
+	for _, succs := range g.successors {
+		edges = append(edges, succs...)
+	}
+	return edges
+}
+
 // successorsOf returns the outgoing edges for a node.
 // Returns nil if n has no outgoing edges
 // (including the case where n is not in the graph at all). The
@@ -51,4 +60,20 @@ func (g *graph) successorsOf(n Node) []Edge {
 // graph and must not be mutated by callers.
 func (g *graph) predecessorsOf(n Node) []Edge {
 	return g.predecessors[n]
+}
+
+// allNodes returns all nodes in the graph.
+func (g *graph) allNodes() []Node {
+	nodes := make(map[Node]bool)
+	for n := range g.successors {
+		nodes[n] = true
+	}
+	for n := range g.predecessors {
+		nodes[n] = true
+	}
+	var res []Node
+	for n := range nodes {
+		res = append(res, n)
+	}
+	return res
 }

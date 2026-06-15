@@ -22,6 +22,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -33,7 +34,7 @@ import (
 var defaultNodeConfig = NodeConfig{}
 
 // MockInvocationContext is a minimal implementation of
-// agent.InvocationContext for testing. It embeds a real
+// agent.Context for testing. It embeds a real
 // context.Context so child cancellation works.
 type MockInvocationContext struct {
 	context.Context
@@ -92,7 +93,7 @@ func (m *MockInvocationContext) WithContext(ctx context.Context) agent.Invocatio
 }
 
 func TestFunctionNode(t *testing.T) {
-	upperFn := func(ctx agent.InvocationContext, input string) (string, error) {
+	upperFn := func(ctx agent.Context, input string) (string, error) {
 		return strings.ToUpper(input), nil
 	}
 
@@ -100,9 +101,10 @@ func TestFunctionNode(t *testing.T) {
 
 	// Create a mock context
 	mockCtx := newMockCtx(t)
+	exCtx := agent.NewNodeContext(mockCtx, nil)
 
 	// Run the node
-	events := node.Run(mockCtx, "hello")
+	events := node.Run(exCtx, "hello")
 
 	count := 0
 	for ev, err := range events {
@@ -122,7 +124,7 @@ func TestFunctionNode(t *testing.T) {
 }
 
 func TestSequentialWorkflow(t *testing.T) {
-	upperFn := func(ctx agent.InvocationContext, input any) (string, error) {
+	upperFn := func(ctx agent.Context, input any) (string, error) {
 		s, ok := input.(string)
 		if !ok {
 			return "", fmt.Errorf("expected string input")
@@ -130,7 +132,7 @@ func TestSequentialWorkflow(t *testing.T) {
 		return strings.ToUpper(s), nil
 	}
 
-	suffixFn := func(ctx agent.InvocationContext, input string) (string, error) {
+	suffixFn := func(ctx agent.Context, input string) (string, error) {
 		return input + " done", nil
 	}
 
@@ -245,7 +247,7 @@ type CustomRouteNode struct {
 	onRun func()
 }
 
-func (n *CustomRouteNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *CustomRouteNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	if n.onRun != nil {
 		n.onRun()
 	}
@@ -282,11 +284,11 @@ func TestWorkflowRouting(t *testing.T) {
 		nodeX := &CustomRouteNode{
 			BaseNode: NewBaseNode("X", "", defaultNodeConfig),
 		}
-		nodeA := NewFunctionNode("A", func(ctx agent.InvocationContext, input any) (string, error) {
+		nodeA := NewFunctionNode("A", func(ctx agent.Context, input any) (string, error) {
 			record(tracker, "A")
 			return "pathA", nil
 		}, defaultNodeConfig)
-		nodeB := NewFunctionNode("B", func(ctx agent.InvocationContext, input any) (string, error) {
+		nodeB := NewFunctionNode("B", func(ctx agent.Context, input any) (string, error) {
 			record(tracker, "B")
 			return "pathB", nil
 		}, defaultNodeConfig)
@@ -297,7 +299,7 @@ func TestWorkflowRouting(t *testing.T) {
 				record(tracker, "C")
 			},
 		}
-		nodeD := NewFunctionNode("D", func(ctx agent.InvocationContext, input any) (string, error) {
+		nodeD := NewFunctionNode("D", func(ctx agent.Context, input any) (string, error) {
 			record(tracker, "D")
 			return "pathD", nil
 		}, defaultNodeConfig)
@@ -461,4 +463,92 @@ func TestWorkflowRouting(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWorkflow_StateSchemaConsistency(t *testing.T) {
+	schemaRaw := &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"Foo": {Type: "string"},
+		},
+	}
+	schema, err := schemaRaw.Resolve(nil)
+	if err != nil {
+		t.Fatalf("failed to resolve schema: %v", err)
+	}
+
+	validNode, err := NewFunctionNodeFromState("valid_node", dummyFnValid, NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewFunctionNodeFromState: %v", err)
+	}
+
+	invalidNode, err := NewFunctionNodeFromState("invalid_node", dummyFnInvalid, NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewFunctionNodeFromState: %v", err)
+	}
+
+	agentNode := newDummyNode("agentNode")
+
+	tests := []struct {
+		name    string
+		nodes   []Node
+		schema  *jsonschema.Resolved
+		wantErr string
+	}{
+		{
+			name:   "valid schema matches exactly",
+			nodes:  []Node{validNode},
+			schema: schema,
+		},
+		{
+			name:    "typo in tag causes error",
+			nodes:   []Node{invalidNode},
+			schema:  schema,
+			wantErr: `node "invalid_node" references state field "foo" which is not declared in StateSchema`,
+		},
+		{
+			name:   "nil schema skips validation",
+			nodes:  []Node{invalidNode},
+			schema: nil,
+		},
+		{
+			name:   "non state params aware nodes are ignored",
+			nodes:  []Node{agentNode},
+			schema: schema,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			edges := fanOutFromStart(tc.nodes)
+			_, err := New("wf", edges, WithStateSchema(tc.schema))
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("expected error to contain %q, got: %v", tc.wantErr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+type validParams struct {
+	Foo       string `state:"Foo"`
+	NodeInput string `state:"node_input"`
+}
+
+type invalidParams struct {
+	Foo string `state:"foo"` // Typo: case mismatch
+}
+
+func dummyFnValid(ctx agent.InvocationContext, p validParams) (string, error) {
+	return "ok", nil
+}
+
+func dummyFnInvalid(ctx agent.InvocationContext, p invalidParams) (string, error) {
+	return "ok", nil
 }

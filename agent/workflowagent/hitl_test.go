@@ -239,7 +239,7 @@ func TestWorkflowAgent_FreshTurn_NotMistakenForResume(t *testing.T) {
 	// flip its own flag before the request is yielded, so the
 	// test can detect that the asker truly re-ran on turn 2.
 	makeAsker := func(flag *atomic.Bool) workflow.Node {
-		return newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+		return newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 			flag.Store(true)
 			yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 				InterruptID: "ask",
@@ -274,16 +274,16 @@ func TestWorkflowAgent_FreshTurn_NotMistakenForResume(t *testing.T) {
 func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 	const interruptID = "ask_name_dyn"
 
-	asker := newHitlNode("ask_name", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
-		nc, ok := ctx.(workflow.NodeContext)
-		if ok {
-			if resp, ok := nc.ResumedInput(interruptID); ok {
-				ev := session.NewEvent(ctx.InvocationID())
-				ev.Output = resp
-				yield(ev, nil)
-				return
-			}
+	asker := newHitlNode("ask_name", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+		// nc, ok := ctx.(workflow.NodeContext)
+		// if ok {
+		if resp, ok := ctx.ResumedInput(interruptID); ok {
+			ev := session.NewEvent(ctx.InvocationID())
+			ev.Output = resp
+			yield(ev, nil)
+			return
 		}
+		// }
 		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 			InterruptID: interruptID,
 			Message:     "What's your name?",
@@ -468,17 +468,17 @@ func (s *fakeSessionState) All() iter.Seq2[string, any] {
 // its own emission pattern.
 type hitlNode struct {
 	workflow.BaseNode
-	run func(ctx agent.InvocationContext, input any, yield func(*session.Event, error) bool)
+	run func(ctx agent.Context, input any, yield func(*session.Event, error) bool)
 }
 
-func newHitlNode(name string, run func(ctx agent.InvocationContext, input any, yield func(*session.Event, error) bool)) *hitlNode {
+func newHitlNode(name string, run func(ctx agent.Context, input any, yield func(*session.Event, error) bool)) *hitlNode {
 	return &hitlNode{
 		BaseNode: workflow.NewBaseNode(name, "", workflow.NodeConfig{}),
 		run:      run,
 	}
 }
 
-func (n *hitlNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *hitlNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.run(ctx, input, yield)
 	}
@@ -578,7 +578,7 @@ func resumeMessage(interruptID string, payload any) *genai.Content {
 // optional schema, then exits. This is the canonical "asker"
 // pattern: a node that pauses the workflow waiting for human input.
 func newAskerNode(interruptID, message string, schema *jsonschema.Schema) *hitlNode {
-	return newHitlNode("asker", func(ctx agent.InvocationContext, _ any, yield func(*session.Event, error) bool) {
+	return newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 			InterruptID:    interruptID,
 			Message:        message,
@@ -603,7 +603,7 @@ func runFreshTurn(t *testing.T, sess *fakeSession, a agent.Agent, text string) [
 func newStringHandlerNode(name string, dst *atomic.Value) workflow.Node {
 	return workflow.NewFunctionNode(
 		name,
-		func(_ agent.InvocationContext, input string) (string, error) {
+		func(_ agent.Context, input string) (string, error) {
 			dst.Store(input)
 			return "handled:" + input, nil
 		},
@@ -616,7 +616,7 @@ func newStringHandlerNode(name string, dst *atomic.Value) workflow.Node {
 func newMapHandlerNode(name string, dst *atomic.Value) workflow.Node {
 	return workflow.NewFunctionNode(
 		name,
-		func(_ agent.InvocationContext, input map[string]any) (any, error) {
+		func(_ agent.Context, input map[string]any) (any, error) {
 			dst.Store(input)
 			return nil, nil
 		},
@@ -630,7 +630,7 @@ func newMapHandlerNode(name string, dst *atomic.Value) workflow.Node {
 func newCountingHandlerNode(name string, counter *atomic.Int32) workflow.Node {
 	return workflow.NewFunctionNode(
 		name,
-		func(_ agent.InvocationContext, _ any) (any, error) {
+		func(_ agent.Context, _ any) (any, error) {
 			counter.Add(1)
 			return nil, nil
 		},
@@ -644,7 +644,7 @@ func newCountingHandlerNode(name string, counter *atomic.Int32) workflow.Node {
 func newFlagHandlerNode(name string, flag *atomic.Bool) workflow.Node {
 	return workflow.NewFunctionNode(
 		name,
-		func(_ agent.InvocationContext, _ any) (any, error) {
+		func(_ agent.Context, _ any) (any, error) {
 			flag.Store(true)
 			return nil, nil
 		},

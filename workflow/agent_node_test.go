@@ -116,7 +116,7 @@ func TestAgentNode_New(t *testing.T) {
 			var inputResolved, outputResolved *jsonschema.Resolved
 			switch tn := node.(type) {
 			case *AgentNode:
-				inputResolved, outputResolved = tn.inputSchema, tn.outputSchema
+				inputResolved, outputResolved = tn.InputSchema(), tn.OutputSchema()
 			default:
 				t.Errorf("unknown node type: %T", tn)
 			}
@@ -243,7 +243,8 @@ func TestAgentNode_Run(t *testing.T) {
 
 			mockCtx := newMockCtx(t)
 			mockCtx.sess = &mockSession{id: "test-session-id"} // Fix nil panic
-			events := node.Run(mockCtx, tc.nodeInput)
+			runCtx := agent.NewNodeContext(mockCtx, nil)
+			events := node.Run(runCtx, tc.nodeInput)
 
 			var got string
 			count := 0
@@ -342,7 +343,7 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 			}
 
 			// Connect to a function node.
-			functionNode := NewFunctionNode[Output, int]("plus_one", func(ctx agent.InvocationContext, in Output) (int, error) {
+			functionNode := NewFunctionNode[Output, int]("plus_one", func(ctx agent.Context, in Output) (int, error) {
 				return in.Result + 1, nil
 			}, NodeConfig{})
 
@@ -351,7 +352,7 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 
 			t.Run("WorkflowExecution", func(t *testing.T) {
 				// Use a seed node to pass the struct input to agentNode
-				seedNode := NewFunctionNode("seed", func(ctx agent.InvocationContext, input any) (*Input, error) {
+				seedNode := NewFunctionNode("seed", func(ctx agent.Context, input any) (*Input, error) {
 					return &Input{Val: tc.input}, nil
 				}, NodeConfig{})
 
@@ -419,11 +420,12 @@ func TestAgentNode_SynthesizesOutputFromModelText(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session-id"}
+	nc := agent.NewNodeContext(mockCtx, nil)
 	var (
 		gotPartial *session.Event
 		gotFinal   *session.Event
 	)
-	for ev, err := range node.Run(mockCtx, "ignored") {
+	for ev, err := range node.Run(nc, "ignored") {
 		if err != nil {
 			t.Fatalf("node.Run: %v", err)
 		}
@@ -479,9 +481,10 @@ func TestAgentNode_StampsIsolationScopeOnEvents(t *testing.T) {
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session-id"}
 	mockCtx.isolationScope = "scope-x"
+	exCtx := agent.NewNodeContext(mockCtx, nil)
 
 	var events []*session.Event
-	for ev, err := range node.Run(mockCtx, "ignored") {
+	for ev, err := range node.Run(exCtx, "ignored") {
 		if err != nil {
 			t.Fatalf("node.Run: %v", err)
 		}
@@ -499,6 +502,271 @@ func TestAgentNode_StampsIsolationScopeOnEvents(t *testing.T) {
 	}
 	if events[1].IsolationScope != "preset" {
 		t.Errorf("event[1] IsolationScope = %q, want %q (preset must be kept)", events[1].IsolationScope, "preset")
+	}
+}
+
+func TestAgentNode_ValidationAndContentConversion(t *testing.T) {
+	type CustomStruct struct {
+		Val string `json:"val"`
+	}
+
+	tests := []struct {
+		name              string
+		nodeInput         any
+		parentUserContent *genai.Content
+		nodeCreator       func(a agent.Agent) (Node, error)
+		wantContent       *genai.Content
+	}{
+		{
+			name:      "struct input into JSON text part",
+			nodeInput: CustomStruct{Val: "test-val"},
+			nodeCreator: func(a agent.Agent) (Node, error) {
+				return NewAgentNodeTyped[CustomStruct, string](a, NodeConfig{})
+			},
+			wantContent: &genai.Content{
+				Role:  "user",
+				Parts: []*genai.Part{{Text: `{"val":"test-val"}`}},
+			},
+		},
+		{
+			name:      "string input into text part",
+			nodeInput: "direct string input",
+			nodeCreator: func(a agent.Agent) (Node, error) {
+				return NewAgentNodeTyped[string, string](a, NodeConfig{})
+			},
+			wantContent: &genai.Content{
+				Role:  "user",
+				Parts: []*genai.Part{{Text: "direct string input"}},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agentInvoked := false
+			var gotContent *genai.Content
+
+			myAgent, err := agent.New(agent.Config{
+				Name: "test_agent",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						agentInvoked = true
+						gotContent = ctx.UserContent()
+						event := session.NewEvent(ctx.InvocationID())
+						event.Output = "ok"
+						yield(event, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("failed to create agent: %v", err)
+			}
+
+			node, err := tc.nodeCreator(myAgent)
+			if err != nil {
+				t.Fatalf("failed to create node: %v", err)
+			}
+
+			mockCtx := newMockCtx(t)
+			mockCtx.sess = &mockSession{id: "test"}
+			if tc.parentUserContent != nil {
+				mockCtx.userContent = tc.parentUserContent
+			}
+
+			exCtx := agent.NewNodeContext(mockCtx, nil)
+			events := node.Run(exCtx, tc.nodeInput)
+			for _, err := range events {
+				if err != nil {
+					t.Fatalf("run failed: %v", err)
+				}
+			}
+
+			if !agentInvoked {
+				t.Error("agent was not invoked")
+			}
+
+			if tc.wantContent != nil {
+				if gotContent == nil {
+					t.Fatal("expected user content, got nil")
+				}
+				if diff := cmp.Diff(tc.wantContent, gotContent); diff != "" {
+					t.Errorf("user content mismatch (-want +got):\n%s", diff)
+				}
+			} else if gotContent != nil {
+				t.Errorf("expected no user content, got: %v", gotContent)
+			}
+		})
+	}
+}
+
+func TestAgentNode_InputValidation(t *testing.T) {
+	type CustomStruct struct {
+		Val string `json:"val"`
+	}
+
+	tests := []struct {
+		name        string
+		nodeCreator func(a agent.Agent) (Node, error)
+		nodeInput   any
+		wantErr     error
+		wantContent *genai.Content
+	}{
+		{
+			name: "validation failure -> scheduler rejects",
+			nodeCreator: func(a agent.Agent) (Node, error) {
+				return NewAgentNodeTyped[string, string](a, NodeConfig{})
+			},
+			nodeInput: CustomStruct{Val: "invalid"},
+			wantErr:   ErrInputValidation,
+		},
+		{
+			name: "validation success -> agent invoked",
+			nodeCreator: func(a agent.Agent) (Node, error) {
+				return NewAgentNodeTyped[CustomStruct, string](a, NodeConfig{})
+			},
+			nodeInput: CustomStruct{Val: "hello"},
+			wantContent: &genai.Content{
+				Role:  "user",
+				Parts: []*genai.Part{{Text: `{"val":"hello"}`}},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agentInvoked := false
+			var gotContent *genai.Content
+
+			myAgent, err := agent.New(agent.Config{
+				Name: "test_agent",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						agentInvoked = true
+						gotContent = ctx.UserContent()
+						event := session.NewEvent(ctx.InvocationID())
+						event.Output = "ok"
+						yield(event, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("failed to create agent: %v", err)
+			}
+
+			node, err := tc.nodeCreator(myAgent)
+			if err != nil {
+				t.Fatalf("failed to create node: %v", err)
+			}
+
+			edges := Chain(Start, node)
+			w, err := New("validation_wf", edges)
+			if err != nil {
+				t.Fatalf("failed to build workflow: %v", err)
+			}
+
+			mockCtx := newMockCtx(t)
+			mockCtx.sess = &mockSession{id: "test"}
+
+			exCtx := agent.NewNodeContext(mockCtx, nil)
+			events := w.RunNode(exCtx, tc.nodeInput)
+			var workflowErr error
+			for _, err := range events {
+				if err != nil {
+					workflowErr = err
+				}
+			}
+
+			if tc.wantErr != nil {
+				if workflowErr == nil {
+					t.Fatal("expected validation error, got nil")
+				}
+				if !errors.Is(workflowErr, tc.wantErr) {
+					t.Errorf("expected error %v, got: %v", tc.wantErr, workflowErr)
+				}
+				if agentInvoked {
+					t.Error("agent was invoked despite validation failure")
+				}
+				return
+			}
+
+			if workflowErr != nil {
+				t.Fatalf("workflow failed: %v", workflowErr)
+			}
+
+			if !agentInvoked {
+				t.Error("agent was not invoked")
+			}
+
+			if tc.wantContent != nil {
+				if gotContent == nil {
+					t.Fatal("expected user content, got nil")
+				}
+				if diff := cmp.Diff(tc.wantContent, gotContent); diff != "" {
+					t.Errorf("user content mismatch (-want +got):\n%s", diff)
+				}
+			}
+		})
+	}
+}
+
+// TestAgentNode_StructuredOutputProjectedViaValidation verifies the
+// end-to-end path that makes the validation fallback reachable: an
+// AgentNode with a structured output schema yields JSON model text,
+// and ValidateOutput projects it onto the schema.
+func TestAgentNode_StructuredOutputProjectedViaValidation(t *testing.T) {
+	wrapped, err := agent.New(agent.Config{
+		Name: "json-talky",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				final := session.NewEvent(ctx.InvocationID())
+				final.LLMResponse.Content = &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: `{"value":"hello"}`}},
+				}
+				yield(final, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	outSchema, err := jsonschema.For[testSchemaInput](nil)
+	if err != nil {
+		t.Fatalf("jsonschema.For: %v", err)
+	}
+	node, err := NewAgentNodeWithSchemas(wrapped, nil, outSchema, NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNodeWithSchemas: %v", err)
+	}
+
+	mockCtx := newMockCtx(t)
+	mockCtx.sess = &mockSession{id: "test-session-id"}
+	exCtx := agent.NewNodeContext(mockCtx, nil)
+	var gotFinal *session.Event
+	for ev, err := range node.Run(exCtx, "ignored") {
+		if err != nil {
+			t.Fatalf("node.Run: %v", err)
+		}
+		if !ev.LLMResponse.Partial {
+			gotFinal = ev
+		}
+	}
+	if gotFinal == nil {
+		t.Fatal("missing final event")
+	}
+
+	// AgentNode itself only synthesizes the raw text; the projection
+	// onto the schema happens in ValidateOutput.
+	got, err := node.ValidateOutput(gotFinal.Output)
+	if err != nil {
+		t.Fatalf("ValidateOutput: %v", err)
+	}
+	gotMap, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("ValidateOutput returned %T, want map[string]any", got)
+	}
+	if gotMap["value"] != "hello" {
+		t.Errorf("got %v, want value=hello", gotMap)
 	}
 }
 
@@ -531,7 +799,8 @@ func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session"}
-	events := node.Run(mockCtx, nil)
+	exCtx := agent.NewNodeContext(mockCtx, nil)
+	events := node.Run(exCtx, nil)
 
 	var finalOutput any
 	for ev, err := range events {

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 )
 
@@ -46,6 +47,41 @@ type dynamicSubScheduler struct {
 	resultByPath map[string]any
 	delegation   outputDelegation
 }
+
+// ResolveByRunID implements [agent.DynamicSubScheduler].
+func (s *dynamicSubScheduler) ResolveByRunID(childName, custom string) (string, error) {
+	return s.resolveRunID(childName, custom)
+}
+
+// DelegatedOutput implements [agent.DynamicSubScheduler].
+func (s *dynamicSubScheduler) DelegatedOutput() (any, bool) {
+	return s.delegatedOutput()
+}
+
+// OutputForAncestors implements [agent.DynamicSubScheduler].
+func (s *dynamicSubScheduler) OutputForAncestors() []string {
+	return s.outputForAncestors
+}
+
+// ParentPath implements [agent.DynamicSubScheduler].
+func (s *dynamicSubScheduler) ParentPath() string {
+	return s.parentPath
+}
+
+// RunNode implements [agent.DynamicSubScheduler].
+func (s *dynamicSubScheduler) RunNode(child, input, opts any) (any, error) {
+	childNode, ok := child.(Node)
+	if !ok {
+		return nil, fmt.Errorf("got child %T, want Node", child)
+	}
+	options, ok := opts.(runNodeOptions)
+	if !ok {
+		return nil, fmt.Errorf("got opts %T, want runNodeOptions", opts)
+	}
+	return s.runNode(childNode, input, options)
+}
+
+var _ agent.DynamicSubScheduler = (*dynamicSubScheduler)(nil)
 
 // outputDelegation is the at-most-one WithUseAsOutput delegation for a
 // parent activation. claim is set eagerly on the first delegating child
@@ -90,10 +126,10 @@ func (d *outputDelegation) output() (any, bool) {
 	return d.value, d.hasValue
 }
 
-func newDynamicSubScheduler(parent NodeContext, parentPath string, emitUp func(*session.Event) error) *dynamicSubScheduler {
-	var ancestors []string
-	if p, ok := parent.(*nodeContext); ok {
-		ancestors = p.outputForAncestors
+func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func(*session.Event) error) agent.DynamicSubScheduler {
+	ancestors := []string{}
+	if parent != nil {
+		ancestors = parent.OutputForAncestors()
 	}
 	s := &dynamicSubScheduler{
 		parentPath:         parentPath,
@@ -132,6 +168,86 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 		s.resultByPath[ev.NodeInfo.Path] = ev.Output
 	}
 }
+
+// func logContext(o any, msg string, lvl int) {
+// 	emit := func(f string, args ...any) {
+// 		prefix := "  >>> " + strings.Repeat("   ", lvl) + msg + ": "
+// 		log.Printf("%s%s", prefix, fmt.Sprintf(f, args...))
+// 	}
+
+// 	ov := reflect.ValueOf(o)
+// 	ot := ov.Type()
+// 	if ot.String() == "context.backgroundCtx" {
+// 		emit("context.Background")
+// 		return
+// 	}
+// 	if ot.Kind() != reflect.Ptr {
+// 		emit("%T %v %v", o, ov, ot)
+// 	}
+
+// 	switch ot.Kind() {
+// 	case reflect.Ptr:
+
+// 		logContext(ov.Elem().Interface(), msg, lvl+1)
+// 		var c agent.Context
+// 		if ot.String() == "*agent.commonContext" {
+// 			c = o.(agent.Context)
+// 		}
+// 		if c != nil {
+// 			logContext(c.InvocationContext(), ".InvocationContext()", lvl+2)
+// 		}
+
+// 	case reflect.Struct:
+// 		// emit("reflect.Struct")
+// 		for i := 0; i < ot.NumField(); i++ {
+// 			fn := ot.Field(i).Name
+// 			if !ot.Field(i).IsExported() {
+// 				// emit("skipping unexported field %d %v", i, fn)
+// 				continue
+// 			}
+// 			if fn == "Context" || fn == "invocationContext" {
+// 				logContext(ov.Field(i).Interface(), "."+fn, lvl+1)
+// 				continue
+// 			}
+// 			//logContext(ov.Field(i).Interface(), ot.Field(i).Name, lvl+1)
+// 		}
+// 	case reflect.Map:
+// 		emit("reflect.Map")
+// 	case reflect.Slice:
+// 		emit("reflect.Slice")
+// 	case reflect.Array:
+// 		emit("reflect.Array")
+// 	case reflect.Chan:
+// 		emit("reflect.Chan")
+// 	case reflect.Func:
+// 		emit("reflect.Func")
+// 	case reflect.Interface:
+// 		emit("reflect.Interface")
+// 	case reflect.Invalid:
+// 		emit("reflect.Invalid")
+// 	default:
+// 		emit("unknown %T", o)
+// 	}
+
+// 	// emit("%v", ot.String())
+// 	// switch o.Kind() {
+
+// }
+
+// func logContext(ctx context.Context, msg string, lvl int) {
+// 	prefix := strings.Repeat("  ", lvl) + msg + ": "
+// 	switch v := ctx.(type) {
+// 	case agent.Context:
+// 		log.Printf("%sagent.Context: %+v", prefix, v)
+// 		logContext(v.InvocationContext(), "InvocationContext", lvl+1)
+// 	case agent.InvocationContext:
+// 		log.Printf("%sagent.InvocationContext: %T: %+v", prefix, v, v)
+// 	case agent.ReadonlyContext:
+// 		log.Printf("%sagent.ReadonlyContext: %T: %+v", prefix, v, v)
+// 	default:
+// 		log.Printf("%scustom: %T", prefix, ctx)
+// 	}
+// }
 
 // runNode executes child once and classifies the outcome: HITL →
 // ErrNodeInterrupted, runtime failure → ErrNodeFailed. A child that
@@ -173,6 +289,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		childAncestors = append([]string{s.parentPath}, s.outputForAncestors...)
 	}
 	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
+	// logContext(childCtx, "childCtx after newDynamicNodeContext", 0)
 
 	// Explicit scope wins over the node-path default; absent both,
 	// inherit. Matches adk-python _compute_isolation_scope_for_node.
@@ -182,7 +299,10 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	} else if opts.scopeFromNodePath {
 		childScope = childPath
 	}
-	childCtx.InvocationContext = withIsolationScope(childCtx.InvocationContext, childScope)
+	childCtx = withIsolationScope(childCtx, childScope)
+	///childCtx.SetInvocationContext(iCtx)
+	// logContext(childCtx, "childCtx after withIsolationScope", 0)
+	//	log.Printf("childCtx: %+v branch: %v", childCtx, childCtx.Branch())
 
 	// EXPERIMENTAL: stash childCtx (a *nodeContext with non-nil
 	// subScheduler) in the embedded context.Context so tools running
@@ -190,9 +310,17 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// child can recover the NodeContext via
 	// workflow.NodeContextFromGoContext. See
 	// scheduleResumedNode for the static-node equivalent.
-	childCtx.InvocationContext = childCtx.InvocationContext.WithContext(
-		WithNodeContext(childCtx.InvocationContext, childCtx),
-	)
+
+	// ctxWithValue := WithNodeContext(childCtx.InvocationContext(), childCtx)
+	// logContext(ctxWithValue, "iCtx3", 0)
+
+	// log.Printf("iCtx3: %+v branch: n/a", ctxWithValue)
+	// iCtx2 := childCtx.WithContext(ctxWithValue)
+	// logContext(iCtx2, "iCtx2", 0)
+	// log.Printf("iCtx2: %+v branch: %v", iCtx2, iCtx2.Branch())
+	// childCtx.SetInvocationContext(iCtx2)
+	// log.Printf("final childCtx: %+v branch: %v", childCtx, childCtx.Branch())
+	// // childCtx= iCtx3
 
 	var (
 		out         any
@@ -230,7 +358,14 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			interrupted = true
 		}
 		if childOut, ok := childEventOutput(ev); ok {
-			out = childOut
+			validated, err := validateAndStampOutput(child, childOut, ev)
+			if err != nil {
+				return nil, &NodeRunError{
+					ChildName: name, ChildPath: childPath, RunID: runID,
+					Cause: err,
+				}
+			}
+			out = validated
 			// Stamp OutputFor so resume can attribute the output: the
 			// emitter's own path plus, under delegation, this parent and
 			// its ancestors (the parent then suppresses its own terminal

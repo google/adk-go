@@ -48,7 +48,14 @@ type Node interface {
 	// It returns the validated output (which might be coerced/parsed/transformed) or an error.
 	// The scheduler invokes it on every yielded event with a non-nil output, before forwarding it to the consumer.
 	ValidateOutput(output any) (any, error)
-	Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error]
+	Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error]
+}
+
+// StateParamsAware is implemented by nodes that bind their parameters
+// from ctx.state. Used by Workflow's static state-schema validation
+// to detect mismatches between declared state fields and node consumers.
+type StateParamsAware interface {
+	StateFieldNames() []string
 }
 
 // Route defines the interface for matching execution results to edges.
@@ -127,7 +134,7 @@ func (s *startNode) ValidateOutput(output any) (any, error) {
 	return output, nil
 }
 
-func (s *startNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (s *startNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }
 
@@ -144,6 +151,9 @@ type Workflow struct {
 	// may run concurrently within a single Run invocation. 0
 	// (the default) means unlimited. Set via WithMaxConcurrency.
 	maxConcurrency int
+
+	// stateSchema holds the state schema for the workflow.
+	stateSchema *jsonschema.Resolved
 }
 
 // Option configures a Workflow at construction time. Pass options
@@ -155,6 +165,7 @@ type Option func(*workflowOptions)
 // engine defaults".
 type workflowOptions struct {
 	maxConcurrency int
+	stateSchema    *jsonschema.Resolved
 }
 
 // WithMaxConcurrency caps how many graph-scheduled nodes may run
@@ -170,6 +181,13 @@ func WithMaxConcurrency(n int) Option {
 			n = 0
 		}
 		o.maxConcurrency = n
+	}
+}
+
+// WithStateSchema sets the state schema for the workflow.
+func WithStateSchema(s *jsonschema.Resolved) Option {
+	return func(o *workflowOptions) {
+		o.stateSchema = s
 	}
 }
 
@@ -203,18 +221,19 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	// loaded RunState in Resume; today a name collision or a
 	// graph evolution between deploys silently corrupts the
 	// resume path.
-	graph := newGraph(edges)
-	if err := validateWorkflow(graph); err != nil {
-		return nil, err
-	}
 	var o workflowOptions
 	for _, opt := range opts {
 		opt(&o)
+	}
+	graph := newGraph(edges)
+	if err := validateWorkflow(graph, o.stateSchema); err != nil {
+		return nil, err
 	}
 	return &Workflow{
 		graph:          graph,
 		name:           name,
 		maxConcurrency: o.maxConcurrency,
+		stateSchema:    o.stateSchema,
 	}, nil
 }
 
@@ -238,12 +257,13 @@ func (w *Workflow) Name() string {
 // when nodes complete. The consumer is the only mutator of the
 // per-node lifecycle map and of session state.
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	return w.RunNode(ctx, userInput(ctx))
+	c := agent.NewNodeContext(ctx, nil)
+	return w.RunNode(c, userInput(c))
 }
 
 // RunNode drives the workflow with the given input.
 // This is used by WorkflowNode to run nested workflows.
-func (w *Workflow) RunNode(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (w *Workflow) RunNode(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		s := newScheduler(ctx, w.graph, w.maxConcurrency)
 		// Seed: schedule START with the supplied input.
@@ -261,7 +281,7 @@ func (w *Workflow) RunNode(ctx agent.InvocationContext, input any) iter.Seq2[*se
 // userInput extracts the workflow's seed input from the
 // InvocationContext's UserContent. Concatenates all text parts;
 // returns nil for an empty UserContent.
-func userInput(ctx agent.InvocationContext) any {
+func userInput(ctx agent.Context) any {
 	uc := ctx.UserContent()
 	if uc == nil {
 		return nil

@@ -18,9 +18,11 @@ import (
 	"errors"
 	"iter"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -59,7 +61,7 @@ func TestSubScheduler_Counter_AutoIncrementsPerChildName(t *testing.T) {
 	sub := newDynamicSubScheduler(newTopLevelCtx(t), "parent", noopEmit)
 
 	for i := 1; i <= 3; i++ {
-		got, err := sub.resolveRunID("childA", "")
+		got, err := sub.ResolveByRunID("childA", "")
 		if err != nil {
 			t.Fatalf("resolveRunID childA #%d: %v", i, err)
 		}
@@ -68,7 +70,7 @@ func TestSubScheduler_Counter_AutoIncrementsPerChildName(t *testing.T) {
 		}
 	}
 	// Independent counter per child name.
-	got, _ := sub.resolveRunID("childB", "")
+	got, _ := sub.ResolveByRunID("childB", "")
 	if got != "1" {
 		t.Errorf("childB first invocation got %q, want \"1\"", got)
 	}
@@ -84,7 +86,7 @@ func TestSubScheduler_Counter_ConcurrentSafe(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			id, err := sub.resolveRunID("worker", "")
+			id, err := sub.ResolveByRunID("worker", "")
 			if err != nil {
 				t.Errorf("resolveRunID: %v", err)
 				return
@@ -100,10 +102,10 @@ func TestSubScheduler_Counter_ConcurrentSafe(t *testing.T) {
 func TestSubScheduler_Counter_CustomIDDoesNotIncrement(t *testing.T) {
 	sub := newDynamicSubScheduler(newTopLevelCtx(t), "parent", noopEmit)
 
-	if _, err := sub.resolveRunID("c", "order-1"); err != nil {
+	if _, err := sub.ResolveByRunID("c", "order-1"); err != nil {
 		t.Fatalf("custom id: %v", err)
 	}
-	got, _ := sub.resolveRunID("c", "")
+	got, _ := sub.ResolveByRunID("c", "")
 	if got != "1" {
 		t.Errorf("auto id after custom got %q, want \"1\" (custom must not bump counter)", got)
 	}
@@ -117,7 +119,7 @@ func TestSubScheduler_RunNode_FreshExecution(t *testing.T) {
 		return nil
 	})
 
-	out, err := sub.runNode(child, "world", runNodeOptions{})
+	out, err := sub.RunNode(child, "world", runNodeOptions{})
 	if err != nil {
 		t.Fatalf("runNode: %v", err)
 	}
@@ -136,7 +138,7 @@ func TestSubScheduler_RunNode_CustomIDInPath(t *testing.T) {
 	child := newStubNode("processor", nil)
 	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
 
-	if _, err := sub.runNode(child, nil, runNodeOptions{customRunID: "order-42"}); err != nil {
+	if _, err := sub.RunNode(child, nil, runNodeOptions{customRunID: "order-42"}); err != nil {
 		t.Fatalf("runNode: %v", err)
 	}
 	// The child must have observed its NodeContext populated with the
@@ -154,7 +156,7 @@ func TestSubScheduler_RunNode_HITLReturnsInterrupted(t *testing.T) {
 		return nil
 	})
 
-	_, err := sub.runNode(child, nil, runNodeOptions{})
+	_, err := sub.RunNode(child, nil, runNodeOptions{})
 	if !errors.Is(err, ErrNodeInterrupted) {
 		t.Fatalf("err = %v, want ErrNodeInterrupted", err)
 	}
@@ -174,7 +176,7 @@ func TestSubScheduler_RunNode_ErrorWinsOverInterrupt(t *testing.T) {
 	child := newInterruptThenFailNode("flaky")
 	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
 
-	_, err := sub.runNode(child, nil, runNodeOptions{})
+	_, err := sub.RunNode(child, nil, runNodeOptions{})
 	if !errors.Is(err, ErrNodeFailed) {
 		t.Errorf("err = %v, want ErrNodeFailed", err)
 	}
@@ -189,7 +191,7 @@ func TestSubScheduler_RunNode_ErrorWinsOverInterrupt(t *testing.T) {
 
 func noopEmit(*session.Event) error { return nil }
 
-func newTopLevelCtx(t *testing.T) *nodeContext {
+func newTopLevelCtx(t *testing.T) agent.Context {
 	t.Helper()
 	return newNodeContext(newMockCtx(t), nil)
 }
@@ -210,16 +212,54 @@ func newStubNode(name string, out any) *stubNode {
 	}
 }
 
-func (n *stubNode) Run(ctx agent.InvocationContext, _ any) iter.Seq2[*session.Event, error] {
-	if nc, ok := ctx.(NodeContext); ok {
-		n.lastPath = nc.Path()
-	}
+func (n *stubNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	n.lastPath = ctx.Path()
 	n.lastBranch = ctx.Branch()
 	n.lastScope = ctx.IsolationScope()
 	out := n.out
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{Output: out}, nil)
 	}
+}
+
+// newSchemaStubNode returns a stubNode carrying an output schema so the
+// dynamic sub-scheduler invokes ValidateOutput on its yielded output.
+func newSchemaStubNode(name string, schema *jsonschema.Resolved, out any) *stubNode {
+	return &stubNode{
+		BaseNode: NewBaseNodeWithSchemas(name, "", NodeConfig{}, nil, schema),
+		out:      out,
+	}
+}
+
+func TestSubScheduler_RunNode_ValidatesOutput(t *testing.T) {
+	schema := resolveTestSchema[testSchemaInput](t)
+
+	t.Run("valid_passes", func(t *testing.T) {
+		child := newSchemaStubNode("ok", schema, map[string]any{"value": "hi"})
+		sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+
+		out, err := sub.RunNode(child, nil, runNodeOptions{})
+		if err != nil {
+			t.Fatalf("runNode: %v", err)
+		}
+		gotMap, ok := out.(map[string]any)
+		if !ok || gotMap["value"] != "hi" {
+			t.Errorf("output = %v, want map value=hi", out)
+		}
+	})
+
+	t.Run("invalid_fails", func(t *testing.T) {
+		child := newSchemaStubNode("bad", schema, map[string]any{"value": 123})
+		sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+
+		_, err := sub.RunNode(child, nil, runNodeOptions{})
+		if !errors.Is(err, ErrNodeFailed) {
+			t.Fatalf("err = %v, want ErrNodeFailed", err)
+		}
+		if !strings.Contains(err.Error(), "output validation failed") {
+			t.Errorf("err = %q, want substring %q", err.Error(), "output validation failed")
+		}
+	})
 }
 
 // messageAsOutputNode emits a final model-text event whose content IS
@@ -237,7 +277,7 @@ func newMessageAsOutputNode(name, text string) *messageAsOutputNode {
 	}
 }
 
-func (n *messageAsOutputNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+func (n *messageAsOutputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
 	text := n.text
 	return func(yield func(*session.Event, error) bool) {
 		ev := &session.Event{NodeInfo: &session.NodeInfo{MessageAsOutput: true}}
@@ -262,7 +302,7 @@ func newRequestInputNode(name, msg string) *requestInputNode {
 	}
 }
 
-func (n *requestInputNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+func (n *requestInputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{
 			RequestedInput: &session.RequestInput{
@@ -280,7 +320,7 @@ func newInterruptThenFailNode(name string) *interruptThenFailNode {
 	return &interruptThenFailNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
 
-func (n *interruptThenFailNode) Run(agent.InvocationContext, any) iter.Seq2[*session.Event, error] {
+func (n *interruptThenFailNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if !yield(&session.Event{
 			RequestedInput: &session.RequestInput{InterruptID: "iid", Message: "ask"},

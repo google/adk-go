@@ -415,15 +415,25 @@ func TestFinishTaskTool_ProcessRequest(t *testing.T) {
 	}
 
 	// The finish_task instruction should have been appended to the system
-	// instruction. Mirrors `test_instruction_content` from Python.
+	// instruction.
 	instructions := utils.TextParts(req.Config.SystemInstruction)
+	wantSubstrings := []string{
+		"finish_task",
+		"Do NOT call 'finish_task' prematurely",
+		"call 'finish_task' by itself with",
+	}
 	if !slices.ContainsFunc(instructions, func(s string) bool {
-		return strings.Contains(s, "finish_task") &&
-			strings.Contains(s, "Do NOT call") &&
-			strings.Contains(s, "by itself with")
+		for _, sub := range wantSubstrings {
+			if !strings.Contains(s, sub) {
+				return false
+			}
+		}
+		return true
 	}) {
-		t.Errorf("system instruction does not contain finish_task guidance; got %v",
-			instructions)
+		t.Errorf("system instruction does not contain finish_task guidance phrases\n"+
+			"  want all substrings: %q\n"+
+			"  got instructions: %v",
+			wantSubstrings, instructions)
 	}
 }
 

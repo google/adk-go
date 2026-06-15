@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/genai"
@@ -28,9 +29,33 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Context {
+	return &commonContext{
+		Context:           parent,
+		invocationContext: parent,
+		resumeInputs:      resumeInputs,
+	}
+}
+
+func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubScheduler, outputForAncestors []string) Context {
+	var inherited map[string]any
+	if p, ok := parent.(*commonContext); ok {
+		inherited = p.resumeInputs
+	}
+	return &commonContext{
+		Context:            parent,
+		invocationContext:  parent,
+		resumeInputs:       inherited,
+		path:               path,
+		runID:              runID,
+		subScheduler:       sub,
+		outputForAncestors: outputForAncestors,
+	}
+}
+
 // NewCallbackContext returns CallbackContext initialized with provided actions.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
-func NewCallbackContext(ic InvocationContext, actions *session.EventActions) CallbackContext {
+func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Context {
 	actions = prepareEventActions(actions)
 	cc := &commonContext{
 		Context:           ic,
@@ -49,7 +74,7 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Cal
 // the returned context's Artifacts().Save(...) wrapper records each saved artifact's version into the underlying
 // EventActions.ArtifactDelta so the resulting Event reflects the saves.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
-func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) CallbackContext {
+func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) Context {
 	actions = prepareEventActions(actions)
 	cc := &commonContext{
 		Context:           ic,
@@ -72,19 +97,30 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 // backed by the same *callbackContext implementation used for CallbackContext,
 // so all callback-context semantics (state delta tracking, artifact delta
 // tracking, etc.) apply, plus the tool-specific extensions on ToolContext.
-func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) ToolContext {
+func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
+	var res commonContext
+	ctx, ok := ic.(*commonContext)
+	if ok {
+		// copy fields
+		res = *ctx
+	} else {
+		res = commonContext{
+			Context:           ic,
+			invocationContext: ic,
+		}
+	}
+
 	if functionCallID == "" {
 		functionCallID = uuid.NewString()
 	}
 	actions = prepareEventActions(actions)
-	return &commonContext{
-		Context:           ic,
-		invocationContext: ic,
-		actions:           actions,
-		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
-		functionCallID:    functionCallID,
-		toolConfirmation:  confirmation,
-	}
+
+	res.actions = actions
+	res.functionCallID = functionCallID
+	res.toolConfirmation = confirmation
+	res.artifacts = &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions}
+
+	return &res
 }
 
 func prepareEventActions(actions *session.EventActions) *session.EventActions {
@@ -115,6 +151,218 @@ type commonContext struct {
 	// Fields below are only populated by NewToolContext.
 	functionCallID   string
 	toolConfirmation *toolconfirmation.ToolConfirmation
+
+	// Fields below are used by NodeContext
+	// resumeInputs are keyed by InterruptID. Nil on fresh activations
+	// and on handoff resume.
+	resumeInputs map[string]any
+
+	// path and runID are populated for dynamic children, empty for
+	// top-level static activations.
+	path  string
+	runID string
+
+	// subScheduler is non-nil only when this context belongs to a
+	// dynamic-node activation; RunNode uses it to schedule children.
+	subScheduler DynamicSubScheduler
+
+	// outputForAncestors are the delegating-ancestor paths carried
+	// into this activation when it runs as a WithUseAsOutput child;
+	// its dynamic sub-scheduler reads them to stamp OutputFor.
+	outputForAncestors []string
+}
+
+// subSchedulerKey keys the sub-scheduler in the embedded context value
+// chain, so it survives re-wrapping that drops the struct field.
+type subSchedulerKey struct{}
+
+// WithSubScheduler stashes sub in ctx's value chain for SubScheduler()
+// to recover after re-wrapping. Returns ctx unchanged if sub is nil.
+func WithSubScheduler(ctx context.Context, sub DynamicSubScheduler) context.Context {
+	if sub == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, subSchedulerKey{}, sub)
+}
+
+// SubScheduler returns the sub-scheduler RunNode uses to schedule
+// children, or nil outside a dynamic-node activation. The struct field
+// is the fast path for a freshly built dynamic-node context (and takes
+// precedence); the embedded context value is the fallback that survives
+// context re-wrapping by agents and the LLM flow.
+func (c *commonContext) SubScheduler() DynamicSubScheduler {
+	if c.subScheduler != nil {
+		return c.subScheduler
+	}
+	if sub, ok := c.Value(subSchedulerKey{}).(DynamicSubScheduler); ok {
+		return sub
+	}
+	return nil
+}
+
+// Path implements [Context].
+func (c *commonContext) Path() string {
+	return c.path
+}
+
+// RunID implements [Context].
+func (c *commonContext) RunID() string {
+	return c.runID
+}
+
+// withBranch returns ctx wrapped with branch as its Branch().
+// Implemented as a small adapter that overrides only Branch() and
+// delegates the rest of the interface to the embedded ctx.
+func withBranch(ctx Context, branch string) Context {
+	if ctx.Branch() == branch {
+		return ctx
+	}
+	return &branchOverride{Context: ctx, branch: branch}
+}
+
+// branchOverride wraps an InvocationContext and overrides Branch().
+// All other interface methods delegate to the embedded value.
+//
+// WithContext is overridden so the branch survives a subsequent
+// context-cancellation wrap. Without this, a caller that does
+// ctx.WithContext(cancelCtx) would get an InvocationContext whose
+// Branch() returns the inner ctx's branch (empty), silently
+// losing the override.
+type branchOverride struct {
+	Context
+	branch string
+}
+
+func (b *branchOverride) Branch() string {
+	return b.branch
+}
+
+// WithBranch implements [Context].
+func (c *commonContext) WithBranch(branch string) Context {
+	ctx := withBranch(c, branch)
+	return &commonContext{
+		Context:            ctx,
+		invocationContext:  ctx,
+		resumeInputs:       c.resumeInputs,
+		path:               c.path,
+		runID:              c.runID,
+		subScheduler:       c.subScheduler,
+		artifacts:          c.artifacts,
+		actions:            c.actions,
+		functionCallID:     c.functionCallID,
+		toolConfirmation:   c.toolConfirmation,
+		outputForAncestors: c.outputForAncestors,
+	}
+}
+
+// Agent implements [InvocationContext].
+func (c *commonContext) Agent() Agent {
+	return c.invocationContext.Agent()
+}
+
+// EndInvocation implements [InvocationContext].
+func (c *commonContext) EndInvocation() {
+	c.invocationContext.EndInvocation()
+}
+
+// Ended implements [InvocationContext].
+func (c *commonContext) Ended() bool {
+	return c.invocationContext.Ended()
+}
+
+// IsolationScope implements [InvocationContext].
+func (c *commonContext) IsolationScope() string {
+	return c.invocationContext.IsolationScope()
+}
+
+// Memory implements [InvocationContext].
+func (c *commonContext) Memory() Memory {
+	return c.invocationContext.Memory()
+}
+
+// ResumedInput implements [InvocationContext].
+func (c *commonContext) ResumedInput(interruptID string) (any, bool) {
+	if c.resumeInputs != nil {
+		if v, ok := c.resumeInputs[interruptID]; ok {
+			return v, true
+		}
+	}
+	return c.invocationContext.ResumedInput(interruptID)
+}
+
+// RunConfig implements [InvocationContext].
+func (c *commonContext) RunConfig() *RunConfig {
+	return c.invocationContext.RunConfig()
+}
+
+// Session implements [InvocationContext].
+func (c *commonContext) Session() session.Session {
+	return c.invocationContext.Session()
+}
+
+// WithContext implements [InvocationContext].
+func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
+	return c.WithAgentContext(ctx)
+	// //panic("Should not be used")
+	// newCtx := c.invocationContext.WithContext(ctx)
+	// return &commonContext{
+	// 	Context:           newCtx,
+	// 	invocationContext: newCtx,
+	// 	artifacts:         c.artifacts,
+	// 	actions:           c.actions,
+	// 	functionCallID:    c.functionCallID,
+	// 	toolConfirmation:  c.toolConfirmation,
+	// }
+}
+
+func (c *commonContext) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
+	// copy & modify
+	res := *c
+	newC, cancelFunc := context.WithTimeout(res.Context, timeout)
+	res.Context = newC
+	return &res, cancelFunc
+}
+
+func (c *commonContext) WithAgentCancel() (Context, context.CancelFunc) {
+	// copy & modify
+	res := *c
+	newC, cancelFunc := context.WithCancel(res.Context)
+	res.Context = newC
+	return &res, cancelFunc
+}
+
+func (c *commonContext) WithAgentContext(ctx context.Context) Context {
+	res := *c
+	if c, ok := ctx.(InvocationContext); ok {
+		res.Context = c
+		res.invocationContext = c
+	} else {
+		res.Context = ctx
+	}
+	return &res
+
+	// //TODO: other fields???
+	// // newCtx := agent.NewNodeContext(ctx, nil)
+	// return &commonContext{
+	// 	Context:            ic,
+	// 	invocationContext:  ic,
+	// 	artifacts:          c.artifacts,
+	// 	actions:            c.actions,
+	// 	functionCallID:     c.functionCallID,
+	// 	toolConfirmation:   c.toolConfirmation,
+	// 	resumeInputs:       c.resumeInputs,
+	// 	path:               c.path,
+	// 	runID:              c.runID,
+	// 	subScheduler:       c.subScheduler,
+	// 	outputForAncestors: c.outputForAncestors,
+	// }
+}
+
+func (c *commonContext) OutputForAncestors() []string {
+	if c.outputForAncestors == nil {
+		return nil
+	}
+	return c.outputForAncestors
 }
 
 func (c *commonContext) AgentName() string {
@@ -130,7 +378,10 @@ func (c *commonContext) State() session.State {
 }
 
 func (c *commonContext) Artifacts() Artifacts {
-	return c.artifacts
+	if c.artifacts != nil {
+		return c.artifacts
+	}
+	return c.invocationContext.Artifacts()
 }
 
 func (c *commonContext) InvocationID() string {
@@ -158,8 +409,9 @@ func (c *commonContext) UserID() string {
 }
 
 var (
-	_ CallbackContext = (*commonContext)(nil)
-	_ ToolContext     = (*commonContext)(nil)
+	_ Context           = (*commonContext)(nil)
+	_ InvocationContext = (*commonContext)(nil)
+	_ ReadonlyContext   = (*commonContext)(nil)
 )
 
 // --- ToolContext extensions ----------------------------------------------
@@ -220,6 +472,15 @@ func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 	return nil
 }
 
+func (c *commonContext) SetInvocationContext(ic InvocationContext) {
+	c.invocationContext = ic
+	c.Context = ic
+}
+
+func (c *commonContext) InvocationContext() InvocationContext {
+	return c.invocationContext
+}
+
 // callbackContextState is a session.State implementation backed by the
 // callback context's EventActions.StateDelta and the underlying session state.
 type callbackContextState struct {
@@ -232,6 +493,17 @@ func (c *callbackContextState) Get(key string) (any, error) {
 			return val, nil
 		}
 	}
+	if c.ctx.invocationContext == nil {
+		return nil, fmt.Errorf("cannot get key %q from state: invocation context is nil", key)
+	}
+	s := c.ctx.invocationContext.Session()
+	if s == nil {
+		return nil, fmt.Errorf("cannot get key %q from state: session is nil", key)
+	}
+	state := s.State()
+	if state == nil {
+		return nil, fmt.Errorf("cannot get key %q from state: state is nil", key)
+	}
 	return c.ctx.invocationContext.Session().State().Get(key)
 }
 
@@ -239,6 +511,18 @@ func (c *callbackContextState) Set(key string, val any) error {
 	if c.ctx.actions != nil && c.ctx.actions.StateDelta != nil {
 		c.ctx.actions.StateDelta[key] = val
 	}
+	if c.ctx.invocationContext == nil {
+		return fmt.Errorf("cannot set key %q to state: invocation context is nil", key)
+	}
+	s := c.ctx.invocationContext.Session()
+	if s == nil {
+		return fmt.Errorf("cannot set key %q to state: session is nil", key)
+	}
+	state := s.State()
+	if state == nil {
+		return fmt.Errorf("cannot set key %q to state: state is nil", key)
+	}
+
 	return c.ctx.invocationContext.Session().State().Set(key, val)
 }
 

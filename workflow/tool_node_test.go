@@ -39,7 +39,7 @@ func TestToolNode_New(t *testing.T) {
 	myTool, err := functiontool.New(functiontool.Config{
 		Name:        "test_tool",
 		Description: "a test tool",
-	}, func(ctx agent.ToolContext, in Input) (Output, error) {
+	}, func(ctx agent.Context, in Input) (Output, error) {
 		return Output{Result: strings.ToUpper(in.Value)}, nil
 	})
 	if err != nil {
@@ -128,7 +128,7 @@ func TestToolNode_Run(t *testing.T) {
 			tool: func() (tool.Tool, error) {
 				return functiontool.New(functiontool.Config{
 					Name: "greet",
-				}, func(ctx agent.ToolContext, in Input) (Output, error) {
+				}, func(ctx agent.Context, in Input) (Output, error) {
 					return Output{Greeting: "Hello " + in.Name}, nil
 				})
 			},
@@ -154,7 +154,7 @@ func TestToolNode_Run(t *testing.T) {
 			tool: func() (tool.Tool, error) {
 				return functiontool.New(functiontool.Config{
 					Name: "greet",
-				}, func(ctx agent.ToolContext, in Input) (string, error) {
+				}, func(ctx agent.Context, in Input) (string, error) {
 					return "HELLO " + strings.ToUpper(in.Name), nil
 				})
 			},
@@ -172,7 +172,7 @@ func TestToolNode_Run(t *testing.T) {
 			tool: func() (tool.Tool, error) {
 				return functiontool.New(functiontool.Config{
 					Name: "test_tool",
-				}, func(ctx agent.ToolContext, in map[string]any) (map[string]any, error) {
+				}, func(ctx agent.Context, in map[string]any) (map[string]any, error) {
 					return map[string]any{"result": "not-an-int"}, nil
 				})
 			},
@@ -187,7 +187,7 @@ func TestToolNode_Run(t *testing.T) {
 			tool: func() (tool.Tool, error) {
 				return functiontool.New(functiontool.Config{
 					Name: "fail_tool",
-				}, func(ctx agent.ToolContext, in Input) (*Output, error) {
+				}, func(ctx agent.Context, in Input) (*Output, error) {
 					return nil, errors.New("something went wrong")
 				})
 			},
@@ -202,7 +202,7 @@ func TestToolNode_Run(t *testing.T) {
 			tool: func() (tool.Tool, error) {
 				return functiontool.New(functiontool.Config{
 					Name: "greet",
-				}, func(ctx agent.ToolContext, in Input) (Output, error) {
+				}, func(ctx agent.Context, in Input) (Output, error) {
 					return Output{Greeting: "Hello " + in.Name}, nil
 				})
 			},
@@ -237,7 +237,8 @@ func TestToolNode_Run(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ValidateInput failed: %v", err)
 			}
-			events := node.Run(mockCtx, validatedInput)
+			exCtx := agent.NewNodeContext(mockCtx, nil)
+			events := node.Run(exCtx, validatedInput)
 
 			var got string
 			count := 0
@@ -304,7 +305,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			doubleTool, err := functiontool.New(functiontool.Config{
 				Name: "double",
-			}, func(ctx agent.ToolContext, in *Input) (Output, error) {
+			}, func(ctx agent.Context, in *Input) (Output, error) {
 				return Output{Result: in.Val * 2}, nil
 			})
 			if err != nil {
@@ -317,7 +318,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 			}
 
 			// Connect to a function node.
-			functionNode := NewFunctionNode[Output, int]("plus_one", func(ctx agent.InvocationContext, in Output) (int, error) {
+			functionNode := NewFunctionNode[Output, int]("plus_one", func(ctx agent.Context, in Output) (int, error) {
 				return in.Result + 1, nil
 			}, defaultNodeConfig)
 
@@ -326,7 +327,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 			t.Run("WorkflowExecution", func(t *testing.T) {
 				// Use a seed node to pass the struct input to toolNode,
 				// since Workflow.Run currently only passes strings from UserContent.
-				seedNode := NewFunctionNode("seed", func(ctx agent.InvocationContext, input any) (*Input, error) {
+				seedNode := NewFunctionNode("seed", func(ctx agent.Context, input any) (*Input, error) {
 					return &Input{Val: tc.input}, nil
 				}, defaultNodeConfig)
 
