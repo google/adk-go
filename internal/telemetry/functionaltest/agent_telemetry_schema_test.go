@@ -75,6 +75,7 @@ func TestTelemetrySchema_AgentWithTool(t *testing.T) {
 			} else {
 				t.Setenv(captureMessageContentEnvVar, "")
 			}
+			telemetry.ApplyEnv()
 
 			// Install in-memory tracer + logger so the test sees
 			// every span/log without depending on global OTel state.
