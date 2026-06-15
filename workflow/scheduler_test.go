@@ -751,6 +751,22 @@ func (n *validationTestNode) Run(ctx agent.Context, input any) iter.Seq2[*sessio
 	}
 }
 
+// roleTestNode emits an event whose Content has Parts but no Role,
+// like FunctionNode / BaseNode-derived nodes that build Content directly.
+type roleTestNode struct {
+	BaseNode
+}
+
+func (n *roleTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Output = "hi"
+		// Content with Parts but deliberately no Role.
+		ev.Content = &genai.Content{Parts: []*genai.Part{{Text: "hi"}}}
+		yield(ev, nil)
+	}
+}
+
 // TestScheduler_ValidateOutput_ValidPasses verifies that a node whose
 // yielded output conforms to its output_schema is forwarded unchanged.
 func TestScheduler_ValidateOutput_ValidPasses(t *testing.T) {
@@ -843,6 +859,98 @@ func (n *schemaValidatedNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.E
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Output = n.output
 		yield(ev, nil)
+	}
+}
+
+// TestScheduler_StampsContentRole verifies the scheduler fills
+// Content.Role with "model" for node events that left it empty,
+// while leaving an explicitly-set role untouched.
+func TestScheduler_StampsContentRole(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	node := &roleTestNode{BaseNode: NewBaseNode("emitter", "", defaultNodeConfig)}
+	w := mustNew(t, []Edge{{From: Start, To: node}})
+
+	var sawContent bool
+	for _, ev := range drain(t, w.Run(mockCtx)) {
+		if ev == nil || ev.Content == nil {
+			continue
+		}
+		sawContent = true
+		if ev.Content.Role != genai.RoleModel {
+			t.Errorf("Content.Role = %q, want %q", ev.Content.Role, genai.RoleModel)
+		}
+	}
+	if !sawContent {
+		t.Fatal("no event with Content observed")
+	}
+}
+
+// preRoledNode sets an explicit non-model role to confirm the
+// scheduler does not overwrite a role the node already chose.
+type preRoledNode struct {
+	BaseNode
+}
+
+func (n *preRoledNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Content = &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "x"}}}
+		yield(ev, nil)
+	}
+}
+
+func TestScheduler_PreservesExplicitContentRole(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	node := &preRoledNode{BaseNode: NewBaseNode("preroled", "", defaultNodeConfig)}
+	w := mustNew(t, []Edge{{From: Start, To: node}})
+
+	for _, ev := range drain(t, w.Run(mockCtx)) {
+		if ev != nil && ev.Content != nil && ev.Content.Role != "user" {
+			t.Errorf("Content.Role = %q, want it preserved as %q", ev.Content.Role, "user")
+		}
+	}
+}
+
+// funcResponseNode emits an event whose Content carries a
+// FunctionResponse part but no Role, like a node forwarding a tool
+// result built directly.
+type funcResponseNode struct {
+	BaseNode
+}
+
+func (n *funcResponseNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Content = &genai.Content{Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{Name: "f", Response: map[string]any{"ok": true}},
+		}}}
+		yield(ev, nil)
+	}
+}
+
+// TestScheduler_StampsFunctionResponseRoleUser verifies that Content
+// carrying a FunctionResponse part defaults to "user" (app/tool
+// authored), not "model".
+func TestScheduler_StampsFunctionResponseRoleUser(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	node := &funcResponseNode{BaseNode: NewBaseNode("fr", "", defaultNodeConfig)}
+	w := mustNew(t, []Edge{{From: Start, To: node}})
+
+	var sawContent bool
+	for _, ev := range drain(t, w.Run(mockCtx)) {
+		if ev == nil || ev.Content == nil {
+			continue
+		}
+		sawContent = true
+		if ev.Content.Role != genai.RoleUser {
+			t.Errorf("Content.Role = %q, want %q", ev.Content.Role, genai.RoleUser)
+		}
+	}
+	if !sawContent {
+		t.Fatal("no event with Content observed")
 	}
 }
 
