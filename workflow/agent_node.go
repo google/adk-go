@@ -76,31 +76,10 @@ func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 // Run implements the Node interface.
 func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		validatedInput, err := n.ValidateInput(input)
+		userContent, err := nodeInputToContent(input)
 		if err != nil {
 			yield(nil, err)
 			return
-		}
-
-		var userContent *genai.Content
-		if validatedInput != nil {
-			switch v := validatedInput.(type) {
-			case string:
-				userContent = &genai.Content{
-					Parts: []*genai.Part{{Text: v}},
-				}
-			case *genai.Content:
-				userContent = v
-			default:
-				b, err := json.Marshal(v)
-				if err != nil {
-					yield(nil, fmt.Errorf("marshaling input for agent %q to JSON: %w", n.agent.Name(), err))
-					return
-				}
-				userContent = &genai.Content{
-					Parts: []*genai.Part{{Text: string(b)}},
-				}
-			}
 		}
 
 		// Use existing agent context instead of implementing a new one.
@@ -129,7 +108,7 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 
 		var events iter.Seq2[*session.Event, error]
 		if runner, ok := n.agent.(NodeRunner); ok {
-			events = runner.RunNode(exCtx, validatedInput)
+			events = runner.RunNode(exCtx, input)
 		} else {
 			events = n.agent.Run(exCtx)
 		}
@@ -218,4 +197,27 @@ func childEventOutput(event *session.Event) (any, bool) {
 		}
 	}
 	return nil, false
+}
+
+func nodeInputToContent(input any) (*genai.Content, error) {
+	switch v := input.(type) {
+	case nil:
+		return nil, nil
+	case *genai.Content:
+		return &genai.Content{Role: "user", Parts: v.Parts}, nil
+	case string:
+		return &genai.Content{Role: "user", Parts: []*genai.Part{{Text: v}}}, nil
+	case json.Marshaler:
+		b, err := v.MarshalJSON()
+		if err != nil {
+			return nil, fmt.Errorf("marshaling input: %w", err)
+		}
+		return &genai.Content{Role: "user", Parts: []*genai.Part{{Text: string(b)}}}, nil
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling input to JSON: %w", err)
+		}
+		return &genai.Content{Role: "user", Parts: []*genai.Part{{Text: string(b)}}}, nil
+	}
 }
