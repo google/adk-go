@@ -123,7 +123,18 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		agentCtx := internalcontext.NewInvocationContext(ctx, params)
 		exCtx := agent.NewNodeContext(agentCtx, nil)
 
-		for event, err := range n.agent.Run(exCtx) {
+		type NodeRunner interface {
+			RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
+		}
+
+		var events iter.Seq2[*session.Event, error]
+		if runner, ok := n.agent.(NodeRunner); ok {
+			events = runner.RunNode(exCtx, validatedInput)
+		} else {
+			events = n.agent.Run(exCtx)
+		}
+
+		for event, err := range events {
 			if err != nil {
 				yield(nil, err)
 				return
