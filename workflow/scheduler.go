@@ -643,9 +643,7 @@ func (s *scheduler) handleEvent(it eventItem) {
 	// Default Content.Role for nodes that left it empty
 	// (FunctionNode/BaseNode set Parts but not Role); clients like
 	// the web UI rely on it. Before the descendant short-circuit so
-	// dynamic children are covered too. A FunctionResponse part is
-	// authored by the app/tool, so it takes "user" (matching the LLM
-	// flow and adk-python); everything else is model-authored.
+	// dynamic children are covered too.
 	if it.ev.Content != nil && it.ev.Content.Role == "" {
 		it.ev.Content.Role = defaultContentRole(it.ev.Content)
 	}
