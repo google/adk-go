@@ -14,8 +14,57 @@
 
 package utils_test
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
 
-func TestNothing(t *testing.T) {
-	// To make it buildable.
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/platform"
+)
+
+func TestGenerateFunctionCallIDUsesProvider(t *testing.T) {
+	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "fixed" })
+
+	got := utils.GenerateFunctionCallID(ctx)
+
+	// The generated ID must carry the "adk-" prefix that RemoveClientFunctionCallID
+	// relies on, and must incorporate the value from the installed provider.
+	if !strings.HasPrefix(got, "adk-") {
+		t.Errorf("GenerateFunctionCallID() = %q, want \"adk-\" prefix", got)
+	}
+	if !strings.HasSuffix(got, "fixed") {
+		t.Errorf("GenerateFunctionCallID() = %q, want it to use the provider value %q", got, "fixed")
+	}
+}
+
+func TestGenerateFunctionCallIDDefaultIsUnique(t *testing.T) {
+	first := utils.GenerateFunctionCallID(context.Background())
+	second := utils.GenerateFunctionCallID(context.Background())
+
+	if first == second {
+		t.Errorf("GenerateFunctionCallID() returned %q twice; want unique values", first)
+	}
+}
+
+func TestPopulateClientFunctionCallIDUsesProvider(t *testing.T) {
+	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "generated" })
+
+	content := &genai.Content{
+		Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "needs_id"}},
+			{FunctionCall: &genai.FunctionCall{ID: "keep", Name: "has_id"}},
+		},
+	}
+
+	utils.PopulateClientFunctionCallID(ctx, content)
+
+	if got := content.Parts[0].FunctionCall.ID; got != "adk-generated" {
+		t.Errorf("empty function call ID = %q, want %q", got, "adk-generated")
+	}
+	if got := content.Parts[1].FunctionCall.ID; got != "keep" {
+		t.Errorf("preset function call ID = %q, want it left untouched (%q)", got, "keep")
+	}
 }

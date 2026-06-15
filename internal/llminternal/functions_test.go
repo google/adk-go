@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -54,6 +55,11 @@ func (m *mockInvocationContext) Agent() agent.Agent {
 func (m *mockInvocationContext) Branch() string {
 	return m.branch
 }
+
+func (m *mockInvocationContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (m *mockInvocationContext) Done() <-chan struct{}       { return nil }
+func (m *mockInvocationContext) Err() error                  { return nil }
+func (m *mockInvocationContext) Value(any) any               { return nil }
 
 func TestGenerateRequestConfirmationEvent(t *testing.T) {
 	confirmingFunctionCall := &genai.FunctionCall{
