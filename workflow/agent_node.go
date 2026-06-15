@@ -127,13 +127,14 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
 		}
 
-		runner, ok := n.agent.(NodeRunner)
-		if !ok {
-			yield(nil, fmt.Errorf("agent %q does not implement NodeRunner", n.agent.Name()))
-			return
+		var events iter.Seq2[*session.Event, error]
+		if runner, ok := n.agent.(NodeRunner); ok {
+			events = runner.RunNode(exCtx, validatedInput)
+		} else {
+			events = n.agent.Run(exCtx)
 		}
 
-		for event, err := range runner.RunNode(exCtx, validatedInput) {
+		for event, err := range events {
 			if err != nil {
 				yield(nil, err)
 				return

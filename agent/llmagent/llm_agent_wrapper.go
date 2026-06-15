@@ -90,45 +90,41 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			}
 		}
 
-		// Build the per-agent InvocationContext used to drive
-		// Agent.Run. The wrapper:
+		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
-		//   - for task/single_turn modes, threads isolation_scope so the
-		//     content processor filters session events to this scope only
-		//     (chat coordinators stay unscoped and see the full
+		//   - threads isolation_scope so the content processor
+		//     filters session events to this scope only (chat
+		//     coordinators stay unscoped and see the full
 		//     conversation).
-		//   - overrides UserContent for task and single_turn modes so the
-		//     content builder has a first-turn fallback when the session
-		//     does not (yet) carry one,
+		//   - overrides UserContent so the content builder has a
+		//     first-turn fallback when the session does not (yet)
+		//     carry one,
 		//   - relies on the embedded InvocationContext for everything
 		//     else (memory, run config, etc.).
-		userContent := ctx.UserContent()
-		if (state.Mode == llminternal.ModeTask || state.Mode == llminternal.ModeSingleTurn) && nodeInput != nil {
-			userContent = nodeInputToContent(nodeInput)
-		}
-		isolationScope := ""
-		if state.Mode == llminternal.ModeTask || state.Mode == llminternal.ModeSingleTurn {
-			isolationScope = ctx.IsolationScope()
-		}
-		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-			Artifacts:      ctx.Artifacts(),
-			Memory:         ctx.Memory(),
-			Session:        ctx.Session(),
-			Branch:         ctx.Branch(),
-			IsolationScope: isolationScope,
-			Agent:          a,
-			UserContent:    userContent,
-			RunConfig:      ctx.RunConfig(),
-			InvocationID:   ctx.InvocationID(),
-		})
-
 		switch state.Mode {
-		case llminternal.ModeSingleTurn:
-			runSingleTurn(a, ic, yield)
 		case llminternal.ModeChat:
-			runChat(a, ic, yield)
-		case llminternal.ModeTask:
-			runTask(a, ic, yield)
+			runChat(a, ctx, yield)
+		case llminternal.ModeSingleTurn, llminternal.ModeTask:
+			userContent := ctx.UserContent()
+			if nodeInput != nil {
+				userContent = nodeInputToContent(nodeInput)
+			}
+			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+				Artifacts:      ctx.Artifacts(),
+				Memory:         ctx.Memory(),
+				Session:        ctx.Session(),
+				Branch:         ctx.Branch(),
+				IsolationScope: ctx.IsolationScope(),
+				Agent:          a,
+				UserContent:    userContent,
+				RunConfig:      ctx.RunConfig(),
+				InvocationID:   ctx.InvocationID(),
+			})
+			if state.Mode == llminternal.ModeSingleTurn {
+				runSingleTurn(a, ic, yield)
+			} else {
+				runTask(a, ic, yield)
+			}
 		}
 	}
 }
@@ -211,7 +207,7 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 		parsed, err := utils.ValidateOutputSchema(text, state.OutputSchema)
 		if err != nil {
 			// TODO: we should return error, once output_schema with tools is supported. As right now there's no guarantee that the actual LLM output will be compliant with set output_schema.
-			//log.Default().Printf("LlmAgent %q output validation failed: %v", a.Name(), err)
+			// log.Default().Printf("LlmAgent %q output validation failed: %v", a.Name(), err)
 			output = text
 		} else {
 			output = parsed
