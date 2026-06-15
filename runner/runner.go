@@ -34,6 +34,7 @@ import (
 	imemory "google.golang.org/adk/internal/memory"
 	"google.golang.org/adk/internal/plugininternal"
 	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/plugin"
@@ -627,11 +628,78 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	if stateDelta != nil {
 		event.Actions.StateDelta = stateDelta
 	}
+	// When a paused task delegation is still in flight (e.g. a
+	// task sub-agent's confirmation request awaiting the user's
+	// reply), stamp the new user message with that task's
+	// isolation_scope so the task agent's content-build (scoped to
+	// <fc_id>) sees it, and so any FunctionResponse the framework
+	// synthesises for the resume turn inherits the same scope as
+	// its originating FunctionCall — preventing FC/FR scope
+	// mismatches in the contents processor. Mirrors adk-python's
+	// Runner._append_user_event (runners.py:754-757) +
+	// _find_active_task_isolation_scope.
+	if event.IsolationScope == "" {
+		if iso := findActiveTaskIsolationScope(storedSession); iso != "" {
+			event.IsolationScope = iso
+		}
+	}
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 		return ctx, nil, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
 	return ctx, event, nil
+}
+
+// findActiveTaskIsolationScope walks the session backwards and returns
+// the most recent isolation_scope that has not yet been closed by a
+// successful finish_task FunctionResponse. Two flavours of task scope
+// open new scopes today:
+//
+//   - FC delegation (chat coordinator → task sub-agent via FunctionCall):
+//     scope = fc.id, opened by an unresolved task FC.
+//   - Workflow dynamic node (task-mode LlmAgent dispatched as a graph
+//     node): scope = "<node_name>@<run_id>", stamped on every event the
+//     task agent emits.
+//
+// Both close on a successful finish_task FunctionResponse (one whose
+// Response carries {"result": FinishTaskSuccessResult}). An error FR
+// (validation failure) does NOT close the scope: the task agent is
+// still active, will see the error, and retry. Walking backward, the
+// first non-empty scope we encounter that hasn't been closed by a
+// later successful finish_task is the paused task awaiting the user's
+// next reply.
+//
+// Mirrors adk-python's _find_active_task_isolation_scope
+// (runners.py:70-106).
+func findActiveTaskIsolationScope(sess session.Session) string {
+	if sess == nil {
+		return ""
+	}
+	events := sess.Events()
+	finished := map[string]struct{}{}
+	for i := events.Len() - 1; i >= 0; i-- {
+		ev := events.At(i)
+		if ev == nil || ev.IsolationScope == "" {
+			continue
+		}
+		scope := ev.IsolationScope
+		for _, fr := range utils.FunctionResponses(ev.Content) {
+			if fr == nil || fr.Name != workflowinternal.FinishTaskToolName {
+				continue
+			}
+			if result, ok := fr.Response["result"]; ok {
+				if s, ok := result.(string); ok && s == workflowinternal.FinishTaskSuccessResult {
+					finished[scope] = struct{}{}
+				}
+			}
+			break
+		}
+		if _, done := finished[scope]; done {
+			continue
+		}
+		return scope
+	}
+	return ""
 }
 
 // findAgentToRun returns the agent that should handle the next request based on

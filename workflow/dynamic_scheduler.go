@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/session"
 )
 
@@ -336,6 +337,15 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	var (
 		out         any
 		interrupted bool
+		// pendingLongRunningIDs collects FunctionCall IDs the child
+		// emitted as long-running (listed in the emitting event's
+		// LongRunningToolIDs). Each is removed when we later see a
+		// matching FunctionResponse from the child. Any IDs left
+		// at the end of the child's iteration represent tools the
+		// child is still waiting on — used by WithRaiseOnWait to
+		// distinguish "child paused for HITL" from "child finished
+		// cleanly with no output".
+		pendingLongRunningIDs map[string]struct{}
 	)
 	for ev, evErr := range child.Run(childCtx, input) {
 		if evErr != nil {
@@ -368,6 +378,39 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		if ev.RequestedInput != nil {
 			interrupted = true
 		}
+		// Track LongRunningToolIDs vs FunctionResponses for
+		// WithRaiseOnWait. The check runs unconditionally so this
+		// stays cheap even when the option is off — only one map
+		// lookup per FC / FR and the maps stay empty when there
+		// are no long-running tools at play.
+		if opts.raiseOnWait {
+			if len(ev.LongRunningToolIDs) > 0 {
+				lrtSet := make(map[string]struct{}, len(ev.LongRunningToolIDs))
+				for _, id := range ev.LongRunningToolIDs {
+					lrtSet[id] = struct{}{}
+				}
+				for _, fc := range utils.FunctionCalls(ev.Content) {
+					if fc == nil || fc.ID == "" {
+						continue
+					}
+					if _, isLR := lrtSet[fc.ID]; !isLR {
+						continue
+					}
+					if pendingLongRunningIDs == nil {
+						pendingLongRunningIDs = map[string]struct{}{}
+					}
+					pendingLongRunningIDs[fc.ID] = struct{}{}
+				}
+			}
+			if len(pendingLongRunningIDs) > 0 {
+				for _, fr := range utils.FunctionResponses(ev.Content) {
+					if fr == nil {
+						continue
+					}
+					delete(pendingLongRunningIDs, fr.ID)
+				}
+			}
+		}
 		if childOut, ok := childEventOutput(ev); ok {
 			validated, err := validateAndStampOutput(child, childOut, ev)
 			if err != nil {
@@ -399,6 +442,17 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		}
 	}
 
+	// With WithRaiseOnWait, an unresolved long-running tool (e.g. a
+	// tool that called ctx.RequestConfirmation and is awaiting the
+	// user's reply) counts as an interruption. Without it, the child
+	// would return (nil, nil) and the caller (a chat coordinator
+	// dispatching this task) would synthesise a completion FR that
+	// falsely closes the still-open delegation — orphaning the FR
+	// the request_confirmation processor synthesises on the next
+	// user turn.
+	if opts.raiseOnWait && len(pendingLongRunningIDs) > 0 {
+		interrupted = true
+	}
 	if interrupted {
 		// HITL is not terminal — parent re-runs on resume and is
 		// expected to re-invoke RunNode. Do not cache.

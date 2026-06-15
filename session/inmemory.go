@@ -229,6 +229,14 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		Timestamp:    event.Timestamp,
 		Author:       event.Author,
 		Branch:       event.Branch,
+		// IsolationScope MUST be preserved on append: subsequent
+		// LlmAgent runs in the same session rely on it for scope-based
+		// event filtering in the contents processor. Dropping it
+		// orphans a sub-agent's persisted FCs from later FRs the
+		// framework synthesises for the same delegation, producing
+		// "no function call event found for function responses ids"
+		// errors on the next turn.
+		IsolationScope: event.IsolationScope,
 		Actions: EventActions{
 			StateDelta:                 maps.Clone(event.Actions.StateDelta),
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
