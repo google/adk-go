@@ -109,7 +109,7 @@ func (p *replayPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, e
 }
 
 // beforeModel intercepts LLM requests, verifies them against the recording, and returns the recorded response.
-func (p *replayPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequest) (*model.LLMResponse, error) {
+func (p *replayPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	on, err := p.isReplayModeOn(ctx.State())
 	if err != nil {
 		return nil, err
@@ -137,7 +137,7 @@ func (p *replayPlugin) beforeModel(ctx agent.CallbackContext, req *model.LLMRequ
 }
 
 // beforeTool intercepts tool calls, verifies them against the recording, and returns the recorded response.
-func (p *replayPlugin) beforeTool(ctx agent.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
+func (p *replayPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	on, err := p.isReplayModeOn(ctx.State())
 	if err != nil {
 		return nil, err
@@ -235,7 +235,7 @@ func (p *replayPlugin) isReplayModeOn(sessionState session.State) (bool, error) 
 }
 
 // getInvocationState retrieves the replay state for the current invocation.
-func (p *replayPlugin) getInvocationState(ctx agent.CallbackContext) (*invocationReplayState, error) {
+func (p *replayPlugin) getInvocationState(ctx agent.Context) (*invocationReplayState, error) {
 	invocationID := ctx.InvocationID()
 	state, ok := p.invocationStates[invocationID]
 	if !ok {

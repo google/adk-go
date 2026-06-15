@@ -22,7 +22,7 @@ import (
 // NewCallbackContext returns a CallbackContext suitable for model, tool, and
 // related callbacks. The returned context's Artifacts().Save tracks each saved
 // artifact's version into the underlying EventActions.ArtifactDelta.
-func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
+func NewCallbackContext(ctx agent.InvocationContext) agent.Context {
 	return agent.NewCallbackContextWithArtifactTracking(ctx, nil)
 }
 
@@ -30,7 +30,7 @@ func NewCallbackContext(ctx agent.InvocationContext) agent.CallbackContext {
 // stateDelta and artifactDelta maps as the initial backing storage for its
 // EventActions. The returned context's Artifacts().Save tracks each saved
 // artifact's version into artifactDelta.
-func NewCallbackContextWithDelta(ctx agent.InvocationContext, stateDelta map[string]any, artifactDelta map[string]int64) agent.CallbackContext {
+func NewCallbackContextWithDelta(ctx agent.InvocationContext, stateDelta map[string]any, artifactDelta map[string]int64) agent.Context {
 	actions := &session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta}
 	return agent.NewCallbackContextWithArtifactTracking(ctx, actions)
 }

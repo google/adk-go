@@ -490,7 +490,7 @@ func (m *MockCallbackContext) SearchMemory(ctx context.Context, query string) (*
 	return nil, fmt.Errorf("SearchMemory() is not supported for MockCallbackContext")
 }
 
-var _ agent.CallbackContext = (*MockCallbackContext)(nil)
+var _ agent.Context = (*MockCallbackContext)(nil)
 
 type MockToolContext struct {
 	agent.ContextMock // inherit mocking responses
