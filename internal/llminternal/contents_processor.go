@@ -22,6 +22,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -139,6 +140,9 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 		processedEvents = append(processedEvents, ev)
 	}
 	filtered = processedEvents
+
+	// Apply compaction: inject summaries and skip events in compacted ranges.
+	filtered = applyCompaction(agentName, filtered)
 
 	//  src/google/adk/flows/llm_flows/contents.py
 	// 	 - _rearrange_events_for_async_function_response
@@ -588,6 +592,84 @@ func shouldExcludeEvent(ev *session.Event) bool {
 		}
 	}
 	return false
+}
+
+// applyCompaction replaces events within each non-subsumed compaction range
+// with the compaction's summary content. Compaction marker events are always
+// removed from the output.
+//
+// A compaction C is subsumed when another compaction C2 fully covers its range
+// (C2.start <= C.start && C2.end >= C.end). Subsumed compactions are hidden so
+// only the widest covering summary is injected.
+func applyCompaction(agentName string, events []*session.Event) []*session.Event {
+	type compRange struct {
+		startTS, endTS time.Time
+		content        *genai.Content
+		ev             *session.Event
+	}
+
+	var ranges []compRange
+	for _, ev := range events {
+		if ev.Actions.Compaction != nil {
+			c := ev.Actions.Compaction
+			ranges = append(ranges, compRange{c.StartTimestamp, c.EndTimestamp, c.CompactedContent, ev})
+		}
+	}
+	if len(ranges) == 0 {
+		return events
+	}
+
+	// Remove subsumed compactions.
+	active := make([]compRange, 0, len(ranges))
+	for _, r := range ranges {
+		subsumed := false
+		for _, r2 := range ranges {
+			if r2.ev == r.ev {
+				continue
+			}
+			if !r2.startTS.After(r.startTS) && !r2.endTS.Before(r.endTS) {
+				subsumed = true
+				break
+			}
+		}
+		if !subsumed {
+			active = append(active, r)
+		}
+	}
+
+	sort.Slice(active, func(i, j int) bool {
+		return active[i].startTS.Before(active[j].startTS)
+	})
+
+	injected := make([]bool, len(active))
+	result := make([]*session.Event, 0, len(events))
+	for _, ev := range events {
+		// Compaction marker events are never emitted.
+		if ev.Actions.Compaction != nil {
+			continue
+		}
+		inRange := -1
+		for i, r := range active {
+			if !ev.Timestamp.Before(r.startTS) && !ev.Timestamp.After(r.endTS) {
+				inRange = i
+				break
+			}
+		}
+		if inRange >= 0 {
+			if !injected[inRange] && active[inRange].content != nil {
+				summaryEv := &session.Event{
+					Timestamp:   active[inRange].startTS,
+					Author:      agentName,
+					LLMResponse: model.LLMResponse{Content: active[inRange].content},
+				}
+				result = append(result, summaryEv)
+				injected[inRange] = true
+			}
+			continue
+		}
+		result = append(result, ev)
+	}
+	return result
 }
 
 func cloneEvent(e *session.Event) *session.Event {

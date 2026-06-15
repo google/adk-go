@@ -23,6 +23,7 @@ import (
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/platform"
 	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/genai"
 )
 
 // Session represents a series of interactions between a user and agents.
@@ -117,6 +118,14 @@ type Event struct {
 	LongRunningToolIDs []string
 }
 
+// IsCompactionMarker returns true when this event carries a compaction summary
+// rather than a regular model or user response. Compaction markers are excluded
+// from normal content rendering and handled by the compaction pass in
+// buildContentsDefault.
+func (e *Event) IsCompactionMarker() bool {
+	return e.Actions.Compaction != nil
+}
+
 // IsFinalResponse returns whether the event is the final response of an agent.
 //
 // Note: when multiple agents participate in one invocation, there could be
@@ -172,6 +181,23 @@ type EventActions struct {
 	TransferToAgent string
 	// The agent is escalating to a higher level agent.
 	Escalate bool
+	// Compaction, when non-nil, marks this event as a compaction record.
+	// The event has no meaningful Content; its role is to carry the summary
+	// that replaces the events in [StartTimestamp, EndTimestamp] during
+	// content assembly.
+	Compaction *EventCompaction
+}
+
+// EventCompaction records that a contiguous range of session events was
+// summarized. The summary in CompactedContent replaces those events when
+// building the LLM context window.
+type EventCompaction struct {
+	// StartTimestamp is the timestamp of the first event that was compacted.
+	StartTimestamp time.Time
+	// EndTimestamp is the timestamp of the last event that was compacted.
+	EndTimestamp time.Time
+	// CompactedContent is the summary that replaces the compacted event range.
+	CompactedContent *genai.Content
 }
 
 // Prefixes for defining session's state scopes
