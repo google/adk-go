@@ -816,3 +816,44 @@ func TestScheduler_PreservesExplicitContentRole(t *testing.T) {
 		}
 	}
 }
+
+// funcResponseNode emits an event whose Content carries a
+// FunctionResponse part but no Role, like a node forwarding a tool
+// result built directly.
+type funcResponseNode struct {
+	BaseNode
+}
+
+func (n *funcResponseNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx.InvocationID())
+		ev.Content = &genai.Content{Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{Name: "f", Response: map[string]any{"ok": true}},
+		}}}
+		yield(ev, nil)
+	}
+}
+
+// TestScheduler_StampsFunctionResponseRoleUser verifies that Content
+// carrying a FunctionResponse part defaults to "user" (app/tool
+// authored), not "model".
+func TestScheduler_StampsFunctionResponseRoleUser(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	node := &funcResponseNode{BaseNode: NewBaseNode("fr", "", defaultNodeConfig)}
+	w := mustNew(t, []Edge{{From: Start, To: node}})
+
+	var sawContent bool
+	for _, ev := range drain(t, w.Run(mockCtx)) {
+		if ev == nil || ev.Content == nil {
+			continue
+		}
+		sawContent = true
+		if ev.Content.Role != genai.RoleUser {
+			t.Errorf("Content.Role = %q, want %q", ev.Content.Role, genai.RoleUser)
+		}
+	}
+	if !sawContent {
+		t.Fatal("no event with Content observed")
+	}
+}
