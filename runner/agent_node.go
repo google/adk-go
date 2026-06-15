@@ -190,9 +190,12 @@ func answeredOpenInterrupts(sess session.Session) map[string]bool {
 }
 
 // newAgentContext builds the per-agent InvocationContext, inheriting
-// services and branch from ctx (mirrors workflow.AgentNode).
-func newAgentContext(ctx agent.InvocationContext, a agent.Agent, userContent *genai.Content) agent.InvocationContext {
-	return icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+// services and branch from ctx (mirrors workflow.AgentNode). The fresh
+// context drops the node's sub-scheduler, so it is re-stashed in the
+// value chain — letting a tool inside the agent (e.g. SingleTurnTool)
+// recover it via RunNode.
+func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Content) agent.InvocationContext {
+	agentCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:     ctx.Artifacts(),
 		Memory:        ctx.Memory(),
 		Session:       ctx.Session(),
@@ -203,6 +206,10 @@ func newAgentContext(ctx agent.InvocationContext, a agent.Agent, userContent *ge
 		EndInvocation: ctx.Ended(),
 		InvocationID:  ctx.InvocationID(),
 	})
+	if sub := ctx.SubScheduler(); sub != nil {
+		agentCtx = agentCtx.WithContext(agent.WithSubScheduler(agentCtx, sub))
+	}
+	return agentCtx
 }
 
 // inputToUserContent converts a node input value into a user Content for
