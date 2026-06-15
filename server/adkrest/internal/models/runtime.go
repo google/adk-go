@@ -33,6 +33,10 @@ type RunAgentRequest struct {
 
 	StateDelta *map[string]any `json:"stateDelta,omitempty"`
 
+	// FunctionCallEventID identifies the event whose function call this
+	// request answers (e.g. a human-in-the-loop reply from the web UI).
+	// Accepted for adk-python parity but currently ignored; declared so
+	// strict decoding (DisallowUnknownFields) does not reject the request.
 	FunctionCallEventID *string `json:"functionCallEventId,omitempty"`
 }
 
