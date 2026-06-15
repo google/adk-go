@@ -553,6 +553,15 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			if !yield(ev, nil) {
 				return
 			}
+			// Only act on non-partial (finalised) events. Streaming
+			// flows emit partial events with the same content as the
+			// eventual final aggregated event; partials are not
+			// persisted to the session, so dispatching off a partial
+			// would synthesise an FR whose matching FC is absent from
+			// history, breaking the next LLM turn's content rearrange.
+			if ev == nil || ev.LLMResponse.Partial {
+				continue
+			}
 			taskFCs := extractTaskDelegationFCs(ev, toolsDict)
 			for _, fc := range taskFCs {
 				if !dispatchAndYield(fc) {
