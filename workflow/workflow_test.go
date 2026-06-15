@@ -34,7 +34,7 @@ import (
 var defaultNodeConfig = NodeConfig{}
 
 // MockInvocationContext is a minimal implementation of
-// agent.InvocationContext for testing. It embeds a real
+// agent.Context for testing. It embeds a real
 // context.Context so child cancellation works.
 type MockInvocationContext struct {
 	context.Context
@@ -93,7 +93,7 @@ func (m *MockInvocationContext) WithContext(ctx context.Context) agent.Invocatio
 }
 
 func TestFunctionNode(t *testing.T) {
-	upperFn := func(ctx agent.InvocationContext, input string) (string, error) {
+	upperFn := func(ctx agent.Context, input string) (string, error) {
 		return strings.ToUpper(input), nil
 	}
 
@@ -101,9 +101,10 @@ func TestFunctionNode(t *testing.T) {
 
 	// Create a mock context
 	mockCtx := newMockCtx(t)
+	exCtx := agent.NewNodeContext(mockCtx, nil)
 
 	// Run the node
-	events := node.Run(mockCtx, "hello")
+	events := node.Run(exCtx, "hello")
 
 	count := 0
 	for ev, err := range events {
@@ -123,7 +124,7 @@ func TestFunctionNode(t *testing.T) {
 }
 
 func TestSequentialWorkflow(t *testing.T) {
-	upperFn := func(ctx agent.InvocationContext, input any) (string, error) {
+	upperFn := func(ctx agent.Context, input any) (string, error) {
 		s, ok := input.(string)
 		if !ok {
 			return "", fmt.Errorf("expected string input")
@@ -131,7 +132,7 @@ func TestSequentialWorkflow(t *testing.T) {
 		return strings.ToUpper(s), nil
 	}
 
-	suffixFn := func(ctx agent.InvocationContext, input string) (string, error) {
+	suffixFn := func(ctx agent.Context, input string) (string, error) {
 		return input + " done", nil
 	}
 
@@ -246,7 +247,7 @@ type CustomRouteNode struct {
 	onRun func()
 }
 
-func (n *CustomRouteNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *CustomRouteNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	if n.onRun != nil {
 		n.onRun()
 	}
@@ -283,11 +284,11 @@ func TestWorkflowRouting(t *testing.T) {
 		nodeX := &CustomRouteNode{
 			BaseNode: NewBaseNode("X", "", defaultNodeConfig),
 		}
-		nodeA := NewFunctionNode("A", func(ctx agent.InvocationContext, input any) (string, error) {
+		nodeA := NewFunctionNode("A", func(ctx agent.Context, input any) (string, error) {
 			record(tracker, "A")
 			return "pathA", nil
 		}, defaultNodeConfig)
-		nodeB := NewFunctionNode("B", func(ctx agent.InvocationContext, input any) (string, error) {
+		nodeB := NewFunctionNode("B", func(ctx agent.Context, input any) (string, error) {
 			record(tracker, "B")
 			return "pathB", nil
 		}, defaultNodeConfig)
@@ -298,7 +299,7 @@ func TestWorkflowRouting(t *testing.T) {
 				record(tracker, "C")
 			},
 		}
-		nodeD := NewFunctionNode("D", func(ctx agent.InvocationContext, input any) (string, error) {
+		nodeD := NewFunctionNode("D", func(ctx agent.Context, input any) (string, error) {
 			record(tracker, "D")
 			return "pathD", nil
 		}, defaultNodeConfig)
@@ -561,7 +562,7 @@ func TestEndToEndInputValidationFlow(t *testing.T) {
 	}
 
 	schemaRaw, _ := jsonschema.For[InitInput](nil)
-	fnNode, _ := NewFunctionNodeWithSchema("parser", func(ctx agent.InvocationContext, input InitInput) (ParsedQuery, error) {
+	fnNode, _ := NewFunctionNodeWithSchema("parser", func(ctx agent.Context, input InitInput) (ParsedQuery, error) {
 		return ParsedQuery{Intent: input.UserQuery + "_intent"}, nil
 	}, schemaRaw, nil, defaultNodeConfig)
 

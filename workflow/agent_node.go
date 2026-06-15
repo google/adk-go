@@ -74,7 +74,7 @@ func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 }
 
 // Run implements the Node interface.
-func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		validatedInput, err := n.ValidateInput(input)
 		if err != nil {
@@ -121,8 +121,20 @@ func (n *AgentNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*sessi
 			InvocationID:   ctx.InvocationID(),
 		}
 		agentCtx := internalcontext.NewInvocationContext(ctx, params)
+		exCtx := agent.NewNodeContext(agentCtx, nil)
 
-		for event, err := range n.agent.Run(agentCtx) {
+		type NodeRunner interface {
+			RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
+		}
+
+		var events iter.Seq2[*session.Event, error]
+		if runner, ok := n.agent.(NodeRunner); ok {
+			events = runner.RunNode(exCtx, validatedInput)
+		} else {
+			events = n.agent.Run(exCtx)
+		}
+
+		for event, err := range events {
 			if err != nil {
 				yield(nil, err)
 				return

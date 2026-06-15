@@ -36,7 +36,7 @@ type ToolNode struct {
 
 // runnableTool is the internal interface that Node uses to invoke tools.
 type runnableTool interface {
-	Run(ctx agent.ToolContext, args any) (map[string]any, error)
+	Run(ctx agent.Context, args any) (map[string]any, error)
 }
 
 // newToolNodeWithSchemasTyped creates a new node wrapping a tool with explicitly provided schemas.
@@ -88,7 +88,7 @@ func NewToolNode(t tool.Tool, cfg NodeConfig) (*ToolNode, error) {
 	return NewToolNodeTyped[any, any](t, cfg)
 }
 
-func (n *ToolNode) runTool(toolCtx agent.ToolContext, input any) (any, error) {
+func (n *ToolNode) runTool(toolCtx agent.Context, input any) (any, error) {
 	runnable := n.tool.(runnableTool)
 	// Upstream nodes (like LLM Agents) frequently produce serialized JSON strings representing
 	// structured tool call arguments. Since ToolNodes expect structured key-value mappings (maps)
@@ -132,7 +132,7 @@ func (n *ToolNode) runTool(toolCtx agent.ToolContext, input any) (any, error) {
 }
 
 // Run implements the Node interface and executes the tool.
-func (n *ToolNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *ToolNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		eventActions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
 		toolCtx := agent.NewToolContext(ctx, uuid.NewString(), eventActions, nil)

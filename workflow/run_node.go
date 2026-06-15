@@ -14,7 +14,11 @@
 
 package workflow
 
-import "fmt"
+import (
+	"fmt"
+
+	"google.golang.org/adk/agent"
+)
 
 // RunNodeOption configures a single RunNode call.
 type RunNodeOption func(*runNodeOptions)
@@ -105,11 +109,11 @@ func WithIsolationScopeFromNodePath() RunNodeOption {
 //     errors.As recovers *NodeRunError with diagnostics.
 //   - ErrInvalidRunNodeContext, ErrInvalidRunID: misuse.
 //   - ctx.Err(): parent cancellation.
-func RunNode[OUT any](ctx NodeContext, child Node, input any, opts ...RunNodeOption) (OUT, error) {
+func RunNode[OUT any](ctx agent.Context, child Node, input any, opts ...RunNodeOption) (OUT, error) {
 	var zero OUT
 
-	nc, ok := ctx.(*nodeContext)
-	if !ok || nc.subScheduler == nil {
+	ss := ctx.SubScheduler()
+	if ss == nil {
 		return zero, ErrInvalidRunNodeContext
 	}
 
@@ -118,7 +122,7 @@ func RunNode[OUT any](ctx NodeContext, child Node, input any, opts ...RunNodeOpt
 		opt(&o)
 	}
 
-	rawOut, err := nc.subScheduler.runNode(child, input, o)
+	rawOut, err := ss.RunNode(child, input, o)
 	if err != nil {
 		return zero, err
 	}

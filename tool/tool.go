@@ -45,12 +45,12 @@ type Tool interface {
 	IsLongRunning() bool
 }
 
-// Context is an alias for agent.ToolContext.
+// Context is an alias for agent.Context.
 //
 // Deprecated: use agent.Context directly. This alias exists only to
 // minimize churn during the migration and will be removed in a future
 // release.
-type Context = agent.ToolContext
+type Context = agent.Context
 
 // Toolset is an interface for a collection of tools. It allows grouping
 // related tools together and providing them to an agent.
@@ -189,18 +189,18 @@ type confirmationTool struct {
 type runnableTool interface {
 	Tool
 	Declaration() *genai.FunctionDeclaration
-	Run(ctx agent.ToolContext, args any) (result map[string]any, err error)
+	Run(ctx agent.Context, args any) (result map[string]any, err error)
 }
 
 func (t *confirmationTool) Declaration() *genai.FunctionDeclaration {
 	return t.runnableTool.Declaration()
 }
 
-func (t *confirmationTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (t *confirmationTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 
-func (t *confirmationTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
+func (t *confirmationTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	ft := t.runnableTool
 
 	// Check for Human-in-the-Loop confirmation.

@@ -71,7 +71,7 @@ type assertSessionParams struct {
 
 func assertSessionValues(
 	t *testing.T,
-	cctx agent.CallbackContext,
+	cctx agent.Context,
 	params *assertSessionParams,
 ) {
 	t.Helper()
@@ -108,7 +108,7 @@ func assertSessionValues(
 
 // --- Callbacks (Modified to use *testing.T) ---
 func beforeAgentCallback(t *testing.T) agent.BeforeAgentCallback {
-	return func(cctx agent.CallbackContext) (*genai.Content, error) {
+	return func(cctx agent.Context) (*genai.Content, error) {
 		if _, err := cctx.State().Get("before_agent_callback_state_key"); err == nil {
 			return genai.NewContentFromText("Sorry, I can only reply once.", genai.RoleModel), nil
 		}
@@ -126,8 +126,8 @@ func beforeAgentCallback(t *testing.T) agent.BeforeAgentCallback {
 	}
 }
 
-func beforeModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
-	return func(cctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+func beforeModelCallback(t *testing.T) func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+	return func(cctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 		if err := cctx.State().Set("before_model_callback_state_key", "before_model_callback_state_value"); err != nil {
 			return nil, fmt.Errorf("failed to set state: %w", err)
 		}
@@ -142,8 +142,8 @@ func beforeModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmReques
 	}
 }
 
-func afterModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
-	return func(cctx agent.CallbackContext, llmResponse *model.LLMResponse, err error) (*model.LLMResponse, error) {
+func afterModelCallback(t *testing.T) func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+	return func(cctx agent.Context, llmResponse *model.LLMResponse, err error) (*model.LLMResponse, error) {
 		if err := cctx.State().Set("after_model_callback_state_key", "after_model_callback_state_value"); err != nil {
 			return nil, fmt.Errorf("failed to set state: %w", err)
 		}
@@ -159,7 +159,7 @@ func afterModelCallback(t *testing.T) func(ctx agent.CallbackContext, llmRespons
 }
 
 func afterAgentCallback(t *testing.T) agent.AfterAgentCallback {
-	return func(cctx agent.CallbackContext) (*genai.Content, error) {
+	return func(cctx agent.Context) (*genai.Content, error) {
 		if err := cctx.State().Set("after_agent_callback_state_key", "after_agent_callback_state_value"); err != nil {
 			return nil, fmt.Errorf("failed to set state: %w", err)
 		}
@@ -263,7 +263,7 @@ type WeatherResult struct {
 	Timestamp   time.Time `json:"timestamp"`
 }
 
-func GetWeather(ctx agent.ToolContext, args WeatherArgs) (WeatherResult, error) {
+func GetWeather(ctx agent.Context, args WeatherArgs) (WeatherResult, error) {
 	// Simulate weather data
 	temperatures := []int{-10, -5, 0, 5, 10, 15, 20, 25, 30, 35}
 	conditions := []string{"sunny", "cloudy", "rainy", "snowy", "windy"}
@@ -291,7 +291,7 @@ type CalculationResult struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-func Calculate(ctx agent.ToolContext, args CalculationArgs) (CalculationResult, error) {
+func Calculate(ctx agent.Context, args CalculationArgs) (CalculationResult, error) {
 	operations := map[string]float64{
 		"add":      args.X + args.Y,
 		"subtract": args.X - args.Y,
@@ -341,7 +341,7 @@ type LogActivityResult struct {
 	err          error
 }
 
-func LogActivity(ctx agent.ToolContext, params LogActivityParams) (LogActivityResult, error) {
+func LogActivity(ctx agent.Context, params LogActivityParams) (LogActivityResult, error) {
 	var activityLog []LogEntry
 	val, err := ctx.State().Get("activity_log")
 	if err == nil {
@@ -366,7 +366,7 @@ func LogActivity(ctx agent.ToolContext, params LogActivityParams) (LogActivityRe
 
 // --- Before Tool Callbacks ---
 
-func beforeToolAuditCallback(ctx agent.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
+func beforeToolAuditCallback(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	fmt.Printf("🔍 AUDIT: About to call tool '%s' with args: %v\n", t.Name(), args)
 
 	var auditLog []map[string]any
@@ -387,7 +387,7 @@ func beforeToolAuditCallback(ctx agent.ToolContext, t tool.Tool, args map[string
 	return nil, nil // Continue execution
 }
 
-func beforeToolSecurityCallback(ctx agent.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
+func beforeToolSecurityCallback(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	if t.Name() == "get_weather" {
 		location := ""
 		if loc, ok := args["location"].(string); ok {
@@ -411,7 +411,7 @@ func beforeToolSecurityCallback(ctx agent.ToolContext, t tool.Tool, args map[str
 	return nil, nil // Continue execution
 }
 
-func beforeToolValidationCallback(ctx agent.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error) {
+func beforeToolValidationCallback(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
 	if t.Name() == "calculate" {
 		operation, _ := args["operation"].(string)
 		y, yOK := args["y"].(float64)
@@ -430,7 +430,7 @@ func beforeToolValidationCallback(ctx agent.ToolContext, t tool.Tool, args map[s
 
 // --- After Tool Callbacks ---
 
-func afterToolEnhancementCallback(ctx agent.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func afterToolEnhancementCallback(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err != nil {
 		return result, err // Don't enhance if there was an error
 	}
@@ -444,7 +444,7 @@ func afterToolEnhancementCallback(ctx agent.ToolContext, t tool.Tool, args, resu
 	return enhancedResponse, nil
 }
 
-func afterToolAsyncCallback(ctx agent.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func afterToolAsyncCallback(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	if err != nil {
 		return result, err
 	}
@@ -653,12 +653,14 @@ func TestToolCallbacksAgent(t *testing.T) {
 
 type mockToolset struct{}
 
-func (m *mockToolset) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (m *mockToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	utils.AppendInstructions(req, "Extra instruction from mockToolset")
 	return nil
 }
 func (m *mockToolset) Name() string                                         { return "test_toolset" }
 func (m *mockToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) { return nil, nil }
+
+var _ tool.Toolset = &mockToolset{}
 
 func TestAgentToolsetPreprocessEffect(t *testing.T) {
 	var capturedReq *model.LLMRequest

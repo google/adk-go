@@ -48,7 +48,7 @@ func (s *mockState) All() iter.Seq2[string, any] {
 }
 
 // upperFn converts input to uppercase and sets it as a route if it is "ALPHA" or "BETA"
-func upperFn(ctx agent.InvocationContext, input any) (any, error) {
+func upperFn(ctx agent.Context, input any) (any, error) {
 	var s string
 	if input != nil {
 		if val, ok := input.(string); ok {
@@ -80,7 +80,7 @@ func stringsToUpper(s string) string {
 }
 
 // suffixFn appends " done" to input
-func suffixFn(ctx agent.InvocationContext, input string) (string, error) {
+func suffixFn(ctx agent.Context, input string) (string, error) {
 	return input + " done", nil
 }
 
@@ -218,11 +218,11 @@ edges:
 	}
 }
 
-func alphaFn(ctx agent.InvocationContext, input string) (string, error) {
+func alphaFn(ctx agent.Context, input string) (string, error) {
 	return "alpha: " + input, nil
 }
 
-func betaFn(ctx agent.InvocationContext, input string) (string, error) {
+func betaFn(ctx agent.Context, input string) (string, error) {
 	return "beta: " + input, nil
 }
 
@@ -399,7 +399,7 @@ type testTool struct{}
 func (t *testTool) Name() string        { return "test_tool" }
 func (t *testTool) Description() string { return "A simple test tool" }
 func (t *testTool) IsLongRunning() bool { return false }
-func (t *testTool) Run(ctx tool.Context, args any) (map[string]any, error) {
+func (t *testTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	return map[string]any{"result": "tool_output"}, nil
 }
 

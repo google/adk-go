@@ -26,7 +26,10 @@ package main
 import (
 	"context"
 	"log"
+	"maps"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 
 	"google.golang.org/genai"
@@ -52,7 +55,7 @@ type CheckPhonePriceOutput struct {
 
 // checkPhonePrice is a mock tool to check the current price of a Pixel phone
 // model.
-func checkPhonePrice(_ agent.ToolContext, in CheckPhonePriceInput) (CheckPhonePriceOutput, error) {
+func checkPhonePrice(_ agent.Context, in CheckPhonePriceInput) (CheckPhonePriceOutput, error) {
 	prices := map[string]float64{
 		"Pixel 10a":         499.0,
 		"Pixel 10":          799.0,
@@ -60,10 +63,14 @@ func checkPhonePrice(_ agent.ToolContext, in CheckPhonePriceInput) (CheckPhonePr
 		"Pixel 10 Pro XL":   1199.0,
 		"Pixel 10 Pro Fold": 1799.0,
 	}
-	// Simple mock logic, defaulting to 799 if not found exactly.
-	for key, value := range prices {
+	keys := slices.Collect(maps.Keys(prices))
+	sort.Slice(keys, func(i, j int) bool {
+		return len(keys[i]) > len(keys[j])
+	})
+
+	for _, key := range keys {
 		if strings.Contains(strings.ToLower(in.ModelName), strings.ToLower(key)) {
-			return CheckPhonePriceOutput{Price: value}, nil
+			return CheckPhonePriceOutput{Price: prices[key]}, nil
 		}
 	}
 	return CheckPhonePriceOutput{Price: 799.0}, nil

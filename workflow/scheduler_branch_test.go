@@ -26,7 +26,7 @@ import (
 // name.
 func branchRecorder(name string, mu *sync.Mutex, seen *map[string]string) *FunctionNode {
 	return NewFunctionNode(name,
-		func(ctx agent.InvocationContext, input any) (string, error) {
+		func(ctx agent.Context, input any) (string, error) {
 			mu.Lock()
 			(*seen)[name] = ctx.Branch()
 			mu.Unlock()

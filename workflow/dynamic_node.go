@@ -96,23 +96,25 @@ func applyDynamicDefaults(cfg NodeConfig) NodeConfig {
 	return cfg
 }
 
-func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		parentNC, ok := ctx.(NodeContext)
-		if !ok {
-			yield(nil, fmt.Errorf("dynamic node %q: scheduler did not supply a NodeContext", n.Name()))
-			return
-		}
-
 		typedInput, err := n.coerceInput(input)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 
-		emit := makeEmit(yield, parentNC)
-		sub := newDynamicSubScheduler(parentNC, n.composePath(parentNC), emit)
-		orchestratorCtx := newDynamicNodeContext(parentNC, sub.parentPath, "", sub, sub.outputForAncestors)
+		emit := makeEmit(yield, ctx)
+		sub := newDynamicSubScheduler(ctx, n.composePath(ctx), emit)
+		orchestratorCtx := newDynamicNodeContext(ctx, sub.ParentPath(), "", sub, sub.OutputForAncestors())
+
+		// Re-stash orchestratorCtx (carries a live subScheduler) into the
+		// embedded context.Context so a tool running inside an LlmAgent that
+		// is itself this node's body can recover a RunNode-capable
+		// NodeContext via NodeContextFromGoContext.
+		// orchestratorCtx.InvocationContext = orchestratorCtx.InvocationContext.WithContext(
+		// 	WithNodeContext(orchestratorCtx.InvocationContext, orchestratorCtx),
+		// )
 
 		out, err := n.fn(orchestratorCtx, typedInput, emit)
 		if err != nil {
@@ -128,7 +130,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 		// A WithUseAsOutput child already emitted this output on its own
 		// event (stamped for this node), so emit no duplicate terminal
 		// event. Mirrors adk-python's _output_delegated.
-		if _, delegated := sub.delegatedOutput(); delegated {
+		if _, delegated := sub.DelegatedOutput(); delegated {
 			return
 		}
 
@@ -138,9 +140,9 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.InvocationContext, input any) iter.
 		if any(out) == nil {
 			return
 		}
-		ev := session.NewEvent(parentNC.InvocationID())
+		ev := session.NewEvent(ctx.InvocationID())
 		ev.Output = out
-		ev.NodeInfo = &session.NodeInfo{Path: sub.parentPath}
+		ev.NodeInfo = &session.NodeInfo{Path: sub.ParentPath()}
 		// TODO(wolo): validate ev.Output against n.outputSchema,
 		// mirroring function_node.go:87-92.
 		yield(ev, nil)

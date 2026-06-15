@@ -134,7 +134,7 @@ func (pm *PluginManager) RunOnEventCallback(cctx agent.InvocationContext, event 
 }
 
 // RunBeforeAgentCallback runs the BeforeAgentCallback for all plugins.
-func (pm *PluginManager) RunBeforeAgentCallback(cctx agent.CallbackContext) (*genai.Content, error) {
+func (pm *PluginManager) RunBeforeAgentCallback(cctx agent.Context) (*genai.Content, error) {
 	for _, plugin := range pm.plugins {
 		callback := plugin.BeforeAgentCallback()
 		if callback != nil {
@@ -151,7 +151,7 @@ func (pm *PluginManager) RunBeforeAgentCallback(cctx agent.CallbackContext) (*ge
 }
 
 // RunAfterAgentCallback runs the AfterAgentCallback for all plugins.
-func (pm *PluginManager) RunAfterAgentCallback(cctx agent.CallbackContext) (*genai.Content, error) {
+func (pm *PluginManager) RunAfterAgentCallback(cctx agent.Context) (*genai.Content, error) {
 	for _, plugin := range pm.plugins {
 		callback := plugin.AfterAgentCallback()
 		if callback != nil {
@@ -168,7 +168,7 @@ func (pm *PluginManager) RunAfterAgentCallback(cctx agent.CallbackContext) (*gen
 }
 
 // RunBeforeToolCallback runs the BeforeToolCallback for all plugins.
-func (pm *PluginManager) RunBeforeToolCallback(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
+func (pm *PluginManager) RunBeforeToolCallback(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 	for _, plugin := range pm.plugins {
 		callback := plugin.BeforeToolCallback()
 		if callback != nil {
@@ -185,7 +185,7 @@ func (pm *PluginManager) RunBeforeToolCallback(ctx agent.ToolContext, tool tool.
 }
 
 // RunAfterToolCallback runs the AfterToolCallback for all plugins.
-func (pm *PluginManager) RunAfterToolCallback(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+func (pm *PluginManager) RunAfterToolCallback(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 	for _, plugin := range pm.plugins {
 		callback := plugin.AfterToolCallback()
 		if callback != nil {
@@ -202,7 +202,7 @@ func (pm *PluginManager) RunAfterToolCallback(ctx agent.ToolContext, tool tool.T
 }
 
 // RunOnToolErrorCallback runs the OnToolErrorCallback for all plugins.
-func (pm *PluginManager) RunOnToolErrorCallback(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+func (pm *PluginManager) RunOnToolErrorCallback(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 	for _, plugin := range pm.plugins {
 		callback := plugin.OnToolErrorCallback()
 		if callback != nil {
@@ -219,7 +219,7 @@ func (pm *PluginManager) RunOnToolErrorCallback(ctx agent.ToolContext, tool tool
 }
 
 // RunBeforeModelCallback runs the BeforeModelCallback for all plugins.
-func (pm *PluginManager) RunBeforeModelCallback(cctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+func (pm *PluginManager) RunBeforeModelCallback(cctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 	for _, plugin := range pm.plugins {
 		callback := plugin.BeforeModelCallback()
 		if callback != nil {
@@ -236,7 +236,7 @@ func (pm *PluginManager) RunBeforeModelCallback(cctx agent.CallbackContext, llmR
 }
 
 // RunAfterModelCallback runs the AfterModelCallback for all plugins.
-func (pm *PluginManager) RunAfterModelCallback(cctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+func (pm *PluginManager) RunAfterModelCallback(cctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 	for _, plugin := range pm.plugins {
 		callback := plugin.AfterModelCallback()
 		if callback != nil {
@@ -253,7 +253,7 @@ func (pm *PluginManager) RunAfterModelCallback(cctx agent.CallbackContext, llmRe
 }
 
 // RunOnModelErrorCallback runs the OnModelErrorCallback for all plugins.
-func (pm *PluginManager) RunOnModelErrorCallback(cctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error) {
+func (pm *PluginManager) RunOnModelErrorCallback(cctx agent.Context, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error) {
 	for _, plugin := range pm.plugins {
 		callback := plugin.OnModelErrorCallback()
 		if callback != nil {

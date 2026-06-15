@@ -129,7 +129,7 @@ func newAgentWithToolScenario(t *testing.T) agent.Agent {
 	sampleTool, err := functiontool.New(functiontool.Config{
 		Name:        "some_tool",
 		Description: "A sample tool.",
-	}, func(_ agent.ToolContext, in Args) (string, error) {
+	}, func(_ agent.Context, in Args) (string, error) {
 		return "processed " + in.Arg1, nil
 	})
 	if err != nil {

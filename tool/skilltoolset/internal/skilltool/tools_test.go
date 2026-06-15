@@ -74,7 +74,7 @@ func (m *mockSource) LoadResource(ctx context.Context, name, resourcePath string
 	return io.NopCloser(strings.NewReader(res)), nil
 }
 
-func createToolContext(t *testing.T) agent.ToolContext {
+func createToolContext(t *testing.T) agent.Context {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 	return agent.NewToolContext(invCtx, "", nil, nil)
 }

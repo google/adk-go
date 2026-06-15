@@ -40,9 +40,6 @@ func TestCallbackContext(t *testing.T) {
 	if _, ok := callback.(agent.ReadonlyContext); !ok {
 		t.Errorf("CallbackContext(%+T) is unexpectedly not a ReadonlyContext", callback)
 	}
-	if got, ok := callback.(agent.InvocationContext); ok {
-		t.Errorf("CallbackContext(%+T) is unexpectedly an InvocationContext", got)
-	}
 }
 
 type testKey struct{}

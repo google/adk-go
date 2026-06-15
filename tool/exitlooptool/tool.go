@@ -23,7 +23,7 @@ import (
 	"google.golang.org/adk/tool/functiontool"
 )
 
-func exitLoop(ctx agent.ToolContext, myArgs struct{}) (map[string]string, error) {
+func exitLoop(ctx agent.Context, myArgs struct{}) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = true
 	return map[string]string{}, nil
