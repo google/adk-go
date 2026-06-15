@@ -71,11 +71,6 @@ func (t *SingleTurnTool) Run(toolCtx agent.Context, args any) (map[string]any, e
 		nodeInput = margs["request"]
 	}
 
-	// nc, ok := workflow.NodeContextFromGoContext(toolCtx)
-	// if !ok {
-	// 	return nil, fmt.Errorf("failed to infer node context")
-	// }
-
 	node, err := workflow.NewAgentNode(t.agent, workflow.NodeConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent node: %w", err)
