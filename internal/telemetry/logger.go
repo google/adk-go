@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"sync"
 
 	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
@@ -36,10 +37,18 @@ import (
 // https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/.
 const captureMessageContentEnvVar = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 
+var (
+	captureMessageContent bool = false
+	once                  sync.Once
+)
+
 // getGenAICaptureMessageContent reports whether message content
 // should be captured in log records.
 func getGenAICaptureMessageContent() bool {
-	return strings.TrimSpace(os.Getenv(captureMessageContentEnvVar)) == "true"
+	once.Do(func() {
+		ApplyEnv()
+	})
+	return captureMessageContent
 }
 
 const elidedContent = "<elided>"
@@ -200,4 +209,16 @@ func contentToJSONLikeValue(c *genai.Content) any {
 		return "<not_serializable>"
 	}
 	return m
+}
+
+// Applies data read from environment variables:
+// OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT
+// will use true for "1" or if the lowercased trimmed value is "true"
+func ApplyEnv() {
+	captureMessageContent = evalsToTrue(os.Getenv(captureMessageContentEnvVar))
+}
+
+func evalsToTrue(s string) bool {
+	u := strings.ToLower(strings.TrimSpace(s))
+	return u == "1" || u == "true"
 }
