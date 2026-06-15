@@ -289,6 +289,7 @@ func TestLogRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			exporter := setup(t, tc.captureMessageContent)
+			ApplyEnv()
 
 			LogRequest(ctx, tc.req, tc.backend)
 
@@ -503,6 +504,7 @@ func TestLogResponse(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			exporter := setup(t, tc.captureMessageContent)
+			ApplyEnv()
 
 			LogResponse(t.Context(), tc.resp, tc.backend)
 
@@ -592,6 +594,7 @@ func setup(t *testing.T, capture bool) *inMemoryExporter {
 	} else {
 		t.Setenv(captureMessageContentEnvVar, "")
 	}
+
 	return exporter
 }
 
