@@ -559,6 +559,10 @@ func (a *llmAgent) FindAgent(name string) agent.Agent {
 	return a.Agent.FindSubAgent(name)
 }
 
+func (a *llmAgent) RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error] {
+	return RunLLMAgentAsNode(a, ctx, nodeInput)
+}
+
 // InstructionProvider allows to create instructions dynamically. It is called
 // on each agent invocation.
 //
