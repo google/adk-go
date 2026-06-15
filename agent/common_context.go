@@ -172,8 +172,32 @@ type commonContext struct {
 	outputForAncestors []string
 }
 
+// subSchedulerKey keys the sub-scheduler in the embedded context value
+// chain, so it survives re-wrapping that drops the struct field.
+type subSchedulerKey struct{}
+
+// WithSubScheduler stashes sub in ctx's value chain for SubScheduler()
+// to recover after re-wrapping. Returns ctx unchanged if sub is nil.
+func WithSubScheduler(ctx context.Context, sub DynamicSubScheduler) context.Context {
+	if sub == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, subSchedulerKey{}, sub)
+}
+
+// SubScheduler returns the sub-scheduler RunNode uses to schedule
+// children, or nil outside a dynamic-node activation. The struct field
+// is the fast path for a freshly built dynamic-node context (and takes
+// precedence); the embedded context value is the fallback that survives
+// context re-wrapping by agents and the LLM flow.
 func (c *commonContext) SubScheduler() DynamicSubScheduler {
-	return c.subScheduler
+	if c.subScheduler != nil {
+		return c.subScheduler
+	}
+	if sub, ok := c.Value(subSchedulerKey{}).(DynamicSubScheduler); ok {
+		return sub
+	}
+	return nil
 }
 
 // Path implements [Context].
