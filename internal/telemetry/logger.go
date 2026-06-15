@@ -220,8 +220,5 @@ func ApplyEnv() {
 
 func evalsToTrue(s string) bool {
 	u := strings.ToLower(strings.TrimSpace(s))
-	if u == "1" || u == "true" {
-		return true
-	}
-	return false
+	return u == "1" || u == "true"
 }
