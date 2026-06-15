@@ -39,9 +39,9 @@ Skills are folders of instructions and resources that extend your capabilities f
 This is very important:
 
 ` +
-		"1. If a skill seems relevant to the current user query, you MUST use the `load_skill` tool with `skill_name=\"<SKILL_NAME>\"` to read its full instructions before proceeding.\n" +
+		"1. If a skill seems relevant to the current user query, you MUST use the `load_skill` tool with `name=\"<SKILL_NAME>\"` to read its full instructions before proceeding.\n" +
 		"2. Once you have read the instructions, follow them exactly as documented before replying to the user. For example, If the instruction lists multiple steps, please make sure you complete all of them in order.\n" +
-		"3. The `load_skill_resource` tool is for viewing files within a skill's directory (e.g., `references/*`, `assets/*`, `scripts/*`). Do NOT use other tools to access these files.\n"
+		"3. Use the `load_skill_resource` tool with `skill_name=\"<SKILL_NAME>\"` and `resource_path=\"<PATH>\"` to view files within a skill's directory (e.g., `references/*`, `assets/*`, `scripts/*`). Do NOT use other tools to access these files.\n"
 )
 
 // Config holds the configuration for creating a Skill Toolset.
