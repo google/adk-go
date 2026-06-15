@@ -32,6 +32,12 @@ type RunAgentRequest struct {
 	Streaming bool `json:"streaming,omitempty"`
 
 	StateDelta *map[string]any `json:"stateDelta,omitempty"`
+
+	// FunctionCallEventID identifies the event whose function call this
+	// request answers (e.g. a human-in-the-loop reply from the web UI).
+	// Accepted for adk-python parity but currently ignored; declared so
+	// strict decoding (DisallowUnknownFields) does not reject the request.
+	FunctionCallEventID *string `json:"functionCallEventId,omitempty"`
 }
 
 // AssertRunAgentRequestRequired checks if the required fields are not zero-ed
