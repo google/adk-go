@@ -601,13 +601,8 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 }
 
 // defaultContentRole picks the role for node Content that left it
-// empty. A FunctionResponse part carries the result of a locally
-// executed function tool back to the model, so it is app-authored and
-// takes genai.RoleUser (matching the LLM flow and adk-python). Note
-// this is about the part type, not tools in general: built-in tools
-// like google_search run inside the model and surface as ordinary
-// model output with no FunctionResponse part. Everything else is
-// model-authored.
+// empty: a FunctionResponse part is app-authored and takes RoleUser;
+// everything else is model-authored.
 func defaultContentRole(c *genai.Content) string {
 	for _, p := range c.Parts {
 		if p != nil && p.FunctionResponse != nil {
