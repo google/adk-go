@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/telemetry"
@@ -607,6 +608,18 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	}
 }
 
+// defaultContentRole picks the role for node Content that left it
+// empty: a FunctionResponse part is app-authored and takes RoleUser;
+// everything else is model-authored.
+func defaultContentRole(c *genai.Content) string {
+	for _, p := range c.Parts {
+		if p != nil && p.FunctionResponse != nil {
+			return genai.RoleUser
+		}
+	}
+	return genai.RoleModel
+}
+
 // handleEvent updates the per-node accumulator. The event has
 // already been read from the queue and will be yielded to the
 // caller by the consumer loop.
@@ -634,6 +647,13 @@ func (s *scheduler) handleEvent(it eventItem) {
 	// keep it.
 	if it.ev.Branch == "" && nr.branch != "" {
 		it.ev.Branch = nr.branch
+	}
+	// Default Content.Role for nodes that left it empty
+	// (FunctionNode/BaseNode set Parts but not Role); clients like
+	// the web UI rely on it. Before the descendant short-circuit so
+	// dynamic children are covered too.
+	if it.ev.Content != nil && it.ev.Content.Role == "" {
+		it.ev.Content.Role = defaultContentRole(it.ev.Content)
 	}
 	var path string
 	if it.ev.NodeInfo != nil {
