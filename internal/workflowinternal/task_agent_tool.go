@@ -51,7 +51,6 @@ func (t *TaskAgentTool) Declaration() *genai.FunctionDeclaration {
 func (t *TaskAgentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
 	// Framework handles task delegation dispatch directly via the
 	// LlmAgent chat wrapper.
-	// TODO: dispatch via RunNode with WithIsolationScope(fcID) and WithRunID(fcID).
 	return nil, nil
 }
 
