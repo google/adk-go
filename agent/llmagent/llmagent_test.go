@@ -151,7 +151,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback doesn't modify anything",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return nil, nil
 				},
 			},
@@ -165,10 +165,10 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns an error",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
 				},
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrHijacked)
 				},
 			},
@@ -180,12 +180,12 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns new LLMResponse",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
 					}, nil
 				},
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("unexpected text", genai.RoleModel),
 					}, nil
@@ -201,7 +201,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "before model callback returns both new LLMResponse and error",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
 					}, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
@@ -215,7 +215,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback doesn't modify anything",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return nil, nil
 				},
 			},
@@ -229,12 +229,12 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns new LLMResponse",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
 					}, nil
 				},
-				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("unexpected text", genai.RoleModel),
 					}, nil
@@ -250,10 +250,10 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns error",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrNoCookie)
 				},
-				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrHijacked)
 				},
 			},
@@ -265,7 +265,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after model callback returns both new LLMResponse and error",
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
 					}, fmt.Errorf("error from after_model_callback: %w", http.ErrNoCookie)
@@ -279,7 +279,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback is not called",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("on_model_error_callback: %w", http.ErrNoCookie)
@@ -295,7 +295,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback changes message",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, nil
@@ -309,12 +309,12 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback changes err",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrNoCookie)
 				},
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrHijacked)
@@ -326,7 +326,7 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback returns both new LLMResponse and error",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrNoCookie)
@@ -338,12 +338,12 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback does not process before model callback error",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("before_model_callback_error: %w", http.ErrNoCookie)
 				},
 			},
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrHijacked)
@@ -357,14 +357,14 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "on model error callback does not process before model callback message",
 			beforeModelCallbacks: []llmagent.BeforeModelCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from before_model_callback", genai.RoleModel),
 					}, nil
 				},
 			},
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, fmt.Errorf("error from on_model_error_callback: %w", http.ErrHijacked)
@@ -380,14 +380,14 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after error callback process on model error callback message",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from on_model_error_callback", genai.RoleModel),
 					}, nil
 				},
 			},
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return &model.LLMResponse{
 						Content: genai.NewContentFromText("hello from after_model_callback", genai.RoleModel),
 					}, nil
@@ -401,12 +401,12 @@ func TestModelCallbacks(t *testing.T) {
 		{
 			name: "after error callback does not process on model error callback error",
 			onModelErrorCallback: []llmagent.OnModelErrorCallback{
-				func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmRequest *model.LLMRequest, llmError error) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("error from on_model_error_callback: %w", http.ErrNoCookie)
 				},
 			},
 			afterModelCallbacks: []llmagent.AfterModelCallback{
-				func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+				func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 					return nil, fmt.Errorf("error from after_model_callback: %w", http.ErrHijacked)
 				},
 			},
@@ -453,7 +453,7 @@ func TestToolCallback(t *testing.T) {
 		Number int `json:"number"`
 	}
 
-	handler := func(_ agent.ToolContext, input Args) (Result, error) {
+	handler := func(_ agent.Context, input Args) (Result, error) {
 		return Result{Number: 1}, nil
 	}
 	rand, _ := functiontool.New(functiontool.Config{
@@ -472,10 +472,10 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, nil
 				},
-				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -508,10 +508,10 @@ func TestToolCallback(t *testing.T) {
 			Tools:                    []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
 				// Since it retursn non nil, the next callback won't be executed.
-				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"number": "3"}, nil
 				},
-				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -543,10 +543,10 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, nil
 				},
-				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -579,10 +579,10 @@ func TestToolCallback(t *testing.T) {
 			Tools:                    []tool.Tool{rand},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
 				// Since it retursn non nil, the next callback won't be executed.
-				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "3"}, nil
 				},
-				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -614,12 +614,12 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"number": "3"}, nil
 				},
 			},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "7"}, nil
 				},
 			},
@@ -651,12 +651,12 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
-				func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, nil
 				},
 			},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, nil
 				},
 			},
@@ -861,7 +861,7 @@ func TestFunctionTool(t *testing.T) {
 	}
 
 	prompt := "what is the sum of 1 + 2?"
-	handler := func(_ agent.ToolContext, input Args) (Result, error) {
+	handler := func(_ agent.Context, input Args) (Result, error) {
 		if input.A != 1 || input.B != 2 {
 			t.Errorf("handler received %+v, want {a: 1, b: 2}", input)
 		}

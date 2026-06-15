@@ -137,7 +137,7 @@ func (t *FinishTaskTool) Declaration() *genai.FunctionDeclaration {
 	}
 }
 
-func (t *FinishTaskTool) ProcessRequest(ctx agent.ToolContext, req *model.LLMRequest) error {
+func (t *FinishTaskTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	instructions := `
 Do NOT call 'finish_task' prematurely. Use your available tools to
 fully complete every aspect of the delegated task first. If the
@@ -151,7 +151,7 @@ no accompanying text output.
 	return toolutils.PackTool(req, t)
 }
 
-func (t *FinishTaskTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
+func (t *FinishTaskTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	if args == nil {
 		return nil, fmt.Errorf("missing argument")
 	}

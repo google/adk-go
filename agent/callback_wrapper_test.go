@@ -104,7 +104,7 @@ func (fakeMemory) SearchMemory(context.Context, string) (*memory.SearchResponse,
 // newTestCallbackContext builds a CallbackContext (a *callbackContextWrapper)
 // backed by a fully-populated invocationContext so that the supported methods
 // have meaningful values to delegate to.
-func newTestCallbackContext(t *testing.T) CallbackContext {
+func newTestCallbackContext(t *testing.T) Context {
 	t.Helper()
 
 	a, err := New(Config{
@@ -210,15 +210,15 @@ func TestCallbackContextWrapper_LogsForToolContextMethods(t *testing.T) {
 func TestCallbackContextWrapper_NoLogForSupportedMethods(t *testing.T) {
 	cases := []struct {
 		name string
-		call func(cc CallbackContext) any
+		call func(cc Context) any
 		want any
 	}{
-		{"AgentName", func(cc CallbackContext) any { return cc.AgentName() }, "test-agent"},
-		{"AppName", func(cc CallbackContext) any { return cc.AppName() }, "app"},
-		{"Branch", func(cc CallbackContext) any { return cc.Branch() }, "branch-1"},
-		{"InvocationID", func(cc CallbackContext) any { return cc.InvocationID() }, "inv-1"},
-		{"SessionID", func(cc CallbackContext) any { return cc.SessionID() }, "sess-1"},
-		{"UserID", func(cc CallbackContext) any { return cc.UserID() }, "user"},
+		{"AgentName", func(cc Context) any { return cc.AgentName() }, "test-agent"},
+		{"AppName", func(cc Context) any { return cc.AppName() }, "app"},
+		{"Branch", func(cc Context) any { return cc.Branch() }, "branch-1"},
+		{"InvocationID", func(cc Context) any { return cc.InvocationID() }, "inv-1"},
+		{"SessionID", func(cc Context) any { return cc.SessionID() }, "sess-1"},
+		{"UserID", func(cc Context) any { return cc.UserID() }, "user"},
 	}
 
 	for _, tc := range cases {
