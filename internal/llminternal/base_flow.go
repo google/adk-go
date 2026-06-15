@@ -48,37 +48,17 @@ import (
 // ErrModelNotConfigured is returned when the model is not configured.
 var ErrModelNotConfigured = errors.New("model not configured; ensure Model is set in llmagent.Config")
 
-// BeforeModelCallback is called before sending a request to the model.
-//
-// If it returns non-nil result or error, the actual call is skipped and the returned value is used
-// as the model invocation result.
-type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
-// AfterModelCallback is called after receiving a response from the model.
-//
-// If it returns non-nil result or error, the returned value is used as the model invocation result.
-type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
-// OnModelErrorCallback is called when the model returns an error.
-//
-// If it returns non-nil result or error, the returned value is used as the model invocation result.
-type OnModelErrorCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+type OnModelErrorCallback func(ctx agent.Context, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
 
-// BeforeToolCallback is called before executing a tool call.
-//
-// If it returns non-nil result or error, the actual tool call is skipped and the returned value is
-// used as the tool invocation result.
-type BeforeToolCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error)
+type BeforeToolCallback func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
-// AfterToolCallback is called after executing a tool call.
-//
-// If it returns non-nil result or error, the returned value is used as the tool invocation result.
-type AfterToolCallback func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
+type AfterToolCallback func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
-// OnToolErrorCallback is called when the tool returns an error.
-//
-// If it returns non-nil result or error, the returned value is used as the tool invocation result.
-type OnToolErrorCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
+type OnToolErrorCallback func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
 
 // Flow is a base implementation of the agent flow.
 type Flow struct {
@@ -1007,7 +987,7 @@ Suggested fixes:
 }
 
 type cancelledToolContext struct {
-	agent.ToolContext
+	agent.Context
 	cancelCtx context.Context
 }
 
@@ -1091,8 +1071,8 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						cancelCtx, cancel := toolCtx.WithAgentCancel()
 						// cancelCtx, cancel := context.WithCancel(toolCtx)
 						cancelToolCtx := &cancelledToolContext{
-							ToolContext: toolCtx,
-							cancelCtx:   cancelCtx,
+							Context:   toolCtx,
+							cancelCtx: cancelCtx,
 						}
 						if impl, ok := liveSess.(*liveSessionImpl); ok {
 							impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
@@ -1210,7 +1190,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	return mergedEvent, nil
 }
 
-func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.ToolContext, tool tool.Tool, fArgs map[string]any, err error) (map[string]any, error) {
+func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any, err error) (map[string]any, error) {
 	pluginManager := pluginManagerFromContext(toolCtx)
 	if pluginManager != nil {
 		result, err := pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
@@ -1221,7 +1201,7 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.ToolContext, tool tool.Tool
 	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
-func (f *Flow) callTool(toolCtx agent.ToolContext, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
+func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
 	var response map[string]any
 	var err error
 	pluginManager := pluginManagerFromContext(toolCtx)
@@ -1268,7 +1248,7 @@ func (f *Flow) callTool(toolCtx agent.ToolContext, tool toolinternal.FunctionToo
 	return response
 }
 
-func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.ToolContext, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
+func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
 	for _, callback := range f.BeforeToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs)
 		if err != nil {
@@ -1283,7 +1263,7 @@ func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.ToolContext, tool tool.To
 	return nil, nil
 }
 
-func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.ToolContext, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.AfterToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fResult, fErr)
 		if err != nil {
@@ -1299,7 +1279,7 @@ func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.ToolContext, tool toolinte
 	return fResult, fErr
 }
 
-func (f *Flow) invokeOnToolErrorCallbacks(toolCtx agent.ToolContext, tool tool.Tool, fArgs map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.OnToolErrorCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fErr)
 		if err != nil {
@@ -1398,10 +1378,10 @@ func pluginManagerFromContext(ctx context.Context) pluginManager {
 }
 
 type pluginManager interface {
-	RunBeforeModelCallback(cctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
-	RunAfterModelCallback(cctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
-	RunOnModelErrorCallback(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
-	RunBeforeToolCallback(ctx agent.ToolContext, t tool.Tool, args map[string]any) (map[string]any, error)
-	RunAfterToolCallback(ctx agent.ToolContext, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
-	RunOnToolErrorCallback(ctx agent.ToolContext, t tool.Tool, args map[string]any, err error) (map[string]any, error)
+	RunBeforeModelCallback(cctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
+	RunAfterModelCallback(cctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
+	RunOnModelErrorCallback(ctx agent.Context, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
+	RunBeforeToolCallback(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error)
+	RunAfterToolCallback(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error)
+	RunOnToolErrorCallback(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error)
 }

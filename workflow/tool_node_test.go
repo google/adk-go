@@ -39,7 +39,7 @@ func TestToolNode_New(t *testing.T) {
 	myTool, err := functiontool.New(functiontool.Config{
 		Name:        "test_tool",
 		Description: "a test tool",
-	}, func(ctx agent.ToolContext, in Input) (Output, error) {
+	}, func(ctx agent.Context, in Input) (Output, error) {
 		return Output{Result: strings.ToUpper(in.Value)}, nil
 	})
 	if err != nil {
@@ -128,7 +128,7 @@ func TestToolNode_Run(t *testing.T) {
 			tool: func() (tool.Tool, error) {
 				return functiontool.New(functiontool.Config{
 					Name: "greet",
-				}, func(ctx agent.ToolContext, in Input) (Output, error) {
+				}, func(ctx agent.Context, in Input) (Output, error) {
 					return Output{Greeting: "Hello " + in.Name}, nil
 				})
 			},
@@ -154,7 +154,7 @@ func TestToolNode_Run(t *testing.T) {
 			tool: func() (tool.Tool, error) {
 				return functiontool.New(functiontool.Config{
 					Name: "greet",
-				}, func(ctx agent.ToolContext, in Input) (string, error) {
+				}, func(ctx agent.Context, in Input) (string, error) {
 					return "HELLO " + strings.ToUpper(in.Name), nil
 				})
 			},
@@ -172,7 +172,7 @@ func TestToolNode_Run(t *testing.T) {
 			tool: func() (tool.Tool, error) {
 				return functiontool.New(functiontool.Config{
 					Name: "test_tool",
-				}, func(ctx agent.ToolContext, in map[string]any) (map[string]any, error) {
+				}, func(ctx agent.Context, in map[string]any) (map[string]any, error) {
 					return map[string]any{"result": "not-an-int"}, nil
 				})
 			},
@@ -187,7 +187,7 @@ func TestToolNode_Run(t *testing.T) {
 			tool: func() (tool.Tool, error) {
 				return functiontool.New(functiontool.Config{
 					Name: "fail_tool",
-				}, func(ctx agent.ToolContext, in Input) (*Output, error) {
+				}, func(ctx agent.Context, in Input) (*Output, error) {
 					return nil, errors.New("something went wrong")
 				})
 			},
@@ -202,7 +202,7 @@ func TestToolNode_Run(t *testing.T) {
 			tool: func() (tool.Tool, error) {
 				return functiontool.New(functiontool.Config{
 					Name: "greet",
-				}, func(ctx agent.ToolContext, in Input) (Output, error) {
+				}, func(ctx agent.Context, in Input) (Output, error) {
 					return Output{Greeting: "Hello " + in.Name}, nil
 				})
 			},
@@ -305,7 +305,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			doubleTool, err := functiontool.New(functiontool.Config{
 				Name: "double",
-			}, func(ctx agent.ToolContext, in *Input) (Output, error) {
+			}, func(ctx agent.Context, in *Input) (Output, error) {
 				return Output{Result: in.Val * 2}, nil
 			})
 			if err != nil {

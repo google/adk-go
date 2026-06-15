@@ -55,7 +55,7 @@ func TestTypes(t *testing.T) {
 		{
 			name: "FunctionTool",
 			constructor: func() (tool.Tool, error) {
-				return functiontool.New(functiontool.Config{}, func(_ agent.ToolContext, input intInput) (intOutput, error) {
+				return functiontool.New(functiontool.Config{}, func(_ agent.Context, input intInput) (intOutput, error) {
 					return intOutput(input), nil
 				})
 			},
@@ -185,7 +185,7 @@ func (tts *testToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
 
 func TestWithConfirmation(t *testing.T) {
 	toolRan := false
-	noOpTool, err := functiontool.New(functiontool.Config{Name: "noOpTool"}, func(ctx agent.ToolContext, input struct{}) (struct{}, error) {
+	noOpTool, err := functiontool.New(functiontool.Config{Name: "noOpTool"}, func(ctx agent.Context, input struct{}) (struct{}, error) {
 		toolRan = true
 		return struct{}{}, nil
 	})

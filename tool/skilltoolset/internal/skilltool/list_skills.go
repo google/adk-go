@@ -39,13 +39,13 @@ func ListSkills(source skill.Source) (tool.Tool, error) {
 			Name:        "list_skills",
 			Description: "Lists all available skills with their names and descriptions.",
 		},
-		func(ctx agent.ToolContext, args ListSkillsArgs) (*ListSkillsResult, error) {
+		func(ctx agent.Context, args ListSkillsArgs) (*ListSkillsResult, error) {
 			return listSkills(ctx, args, source)
 		},
 	)
 }
 
-func listSkills(ctx agent.ToolContext, _ ListSkillsArgs, source skill.Source) (*ListSkillsResult, error) {
+func listSkills(ctx agent.Context, _ ListSkillsArgs, source skill.Source) (*ListSkillsResult, error) {
 	skills, err := source.ListFrontmatters(ctx)
 	if err != nil {
 		return nil, err

@@ -52,7 +52,7 @@ type CheckPhonePriceOutput struct {
 
 // checkPhonePrice is a mock tool to check the current price of a Pixel phone
 // model.
-func checkPhonePrice(_ agent.ToolContext, in CheckPhonePriceInput) (CheckPhonePriceOutput, error) {
+func checkPhonePrice(_ agent.Context, in CheckPhonePriceInput) (CheckPhonePriceOutput, error) {
 	prices := map[string]float64{
 		"Pixel 10a":         499.0,
 		"Pixel 10":          799.0,

@@ -97,7 +97,7 @@ func (m *mockToolContext) Session() session.Session                             
 func (m *mockToolContext) SubScheduler() agent.DynamicSubScheduler                 { return nil }
 func (m *mockToolContext) WithBranch(branch string) agent.Context                  { return nil }
 
-var _ agent.ToolContext = (*mockToolContext)(nil)
+var _ agent.Context = (*mockToolContext)(nil)
 
 // --- Tests ---
 

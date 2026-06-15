@@ -399,7 +399,7 @@ type testTool struct{}
 func (t *testTool) Name() string        { return "test_tool" }
 func (t *testTool) Description() string { return "A simple test tool" }
 func (t *testTool) IsLongRunning() bool { return false }
-func (t *testTool) Run(ctx agent.ToolContext, args any) (map[string]any, error) {
+func (t *testTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	return map[string]any{"result": "tool_output"}, nil
 }
 

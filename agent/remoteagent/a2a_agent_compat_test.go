@@ -117,7 +117,7 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.AfterRequestCallbacks = []AfterA2ARequestCallback{
-					func(ctx agent.CallbackContext, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
+					func(ctx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
 						if resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0 {
 							resp.Content.Parts[0].Text = "modified-by-agent-callback"
 						}
@@ -142,7 +142,7 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.BeforeRequestCallbacks = []BeforeA2ARequestCallback{
-					func(ctx agent.CallbackContext, req *legacyA2A.MessageSendParams) (*session.Event, error) {
+					func(ctx agent.Context, req *legacyA2A.MessageSendParams) (*session.Event, error) {
 						req.Message = legacyA2A.NewMessage(legacyA2A.MessageRoleUser, legacyA2A.TextPart{Text: "42"})
 						return nil, nil
 					},
@@ -161,7 +161,7 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.BeforeRequestCallbacks = []BeforeA2ARequestCallback{
-					func(ctx agent.CallbackContext, req *legacyA2A.MessageSendParams) (*session.Event, error) {
+					func(ctx agent.Context, req *legacyA2A.MessageSendParams) (*session.Event, error) {
 						return &session.Event{
 							LLMResponse: model.LLMResponse{
 								Content: genai.NewContentFromText("cached-response", genai.RoleModel),
@@ -246,13 +246,13 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.AfterRequestCallbacks = []AfterA2ARequestCallback{
-					func(ctx agent.CallbackContext, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
+					func(ctx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
 						if resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0 {
 							resp.Content.Parts[0].Text += "-first"
 						}
 						return nil, nil
 					},
-					func(ctx agent.CallbackContext, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
+					func(ctx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
 						if resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0 {
 							resp.Content.Parts[0].Text += "-second"
 						}
