@@ -552,3 +552,67 @@ func dummyFnValid(ctx agent.InvocationContext, p validParams) (string, error) {
 func dummyFnInvalid(ctx agent.InvocationContext, p invalidParams) (string, error) {
 	return "ok", nil
 }
+
+func TestEndToEndInputValidationFlow(t *testing.T) {
+	type InitInput struct {
+		UserQuery string `json:"user_query"`
+	}
+	type ParsedQuery struct {
+		Intent string `json:"intent"`
+	}
+
+	schemaRaw, _ := jsonschema.For[InitInput](nil)
+	fnNode, _ := NewFunctionNodeWithSchema("parser", func(ctx agent.Context, input InitInput) (ParsedQuery, error) {
+		return ParsedQuery{Intent: input.UserQuery + "_intent"}, nil
+	}, schemaRaw, nil, defaultNodeConfig)
+
+	joinSchema, _ := jsonschema.For[ParsedQuery](nil)
+	joinSchemaResolved, _ := joinSchema.Resolve(nil)
+	joinNode := NewJoinNodeWithSchema("join", joinSchemaResolved)
+
+	type AgentInput struct {
+		Parser struct {
+			Intent string `json:"intent"`
+		} `json:"parser"`
+	}
+
+	var receivedInput string
+	dummyAgent, _ := agent.New(agent.Config{
+		Name: "e2e_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if ctx.UserContent() != nil && len(ctx.UserContent().Parts) > 0 {
+					receivedInput = ctx.UserContent().Parts[0].Text
+				}
+				ev := session.NewEvent(ctx.InvocationID())
+				ev.Output = "ok"
+				yield(ev, nil)
+			}
+		},
+	})
+
+	agentNode, _ := NewAgentNodeTyped[AgentInput, string](dummyAgent, defaultNodeConfig)
+
+	wf := mustNew(t, []Edge{
+		{From: Start, To: fnNode},
+		{From: fnNode, To: joinNode},
+		{From: joinNode, To: agentNode},
+	})
+
+	mockCtx := newMockCtx(t)
+	mockCtx.sess = &mockSession{id: "test"}
+	mockCtx.userContent = &genai.Content{
+		Parts: []*genai.Part{{Text: `{"user_query": "hello"}`}},
+	}
+
+	for ev, err := range wf.Run(mockCtx) {
+		if err != nil {
+			t.Fatalf("expected successful end-to-end run, got error: %v", err)
+		}
+		_ = ev
+	}
+
+	if !strings.Contains(receivedInput, "hello_intent") {
+		t.Errorf("expected json payload at the end to contain 'hello_intent', got %q", receivedInput)
+	}
+}
