@@ -438,14 +438,15 @@ type agentState = agentinternal.State
 func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	// TODO: branch context?
 	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:    ctx.Artifacts(),
-		Memory:       ctx.Memory(),
-		Session:      ctx.Session(),
-		Branch:       ctx.Branch(),
-		Agent:        a,
-		UserContent:  ctx.UserContent(),
-		RunConfig:    ctx.RunConfig(),
-		InvocationID: ctx.InvocationID(),
+		Artifacts:      ctx.Artifacts(),
+		Memory:         ctx.Memory(),
+		Session:        ctx.Session(),
+		Branch:         ctx.Branch(),
+		IsolationScope: ctx.IsolationScope(),
+		Agent:          a,
+		UserContent:    ctx.UserContent(),
+		RunConfig:      ctx.RunConfig(),
+		InvocationID:   ctx.InvocationID(),
 	})
 
 	f := &llminternal.Flow{
@@ -472,14 +473,15 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:    ctx.Artifacts(),
-		Memory:       ctx.Memory(),
-		Session:      ctx.Session(),
-		Branch:       ctx.Branch(),
-		Agent:        a,
-		UserContent:  ctx.UserContent(),
-		RunConfig:    ctx.RunConfig(),
-		InvocationID: ctx.InvocationID(),
+		Artifacts:      ctx.Artifacts(),
+		Memory:         ctx.Memory(),
+		Session:        ctx.Session(),
+		Branch:         ctx.Branch(),
+		IsolationScope: ctx.IsolationScope(),
+		Agent:          a,
+		UserContent:    ctx.UserContent(),
+		RunConfig:      ctx.RunConfig(),
+		InvocationID:   ctx.InvocationID(),
 	})
 
 	f := &llminternal.Flow{

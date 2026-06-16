@@ -30,6 +30,7 @@ type runNodeOptions struct {
 	useAsOutput            bool
 	overrideIsolationScope string
 	scopeFromNodePath      bool
+	raiseOnWait            bool
 }
 
 // WithRunID overrides the auto-generated counter with a stable
@@ -97,6 +98,18 @@ func WithIsolationScope(scope string) RunNodeOption {
 // LlmAgent case. WithIsolationScope, if also set, takes precedence.
 func WithIsolationScopeFromNodePath() RunNodeOption {
 	return func(o *runNodeOptions) { o.scopeFromNodePath = true }
+}
+
+// WithRaiseOnWait makes RunNode treat a child that finishes its
+// iteration with an unresolved long-running tool call as an interruption rather than a
+// normal completion.
+//
+// Use this when the caller (e.g. a chat-mode coordinator
+// dispatching a task sub-agent via a FunctionCall) MUST distinguish
+// "child paused waiting for HITL" from "child finished cleanly
+// with no output".
+func WithRaiseOnWait() RunNodeOption {
+	return func(o *runNodeOptions) { o.raiseOnWait = true }
 }
 
 // RunNode schedules child as a sub-node of the currently-executing

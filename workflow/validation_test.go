@@ -372,6 +372,100 @@ func TestValidateCycles(t *testing.T) {
 	}
 }
 
+func TestValidateFanIn(t *testing.T) {
+	tests := []struct {
+		name      string
+		edges     func() []Edge
+		expectErr bool
+	}{
+		{
+			name: "non-Join diamond fan-in rejected",
+			edges: func() []Edge {
+				a, b, c, d := newDummyNode("A"), newDummyNode("B"), newDummyNode("C"), newDummyNode("D")
+				return []Edge{
+					{From: Start, To: a},
+					{From: a, To: b},
+					{From: a, To: c},
+					{From: b, To: d},
+					{From: c, To: d},
+				}
+			},
+			expectErr: true,
+		},
+		{
+			name: "JoinNode diamond fan-in allowed",
+			edges: func() []Edge {
+				a, b, c := newDummyNode("A"), newDummyNode("B"), newDummyNode("C")
+				j := NewJoinNode("J")
+				return []Edge{
+					{From: Start, To: a},
+					{From: a, To: b},
+					{From: a, To: c},
+					{From: b, To: j},
+					{From: c, To: j},
+				}
+			},
+			expectErr: false,
+		},
+		{
+			name: "conditional loop-back not rejected",
+			edges: func() []Edge {
+				a, b := newDummyNode("A"), newDummyNode("B")
+				// A has two incoming edges (Start + back-edge from B), but
+				// the back-edge is conditional, so they don't fire together.
+				return []Edge{
+					{From: Start, To: a},
+					{From: a, To: b},
+					{From: b, To: a, Route: StringRoute("retry")},
+				}
+			},
+			expectErr: false,
+		},
+		{
+			name: "conditional fan-in not rejected",
+			edges: func() []Edge {
+				a, b, c, d := newDummyNode("A"), newDummyNode("B"), newDummyNode("C"), newDummyNode("D")
+				// Only one of B/C routes into D at a time.
+				return []Edge{
+					{From: Start, To: a},
+					{From: a, To: b},
+					{From: a, To: c},
+					{From: b, To: d, Route: StringRoute("x")},
+					{From: c, To: d, Route: StringRoute("y")},
+				}
+			},
+			expectErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateFanIn(newGraph(tc.edges()))
+			if tc.expectErr && !errors.Is(err, ErrUnsupportedFanIn) {
+				t.Errorf("got %v, want ErrUnsupportedFanIn", err)
+			} else if !tc.expectErr && err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
+// TestNew_NonJoinFanIn_Rejected confirms the fan-in check is wired into
+// the public New constructor.
+func TestNew_NonJoinFanIn_Rejected(t *testing.T) {
+	a, b, c, d := newDummyNode("A"), newDummyNode("B"), newDummyNode("C"), newDummyNode("D")
+	_, err := New("wf", []Edge{
+		{From: Start, To: a},
+		{From: a, To: b},
+		{From: a, To: c},
+		{From: b, To: d},
+		{From: c, To: d},
+	})
+	if !errors.Is(err, ErrUnsupportedFanIn) {
+		t.Errorf("New() error = %v, want ErrUnsupportedFanIn", err)
+	}
+}
+
 func TestValidateSubWorkflowNames(t *testing.T) {
 	// Create a valid sub-workflow
 	subWf, err := New("inner_wf", []Edge{{From: Start, To: newDummyNode("A")}})

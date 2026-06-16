@@ -224,11 +224,12 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 
 	eventCopy := &Event{
-		ID:           event.ID,
-		InvocationID: event.InvocationID,
-		Timestamp:    event.Timestamp,
-		Author:       event.Author,
-		Branch:       event.Branch,
+		ID:             event.ID,
+		InvocationID:   event.InvocationID,
+		Timestamp:      event.Timestamp,
+		Author:         event.Author,
+		Branch:         event.Branch,
+		IsolationScope: event.IsolationScope,
 		Actions: EventActions{
 			StateDelta:                 maps.Clone(event.Actions.StateDelta),
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),

@@ -26,9 +26,15 @@ func CalculateDelay(cfg *RetryConfig, failedAttempts int) time.Duration {
 		return 0
 	}
 
+	// Unset BackoffFactor would collapse the delay to 0; use constant delay.
+	backoffFactor := cfg.BackoffFactor
+	if backoffFactor <= 0 {
+		backoffFactor = 1.0
+	}
+
 	delay := float64(cfg.InitialDelay)
 	for i := 1; i < failedAttempts; i++ {
-		delay *= cfg.BackoffFactor
+		delay *= backoffFactor
 	}
 
 	maxDelay := float64(cfg.MaxDelay)
