@@ -442,14 +442,6 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		}
 	}
 
-	// With WithRaiseOnWait, an unresolved long-running tool (e.g. a
-	// tool that called ctx.RequestConfirmation and is awaiting the
-	// user's reply) counts as an interruption. Without it, the child
-	// would return (nil, nil) and the caller (a chat coordinator
-	// dispatching this task) would synthesise a completion FR that
-	// falsely closes the still-open delegation — orphaning the FR
-	// the request_confirmation processor synthesises on the next
-	// user turn.
 	if opts.raiseOnWait && len(pendingLongRunningIDs) > 0 {
 		interrupted = true
 	}

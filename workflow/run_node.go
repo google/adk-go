@@ -101,22 +101,13 @@ func WithIsolationScopeFromNodePath() RunNodeOption {
 }
 
 // WithRaiseOnWait makes RunNode treat a child that finishes its
-// iteration with an unresolved long-running tool call (a
-// FunctionCall whose ID is listed in the emitting event's
-// LongRunningToolIDs and for which no matching FunctionResponse
-// was emitted by the child) as an interruption rather than a
-// normal completion. The call returns ErrNodeInterrupted instead
-// of (nil, nil).
+// iteration with an unresolved long-running tool call as an interruption rather than a
+// normal completion.
 //
 // Use this when the caller (e.g. a chat-mode coordinator
 // dispatching a task sub-agent via a FunctionCall) MUST distinguish
 // "child paused waiting for HITL" from "child finished cleanly
-// with no output", because synthesising a completion FunctionResponse
-// in the former case would falsely close a still-open delegation.
-//
-// Mirrors adk-python's `ctx.run_node(raise_on_wait=True)` parameter
-// in src/google/adk/workflow/_llm_agent_wrapper.py:159, used by the
-// task-FC dispatch path for the same reason.
+// with no output".
 func WithRaiseOnWait() RunNodeOption {
 	return func(o *runNodeOptions) { o.raiseOnWait = true }
 }

@@ -403,17 +403,6 @@ func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx workflo
 	if err != nil {
 		return nil, fmt.Errorf("dispatchTaskFC: build node for %q: %w", fc.Name, err)
 	}
-	// WithRaiseOnWait: when the task sub-agent emits a long-running
-	// tool call (e.g. ctx.RequestConfirmation) and finishes its
-	// iteration without producing a matching FunctionResponse, treat
-	// it as an interruption rather than a clean completion. The
-	// caller (runChat's dispatchAndYield) catches ErrNodeInterrupted
-	// and skips synthesising the delegation-closing FR — leaving the
-	// delegation unresolved so the next user turn re-dispatches into
-	// the same scope, where the request_confirmation processor will
-	// see the user's reply and resume the tool. Mirrors adk-python's
-	// ctx.run_node(raise_on_wait=True) at
-	// src/google/adk/workflow/_llm_agent_wrapper.py:159.
 	out, err := workflow.RunNode[any](ctx, node, fc.Args,
 		workflow.WithRunID(fc.ID),
 		workflow.WithIsolationScope(fc.ID),

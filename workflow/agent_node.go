@@ -114,17 +114,6 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			events = n.agent.Run(exCtx)
 		}
 
-		// Task-mode LlmAgents set their output exclusively via
-		// finish_task (handled by llmagent.runTask, which stamps
-		// ev.Output from the FC's args on the successful FR). Plain
-		// model text emitted by a task agent is user-facing chatter
-		// — typically a question to the user mid-conversation — and
-		// must NOT be promoted to the node output. Promoting it
-		// would make the chat coordinator's dispatchTaskFC see a
-		// non-nil output, synthesise a delegation-closing FR, and
-		// route the next user reply to the coordinator instead of
-		// back into the still-open task scope. See
-		// llm_agent_wrapper.go:dispatchAndYield's out==nil branch.
 		skipSynthesize := false
 		if llmA, ok := n.agent.(llminternal.Agent); ok && llmA != nil {
 			if llminternal.Reveal(llmA).Mode == llminternal.ModeTask {

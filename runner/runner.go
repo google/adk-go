@@ -628,16 +628,6 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	if stateDelta != nil {
 		event.Actions.StateDelta = stateDelta
 	}
-	// When a paused task delegation is still in flight (e.g. a
-	// task sub-agent's confirmation request awaiting the user's
-	// reply), stamp the new user message with that task's
-	// isolation_scope so the task agent's content-build (scoped to
-	// <fc_id>) sees it, and so any FunctionResponse the framework
-	// synthesises for the resume turn inherits the same scope as
-	// its originating FunctionCall — preventing FC/FR scope
-	// mismatches in the contents processor. Mirrors adk-python's
-	// Runner._append_user_event (runners.py:754-757) +
-	// _find_active_task_isolation_scope.
 	if event.IsolationScope == "" {
 		if iso := findActiveTaskIsolationScope(storedSession); iso != "" {
 			event.IsolationScope = iso
@@ -650,27 +640,8 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	return ctx, event, nil
 }
 
-// findActiveTaskIsolationScope walks the session backwards and returns
-// the most recent isolation_scope that has not yet been closed by a
-// successful finish_task FunctionResponse. Two flavours of task scope
-// open new scopes today:
-//
-//   - FC delegation (chat coordinator → task sub-agent via FunctionCall):
-//     scope = fc.id, opened by an unresolved task FC.
-//   - Workflow dynamic node (task-mode LlmAgent dispatched as a graph
-//     node): scope = "<node_name>@<run_id>", stamped on every event the
-//     task agent emits.
-//
-// Both close on a successful finish_task FunctionResponse (one whose
-// Response carries {"result": FinishTaskSuccessResult}). An error FR
-// (validation failure) does NOT close the scope: the task agent is
-// still active, will see the error, and retry. Walking backward, the
-// first non-empty scope we encounter that hasn't been closed by a
-// later successful finish_task is the paused task awaiting the user's
-// next reply.
-//
-// Mirrors adk-python's _find_active_task_isolation_scope
-// (runners.py:70-106).
+// findActiveTaskIsolationScope returns the most recent isolation_scope that has
+// not yet been closed by a successful finish_task FunctionResponse.
 func findActiveTaskIsolationScope(sess session.Session) string {
 	if sess == nil {
 		return ""
