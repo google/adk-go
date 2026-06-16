@@ -170,7 +170,6 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		})
 		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
-
 		ic := &invocationContext{
 			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
@@ -194,24 +193,24 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			}
 		}
 
-		if ic.Ended() {
+		if nodeCtx.Ended() {
 			return
 		}
 
 		for event, err := range a.run(nodeCtx) {
 			if event != nil && event.Author == "" {
-				event.Author = getAuthorForEvent(ic, event)
+				event.Author = getAuthorForEvent(nodeCtx, event)
 			}
 			if !yield(event, err) {
 				return
 			}
 		}
 
-		if ic.Ended() {
+		if nodeCtx.Ended() {
 			return
 		}
 
-		event, err = runAfterAgentCallbacks(ic)
+		event, err = runAfterAgentCallbacks(nodeCtx)
 		if event != nil || err != nil {
 			yield(event, err)
 		}
@@ -238,7 +237,7 @@ func (a *agent) FindSubAgent(name string) Agent {
 	return nil
 }
 
-func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
+func getAuthorForEvent(ctx Context, event *session.Event) string {
 	if event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
 		return genai.RoleUser
 	}

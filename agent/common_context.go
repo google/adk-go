@@ -129,7 +129,11 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 	res.toolConfirmation = confirmation
 	res.artifacts = &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions}
 
-	return &res
+	wrapper := &toolContextWrapper{
+		context: &res,
+	}
+
+	return wrapper
 }
 
 func prepareEventActions(actions *session.EventActions) *session.EventActions {
@@ -146,11 +150,8 @@ func prepareEventActions(actions *session.EventActions) *session.EventActions {
 	return actions
 }
 
-// commonContext is the single concrete implementation of CallbackContext
-// (and, when constructed via NewToolContext, of ToolContext as well). The
-// tool-specific methods (FunctionCallID, Actions, SearchMemory,
-// ToolConfirmation, RequestConfirmation) are always present on the concrete
-// type; they are only meaningful when the context is used as a ToolContext.
+// commonContext is the single concrete implementation of Context for static and dynamic Nodes
+// Callbacks and Tools
 type commonContext struct {
 	context.Context
 	invocationContext InvocationContext
@@ -322,16 +323,6 @@ func (c *commonContext) Session() session.Session {
 // WithContext implements [InvocationContext].
 func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
 	return c.WithAgentContext(ctx)
-	// //panic("Should not be used")
-	// newCtx := c.invocationContext.WithContext(ctx)
-	// return &commonContext{
-	// 	Context:           newCtx,
-	// 	invocationContext: newCtx,
-	// 	artifacts:         c.artifacts,
-	// 	actions:           c.actions,
-	// 	functionCallID:    c.functionCallID,
-	// 	toolConfirmation:  c.toolConfirmation,
-	// }
 }
 
 func (c *commonContext) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
@@ -359,22 +350,6 @@ func (c *commonContext) WithAgentContext(ctx context.Context) Context {
 		res.Context = ctx
 	}
 	return &res
-
-	// //TODO: other fields???
-	// // newCtx := agent.NewNodeContext(ctx, nil)
-	// return &commonContext{
-	// 	Context:            ic,
-	// 	invocationContext:  ic,
-	// 	artifacts:          c.artifacts,
-	// 	actions:            c.actions,
-	// 	functionCallID:     c.functionCallID,
-	// 	toolConfirmation:   c.toolConfirmation,
-	// 	resumeInputs:       c.resumeInputs,
-	// 	path:               c.path,
-	// 	runID:              c.runID,
-	// 	subScheduler:       c.subScheduler,
-	// 	outputForAncestors: c.outputForAncestors,
-	// }
 }
 
 // OutputForAncestors implements [Context].
@@ -497,11 +472,6 @@ func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 	// false (hasFunctionResponses == true), causing the loop to continue.
 	c.actions.SkipSummarization = true
 	return nil
-}
-
-func (c *commonContext) SetInvocationContext(ic InvocationContext) {
-	c.invocationContext = ic
-	c.Context = ic
 }
 
 func (c *commonContext) InvocationContext() InvocationContext {

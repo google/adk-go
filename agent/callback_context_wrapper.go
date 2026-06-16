@@ -51,11 +51,6 @@ func (c *callbackContextWrapper) InvocationContext() InvocationContext {
 	return nil
 }
 
-// SetInvocationContext implements [Context].
-func (c *callbackContextWrapper) SetInvocationContext(InvocationContext) {
-	log.Print("SetInvocationContext() is not supported for CallbackContext")
-}
-
 // SubScheduler implements [Context].
 func (c *callbackContextWrapper) SubScheduler() DynamicSubScheduler {
 	log.Print("SubScheduler() is not supported for CallbackContext")
