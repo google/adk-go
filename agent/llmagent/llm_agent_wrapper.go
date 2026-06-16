@@ -88,9 +88,9 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 		// Carry the node's sub-scheduler in the value chain so it
 		// survives the context re-wrapping below (and inside Agent.Run),
 		// letting a tool delegate via RunNode (e.g. SingleTurnTool).
-		if sub := ctx.SubScheduler(); sub != nil {
-			ctx = ctx.WithAgentContext(agent.WithSubScheduler(ctx, sub))
-		}
+		// if sub := ctx.SubScheduler(); sub != nil {
+		// 	ctx = ctx.WithAgentContext(agent.WithSubScheduler(ctx, sub))
+		// }
 
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),

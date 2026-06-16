@@ -144,6 +144,15 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 	return wrapper
 }
 
+func NewCleanToolContext(ctx Context, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) (Context, error) {
+	c, ok := ctx.(*commonContext)
+	if !ok {
+		return nil, fmt.Errorf("Context is not commonContext, but %T", ctx)
+	}
+	res := c.newCleanToolContext(functionCallID, actions, confirmation)
+	return res, nil
+}
+
 func prepareEventActions(actions *session.EventActions) *session.EventActions {
 	if actions == nil {
 		return &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
@@ -194,15 +203,6 @@ type commonContext struct {
 // chain, so it survives re-wrapping that drops the struct field.
 type subSchedulerKey struct{}
 
-// WithSubScheduler stashes sub in ctx's value chain for SubScheduler()
-// to recover after re-wrapping. Returns ctx unchanged if sub is nil.
-func WithSubScheduler(ctx context.Context, sub DynamicSubScheduler) context.Context {
-	if sub == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, subSchedulerKey{}, sub)
-}
-
 // SubScheduler returns the sub-scheduler RunNode uses to schedule
 // children, or nil outside a dynamic-node activation. The struct field
 // is the fast path for a freshly built dynamic-node context (and takes
@@ -212,10 +212,25 @@ func (c *commonContext) SubScheduler() DynamicSubScheduler {
 	if c.subScheduler != nil {
 		return c.subScheduler
 	}
-	if sub, ok := c.Value(subSchedulerKey{}).(DynamicSubScheduler); ok {
-		return sub
+	if cc, ok := c.Context.(*commonContext); ok {
+		return cc.SubScheduler()
 	}
 	return nil
+}
+
+func (c *commonContext) newCleanToolContext(functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
+	ic := &invocationContext{
+		session:      c.Session(),
+		invocationID: c.InvocationID(),
+	}
+	res := &commonContext{
+		invocationContext: ic,
+		actions:           actions,
+		functionCallID:    functionCallID,
+		toolConfirmation:  confirmation,
+		subScheduler:      c.subScheduler,
+	}
+	return res
 }
 
 // Path implements [Context].

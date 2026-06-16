@@ -52,8 +52,7 @@ func (c *toolContextWrapper) InvocationContext() InvocationContext {
 
 // SubScheduler implements [Context].
 func (c *toolContextWrapper) SubScheduler() DynamicSubScheduler {
-	log.Print("SubScheduler() is not supported for ToolContext")
-	return nil
+	return c.context.SubScheduler()
 }
 
 // Agent implements [Context].

@@ -208,10 +208,11 @@ func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Conten
 		Path:               ctx.Path(),
 		OutputForAncestors: ctx.OutputForAncestors(),
 	})
-	if sub := ctx.SubScheduler(); sub != nil {
-		agentCtx = agentCtx.WithContext(agent.WithSubScheduler(agentCtx, sub))
-	}
-	return agentCtx
+	// agentCtx := agent.New(ic)
+	// if sub := ctx.SubScheduler(); sub != nil {
+	// 	agentCtx = agentCtx.WithContext(agent.WithSubScheduler(agentCtx, sub))
+	// }
+	return ic
 }
 
 // inputToUserContent converts a node input value into a user Content for
