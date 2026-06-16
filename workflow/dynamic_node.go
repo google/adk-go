@@ -105,11 +105,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 			return
 		}
 
-		// One mutex serializes every yield for this activation: the emit
-		// passed to the DynamicFn and the same emit driven by RunNode via
-		// the sub-scheduler. Concurrent children must not yield at once.
-		var emitMu sync.Mutex
-		emit := makeEmit(yield, ctx, &emitMu)
+		emit := makeEmit(yield, ctx)
 		sub := newDynamicSubScheduler(ctx, n.composePath(ctx), emit)
 		orchestratorCtx := newDynamicNodeContext(ctx, sub.ParentPath(), "", sub, sub.OutputForAncestors())
 
@@ -192,11 +188,12 @@ func (n *dynamicNode[IN, OUT]) composePath(parent NodeContext) string {
 // consumer triggers this, but the contract must not depend on it),
 // return context.Canceled as a stand-in.
 //
-// mu serializes yield: a DynamicFn may run concurrent children (see
-// WithUseSubBranch) that all emit through this one callback, and calling
-// the same yield from multiple goroutines panics the iterator and races
-// the parent runNode's completion accumulator.
-func makeEmit(yield func(*session.Event, error) bool, parentCtx NodeContext, mu *sync.Mutex) func(*session.Event) error {
+// A single mutex serializes yield: a DynamicFn may run concurrent
+// children (see WithUseSubBranch) that all emit through this one
+// callback, and calling the same yield from multiple goroutines panics
+// the iterator and races the parent runNode's completion accumulator.
+func makeEmit(yield func(*session.Event, error) bool, parentCtx NodeContext) func(*session.Event) error {
+	var mu sync.Mutex
 	return func(ev *session.Event) error {
 		mu.Lock()
 		defer mu.Unlock()
