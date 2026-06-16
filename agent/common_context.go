@@ -29,12 +29,21 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
-func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Context {
+// NewContext returns a full Context backed by parent, with no callback,
+// tool, or node specializations. Use it wherever a plain run context is
+// needed (e.g. running an agent).
+func NewContext(parent InvocationContext) Context {
 	return &commonContext{
 		Context:           parent,
 		invocationContext: parent,
-		resumeInputs:      resumeInputs,
 	}
+}
+
+// NewNodeContext returns a Context carrying per-node resume inputs.
+func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Context {
+	c := NewContext(parent).(*commonContext)
+	c.resumeInputs = resumeInputs
+	return c
 }
 
 func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubScheduler, outputForAncestors []string) Context {
