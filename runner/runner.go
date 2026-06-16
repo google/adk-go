@@ -597,7 +597,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 				RunConfig:    ctx.RunConfig(),
 				InvocationID: ctx.InvocationID(),
 			})
-			ctx = agent.NewCallbackContext(ic, nil)
+			ctx = agent.NewContext(ic)
 		}
 	}
 

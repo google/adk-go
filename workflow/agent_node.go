@@ -204,6 +204,9 @@ func nodeInputToContent(input any) (*genai.Content, error) {
 	case nil:
 		return nil, nil
 	case *genai.Content:
+		if v == nil {
+			return nil, nil
+		}
 		return &genai.Content{Role: "user", Parts: v.Parts}, nil
 	case string:
 		return &genai.Content{Role: "user", Parts: []*genai.Part{{Text: v}}}, nil
