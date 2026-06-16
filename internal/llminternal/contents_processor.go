@@ -616,7 +616,7 @@ func applyCompaction(agentName string, events []*session.Event) []*session.Event
 
 	var ranges []compRange
 	for _, ev := range events {
-		if ev.Actions.Compaction != nil {
+		if ev.IsCompactionMarker() {
 			c := ev.Actions.Compaction
 			ranges = append(ranges, compRange{c.StartTimestamp, c.EndTimestamp, c.CompactedContent})
 		}
@@ -691,7 +691,7 @@ func applyCompaction(agentName string, events []*session.Event) []*session.Event
 	// rearrangeEventsForLatestFunctionResponse to error.
 	respIDsOutside := make(map[string]bool)
 	for _, ev := range events {
-		if ev.Actions.Compaction != nil || inAnyRange(ev.Timestamp) {
+		if ev.IsCompactionMarker() || inAnyRange(ev.Timestamp) {
 			continue
 		}
 		for _, fr := range utils.FunctionResponses(utils.Content(ev)) {
@@ -700,7 +700,7 @@ func applyCompaction(agentName string, events []*session.Event) []*session.Event
 	}
 	pinned := make(map[*session.Event]bool)
 	for _, ev := range events {
-		if ev.Actions.Compaction != nil || !inAnyRange(ev.Timestamp) {
+		if ev.IsCompactionMarker() || !inAnyRange(ev.Timestamp) {
 			continue
 		}
 		for _, fc := range utils.FunctionCalls(utils.Content(ev)) {
@@ -716,7 +716,7 @@ func applyCompaction(agentName string, events []*session.Event) []*session.Event
 	injected := make(map[int]bool, len(active))
 	result := make([]*session.Event, 0, len(events))
 	for _, ev := range events {
-		if ev.Actions.Compaction != nil {
+		if ev.IsCompactionMarker() {
 			continue
 		}
 		if pinned[ev] {

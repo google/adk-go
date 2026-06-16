@@ -118,10 +118,9 @@ type Event struct {
 	LongRunningToolIDs []string
 }
 
-// IsCompactionMarker returns true when this event carries a compaction summary
-// rather than a regular model or user response. Compaction markers are excluded
-// from normal content rendering and handled by the compaction pass in
-// buildContentsDefault.
+// IsCompactionMarker reports whether this event is a compaction record whose
+// Content should not be rendered directly; the summary lives in
+// Actions.Compaction.CompactedContent instead.
 func (e *Event) IsCompactionMarker() bool {
 	return e.Actions.Compaction != nil
 }
