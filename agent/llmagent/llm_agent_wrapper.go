@@ -41,6 +41,7 @@ package llmagent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
@@ -405,6 +406,7 @@ func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx workflo
 	out, err := workflow.RunNode[any](ctx, node, fc.Args,
 		workflow.WithRunID(fc.ID),
 		workflow.WithIsolationScope(fc.ID),
+		workflow.WithRaiseOnWait(),
 	)
 	if err != nil {
 		return nil, err
@@ -495,16 +497,61 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 	dispatchAndYield := func(fc *genai.FunctionCall) (ok bool) {
 		out, err := dispatchTaskFC(a, fc, ctx)
 		if err != nil {
-			// HITL pause propagates as ErrNodeInterrupted; bubble it
-			// up so the outer scheduler can park the coordinator.
+			if errors.Is(err, workflow.ErrNodeInterrupted) {
+				// Task sub-agent paused on a long-running tool
+				// (e.g. its tool called ctx.RequestConfirmation
+				// and is awaiting the user's reply). Do NOT
+				// synthesise a delegation-closing FR: leaving
+				// the delegation unresolved makes
+				// findUnresolvedTaskDelegations re-dispatch it on
+				// the next user turn, where the
+				// request_confirmation processor will see the
+				// reply and resume the tool inside the same
+				// isolation scope.
+				//
+				// Return false to stop both the inner Agent.Run
+				// iterator and the outer re-entry loop. Without
+				// stopping, the coordinator's LLM would be invoked
+				// again with no new information and produce
+				// duplicate user-facing text plus duplicate
+				// pending-interrupt prompts. The runner's iterator
+				// drains cleanly; the console launcher then
+				// scans collected events for LongRunningToolIDs
+				// and renders the (single) interrupt prompt.
+				return false
+			}
 			yield(nil, err)
+			return false
+		}
+		if out == nil {
+			// Task sub-agent drained its iterator without ever
+			// calling finish_task (e.g. it emitted a natural-
+			// language question to the user and is waiting for
+			// the reply). runTask only sets ev.Output when it
+			// observes a successful finish_task FR, so out==nil
+			// means the task did not actually finish.
+			//
+			// Treating this as a completion would (a) synthesise
+			// a misleading delegation-closing FR, and (b) route
+			// the user's next message to the coordinator instead
+			// of back into the paused task, causing the
+			// coordinator to re-dispatch a fresh task on every
+			// reply and loop forever.
+			//
+			// Leave the delegation unresolved: the next user
+			// turn will be stamped (by the runner's active-task
+			// scope helper) into this task's scope, and
+			// findUnresolvedTaskDelegations will re-dispatch
+			// into the same scope so the task agent sees the
+			// reply in its conversation history.
 			return false
 		}
 		return yield(synthesizeTaskFREvent(ctx.InvocationID(), fc, out), nil)
 	}
 
 	// Step 1: pre-LLM scan for unresolved task FCs from prior turns.
-	for _, fc := range findUnresolvedTaskDelegations(ctx.Session(), a.Name(), toolsDict) {
+	unresolved := findUnresolvedTaskDelegations(ctx.Session(), a.Name(), toolsDict)
+	for _, fc := range unresolved {
 		if !dispatchAndYield(fc) {
 			return
 		}
