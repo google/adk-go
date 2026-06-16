@@ -34,6 +34,7 @@ import (
 	imemory "google.golang.org/adk/internal/memory"
 	"google.golang.org/adk/internal/plugininternal"
 	"google.golang.org/adk/internal/utils"
+	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/plugin"
@@ -627,11 +628,49 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	if stateDelta != nil {
 		event.Actions.StateDelta = stateDelta
 	}
+	if event.IsolationScope == "" {
+		if iso := findActiveTaskIsolationScope(storedSession); iso != "" {
+			event.IsolationScope = iso
+		}
+	}
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 		return ctx, nil, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
 	return ctx, event, nil
+}
+
+// findActiveTaskIsolationScope returns the most recent isolation_scope that has
+// not yet been closed by a successful finish_task FunctionResponse.
+func findActiveTaskIsolationScope(sess session.Session) string {
+	if sess == nil {
+		return ""
+	}
+	events := sess.Events()
+	finished := map[string]struct{}{}
+	for i := events.Len() - 1; i >= 0; i-- {
+		ev := events.At(i)
+		if ev == nil || ev.IsolationScope == "" {
+			continue
+		}
+		scope := ev.IsolationScope
+		for _, fr := range utils.FunctionResponses(ev.Content) {
+			if fr == nil || fr.Name != workflowinternal.FinishTaskToolName {
+				continue
+			}
+			if result, ok := fr.Response["result"]; ok {
+				if s, ok := result.(string); ok && s == workflowinternal.FinishTaskSuccessResult {
+					finished[scope] = struct{}{}
+				}
+			}
+			break
+		}
+		if _, done := finished[scope]; done {
+			continue
+		}
+		return scope
+	}
+	return ""
 }
 
 // findAgentToRun returns the agent that should handle the next request based on

@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	internalcontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/internal/llminternal"
 	"google.golang.org/adk/session"
 )
 
@@ -113,13 +114,22 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			events = n.agent.Run(exCtx)
 		}
 
+		skipSynthesize := false
+		if llmA, ok := n.agent.(llminternal.Agent); ok && llmA != nil {
+			if llminternal.Reveal(llmA).Mode == llminternal.ModeTask {
+				skipSynthesize = true
+			}
+		}
+
 		for event, err := range events {
 			if err != nil {
 				yield(nil, err)
 				return
 			}
 
-			synthesizeAgentOutput(event)
+			if !skipSynthesize {
+				synthesizeAgentOutput(event)
+			}
 
 			// Tag the event for scope filtering (mirrors adk-python
 			// NodeRunner._enrich_event). The scheduler stamps delegated
@@ -148,11 +158,24 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 // resume) know this event's output was derived from the model
 // message, mirroring adk-python's process_llm_agent_output which
 // sets event.output and node_info.message_as_output together.
+//
+// Long-running-tool events (e.g. a tool that called
+// ctx.RequestConfirmation and is awaiting the user's reply) are
+// excluded: IsFinalResponse() returns true for them so the flow
+// loop terminates the round, but they represent a pause, not a
+// completion. Treating them as MessageAsOutput would cache an
+// empty "" as the agent's "output" and, on resume, short-circuit
+// the re-run via collectNodeOutputs / WithRunID-replay — making
+// the chat wrapper synthesise a bogus completion FR for what is
+// still an open delegation.
 func synthesizeAgentOutput(event *session.Event) {
 	if event == nil || event.Output != nil {
 		return
 	}
 	if !event.IsFinalResponse() {
+		return
+	}
+	if len(event.LongRunningToolIDs) > 0 {
 		return
 	}
 	if text, ok := messageText(event); ok {
