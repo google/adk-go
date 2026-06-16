@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/session"
 )
 
@@ -287,6 +288,74 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 	expectedText := fmt.Sprintf("Uploaded file: %s. It has been saved to the artifacts", savedFileName)
 	if partWithBlob.Text != expectedText {
 		t.Errorf("unexpected text in placeholder part. got %q, want %q", partWithBlob.Text, expectedText)
+	}
+}
+
+// TestRunner_PluginModifiesUserMessage guards that a plugin modifying the
+// user message still yields a full run context.
+func TestRunner_PluginModifiesUserMessage(t *testing.T) {
+	ctx := context.Background()
+	appName := "testApp"
+	userID := "testUser"
+	sessionID := "testSession"
+
+	var gotMessage *genai.Content
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// Accessors that nil-deref on a callback-only context.
+				_ = ctx.Agent().Name()
+				_ = ctx.Session().ID()
+				gotMessage = ctx.UserContent()
+			}
+		},
+	}))
+
+	modifierPlugin, err := plugin.New(plugin.Config{
+		Name: "message_modifier",
+		OnUserMessageCallback: func(_ agent.InvocationContext, _ *genai.Content) (*genai.Content, error) {
+			return &genai.Content{
+				Role:  genai.RoleUser,
+				Parts: []*genai.Part{genai.NewPartFromText("modified")},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+
+	sessionService := session.InMemoryService()
+	r, err := New(Config{
+		AppName:        appName,
+		Agent:          testAgent,
+		SessionService: sessionService,
+		PluginConfig:   PluginConfig{Plugins: []*plugin.Plugin{modifierPlugin}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	}); err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromText("original")}}
+	for _, err := range r.Run(ctx, userID, sessionID, msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run() returned an error: %v", err)
+		}
+	}
+
+	if gotMessage == nil {
+		t.Fatal("agent did not observe a user message")
+	}
+	if len(gotMessage.Parts) != 1 || gotMessage.Parts[0].Text != "modified" {
+		t.Errorf("agent saw %v, want the plugin-modified message", gotMessage)
 	}
 }
 

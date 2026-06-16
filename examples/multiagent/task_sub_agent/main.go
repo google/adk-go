@@ -94,7 +94,7 @@ func confirmation(_ agent.Context, _ ConfirmationInput) (ConfirmationOutput, err
 func main() {
 	ctx := context.Background()
 
-	model, err := gemini.NewModel(ctx, "gemini-3.1-flash-lite", &genai.ClientConfig{
+	model, err := gemini.NewModel(ctx, "gemini-3.5-flash", &genai.ClientConfig{
 		APIKey: os.Getenv("GOOGLE_API_KEY"),
 	})
 	if err != nil {
@@ -190,6 +190,7 @@ Once you have both pieces of information, finish your task.
 		Tools:     []tool.Tool{placeOrderTool},
 		Instruction: `You are a helpful coordinator for a food delivery service.
 You need both order and payment information to place an order.
+You must verify food order with 'order_collector'
 `,
 	})
 	if err != nil {

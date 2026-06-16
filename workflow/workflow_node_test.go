@@ -152,6 +152,94 @@ func TestNestedWorkflow_MultipleOutputs(t *testing.T) {
 	}
 }
 
+// Two terminals producing output is an error, not a nondeterministic
+// pick.
+func TestNestedWorkflow_MultipleTerminals(t *testing.T) {
+	passthrough := func(ctx agent.Context, input string) (string, error) { return input, nil }
+	a := NewFunctionNode("a", passthrough, defaultNodeConfig)
+	b := NewFunctionNode("b", passthrough, defaultNodeConfig)
+	c := NewFunctionNode("c", passthrough, defaultNodeConfig)
+	innerEdges := NewEdgeBuilder().Add(Start, a).AddFanOut(a, b, c).Build()
+
+	wfNode, err := NewWorkflowNode("nested_step", innerEdges)
+	if err != nil {
+		t.Fatalf("failed to create workflow node: %v", err)
+	}
+	outerWf := mustNew(t, Chain(Start, wfNode))
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "input"}}}
+
+	var gotErr error
+	for _, err := range outerWf.Run(mockCtx) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if !errors.Is(gotErr, ErrMultipleOutputs) {
+		t.Errorf("got error %v, want ErrMultipleOutputs", gotErr)
+	}
+}
+
+// A silent terminal (no output) yields no workflow output, even when an
+// earlier node produced one.
+func TestNestedWorkflow_SilentTerminal(t *testing.T) {
+	producer := func(ctx agent.Context, input string) (string, error) { return "intermediate", nil }
+	// Terminal returns a *session.Event with no Output (a side-effect sink).
+	sink := func(ctx agent.Context, input string) (*session.Event, error) {
+		return &session.Event{}, nil
+	}
+	a := NewFunctionNode("producer", producer, defaultNodeConfig)
+	b := NewFunctionNode("sink", sink, defaultNodeConfig)
+	innerEdges := Chain(Start, a, b)
+
+	wfNode, err := NewWorkflowNode("nested_step", innerEdges)
+	if err != nil {
+		t.Fatalf("failed to create workflow node: %v", err)
+	}
+	outerWf := mustNew(t, Chain(Start, wfNode))
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "input"}}}
+
+	for ev, err := range outerWf.Run(mockCtx) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ev.Output != nil {
+			t.Errorf("expected no output, got %v", ev.Output)
+		}
+	}
+}
+
+// A terminal whose output is model text (MessageAsOutput) is still
+// picked up as the workflow output.
+func TestNestedWorkflow_MessageAsOutputTerminal(t *testing.T) {
+	innerEdges := Chain(Start, newMessageAsOutputNode("terminal", "from-message"))
+
+	wfNode, err := NewWorkflowNode("nested_step", innerEdges)
+	if err != nil {
+		t.Fatalf("failed to create workflow node: %v", err)
+	}
+	outerWf := mustNew(t, Chain(Start, wfNode))
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "input"}}}
+
+	var gotOutput any
+	for ev, err := range outerWf.Run(mockCtx) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ev.Output != nil {
+			gotOutput = ev.Output
+		}
+	}
+	if gotOutput != "from-message" {
+		t.Errorf("got output %v, want %q", gotOutput, "from-message")
+	}
+}
+
 func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 	// Create inner workflow edges
 	nestedStateUpdater := func(ctx agent.Context, input string) (string, error) {

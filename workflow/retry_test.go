@@ -49,6 +49,23 @@ func TestCalculateDelay(t *testing.T) {
 	}
 }
 
+// TestCalculateDelayUnsetBackoffFactor guards that an unset BackoffFactor
+// gives a constant delay instead of collapsing to 0.
+func TestCalculateDelayUnsetBackoffFactor(t *testing.T) {
+	cfg := &RetryConfig{
+		MaxAttempts:  3,
+		InitialDelay: time.Second,
+		// BackoffFactor intentionally unset (zero).
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		got := CalculateDelay(cfg, attempt)
+		if got != time.Second {
+			t.Errorf("CalculateDelay(unset backoff, %d) = %v, want %v", attempt, got, time.Second)
+		}
+	}
+}
+
 func TestCalculateDelayWithJitter(t *testing.T) {
 	cfg := &RetryConfig{
 		InitialDelay:  time.Second,
