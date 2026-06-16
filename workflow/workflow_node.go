@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"fmt"
 	"iter"
 
 	"google.golang.org/adk/agent"
@@ -41,12 +42,20 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 }
 
 // Run executes the sub-workflow with the given input.
-// It intercepts events from the sub-workflow to ensure that only the final
-// output is yielded to the parent scheduler, preventing ErrMultipleOutputs
-// if intermediate steps also produced outputs.
+//
+// The sub-workflow's output is the output of its terminal node(s) —
+// nodes with no outgoing edges — selected by graph topology, not by
+// event arrival order. Exactly one terminal output is forwarded as
+// this node's output; more than one is a graph-design error
+// (ErrMultipleOutputs); zero means the node produces no output.
+// Mirrors adk-python's _set_ctx_output_or_interrupts.
 func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+	terminals := n.subWorkflow.graph.terminalNodeNames()
 	return func(yield func(*session.Event, error) bool) {
-		var lastOutput any
+		// terminalOutputs is keyed by terminal node name (last write
+		// wins), so re-running a terminal via loop-back does not inflate
+		// the count.
+		terminalOutputs := make(map[string]any)
 		var pendingErr error
 		// consumerGone becomes true once the parent yield returns false. After
 		// that, calling yield again panics the iterator (Go 1.23 range-over-func
@@ -55,7 +64,6 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 
 		// Create a cancellable context to signal the sub-workflow to stop on error or break.
 		subCtx, cancel := ctx.WithAgentCancel()
-		// subCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		ctx = ctx.WithAgentContext(subCtx)
 
@@ -70,21 +78,29 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 				continue
 			}
 
+			// Capture the output only from terminal nodes. childEventOutput
+			// matches the scheduler: Event.Output, or model text when
+			// MessageAsOutput is set.
+			if out, ok := childEventOutput(ev); ok && ev.NodeInfo != nil && terminals[ev.NodeInfo.Path] {
+				terminalOutputs[ev.NodeInfo.Path] = out
+			}
+
 			if consumerGone {
 				// Drain remaining events without yielding.
 				continue
 			}
 
-			out := ev
-			if ev.Output != nil {
-				lastOutput = ev.Output
-				// Create a shallow copy and clear Output so the parent
-				// scheduler doesn't fail on multiple outputs for this node.
-				evCopy := *ev
-				evCopy.Output = nil
-				out = &evCopy
+			if ev.Output == nil {
+				if !yield(ev, nil) {
+					consumerGone = true
+					cancel()
+				}
+				continue
 			}
-			if !yield(out, nil) {
+			// Forward with Output stripped (see the doc comment).
+			evCopy := *ev
+			evCopy.Output = nil
+			if !yield(&evCopy, nil) {
 				consumerGone = true
 				cancel()
 			}
@@ -101,10 +117,16 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 			return
 		}
 
-		// Yield the final output at the end if we captured any.
-		if lastOutput != nil {
+		if len(terminalOutputs) > 1 {
+			yield(nil, fmt.Errorf("%w: sub-workflow %q has %d terminal nodes producing output; a workflow must have at most one terminal output",
+				ErrMultipleOutputs, n.subWorkflow.Name(), len(terminalOutputs)))
+			return
+		}
+
+		// Yield the terminal output at the end if one was produced.
+		for _, out := range terminalOutputs {
 			event := session.NewEvent(ctx.InvocationID())
-			event.Output = lastOutput
+			event.Output = out
 			yield(event, nil)
 		}
 	}

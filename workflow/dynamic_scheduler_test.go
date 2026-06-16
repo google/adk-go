@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -185,11 +186,80 @@ func TestSubScheduler_RunNode_ErrorWinsOverInterrupt(t *testing.T) {
 	}
 }
 
+// TestSubScheduler_RehydrateCache_InvocationScope verifies that
+// rehydrateCache serves a child's output from cache only when the
+// terminal event belongs to the current invocation. Auto-counter
+// run-ids reset to 1 on every fresh activation, so a later user turn
+// reuses the same childPath ("wf/child@1"); without the invocation
+// filter the prior turn's output would be replayed and the child would
+// never re-run — the regression behind the empty second turn of the
+// dynamic workflow example. The current-invocation case must still hit
+// to preserve within-invocation resume/dedup.
+//
+// MockInvocationContext.InvocationID() is "test-invocation-id".
+func TestSubScheduler_RehydrateCache_InvocationScope(t *testing.T) {
+	const childPath = "wf/child@1"
+	event := func(invocationID, output string) *session.Event {
+		return &session.Event{
+			InvocationID: invocationID,
+			Output:       output,
+			NodeInfo:     &session.NodeInfo{Path: childPath},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		events    sliceEvents
+		wantHit   bool
+		wantValue any
+	}{
+		{
+			name:    "other invocation ignored",
+			events:  sliceEvents{event("prev-invocation", "stale")},
+			wantHit: false,
+		},
+		{
+			name:      "current invocation wins over prior",
+			events:    sliceEvents{event("prev-invocation", "stale"), event("test-invocation-id", "fresh")},
+			wantHit:   true,
+			wantValue: "fresh",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newMockCtx(t)
+			ctx.sess = &eventsSession{events: tc.events}
+			sub := newDynamicSubScheduler(newNodeContext(ctx, nil), "wf", noopEmit).(*dynamicSubScheduler)
+
+			out, ok := sub.lookupCachedOutput(childPath)
+			if ok != tc.wantHit {
+				t.Fatalf("lookupCachedOutput(%q) hit = %v, want %v (out=%v)", childPath, ok, tc.wantHit, out)
+			}
+			if ok && out != tc.wantValue {
+				t.Errorf("cached output = %v, want %v", out, tc.wantValue)
+			}
+		})
+	}
+}
+
 // =============================================================================
 // Test fixtures and helpers
 // =============================================================================
 
 func noopEmit(*session.Event) error { return nil }
+
+// eventsSession is a minimal session.Session exposing a fixed event
+// history; only Events() is consulted by rehydrateCache.
+type eventsSession struct {
+	events session.Events
+}
+
+func (s *eventsSession) ID() string                { return "test-session" }
+func (s *eventsSession) AppName() string           { return "test-app" }
+func (s *eventsSession) UserID() string            { return "test-user" }
+func (s *eventsSession) State() session.State      { return nil }
+func (s *eventsSession) Events() session.Events    { return s.events }
+func (s *eventsSession) LastUpdateTime() time.Time { return time.Time{} }
 
 func newTopLevelCtx(t *testing.T) agent.Context {
 	t.Helper()
