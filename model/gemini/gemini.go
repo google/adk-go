@@ -32,6 +32,20 @@ import (
 	"google.golang.org/adk/model"
 )
 
+// init registers Gemini model names (e.g. "gemini-2.5-flash") with the
+// package-level model registry so callers can build a [model.LLM] from just a
+// name via [model.NewLLM].
+//
+// The registry path constructs the client with application-default credentials
+// (a nil [genai.ClientConfig]). Callers that need a custom configuration
+// (custom HTTP client, API key, backend, etc.) should call [NewModel]
+// directly.
+func init() {
+	model.Register("(?i)gemini-.*", func(ctx context.Context, name string) (model.LLM, error) {
+		return NewModel(ctx, name, nil)
+	})
+}
+
 // TODO: test coverage
 type geminiModel struct {
 	client             *genai.Client
