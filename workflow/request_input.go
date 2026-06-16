@@ -109,3 +109,20 @@ func NewRequestInputEvent(ctx agent.InvocationContext, req session.RequestInput)
 
 	return ev
 }
+
+// ResumeOrRequestInput collapses the re-entry HITL pattern (see
+// NodeConfig.RerunOnResume) into one call: it returns the human's reply
+// if the node is being re-run after the answer, otherwise it emits a
+// RequestInput and returns ErrNodeInterrupted so the caller can pause.
+// req.InterruptID is the shared key for the request and the resume
+// lookup. An emit failure is returned in place of ErrNodeInterrupted.
+// See examples/workflow/hitl_rerun for usage.
+func ResumeOrRequestInput(ctx agent.Context, emit func(*session.Event) error, req session.RequestInput) (any, error) {
+	if reply, ok := ctx.ResumedInput(req.InterruptID); ok {
+		return reply, nil
+	}
+	if err := emit(NewRequestInputEvent(ctx, req)); err != nil {
+		return nil, err
+	}
+	return nil, ErrNodeInterrupted
+}

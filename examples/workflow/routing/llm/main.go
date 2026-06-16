@@ -27,7 +27,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"iter"
 	"log"
 	"os"
 	"strings"
@@ -55,38 +54,21 @@ const classifierInstruction = `Classify the user's message into one of three cat
 
 Answer with EXACTLY one word, lowercase, no punctuation: question, exclamation, or statement.`
 
-// routeFromClassificationNode turns the classifier's one-word
-// output into a routing event. A FunctionNode can't set
-// Event.Routes from its body, so routing nodes drop down to
-// BaseNode.
-type routeFromClassificationNode struct {
-	workflow.BaseNode
-}
-
-func newRouteNode() *routeFromClassificationNode {
-	return &routeFromClassificationNode{
-		BaseNode: workflow.NewBaseNode(
-			"route_by_classification",
-			"emits a routing event keyed on the LLM's one-word classification",
-			workflow.NodeConfig{},
-		),
+// routeByClassification turns the classifier's one-word output into a
+// routing event; returning nil suppresses the default terminal event.
+func routeByClassification(ctx agent.Context, input any, emit func(*session.Event) error) (any, error) {
+	// Normalise defensively in case the LLM ignored the one-word
+	// instruction; off-script replies fall through to "statement".
+	category := strings.TrimRight(strings.ToLower(strings.TrimSpace(fmt.Sprint(input))), ".")
+	if category != "question" && category != "exclamation" && category != "statement" {
+		category = "statement"
 	}
-}
-
-func (n *routeFromClassificationNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		// input is the classifier's reply, normalised defensively
-		// in case the LLM ignored the one-word instruction.
-		category := strings.ToLower(strings.TrimSpace(fmt.Sprint(input)))
-		category = strings.TrimRight(category, ".")
-		if category != "question" && category != "exclamation" && category != "statement" {
-			// Off-script replies fall through to a handler.
-			category = "statement"
-		}
-		ev := session.NewEvent(ctx.InvocationID())
-		ev.Routes = []string{category}
-		yield(ev, nil)
+	ev := session.NewEvent(ctx.InvocationID())
+	ev.Routes = []string{category}
+	if err := emit(ev); err != nil {
+		return nil, err
 	}
+	return nil, nil
 }
 
 func answerQuestion(ctx agent.Context, _ any) (string, error) {
@@ -148,7 +130,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to create classify node: %v", err)
 	}
-	routeNode := newRouteNode()
+	routeNode := workflow.NewEmittingFunctionNode("route_by_classification", routeByClassification, workflow.NodeConfig{})
 	question := workflow.NewFunctionNode("answer_question", answerQuestion, workflow.NodeConfig{})
 	statement := workflow.NewFunctionNode("comment_statement", commentOnStatement, workflow.NodeConfig{})
 	exclamation := workflow.NewFunctionNode("react_exclamation", reactToExclamation, workflow.NodeConfig{})

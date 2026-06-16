@@ -15,9 +15,18 @@
 package workflow_test
 
 import (
+	"context"
+	"iter"
 	"testing"
 
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/internal/agent/runconfig"
+	icontext "google.golang.org/adk/internal/context"
+	"google.golang.org/adk/model"
+	"google.golang.org/adk/session"
 	"google.golang.org/adk/workflow"
 )
 
@@ -36,3 +45,109 @@ func TestNewAgentNode_NameInheritedFromAgent(t *testing.T) {
 		t.Errorf("node.Name() = %q, want %q (must inherit from wrapped agent)", got, want)
 	}
 }
+
+// Task-mode agents' natural-language text must NOT be promoted to
+// the node Output: their authoritative output is set via finish_task
+// (in llmagent.runTask). Promoting plain text would make the chat
+// coordinator close the delegation prematurely and route the next
+// user reply away from the still-open task scope.
+func TestAgentNode_TaskMode_DoesNotPromoteModelText(t *testing.T) {
+	t.Parallel()
+
+	const userFacingText = "Please tell me what you'd like to order."
+	llm := &scriptedLLM{turns: []*model.LLMResponse{{
+		Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{Text: userFacingText}},
+		},
+	}}}
+
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:  "order_collector",
+		Mode:  llmagent.ModeTask,
+		Model: llm,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+
+	node, err := workflow.NewAgentNode(taskAgent, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+
+	exCtx := newRunnableNodeContext(t, taskAgent)
+
+	var lastEv *session.Event
+	for ev, runErr := range node.Run(exCtx, nil) {
+		if runErr != nil {
+			t.Fatalf("node.Run yielded err: %v", runErr)
+		}
+		if ev == nil || ev.LLMResponse.Partial {
+			continue
+		}
+		lastEv = ev
+	}
+	if lastEv == nil {
+		t.Fatal("no non-partial events yielded")
+	}
+	if lastEv.Output != nil {
+		t.Errorf("Output = %v, want nil (task-mode text must not be promoted)", lastEv.Output)
+	}
+	if lastEv.NodeInfo != nil && lastEv.NodeInfo.MessageAsOutput {
+		t.Errorf("NodeInfo.MessageAsOutput = true, want false/unset for task-mode text")
+	}
+}
+
+// newRunnableNodeContext builds the minimal NodeContext an LlmAgent
+// flow needs: in-memory Session, Agent, and a RunConfig on the
+// embedded context (the flow reads it via runconfig.FromContext and
+// nil-derefs otherwise).
+func newRunnableNodeContext(t *testing.T, a agent.Agent) agent.Context {
+	t.Helper()
+	svc := session.InMemoryService()
+	resp, err := svc.Create(context.Background(), &session.CreateRequest{
+		AppName: "app",
+		UserID:  "u",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	stdCtx := runconfig.ToContext(t.Context(), &runconfig.RunConfig{
+		StreamingMode: runconfig.StreamingModeNone,
+	})
+	ic := icontext.NewInvocationContext(stdCtx, icontext.InvocationContextParams{
+		Agent:        a,
+		Session:      resp.Session,
+		InvocationID: "inv-test",
+	})
+	return agent.NewNodeContext(ic, nil)
+}
+
+// scriptedLLM yields one LLMResponse per GenerateContent call,
+// falling back to a terminal "done" event so the flow loop exits.
+type scriptedLLM struct {
+	turns   []*model.LLMResponse
+	callIdx int
+}
+
+func (*scriptedLLM) Name() string { return "scripted-mock" }
+
+func (s *scriptedLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	idx := s.callIdx
+	s.callIdx++
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if idx < len(s.turns) {
+			yield(s.turns[idx], nil)
+			return
+		}
+		yield(&model.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{{Text: "done"}},
+			},
+		}, nil)
+	}
+}
+
+var _ model.LLM = (*scriptedLLM)(nil)

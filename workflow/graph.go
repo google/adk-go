@@ -77,3 +77,20 @@ func (g *graph) allNodes() []Node {
 	}
 	return res
 }
+
+// terminalNodeNames returns the names of terminal nodes: those with no
+// outgoing edges, excluding the Start sentinel.
+func (g *graph) terminalNodeNames() map[string]bool {
+	sources := make(map[string]bool)
+	for n := range g.successors {
+		sources[n.Name()] = true
+	}
+	terminals := make(map[string]bool)
+	for _, n := range g.allNodes() {
+		if n.Name() == Start.Name() || sources[n.Name()] {
+			continue
+		}
+		terminals[n.Name()] = true
+	}
+	return terminals
+}

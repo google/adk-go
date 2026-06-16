@@ -18,7 +18,7 @@
 //
 //	Start → ask_name → greet
 //
-// The ask_name node yields a RequestInput that pauses the
+// The ask_name node emits a RequestInput that pauses the
 // workflow. The console launcher renders the prompt; the user's
 // reply is delivered to greet as its input.
 //
@@ -34,11 +34,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"iter"
 	"log"
 	"os"
-
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/workflowagent"
@@ -48,65 +45,39 @@ import (
 	"google.golang.org/adk/workflow"
 )
 
-// inlineNode wraps a closure as a workflow.Node so we can yield
-// RequestInput (FunctionNode's "input → output" shape does not
-// cover that).
-type inlineNode struct {
-	workflow.BaseNode
-	run func(agent.Context, any) iter.Seq2[*session.Event, error]
-}
-
-func (n *inlineNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
-	return n.run(ctx, input)
-}
-
-func mkNode(name, desc string, run func(agent.Context, any) iter.Seq2[*session.Event, error]) *inlineNode {
-	return &inlineNode{BaseNode: workflow.NewBaseNode(name, desc, workflow.NodeConfig{}), run: run}
-}
-
-// askName pauses the workflow with a RequestInput asking for the
-// user's name. The handoff resume delivers the reply as the next
-// node's input.
-func askName(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
-			InterruptID: "ask_name",
-			Message:     "What's your name?",
-		}), nil)
-	}
-}
-
-// greet receives the user's reply (as plain text) and yields one
-// event with the greeting as both the workflow output (StateDelta)
-// and Content (so the console launcher prints it).
-func greet(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		name, _ := input.(string)
-		if name == "" {
-			name = "stranger"
-		}
-		msg := fmt.Sprintf("Hello, %s!", name)
-		ev := session.NewEvent(ctx.InvocationID())
-		ev.Output = msg
-		ev.Content = &genai.Content{
-			Parts: []*genai.Part{{Text: msg}},
-		}
-		yield(ev, nil)
-	}
-}
-
 func main() {
 	ctx := context.Background()
 
-	ask := mkNode("ask_name", "asks the user for their name", askName)
-	hello := mkNode("greet", "greets the user by name", greet)
+	ask := workflow.NewEmittingFunctionNode[any, any]("ask_name",
+		func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+			if err := emit(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+				InterruptID: "ask_name",
+				Message:     "What's your name?",
+			})); err != nil {
+				return nil, err
+			}
+			return nil, workflow.ErrNodeInterrupted
+		},
+		workflow.NodeConfig{},
+	)
 
-	edges := workflow.Chain(workflow.Start, ask, hello)
+	// greet receives the user's reply (a string) and returns the
+	// greeting. The classic NewFunctionNode is enough — no events
+	// to emit beyond the terminal output.
+	greet := workflow.NewFunctionNode("greet",
+		func(_ agent.Context, name string) (string, error) {
+			if name == "" {
+				name = "stranger"
+			}
+			return fmt.Sprintf("Hello, %s!", name), nil
+		},
+		workflow.NodeConfig{},
+	)
 
 	rootAgent, err := workflowagent.New(workflowagent.Config{
 		Name:        "hitl_simple",
 		Description: "minimal HITL workflow for console launcher verification",
-		Edges:       edges,
+		Edges:       workflow.Chain(workflow.Start, ask, greet),
 	})
 	if err != nil {
 		log.Fatalf("failed to create workflow agent: %v", err)

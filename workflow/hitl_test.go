@@ -254,3 +254,68 @@ func TestScheduler_HitlNode_ConcurrentBranches_PausesOnlyWhenAllNonRunning(t *te
 		t.Errorf("expected exactly 1 RequestedInput event in the stream, got %d", count)
 	}
 }
+
+func TestResumeOrRequestInput(t *testing.T) {
+	t.Run("first pass emits request and pauses", func(t *testing.T) {
+		ctx := newNodeContext(newMockCtx(t), nil)
+
+		var emitted []*session.Event
+		emit := func(ev *session.Event) error {
+			emitted = append(emitted, ev)
+			return nil
+		}
+
+		reply, err := ResumeOrRequestInput(ctx, emit, session.RequestInput{
+			InterruptID: "ask_name",
+			Message:     "What's your name?",
+		})
+		if !errors.Is(err, ErrNodeInterrupted) {
+			t.Fatalf("err = %v, want ErrNodeInterrupted", err)
+		}
+		if reply != nil {
+			t.Errorf("reply = %v, want nil on first pass", reply)
+		}
+		if len(emitted) != 1 || emitted[0].RequestedInput == nil {
+			t.Fatalf("expected one RequestInput event, got %v", emitted)
+		}
+		if got := emitted[0].RequestedInput.InterruptID; got != "ask_name" {
+			t.Errorf("InterruptID = %q, want %q", got, "ask_name")
+		}
+	})
+
+	t.Run("resume returns reply without emitting", func(t *testing.T) {
+		ctx := newNodeContext(newMockCtx(t), map[string]any{"ask_name": "Alice"})
+
+		emitted := false
+		emit := func(*session.Event) error {
+			emitted = true
+			return nil
+		}
+
+		reply, err := ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "ask_name"})
+		if err != nil {
+			t.Fatalf("err = %v, want nil on resume", err)
+		}
+		if reply != "Alice" {
+			t.Errorf("reply = %v, want %q", reply, "Alice")
+		}
+		if emitted {
+			t.Error("emit called on resume; the request must not be re-sent")
+		}
+	})
+
+	t.Run("emit failure is returned instead of ErrNodeInterrupted", func(t *testing.T) {
+		ctx := newNodeContext(newMockCtx(t), nil)
+
+		wantErr := errors.New("emit failed")
+		emit := func(*session.Event) error { return wantErr }
+
+		_, err := ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "ask_name"})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("err = %v, want %v", err, wantErr)
+		}
+		if errors.Is(err, ErrNodeInterrupted) {
+			t.Error("emit failure must not be reported as ErrNodeInterrupted")
+		}
+	})
+}

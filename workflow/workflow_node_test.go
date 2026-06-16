@@ -152,6 +152,94 @@ func TestNestedWorkflow_MultipleOutputs(t *testing.T) {
 	}
 }
 
+// Two terminals producing output is an error, not a nondeterministic
+// pick.
+func TestNestedWorkflow_MultipleTerminals(t *testing.T) {
+	passthrough := func(ctx agent.Context, input string) (string, error) { return input, nil }
+	a := NewFunctionNode("a", passthrough, defaultNodeConfig)
+	b := NewFunctionNode("b", passthrough, defaultNodeConfig)
+	c := NewFunctionNode("c", passthrough, defaultNodeConfig)
+	innerEdges := NewEdgeBuilder().Add(Start, a).AddFanOut(a, b, c).Build()
+
+	wfNode, err := NewWorkflowNode("nested_step", innerEdges)
+	if err != nil {
+		t.Fatalf("failed to create workflow node: %v", err)
+	}
+	outerWf := mustNew(t, Chain(Start, wfNode))
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "input"}}}
+
+	var gotErr error
+	for _, err := range outerWf.Run(mockCtx) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if !errors.Is(gotErr, ErrMultipleOutputs) {
+		t.Errorf("got error %v, want ErrMultipleOutputs", gotErr)
+	}
+}
+
+// A silent terminal (no output) yields no workflow output, even when an
+// earlier node produced one.
+func TestNestedWorkflow_SilentTerminal(t *testing.T) {
+	producer := func(ctx agent.Context, input string) (string, error) { return "intermediate", nil }
+	// Terminal returns a *session.Event with no Output (a side-effect sink).
+	sink := func(ctx agent.Context, input string) (*session.Event, error) {
+		return &session.Event{}, nil
+	}
+	a := NewFunctionNode("producer", producer, defaultNodeConfig)
+	b := NewFunctionNode("sink", sink, defaultNodeConfig)
+	innerEdges := Chain(Start, a, b)
+
+	wfNode, err := NewWorkflowNode("nested_step", innerEdges)
+	if err != nil {
+		t.Fatalf("failed to create workflow node: %v", err)
+	}
+	outerWf := mustNew(t, Chain(Start, wfNode))
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "input"}}}
+
+	for ev, err := range outerWf.Run(mockCtx) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ev.Output != nil {
+			t.Errorf("expected no output, got %v", ev.Output)
+		}
+	}
+}
+
+// A terminal whose output is model text (MessageAsOutput) is still
+// picked up as the workflow output.
+func TestNestedWorkflow_MessageAsOutputTerminal(t *testing.T) {
+	innerEdges := Chain(Start, newMessageAsOutputNode("terminal", "from-message"))
+
+	wfNode, err := NewWorkflowNode("nested_step", innerEdges)
+	if err != nil {
+		t.Fatalf("failed to create workflow node: %v", err)
+	}
+	outerWf := mustNew(t, Chain(Start, wfNode))
+
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "input"}}}
+
+	var gotOutput any
+	for ev, err := range outerWf.Run(mockCtx) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ev.Output != nil {
+			gotOutput = ev.Output
+		}
+	}
+	if gotOutput != "from-message" {
+		t.Errorf("got output %v, want %q", gotOutput, "from-message")
+	}
+}
+
 func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 	// Create inner workflow edges
 	nestedStateUpdater := func(ctx agent.Context, input string) (string, error) {
@@ -294,5 +382,49 @@ func TestNestedWorkflow_ErrorPropagation(t *testing.T) {
 	}
 	if !strings.Contains(runErr.Error(), "intentional failure") {
 		t.Errorf("expected error containing 'intentional failure', got %v", runErr)
+	}
+}
+
+// TestNestedWorkflow_BreakMidStream checks that breaking the range loop
+// mid-stream does not panic. break makes yield return false; Go forbids
+// calling yield again after that.
+func TestNestedWorkflow_BreakMidStream(t *testing.T) {
+	// Two chained output nodes, so a second event is still pending at break.
+	innerFn1 := func(ctx agent.Context, input string) (string, error) {
+		return input + "-a", nil
+	}
+	innerFn2 := func(ctx agent.Context, input string) (string, error) {
+		return input + "-b", nil
+	}
+	innerNode1 := NewFunctionNode("inner1", innerFn1, defaultNodeConfig)
+	innerNode2 := NewFunctionNode("inner2", innerFn2, defaultNodeConfig)
+	innerEdges := Chain(Start, innerNode1, innerNode2)
+
+	wfNode, err := NewWorkflowNode("nested", innerEdges)
+	if err != nil {
+		t.Fatalf("failed to create workflow node: %v", err)
+	}
+
+	mockCtx := newMockCtx(t)
+	exCtx := agent.NewNodeContext(mockCtx, nil)
+
+	// Turn the regression's panic into a readable failure; no-op once fixed.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("WorkflowNode.Run panicked after consumer break: %v", r)
+		}
+	}()
+
+	count := 0
+	for _, err := range wfNode.Run(exCtx, "in") {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		count++
+		break
+	}
+
+	if count != 1 {
+		t.Errorf("expected to consume exactly 1 event before break, got %d", count)
 	}
 }
