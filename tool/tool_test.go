@@ -20,8 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/memory"
@@ -161,11 +159,7 @@ func (c *testContext) SearchMemory(context.Context, string) (*memory.SearchRespo
 	return nil, nil
 }
 func (c *testContext) AgentName() string                                       { return "test-agent" }
-func (c *testContext) ReadonlyState() session.ReadonlyState                    { return nil }
-func (c *testContext) State() session.State                                    { return nil }
-func (c *testContext) Artifacts() agent.Artifacts                              { return nil }
 func (c *testContext) InvocationID() string                                    { return "test-invocation-id" }
-func (c *testContext) UserContent() *genai.Content                             { return nil }
 func (c *testContext) AppName() string                                         { return "test-app" }
 func (c *testContext) Branch() string                                          { return "test-branch" }
 func (c *testContext) SessionID() string                                       { return "test-session-id" }
