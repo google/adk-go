@@ -160,6 +160,14 @@ func (r *Runner) runNode(
 			event.Author = agentToRun.Name()
 		}
 
+		if event != nil && !event.LLMResponse.Partial {
+			if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
+				clone := *event
+				clone.Output = nil
+				event = &clone
+			}
+		}
+
 		if pluginManager != nil {
 			modifiedEvent, perr := pluginManager.RunOnEventCallback(ictx, event)
 			if perr != nil {

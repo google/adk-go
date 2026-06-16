@@ -77,10 +77,10 @@ func createBooking(ctx agent.Context, args CreateBookingArgs) (map[string]any, e
 }
 
 type FlightPreferences struct {
-	CabinClass       string `json:"cabin_class"`
-	MaxStops         int    `json:"max_stops"`
-	PreferredAirline string `json:"preferred_airline"`
-	FlexibleDates    bool   `json:"flexible_dates"`
+	CabinClass       string  `json:"cabin_class"`
+	MaxStops         int     `json:"max_stops"`
+	PreferredAirline *string `json:"preferred_airline"`
+	FlexibleDates    bool    `json:"flexible_dates"`
 }
 
 type TripDetails struct {
@@ -98,7 +98,7 @@ type SearchFlightsArgs struct {
 func searchFlights(ctx agent.Context, args SearchFlightsArgs) (map[string]any, error) {
 	if args.Preferences == nil {
 		args.Preferences = &FlightPreferences{
-			CabinClass:    "Economy",
+			CabinClass:    "economy",
 			MaxStops:      1,
 			FlexibleDates: false,
 		}
@@ -121,9 +121,9 @@ func searchFlights(ctx agent.Context, args SearchFlightsArgs) (map[string]any, e
 		"search_status":     "completed",
 	}
 
-	airline := args.Preferences.PreferredAirline
-	if airline == "" {
-		airline = "Various Airlines"
+	airline := "Various Airlines"
+	if args.Preferences.PreferredAirline != nil && *args.Preferences.PreferredAirline != "" {
+		airline = *args.Preferences.PreferredAirline
 	}
 
 	stopsDesc := "direct"
