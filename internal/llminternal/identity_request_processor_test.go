@@ -72,6 +72,14 @@ func TestIdentityRequestProcessor(t *testing.T) {
 			wantNoSI: true,
 		},
 		{
+			name: "NoOpForSingleTurnMode",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "single_turn"})),
+				s:     &State{Mode: ModeSingleTurn},
+			},
+			wantNoSI: true,
+		},
+		{
 			name: "EmptyDescription",
 			agent: &mockLLMAgent{
 				Agent: utils.Must(agent.New(agent.Config{

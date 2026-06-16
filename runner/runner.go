@@ -304,6 +304,14 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				continue
 			}
 
+			if event != nil && !event.LLMResponse.Partial {
+				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
+					clone := *event
+					clone.Output = nil
+					event = &clone
+				}
+			}
+
 			if pluginManager != nil {
 				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
 				if err != nil {
@@ -488,6 +496,14 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					return
 				}
 				continue
+			}
+
+			if event != nil && !event.LLMResponse.Partial {
+				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
+					clone := *event
+					clone.Output = nil
+					event = &clone
+				}
 			}
 
 			if r.pluginManager != nil {

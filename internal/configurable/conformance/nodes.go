@@ -20,12 +20,38 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/internal/configurable"
+	"google.golang.org/adk/internal/typeutil"
 )
 
-func uppercaseFormatter(ctx agent.InvocationContext, input string) (string, error) {
-	fmt.Println("in uppercase formatter")
-	fmt.Printf("input: %v\n", input)
-	return strings.ToUpper(input), nil
+func uppercaseFormatter(ctx agent.Context, input any) (any, error) {
+	switch v := input.(type) {
+	case string:
+		return strings.ToUpper(v), nil
+	case map[string]any:
+		res := make(map[string]any, len(v))
+		for k, val := range v {
+			if s, ok := val.(string); ok {
+				res[k] = strings.ToUpper(s)
+			} else {
+				res[k] = val
+			}
+		}
+		return res, nil
+	default:
+		m, err := typeutil.ConvertToWithJSONSchema[any, map[string]any](input, nil)
+		if err == nil {
+			res := make(map[string]any, len(m))
+			for k, val := range m {
+				if s, ok := val.(string); ok {
+					res[k] = strings.ToUpper(s)
+				} else {
+					res[k] = val
+				}
+			}
+			return res, nil
+		}
+		return nil, fmt.Errorf("node_input must be a string or a map/dict")
+	}
 }
 
 func RegisterNodeFunctions() error {
