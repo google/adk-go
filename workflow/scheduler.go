@@ -388,7 +388,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	perNodeCtx = perNodeCtx.WithBranch(branch)
 
 	// wrapped := withBranch(s.parentCtx.WithContext(nodeCtx), branch)
-	perNodeCtx = newNodeContext(perNodeCtx, resumeInputs)
+	perNodeCtx = agent.NewNodeContext(perNodeCtx, resumeInputs)
 
 	nodePath := name + "@1"
 	if p := s.parentCtx.Path(); p != "" {

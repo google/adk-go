@@ -19,19 +19,3 @@ import (
 )
 
 type NodeContext = agent.Context
-
-// newNodeContext wraps parent for a top-level (static) activation.
-func newNodeContext(parent agent.InvocationContext, resumeInputs map[string]any) agent.Context {
-	return agent.NewNodeContext(parent, resumeInputs)
-}
-
-// newDynamicNodeContext wraps parent for either a dynamic-node
-// activation or one of its children, attaching path, runID, and the
-// sub-scheduler RunNode reaches from the orchestrator body. Children
-// pass the sub-scheduler's counter (or WithRunID) value as runID; a
-// dynamic node's own activation passes runID="" — it is not itself a
-// sub-scheduler child. Child inherits resumeInputs so HITL responses
-// reach dynamic children.
-func newDynamicNodeContext(parent NodeContext, path, runID string, sub agent.DynamicSubScheduler, outputForAncestors []string) agent.Context {
-	return agent.NewDynamicNodeContext(parent, path, runID, sub, outputForAncestors)
-}

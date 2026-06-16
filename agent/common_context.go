@@ -47,6 +47,14 @@ func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Conte
 }
 
 func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubScheduler, outputForAncestors []string) Context {
+	// NewDynamicNodeContext wraps parent for either a dynamic-node
+	// activation or one of its children, attaching path, runID, and the
+	// sub-scheduler RunNode reaches from the orchestrator body. Children
+	// pass the sub-scheduler's counter (or WithRunID) value as runID; a
+	// dynamic node's own activation passes runID="" — it is not itself a
+	// sub-scheduler child. Child inherits resumeInputs so HITL responses
+	// reach dynamic children.
+
 	var inherited map[string]any
 	if p, ok := parent.(*commonContext); ok {
 		inherited = p.resumeInputs

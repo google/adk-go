@@ -328,7 +328,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	if opts.useAsOutput {
 		childAncestors = append([]string{s.parentPath}, s.outputForAncestors...)
 	}
-	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
+	childCtx := agent.NewDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
 	// logContext(childCtx, "childCtx after newDynamicNodeContext", 0)
 
 	// Explicit scope wins over the node-path default; absent both,
