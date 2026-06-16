@@ -147,18 +147,29 @@ func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func
 // resumed orchestrator (which re-runs from the top) serves already
 // completed children from cache instead of re-executing them. Each
 // child's terminal event carries its childPath in NodeInfo.Path and a
-// non-nil Output; keyed by childPath, so only stable WithRunID calls
-// hit (auto-counter ids regenerate per activation and miss).
+// non-nil Output; keyed by childPath.
+//
+// Only events from the current invocation are considered. Auto-counter
+// run-ids reset to 1 on every fresh activation, so a later user turn
+// reuses the same childPath ("<parent>/<child>@1") as a prior turn;
+// without the invocation filter those stale outputs would be served
+// from cache and the child would never re-run on the new turn. Mirrors
+// adk-python, which gates rehydration on event.invocation_id (see
+// _reconstruct_node_states / _scan_parent_child_sequence).
 func (s *dynamicSubScheduler) rehydrateCache() {
 	sess := s.parentCtx.Session()
 	if sess == nil {
 		return
 	}
+	invocationID := s.parentCtx.InvocationID()
 	prefix := s.parentPath + "/"
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ev := range sess.Events().All() {
 		if ev == nil || ev.Output == nil || ev.NodeInfo == nil {
+			continue
+		}
+		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
 		if !strings.HasPrefix(ev.NodeInfo.Path, prefix) {
