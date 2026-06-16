@@ -226,7 +226,6 @@ func TestSingleTurnTool_Run_HappyPath(t *testing.T) {
 	)
 	orchestrator := workflow.NewDynamicNode("orchestrator",
 		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
-			// ic := ctx.WithContext(workflow.WithNodeContext(ctx, ctx))
 			toolCtx := agent.NewToolContext(ctx, "fc-id", &session.EventActions{}, nil)
 			gotResult, gotErr = st.Run(toolCtx, map[string]any{"request": "hello"})
 			return nil, gotErr
