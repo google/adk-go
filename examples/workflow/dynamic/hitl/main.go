@@ -34,7 +34,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"iter"
 	"log"
 	"os"
 
@@ -48,32 +47,21 @@ import (
 	"google.golang.org/adk/workflow"
 )
 
-// askName is an inline workflow.Node that pauses with a RequestInput
-// asking for the user's name. We can't use FunctionNode because its
-// "input → output" shape does not cover RequestInput emission.
-type askName struct {
-	workflow.BaseNode
-}
-
-func newAskName() *askName {
-	return &askName{
-		BaseNode: workflow.NewBaseNode("ask_name", "asks the user for their name", workflow.NodeConfig{}),
-	}
-}
-
-func (n *askName) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
-			InterruptID: "ask_name",
-			Message:     "What's your name?",
-		}), nil)
-	}
-}
-
 func main() {
 	ctx := context.Background()
 
-	ask := newAskName()
+	ask := workflow.NewEmittingFunctionNode[any, any]("ask_name",
+		func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+			if err := emit(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+				InterruptID: "ask_name",
+				Message:     "What's your name?",
+			})); err != nil {
+				return nil, err
+			}
+			return nil, workflow.ErrNodeInterrupted
+		},
+		workflow.NodeConfig{},
+	)
 
 	greeter := workflow.NewDynamicNode[string, string]("hitl_demo",
 		func(nc workflow.NodeContext, _ string, emit func(*session.Event) error) (string, error) {

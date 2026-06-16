@@ -21,8 +21,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"iter"
 	"log"
 	"os"
 	"strings"
@@ -35,42 +33,19 @@ import (
 	"google.golang.org/adk/workflow"
 )
 
-// classifyNode emits the routing event. A FunctionNode can't set
-// Event.Routes from its body, so routing nodes drop down to
-// BaseNode.
-type classifyNode struct {
-	workflow.BaseNode
-}
-
-func newClassifyNode() *classifyNode {
-	return &classifyNode{
-		BaseNode: workflow.NewBaseNode(
-			"classify",
-			"emits a routing event keyed on the message's terminal punctuation",
-			workflow.NodeConfig{},
-		),
+// classifyAndRoute emits a routing event keyed on the message
+// category; returning nil suppresses the default terminal event.
+func classifyAndRoute(ctx agent.Context, msg string, emit func(*session.Event) error) (any, error) {
+	ev := session.NewEvent(ctx.InvocationID())
+	ev.Routes = []string{classify(msg)}
+	ev.Output = msg // feeds the successor's typed input
+	if err := emit(ev); err != nil {
+		return nil, err
 	}
+	return nil, nil
 }
 
-func (n *classifyNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		msg, ok := input.(string)
-		if !ok {
-			yield(nil, fmt.Errorf("classify: expected string input, got %T", input))
-			return
-		}
-		category := classify(msg)
-		ev := session.NewEvent(ctx.InvocationID())
-		ev.Routes = []string{category}
-		// Event.Output is the channel the engine reads to feed the
-		// successor node's typed input.
-		ev.Output = msg
-		yield(ev, nil)
-	}
-}
-
-// classify maps a message to a category by its terminal
-// punctuation.
+// classify maps a message to a category by its terminal punctuation.
 func classify(msg string) string {
 	trimmed := strings.TrimSpace(msg)
 	switch {
@@ -98,7 +73,7 @@ func reactToExclamation(_ agent.Context, msg string) (string, error) {
 func main() {
 	ctx := context.Background()
 
-	classify := newClassifyNode()
+	classify := workflow.NewEmittingFunctionNode("classify", classifyAndRoute, workflow.NodeConfig{})
 	question := workflow.NewFunctionNode("answer_question", answerQuestion, workflow.NodeConfig{})
 	statement := workflow.NewFunctionNode("comment_statement", commentOnStatement, workflow.NodeConfig{})
 	exclamation := workflow.NewFunctionNode("react_exclamation", reactToExclamation, workflow.NodeConfig{})
