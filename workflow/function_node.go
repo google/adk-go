@@ -258,9 +258,15 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 			if !ok {
 				// Fallback to the json-like input types that cannot be converted by the standard type assertion.
 				// E.g. tool nodes return map[string]any as input and user may define a struct as the target type.
+				// ConvertToWithJSONSchema also validates against inputSchema; the explicit Validate below covers
+				// the assertion-hit path so schema constraints (e.g. maxLength) are enforced regardless.
 				typedInput, err = typeutil.ConvertToWithJSONSchema[any, IN](input, inputSchema)
 				if err != nil {
 					return nil, fmt.Errorf("new function node: invalid input type, expected %T: %w", new(IN), err)
+				}
+			} else if inputSchema != nil {
+				if err = typeutil.ValidateWithJSONSchema(typedInput, inputSchema); err != nil {
+					return nil, fmt.Errorf("function node %s: validation failed for input %T: %w", name, new(IN), err)
 				}
 			}
 			output, err = fn(ctx, typedInput)
@@ -294,11 +300,19 @@ func newEmittingFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn Emi
 		if input != nil {
 			t, ok := input.(IN)
 			if !ok {
+				// Fallback to the json-like input types that cannot be converted by the standard type assertion.
+				// E.g. tool nodes return map[string]any as input and user may define a struct as the target type.
+				// ConvertToWithJSONSchema also validates against inputSchema; the explicit Validate below covers
+				// the assertion-hit path so schema constraints (e.g. maxLength) are enforced regardless.
 				converted, err := typeutil.ConvertToWithJSONSchema[any, IN](input, inputSchema)
 				if err != nil {
 					return nil, fmt.Errorf("new function node: invalid input type, expected %T: %w", new(IN), err)
 				}
 				t = converted
+			} else if inputSchema != nil {
+				if err := typeutil.ValidateWithJSONSchema(t, inputSchema); err != nil {
+					return nil, fmt.Errorf("function node %s: validation failed for input %T: %w", name, new(IN), err)
+				}
 			}
 			typedInput = t
 		}

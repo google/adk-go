@@ -15,16 +15,12 @@
 // hitl_rerun shows the re-entry HITL pattern: a single emitting
 // FunctionNode both pauses for input and produces the final output.
 // Unlike hitl_simple (two nodes, handoff resume), here one node is
-// re-run from scratch on resume (NodeConfig.RerunOnResume = &true),
-// so the same body has two branches:
+// re-run from scratch on resume (NodeConfig.RerunOnResume = &true).
 //
-//   - first pass: emit a RequestInput and return ErrNodeInterrupted
-//     (pause, no output);
-//   - after resume: read the reply via NodeContext.ResumedInput and
-//     return the greeting as the terminal output.
-//
-// This is where ErrNodeInterrupted matters: the pause branch must end
-// without an output, while the resume branch returns one.
+// workflow.ResumeOrRequestInput collapses the two phases into one
+// call: on the first pass it emits a RequestInput and returns
+// ErrNodeInterrupted (pause, no output); after resume it returns the
+// human's reply, which the body turns into the terminal output.
 //
 //	go run ./examples/workflow/hitl_rerun/ console
 //
@@ -54,25 +50,22 @@ func main() {
 	rerun := true
 	greet := workflow.NewEmittingFunctionNode[any, any]("greet",
 		func(nc workflow.NodeContext, _ any, emit func(*session.Event) error) (any, error) {
-			// Resume branch: the node was re-run after the human
-			// replied, so the answer is available here.
-			if reply, ok := nc.ResumedInput("ask_name"); ok {
-				name, _ := reply.(string)
-				if name == "" {
-					name = "stranger"
-				}
-				return fmt.Sprintf("Hello, %s!", name), nil
-			}
-
-			// First pass: ask and pause. ErrNodeInterrupted ends the
-			// activation without a terminal output.
-			if err := emit(workflow.NewRequestInputEvent(nc, session.RequestInput{
+			// ResumeOrRequestInput pauses (asks and returns
+			// ErrNodeInterrupted) on the first pass, and returns the
+			// human's reply once the node is re-run after the answer.
+			reply, err := workflow.ResumeOrRequestInput(nc, emit, session.RequestInput{
 				InterruptID: "ask_name",
 				Message:     "What's your name?",
-			})); err != nil {
+			})
+			if err != nil {
 				return nil, err
 			}
-			return nil, workflow.ErrNodeInterrupted
+
+			name, _ := reply.(string)
+			if name == "" {
+				name = "stranger"
+			}
+			return fmt.Sprintf("Hello, %s!", name), nil
 		},
 		workflow.NodeConfig{RerunOnResume: &rerun},
 	)

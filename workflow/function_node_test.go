@@ -550,3 +550,64 @@ func TestEmittingFunctionNode_EmitProgressBeforeOutput(t *testing.T) {
 		t.Error(`did not observe terminal event with Output="done"`)
 	}
 }
+
+// Input schema constraints (e.g. maxLength) must be enforced even when
+// the input already arrives as type IN, i.e. on the type-assertion-hit
+// path that skips ConvertToWithJSONSchema.
+func TestFunctionNode_ValidatesInputOnAssertionHitPath(t *testing.T) {
+	type Input struct {
+		Name string `json:"name"`
+	}
+
+	maxLen := 3
+	inputSchema := &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"name": {Type: "string", MaxLength: &maxLen},
+		},
+	}
+
+	fn := func(_ agent.Context, in Input) (string, error) { return in.Name, nil }
+	emittingFn := func(_ agent.Context, in Input, _ func(*session.Event) error) (any, error) {
+		return in.Name, nil
+	}
+
+	runOnce := func(t *testing.T, node *FunctionNode, input Input) error {
+		t.Helper()
+		exCtx := agent.NewNodeContext(newMockCtx(t), nil)
+		for _, err := range node.Run(exCtx, input) {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	t.Run("plain", func(t *testing.T) {
+		node, err := NewFunctionNodeWithSchema[Input, string]("greet", fn, inputSchema, nil, defaultNodeConfig)
+		if err != nil {
+			t.Fatalf("NewFunctionNodeWithSchema: %v", err)
+		}
+		if err := runOnce(t, node, Input{Name: "ok"}); err != nil {
+			t.Errorf("valid input rejected: %v", err)
+		}
+		err = runOnce(t, node, Input{Name: "too-long"})
+		if err == nil || !strings.Contains(err.Error(), "validation failed for input") {
+			t.Errorf("over-length input: err = %v, want validation failure", err)
+		}
+	})
+
+	t.Run("emitting", func(t *testing.T) {
+		node, err := NewEmittingFunctionNodeWithSchema[Input, any]("greet", emittingFn, inputSchema, nil, defaultNodeConfig)
+		if err != nil {
+			t.Fatalf("NewEmittingFunctionNodeWithSchema: %v", err)
+		}
+		if err := runOnce(t, node, Input{Name: "ok"}); err != nil {
+			t.Errorf("valid input rejected: %v", err)
+		}
+		err = runOnce(t, node, Input{Name: "too-long"})
+		if err == nil || !strings.Contains(err.Error(), "validation failed for input") {
+			t.Errorf("over-length input: err = %v, want validation failure", err)
+		}
+	})
+}
