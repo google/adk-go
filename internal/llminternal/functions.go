@@ -15,6 +15,8 @@
 package llminternal
 
 import (
+	"sort"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -50,7 +52,18 @@ func generateRequestConfirmationEvent(
 		}
 	}
 
-	for funcID, confirmation := range functionResponseEvent.Actions.RequestedToolConfirmations {
+	// Iterate in sorted funcID order so the emitted parts and
+	// longRunningToolIDs come out in a stable order. Go map iteration order is
+	// randomized, so collect and sort the keys first. Use stdlib sort (rather
+	// than maps.Keys) to avoid Go-version compatibility issues.
+	funcIDs := make([]string, 0, len(functionResponseEvent.Actions.RequestedToolConfirmations))
+	for k := range functionResponseEvent.Actions.RequestedToolConfirmations {
+		funcIDs = append(funcIDs, k)
+	}
+	sort.Strings(funcIDs)
+
+	for _, funcID := range funcIDs {
+		confirmation := functionResponseEvent.Actions.RequestedToolConfirmations[funcID]
 		originalPart, ok := functionCallParts[funcID]
 		if !ok || originalPart.FunctionCall == nil {
 			continue
