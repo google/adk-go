@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/session"
 )
 
@@ -147,18 +148,29 @@ func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func
 // resumed orchestrator (which re-runs from the top) serves already
 // completed children from cache instead of re-executing them. Each
 // child's terminal event carries its childPath in NodeInfo.Path and a
-// non-nil Output; keyed by childPath, so only stable WithRunID calls
-// hit (auto-counter ids regenerate per activation and miss).
+// non-nil Output; keyed by childPath.
+//
+// Only events from the current invocation are considered. Auto-counter
+// run-ids reset to 1 on every fresh activation, so a later user turn
+// reuses the same childPath ("<parent>/<child>@1") as a prior turn;
+// without the invocation filter those stale outputs would be served
+// from cache and the child would never re-run on the new turn. Mirrors
+// adk-python, which gates rehydration on event.invocation_id (see
+// _reconstruct_node_states / _scan_parent_child_sequence).
 func (s *dynamicSubScheduler) rehydrateCache() {
 	sess := s.parentCtx.Session()
 	if sess == nil {
 		return
 	}
+	invocationID := s.parentCtx.InvocationID()
 	prefix := s.parentPath + "/"
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ev := range sess.Events().All() {
 		if ev == nil || ev.Output == nil || ev.NodeInfo == nil {
+			continue
+		}
+		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
 		if !strings.HasPrefix(ev.NodeInfo.Path, prefix) {
@@ -325,6 +337,15 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	var (
 		out         any
 		interrupted bool
+		// pendingLongRunningIDs collects FunctionCall IDs the child
+		// emitted as long-running (listed in the emitting event's
+		// LongRunningToolIDs). Each is removed when we later see a
+		// matching FunctionResponse from the child. Any IDs left
+		// at the end of the child's iteration represent tools the
+		// child is still waiting on — used by WithRaiseOnWait to
+		// distinguish "child paused for HITL" from "child finished
+		// cleanly with no output".
+		pendingLongRunningIDs map[string]struct{}
 	)
 	for ev, evErr := range child.Run(childCtx, input) {
 		if evErr != nil {
@@ -357,6 +378,39 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		if ev.RequestedInput != nil {
 			interrupted = true
 		}
+		// Track LongRunningToolIDs vs FunctionResponses for
+		// WithRaiseOnWait. The check runs unconditionally so this
+		// stays cheap even when the option is off — only one map
+		// lookup per FC / FR and the maps stay empty when there
+		// are no long-running tools at play.
+		if opts.raiseOnWait {
+			if len(ev.LongRunningToolIDs) > 0 {
+				lrtSet := make(map[string]struct{}, len(ev.LongRunningToolIDs))
+				for _, id := range ev.LongRunningToolIDs {
+					lrtSet[id] = struct{}{}
+				}
+				for _, fc := range utils.FunctionCalls(ev.Content) {
+					if fc == nil || fc.ID == "" {
+						continue
+					}
+					if _, isLR := lrtSet[fc.ID]; !isLR {
+						continue
+					}
+					if pendingLongRunningIDs == nil {
+						pendingLongRunningIDs = map[string]struct{}{}
+					}
+					pendingLongRunningIDs[fc.ID] = struct{}{}
+				}
+			}
+			if len(pendingLongRunningIDs) > 0 {
+				for _, fr := range utils.FunctionResponses(ev.Content) {
+					if fr == nil {
+						continue
+					}
+					delete(pendingLongRunningIDs, fr.ID)
+				}
+			}
+		}
 		if childOut, ok := childEventOutput(ev); ok {
 			validated, err := validateAndStampOutput(child, childOut, ev)
 			if err != nil {
@@ -388,6 +442,9 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		}
 	}
 
+	if opts.raiseOnWait && len(pendingLongRunningIDs) > 0 {
+		interrupted = true
+	}
 	if interrupted {
 		// HITL is not terminal — parent re-runs on resume and is
 		// expected to re-invoke RunNode. Do not cache.

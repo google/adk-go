@@ -599,6 +599,21 @@ func TestAgentNode_ValidationAndContentConversion(t *testing.T) {
 	}
 }
 
+// TestNodeInputToContent_TypedNilContent guards that a typed-nil
+// *genai.Content is treated as nil input instead of panicking on v.Parts.
+func TestNodeInputToContent_TypedNilContent(t *testing.T) {
+	var typedNil *genai.Content
+	var input any = typedNil // non-nil interface wrapping a nil *genai.Content
+
+	got, err := nodeInputToContent(input)
+	if err != nil {
+		t.Fatalf("nodeInputToContent returned error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("nodeInputToContent(typed-nil) = %#v, want nil", got)
+	}
+}
+
 func TestAgentNode_InputValidation(t *testing.T) {
 	type CustomStruct struct {
 		Val string `json:"val"`
