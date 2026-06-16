@@ -109,14 +109,6 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 		sub := newDynamicSubScheduler(ctx, n.composePath(ctx), emit)
 		orchestratorCtx := newDynamicNodeContext(ctx, sub.ParentPath(), "", sub, sub.OutputForAncestors())
 
-		// Re-stash orchestratorCtx (carries a live subScheduler) into the
-		// embedded context.Context so a tool running inside an LlmAgent that
-		// is itself this node's body can recover a RunNode-capable
-		// NodeContext via NodeContextFromGoContext.
-		// orchestratorCtx.InvocationContext = orchestratorCtx.InvocationContext.WithContext(
-		// 	WithNodeContext(orchestratorCtx.InvocationContext, orchestratorCtx),
-		// )
-
 		out, err := n.fn(orchestratorCtx, typedInput, emit)
 		if err != nil {
 			// WaitForOutput park emitted no interrupt event, so surface
