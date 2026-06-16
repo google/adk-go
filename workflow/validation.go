@@ -58,6 +58,12 @@ var ErrUnconditionalCycle = errors.New("unconditional cycle detected")
 // ErrSubWorkflowNameCollision is returned when a sub-workflow has the same name as the parent workflow.
 var ErrSubWorkflowNameCollision = errors.New("sub-workflow name collision")
 
+// ErrUnsupportedFanIn is returned when a non-JoinNode has two or more
+// unconditional incoming edges. Such a fan-in target would be activated
+// once per predecessor, which the scheduler does not yet serialize
+// safely. Use a JoinNode to converge multiple branches.
+var ErrUnsupportedFanIn = errors.New("non-JoinNode fan-in is not yet supported")
+
 // validateNodes executes a set of edges validation checks.
 func validateNodes(edges []Edge) error {
 	if err := validateUniqueNames(edges); err != nil {
@@ -156,6 +162,9 @@ func validateWorkflow(workflow *graph, schema *jsonschema.Resolved) error {
 		return err
 	}
 	if err := validateCycles(workflow); err != nil {
+		return err
+	}
+	if err := validateFanIn(workflow); err != nil {
 		return err
 	}
 	if err := validateStaticSchemas(workflow); err != nil {
@@ -318,6 +327,33 @@ func validateCycles(workflow *graph) error {
 		}
 	}
 
+	return nil
+}
+
+// validateFanIn rejects a non-JoinNode target that has two or more
+// unconditional incoming edges. Such a node would be activated once per
+// completed predecessor, colliding the scheduler's per-name bookkeeping
+// (mixed outputs, lost cancel funcs). JoinNode handles fan-in via a
+// barrier; everything else must converge through one. Only unconditional
+// (Route == nil) edges are counted so conditional fan-in and loop-back
+// back-edges — where the predecessors don't all fire together — are not
+// rejected.
+func validateFanIn(workflow *graph) error {
+	for node, edges := range workflow.predecessors {
+		if _, isJoin := node.(*JoinNode); isJoin {
+			continue
+		}
+		unconditional := 0
+		for _, edge := range edges {
+			if edge.Route == nil {
+				unconditional++
+			}
+		}
+		if unconditional > 1 {
+			return fmt.Errorf("%w: node %q has %d unconditional incoming edges; "+
+				"use a JoinNode to converge branches", ErrUnsupportedFanIn, node.Name(), unconditional)
+		}
+	}
 	return nil
 }
 
