@@ -24,8 +24,8 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/internal/toolinternal/toolutils"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // ErrConfirmationRequired indicates that the tool requires confirmation.
