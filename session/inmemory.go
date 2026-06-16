@@ -243,6 +243,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		LLMResponse:        event.LLMResponse,
 		Output:             event.Output,
 		NodeInfo:           event.NodeInfo,
+		IsolationScope:     event.IsolationScope,
 	}
 
 	// update the in-memory session service
