@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"sync"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -186,8 +187,16 @@ func (n *dynamicNode[IN, OUT]) composePath(parent NodeContext) string {
 // When yield returns false without ctx cancellation (no current
 // consumer triggers this, but the contract must not depend on it),
 // return context.Canceled as a stand-in.
+//
+// A single mutex serializes yield: a DynamicFn may run concurrent
+// children (see WithUseSubBranch) that all emit through this one
+// callback, and calling the same yield from multiple goroutines panics
+// the iterator and races the parent runNode's completion accumulator.
 func makeEmit(yield func(*session.Event, error) bool, parentCtx NodeContext) func(*session.Event) error {
+	var mu sync.Mutex
 	return func(ev *session.Event) error {
+		mu.Lock()
+		defer mu.Unlock()
 		if err := parentCtx.Err(); err != nil {
 			return err
 		}
