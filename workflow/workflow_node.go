@@ -57,6 +57,10 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 		// the count.
 		terminalOutputs := make(map[string]any)
 		var pendingErr error
+		// consumerGone becomes true once the parent yield returns false. After
+		// that, calling yield again panics the iterator (Go 1.23 range-over-func
+		// contract), so we only keep draining the sub-workflow to avoid leaks.
+		consumerGone := false
 
 		// Create a cancellable context to signal the sub-workflow to stop on error or break.
 		subCtx, cancel := ctx.WithAgentCancel()
@@ -81,10 +85,15 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 				terminalOutputs[ev.NodeInfo.Path] = out
 			}
 
+			if consumerGone {
+				// Drain remaining events without yielding.
+				continue
+			}
+
 			if ev.Output == nil {
 				if !yield(ev, nil) {
+					consumerGone = true
 					cancel()
-					continue
 				}
 				continue
 			}
@@ -92,9 +101,14 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 			evCopy := *ev
 			evCopy.Output = nil
 			if !yield(&evCopy, nil) {
+				consumerGone = true
 				cancel()
-				continue
 			}
+		}
+
+		// The consumer already broke the range loop; yielding again would panic.
+		if consumerGone {
+			return
 		}
 
 		// Yield the error at the very end if one occurred.

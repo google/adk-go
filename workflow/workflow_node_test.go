@@ -384,3 +384,47 @@ func TestNestedWorkflow_ErrorPropagation(t *testing.T) {
 		t.Errorf("expected error containing 'intentional failure', got %v", runErr)
 	}
 }
+
+// TestNestedWorkflow_BreakMidStream checks that breaking the range loop
+// mid-stream does not panic. break makes yield return false; Go forbids
+// calling yield again after that.
+func TestNestedWorkflow_BreakMidStream(t *testing.T) {
+	// Two chained output nodes, so a second event is still pending at break.
+	innerFn1 := func(ctx agent.Context, input string) (string, error) {
+		return input + "-a", nil
+	}
+	innerFn2 := func(ctx agent.Context, input string) (string, error) {
+		return input + "-b", nil
+	}
+	innerNode1 := NewFunctionNode("inner1", innerFn1, defaultNodeConfig)
+	innerNode2 := NewFunctionNode("inner2", innerFn2, defaultNodeConfig)
+	innerEdges := Chain(Start, innerNode1, innerNode2)
+
+	wfNode, err := NewWorkflowNode("nested", innerEdges)
+	if err != nil {
+		t.Fatalf("failed to create workflow node: %v", err)
+	}
+
+	mockCtx := newMockCtx(t)
+	exCtx := agent.NewNodeContext(mockCtx, nil)
+
+	// Turn the regression's panic into a readable failure; no-op once fixed.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("WorkflowNode.Run panicked after consumer break: %v", r)
+		}
+	}()
+
+	count := 0
+	for _, err := range wfNode.Run(exCtx, "in") {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		count++
+		break
+	}
+
+	if count != 1 {
+		t.Errorf("expected to consume exactly 1 event before break, got %d", count)
+	}
+}
