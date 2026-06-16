@@ -112,13 +112,14 @@ func TestInMemorySession_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	}
 	sess := createResp.Session
 
+	const wantScope = "adk-task-isolation-scope"
 	event := &session.Event{
 		ID:             "wf_event",
 		Author:         "agent",
+		IsolationScope: wantScope,
 		NodeInfo:       &session.NodeInfo{Path: "ask_name"},
 		RequestedInput: &session.RequestInput{InterruptID: "ask_name", Message: "What's your name?"},
 		Routes:         []string{"route_a"},
-		IsolationScope: "scope_a",
 	}
 	if err := service.AppendEvent(ctx, sess, event); err != nil {
 		t.Fatalf("AppendEvent: %v", err)
@@ -142,8 +143,8 @@ func TestInMemorySession_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 	if len(ev.Routes) != 1 || ev.Routes[0] != "route_a" {
 		t.Errorf("Routes not persisted: %#v", ev.Routes)
 	}
-	if ev.IsolationScope != "scope_a" {
-		t.Errorf("IsolationScope not persisted: got %q, want %q", ev.IsolationScope, "scope_a")
+	if ev.IsolationScope != wantScope {
+		t.Errorf("IsolationScope = %q, want %q", ev.IsolationScope, wantScope)
 	}
 }
 
