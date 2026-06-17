@@ -37,9 +37,6 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 	type Output struct {
 		Result string `json:"result"`
 	}
-	type TargetOutput struct {
-		Result int `json:"result"`
-	}
 
 	tests := []struct {
 		name         string
@@ -79,18 +76,6 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 			wantOutput:   map[string]any{"result": "zero"},
 			wantErr:      false,
 		},
-		{
-			name:     "ValidationError",
-			nodeName: "test",
-			fn: func(ctx agent.Context, input Input) (map[string]any, error) {
-				return map[string]any{"result": "not-an-int"}, nil
-			},
-			inputSchema:  mustSchema[Input](t),
-			outputSchema: mustSchema[TargetOutput](t),
-			input:        Input{Value: "hello"},
-			wantErr:      true,
-			errSubstr:    "validation failed for output",
-		},
 	}
 
 	for _, tc := range tests {
@@ -127,6 +112,111 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 
 			if !tc.wantErr && count != 1 {
 				t.Errorf("expected 1 event, got %d", count)
+			}
+		})
+	}
+}
+
+// TestFunctionNode_RunDoesNotValidate verifies Run yields the raw output
+// unchanged even when it violates the output schema: validation is the
+// scheduler's job (ValidateOutput), not Run's.
+func TestFunctionNode_RunDoesNotValidate(t *testing.T) {
+	type Input struct {
+		Value string `json:"value"`
+	}
+	type TargetOutput struct {
+		Result int `json:"result"`
+	}
+
+	raw := map[string]any{"result": "not-an-int"} // violates TargetOutput
+	fn := func(ctx agent.Context, input Input) (map[string]any, error) {
+		return raw, nil
+	}
+	node, err := NewFunctionNodeWithSchema[Input, map[string]any](
+		"test", fn, mustSchema[Input](t), mustSchema[TargetOutput](t), defaultNodeConfig)
+	if err != nil {
+		t.Fatalf("NewFunctionNodeWithSchema failed: %v", err)
+	}
+
+	mockCtx := &MockInvocationContext{sess: nil}
+	exCtx := agent.NewNodeContext(mockCtx, nil)
+	count := 0
+	for ev, err := range node.Run(exCtx, Input{Value: "hello"}) {
+		if err != nil {
+			t.Fatalf("Run returned unexpected error: %v", err)
+		}
+		if diff := cmp.Diff(raw, ev.Output); diff != "" {
+			t.Errorf("Run output mismatch (-want +got):\n%s", diff)
+		}
+		count++
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 event from Run, got %d", count)
+	}
+}
+
+// TestFunctionNode_ValidateOutput covers the scheduler-side output
+// validation contract: a schema-conforming value passes through, a
+// schema mismatch errors, and a nil schema accepts anything.
+func TestFunctionNode_ValidateOutput(t *testing.T) {
+	type Input struct {
+		Value string `json:"value"`
+	}
+	type TargetOutput struct {
+		Result int `json:"result"`
+	}
+
+	fn := func(ctx agent.Context, input Input) (map[string]any, error) {
+		return nil, nil // body unused: ValidateOutput is exercised directly
+	}
+	schemaNode, err := NewFunctionNodeWithSchema[Input, map[string]any](
+		"test", fn, mustSchema[Input](t), mustSchema[TargetOutput](t), defaultNodeConfig)
+	if err != nil {
+		t.Fatalf("NewFunctionNodeWithSchema failed: %v", err)
+	}
+	nilSchemaNode := NewFunctionNode[Input, map[string]any]("test_nil", fn, defaultNodeConfig)
+
+	tests := []struct {
+		name    string
+		node    *FunctionNode
+		output  any
+		want    any
+		wantErr bool
+	}{
+		{
+			name:   "direct_valid_passes_through",
+			node:   schemaNode,
+			output: map[string]any{"result": 1},
+			want:   map[string]any{"result": 1},
+		},
+		{
+			name:    "schema_mismatch_fails",
+			node:    schemaNode,
+			output:  map[string]any{"result": "not-an-int"},
+			wantErr: true,
+		},
+		{
+			name:   "nil_schema_passes_through",
+			node:   nilSchemaNode,
+			output: map[string]any{"anything": 1},
+			want:   map[string]any{"anything": 1},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.node.ValidateOutput(tc.output)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ValidateOutput: expected error, got nil (out=%v)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateOutput: unexpected error: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("ValidateOutput mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
