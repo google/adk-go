@@ -212,12 +212,13 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 
 	var output any
 	if state.OutputSchema != nil {
-		parsed, err := utils.ValidateOutputSchema(text, state.OutputSchema)
-		if err != nil {
-			// TODO: we should return error, once output_schema with tools is supported. As right now there's no guarantee that the actual LLM output will be compliant with set output_schema.
-			// log.Default().Printf("LlmAgent %q output validation failed: %v", a.Name(), err)
-			output = text
+		if strings.TrimSpace(text) == "" {
+			output = nil
 		} else {
+			parsed, err := utils.ValidateOutputSchema(text, state.OutputSchema)
+			if err != nil {
+				return fmt.Errorf("LlmAgent %q output validation failed: %w", a.Name(), err)
+			}
 			output = parsed
 		}
 	} else {
@@ -559,37 +560,6 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 
 	// Step 2: run Agent.Run; on every fresh task FC, dispatch and
 	// re-enter Agent.Run with the FR now in session.
-	//
-	// transfer_to_agent — deliberate divergence from adk-python.
-	//
-	// adk-python's wrapper (_llm_agent_wrapper.py:389-403) terminates
-	// on event.actions.transfer_to_agent and (when is_resumable)
-	// emits an agent-state event so the runner's next-turn picker
-	// can resume the transferred-to agent on a later user turn.
-	// adk-go does NOT do this — the wrapper simply forwards events
-	// through, relying on base_flow.go:639-651's inline-forward to
-	// run the transferred-to sub-agent within the same runner.Run
-	// iterator.
-	//
-	// Why we diverge intentionally:
-	//
-	//   1. adk-go has no resumability machinery (no is_resumable,
-	//      set_agent_state, or _create_agent_state_event). Mirroring
-	//      Python's wrapper-exit without resumability would yield
-	//      Python's non-resumable behaviour, which is: round 0
-	//      emits only the transfer event; round 1's findAgentToRun
-	//      walks back to find the most-recent non-user author —
-	//      which is the *root agent* (who authored the transfer
-	//      event) — so round 1 re-runs the root agent, NOT the
-	//      transferred-to agent. The transfer becomes a "hint" the
-	//      LLM has to re-decide each turn. That UX is strictly
-	//      worse than the current inline-forwarding behaviour.
-	//
-	//   2. adk-go's inline forwarding produces a useful single-turn
-	//      multi-hop UX: the user gets the transferred-to agent's
-	//      response immediately. This is well-suited to streaming
-	//      and to A2A multi-hop scenarios that rely on single-message
-	//      hand-offs (see agent/remoteagent/v2/a2a_e2e_test.go).
 	for {
 		hadTaskFC := false
 		for ev, err := range a.Run(ctx) {

@@ -556,12 +556,7 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 		}
 	})
 
-	// TODO: once OutputSchema-with-tools is supported, restore strict
-	// validation in llmagent.ProcessLLMAgentOutput and tighten these two cases
-	// (invalid JSON should return a schema validation error; whitespace-
-	// only text should leave Output nil). The current behaviour falls back
-	// to the raw text — see the TODO in llmagent.ProcessLLMAgentOutput.
-	t.Run("OutputSchema invalid JSON: falls back to raw text (no error)", func(t *testing.T) {
+	t.Run("OutputSchema invalid JSON: returns validation error", func(t *testing.T) {
 		t.Parallel()
 		schema := &genai.Schema{
 			Type: genai.TypeObject,
@@ -580,15 +575,12 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 				},
 			},
 		}
-		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
-			t.Fatalf("err = %v, want nil (validation errors are currently swallowed)", err)
-		}
-		if got, ok := ev.Output.(string); !ok || got != raw {
-			t.Errorf("Output = %v (%T), want raw text %q", ev.Output, ev.Output, raw)
+		if err := llmagent.ProcessLLMAgentOutput(a, ev); err == nil {
+			t.Fatalf("err = nil, want a schema-validation error for raw=%q", raw)
 		}
 	})
 
-	t.Run("OutputSchema + empty text: Output is the raw whitespace text, no error", func(t *testing.T) {
+	t.Run("OutputSchema + whitespace-only text: Output stays nil, no error", func(t *testing.T) {
 		t.Parallel()
 		schema := &genai.Schema{Type: genai.TypeObject}
 		a := makeLLMAgent(t, "x", withOutputSchema(schema))
@@ -602,10 +594,10 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 			},
 		}
 		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
-			t.Fatal(err)
+			t.Fatalf("err = %v, want nil (whitespace short-circuits to nil)", err)
 		}
-		if got, ok := ev.Output.(string); !ok || got != raw {
-			t.Errorf("Output = %v (%T), want raw text %q (no whitespace trim currently)", ev.Output, ev.Output, raw)
+		if ev.Output != nil {
+			t.Errorf("Output = %v, want nil (whitespace text must NOT be returned as the output)", ev.Output)
 		}
 		if ev.NodeInfo == nil || !ev.NodeInfo.MessageAsOutput {
 			t.Errorf("MessageAsOutput should still be set")
