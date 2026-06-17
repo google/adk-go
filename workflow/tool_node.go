@@ -112,23 +112,39 @@ func (n *ToolNode) runTool(toolCtx agent.Context, input any) (any, error) {
 		return nil, fmt.Errorf("tool %q execution failed: %w", n.tool.Name(), err)
 	}
 
-	var toolOutput any = output
+	return output, nil
+}
 
-	// Validate
-	if schema := n.OutputSchema(); schema != nil {
-		if err := schema.Validate(output); err != nil {
-			if val, ok := output["result"]; ok {
-				if err := schema.Validate(val); err != nil {
-					return nil, fmt.Errorf("converting tool %q output: validation failed for result key: %w", n.tool.Name(), err)
-				}
-				toolOutput = val
-			} else {
-				return nil, fmt.Errorf("converting tool %q output: validation failed: %w", n.tool.Name(), err)
+// ValidateOutput validates the tool output against the node's output
+// schema, adding a FunctionTool-specific fallback on top of the default
+// behavior: when the output is a map of shape {"result": X} that fails
+// direct schema validation, it retries against the unwrapped "result"
+// value and, on success, returns that unwrapped value.
+//
+// This override is the home for the {"result": X} convention because it
+// is tool-specific; making it a general default could mask genuine
+// validation errors in other node types.
+func (n *ToolNode) ValidateOutput(out any) (any, error) {
+	schema := n.OutputSchema()
+	if schema == nil {
+		return out, nil
+	}
+	// Try standard validation first.
+	if validated, err := defaultValidateOutput(out, schema); err == nil {
+		return validated, nil
+	}
+	// Fallback: unwrap {"result": X} (FunctionTool convention).
+	if m, ok := out.(map[string]any); ok {
+		if val, ok := m["result"]; ok {
+			if validated, err := defaultValidateOutput(val, schema); err == nil {
+				return validated, nil
 			}
 		}
 	}
-
-	return toolOutput, nil
+	// Both attempts failed: return the error from validating the
+	// original output, not the one from the {"result": X} fallback,
+	// so the caller sees the actual schema mismatch.
+	return defaultValidateOutput(out, schema)
 }
 
 // Run implements the Node interface and executes the tool.
