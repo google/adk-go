@@ -435,7 +435,7 @@ func TestAgentTransfer_ProcessRequest(t *testing.T) {
 		x int
 	}
 	var req model.LLMRequest
-	handler := func(ctx tool.Context, input Input) (int, error) {
+	handler := func(ctx agent.ToolContext, input Input) (int, error) {
 		return input.x, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{
@@ -471,7 +471,7 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		curTool := &llminternal.TransferToAgentTool{}
 
 		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-		ctx := toolinternal.NewToolContext(invCtx, "", &session.EventActions{}, nil)
+		ctx := agent.NewToolContext(invCtx, "", &session.EventActions{}, nil)
 
 		wantAgentName := "TestAgent"
 		args := map[string]any{"agent_name": wantAgentName}
@@ -497,7 +497,7 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				curTool := &llminternal.TransferToAgentTool{}
-				ctx := toolinternal.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil, nil)
+				ctx := agent.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil, nil)
 				if got, err := curTool.Run(ctx, tc.args); err == nil {
 					t.Fatalf("Run(%v) = (%v, %v), want error", tc.args, got, err)
 				}

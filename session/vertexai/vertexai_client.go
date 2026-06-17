@@ -86,8 +86,9 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 		ReasoningEngine: reasoningEngine,
 	}
 	rpcReq := &aiplatformpb.CreateSessionRequest{
-		Parent:  vertexaiutil.AgentEngineResource(aeData),
-		Session: pbSession,
+		Parent:    vertexaiutil.AgentEngineResource(aeData),
+		Session:   pbSession,
+		SessionId: req.SessionID,
 	}
 	lro, err := c.rpcClient.CreateSession(ctx, rpcReq)
 	if err != nil {
@@ -461,12 +462,14 @@ func aiplatformToGenaiContent(rpcResp *aiplatformpb.SessionEvent) *genai.Content
 			case *aiplatformpb.Part_FunctionCall:
 				argsMap := v.FunctionCall.Args.AsMap() // Converts *structpb.Struct -> map[string]any
 				part.FunctionCall = &genai.FunctionCall{
+					ID:   v.FunctionCall.Id,
 					Name: v.FunctionCall.Name,
 					Args: argsMap,
 				}
 			case *aiplatformpb.Part_FunctionResponse:
 				responseMap := v.FunctionResponse.Response.AsMap() // Converts *structpb.Struct -> map[string]any
 				part.FunctionResponse = &genai.FunctionResponse{
+					ID:       v.FunctionResponse.Id,
 					Name:     v.FunctionResponse.Name,
 					Response: responseMap,
 				}

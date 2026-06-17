@@ -21,9 +21,12 @@ import (
 	"testing"
 	"time"
 
-	a2acore "github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
-	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
+	a2alegacy "github.com/a2aproject/a2a-go/a2a"
+	a2alegacyclient "github.com/a2aproject/a2a-go/a2aclient"
+	a2alegacyagentcard "github.com/a2aproject/a2a-go/a2aclient/agentcard"
+	a2acore "github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -72,7 +75,7 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 		Name: "HelloWorldAgent",
 		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
-				event := session.NewEvent(ic.InvocationID())
+				event := session.NewEventWithContext(ic, ic.InvocationID())
 				event.Content = genai.NewContentFromText(wantMessage, genai.RoleModel)
 				yield(event, nil)
 			}
@@ -92,41 +95,83 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 		}
 	}()
 
-	var card *a2acore.AgentCard
-	for retry := range 3 {
-		time.Sleep(10 * time.Millisecond) // give server time to start
-		card, err = agentcard.DefaultResolver.Resolve(ctx, "http://localhost:"+strconv.Itoa(port))
-		if err == nil {
-			break
+	t.Run("A2A v2 client", func(t *testing.T) {
+		var card *a2acore.AgentCard
+		for retry := range 3 {
+			time.Sleep(10 * time.Millisecond) // give server time to start
+			card, err = agentcard.DefaultResolver.Resolve(ctx, "http://localhost:"+strconv.Itoa(port))
+			if err == nil {
+				break
+			}
+			if retry == 2 {
+				t.Fatalf("cardResolver.Resolve() error = %v", err)
+			}
 		}
-		if retry == 2 {
-			t.Fatalf("cardResolver.Resolve() error = %v", err)
+
+		client, err := a2aclient.NewFromCard(ctx, card)
+		if err != nil {
+			t.Fatalf("a2aclient.NewFromCard() error = %v", err)
 		}
-	}
 
-	client, err := a2aclient.NewFromCard(ctx, card)
-	if err != nil {
-		t.Fatalf("a2aclient.NewFromCard() error = %v", err)
-	}
-
-	got, err := client.SendMessage(ctx, &a2acore.MessageSendParams{
-		Message: a2acore.NewMessage(a2acore.MessageRoleUser, a2acore.TextPart{Text: "Hi!"}),
+		got, err := client.SendMessage(ctx, &a2acore.SendMessageRequest{
+			Message: a2acore.NewMessage(a2acore.MessageRoleUser, a2acore.NewTextPart("Hi!")),
+		})
+		if err != nil {
+			t.Fatalf("client.SendMessage() error = %v", err)
+		}
+		task, ok := got.(*a2acore.Task)
+		if !ok {
+			t.Fatalf("client.SendMessage() result type = %T, want a2a.Task", got)
+		}
+		if len(task.Artifacts) != 1 {
+			t.Fatalf("len(task.Artifacts) = %d, want 1", len(task.Artifacts))
+		}
+		parts := task.Artifacts[0].Parts
+		if len(parts) != 1 {
+			t.Fatalf("len(task.Artifacts[0].Parts) = %d, want 1", len(parts))
+		}
+		if gotPart := parts[0].Text(); gotPart != wantMessage {
+			t.Fatalf("task.Artifacts[0].Parts[0] = %v, want %v", parts[0], wantMessage)
+		}
 	})
-	if err != nil {
-		t.Fatalf("client.SendMessage() error = %v", err)
-	}
-	task, ok := got.(*a2acore.Task)
-	if !ok {
-		t.Fatalf("client.SendMessage() result type = %T, want a2a.Task", got)
-	}
-	if len(task.Artifacts) != 1 {
-		t.Fatalf("len(task.Artifacts) = %d, want 1", len(task.Artifacts))
-	}
-	parts := task.Artifacts[0].Parts
-	if len(parts) != 1 {
-		t.Fatalf("len(task.Artifacts[0].Parts) = %d, want 1", len(parts))
-	}
-	if gotPart, ok := parts[0].(a2acore.TextPart); !ok || gotPart.Text != wantMessage {
-		t.Fatalf("task.Artifacts[0].Parts[0] = %v, want %v", parts[0], a2acore.TextPart{Text: wantMessage})
-	}
+
+	t.Run("A2A v0 client", func(t *testing.T) {
+		var card *a2alegacy.AgentCard
+		for retry := range 3 {
+			time.Sleep(10 * time.Millisecond) // give server time to start
+			card, err = a2alegacyagentcard.DefaultResolver.Resolve(ctx, "http://localhost:"+strconv.Itoa(port))
+			if err == nil {
+				break
+			}
+			if retry == 2 {
+				t.Fatalf("a2alegacyagentcard.DefaultResolver.Resolve() error = %v", err)
+			}
+		}
+
+		client, err := a2alegacyclient.NewFromCard(ctx, card)
+		if err != nil {
+			t.Fatalf("a2alegacyclient.NewFromCard() error = %v", err)
+		}
+
+		got, err := client.SendMessage(ctx, &a2alegacy.MessageSendParams{
+			Message: a2alegacy.NewMessage(a2alegacy.MessageRoleUser, a2alegacy.TextPart{Text: "Hi!"}),
+		})
+		if err != nil {
+			t.Fatalf("client.SendMessage() error = %v", err)
+		}
+		task, ok := got.(*a2alegacy.Task)
+		if !ok {
+			t.Fatalf("client.SendMessage() result type = %T, want a2alegacy.Task", got)
+		}
+		if len(task.Artifacts) != 1 {
+			t.Fatalf("len(task.Artifacts) = %d, want 1", len(task.Artifacts))
+		}
+		parts := task.Artifacts[0].Parts
+		if len(parts) != 1 {
+			t.Fatalf("len(task.Artifacts[0].Parts) = %d, want 1", len(parts))
+		}
+		if gotPart := parts[0].(a2alegacy.TextPart); gotPart.Text != wantMessage {
+			t.Fatalf("task.Artifacts[0].Parts[0] = %v, want %v", parts[0], wantMessage)
+		}
+	})
 }

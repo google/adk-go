@@ -20,45 +20,39 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var toIgnore = map[string]struct{}{"thought_signature": {}, "http_options": {}, "args": {}, "response": {}}
+var toIgnore = map[string]struct{}{
+	"thought_signature": {},
+	"http_options":      {},
+	"args":              {},
+	"response":          {},
+}
 
-func removeUnderscores(node *yaml.Node) {
+var toIgnoreButRecurse = map[string]struct{}{
+	"user_message_index": {},
+	"agent_name":         {},
+	"llm_recording":      {},
+	"llm_request":        {},
+	"llm_responses":      {},
+	"tool_recording":     {},
+	"tool_call":          {},
+	"tool_response":      {},
+}
+
+// normalizeYAMLNode standardizes the recorded YAML AST in a single tree traversal.
+// It strips underscores from structural Go field keys to match case-insensitive fields,
+// while preserving user freeform tool arguments/responses, and resolves type mismatches.
+func normalizeYAMLNode(node *yaml.Node) {
 	switch node.Kind {
 	case yaml.DocumentNode, yaml.SequenceNode:
-		// If it's a document or a list, just pass through to its children
 		for _, child := range node.Content {
-			removeUnderscores(child)
+			normalizeYAMLNode(child)
 		}
 	case yaml.MappingNode:
-		// A MappingNode's content is a flat array alternating [key, value, key, value...]
 		for i := 0; i < len(node.Content); i += 2 {
 			keyNode := node.Content[i]
 			valueNode := node.Content[i+1]
-			if _, ok := toIgnore[keyNode.Value]; ok {
-				continue
-			}
 
-			// Strip the underscore from the key (e.g., "first_name" -> "firstname")
-			keyNode.Value = strings.ReplaceAll(keyNode.Value, "_", "")
-
-			// Continue walking down into the value in case of nested objects
-			removeUnderscores(valueNode)
-		}
-	}
-}
-
-func fixTypeMismatches(n *yaml.Node) {
-	switch n.Kind {
-	case yaml.DocumentNode, yaml.SequenceNode:
-		for _, child := range n.Content {
-			fixTypeMismatches(child)
-		}
-
-	case yaml.MappingNode:
-		for i := 0; i < len(n.Content); i += 2 {
-			keyNode := n.Content[i]
-			valueNode := n.Content[i+1]
-
+			// 1. Fix known type mismatches and singular/plural fields
 			switch keyNode.Value {
 			case "systeminstruction":
 				if valueNode.Kind == yaml.ScalarNode {
@@ -86,10 +80,33 @@ func fixTypeMismatches(n *yaml.Node) {
 						},
 					}
 				}
+			case "llmresponse", "llm_response":
+				if valueNode.Kind == yaml.MappingNode {
+					origCopy := *valueNode
+					valueNode.Kind = yaml.SequenceNode
+					valueNode.Tag = "!!seq"
+					valueNode.Value = ""
+					valueNode.Content = []*yaml.Node{&origCopy}
+				}
+				keyNode.Value = "llm_responses"
 			}
 
-			// Recurse into the value to catch nested structures
-			fixTypeMismatches(valueNode)
+			// 2. Skip processing/recursion for ignored freeform keys (like tool args or response payload)
+			if _, ok := toIgnore[keyNode.Value]; ok {
+				continue
+			}
+
+			// 3. For standard metadata fields, preserve snake_case but recurse into value
+			if _, ok := toIgnoreButRecurse[keyNode.Value]; ok {
+				normalizeYAMLNode(valueNode)
+				continue
+			}
+
+			// 4. Strip underscores to match camelCase Go struct field names case-insensitively
+			keyNode.Value = strings.ReplaceAll(keyNode.Value, "_", "")
+
+			// 5. Recurse to process nested fields
+			normalizeYAMLNode(valueNode)
 		}
 	}
 }

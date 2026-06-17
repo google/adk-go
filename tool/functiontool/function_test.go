@@ -28,6 +28,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/testutil"
@@ -49,7 +50,7 @@ type SumResult struct {
 	Sum int `json:"sum"` // the sum of two integers
 }
 
-func sumFunc(ctx tool.Context, input SumArgs) (SumResult, error) {
+func sumFunc(ctx agent.ToolContext, input SumArgs) (SumResult, error) {
 	return SumResult{Sum: input.A + input.B}, nil
 }
 
@@ -64,9 +65,9 @@ func ExampleNew() {
 	_ = sumTool // use the tool
 }
 
-func createToolContext(t *testing.T) tool.Context {
+func createToolContext(t *testing.T) agent.ToolContext {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	return toolinternal.NewToolContext(invCtx, "", &session.EventActions{}, nil)
+	return agent.NewToolContext(invCtx, "", &session.EventActions{}, nil)
 }
 
 //go:generate go test -v -httprecord=.*
@@ -100,7 +101,7 @@ func TestFunctionTool_Simple(t *testing.T) {
 		},
 	}
 
-	weatherReport := func(ctx tool.Context, input Args) (Result, error) {
+	weatherReport := func(ctx agent.ToolContext, input Args) (Result, error) {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
 			return ret, nil
@@ -201,7 +202,7 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	type IntOutput struct {
 		Result int `json:"result"`
 	}
-	identityFunc := func(ctx tool.Context, input IntInput) (IntOutput, error) {
+	identityFunc := func(ctx agent.ToolContext, input IntInput) (IntOutput, error) {
 		return IntOutput{Result: input.X}, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{
@@ -219,7 +220,7 @@ func TestFunctionTool_DifferentFunctionDeclarations_ConsolidatedInOneGenAiTool(t
 	type StringOutput struct {
 		Result string `json:"result"`
 	}
-	stringIdentityFunc := func(ctx tool.Context, input StringInput) (StringOutput, error) {
+	stringIdentityFunc := func(ctx agent.ToolContext, input StringInput) (StringOutput, error) {
 		return StringOutput{Result: input.Value}, nil
 	}
 	stringIdentityTool, err := functiontool.New(
@@ -265,7 +266,7 @@ func TestFunctionTool_ReturnsBasicType(t *testing.T) {
 		"paris":  "The weather in Paris is sunny with a temperature of 25 derees Celsius.",
 	}
 
-	weatherReport := func(ctx tool.Context, input Args) (string, error) {
+	weatherReport := func(ctx agent.ToolContext, input Args) (string, error) {
 		city := strings.ToLower(input.City)
 		if ret, ok := resultSet[city]; ok {
 			return ret, nil
@@ -355,7 +356,7 @@ func TestFunctionTool_MapInput(t *testing.T) {
 			Name:        "sum_map",
 			Description: "sums numbers provided in a map input",
 		},
-		func(ctx tool.Context, input map[string]int) (Output, error) {
+		func(ctx agent.ToolContext, input map[string]int) (Output, error) {
 			return Output{Sum: input["a"] + input["b"]}, nil
 		})
 	if err != nil {
@@ -440,7 +441,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 		Name:        "print_quantity",
 		Description: "print the remaining quantity of the given fruit.",
 		InputSchema: ischema,
-	}, func(ctx tool.Context, input Args) (any, error) {
+	}, func(ctx agent.ToolContext, input Args) (any, error) {
 		fruit := strings.ToLower(input.Fruit)
 		if fruit != "mandarin" && fruit != "kiwi" {
 			t.Errorf("unexpected fruit: %q", fruit)
@@ -552,7 +553,7 @@ type SimpleArgs struct {
 	Num int
 }
 
-func okFunc(_ tool.Context, _ SimpleArgs) (string, error) {
+func okFunc(_ agent.ToolContext, _ SimpleArgs) (string, error) {
 	return "ok", nil
 }
 
@@ -584,6 +585,9 @@ func TestToolConfirmation(t *testing.T) {
 			args: map[string]any{"Num": 1},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 1},
@@ -593,9 +597,6 @@ func TestToolConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
-					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
-				}, "user"),
 			},
 		},
 		{
@@ -608,6 +609,9 @@ func TestToolConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": true}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 1},
@@ -617,9 +621,6 @@ func TestToolConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
-					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
-				}, "user"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{"result": "ok"}, "user"),
 			},
 		},
@@ -633,6 +634,9 @@ func TestToolConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": false}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 1},
@@ -642,9 +646,6 @@ func TestToolConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
-					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
-				}, "user"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
 					"error": errors.New("error tool \"test_tool\" call is rejected"),
 				}, "user"),
@@ -675,6 +676,9 @@ func TestToolConfirmation(t *testing.T) {
 			args: map[string]any{"Num": 4},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 4},
@@ -684,9 +688,6 @@ func TestToolConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
-					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
-				}, "user"),
 			},
 		},
 		{
@@ -701,6 +702,9 @@ func TestToolConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": true}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 4},
@@ -710,9 +714,6 @@ func TestToolConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
-					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
-				}, "user"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{"result": "ok"}, "user"),
 			},
 		},
@@ -728,6 +729,9 @@ func TestToolConfirmation(t *testing.T) {
 			confirmFunctionResponse: &genai.FunctionResponse{Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": false}},
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 4}, "model"),
+				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
+					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
+				}, "user"),
 				genai.NewContentFromFunctionCall(toolconfirmation.FunctionCallName, map[string]any{
 					"originalFunctionCall": &genai.FunctionCall{
 						Args: map[string]any{"Num": 4},
@@ -737,9 +741,6 @@ func TestToolConfirmation(t *testing.T) {
 						Hint: "Please approve or reject the tool call test_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					},
 				}, "model"),
-				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
-					"error": errors.New("error tool \"test_tool\" requires confirmation, please approve or reject"),
-				}, "user"),
 				genai.NewContentFromFunctionResponse("test_tool", map[string]any{
 					"error": errors.New("error tool \"test_tool\" call is rejected"),
 				}, "user"),
@@ -865,6 +866,56 @@ func TestToolConfirmation(t *testing.T) {
 	}
 }
 
+func TestToolConfirmationYieldsFunctionResponseBeforeConfirmation(t *testing.T) {
+	mockModel := &testutil.MockModel{
+		Responses: []*genai.Content{
+			genai.NewContentFromFunctionCall("test_tool", map[string]any{"Num": 1}, genai.RoleModel),
+		},
+	}
+
+	myTool, err := functiontool.New(functiontool.Config{
+		Name:                "test_tool",
+		RequireConfirmation: true,
+	}, okFunc)
+	if err != nil {
+		t.Fatalf("Failed to create tool: %v", err)
+	}
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "simple agent",
+		Model: mockModel,
+		Tools: []tool.Tool{myTool},
+	})
+	if err != nil {
+		t.Fatalf("failed to create llm agent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, a)
+	sawFunctionResponse := false
+
+	for got, err := range runner.Run(t, "id", "message") {
+		// The mock model emits a sentinel error once exhausted; treat any
+		// error as end-of-stream and rely on the post-loop assertions.
+		if err != nil {
+			break
+		}
+
+		for _, part := range got.Content.Parts {
+			if part.FunctionResponse != nil && part.FunctionResponse.Name == "test_tool" {
+				sawFunctionResponse = true
+			}
+			if part.FunctionCall != nil && part.FunctionCall.Name == toolconfirmation.FunctionCallName {
+				if !sawFunctionResponse {
+					t.Fatal("confirmation was yielded before the tool function response")
+				}
+				return
+			}
+		}
+	}
+
+	t.Fatal("expected confirmation event")
+}
+
 // Mock types for TArgs and TResults
 type TestArgs struct {
 	Name string
@@ -876,7 +927,7 @@ type TestResult struct {
 
 func TestNew_RequireConfirmationProvider_Validation(t *testing.T) {
 	// A dummy handler to satisfy the function signature
-	dummyHandler := func(_ tool.Context, _ TestArgs) (TestResult, error) {
+	dummyHandler := func(_ agent.ToolContext, _ TestArgs) (TestResult, error) {
 		return TestResult{Value: 1}, nil
 	}
 
@@ -987,7 +1038,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "string_tool",
 					Description: "a tool with string input",
-				}, func(ctx tool.Context, input string) (string, error) {
+				}, func(ctx agent.ToolContext, input string) (string, error) {
 					return input, nil
 				})
 			},
@@ -999,7 +1050,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "int_tool",
 					Description: "a tool with int input",
-				}, func(ctx tool.Context, input int) (int, error) {
+				}, func(ctx agent.ToolContext, input int) (int, error) {
 					return input, nil
 				})
 			},
@@ -1011,7 +1062,7 @@ func TestNew_InvalidInputType(t *testing.T) {
 				return functiontool.New(functiontool.Config{
 					Name:        "bool_tool",
 					Description: "a tool with bool input",
-				}, func(ctx tool.Context, input bool) (bool, error) {
+				}, func(ctx agent.ToolContext, input bool) (bool, error) {
 					return input, nil
 				})
 			},
@@ -1037,7 +1088,7 @@ func TestFunctionTool_PanicRecovery(t *testing.T) {
 		Value string `json:"value"`
 	}
 
-	panicHandler := func(ctx tool.Context, input Args) (string, error) {
+	panicHandler := func(ctx agent.ToolContext, input Args) (string, error) {
 		panic("intentional panic for testing")
 	}
 

@@ -17,10 +17,10 @@ package context
 import (
 	"context"
 
-	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/platform"
 	"google.golang.org/adk/session"
 )
 
@@ -41,7 +41,7 @@ type InvocationContextParams struct {
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
 	if params.InvocationID == "" {
-		params.InvocationID = "e-" + uuid.NewString()
+		params.InvocationID = "e-" + platform.NewUUID(ctx)
 	}
 	return &InvocationContext{
 		Context: ctx,

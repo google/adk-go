@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 	"google.golang.org/adk/tool/skilltoolset/skill"
@@ -45,13 +46,13 @@ func LoadSkillResource(source skill.Source) (tool.Tool, error) {
 			Name:        "load_skill_resource",
 			Description: "Loads a resource file (e.g., from references/ or assets/) associated with the specified skill.",
 		},
-		func(ctx tool.Context, args LoadSkillResourceArgs) (*LoadSkillResourceResult, error) {
+		func(ctx agent.ToolContext, args LoadSkillResourceArgs) (*LoadSkillResourceResult, error) {
 			return loadSkillResource(ctx, args, source)
 		},
 	)
 }
 
-func loadSkillResource(ctx tool.Context, args LoadSkillResourceArgs, source skill.Source) (*LoadSkillResourceResult, error) {
+func loadSkillResource(ctx agent.ToolContext, args LoadSkillResourceArgs, source skill.Source) (*LoadSkillResourceResult, error) {
 	if args.SkillName == "" {
 		return nil, fmt.Errorf("skill name is required to load a resource")
 	}
