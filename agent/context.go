@@ -151,8 +151,6 @@ type CallbackContext = Context
 // migration to the unified context and will be removed in a future release.
 type ToolContext = Context
 
-// TODO(kdroste): comment the interface
-
 // Context is the unified context passed to user callbacks during agent
 // execution and to tools when they are called. It provides access to the
 // originating function call, mutable event actions, long-term memory search,
