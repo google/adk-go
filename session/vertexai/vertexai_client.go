@@ -332,12 +332,8 @@ func eventToRawEvent(event *session.Event) (*structpb.Struct, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshaling event: %w", err)
 	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("unmarshaling event to map: %w", err)
-	}
-	s, err := structpb.NewStruct(m)
-	if err != nil {
+	s := &structpb.Struct{}
+	if err := s.UnmarshalJSON(b); err != nil {
 		return nil, fmt.Errorf("converting event to structpb: %w", err)
 	}
 	return s, nil
