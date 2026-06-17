@@ -17,6 +17,8 @@ package vertexai
 import (
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/util/vertexai"
@@ -107,6 +109,146 @@ func TestGetReasoningEngineID(t *testing.T) {
 			// Check Returned Value
 			if got != tt.expectedID {
 				t.Errorf("getReasoningEngineID() got = %v, want %v", got, tt.expectedID)
+			}
+		})
+	}
+}
+
+// TestRawEventRoundTrip pins that fields lacking a dedicated SessionEvent
+// column survive a raw_event write/read round-trip — NodeInfo in
+// particular, which the legacy field-based path dropped — and that the
+// fields already persisted via dedicated columns are not degraded.
+func TestRawEventRoundTrip(t *testing.T) {
+	tests := []struct {
+		name  string
+		event *session.Event
+	}{
+		{
+			name: "workflow fields",
+			event: &session.Event{
+				InvocationID:   "inv-1",
+				Author:         "agent-x",
+				Branch:         "a.b",
+				IsolationScope: "scope-1",
+				Routes:         []string{"approve"},
+				Output:         "the-output",
+				NodeInfo: &session.NodeInfo{
+					Path:            "wf/child@1",
+					MessageAsOutput: true,
+					OutputFor:       []string{"wf/child@1", "wf"},
+				},
+			},
+		},
+		{
+			name: "content with text and function call",
+			event: &session.Event{
+				Author: "agent-x",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: string(genai.RoleModel),
+						Parts: []*genai.Part{
+							{Text: "hello"},
+							{FunctionCall: &genai.FunctionCall{
+								ID:   "call-1",
+								Name: "get_weather",
+								Args: map[string]any{"city": "Stockholm"},
+							}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "structured output",
+			event: &session.Event{
+				Author: "agent-x",
+				Output: map[string]any{"score": float64(42), "label": "ok"},
+			},
+		},
+		{
+			// Typed map[string]int64 keeps its int type (unlike any-typed
+			// Output/StateDelta; see TestRawEventNumericContract).
+			name: "typed int64 artifact delta preserved",
+			event: &session.Event{
+				Author: "agent-x",
+				Output: "x",
+				Actions: session.EventActions{
+					ArtifactDelta: map[string]int64{"file.png": 7},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := eventToRawEvent(tc.event)
+			if err != nil {
+				t.Fatalf("eventToRawEvent() error = %v", err)
+			}
+			got, err := eventFromRawEvent(raw)
+			if err != nil {
+				t.Fatalf("eventFromRawEvent() error = %v", err)
+			}
+			if diff := cmp.Diff(tc.event, got); diff != "" {
+				t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestRawEventNumericContract pins the documented contract (see
+// eventToRawEvent): integers in the any-typed Output and StateDelta come
+// back as float64.
+func TestRawEventNumericContract(t *testing.T) {
+	event := &session.Event{
+		Author: "agent-x",
+		Output: int64(9007199254740993), // 2^53 + 1
+		Actions: session.EventActions{
+			StateDelta: map[string]any{"count": 3},
+		},
+	}
+	raw, err := eventToRawEvent(event)
+	if err != nil {
+		t.Fatalf("eventToRawEvent() error = %v", err)
+	}
+	got, err := eventFromRawEvent(raw)
+	if err != nil {
+		t.Fatalf("eventFromRawEvent() error = %v", err)
+	}
+	if _, ok := got.Output.(float64); !ok {
+		t.Errorf("Output type = %T, want float64", got.Output)
+	}
+	if v, ok := got.Actions.StateDelta["count"].(float64); !ok || v != 3 {
+		t.Errorf("StateDelta[count] = %#v, want float64(3)", got.Actions.StateDelta["count"])
+	}
+}
+
+// TestEventNeedsRawEvent guards the invariant that plain events keep
+// their legacy wire format (no raw_event) while events carrying state
+// without a dedicated SessionEvent column opt into raw_event. Changing
+// this for plain events would invalidate the recorded replay fixtures.
+func TestEventNeedsRawEvent(t *testing.T) {
+	tests := []struct {
+		name  string
+		event *session.Event
+		want  bool
+	}{
+		{name: "plain event", event: &session.Event{Author: "user"}, want: false},
+		{name: "with content only", event: &session.Event{
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hi", genai.RoleUser)},
+		}, want: false},
+		{name: "with output", event: &session.Event{Output: "x"}, want: true},
+		{name: "with node info", event: &session.Event{NodeInfo: &session.NodeInfo{Path: "wf"}}, want: true},
+		{name: "with isolation scope", event: &session.Event{IsolationScope: "s"}, want: true},
+		{name: "with routes", event: &session.Event{Routes: []string{"approve"}}, want: true},
+		{name: "with requested input", event: &session.Event{
+			RequestedInput: &session.RequestInput{InterruptID: "i"},
+		}, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := eventNeedsRawEvent(tc.event); got != tc.want {
+				t.Errorf("eventNeedsRawEvent() = %v, want %v", got, tc.want)
 			}
 		})
 	}
