@@ -99,6 +99,12 @@ func needOutputSchemaProcessor(state *State) bool {
 	if state == nil || state.Model == nil {
 		return false
 	}
+	// Task-mode agents already have a structured-output mechanism:
+	// the auto-injected finish_task tool whose declaration mirrors
+	// the agent's OutputSchema.
+	if state.Mode == ModeTask {
+		return false
+	}
 	hasTools := len(state.Tools) > 0 || len(state.Toolsets) > 0
 	return hasTools && googlellm.NeedsOutputSchemaProcessor(state.Model)
 }
