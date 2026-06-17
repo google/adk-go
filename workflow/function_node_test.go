@@ -158,6 +158,17 @@ func TestFunctionNode_ValidateOutput(t *testing.T) {
 	if _, err := node.ValidateOutput(got); err == nil {
 		t.Fatalf("ValidateOutput: expected validation error, got nil")
 	}
+
+	// A schema-conforming output passes ValidateOutput and is returned
+	// unchanged.
+	valid := map[string]any{"result": 1}
+	gotValid, err := node.ValidateOutput(valid)
+	if err != nil {
+		t.Fatalf("ValidateOutput: unexpected error for valid output: %v", err)
+	}
+	if diff := cmp.Diff(valid, gotValid); diff != "" {
+		t.Errorf("ValidateOutput mismatch (-want +got):\n%s", diff)
+	}
 }
 
 func mustSchema[T any](t *testing.T) *jsonschema.Schema {
