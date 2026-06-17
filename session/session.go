@@ -140,7 +140,7 @@ type Event struct {
 
 	// NodeInfo carries workflow-node metadata for events emitted
 	// inside a workflow. Nil for non-workflow events.
-	NodeInfo *NodeInfo `json:"nodeInfo,omitempty"`
+	NodeInfo *NodeInfo `json:"NodeInfo,omitempty"`
 }
 
 // NodeInfo carries the per-event metadata identifying which node in
@@ -152,19 +152,19 @@ type NodeInfo struct {
 	// The scheduler uses it to scope per-activation Output/Routes
 	// invariants to the emitter, allowing dynamic nodes to forward
 	// children's terminal events alongside their own.
-	Path string `json:"path,omitempty"`
+	Path string `json:"Path,omitempty"`
 
 	// MessageAsOutput marks that this event's content IS the node's
 	// output: when set and Event.Output is nil, readers derive the
 	// node output from the event's model text. Mirrors adk-python's
 	// node_info.message_as_output.
-	MessageAsOutput bool `json:"messageAsOutput,omitempty"`
+	MessageAsOutput bool `json:"MessageAsOutput,omitempty"`
 
 	// OutputFor lists the node paths this event's Output counts for: the
 	// emitter plus any WithUseAsOutput delegating ancestors, so one event
 	// stands in for a whole delegation chain rather than each level
 	// re-emitting a duplicate. Mirrors adk-python's node_info.output_for.
-	OutputFor []string `json:"outputFor,omitempty"`
+	OutputFor []string `json:"OutputFor,omitempty"`
 }
 
 // RequestInput describes a single human-in-the-loop prompt emitted
