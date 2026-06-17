@@ -348,6 +348,7 @@ func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
 	return c.WithAgentContext(ctx)
 }
 
+// WithAgentTimeout creates a new context as a shallow copy, adding timeout to the top of the underlying context.Context.
 func (c *commonContext) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
 	// copy & modify
 	res := *c
@@ -356,6 +357,7 @@ func (c *commonContext) WithAgentTimeout(timeout time.Duration) (Context, contex
 	return &res, cancelFunc
 }
 
+// WithAgentCancel creates a new context as a shallow copy, adding cancellation to the top of the underlying context.Context.
 func (c *commonContext) WithAgentCancel() (Context, context.CancelFunc) {
 	// copy & modify
 	res := *c
@@ -364,6 +366,8 @@ func (c *commonContext) WithAgentCancel() (Context, context.CancelFunc) {
 	return &res, cancelFunc
 }
 
+// WithAgentContext creates a new context as a shallow copy setting the internal contexts to ctx.
+// If the ctx is InvocationContext, the underlying invocationContext is set to ctx.
 func (c *commonContext) WithAgentContext(ctx context.Context) Context {
 	res := *c
 	if c, ok := ctx.(InvocationContext); ok {
