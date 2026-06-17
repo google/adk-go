@@ -230,11 +230,6 @@ func NewFunctionNodeFromState[Params, OUT any](
 		if err != nil {
 			return output, err
 		}
-		if oschema != nil {
-			if err := typeutil.ValidateWithJSONSchema(output, oschema); err != nil {
-				return nil, fmt.Errorf("function node %s: validation failed for output %T: %w", name, new(OUT), err)
-			}
-		}
 		return output, nil
 	}
 
@@ -276,13 +271,6 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 			return output, err
 		}
 
-		if outputSchema != nil {
-			validateErr := typeutil.ValidateWithJSONSchema(output, outputSchema)
-			if validateErr != nil {
-				return nil, fmt.Errorf("function node %s: validation failed for output %T: %w", name, new(OUT), validateErr)
-			}
-		}
-
 		return output, nil
 	}
 
@@ -320,11 +308,6 @@ func newEmittingFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn Emi
 		output, err := fn(ctx, typedInput, emit)
 		if err != nil {
 			return nil, err
-		}
-		if outputSchema != nil {
-			if validateErr := typeutil.ValidateWithJSONSchema(output, outputSchema); validateErr != nil {
-				return nil, fmt.Errorf("function node %s: validation failed for output %T: %w", name, new(OUT), validateErr)
-			}
 		}
 		return output, nil
 	}
