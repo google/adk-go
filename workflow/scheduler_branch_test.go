@@ -74,11 +74,14 @@ func TestScheduler_MultipleSuccessors_AssignsSubBranches(t *testing.T) {
 	b := branchRecorder("b", &mu, &seen)
 	c := branchRecorder("c", &mu, &seen)
 
-	// START fans out to a + b + c.
+	join := NewJoinNode("join")
 	w := mustNew(t, []Edge{
 		{From: Start, To: a},
 		{From: Start, To: b},
 		{From: Start, To: c},
+		{From: a, To: join},
+		{From: b, To: join},
+		{From: c, To: join},
 	})
 
 	drain(t, w.Run(mockCtx))
@@ -109,10 +112,13 @@ func TestScheduler_FanOutChainedDeeperBranches(t *testing.T) {
 	b1 := branchRecorder("b1", &mu, &seen)
 	b2 := branchRecorder("b2", &mu, &seen)
 
+	join := NewJoinNode("join")
 	w := mustNew(t, []Edge{
 		{From: Start, To: a}, // a stays on root (single successor)
 		{From: a, To: b1},    // a fans out: b1 and b2 get sub-branches
 		{From: a, To: b2},
+		{From: b1, To: join},
+		{From: b2, To: join},
 	})
 
 	drain(t, w.Run(mockCtx))
@@ -225,9 +231,12 @@ func TestScheduler_EventsAreBranchStamped(t *testing.T) {
 	a := branchRecorder("a", &mu, &seen)
 	b := branchRecorder("b", &mu, &seen)
 
+	join := NewJoinNode("join")
 	w := mustNew(t, []Edge{
 		{From: Start, To: a},
 		{From: Start, To: b},
+		{From: a, To: join},
+		{From: b, To: join},
 	})
 
 	events := drain(t, w.Run(mockCtx))
