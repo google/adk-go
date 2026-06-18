@@ -254,12 +254,18 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 
 	var eventState *aiplatformpb.EventActions
 	// Convert and set the initial state if provided
-	if len(event.Actions.StateDelta) > 0 {
-		sessionState, err := structpb.NewStruct(event.Actions.StateDelta)
-		if err != nil {
-			return fmt.Errorf("failed to convert state to structpb: %w", err)
+	if len(event.Actions.StateDelta) > 0 || len(event.Actions.ArtifactDelta) > 0 {
+		eventState = &aiplatformpb.EventActions{}
+		if len(event.Actions.StateDelta) > 0 {
+			sessionState, err := structpb.NewStruct(event.Actions.StateDelta)
+			if err != nil {
+				return fmt.Errorf("failed to convert state to structpb: %w", err)
+			}
+			eventState.StateDelta = sessionState
 		}
-		eventState = &aiplatformpb.EventActions{StateDelta: sessionState}
+		if len(event.Actions.ArtifactDelta) > 0 {
+			eventState.ArtifactDelta = toInt32Map(event.Actions.ArtifactDelta)
+		}
 	}
 
 	content, err := createAiplatformpbContent(event)
@@ -329,7 +335,8 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 			InvocationID: rpcResp.InvocationId,
 			Author:       rpcResp.Author,
 			Actions: session.EventActions{
-				StateDelta: filterNilValues(rpcResp.Actions.StateDelta.AsMap()),
+				StateDelta:    filterNilValues(rpcResp.Actions.StateDelta.AsMap()),
+				ArtifactDelta: toInt64Map(rpcResp.Actions.GetArtifactDelta()),
 			},
 			LLMResponse: model.LLMResponse{
 				Content:      content,
@@ -781,6 +788,32 @@ func createGroundingMetadata(metadata *aiplatformpb.GroundingMetadata) *genai.Gr
 		out.GroundingSupports = supports
 	}
 
+	return out
+}
+
+// toInt32Map converts a map[string]int64 to map[string]int32.
+// Used when writing ArtifactDelta to the proto (int64 → int32).
+func toInt32Map(m map[string]int64) map[string]int32 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]int32, len(m))
+	for k, v := range m {
+		out[k] = int32(v)
+	}
+	return out
+}
+
+// toInt64Map converts a map[string]int32 to map[string]int64.
+// Used when reading ArtifactDelta from the proto (int32 → int64).
+func toInt64Map(m map[string]int32) map[string]int64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(m))
+	for k, v := range m {
+		out[k] = int64(v)
+	}
 	return out
 }
 
