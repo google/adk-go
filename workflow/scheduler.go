@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +48,11 @@ var (
 	// than one event whose Routes field is set. A node activation
 	// may emit at most one routing decision.
 	ErrMultipleRoutingEvents = errors.New("workflow: node produced multiple events with route tags; only one event per execution can specify routes")
+
+	// ErrMultipleTerminalOutputs is returned when more than one
+	// terminal node produced output in a run, making the workflow's
+	// output ambiguous. See scheduler.finalize for the exact rule.
+	ErrMultipleTerminalOutputs = errors.New("workflow: multiple terminal nodes produced output; a workflow must have at most one terminal output")
 )
 
 // scheduler drives a single Workflow.Run invocation. It owns the
@@ -609,7 +616,47 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 	// panics the iterator.
 	if pendingErr != nil && !consumerGone {
 		yield(nil, pendingErr)
+		return
 	}
+
+	// Skip finalize when draining (cancelled, consumer gone, or a node
+	// errored): the run did not complete normally.
+	if !draining {
+		if err := s.finalize(); err != nil {
+			yield(nil, err)
+		}
+	}
+}
+
+// finalize errors if more than one terminal node (no outgoing edges,
+// excluding START) produced output in this run. It counts actual
+// outputs, not graph shape, so fan-out and conditional-routing graphs
+// with several terminal branches are fine as long as at most one yields
+// output. No-op while a node is interrupted: the run has not finished.
+// Mirrors adk-python's Workflow._finalize.
+func (s *scheduler) finalize() error {
+	for _, ns := range s.state.Nodes {
+		if ns.Status == NodeWaiting {
+			return nil
+		}
+	}
+
+	var producers []string
+	for name := range s.graph.terminalNodeNames() {
+		ns, ok := s.state.Nodes[name]
+		if !ok || ns.Status != NodeCompleted {
+			continue
+		}
+		if ns.Output != nil {
+			producers = append(producers, name)
+		}
+	}
+
+	if len(producers) > 1 {
+		slices.Sort(producers)
+		return fmt.Errorf("%w: %s", ErrMultipleTerminalOutputs, strings.Join(producers, ", "))
+	}
+	return nil
 }
 
 // defaultContentRole picks the role for node Content that left it

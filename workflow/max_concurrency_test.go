@@ -38,13 +38,17 @@ func bumpPeak(inFlight, peak *atomic.Int32) func() {
 	return func() { inFlight.Add(-1) }
 }
 
-// fanOutFromStart builds N Edge{Start, nodes[i]} edges.
-func fanOutFromStart(nodes []Node) []Edge {
-	edges := make([]Edge, 0, len(nodes))
+// fanOutToJoin builds a START -> nodes -> join topology: every node
+// fans out from START and feeds a single JoinNode. Returns the edges
+// and the join.
+func fanOutToJoin(nodes []Node) ([]Edge, *JoinNode) {
+	join := NewJoinNode("join")
+	edges := make([]Edge, 0, len(nodes)+1)
 	for _, n := range nodes {
 		edges = append(edges, Edge{From: Start, To: n})
+		edges = append(edges, Edge{From: n, To: join})
 	}
-	return edges
+	return edges, join
 }
 
 // TestMaxConcurrency_Caps verifies that a fan-out wider than the
@@ -68,7 +72,8 @@ func TestMaxConcurrency_Caps(t *testing.T) {
 		})
 	}
 
-	w, err := New("", fanOutFromStart(nodes), WithMaxConcurrency(cap))
+	edges, _ := fanOutToJoin(nodes)
+	w, err := New("", edges, WithMaxConcurrency(cap))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -120,7 +125,8 @@ func TestMaxConcurrency_PendingDispatchedFIFO(t *testing.T) {
 			defaultNodeConfig,
 		)
 	}
-	w, err := New("", fanOutFromStart(nodes), WithMaxConcurrency(1))
+	edges, _ := fanOutToJoin(nodes)
+	w, err := New("", edges, WithMaxConcurrency(1))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -173,7 +179,8 @@ func TestMaxConcurrency_RetryRespectsLimit(t *testing.T) {
 		defaultNodeConfig,
 	)
 
-	w, err := New("", fanOutFromStart([]Node{flaky, stable}), WithMaxConcurrency(1))
+	edges, _ := fanOutToJoin([]Node{flaky, stable})
+	w, err := New("", edges, WithMaxConcurrency(1))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
