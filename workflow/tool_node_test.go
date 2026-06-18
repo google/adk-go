@@ -110,9 +110,6 @@ func TestToolNode_Run(t *testing.T) {
 	type Output struct {
 		Greeting string `json:"greeting"`
 	}
-	type ErrorOutput struct {
-		Result int `json:"result"`
-	}
 
 	tests := []struct {
 		name      string
@@ -162,25 +159,13 @@ func TestToolNode_Run(t *testing.T) {
 			node: func(t tool.Tool) (Node, error) {
 				return NewToolNodeTyped[Input, string](t, defaultNodeConfig)
 			},
+			// Run yields the raw FunctionTool map output; the
+			// {"result": X} unwrap happens scheduler-side in
+			// ToolNode.ValidateOutput.
 			extract: func(t *testing.T, out any) string {
-				return out.(string)
+				return out.(map[string]any)["result"].(string)
 			},
 			want: "HELLO WORLD",
-		},
-		{
-			name: "schema_validation_error",
-			tool: func() (tool.Tool, error) {
-				return functiontool.New(functiontool.Config{
-					Name: "test_tool",
-				}, func(ctx agent.Context, in map[string]any) (map[string]any, error) {
-					return map[string]any{"result": "not-an-int"}, nil
-				})
-			},
-			nodeInput: map[string]any{},
-			node: func(t tool.Tool) (Node, error) {
-				return NewToolNodeTyped[map[string]any, ErrorOutput](t, defaultNodeConfig)
-			},
-			wantErr: "converting tool \"test_tool\" output",
 		},
 		{
 			name: "tool_execution_error",
@@ -271,6 +256,78 @@ func TestToolNode_Run(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("output mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestToolNode_ValidateOutput exercises the FunctionTool-specific
+// {"result": X} unwrap fallback that ToolNode layers on top of the
+// default schema validation.
+func TestToolNode_ValidateOutput(t *testing.T) {
+	type Result struct {
+		Greeting string `json:"greeting"`
+	}
+
+	// Node carrying a Result output schema.
+	schemaNode := &ToolNode{
+		BaseNode: NewBaseNodeWithSchemas(
+			"greet", "", defaultNodeConfig, nil, resolveTestSchema[Result](t)),
+	}
+	// Node with no output schema.
+	nilSchemaNode := &ToolNode{
+		BaseNode: NewBaseNode("greet", "", defaultNodeConfig),
+	}
+
+	valid := map[string]any{"greeting": "Hello World"}
+
+	tests := []struct {
+		name    string
+		node    *ToolNode
+		output  any
+		want    any
+		wantErr bool
+	}{
+		{
+			name:   "direct_valid_passes_through",
+			node:   schemaNode,
+			output: valid,
+			want:   valid,
+		},
+		{
+			name:   "result_wrapped_is_unwrapped",
+			node:   schemaNode,
+			output: map[string]any{"result": valid},
+			want:   valid,
+		},
+		{
+			name:    "fails_direct_and_fallback",
+			node:    schemaNode,
+			output:  map[string]any{"result": map[string]any{"unexpected": 1}},
+			wantErr: true,
+		},
+		{
+			name:   "nil_schema_passes_through",
+			node:   nilSchemaNode,
+			output: map[string]any{"anything": 1},
+			want:   map[string]any{"anything": 1},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.node.ValidateOutput(tc.output)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ValidateOutput: expected error, got nil (out=%v)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateOutput: unexpected error: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("ValidateOutput mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

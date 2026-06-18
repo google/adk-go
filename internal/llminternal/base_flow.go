@@ -644,7 +644,16 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
 				return
 			}
-			for ev, err := range nextAgent.Run(ctx) {
+			type nodeRunner interface {
+				RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
+			}
+			var nextStream iter.Seq2[*session.Event, error]
+			if nr, ok := nextAgent.(nodeRunner); ok {
+				nextStream = nr.RunNode(agent.NewNodeContext(ctx, nil), nil)
+			} else {
+				nextStream = nextAgent.Run(ctx)
+			}
+			for ev, err := range nextStream {
 				if !yield(ev, err) || err != nil { // forward
 					return
 				}
