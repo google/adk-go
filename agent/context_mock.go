@@ -65,6 +65,37 @@ func (m *StrictContextMock) Err() error { return m.ctx().Err() }
 // Value implements [ToolContext].
 func (m *StrictContextMock) Value(key any) any { return m.ctx().Value(key) }
 
+// InvocationContext methods.
+
+// Agent implements [ToolContext].
+func (m *StrictContextMock) Agent() Agent { panic("not implemented") }
+
+// Memory implements [ToolContext].
+func (m *StrictContextMock) Memory() Memory { panic("not implemented") }
+
+// Session implements [ToolContext].
+func (m *StrictContextMock) Session() session.Session { panic("not implemented") }
+
+// IsolationScope implements [ToolContext].
+func (m *StrictContextMock) IsolationScope() string { panic("not implemented") }
+
+// RunConfig implements [ToolContext].
+func (m *StrictContextMock) RunConfig() *RunConfig { panic("not implemented") }
+
+// EndInvocation implements [ToolContext].
+func (m *StrictContextMock) EndInvocation() { panic("not implemented") }
+
+// Ended implements [ToolContext].
+func (m *StrictContextMock) Ended() bool { panic("not implemented") }
+
+// ResumedInput implements [ToolContext].
+func (m *StrictContextMock) ResumedInput(interruptID string) (any, bool) { panic("not implemented") }
+
+// WithContext implements [ToolContext].
+func (m *StrictContextMock) WithContext(ctx context.Context) InvocationContext {
+	panic("not implemented")
+}
+
 // ReadonlyContext methods.
 
 // UserContent implements [ToolContext].
@@ -121,6 +152,42 @@ func (m *StrictContextMock) ToolConfirmation() *toolconfirmation.ToolConfirmatio
 func (m *StrictContextMock) RequestConfirmation(hint string, payload any) error {
 	panic("not implemented")
 }
+
+// NodeContext methods.
+
+// Path implements [ToolContext].
+func (m *StrictContextMock) Path() string { panic("not implemented") }
+
+// RunID implements [ToolContext].
+func (m *StrictContextMock) RunID() string { panic("not implemented") }
+
+// WithBranch implements [ToolContext].
+func (m *StrictContextMock) WithBranch(branch string) Context { panic("not implemented") }
+
+// SubScheduler implements [ToolContext].
+func (m *StrictContextMock) SubScheduler() DynamicSubScheduler { panic("not implemented") }
+
+// InvocationContext implements [ToolContext].
+func (m *StrictContextMock) InvocationContext() InvocationContext { panic("not implemented") }
+
+// SetInvocationContext implements [ToolContext].
+func (m *StrictContextMock) SetInvocationContext(InvocationContext) { panic("not implemented") }
+
+// WithAgentContext implements [ToolContext].
+func (m *StrictContextMock) WithAgentContext(ctx context.Context) Context { panic("not implemented") }
+
+// WithAgentTimeout implements [ToolContext].
+func (m *StrictContextMock) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
+	panic("not implemented")
+}
+
+// WithAgentCancel implements [ToolContext].
+func (m *StrictContextMock) WithAgentCancel() (Context, context.CancelFunc) {
+	panic("not implemented")
+}
+
+// OutputForAncestors implements [ToolContext].
+func (m *StrictContextMock) OutputForAncestors() []string { panic("not implemented") }
 
 var (
 	_ ToolContext     = (*StrictContextMock)(nil)
