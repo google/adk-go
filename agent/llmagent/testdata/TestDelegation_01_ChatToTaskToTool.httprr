@@ -1,0 +1,290 @@
+httprr trace v1
+1927 1910
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1694
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Fetch and store the following items: apple, banana, cherry."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a coordinator with one sub-agent and one tool.\n\nWORKFLOW:\n  1. Always call the data_fetcher sub-agent first with a request\n     describing the items the user mentioned.\n  2. Once data_fetcher returns its structured `output` (a list of items),\n     call the store_report tool exactly once with those items.\n  3. After store_report returns, reply with a single concise sentence\n     confirming the number stored. Do not call any tool again.\n\nNever ask the user for clarification; the user's first message always\ncontains everything you need.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Routes requests to data_fetcher, then stores the result.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Stores the final list of items.","name":"store_report","parametersJsonSchema":{"additionalProperties":false,"properties":{"items":{"items":{"type":"string"},"type":["null","array"]}},"required":["items"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"stored":{"type":"integer"}},"required":["stored"],"type":"object"}},{"description":"Fetches a list of items requested by the coordinator.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"data_fetcher","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:27:39 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=10984
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "data_fetcher",
+              "args": {
+                "request": "Fetch the following items: apple, banana, cherry."
+              },
+              "id": "gzbp0yzp"
+            },
+            "thoughtSignature": "EoQECoEEAQw51sdj6RBGtYODyRVVMU62S4Z/jMMzlU71zS//a7xe864NtBiZLocG4E8REgwHlF2KrQYrAhn/R5FSWC1yblTqaMDhIyXENo08b8kh4hrvP8tyquG9HRAYmYACdqbalk0DYj+WQwN4PtSQSDMnxFCIGDcP5Biq09RillEYD43C/e64IS4e9zqqFfMF+mbhxeOvHlcyaMGbT7tpMxueNqORGQOEbF7HvqtVPBONTpOGqTQ7xxAKeNdn73TMv44Fk1ftOioTkXyw3m+txNga+UoifQEOLrl/2Mqusmx38f4S/whrRwSDKRNdbRuoLS/xhHOAuRSnEvzjaxCeSatevT/w7Y4fiZDH3k1x4PUdVjGeXKKbDyIAdysko0XgTNOYw4tQDjpcMIF0TxOZj6J+fQJ8u/9i1bf5pEDtTycE3McVcvZhfTW9vnhDk4nd1GEpxBITHlyDwvmLwULk4BkI6o+IL2cWMvHkWk9YOJYzfiR+O47hS+Rv4S+JvObX+45kbMJWYG5inZf3ICGGVOsNksn1OFYTHBE/v+Feo8qdWdZOS2BlVvpPr+bxopzrJr41A4mGqwmR9OFlWay/g9nFoV2fCVXjutMXW1CSxXs/CqMizkgrvNUECZEmegbpEEqd63sYwuwToVzs/Go4bJ9TKbG+4VFegbMTe+wOE513wyRO"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 348,
+    "candidatesTokenCount": 27,
+    "totalTokenCount": 492,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 348
+      }
+    ],
+    "thoughtsTokenCount": 117,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "kHYyat3aEu6akdUPtOrP-A4"
+}
+1957 2260
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1724
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"Fetch the following items: apple, banana, cherry.\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You collect a structured list of items for the coordinator.\nYou have no tools. When you receive a request, immediately call `finish_task`\nwith the items field populated from the request. Do not ask follow-up\nquestions; the request always describes the items you should return.\n\nYou are an agent. Your internal name is \"data_fetcher\". The description about you is \"Fetches a list of items requested by the coordinator.\".\n\n\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Signal that this agent has completed its delegated task. Call this when you have finished your delegated task. Pass the required output data in the parameters.","name":"finish_task","parameters":{"properties":{"items":{"description":"List of fetched items.","items":{"type":"STRING"},"type":"ARRAY"}},"required":["items"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:27:49 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=9881
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "finish_task",
+              "args": {
+                "items": [
+                  "apple",
+                  "banana",
+                  "cherry"
+                ]
+              },
+              "id": "37rgmeqm"
+            },
+            "thoughtSignature": "EugFCuUFAQw51sfJIBmj62vI3NouJ+dThohhIFd1hyiqbJwc082GLm7hGcqH6uL8IhJYDY4aS/c4cRvS2Pjk2vwYD+7I72LDUrXgyBmcDvHzRj0yFNmT6kZMg4Zs0qPnFDY00a/jgUDd9bAMe6VHwBaVAWqaF629VhsepA5dFy8PA1vIOYpgqeep8EMIbO05m+Yqzm6yL75pDG73g5ZQP7siULVOVB72Zqvsc7eXPZTd/jZR78peyEl0MYjeZlEtMbcPnJz0p+qnkE5xsT2Vsjh/FmWboG5QXYiS5XTE4xbBUUitK094BUGt8YiBoibwtH4ExZ+FgR+0ydzvK0b3du5BFHJP7Ro+d+Zn801ehNHGBz/z91xLss+zq6yLVQEP6FjMuIRtJkn7TT//VGfAvJPCKXwxgwM19D9wUla8L7a8S0HfqZolbwqC2KAu2WvndgCc0DJ1lRYE6uoHL4k4llfgzzQhFCUhITxcR0VXqRrkq/5KEQM8obABhIwdZzEL3YjzS9CWCEjJG6yJ8myLbkdNM4Km6rgtWWzboXIAtloHuGNFmFfnffhyTSq/qEk2jPzhQwJk5/XMmoZi6E6G6qbTCGVpFAdmualhFE76P3H/yYkxHqoDPX8grl0aMNqhcJ8bSuxQTbufI13tOAf7lVADiT8W8adfJLO8xlEabq8vtP65Wz1mP2+cUNFg3cGx2nFgy4eOhMLZ2EagnNfACNKCJciWJ7MO+F6iQfx0Rd6kZpejmLEoFk/3WFAN8EqaJFHbgAtcF53zOSRF1ZTIFho6FiZoa6bes+lpf6OkkTzJB5QQS5CU8GQbuQgi+2zJullwwST9yXRk+EVwiqV8cMi45JLtdBMAnkcLs5Y1wUnD+sH6BfGjpRyPzSJxjxNGQEWlWZZ/MPlRkGLI388YR+TDVeufDclDrfQfHPsorEQOdHK03sY9HbIz7tmInAtqywvVarRAk2OSTVl1ngktHMllTNf9gFLdpvUW"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 356,
+    "candidatesTokenCount": 24,
+    "totalTokenCount": 557,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 356
+      }
+    ],
+    "thoughtsTokenCount": 177,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "m3Yyao_dEM_n7M8P_dHMoA8"
+}
+2932 1552
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2699
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Fetch and store the following items: apple, banana, cherry."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Fetch the following items: apple, banana, cherry."},"id":"gzbp0yzp","name":"data_fetcher"},"thoughtSignature":"EoQECoEEAQw51sdj6RBGtYODyRVVMU62S4Z/jMMzlU71zS//a7xe864NtBiZLocG4E8REgwHlF2KrQYrAhn/R5FSWC1yblTqaMDhIyXENo08b8kh4hrvP8tyquG9HRAYmYACdqbalk0DYj+WQwN4PtSQSDMnxFCIGDcP5Biq09RillEYD43C/e64IS4e9zqqFfMF+mbhxeOvHlcyaMGbT7tpMxueNqORGQOEbF7HvqtVPBONTpOGqTQ7xxAKeNdn73TMv44Fk1ftOioTkXyw3m+txNga+UoifQEOLrl/2Mqusmx38f4S/whrRwSDKRNdbRuoLS/xhHOAuRSnEvzjaxCeSatevT/w7Y4fiZDH3k1x4PUdVjGeXKKbDyIAdysko0XgTNOYw4tQDjpcMIF0TxOZj6J+fQJ8u/9i1bf5pEDtTycE3McVcvZhfTW9vnhDk4nd1GEpxBITHlyDwvmLwULk4BkI6o+IL2cWMvHkWk9YOJYzfiR+O47hS+Rv4S+JvObX+45kbMJWYG5inZf3ICGGVOsNksn1OFYTHBE/v+Feo8qdWdZOS2BlVvpPr+bxopzrJr41A4mGqwmR9OFlWay/g9nFoV2fCVXjutMXW1CSxXs/CqMizkgrvNUECZEmegbpEEqd63sYwuwToVzs/Go4bJ9TKbG+4VFegbMTe+wOE513wyRO"}],"role":"model"},{"parts":[{"functionResponse":{"id":"gzbp0yzp","name":"data_fetcher","response":{"items":["apple","banana","cherry"]}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a coordinator with one sub-agent and one tool.\n\nWORKFLOW:\n  1. Always call the data_fetcher sub-agent first with a request\n     describing the items the user mentioned.\n  2. Once data_fetcher returns its structured `output` (a list of items),\n     call the store_report tool exactly once with those items.\n  3. After store_report returns, reply with a single concise sentence\n     confirming the number stored. Do not call any tool again.\n\nNever ask the user for clarification; the user's first message always\ncontains everything you need.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Routes requests to data_fetcher, then stores the result.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Stores the final list of items.","name":"store_report","parametersJsonSchema":{"additionalProperties":false,"properties":{"items":{"items":{"type":"string"},"type":["null","array"]}},"required":["items"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"stored":{"type":"integer"}},"required":["stored"],"type":"object"}},{"description":"Fetches a list of items requested by the coordinator.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"data_fetcher","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:27:57 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=8264
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "store_report",
+              "args": {
+                "items": [
+                  "apple",
+                  "banana",
+                  "cherry"
+                ]
+              },
+              "id": "chnsu55g"
+            },
+            "thoughtSignature": "EtUBCtIBAQw51seMJeiOzQBs1FHtQTTGMGtv6+34pSCtBoweUOz+gfDbtBLjSEwj0dxX82a7I/RNaa+KSSiQ3K9iD9kc6313HYAK46ISn+vBFF4cOe8YoSkwduLyCnuvrgBdZClRrAuuogwHGSD9kYtMc+HZVvlyzM6Tqwew16c0OVSZ4YO8h1gizoP22ExQ7gl2w9ywilq5wnK/SVKLaYuUilzcdW2FWuWGru//NkUXSATFPMYr4JnglYpN80e5I+WLgpmQBzHR549OskRdVusJPQztTAF8"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 515,
+    "candidatesTokenCount": 24,
+    "totalTokenCount": 584,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 515
+      }
+    ],
+    "thoughtsTokenCount": 45,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "pXYyavGFCt6HnsEP3POCyA8"
+}
+3482 1280
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3249
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Fetch and store the following items: apple, banana, cherry."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Fetch the following items: apple, banana, cherry."},"id":"gzbp0yzp","name":"data_fetcher"},"thoughtSignature":"EoQECoEEAQw51sdj6RBGtYODyRVVMU62S4Z/jMMzlU71zS//a7xe864NtBiZLocG4E8REgwHlF2KrQYrAhn/R5FSWC1yblTqaMDhIyXENo08b8kh4hrvP8tyquG9HRAYmYACdqbalk0DYj+WQwN4PtSQSDMnxFCIGDcP5Biq09RillEYD43C/e64IS4e9zqqFfMF+mbhxeOvHlcyaMGbT7tpMxueNqORGQOEbF7HvqtVPBONTpOGqTQ7xxAKeNdn73TMv44Fk1ftOioTkXyw3m+txNga+UoifQEOLrl/2Mqusmx38f4S/whrRwSDKRNdbRuoLS/xhHOAuRSnEvzjaxCeSatevT/w7Y4fiZDH3k1x4PUdVjGeXKKbDyIAdysko0XgTNOYw4tQDjpcMIF0TxOZj6J+fQJ8u/9i1bf5pEDtTycE3McVcvZhfTW9vnhDk4nd1GEpxBITHlyDwvmLwULk4BkI6o+IL2cWMvHkWk9YOJYzfiR+O47hS+Rv4S+JvObX+45kbMJWYG5inZf3ICGGVOsNksn1OFYTHBE/v+Feo8qdWdZOS2BlVvpPr+bxopzrJr41A4mGqwmR9OFlWay/g9nFoV2fCVXjutMXW1CSxXs/CqMizkgrvNUECZEmegbpEEqd63sYwuwToVzs/Go4bJ9TKbG+4VFegbMTe+wOE513wyRO"}],"role":"model"},{"parts":[{"functionResponse":{"id":"gzbp0yzp","name":"data_fetcher","response":{"items":["apple","banana","cherry"]}}}],"role":"user"},{"parts":[{"functionCall":{"args":{"items":["apple","banana","cherry"]},"id":"chnsu55g","name":"store_report"},"thoughtSignature":"EtUBCtIBAQw51seMJeiOzQBs1FHtQTTGMGtv6+34pSCtBoweUOz+gfDbtBLjSEwj0dxX82a7I/RNaa+KSSiQ3K9iD9kc6313HYAK46ISn+vBFF4cOe8YoSkwduLyCnuvrgBdZClRrAuuogwHGSD9kYtMc+HZVvlyzM6Tqwew16c0OVSZ4YO8h1gizoP22ExQ7gl2w9ywilq5wnK/SVKLaYuUilzcdW2FWuWGru//NkUXSATFPMYr4JnglYpN80e5I+WLgpmQBzHR549OskRdVusJPQztTAF8"}],"role":"model"},{"parts":[{"functionResponse":{"id":"chnsu55g","name":"store_report","response":{"stored":3}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a coordinator with one sub-agent and one tool.\n\nWORKFLOW:\n  1. Always call the data_fetcher sub-agent first with a request\n     describing the items the user mentioned.\n  2. Once data_fetcher returns its structured `output` (a list of items),\n     call the store_report tool exactly once with those items.\n  3. After store_report returns, reply with a single concise sentence\n     confirming the number stored. Do not call any tool again.\n\nNever ask the user for clarification; the user's first message always\ncontains everything you need.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Routes requests to data_fetcher, then stores the result.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Stores the final list of items.","name":"store_report","parametersJsonSchema":{"additionalProperties":false,"properties":{"items":{"items":{"type":"string"},"type":["null","array"]}},"required":["items"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"stored":{"type":"integer"}},"required":["stored"],"type":"object"}},{"description":"Fetches a list of items requested by the coordinator.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"data_fetcher","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:28:00 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3619
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I have successfully stored the 3 items.",
+            "thoughtSignature": "EtkBCtYBAQw51sfVacZ/7ZpD7U2QcjUrVm9CvOe/Xjz1zRapvZRZmRLnzGgC7+y0h8YKSzCnA2HZK8Jjpwfg3osSweNU2hYJLAt5vfHsDOJjAyzECXepJ8zV6JPbKVLBjhq3UmERprJjUPzRolYfGyV7Aq0+IFgwr5MtpKnAjEmS6gQukxqJn6qQaAqtU9X754Qh/z/t7qJCLe672r1clU/oHUsKtoziTW9Ws7n7bq1vN9a66balIpv2dIOeC7nnnz045Lye9gTlTR+sOG/4O7VAuEkI4ROFrU31PA=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 596,
+    "candidatesTokenCount": 9,
+    "totalTokenCount": 644,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 596
+      }
+    ],
+    "thoughtsTokenCount": 39,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "rXYyat33GeignsEPqdqBgAk"
+}
+3955 3572
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3722
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Fetch and store the following items: apple, banana, cherry."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Fetch the following items: apple, banana, cherry."},"id":"gzbp0yzp","name":"data_fetcher"},"thoughtSignature":"EoQECoEEAQw51sdj6RBGtYODyRVVMU62S4Z/jMMzlU71zS//a7xe864NtBiZLocG4E8REgwHlF2KrQYrAhn/R5FSWC1yblTqaMDhIyXENo08b8kh4hrvP8tyquG9HRAYmYACdqbalk0DYj+WQwN4PtSQSDMnxFCIGDcP5Biq09RillEYD43C/e64IS4e9zqqFfMF+mbhxeOvHlcyaMGbT7tpMxueNqORGQOEbF7HvqtVPBONTpOGqTQ7xxAKeNdn73TMv44Fk1ftOioTkXyw3m+txNga+UoifQEOLrl/2Mqusmx38f4S/whrRwSDKRNdbRuoLS/xhHOAuRSnEvzjaxCeSatevT/w7Y4fiZDH3k1x4PUdVjGeXKKbDyIAdysko0XgTNOYw4tQDjpcMIF0TxOZj6J+fQJ8u/9i1bf5pEDtTycE3McVcvZhfTW9vnhDk4nd1GEpxBITHlyDwvmLwULk4BkI6o+IL2cWMvHkWk9YOJYzfiR+O47hS+Rv4S+JvObX+45kbMJWYG5inZf3ICGGVOsNksn1OFYTHBE/v+Feo8qdWdZOS2BlVvpPr+bxopzrJr41A4mGqwmR9OFlWay/g9nFoV2fCVXjutMXW1CSxXs/CqMizkgrvNUECZEmegbpEEqd63sYwuwToVzs/Go4bJ9TKbG+4VFegbMTe+wOE513wyRO"}],"role":"model"},{"parts":[{"functionResponse":{"id":"gzbp0yzp","name":"data_fetcher","response":{"items":["apple","banana","cherry"]}}}],"role":"user"},{"parts":[{"functionCall":{"args":{"items":["apple","banana","cherry"]},"id":"chnsu55g","name":"store_report"},"thoughtSignature":"EtUBCtIBAQw51seMJeiOzQBs1FHtQTTGMGtv6+34pSCtBoweUOz+gfDbtBLjSEwj0dxX82a7I/RNaa+KSSiQ3K9iD9kc6313HYAK46ISn+vBFF4cOe8YoSkwduLyCnuvrgBdZClRrAuuogwHGSD9kYtMc+HZVvlyzM6Tqwew16c0OVSZ4YO8h1gizoP22ExQ7gl2w9ywilq5wnK/SVKLaYuUilzcdW2FWuWGru//NkUXSATFPMYr4JnglYpN80e5I+WLgpmQBzHR549OskRdVusJPQztTAF8"}],"role":"model"},{"parts":[{"functionResponse":{"id":"chnsu55g","name":"store_report","response":{"stored":3}}}],"role":"user"},{"parts":[{"text":"I have successfully stored the 3 items.","thoughtSignature":"EtkBCtYBAQw51sfVacZ/7ZpD7U2QcjUrVm9CvOe/Xjz1zRapvZRZmRLnzGgC7+y0h8YKSzCnA2HZK8Jjpwfg3osSweNU2hYJLAt5vfHsDOJjAyzECXepJ8zV6JPbKVLBjhq3UmERprJjUPzRolYfGyV7Aq0+IFgwr5MtpKnAjEmS6gQukxqJn6qQaAqtU9X754Qh/z/t7qJCLe672r1clU/oHUsKtoziTW9Ws7n7bq1vN9a66balIpv2dIOeC7nnnz045Lye9gTlTR+sOG/4O7VAuEkI4ROFrU31PA=="}],"role":"model"},{"parts":[{"text":"What items did I just ask you to store?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a coordinator with one sub-agent and one tool.\n\nWORKFLOW:\n  1. Always call the data_fetcher sub-agent first with a request\n     describing the items the user mentioned.\n  2. Once data_fetcher returns its structured `output` (a list of items),\n     call the store_report tool exactly once with those items.\n  3. After store_report returns, reply with a single concise sentence\n     confirming the number stored. Do not call any tool again.\n\nNever ask the user for clarification; the user's first message always\ncontains everything you need.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Routes requests to data_fetcher, then stores the result.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Stores the final list of items.","name":"store_report","parametersJsonSchema":{"additionalProperties":false,"properties":{"items":{"items":{"type":"string"},"type":["null","array"]}},"required":["items"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"stored":{"type":"integer"}},"required":["stored"],"type":"object"}},{"description":"Fetches a list of items requested by the coordinator.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"data_fetcher","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:28:09 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=8431
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "You asked me to store apple, banana, and cherry.",
+            "thoughtSignature": "EocPCoQPAQw51sdtrMKusf8Z3dQGitczXwm6o7Hh+smX1AGFhmrxj9tDR6Jn1iSFQI63ytHs0NaCohdZAgEex19b2dawv4rYzcEMzBiTOnZKY84ZRzestjBvaBta8G7DkurKkWXtrnobioDGwJEKurx6s1is390Z7NtjWv6SddReMoRDmg6YQVMogteO6oxbLFDWgrd8JFOieUWYWQ852OhPz/Bg4EexOmVkWWTot3Y0UrGIdYXLX5X5wQYyqJSxRJjO57x3wW57aAND+d1R61CzCOOxlc5SdJjonkkyzQT6dZerWEAs78J1YucDyhBaFVcpdDeXd9cHIeKpMw8A/CyorMl6Nr8B41/PwefpNTu0VAVwRJGMb9SwO4GfyvbmzYdTim++yiPYyJhp9LIeMAlxF0rK3bZfHHCMwTcQ9FK+VtfEkTfeF3OO5/9lTa0sRKsfhM3wMNt4UpSLNR6axQ/W/LQ0rOrbYWWvRkU7Gs6IFVzulmAEwYdVBLHe1Y5RCB/+YbH3LrgN2l9tLGbVjg3RdY28iFVpJkY3yL6CCCZbr8ysr0RbXgdww7l68uQA9wLberLRbITeqnpoFfxmA3rV9cHhLQyuvQnVGHKHJoycvOSk5VeujzDQVyhfkeBzxkVGuC5hN4HZ44787HAEO0gAN9J1pqw5PgS/LpFwdcdIoh+Ifh1ZGE03lbNf5cLUYIx/Wrh/4XwPGiahiCnNNh0soeHISaOMCrXQT80gcAydLe6/evInF13iZcr5fblHRbjFofw0NPtxEn5ht9ih6fVJVYaPHdVKIxY5dhm/VC5GMtzs2u7nj/xLeeaOKDrgFU4vFZxtRsu3dxD/3qjc2roY/2pi56+LRcuWz1tdR6crBIAvv+ildBlOFxVSVPfoHlFr/9zx/kqsGw/KL89LesiKFEw43eyhq7fa2PFvF6gJaJxSgRuNtc1uT0L5xvP4x6LkKID2mdtp5MOIZOLn058ZGEBLYHXGBJHNLacqp5AYrb2NwyxfhIsjRBpXTqtOIKuTy2nitItXvbZ2g+478ZQPF0NJsR3Sb6cMlEH19Xdlu/oA4tLHW63GUG9+7IBUsHmVaXCbfdyrurs5GpiSMrr4Kzwm6zYuUnh+1gsBBaZuhcr3mk/12qXWWsApjc3Xr/iVe79DhSjJgjp252UOAZSRn3gH46SL8J5/9XTW680mXgi9+UpqKIVVgNeCKRcHvIv4BeSIw4adA8GMyxnORZzCIbUmsHehP8Kb2CfZj8c3hQYthAQDCXyidNWksDBcpzCvKKjXGtm/kCdL0lrcCP6L6pm92MRBuIJDd/tOFhQBoTAY199sT9pBoshE69MTwK2Oo20iidAGfm2dahkJ26qHclNkUaYGXZO8VZUNrqui7PnAz9Din5DOZRKqX7GwyP69nJUpg2gY5cnVAkZ2nowTCrhiPgDhGBfT4jI1LPMGqf2X11HWFnmYlWCMtYQpiTl8AFc9CdhVRxCACJeBAm82mmVvMwzRXoh5NYQx7h7UJ1gzIoB0liBSj4DrJfvFuASrlGG3yD7qcQJxUKmnjECbsyoE3AfZfvsYgQFT6GuumUyo/YemeM7xK0s3PHkbv7BPOflo5gQ1VjK01Nv02ULxvnq9pc9f2ezJYjoD9C/ZQP/YsOLnzwizyWr5UzdgMUdakXxbKs2Yp+Xm5GHdb5aSQIL8fDR783SxNqqx8iwh8SRoMF/xbGBudMtKi1hpgm1aV7cWz3HQV1e4RZnPbe/9sMPmWzPMt0wPYdanlqwP+gA9CrQIqXYRPYvNQAKpeXrJGrLhSwFzjQnxTQU2mx1Dl0QMO2UZWQQan5WI9mLCzpSkVQ77MKP+U4/H4jvSDkRu8nGKSKlo+zxLpySpHECnHwvIbNLHVWEjxHy41VuyG9yuy79yQvmQ/TJU+nacXZAnWN6j2ZRFjjYmelCjufkeHesRgSk5+E0PRsO4iZTyi1ggz8901AhdsaD5WnnPFcZPinpfM+1mLTkaJKB5KZP6FKHQIbbVP2R8QxnzOOEzI4A4IpFmeYfyxxfvulYnvcQwYUejaHjcsB2foSrxlvoq6VS1ijqh0dd2yHk3/MkLS68lx++ANxq6XEdfgbJG3emgqMrwIpwLMCl7xLbyMLaHFAEO3fw6d4hBBOgBD3EnxOXW0tUKksVcR3WRtJlAdIV82CHCvJYFlGKcYHqSgjJaPpnfiIVxYkAhLQAT0FJRjT5cU+3m3DsVZEqHd1+gCrBwT3QCS9tMHk5UWe1eDoIFpDlLczcrr47PRpYiXAUpO5DplVMJ477c+Q/prnptrWNUouUctWKCUngFWI+VRyr4mFIEDtXbnOpcc3DdHvTZAXFeFndN7GYytZAtStc988PEqmuW7Cj2M8eiRytnmS5vUR+vtfNP/sJ1UkbnyLV2clPGOVat+YdGAmUE7HmKMlxDWfy91GlGABRdVttQbYcOlgrmYdpJQm8lQOiN2g9xgGvSmifKAjoDYOLfuKIzaRGWFSI+OrOy/BEqa4hHFS2lJ0y7QN/JGwT6DX8VCZ2hPLt1Q+xJOXfgQd+lkqiJhEJHQjqPoJI4Cg=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 656,
+    "candidatesTokenCount": 12,
+    "totalTokenCount": 1128,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 656
+      }
+    ],
+    "thoughtsTokenCount": 460,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "sXYyavTPBK-nkdUPk9erqAo"
+}

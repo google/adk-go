@@ -1,0 +1,290 @@
+httprr trace v1
+1622 1898
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1389
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Extract and summarise: apples, bread, eggs."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Two-step workflow:\n  1. Call extractor with a request describing the items the user\n     mentioned. Wait for its structured `output` containing the items list.\n  2. Call summarize EXACTLY ONCE, passing the items from step 1.\n  3. Reply with one short sentence repeating the summary.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"First calls extractor, then summarize.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Summarises a list of items into a one-line string.","name":"summarize","parametersJsonSchema":{"additionalProperties":false,"properties":{"items":{"items":{"type":"string"},"type":["null","array"]}},"required":["items"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"summary":{"type":"string"}},"required":["summary"],"type":"object"}},{"description":"Extracts a list of items from a request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"extractor","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:57:54 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1445
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "extractor",
+              "args": {
+                "request": "Extract the list of grocery items mentioned by the user: apples, bread, eggs."
+              },
+              "id": "bu4kjcsx"
+            },
+            "thoughtSignature": "EugDCuUDAQw51scLDR00xq3c5Jr0jq+uquWFjdKd8NzsiMjdTnqUMs5soDWDt3A7uXavJRm54b0raEyKSlJTFnErJ9hpyRFNusG6bRn3wUqQK+QECc9OZECOsUj5tIuzA0hSsEyPD7tXxjC5v73tcQhcmryfaBN+ZDpiCAKD6jlyctNjH9ImNQhT33BlQ0nwd1gAhpyi5K7YFjORvWyxS2MA1yqCR4JTJZZqI/WsbQGT0o1X1y1gMfDwRYyy33nDqkiCktDo5Ejw5nwGyoRACnd/4d/v2SYU2CiNypKEU0+zKMUVDQdzUZ08JZn2aV66iu2yPotMGyCk4/Y5s63ORb+bJqLq7tILJaFmoOdEqYhQtGnDdF3XhHFT/6JShtxn0f6JbFcZ8flRkNWMqEFeYVVIrxNkCdM3Jp6DRRX5jXmeAbRMsd6skC2SXtHrcbgRv6038hwqaYl1v8NTaKH87YGhpYILK9lFHAKV0VKUxe1mMOi7es+A9vrzZh6KcRUrtMmV15kNd8CPr4IdNTa2XlVTlz7CwrBqrBFvZeTPH2XIeAsEXY+Byok5evDdWItjjNnD09MlK4xgWqraKW++CH4uKkFCPdnsH/KEm4XT0YdCv2jt8G8bex5ogZnida+aManlzM/FDZvOtVg="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 275,
+    "candidatesTokenCount": 30,
+    "totalTokenCount": 412,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 275
+      }
+    ],
+    "thoughtsTokenCount": 107,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "sX0yat2XDJWonsEPtsmCiA8"
+}
+1765 1934
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1532
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"{\"request\":\"Extract the list of grocery items mentioned by the user: apples, bread, eggs.\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Read the request, extract the list of items mentioned, and\nimmediately call `finish_task` with {\"items\":[...]}.\n\nYou are an agent. Your internal name is \"extractor\". The description about you is \"Extracts a list of items from a request.\".\n\n\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}},{"description":"Signal that this agent has completed its delegated task. Call this when you have finished your delegated task. Pass the required output data in the parameters.","name":"finish_task","parameters":{"properties":{"items":{"items":{"type":"STRING"},"type":"ARRAY"}},"required":["items"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:57:55 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1289
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "finish_task",
+              "args": {
+                "items": [
+                  "apples",
+                  "bread",
+                  "eggs"
+                ]
+              },
+              "id": "4q714y4h"
+            },
+            "thoughtSignature": "EvUDCvIDAQw51sd300tbbLqxu65RjJHSC3utd/ssIeeefw0l0ulAiCyqGFbH6+1qAVZN22gvQLw3mOcyefqBFUaT40hx+b65o7GF4qZtYb22FHbac1GvRxZg0YGMEAPAqfwCFssiYLZk1yFVl36w936L0NpzIYY7w4BTiZwL1viESpuSLj0V9VBCl6eEMVogaEB8Cqb9kNRCXn5K4rhoE9V7qQQc6/ASrtBUxI5dNnoU77KSbwNyVPzEKOFh9QIM4ApP51Lh1CQJMcbGpwtPCgsbXrJPFJ39ND9RM4Ejke34uKoupE8PMzxrTiRbJn3BZd0VC+J4IIR7ml2OHtvXayqeBlKvSuRI7lddRPCgB+7WS3tywQ9ophRihURotUZxaNx3Dk+iW82xnVd651U7WYu+Wso5CS6Vn9K52QcSD6/5JlW3NSQ4iJP6S1o7jBjSRgpSyz9FR3iGV2Dgf3Bfgd0WglWfF0Wphsjka1yHJ3DiDWCkklcTfZLleemrCuzLV6Z/ZRHIy3yb/V+6HNAmuNi/sV9h/E8h4tnD8rWWGzUTVlGOp+cETeOGT1e2xSf5nKicUx/tbzZxmLj/LGc2ZrgsokKEGasvUx9lQyERwtzu1nWqilr0fABV+wsJE5DOS8sKZGN5WiXGSd9lQ3lS92mDBgRki/b5"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 315,
+    "candidatesTokenCount": 24,
+    "totalTokenCount": 458,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 315
+      }
+    ],
+    "thoughtsTokenCount": 119,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "sn0yarfMJ9b7nsEPjNSLgA8"
+}
+2611 1584
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2378
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Extract and summarise: apples, bread, eggs."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Extract the list of grocery items mentioned by the user: apples, bread, eggs."},"id":"bu4kjcsx","name":"extractor"},"thoughtSignature":"EugDCuUDAQw51scLDR00xq3c5Jr0jq+uquWFjdKd8NzsiMjdTnqUMs5soDWDt3A7uXavJRm54b0raEyKSlJTFnErJ9hpyRFNusG6bRn3wUqQK+QECc9OZECOsUj5tIuzA0hSsEyPD7tXxjC5v73tcQhcmryfaBN+ZDpiCAKD6jlyctNjH9ImNQhT33BlQ0nwd1gAhpyi5K7YFjORvWyxS2MA1yqCR4JTJZZqI/WsbQGT0o1X1y1gMfDwRYyy33nDqkiCktDo5Ejw5nwGyoRACnd/4d/v2SYU2CiNypKEU0+zKMUVDQdzUZ08JZn2aV66iu2yPotMGyCk4/Y5s63ORb+bJqLq7tILJaFmoOdEqYhQtGnDdF3XhHFT/6JShtxn0f6JbFcZ8flRkNWMqEFeYVVIrxNkCdM3Jp6DRRX5jXmeAbRMsd6skC2SXtHrcbgRv6038hwqaYl1v8NTaKH87YGhpYILK9lFHAKV0VKUxe1mMOi7es+A9vrzZh6KcRUrtMmV15kNd8CPr4IdNTa2XlVTlz7CwrBqrBFvZeTPH2XIeAsEXY+Byok5evDdWItjjNnD09MlK4xgWqraKW++CH4uKkFCPdnsH/KEm4XT0YdCv2jt8G8bex5ogZnida+aManlzM/FDZvOtVg="}],"role":"model"},{"parts":[{"functionResponse":{"id":"bu4kjcsx","name":"extractor","response":{"items":["apples","bread","eggs"]}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Two-step workflow:\n  1. Call extractor with a request describing the items the user\n     mentioned. Wait for its structured `output` containing the items list.\n  2. Call summarize EXACTLY ONCE, passing the items from step 1.\n  3. Reply with one short sentence repeating the summary.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"First calls extractor, then summarize.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Summarises a list of items into a one-line string.","name":"summarize","parametersJsonSchema":{"additionalProperties":false,"properties":{"items":{"items":{"type":"string"},"type":["null","array"]}},"required":["items"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"summary":{"type":"string"}},"required":["summary"],"type":"object"}},{"description":"Extracts a list of items from a request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"extractor","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:57:57 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1439
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "summarize",
+              "args": {
+                "items": [
+                  "apples",
+                  "bread,",
+                  "eggs"
+                ]
+              },
+              "id": "lde815f6"
+            },
+            "thoughtSignature": "Eu4BCusBAQw51sfrm+vjR0EirseBRHJFGRzAP0ExDCvB4LHcjoQnDgHtJKe2sNF9RCTttQ/6oLN+w5kVL9/oRqRLdHxN6/5fmEjbWwTRdqCgH5SUXF1u6/IlLKRuctP55cLNR8y40MrdrUXBA/E0Eoojs5zozZbqUov5OhMVNrhicnrJe00s18+/BNSAG3dIjJgyOGf+6l7c8ifnuudhUZwnKZD3W7TOJNCv1w932p+bac5vpmhwTLOwt4TTO9v+XMq0U/AXNPO44Qju79DLFvdYwzOMjBhEp8Vpy7MQMS9ySPez1oDxjdlZMzNW8Z5TdQ=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 432,
+    "candidatesTokenCount": 24,
+    "totalTokenCount": 510,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 432
+      }
+    ],
+    "thoughtsTokenCount": 54,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "s30yaty3OJDYkdUPhriGoAo"
+}
+3219 1829
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2986
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Extract and summarise: apples, bread, eggs."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Extract the list of grocery items mentioned by the user: apples, bread, eggs."},"id":"bu4kjcsx","name":"extractor"},"thoughtSignature":"EugDCuUDAQw51scLDR00xq3c5Jr0jq+uquWFjdKd8NzsiMjdTnqUMs5soDWDt3A7uXavJRm54b0raEyKSlJTFnErJ9hpyRFNusG6bRn3wUqQK+QECc9OZECOsUj5tIuzA0hSsEyPD7tXxjC5v73tcQhcmryfaBN+ZDpiCAKD6jlyctNjH9ImNQhT33BlQ0nwd1gAhpyi5K7YFjORvWyxS2MA1yqCR4JTJZZqI/WsbQGT0o1X1y1gMfDwRYyy33nDqkiCktDo5Ejw5nwGyoRACnd/4d/v2SYU2CiNypKEU0+zKMUVDQdzUZ08JZn2aV66iu2yPotMGyCk4/Y5s63ORb+bJqLq7tILJaFmoOdEqYhQtGnDdF3XhHFT/6JShtxn0f6JbFcZ8flRkNWMqEFeYVVIrxNkCdM3Jp6DRRX5jXmeAbRMsd6skC2SXtHrcbgRv6038hwqaYl1v8NTaKH87YGhpYILK9lFHAKV0VKUxe1mMOi7es+A9vrzZh6KcRUrtMmV15kNd8CPr4IdNTa2XlVTlz7CwrBqrBFvZeTPH2XIeAsEXY+Byok5evDdWItjjNnD09MlK4xgWqraKW++CH4uKkFCPdnsH/KEm4XT0YdCv2jt8G8bex5ogZnida+aManlzM/FDZvOtVg="}],"role":"model"},{"parts":[{"functionResponse":{"id":"bu4kjcsx","name":"extractor","response":{"items":["apples","bread","eggs"]}}}],"role":"user"},{"parts":[{"functionCall":{"args":{"items":["apples","bread,","eggs"]},"id":"lde815f6","name":"summarize"},"thoughtSignature":"Eu4BCusBAQw51sfrm+vjR0EirseBRHJFGRzAP0ExDCvB4LHcjoQnDgHtJKe2sNF9RCTttQ/6oLN+w5kVL9/oRqRLdHxN6/5fmEjbWwTRdqCgH5SUXF1u6/IlLKRuctP55cLNR8y40MrdrUXBA/E0Eoojs5zozZbqUov5OhMVNrhicnrJe00s18+/BNSAG3dIjJgyOGf+6l7c8ifnuudhUZwnKZD3W7TOJNCv1w932p+bac5vpmhwTLOwt4TTO9v+XMq0U/AXNPO44Qju79DLFvdYwzOMjBhEp8Vpy7MQMS9ySPez1oDxjdlZMzNW8Z5TdQ=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"lde815f6","name":"summarize","response":{"summary":"items: apples, bread,, eggs"}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Two-step workflow:\n  1. Call extractor with a request describing the items the user\n     mentioned. Wait for its structured `output` containing the items list.\n  2. Call summarize EXACTLY ONCE, passing the items from step 1.\n  3. Reply with one short sentence repeating the summary.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"First calls extractor, then summarize.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Summarises a list of items into a one-line string.","name":"summarize","parametersJsonSchema":{"additionalProperties":false,"properties":{"items":{"items":{"type":"string"},"type":["null","array"]}},"required":["items"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"summary":{"type":"string"}},"required":["summary"],"type":"object"}},{"description":"Extracts a list of items from a request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"extractor","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:57:58 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1559
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Here is the summary of the items: items: apples, bread,, eggs.",
+            "thoughtSignature": "EuMECuAEAQw51seBX9dkmzYYjPn3AA3y96V3mtnKN7MICVhh2eKPWGjOlnE4c463G28aLePyBERUvqwekoa0rPx4zkcIDJZrGa+b6hdo/4DIYR7/l7LM8/ABbNo/HBzDX9GWR6lC74jEDiAcHU8mor8wD7hg7K1apiSJvCLvqjUSOaWV3Ec1GvRQtQac7ic+O5XKS98dAU6qAhRFC5e9ttnukPkLFhMsUwGL+SNEkokrmx0yahhCgGrk2kybvGj8i5KYpvEDgX1HEUgXthys5zCQiH58BvrzqdhTyEZB70mO7yy2NW/LIHRirVZCErQZIm4wmQFiDdL9RVgS45wuA4ReybuK5GdowvyG/X4JkwwRQnUjFmNxhc3mheX4fdSmE8SzHFaXMzjWTZt/mnVlo9eb8p49KN6Jj+26qBxmDvaL9PzsHhkE+Fiw84gXk2vQs+t3DyITF9liWVktJA9gF4nFGI/s5mXt+sW2alyG1RUIkkzPHyiFHbmOzf0mHdqo6zbCI2TWTr3kUkQVHuhUVIopKEbPOTlDnlyvaVL2uUDlZZ6KF2j+hbdOya90aszZpkdhIfm5dtzvigJGm/FxHL2UyKFXpyhfcBplVGhNpv01qh9YNqp8bTJtoVXv1OxEBCzecc1QuHIxs9JKcZ6ZEOln/m5mSGaGk4eqS31XJ2a9INrVbLIC78uhiyNTM4+QFZfW70TrMO+owNT2kYn3KazyDwi2gGGipcBf0E8wbY9up/trBZxyA3eQbFtYjFC0sH034CDx6/TWm7vykN4JJrZhwnDHSuKGMvdljoFTleRPcj48/pw="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 529,
+    "candidatesTokenCount": 16,
+    "totalTokenCount": 690,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 529
+      }
+    ],
+    "thoughtsTokenCount": 145,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "tX0yaqTNF8WfkdUP_Zyf-Qc"
+}
+4242 1378
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 4009
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"Extract and summarise: apples, bread, eggs."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Extract the list of grocery items mentioned by the user: apples, bread, eggs."},"id":"bu4kjcsx","name":"extractor"},"thoughtSignature":"EugDCuUDAQw51scLDR00xq3c5Jr0jq+uquWFjdKd8NzsiMjdTnqUMs5soDWDt3A7uXavJRm54b0raEyKSlJTFnErJ9hpyRFNusG6bRn3wUqQK+QECc9OZECOsUj5tIuzA0hSsEyPD7tXxjC5v73tcQhcmryfaBN+ZDpiCAKD6jlyctNjH9ImNQhT33BlQ0nwd1gAhpyi5K7YFjORvWyxS2MA1yqCR4JTJZZqI/WsbQGT0o1X1y1gMfDwRYyy33nDqkiCktDo5Ejw5nwGyoRACnd/4d/v2SYU2CiNypKEU0+zKMUVDQdzUZ08JZn2aV66iu2yPotMGyCk4/Y5s63ORb+bJqLq7tILJaFmoOdEqYhQtGnDdF3XhHFT/6JShtxn0f6JbFcZ8flRkNWMqEFeYVVIrxNkCdM3Jp6DRRX5jXmeAbRMsd6skC2SXtHrcbgRv6038hwqaYl1v8NTaKH87YGhpYILK9lFHAKV0VKUxe1mMOi7es+A9vrzZh6KcRUrtMmV15kNd8CPr4IdNTa2XlVTlz7CwrBqrBFvZeTPH2XIeAsEXY+Byok5evDdWItjjNnD09MlK4xgWqraKW++CH4uKkFCPdnsH/KEm4XT0YdCv2jt8G8bex5ogZnida+aManlzM/FDZvOtVg="}],"role":"model"},{"parts":[{"functionResponse":{"id":"bu4kjcsx","name":"extractor","response":{"items":["apples","bread","eggs"]}}}],"role":"user"},{"parts":[{"functionCall":{"args":{"items":["apples","bread,","eggs"]},"id":"lde815f6","name":"summarize"},"thoughtSignature":"Eu4BCusBAQw51sfrm+vjR0EirseBRHJFGRzAP0ExDCvB4LHcjoQnDgHtJKe2sNF9RCTttQ/6oLN+w5kVL9/oRqRLdHxN6/5fmEjbWwTRdqCgH5SUXF1u6/IlLKRuctP55cLNR8y40MrdrUXBA/E0Eoojs5zozZbqUov5OhMVNrhicnrJe00s18+/BNSAG3dIjJgyOGf+6l7c8ifnuudhUZwnKZD3W7TOJNCv1w932p+bac5vpmhwTLOwt4TTO9v+XMq0U/AXNPO44Qju79DLFvdYwzOMjBhEp8Vpy7MQMS9ySPez1oDxjdlZMzNW8Z5TdQ=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"lde815f6","name":"summarize","response":{"summary":"items: apples, bread,, eggs"}}}],"role":"user"},{"parts":[{"text":"Here is the summary of the items: items: apples, bread,, eggs.","thoughtSignature":"EuMECuAEAQw51seBX9dkmzYYjPn3AA3y96V3mtnKN7MICVhh2eKPWGjOlnE4c463G28aLePyBERUvqwekoa0rPx4zkcIDJZrGa+b6hdo/4DIYR7/l7LM8/ABbNo/HBzDX9GWR6lC74jEDiAcHU8mor8wD7hg7K1apiSJvCLvqjUSOaWV3Ec1GvRQtQac7ic+O5XKS98dAU6qAhRFC5e9ttnukPkLFhMsUwGL+SNEkokrmx0yahhCgGrk2kybvGj8i5KYpvEDgX1HEUgXthys5zCQiH58BvrzqdhTyEZB70mO7yy2NW/LIHRirVZCErQZIm4wmQFiDdL9RVgS45wuA4ReybuK5GdowvyG/X4JkwwRQnUjFmNxhc3mheX4fdSmE8SzHFaXMzjWTZt/mnVlo9eb8p49KN6Jj+26qBxmDvaL9PzsHhkE+Fiw84gXk2vQs+t3DyITF9liWVktJA9gF4nFGI/s5mXt+sW2alyG1RUIkkzPHyiFHbmOzf0mHdqo6zbCI2TWTr3kUkQVHuhUVIopKEbPOTlDnlyvaVL2uUDlZZ6KF2j+hbdOya90aszZpkdhIfm5dtzvigJGm/FxHL2UyKFXpyhfcBplVGhNpv01qh9YNqp8bTJtoVXv1OxEBCzecc1QuHIxs9JKcZ6ZEOln/m5mSGaGk4eqS31XJ2a9INrVbLIC78uhiyNTM4+QFZfW70TrMO+owNT2kYn3KazyDwi2gGGipcBf0E8wbY9up/trBZxyA3eQbFtYjFC0sH034CDx6/TWm7vykN4JJrZhwnDHSuKGMvdljoFTleRPcj48/pw="}],"role":"model"},{"parts":[{"text":"How many items did I ask you to summarise?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Two-step workflow:\n  1. Call extractor with a request describing the items the user\n     mentioned. Wait for its structured `output` containing the items list.\n  2. Call summarize EXACTLY ONCE, passing the items from step 1.\n  3. Reply with one short sentence repeating the summary.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"First calls extractor, then summarize.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Summarises a list of items into a one-line string.","name":"summarize","parametersJsonSchema":{"additionalProperties":false,"properties":{"items":{"items":{"type":"string"},"type":["null","array"]}},"required":["items"],"type":"object"},"responseJsonSchema":{"additionalProperties":false,"properties":{"summary":{"type":"string"}},"required":["summary"],"type":"object"}},{"description":"Extracts a list of items from a request.\nIMPORTANT: This tool delegates execution to a specialized agent. Do NOT call this tool in parallel with any other tools.","name":"extractor","parameters":{"properties":{"request":{"description":"Detailed instructions or context for the task sub-agent.","type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Wed, 17 Jun 2026 10:57:59 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1103
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "You asked me to summarise 3 items (apples, bread, and eggs).",
+            "thoughtSignature": "EpQCCpECAQw51sfztuaPmi8W3fQlCktf1sFlOqtoRc5ZX+R0TKVebCWuSUJ+y7f0BU9yLE7p0Dgu4YyI6LKsUsQn7FzcG+0MlOwWnm6GaftuN39ZqMfDY3oeWhyhMUNTZxnwGgZBYaks7XGbU3blbRSkp6l3bxsZ3Z7rST1yybl6LZqJYomiZrUmZhKzu6+p11ybNdXjG0XepowINIm9UgtJ6Kc8AVE4bFP2RjMVHFjp/EzE0loxFqg5xV4oYY+bPtbMH8VyTKefZ48s3vmqcXm/huWXNOR94YpF6RZFuDc84AXfbHTlGR3AFs14GAigpFfO+aFj5/zEhmTccMUN4NVqgl/13fa4GprTgvJe0PKKQFCkNcFo"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 702,
+    "candidatesTokenCount": 16,
+    "totalTokenCount": 771,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 702
+      }
+    ],
+    "thoughtsTokenCount": 53,
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "tn0yauixOemakdUPh5CpgA4"
+}
