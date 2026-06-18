@@ -26,6 +26,12 @@ var (
 	// ErrNodeInterrupted wraps a child node's HITL pause request.
 	ErrNodeInterrupted = errors.New("workflow: dynamic child interrupted")
 
+	// ErrNodeWaitingForOutput is a pause with no interrupt ID: a
+	// WaitForOutput child finished without output, so the parent parks
+	// instead of completing. Wraps ErrNodeInterrupted so existing
+	// errors.Is(ErrNodeInterrupted) checks still treat it as a pause.
+	ErrNodeWaitingForOutput = fmt.Errorf("%w: waiting for output", ErrNodeInterrupted)
+
 	// ErrInvalidRunNodeContext is returned by RunNode when ctx is not
 	// the NodeContext of a currently-executing dynamic node.
 	ErrInvalidRunNodeContext = errors.New("workflow: RunNode called outside a dynamic node")
