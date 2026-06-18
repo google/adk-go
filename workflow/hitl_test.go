@@ -319,3 +319,36 @@ func TestResumeOrRequestInput(t *testing.T) {
 		}
 	})
 }
+
+// TestScheduler_WaitForOutputPause_SuspendsWorkflow drives the
+// WaitForOutput pause through a real workflow (Start -> orch ->
+// downstream). orch runs a WaitForOutput child that yields no output,
+// so RunNode parks the parent. A genuine pause must suspend the
+// workflow: orch lands NodeWaiting and downstream must NOT run.
+func TestScheduler_WaitForOutputPause_SuspendsWorkflow(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	child := newWaitForOutputNode("waiter")
+	orch := NewDynamicNode[any, any](
+		"orch",
+		func(ctx NodeContext, _ any, _ func(*session.Event) error) (any, error) {
+			return RunNode[any](ctx, child, nil)
+		},
+		NodeConfig{},
+	)
+	var downstreamRan atomic.Bool
+	downstream := newHitlNode("downstream", func(_ agent.Context, _ any, _ func(*session.Event, error) bool) {
+		downstreamRan.Store(true)
+	})
+
+	w := mustNew(t, []Edge{
+		{From: Start, To: orch},
+		{From: orch, To: downstream},
+	})
+
+	drain(t, w.Run(mockCtx))
+
+	if downstreamRan.Load() {
+		t.Error("downstream ran; a WaitForOutput pause must suspend the workflow, not complete the parent")
+	}
+}

@@ -112,6 +112,46 @@ func TestRunNode_PropagatesErrNodeInterrupted(t *testing.T) {
 	}
 }
 
+func TestRunNode_WaitForOutputChildWithNoOutput_ParksParent(t *testing.T) {
+	// A WaitForOutput child that finishes without producing output must
+	// park the parent (ErrNodeInterrupted), not falsely complete it with
+	// the zero value. Mirrors adk-python ctx.run_node(raise_on_wait=True).
+	child := newWaitForOutputNode("waiter")
+	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
+		return RunNode[string](ctx, child, nil)
+	})
+	if !errors.Is(err, ErrNodeInterrupted) {
+		t.Errorf("err = %v, want errors.Is ErrNodeInterrupted", err)
+	}
+}
+
+func TestRunNode_WaitForOutputChildWithOutput_Completes(t *testing.T) {
+	// A WaitForOutput child that does produce output completes normally;
+	// the gate must only fire on missing output.
+	child := newWaitForOutputWithValueNode("waiter", "done")
+	got := runInOrchestrator[string](t, func(ctx NodeContext) (string, error) {
+		return RunNode[string](ctx, child, nil)
+	})
+	if got != "done" {
+		t.Errorf("RunNode output = %q, want %q", got, "done")
+	}
+}
+
+func TestRunNode_NoWaitForOutputChildWithNoOutput_ReturnsZero(t *testing.T) {
+	// Without WaitForOutput, a child that emits no output still completes
+	// and yields the zero value — the gate must not change this default.
+	child := newStubNode("c", nil)
+	got, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
+		return RunNode[string](ctx, child, nil)
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("RunNode output = %q, want zero value", got)
+	}
+}
+
 func TestRunNode_PropagatesErrNodeFailed(t *testing.T) {
 	failer := newFailingNode("failer", errors.New("boom"))
 	_, err := runInOrchestratorWithErr[string](t, func(ctx NodeContext) (string, error) {
@@ -705,5 +745,43 @@ func TestRunNode_ConcurrentChildren_NoRace(t *testing.T) {
 	}
 	if want := n + 1; outputs != want {
 		t.Errorf("output-bearing events = %d, want %d", outputs, want)
+	}
+}
+
+// waitForOutputNode has WaitForOutput=true and emits a state-only event
+// (no Output), modeling an LlmAgent task/chat node that has not yet
+// produced its final output.
+type waitForOutputNode struct{ BaseNode }
+
+func newWaitForOutputNode(name string) *waitForOutputNode {
+	t := true
+	return &waitForOutputNode{BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: &t})}
+}
+
+func (n *waitForOutputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		yield(&session.Event{}, nil) // state-only: no Output, no RequestedInput
+	}
+}
+
+// waitForOutputWithValueNode has WaitForOutput=true and does emit an
+// Output, so RunNode must complete it normally.
+type waitForOutputWithValueNode struct {
+	BaseNode
+	out any
+}
+
+func newWaitForOutputWithValueNode(name string, out any) *waitForOutputWithValueNode {
+	t := true
+	return &waitForOutputWithValueNode{
+		BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: &t}),
+		out:      out,
+	}
+}
+
+func (n *waitForOutputWithValueNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+	out := n.out
+	return func(yield func(*session.Event, error) bool) {
+		yield(&session.Event{Output: out}, nil)
 	}
 }
