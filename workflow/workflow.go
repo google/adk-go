@@ -154,6 +154,10 @@ type Workflow struct {
 
 	// stateSchema holds the state schema for the workflow.
 	stateSchema *jsonschema.Resolved
+
+	// isRootWrapper marks this workflow as a synthetic single-node wrapper
+	// created by Runner.runNode to drive a standalone agent.
+	isRootWrapper bool
 }
 
 // Option configures a Workflow at construction time. Pass options
@@ -166,6 +170,22 @@ type Option func(*workflowOptions)
 type workflowOptions struct {
 	maxConcurrency int
 	stateSchema    *jsonschema.Resolved
+	isRootWrapper  bool
+}
+
+// WithRootWrapper marks this workflow as a synthetic single-node wrapper
+// created by Runner.runNode to drive a standalone agent.
+//
+// Architectural note: Unlike Go, Python ADK does not wrap standalone agents
+// in a synthetic workflow (Python's Runner.run drives agent.run_async directly).
+// Go introduced this wrapper so all agent execution rides through a unified
+// graph engine. When marked as a root wrapper, Workflow.Run does not stamp
+// an extraneous parent namespace prefix ("app/agent@1") onto root contexts,
+// maintaining strict path parity with Python reference recordings.
+func WithRootWrapper() Option {
+	return func(o *workflowOptions) {
+		o.isRootWrapper = true
+	}
 }
 
 // WithMaxConcurrency caps how many graph-scheduled nodes may run
@@ -226,6 +246,7 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 		opt(&o)
 	}
 	graph := newGraph(edges)
+	graph.isRootWrapper = o.isRootWrapper
 	if err := validateWorkflow(graph, o.stateSchema); err != nil {
 		return nil, err
 	}
@@ -234,6 +255,7 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 		name:           name,
 		maxConcurrency: o.maxConcurrency,
 		stateSchema:    o.stateSchema,
+		isRootWrapper:  o.isRootWrapper,
 	}, nil
 }
 
@@ -257,7 +279,20 @@ func (w *Workflow) Name() string {
 // when nodes complete. The consumer is the only mutator of the
 // per-node lifecycle map and of session state.
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	c := agent.NewNodeContext(ctx, nil)
+	var c agent.Context
+	if !w.isRootWrapper && w.Name() != "" {
+		wfPath := w.Name() + "@1"
+		if ac, ok := ctx.(agent.Context); ok && ac.Path() != "" {
+			wfPath = ac.Path() + "/" + w.Name() + "@1"
+		}
+		var ancestors []string
+		if ac, ok := ctx.(agent.Context); ok {
+			ancestors = ac.OutputForAncestors()
+		}
+		c = agent.NewDynamicNodeContext(agent.NewNodeContext(ctx, nil), wfPath, "1", nil, ancestors)
+	} else {
+		c = agent.NewNodeContext(ctx, nil)
+	}
 	return w.RunNode(c, userInput(c))
 }
 

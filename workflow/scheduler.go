@@ -79,6 +79,7 @@ type scheduler struct {
 	state       *RunState       // persisted lifecycle state
 	graph       *graph          // adjacency, terminal lookup
 	nodesByName map[string]Node // built once at construction; lets handleCompletion resolve a completion's name back to its Node in O(1)
+	terminals   map[string]bool // terminal graph nodes (designated use_as_output)
 
 	// Per-node accumulators, created when a node is scheduled and
 	// deleted on its completion. Owned by the consumer goroutine.
@@ -122,13 +123,11 @@ type pendingActivation struct {
 	resumeInputs map[string]any // nil for non-resume schedules
 }
 
-// nodeRun is the per-node consumer-side accumulator. It buffers the
-// node's routing event (if any) and its single output between the
-// time those events arrive and the time the node's completion
-// arrives, at which point successors are scheduled.
+// nodeRun accumulates mid-flight state for a running node goroutine.
+// Owned exclusively by the consumer goroutine: mutations happen on
+// eventItem delivery and reads happen on completionItem arrival.
 //
-// The single-output and single-routing-event constraints are
-// enforced here: a second event carrying either kind sets err
+// Duplicate outputs or routing events record an error on the struct
 // without overwriting the first value, and the consumer surfaces
 // the error at completion.
 type nodeRun struct {
@@ -137,6 +136,7 @@ type nodeRun struct {
 	hasOutput    bool           // distinguishes "no output yet" from "output was nil"
 	err          error          // set on duplicate output or duplicate routing event
 	branch       string         // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
+	nodePath     string         // hierarchical path assigned at scheduling (e.g. "parent/child@1" or "child@1")
 
 	// interruptIDs are unresolved long-running tool call IDs raised by
 	// the node's events. A non-empty set at completion parks the node
@@ -255,6 +255,7 @@ func newScheduler(parent agent.Context, g *graph, maxConcurrency int) *scheduler
 		state:          NewRunState(),
 		graph:          g,
 		nodesByName:    buildNodesByName(g),
+		terminals:      g.terminalNodeNames(),
 		runsByName:     map[string]*nodeRun{},
 		runCancels:     map[string]context.CancelFunc{},
 		retryTimers:    map[string]*time.Timer{},
@@ -389,6 +390,20 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	// wrapped := withBranch(s.parentCtx.WithContext(nodeCtx), branch)
 	perNodeCtx = newNodeContext(perNodeCtx, resumeInputs)
 
+	nodePath := name + "@1"
+	if p := s.parentCtx.Path(); p != "" {
+		nodePath = p + "/" + name + "@1"
+	} else if s.graph.isRootWrapper {
+		nodePath = ""
+	}
+	var ancestors []string
+	if s.terminals[name] {
+		if s.parentCtx.Path() != "" {
+			ancestors = append([]string{s.parentCtx.Path()}, s.parentCtx.OutputForAncestors()...)
+		}
+	}
+	perNodeCtx = agent.NewDynamicNodeContext(perNodeCtx, nodePath, "1", nil, ancestors)
+
 	// EXPERIMENTAL: stash perNodeCtx in the embedded context.Context
 	// so tools running inside an LlmAgent that is itself running as
 	// this node can recover the NodeContext via
@@ -410,7 +425,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	ns.Input = input
 	ns.TriggeredBy = triggeredBy
 	ns.Branch = branch
-	s.runsByName[name] = &nodeRun{branch: branch}
+	s.runsByName[name] = &nodeRun{branch: branch, nodePath: nodePath}
 
 	s.runCancels[name] = cancel
 	s.wg.Add(1)
@@ -706,11 +721,15 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev.Content != nil && it.ev.Content.Role == "" {
 		it.ev.Content.Role = defaultContentRole(it.ev.Content)
 	}
+	expectedPath := nr.nodePath
+	if expectedPath == "" {
+		expectedPath = it.nodeName
+	}
 	var path string
 	if it.ev.NodeInfo != nil {
 		path = it.ev.NodeInfo.Path
 	}
-	isDescendant := path != "" && path != it.nodeName
+	isDescendant := path != "" && path != expectedPath && path != it.nodeName
 	// Track long-running interrupts before the descendant
 	// short-circuit so a dynamic child's pause is promoted to the
 	// parent node (a RequestInput pause rides on LongRunningToolIDs).
@@ -727,7 +746,8 @@ func (s *scheduler) handleEvent(it eventItem) {
 		if it.ev.NodeInfo == nil {
 			it.ev.NodeInfo = &session.NodeInfo{}
 		}
-		it.ev.NodeInfo.Path = it.nodeName
+		it.ev.NodeInfo.Path = expectedPath
+		path = expectedPath
 	}
 	if it.ev.Routes != nil {
 		nr.setRoutingEvent(it.ev, it.nodeName)
@@ -747,6 +767,15 @@ func (s *scheduler) handleEvent(it eventItem) {
 			return
 		}
 		nr.setOutput(validated, it.nodeName)
+		outputFor := []string{path}
+		if s.terminals[it.nodeName] && s.parentCtx.Path() != "" {
+			outputFor = append(outputFor, s.parentCtx.Path())
+			outputFor = append(outputFor, s.parentCtx.OutputForAncestors()...)
+		}
+		if it.ev.NodeInfo == nil {
+			it.ev.NodeInfo = &session.NodeInfo{}
+		}
+		it.ev.NodeInfo.OutputFor = outputFor
 	}
 }
 

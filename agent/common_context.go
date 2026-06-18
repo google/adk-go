@@ -211,7 +211,13 @@ func (c *commonContext) SubScheduler() DynamicSubScheduler {
 
 // Path implements [Context].
 func (c *commonContext) Path() string {
-	return c.path
+	if c.path != "" {
+		return c.path
+	}
+	if p, ok := c.Context.(interface{ Path() string }); ok {
+		return p.Path()
+	}
+	return ""
 }
 
 // RunID implements [Context].
@@ -368,10 +374,13 @@ func (c *commonContext) WithAgentContext(ctx context.Context) Context {
 }
 
 func (c *commonContext) OutputForAncestors() []string {
-	if c.outputForAncestors == nil {
-		return nil
+	if c.outputForAncestors != nil {
+		return c.outputForAncestors
 	}
-	return c.outputForAncestors
+	if p, ok := c.Context.(interface{ OutputForAncestors() []string }); ok {
+		return p.OutputForAncestors()
+	}
+	return nil
 }
 
 func (c *commonContext) AgentName() string {
