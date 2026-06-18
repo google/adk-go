@@ -1,0 +1,118 @@
+- author: user
+  role: user
+  parts:
+    - text: Order 2 pizzas. Pay with card 4111111111111111, cvv 123.
+- author: coordinator
+  role: model
+  parts:
+    - function_call:
+        name: order_collector
+        id: xqv510lg
+        args:
+            request: Collect the order for 2 pizzas.
+  node_info:
+    path: coordinator
+- author: order_collector
+  isolation_scope: xqv510lg
+  role: model
+  parts:
+    - function_call:
+        name: finish_task
+        id: 55relgui
+        args:
+            item: pizza
+            quantity: 2
+  node_info:
+    path: coordinator/order_collector@xqv510lg
+- author: order_collector
+  isolation_scope: xqv510lg
+  role: user
+  parts:
+    - function_response:
+        name: finish_task
+        id: 55relgui
+        response:
+            result: Task completed.
+  output:
+    item: pizza
+    quantity: 2
+  node_info:
+    path: coordinator/order_collector@xqv510lg
+    output_for:
+        - coordinator/order_collector@xqv510lg
+- author: user
+  role: user
+  parts:
+    - function_response:
+        name: order_collector
+        id: xqv510lg
+        response:
+            item: pizza
+            quantity: 2
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: model
+  parts:
+    - function_call:
+        name: payment_collector
+        id: dvmv5eqa
+        args:
+            request: Collect payment details for card 4111111111111111 with CVV 123.
+  node_info:
+    path: coordinator
+- author: payment_collector
+  isolation_scope: dvmv5eqa
+  role: model
+  parts:
+    - function_call:
+        name: finish_task
+        id: fm6nag3h
+        args:
+            credit_card_number: "4111111111111111"
+            cvv: "123"
+  node_info:
+    path: coordinator/payment_collector@dvmv5eqa
+- author: payment_collector
+  isolation_scope: dvmv5eqa
+  role: user
+  parts:
+    - function_response:
+        name: finish_task
+        id: fm6nag3h
+        response:
+            result: Task completed.
+  output:
+    credit_card_number: "4111111111111111"
+    cvv: "123"
+  node_info:
+    path: coordinator/payment_collector@dvmv5eqa
+    output_for:
+        - coordinator/payment_collector@dvmv5eqa
+- author: user
+  role: user
+  parts:
+    - function_response:
+        name: payment_collector
+        id: dvmv5eqa
+        response:
+            credit_card_number: "4111111111111111"
+            cvv: "123"
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: model
+  parts:
+    - text: Your order for 2 pizzas has been successfully processed using the credit card ending in 1111.
+  node_info:
+    path: coordinator
+- author: user
+  role: user
+  parts:
+    - text: What did I order, and how am I paying?
+- author: coordinator
+  role: model
+  parts:
+    - text: You ordered 2 pizzas, and you are paying with your credit card ending in 1111.
+  node_info:
+    path: coordinator
