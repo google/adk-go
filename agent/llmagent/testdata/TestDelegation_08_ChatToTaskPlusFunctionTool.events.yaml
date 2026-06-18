@@ -1,0 +1,98 @@
+- author: user
+  role: user
+  parts:
+    - text: 'Extract and summarise: apples, bread, eggs.'
+- author: coordinator
+  role: model
+  parts:
+    - function_call:
+        name: extractor
+        id: bu4kjcsx
+        args:
+            request: 'Extract the list of grocery items mentioned by the user: apples, bread, eggs.'
+  node_info:
+    path: coordinator
+- author: extractor
+  isolation_scope: bu4kjcsx
+  role: model
+  parts:
+    - function_call:
+        name: finish_task
+        id: 4q714y4h
+        args:
+            items:
+                - apples
+                - bread
+                - eggs
+  node_info:
+    path: coordinator/extractor@bu4kjcsx
+- author: extractor
+  isolation_scope: bu4kjcsx
+  role: user
+  parts:
+    - function_response:
+        name: finish_task
+        id: 4q714y4h
+        response:
+            result: Task completed.
+  output:
+    items:
+        - apples
+        - bread
+        - eggs
+  node_info:
+    path: coordinator/extractor@bu4kjcsx
+    output_for:
+        - coordinator/extractor@bu4kjcsx
+- author: user
+  role: user
+  parts:
+    - function_response:
+        name: extractor
+        id: bu4kjcsx
+        response:
+            items:
+                - apples
+                - bread
+                - eggs
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: model
+  parts:
+    - function_call:
+        name: summarize
+        id: lde815f6
+        args:
+            items:
+                - apples
+                - bread,
+                - eggs
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: user
+  parts:
+    - function_response:
+        name: summarize
+        id: lde815f6
+        response:
+            summary: 'items: apples, bread,, eggs'
+  node_info:
+    path: coordinator
+- author: coordinator
+  role: model
+  parts:
+    - text: 'Here is the summary of the items: items: apples, bread,, eggs.'
+  node_info:
+    path: coordinator
+- author: user
+  role: user
+  parts:
+    - text: How many items did I ask you to summarise?
+- author: coordinator
+  role: model
+  parts:
+    - text: You asked me to summarise 3 items (apples, bread, and eggs).
+  node_info:
+    path: coordinator
