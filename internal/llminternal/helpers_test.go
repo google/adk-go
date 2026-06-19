@@ -15,7 +15,12 @@
 package llminternal
 
 import (
+	"iter"
+	"time"
+
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/codeexecution"
+	"google.golang.org/adk/session"
 )
 
 // mockLLMAgent satisfies both agent.Agent (via embedding) and llminternal.Agent (via internal() implementation)
@@ -29,3 +34,87 @@ var _ Agent = (*mockLLMAgent)(nil)
 func (m *mockLLMAgent) internal() *State {
 	return m.s
 }
+
+type mockCodeExecutor struct {
+	stdout string
+	stderr string
+}
+
+func (m *mockCodeExecutor) ExecuteCode(agent.InvocationContext, *codeexecution.CodeExecutionInput) (*codeexecution.CodeExecutionResult, error) {
+	return &codeexecution.CodeExecutionResult{
+		Stdout: m.stdout,
+		Stderr: m.stderr,
+	}, nil
+}
+
+func (m *mockCodeExecutor) Config() *codeexecution.CodeExecutorConfig {
+	return &codeexecution.CodeExecutorConfig{
+		OptimizeDataFile:   false,
+		Stateful:           false,
+		ErrorRetryAttempts: 2,
+		CodeBlockDelimiters: []codeexecution.Delimiter{
+			{
+				Leading:  "```python\n",
+				Trailing: "\n```",
+			},
+		},
+		ExecutionResultDelimiters: []codeexecution.Delimiter{
+			{
+				Leading:  "```python\n",
+				Trailing: "\n```",
+			},
+		},
+		TimeoutSeconds: 60,
+	}
+}
+
+var _ codeexecution.CodeExecutor = (*mockCodeExecutor)(nil)
+
+type mockState struct {
+	data map[string]any
+}
+
+func (m *mockState) Set(key string, val any) error {
+	m.data[key] = val
+	return nil
+}
+
+func (m *mockState) Get(key string) (any, error) {
+	return m.data[key], nil
+}
+
+func (m *mockState) All() iter.Seq2[string, any] {
+	return nil
+}
+
+var _ session.State = (*mockState)(nil)
+
+type mockSession struct {
+	state *mockState
+}
+
+func (m *mockSession) ID() string {
+	return "mock-session-id"
+}
+
+func (m *mockSession) AppName() string {
+	return "mock-app"
+}
+
+func (m *mockSession) UserID() string {
+	return "mock-user"
+}
+
+func (m *mockSession) State() session.State {
+	return m.state
+}
+
+func (m *mockSession) Events() session.Events {
+	return nil
+}
+
+func (m *mockSession) LastUpdateTime() time.Time {
+	return time.Now()
+}
+
+var _ session.Session = (*mockSession)(nil)

@@ -64,7 +64,7 @@ type Flow struct {
 
 	Tools                 []tool.Tool
 	RequestProcessors     []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]
-	ResponseProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error
+	ResponseProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error]
 	BeforeModelCallbacks  []BeforeModelCallback
 	AfterModelCallbacks   []AfterModelCallback
 	OnModelErrorCallbacks []OnModelErrorCallback
@@ -92,7 +92,7 @@ var (
 		AgentTransferRequestProcessor,
 		removeDisplayNameIfExists,
 	}
-	DefaultResponseProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error{
+	DefaultResponseProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error]{
 		nlPlanningResponseProcessor,
 		codeExecutionResponseProcessor,
 	}
@@ -560,9 +560,16 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
-			if err := f.postprocess(ctx, req, resp); err != nil {
-				yield(nil, err)
-				return
+			for ev, err := range f.postprocess(ctx, req, resp) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if ev != nil {
+					if !yield(ev, nil) {
+						return
+					}
+				}
 			}
 			// Skip the model response event if there is no content and no error code.
 			// This is needed for the code executor to trigger another loop according to
@@ -898,14 +905,24 @@ func (f *Flow) runOnModelErrorCallbacks(ctx agent.InvocationContext, llmReq *mod
 	return nil, nil
 }
 
-func (f *Flow) postprocess(ctx agent.InvocationContext, req *model.LLMRequest, resp *responseWithEventID) error {
-	// apply response processor functions to the response in the configured order.
-	for _, processor := range f.ResponseProcessors {
-		if err := processor(ctx, req, resp.LLMResponse); err != nil {
-			return err
+func (f *Flow) postprocess(ctx agent.InvocationContext, req *model.LLMRequest, resp *responseWithEventID) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		// apply response processor functions to the response in the configured order.
+
+		// Skip the model response event if there is no content and no error code.
+		// This is needed for the code executor to trigger another loop.
+		for _, processor := range f.ResponseProcessors {
+			for ev, err := range processor(ctx, req, resp.LLMResponse) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if ev != nil {
+					yield(ev, nil)
+				}
+			}
 		}
 	}
-	return nil
 }
 
 func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.Agent {
@@ -1130,7 +1147,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			}
 
 			// TODO: handle long-running tool.
-			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+			ev := session.NewEvent(ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
 					Role: "user",

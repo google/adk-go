@@ -18,6 +18,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/codeexecution"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/tool"
 )
@@ -49,6 +50,8 @@ type State struct {
 	OutputSchema *genai.Schema
 
 	OutputKey string
+
+	CodeExecutor codeexecution.CodeExecutor
 }
 
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
