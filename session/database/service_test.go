@@ -23,12 +23,12 @@ import (
 
 	"google.golang.org/adk/platform"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/session/session_test"
+	"google.golang.org/adk/session/sessiontestsuite"
 )
 
 func Test_databaseService(t *testing.T) {
-	opts := session_test.SuiteOptions{SupportsUserProvidedSessionID: true}
-	session_test.RunServiceTests(t, opts, func(t *testing.T) session.Service {
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true}
+	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return emptyService(t)
 	})
 }

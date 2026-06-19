@@ -28,7 +28,7 @@ import (
 	"google.golang.org/grpc"
 
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/session/session_test"
+	"google.golang.org/adk/session/sessiontestsuite"
 )
 
 // if you want to test it for yourself, you can regenerate all by running
@@ -46,12 +46,12 @@ const (
 )
 
 func Test_vertexaiService(t *testing.T) {
-	opts := session_test.SuiteOptions{
+	opts := sessiontestsuite.SuiteOptions{
 		SupportsUserProvidedSessionID: true,
 		ProvidesServerAssignedEventID: true,
 		AppName:                       EngineId,
 	} // VertexAI forbids custom IDs
-	session_test.RunServiceTests(t, opts, func(t *testing.T) session.Service {
+	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		name := strings.ReplaceAll(t.Name(), "/", "_")
 		s, _ := emptyService(t, name, false)
 		return s
