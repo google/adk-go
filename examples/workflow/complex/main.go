@@ -41,7 +41,7 @@ func main() {
 		Description: "writes poems",
 		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
-				ev1 := session.NewEvent(ic.InvocationID())
+				ev1 := session.NewEventWithContext(ic, ic.InvocationID())
 				ev1.Partial = true
 				ev1.Content = &genai.Content{
 					Parts: []*genai.Part{{Text: "the first line of the poem"}},
@@ -54,7 +54,7 @@ func main() {
 					return
 				}
 
-				ev2 := session.NewEvent(ic.InvocationID())
+				ev2 := session.NewEventWithContext(ic, ic.InvocationID())
 				ev2.Partial = false
 				ev2.Content = &genai.Content{
 					Parts: []*genai.Part{{Text: "the second line of the poem"}},

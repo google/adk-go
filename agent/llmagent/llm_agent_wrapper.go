@@ -40,6 +40,7 @@
 package llmagent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -152,7 +153,7 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 	if content == nil {
 		return nil
 	}
-	ev := session.NewEvent(ctx.InvocationID())
+	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 	ev.Author = "user"
 	ev.LLMResponse = model.LLMResponse{Content: content}
 	if iso := ctx.IsolationScope(); iso != "" {
@@ -415,14 +416,14 @@ func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx workflo
 
 // synthesizeTaskFREvent builds the synthesised FR event for a completed
 // task delegation.
-func synthesizeTaskFREvent(invocationID string, fc *genai.FunctionCall, output any) *session.Event {
+func synthesizeTaskFREvent(ctx context.Context, invocationID string, fc *genai.FunctionCall, output any) *session.Event {
 	var response map[string]any
 	if m, ok := output.(map[string]any); ok {
 		response = m
 	} else {
 		response = map[string]any{"output": output}
 	}
-	ev := session.NewEvent(invocationID)
+	ev := session.NewEventWithContext(ctx, invocationID)
 	ev.Author = "user"
 	ev.LLMResponse = model.LLMResponse{
 		Content: &genai.Content{
@@ -545,7 +546,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			// reply in its conversation history.
 			return false
 		}
-		return yield(synthesizeTaskFREvent(ctx.InvocationID(), fc, out), nil)
+		return yield(synthesizeTaskFREvent(ctx, ctx.InvocationID(), fc, out), nil)
 	}
 
 	// Step 1: pre-LLM scan for unresolved task FCs from prior turns.

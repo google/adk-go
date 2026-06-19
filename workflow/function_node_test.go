@@ -85,7 +85,7 @@ func TestNewFunctionNodeWithSchema(t *testing.T) {
 				t.Fatalf("NewFunctionNodeWithSchema failed: %v", err)
 			}
 
-			mockCtx := &MockInvocationContext{sess: nil}
+			mockCtx := &MockInvocationContext{Context: t.Context(), sess: nil}
 			exCtx := agent.NewNodeContext(mockCtx, nil)
 			events := node.Run(exCtx, tc.input)
 
@@ -138,7 +138,7 @@ func TestFunctionNode_RunDoesNotValidate(t *testing.T) {
 		t.Fatalf("NewFunctionNodeWithSchema failed: %v", err)
 	}
 
-	mockCtx := &MockInvocationContext{sess: nil}
+	mockCtx := &MockInvocationContext{Context: t.Context(), sess: nil}
 	exCtx := agent.NewNodeContext(mockCtx, nil)
 	count := 0
 	for ev, err := range node.Run(exCtx, Input{Value: "hello"}) {
@@ -233,14 +233,14 @@ func mustSchema[T any](t *testing.T) *jsonschema.Schema {
 
 func TestFunctionNodeDirectEventPropagation(t *testing.T) {
 	fn := func(ctx agent.Context, input string) (*session.Event, error) {
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 		ev.Output = input + " processed"
 		ev.Routes = []string{"CUSTOM_ROUTE"}
 		return ev, nil
 	}
 
 	node := NewFunctionNode[string, *session.Event]("event_proc", fn, defaultNodeConfig)
-	mockCtx := &MockInvocationContext{sess: nil}
+	mockCtx := &MockInvocationContext{Context: t.Context(), sess: nil}
 	exCtx := agent.NewNodeContext(mockCtx, nil)
 
 	events := node.Run(exCtx, "hello")
@@ -400,7 +400,7 @@ func TestNewFunctionNodeFromState(t *testing.T) {
 			mockSess := &mockSessionForTest{
 				state: &mockStateForTest{data: tc.stateData},
 			}
-			mockCtx := &MockInvocationContext{sess: mockSess}
+			mockCtx := &MockInvocationContext{Context: t.Context(), sess: mockSess}
 			exCtx := agent.NewNodeContext(mockCtx, nil)
 
 			events := node.Run(exCtx, tc.input)
@@ -597,7 +597,7 @@ func TestEmittingFunctionNode_EmitProgressBeforeOutput(t *testing.T) {
 
 	var downstreamRan atomic.Bool
 	worker := NewEmittingFunctionNode("worker", func(ctx agent.Context, _ any, emit func(*session.Event) error) (string, error) {
-		progress := session.NewEvent(ctx.InvocationID())
+		progress := session.NewEventWithContext(ctx, ctx.InvocationID())
 		progress.Content = &genai.Content{Parts: []*genai.Part{{Text: "tick"}}}
 		if err := emit(progress); err != nil {
 			return "", err

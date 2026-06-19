@@ -342,7 +342,7 @@ func (n *FunctionNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 			return
 		}
 
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, ctx.InvocationID())
 		if c, ok := output.(*genai.Content); ok {
 			event.Content = c
 		} else if c, ok := output.(genai.Content); ok {
@@ -371,7 +371,7 @@ func (n *FunctionNode) runEmitting(ctx agent.Context, input any, yield func(*ses
 	if output == nil {
 		return
 	}
-	event := session.NewEvent(ctx.InvocationID())
+	event := session.NewEventWithContext(ctx, ctx.InvocationID())
 	event.Output = output
 	if s, ok := output.(string); ok {
 		event.Content = &genai.Content{

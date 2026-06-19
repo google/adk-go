@@ -83,7 +83,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 		nItems := v.Len()
 		if nItems == 0 {
 			// Yield an empty list as output
-			event := session.NewEvent(ctx.InvocationID())
+			event := session.NewEventWithContext(ctx, ctx.InvocationID())
 			event.Output = []any{}
 			yield(event, nil)
 			return
@@ -155,7 +155,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 		}
 
 		// Yield the aggregated output
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, ctx.InvocationID())
 		event.Output = outputs
 		yield(event, nil)
 	}

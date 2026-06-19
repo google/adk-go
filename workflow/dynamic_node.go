@@ -147,7 +147,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 		if any(out) == nil {
 			return
 		}
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 		ev.Output = out
 		ev.NodeInfo = &session.NodeInfo{Path: sub.ParentPath()}
 		// TODO(wolo): validate ev.Output against n.outputSchema,

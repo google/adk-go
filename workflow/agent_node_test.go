@@ -54,7 +54,7 @@ func TestAgentNode_New(t *testing.T) {
 		Description: "a test agent",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
-				event := session.NewEvent(ctx.InvocationID())
+				event := session.NewEventWithContext(ctx, ctx.InvocationID())
 				event.Output = map[string]any{"result": "success"}
 				yield(event, nil)
 			}
@@ -157,7 +157,7 @@ func TestAgentNode_Run(t *testing.T) {
 							if uc != nil && len(uc.Parts) > 0 {
 								val = uc.Parts[0].Text
 							}
-							event := session.NewEvent(ctx.InvocationID())
+							event := session.NewEventWithContext(ctx, ctx.InvocationID())
 							event.Output = map[string]any{"result": val}
 							yield(event, nil)
 						}
@@ -193,7 +193,7 @@ func TestAgentNode_Run(t *testing.T) {
 							if uc != nil && len(uc.Parts) > 0 {
 								val = uc.Parts[0].Text
 							}
-							event := session.NewEvent(ctx.InvocationID())
+							event := session.NewEventWithContext(ctx, ctx.InvocationID())
 							event.Output = val
 							yield(event, nil)
 						}
@@ -327,7 +327,7 @@ func TestAgentNode_WorkflowIntegration(t *testing.T) {
 							val = parsed.Val
 						}
 
-						event := session.NewEvent(ctx.InvocationID())
+						event := session.NewEventWithContext(ctx, ctx.InvocationID())
 						event.Output = map[string]any{"result": val * 2}
 						yield(event, nil)
 					}
@@ -387,7 +387,7 @@ func TestAgentNode_SynthesizesOutputFromModelText(t *testing.T) {
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				// Partial must not be promoted to Output.
-				partial := session.NewEvent(ctx.InvocationID())
+				partial := session.NewEventWithContext(ctx, ctx.InvocationID())
 				partial.LLMResponse.Partial = true
 				partial.LLMResponse.Content = &genai.Content{
 					Role:  "model",
@@ -397,7 +397,7 @@ func TestAgentNode_SynthesizesOutputFromModelText(t *testing.T) {
 					return
 				}
 				// Thought parts are skipped; text parts concatenate.
-				final := session.NewEvent(ctx.InvocationID())
+				final := session.NewEventWithContext(ctx, ctx.InvocationID())
 				final.LLMResponse.Content = &genai.Content{
 					Role: "model",
 					Parts: []*genai.Part{
@@ -460,11 +460,11 @@ func TestAgentNode_StampsIsolationScopeOnEvents(t *testing.T) {
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			gotAgentScope = ctx.IsolationScope()
 			return func(yield func(*session.Event, error) bool) {
-				ev := session.NewEvent(ctx.InvocationID())
+				ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 				ev.Output = "v"
 				yield(ev, nil)
 				// An event that already carries a scope is left untouched.
-				pre := session.NewEvent(ctx.InvocationID())
+				pre := session.NewEventWithContext(ctx, ctx.InvocationID())
 				pre.IsolationScope = "preset"
 				yield(pre, nil)
 			}
@@ -552,7 +552,7 @@ func TestAgentNode_ValidationAndContentConversion(t *testing.T) {
 					return func(yield func(*session.Event, error) bool) {
 						agentInvoked = true
 						gotContent = ctx.UserContent()
-						event := session.NewEvent(ctx.InvocationID())
+						event := session.NewEventWithContext(ctx, ctx.InvocationID())
 						event.Output = "ok"
 						yield(event, nil)
 					}
@@ -658,7 +658,7 @@ func TestAgentNode_InputValidation(t *testing.T) {
 					return func(yield func(*session.Event, error) bool) {
 						agentInvoked = true
 						gotContent = ctx.UserContent()
-						event := session.NewEvent(ctx.InvocationID())
+						event := session.NewEventWithContext(ctx, ctx.InvocationID())
 						event.Output = "ok"
 						yield(event, nil)
 					}
@@ -733,7 +733,7 @@ func TestAgentNode_StructuredOutputProjectedViaValidation(t *testing.T) {
 		Name: "json-talky",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
-				final := session.NewEvent(ctx.InvocationID())
+				final := session.NewEventWithContext(ctx, ctx.InvocationID())
 				final.LLMResponse.Content = &genai.Content{
 					Role:  "model",
 					Parts: []*genai.Part{{Text: `{"value":"hello"}`}},
@@ -790,7 +790,7 @@ func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
 		Name: "text_only_agent",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
-				event := session.NewEvent(ctx.InvocationID())
+				event := session.NewEventWithContext(ctx, ctx.InvocationID())
 				// Model response with plain text, but no Output set
 				event.Content = &genai.Content{
 					Parts: []*genai.Part{
