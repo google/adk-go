@@ -257,7 +257,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			return nil, fmt.Errorf("failed to run plugin before agent callback: %w", err)
 		}
 		if content != nil {
-			event := session.NewEvent(ctx.InvocationID())
+			event := session.NewEventWithContext(ctx, ctx.InvocationID())
 			event.LLMResponse = model.LLMResponse{
 				Content: content,
 			}
@@ -278,7 +278,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			continue
 		}
 
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, ctx.InvocationID())
 		event.LLMResponse = model.LLMResponse{
 			Content: content,
 		}
@@ -291,7 +291,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 
 	// check if has delta create event with it
 	if len(actions.StateDelta) > 0 {
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
 		event.Actions = *actions
@@ -316,7 +316,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			return nil, fmt.Errorf("failed to run plugin after agent callback: %w", err)
 		}
 		if content != nil {
-			event := session.NewEvent(ctx.InvocationID())
+			event := session.NewEventWithContext(ctx, ctx.InvocationID())
 			event.LLMResponse = model.LLMResponse{
 				Content: content,
 			}
@@ -336,7 +336,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			continue
 		}
 
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, ctx.InvocationID())
 		event.LLMResponse = model.LLMResponse{
 			Content: newContent,
 		}
@@ -350,7 +350,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 
 	// check if has delta create event with it
 	if len(actions.StateDelta) > 0 {
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
 		event.Actions = *actions

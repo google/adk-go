@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/platform"
 	"google.golang.org/adk/session"
 )
 
@@ -44,14 +46,15 @@ func (storageSession) TableName() string {
 }
 
 // Helper to map from internal struct to GORM struct
-func createStorageSession(s *localSession) (*storageSession, error) {
+func createStorageSession(ctx context.Context, s *localSession) (*storageSession, error) {
+	now := platform.Now(ctx)
 	return &storageSession{
 		UserID:     s.userID,
 		AppName:    s.appName,
 		ID:         s.sessionID,
 		State:      s.state,
-		CreateTime: time.Now(),
-		UpdateTime: time.Now(),
+		CreateTime: now,
+		UpdateTime: now,
 	}, nil
 }
 

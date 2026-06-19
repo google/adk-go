@@ -25,11 +25,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"rsc.io/omap"
 	"rsc.io/ordered"
 
 	"google.golang.org/adk/internal/sessionutils"
+	"google.golang.org/adk/platform"
 )
 
 type stateMap map[string]any
@@ -50,7 +50,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 
 	sessionID := req.SessionID
 	if sessionID == "" {
-		sessionID = uuid.NewString()
+		sessionID = platform.NewUUID(ctx)
 	}
 
 	key := id{
@@ -74,7 +74,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	val := &session{
 		id:        key,
 		state:     state,
-		updatedAt: time.Now(),
+		updatedAt: platform.Now(ctx),
 	}
 
 	s.sessions.Set(encodedKey, val)

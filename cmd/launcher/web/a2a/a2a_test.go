@@ -75,7 +75,7 @@ func TestWebLauncher_ServesA2A(t *testing.T) {
 		Name: "HelloWorldAgent",
 		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
-				event := session.NewEvent(ic.InvocationID())
+				event := session.NewEventWithContext(ic, ic.InvocationID())
 				event.Content = genai.NewContentFromText(wantMessage, genai.RoleModel)
 				yield(event, nil)
 			}

@@ -87,8 +87,9 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 		ReasoningEngine: reasoningEngine,
 	}
 	rpcReq := &aiplatformpb.CreateSessionRequest{
-		Parent:  vertexaiutil.AgentEngineResource(aeData),
-		Session: pbSession,
+		Parent:    vertexaiutil.AgentEngineResource(aeData),
+		Session:   pbSession,
+		SessionId: req.SessionID,
 	}
 	lro, err := c.rpcClient.CreateSession(ctx, rpcReq)
 	if err != nil {

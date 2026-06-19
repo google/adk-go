@@ -19,11 +19,11 @@ import (
 	"fmt"
 	"iter"
 
-	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/memory"
+	"google.golang.org/adk/platform"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool/toolconfirmation"
 )
@@ -66,7 +66,7 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 // tracking, etc.) apply, plus the tool-specific extensions on ToolContext.
 func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) ToolContext {
 	if functionCallID == "" {
-		functionCallID = uuid.NewString()
+		functionCallID = platform.NewUUID(ic)
 	}
 	actions = prepareEventActions(actions)
 	return &callbackContext{
