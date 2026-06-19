@@ -177,4 +177,3 @@ func TestEventNodeName(t *testing.T) {
 		})
 	}
 }
-
