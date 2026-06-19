@@ -47,7 +47,7 @@ func TestRunner_WorkflowHITL_Roundtrip_Handoff(t *testing.T) {
 	var handlerInput atomic.Value
 	handler := workflow.NewFunctionNode(
 		"handler",
-		func(ctx agent.InvocationContext, input string) (string, error) {
+		func(ctx agent.Context, input string) (string, error) {
 			handlerInput.Store(input)
 			return "handled:" + input, nil
 		},
@@ -104,7 +104,7 @@ func TestRunner_WorkflowHITL_Roundtrip_ReEntry(t *testing.T) {
 	var handlerInput atomic.Value
 	handler := workflow.NewFunctionNode(
 		"handler",
-		func(ctx agent.InvocationContext, input string) (string, error) {
+		func(ctx agent.Context, input string) (string, error) {
 			handlerInput.Store(input)
 			return "handled:" + input, nil
 		},
@@ -134,11 +134,9 @@ func TestRunner_WorkflowHITL_Roundtrip_ReEntry(t *testing.T) {
 }
 
 // TestRunner_WorkflowHITL_FunctionResponseRoutedByID verifies the
-// runner-level routing contract: the second turn's FunctionResponse
-// is matched against the prior FunctionCall by ID alone (not by
-// content or session-state magic), and the matched event's Author
-// is what determines which agent gets re-invoked. Pinning this
-// behaviour against accidental regression in runner.findAgentToRun.
+// runner-level routing contract: the resume FunctionResponse is matched
+// to the prior FunctionCall by ID, and the matched event's Author
+// selects which agent gets re-invoked (runner.findAgentToRun).
 func TestRunner_WorkflowHITL_FunctionResponseRoutedByID(t *testing.T) {
 	ctx := t.Context()
 
@@ -182,17 +180,18 @@ func TestRunner_WorkflowHITL_FunctionResponseRoutedByID(t *testing.T) {
 	}
 }
 
-// TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume is the
-// end-to-end acceptance scenario for dynamic-workflow resume/dedup +
-// HITL (b/515644762): a dynamic orchestrator runs two children
+// TestRunner_WorkflowHITL_DynamicOrchestrator_Resume is the
+// end-to-end scenario for dynamic-workflow resume + HITL
+// (b/515644762): a dynamic orchestrator runs two children
 // sequentially via RunNode. The first completes; the second requests
 // human input and suspends the whole parent. On resume the parent
-// body re-executes from the top, and the contract requires:
-//   - the first RunNode returns the cached output (the first child
-//     does NOT run again), and
+// body re-executes from the top:
+//   - the first RunNode re-runs (the per-invocation cache does not
+//     carry across turns; each resume is a new invocation, matching
+//     adk-python which gates rehydration on invocation_id), and
 //   - the second RunNode observes the user's response and the parent
 //     completes with its final value.
-func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
+func TestRunner_WorkflowHITL_DynamicOrchestrator_Resume(t *testing.T) {
 	ctx := t.Context()
 
 	const interruptID = "approval"
@@ -200,7 +199,7 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
 	var firstChildRuns atomic.Int32
 	firstChild := workflow.NewFunctionNode(
 		"first_child",
-		func(ctx agent.InvocationContext, input string) (string, error) {
+		func(ctx agent.Context, input string) (string, error) {
 			firstChildRuns.Add(1)
 			return "X:" + input, nil
 		},
@@ -213,15 +212,12 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
 	orchestrator := workflow.NewDynamicNode[string, string](
 		"orchestrate",
 		func(nc workflow.NodeContext, input string, _ func(*session.Event) error) (string, error) {
-			// Stable run IDs so the cache correlates the same child
-			// across the fresh turn and the resume re-execution.
 			x, err := workflow.RunNode[string](nc, firstChild, input, workflow.WithRunID("c1"))
 			if err != nil {
 				return "", err
 			}
 			y, err := workflow.RunNode[any](nc, secondChild, nil, workflow.WithRunID("c2"))
 			if err != nil {
-				// Pause: ErrNodeInterrupted (swallowed by dynamicNode.Run).
 				return "", err
 			}
 			decision, _ := y.(string)
@@ -253,11 +249,11 @@ func TestRunner_WorkflowHITL_DynamicOrchestrator_DedupAndResume(t *testing.T) {
 		agent.RunConfig{},
 	))
 
-	if got := firstChildRuns.Load(); got != 1 {
-		t.Errorf("first child ran %d times total, want 1 (re-entry must serve it from cache, not re-execute)", got)
+	if got := firstChildRuns.Load(); got != 2 {
+		t.Errorf("first child ran %d times total, want 2 (resume re-executes the orchestrator under a new invocation)", got)
 	}
 	if got, want := parentOutput.Load(), "X:draft|Y:yes"; got != want {
-		t.Errorf("parent output = %v, want %q (cached first child + resumed second child)", got, want)
+		t.Errorf("parent output = %v, want %q (re-run first child + resumed second child)", got, want)
 	}
 }
 
@@ -298,7 +294,7 @@ func newHitlAsker(name, interruptID string, rerunOnResume bool) *hitlAskerNode {
 	}
 }
 
-func (n *hitlAskerNode) Run(ctx agent.InvocationContext, input any) iter.Seq2[*session.Event, error] {
+func (n *hitlAskerNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// On re-entry, hand the response to the successor as output.
 		if response, ok := ctx.ResumedInput(n.interruptID); ok {
@@ -337,7 +333,7 @@ func resumeContent(callID, callName string, payload any) *genai.Content {
 
 // findLongRunningInterrupt returns the ID and name of the first
 // FunctionCall flagged in its event's LongRunningToolIDs, or empty
-// strings if none. This is how adk-python's CLI detects a HITL pause.
+// strings if none.
 func findLongRunningInterrupt(events []*session.Event) (id, name string) {
 	for _, ev := range events {
 		if ev == nil || len(ev.LongRunningToolIDs) == 0 || ev.Content == nil {
