@@ -75,9 +75,15 @@ func (r *Runner) runNode(
 		yield(nil, err)
 		return
 	}
+	// Architectural note: Unlike Go, Python ADK executes standalone agents
+	// directly via agent.run_async. Go wraps top-level agents in a synthetic
+	// single-node workflow (START -> node) so all execution rides through
+	// a unified graph engine. We pass workflow.WithRootWrapper() to prevent
+	// this synthetic workflow from stamping an unwanted namespace prefix
+	// ("app/agent@1") onto events, ensuring 100% path parity with Python.
 	wf, err := workflow.New(rootWorkflowName(r.appName, agentToRun), []workflow.Edge{
 		{From: workflow.Start, To: node},
-	})
+	}, workflow.WithRootWrapper())
 	if err != nil {
 		yield(nil, fmt.Errorf("failed to build node workflow: %w", err))
 		return

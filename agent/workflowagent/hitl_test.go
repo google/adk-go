@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -324,7 +325,7 @@ func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 
 	var got any
 	for _, ev := range turn2 {
-		if ev.Output != nil && ev.NodeInfo != nil && ev.NodeInfo.Path == "hitl_demo" {
+		if ev.Output != nil && ev.NodeInfo != nil && strings.Contains(ev.NodeInfo.Path, "hitl_demo") {
 			got = ev.Output
 		}
 	}

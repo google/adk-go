@@ -315,7 +315,7 @@ func resolveNodeFromYAML(ctx context.Context, parentPath, ref, absPath string) (
 			ParallelWorker: cfg.ParallelWorker,
 		}
 
-		return workflow.NewToolNode(t, nodeConfig)
+		return workflow.NewNamedToolNode(cfg.Name, t, nodeConfig)
 	}
 
 	// Otherwise, it is a standard agent class. Resolve it as an agent and wrap in NewAgentNode.
