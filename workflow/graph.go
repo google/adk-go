@@ -18,8 +18,9 @@ package workflow
 // Built once at workflow construction; queried by the engine at
 // dispatch time.
 type graph struct {
-	successors   map[Node][]Edge
-	predecessors map[Node][]Edge
+	successors    map[Node][]Edge
+	predecessors  map[Node][]Edge
+	isRootWrapper bool
 }
 
 // newGraph indexes edges by source and target node so successor

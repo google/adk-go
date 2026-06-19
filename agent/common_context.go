@@ -211,7 +211,17 @@ func (c *commonContext) SubScheduler() DynamicSubScheduler {
 
 // Path implements [Context].
 func (c *commonContext) Path() string {
-	return c.path
+	if c.path != "" {
+		return c.path
+	}
+	// Fallback: when this commonContext wraps another ADK Context (e.g. via NewToolContext
+	// wrapping a branchOverride), c.path is empty. Asserting against interface{ Path() string }
+	// delegates to c.Context. Without this delegation, reading Path() would fail whenever
+	// context is wrapped by adapters like branchOverride.
+	if p, ok := c.Context.(interface{ Path() string }); ok {
+		return p.Path()
+	}
+	return ""
 }
 
 // RunID implements [Context].
@@ -367,11 +377,19 @@ func (c *commonContext) WithAgentContext(ctx context.Context) Context {
 	// }
 }
 
+// OutputForAncestors implements [Context].
 func (c *commonContext) OutputForAncestors() []string {
-	if c.outputForAncestors == nil {
-		return nil
+	if c.outputForAncestors != nil {
+		return c.outputForAncestors
 	}
-	return c.outputForAncestors
+	// Fallback: when this commonContext wraps another ADK Context (e.g. via NewToolContext
+	// wrapping a branchOverride), c.outputForAncestors is nil. Asserting against
+	// interface{ OutputForAncestors() []string } delegates to c.Context. Without this delegation,
+	// reading OutputForAncestors() would fail whenever context is wrapped by adapters like branchOverride.
+	if p, ok := c.Context.(interface{ OutputForAncestors() []string }); ok {
+		return p.OutputForAncestors()
+	}
+	return nil
 }
 
 func (c *commonContext) AgentName() string {

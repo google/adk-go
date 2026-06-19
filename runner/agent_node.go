@@ -196,15 +196,17 @@ func answeredOpenInterrupts(sess session.Session) map[string]bool {
 // recover it via RunNode.
 func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Content) agent.InvocationContext {
 	agentCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:     ctx.Artifacts(),
-		Memory:        ctx.Memory(),
-		Session:       ctx.Session(),
-		Branch:        ctx.Branch(),
-		Agent:         a,
-		UserContent:   userContent,
-		RunConfig:     ctx.RunConfig(),
-		EndInvocation: ctx.Ended(),
-		InvocationID:  ctx.InvocationID(),
+		Artifacts:          ctx.Artifacts(),
+		Memory:             ctx.Memory(),
+		Session:            ctx.Session(),
+		Branch:             ctx.Branch(),
+		Agent:              a,
+		UserContent:        userContent,
+		RunConfig:          ctx.RunConfig(),
+		EndInvocation:      ctx.Ended(),
+		InvocationID:       ctx.InvocationID(),
+		Path:               ctx.Path(),
+		OutputForAncestors: ctx.OutputForAncestors(),
 	})
 	if sub := ctx.SubScheduler(); sub != nil {
 		agentCtx = agentCtx.WithContext(agent.WithSubScheduler(agentCtx, sub))

@@ -41,9 +41,12 @@ type runnableTool interface {
 
 // newToolNodeWithSchemasTyped creates a new node wrapping a tool with explicitly provided schemas.
 // If a schema is nil, it will be inferred from the corresponding generic type Input or Output.
-func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*ToolNode, error) {
+func newToolNodeWithSchemasTyped[Input, Output any](name string, t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*ToolNode, error) {
 	if t == nil {
 		return nil, fmt.Errorf("tool cannot be nil")
+	}
+	if name == "" {
+		name = t.Name()
 	}
 	ischema, err := resolvedSchema[Input](inputSchema)
 	if err != nil {
@@ -65,7 +68,7 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 	}
 
 	return &ToolNode{
-		BaseNode: NewBaseNodeWithSchemas(t.Name(), t.Description(), cfg, ischema, oschema),
+		BaseNode: NewBaseNodeWithSchemas(name, t.Description(), cfg, ischema, oschema),
 		tool:     t,
 	}, nil
 }
@@ -73,19 +76,24 @@ func newToolNodeWithSchemasTyped[Input, Output any](t tool.Tool, inputSchema, ou
 // NewToolNodeWithSchemas is a convenience wrapper for NewToolNodeWithSchemasTyped[any, any].
 // It uses explicitly provided schemas for both input and output.
 func NewToolNodeWithSchemas(t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*ToolNode, error) {
-	return newToolNodeWithSchemasTyped[any, any](t, inputSchema, outputSchema, cfg)
+	return newToolNodeWithSchemasTyped[any, any]("", t, inputSchema, outputSchema, cfg)
 }
 
 // NewToolNodeTyped creates a new node wrapping a tool using generics to
 // automatically infer input and output schemas from the provided types.
 func NewToolNodeTyped[Input, Output any](t tool.Tool, cfg NodeConfig) (*ToolNode, error) {
-	return newToolNodeWithSchemasTyped[Input, Output](t, nil, nil, cfg)
+	return newToolNodeWithSchemasTyped[Input, Output]("", t, nil, nil, cfg)
 }
 
 // NewToolNode creates a new node wrapping a tool. Input and output schemas
 // are inferred as 'any'.
 func NewToolNode(t tool.Tool, cfg NodeConfig) (*ToolNode, error) {
 	return NewToolNodeTyped[any, any](t, cfg)
+}
+
+// NewNamedToolNode creates a new node wrapping a tool with an explicit node name.
+func NewNamedToolNode(name string, t tool.Tool, cfg NodeConfig) (*ToolNode, error) {
+	return newToolNodeWithSchemasTyped[any, any](name, t, nil, nil, cfg)
 }
 
 func (n *ToolNode) runTool(toolCtx agent.Context, input any) (any, error) {

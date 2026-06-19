@@ -54,6 +54,7 @@ type Event struct {
 	OutputTranscription *genai.Transcription                        `json:"outputTranscription,omitempty"`
 	Actions             EventActions                                `json:"actions"`
 	Output              any                                         `json:"output,omitempty"`
+	NodeInfo            *session.NodeInfo                           `json:"nodeInfo,omitempty"`
 }
 
 // ToSessionEvent maps Event data struct to session.Event
@@ -65,6 +66,7 @@ func ToSessionEvent(event Event) *session.Event {
 		Author:             event.Author,
 		LongRunningToolIDs: event.LongRunningToolIDs,
 		Output:             event.Output,
+		NodeInfo:           event.NodeInfo,
 		LLMResponse: model.LLMResponse{
 			AvgLogprobs:         event.AvgLogprobs,
 			Content:             event.Content,
@@ -100,6 +102,7 @@ func FromSessionEvent(event session.Event) Event {
 		Partial:             event.Partial,
 		LongRunningToolIDs:  event.LongRunningToolIDs,
 		Output:              event.Output,
+		NodeInfo:            event.NodeInfo,
 		AvgLogprobs:         event.LLMResponse.AvgLogprobs,
 		Content:             event.LLMResponse.Content,
 		GroundingMetadata:   event.LLMResponse.GroundingMetadata,

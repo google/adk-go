@@ -154,7 +154,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node) map[string]
 		// Interrupts the node raised, attributed to the static graph
 		// node that emitted the event (NodeInfo.Path; dynamic children
 		// fold into their static ancestor — see eventNodeName).
-		owner := eventNodeName(ev)
+		owner := eventNodeName(ev, nodesByName)
 		if _, ok := nodesByName[owner]; !ok {
 			continue
 		}
@@ -191,7 +191,7 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node) (out
 		if ev == nil {
 			continue
 		}
-		name := eventNodeName(ev)
+		name := eventNodeName(ev, nodesByName)
 		if _, ok := nodesByName[name]; !ok {
 			continue
 		}
@@ -418,9 +418,17 @@ func firstUserInput(events session.Events) any {
 // "parent/child@1"; its interrupt is owned by the nearest static
 // ancestor (the first path segment). Falls back to Author for the
 // LlmAgent node path, where Author == node name and no path is set.
-func eventNodeName(ev *session.Event) string {
+func eventNodeName(ev *session.Event, nodesByName map[string]Node) string {
 	if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
-		return staticNodeName(ev.NodeInfo.Path)
+		for _, seg := range strings.Split(ev.NodeInfo.Path, "/") {
+			name := seg
+			if idx := strings.IndexByte(name, '@'); idx >= 0 {
+				name = name[:idx]
+			}
+			if _, ok := nodesByName[name]; ok {
+				return name
+			}
+		}
 	}
 	return ev.Author
 }

@@ -17,6 +17,7 @@ package workflow
 import (
 	"fmt"
 	"iter"
+	"strings"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
@@ -81,8 +82,17 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 			// Capture the output only from terminal nodes. childEventOutput
 			// matches the scheduler: Event.Output, or model text when
 			// MessageAsOutput is set.
-			if out, ok := childEventOutput(ev); ok && ev.NodeInfo != nil && terminals[ev.NodeInfo.Path] {
-				terminalOutputs[ev.NodeInfo.Path] = out
+			if out, ok := childEventOutput(ev); ok && ev.NodeInfo != nil {
+				for _, seg := range strings.Split(ev.NodeInfo.Path, "/") {
+					name := seg
+					if idx := strings.IndexByte(name, '@'); idx >= 0 {
+						name = name[:idx]
+					}
+					if terminals[name] {
+						terminalOutputs[name] = out
+						break
+					}
+				}
 			}
 
 			if consumerGone {
@@ -127,7 +137,9 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 		for _, out := range terminalOutputs {
 			event := session.NewEvent(ctx.InvocationID())
 			event.Output = out
-			yield(event, nil)
+			if !yield(event, nil) {
+				return
+			}
 		}
 	}
 }
