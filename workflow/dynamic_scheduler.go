@@ -179,34 +179,6 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 		// Last write wins, matching live execution order.
 		s.resultByPath[ev.NodeInfo.Path] = ev.Output
 	}
-	s.rehydrateCache()
-	return s
-}
-
-// rehydrateCache repopulates resultByPath from session history so a
-// resumed orchestrator (which re-runs from the top) serves already
-// completed children from cache instead of re-executing them. Each
-// child's terminal event carries its childPath in NodeInfo.Path and a
-// non-nil Output; keyed by childPath, so only stable WithRunID calls
-// hit (auto-counter ids regenerate per activation and miss).
-func (s *dynamicSubScheduler) rehydrateCache() {
-	sess := s.parentCtx.Session()
-	if sess == nil {
-		return
-	}
-	prefix := s.parentPath + "/"
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for ev := range sess.Events().All() {
-		if ev == nil || ev.Output == nil || ev.NodeInfo == nil {
-			continue
-		}
-		if !strings.HasPrefix(ev.NodeInfo.Path, prefix) {
-			continue
-		}
-		// Last write wins, matching live execution order.
-		s.resultByPath[ev.NodeInfo.Path] = ev.Output
-	}
 }
 
 // func logContext(o any, msg string, lvl int) {
