@@ -209,8 +209,9 @@ func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Conten
 		OutputForAncestors: ctx.OutputForAncestors(),
 	})
 	//TODO(kdroste): copy original SubScheduler??
-	//nc := agent.NewDynamicNodeContext(ic, "", "", ctx.SubScheduler(), nil)
-	return ic
+	nc := agent.NewNodeContext(ic, nil)
+	dnc := agent.NewDynamicNodeContext(nc, "", "", ctx.SubScheduler(), nil)
+	return dnc
 }
 
 // inputToUserContent converts a node input value into a user Content for
