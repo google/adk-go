@@ -181,11 +181,10 @@ func TestRunner_WorkflowHITL_FunctionResponseRoutedByID(t *testing.T) {
 }
 
 // TestRunner_WorkflowHITL_DynamicOrchestrator_Resume is the
-// end-to-end scenario for dynamic-workflow resume + HITL
-// (b/515644762): a dynamic orchestrator runs two children
-// sequentially via RunNode. The first completes; the second requests
-// human input and suspends the whole parent. On resume the parent
-// body re-executes from the top:
+// end-to-end scenario for dynamic-workflow resume + HITL: a dynamic
+// orchestrator runs two children sequentially via RunNode. The first
+// completes; the second requests human input and suspends the whole
+// parent. On resume the parent body re-executes from the top:
 //   - the first RunNode re-runs (the per-invocation cache does not
 //     carry across turns; each resume is a new invocation, matching
 //     adk-python which gates rehydration on invocation_id), and
