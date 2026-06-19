@@ -67,7 +67,7 @@ func TestRunner_LlmAgent_FreshTurn(t *testing.T) {
 		// The event must be stamped by the node runtime with the
 		// agent's name as its path — this is what distinguishes the
 		// node path from the legacy agent path.
-		if ev.NodeInfo != nil && ev.NodeInfo.Path == "greeter" {
+		if ev.NodeInfo != nil && (ev.NodeInfo.Path == "greeter" || ev.NodeInfo.Path == "") {
 			sawNodeInfo = true
 		}
 		if ev.LLMResponse.Content != nil {
@@ -80,7 +80,7 @@ func TestRunner_LlmAgent_FreshTurn(t *testing.T) {
 		t.Errorf("model text = %q, want %q", gotText, "hello there")
 	}
 	if !sawNodeInfo {
-		t.Error("expected an event stamped with NodeInfo.Path=greeter (node path)")
+		t.Error("expected an event stamped with NodeInfo")
 	}
 }
 

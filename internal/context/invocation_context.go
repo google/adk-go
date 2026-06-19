@@ -38,6 +38,8 @@ type InvocationContextParams struct {
 	EndInvocation               bool
 	InvocationID                string
 	LiveSessionResumptionHandle string
+	Path                        string
+	OutputForAncestors          []string
 }
 
 func NewInvocationContext(ctx context.Context, params InvocationContextParams) agent.InvocationContext {
