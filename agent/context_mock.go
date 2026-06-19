@@ -44,6 +44,12 @@ type StrictContextMock struct {
 	Ctx context.Context
 }
 
+// NewStrictContextMock returns a StrictContextMock backed by ctx. It keeps test
+// literals concise when the mock is embedded as the only field of a fake.
+func NewStrictContextMock(ctx context.Context) StrictContextMock {
+	return StrictContextMock{Ctx: ctx}
+}
+
 func (m *StrictContextMock) ctx() context.Context {
 	if m.Ctx == nil {
 		panic("agent.StrictContextMock: Ctx is nil")
