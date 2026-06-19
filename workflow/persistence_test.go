@@ -118,3 +118,63 @@ func TestCollectNodeOutputs_OutputForAttributesAncestors(t *testing.T) {
 		t.Errorf("outputs[outer] = %#v, want %q (ancestor not attributed)", got, want)
 	}
 }
+
+func TestEventNodeName(t *testing.T) {
+	nodes := map[string]Node{
+		"nodeA":  newDummyNode("nodeA"),
+		"parent": newDummyNode("parent"),
+		"child":  newDummyNode("child"),
+	}
+
+	tests := []struct {
+		name string
+		ev   *session.Event
+		want string
+	}{
+		{
+			name: "nil NodeInfo falls back to Author",
+			ev:   &session.Event{Author: "authorNode"},
+			want: "authorNode",
+		},
+		{
+			name: "empty Path falls back to Author",
+			ev:   &session.Event{Author: "authorNode", NodeInfo: &session.NodeInfo{Path: ""}},
+			want: "authorNode",
+		},
+		{
+			name: "static node path",
+			ev:   &session.Event{Author: "authorNode", NodeInfo: &session.NodeInfo{Path: "nodeA"}},
+			want: "nodeA",
+		},
+		{
+			name: "node path with invocation ID",
+			ev:   &session.Event{Author: "authorNode", NodeInfo: &session.NodeInfo{Path: "nodeA@1"}},
+			want: "nodeA",
+		},
+		{
+			name: "hierarchical path matches static parent",
+			ev:   &session.Event{Author: "authorNode", NodeInfo: &session.NodeInfo{Path: "parent/child@1"}},
+			want: "parent",
+		},
+		{
+			name: "hierarchical path matches child when parent unknown",
+			ev:   &session.Event{Author: "authorNode", NodeInfo: &session.NodeInfo{Path: "unknown/child@2"}},
+			want: "child",
+		},
+		{
+			name: "path segments not in nodes map falls back to Author",
+			ev:   &session.Event{Author: "authorNode", NodeInfo: &session.NodeInfo{Path: "unknown/other@1"}},
+			want: "authorNode",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := eventNodeName(tc.ev, nodes)
+			if got != tc.want {
+				t.Errorf("eventNodeName() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+

@@ -396,13 +396,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	} else if s.graph.isRootWrapper {
 		nodePath = ""
 	}
-	var ancestors []string
-	if s.terminals[name] {
-		if s.parentCtx.Path() != "" {
-			ancestors = append([]string{s.parentCtx.Path()}, s.parentCtx.OutputForAncestors()...)
-		}
-	}
-	perNodeCtx = agent.NewDynamicNodeContext(perNodeCtx, nodePath, "1", nil, ancestors)
+	perNodeCtx = agent.NewDynamicNodeContext(perNodeCtx, nodePath, "1", nil, s.terminalAncestors(name))
 
 	// EXPERIMENTAL: stash perNodeCtx in the embedded context.Context
 	// so tools running inside an LlmAgent that is itself running as
@@ -686,6 +680,15 @@ func defaultContentRole(c *genai.Content) string {
 	return genai.RoleModel
 }
 
+// terminalAncestors returns the ancestor paths for a terminal node's output,
+// or nil if nodeName is not terminal or the workflow is running at root level.
+func (s *scheduler) terminalAncestors(nodeName string) []string {
+	if !s.terminals[nodeName] || s.parentCtx.Path() == "" {
+		return nil
+	}
+	return append([]string{s.parentCtx.Path()}, s.parentCtx.OutputForAncestors()...)
+}
+
 // handleEvent updates the per-node accumulator. The event has
 // already been read from the queue and will be yielded to the
 // caller by the consumer loop.
@@ -767,11 +770,7 @@ func (s *scheduler) handleEvent(it eventItem) {
 			return
 		}
 		nr.setOutput(validated, it.nodeName)
-		outputFor := []string{path}
-		if s.terminals[it.nodeName] && s.parentCtx.Path() != "" {
-			outputFor = append(outputFor, s.parentCtx.Path())
-			outputFor = append(outputFor, s.parentCtx.OutputForAncestors()...)
-		}
+		outputFor := append([]string{path}, s.terminalAncestors(it.nodeName)...)
 		if it.ev.NodeInfo == nil {
 			it.ev.NodeInfo = &session.NodeInfo{}
 		}
