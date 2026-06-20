@@ -176,13 +176,9 @@ func seedEvent(text string) *session.Event {
 	return ev
 }
 
-// TestWrappedSession_SeedNotPersisted is the regression guard for the
-// single_turn node-input contract: the seed must be visible to the
-// prompt builder via the wrapped view, yet must not leak into the
-// underlying session history. Earlier the wrapper yielded the seed as
-// a real event and the runner persisted it, polluting the conversation
-// with transient node inputs (see the wrappedSession TODO in
-// llm_agent_wrapper.go).
+// TestWrappedSession_SeedNotPersisted asserts the single_turn
+// node-input contract: the seed is visible through the wrapped view but
+// never written to the underlying session history.
 func TestWrappedSession_SeedNotPersisted(t *testing.T) {
 	t.Parallel()
 

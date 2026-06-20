@@ -724,13 +724,10 @@ func runFunctionNodeOnce[OUT any](t *testing.T, fn func(ctx agent.Context, input
 	return got
 }
 
-// TestFunctionNode_ContentOutputGoesToContent is the regression guard
-// for the genai.Content branch: when a FunctionNode returns a
-// *genai.Content (or genai.Content), the value must populate
-// event.Content (a renderable message), not event.Output (an opaque
-// any). Mirrors adk-python _function_node.py which maps a Content
-// return to Event(content=...). Before the fix the Content landed in
-// event.Output and the message did not render.
+// TestFunctionNode_ContentOutputGoesToContent asserts that a
+// *genai.Content (or genai.Content) return populates event.Content, not
+// event.Output. Mirrors adk-python _function_node.py, which maps a
+// Content return to Event(content=...).
 func TestFunctionNode_ContentOutputGoesToContent(t *testing.T) {
 	t.Parallel()
 

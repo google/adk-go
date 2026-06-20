@@ -329,15 +329,11 @@ func hasWaitingInterrupt(state *workflow.RunState, id string) bool {
 	return false
 }
 
-// TestRunner_MessageAsOutput_ClearsOutput is the regression guard for
-// the duplicate-output fix. An AgentNode wrapping an LlmAgent emits a
-// final model message that synthesizeAgentOutput stamps with
-// NodeInfo.MessageAsOutput and populates both Content (the model text)
-// and Output (the same text). Driven through the runner, the yielded
-// event must have Output cleared so downstream renderers don't surface
-// the same text twice, while Content survives. Mirrors adk-python
-// runners.py, which copies the event and sets output=None when
-// node_info.message_as_output.
+// TestRunner_MessageAsOutput_ClearsOutput asserts that for a
+// NodeInfo.MessageAsOutput event (Content holds the model text), the
+// runner yields it with Output cleared and Content kept, so renderers
+// don't surface the text twice. Mirrors adk-python runners.py, which
+// clears output when node_info.message_as_output.
 func TestRunner_MessageAsOutput_ClearsOutput(t *testing.T) {
 	ctx := t.Context()
 	svc := session.InMemoryService()
