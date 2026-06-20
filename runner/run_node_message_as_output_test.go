@@ -82,12 +82,9 @@ func TestRunner_MessageAsOutput_ClearsOutput(t *testing.T) {
 		}
 		sawMessageAsOutput = true
 
-		// Output must be cleared on the yielded event to avoid
-		// rendering the model text twice.
 		if ev.Output != nil {
-			t.Errorf("MessageAsOutput event has Output = %v, want nil (must be cleared)", ev.Output)
+			t.Errorf("MessageAsOutput event Output = %v, want nil; must be cleared to avoid double-rendering the model text", ev.Output)
 		}
-		// Content must survive — clearing Output must not drop the message.
 		if len(ev.LLMResponse.Content.Parts) == 0 {
 			t.Error("MessageAsOutput event lost its Content after Output was cleared")
 		}

@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -69,9 +68,9 @@ func TestFunctionNode_ContentOutputGoesToContent(t *testing.T) {
 		}, nil)
 
 		if ev.Output != nil {
-			t.Errorf("event.Output = %v, want nil (Content must not go to Output)", ev.Output)
+			t.Errorf("event.Output = %v, want nil; Content must not go to Output", ev.Output)
 		}
-		if diff := cmp.Diff(want, ev.Content, cmpopts.IgnoreUnexported(genai.Content{}, genai.Part{})); diff != "" {
+		if diff := cmp.Diff(want, ev.Content); diff != "" {
 			t.Errorf("event.Content mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -83,12 +82,9 @@ func TestFunctionNode_ContentOutputGoesToContent(t *testing.T) {
 		}, nil)
 
 		if ev.Output != nil {
-			t.Errorf("event.Output = %v, want nil (Content must not go to Output)", ev.Output)
+			t.Errorf("event.Output = %v, want nil; Content must not go to Output", ev.Output)
 		}
-		if ev.Content == nil {
-			t.Fatal("event.Content = nil, want the returned Content")
-		}
-		if diff := cmp.Diff(want, ev.Content, cmpopts.IgnoreUnexported(genai.Content{}, genai.Part{})); diff != "" {
+		if diff := cmp.Diff(want, ev.Content); diff != "" {
 			t.Errorf("event.Content mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -106,7 +102,7 @@ func TestFunctionNode_NonContentOutputGoesToOutput(t *testing.T) {
 	}, nil)
 
 	if ev.Content != nil {
-		t.Errorf("event.Content = %v, want nil (non-Content output must not set Content)", ev.Content)
+		t.Errorf("event.Content = %v, want nil; non-Content output must not set Content", ev.Content)
 	}
 	if diff := cmp.Diff(want, ev.Output); diff != "" {
 		t.Errorf("event.Output mismatch (-want +got):\n%s", diff)

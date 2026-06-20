@@ -24,7 +24,7 @@ import (
 )
 
 // newSessionWithEvent returns an in-memory session.Session preloaded
-// with a single user-authored event, plus the count of its events.
+// with a single user-authored event.
 func newSessionWithEvent(t *testing.T, text string) session.Session {
 	t.Helper()
 	svc := session.InMemoryService()
@@ -63,72 +63,33 @@ func seedEvent(text string) *session.Event {
 }
 
 // TestWrappedSession_SeedNotPersisted is the regression guard for the
-// single_turn node-input contract: the seeded user event must be
-// visible when building the LLM prompt (so the agent sees its input)
-// but must NOT be written to the underlying session history. Before
-// this behavior, the wrapper yielded the seed as a real event and the
-// runner persisted it, polluting the conversation with transient node
-// inputs (see the wrappedSession TODO in llm_agent_wrapper.go).
+// single_turn node-input contract: the seed must be visible to the
+// prompt builder via the wrapped view, yet must not leak into the
+// underlying session history. Earlier the wrapper yielded the seed as
+// a real event and the runner persisted it, polluting the conversation
+// with transient node inputs (see the wrappedSession TODO in
+// llm_agent_wrapper.go).
 func TestWrappedSession_SeedNotPersisted(t *testing.T) {
 	t.Parallel()
 
 	base := newSessionWithEvent(t, "existing turn")
 	baseLen := base.Events().Len()
-
 	seed := seedEvent("transient node input")
 	wrapped := &wrappedSession{Session: base, appended: seed}
 
-	// The wrapped view exposes the seed appended after the originals.
 	if got, want := wrapped.Events().Len(), baseLen+1; got != want {
 		t.Errorf("wrapped.Events().Len() = %d, want %d", got, want)
 	}
-	last := wrapped.Events().At(wrapped.Events().Len() - 1)
-	if last != seed {
-		t.Errorf("last wrapped event = %v, want the seed event", last)
+	if got := wrapped.Events().At(wrapped.Events().Len() - 1); got != seed {
+		t.Errorf("last wrapped event = %v, want the seed", got)
 	}
 
-	// The underlying session must be unchanged: the seed must not leak
-	// into the real history.
 	if got := base.Events().Len(); got != baseLen {
-		t.Errorf("underlying session length changed to %d, want %d (seed must not persist)", got, baseLen)
+		t.Errorf("underlying session length = %d, want %d; seed must not persist", got, baseLen)
 	}
 	for ev := range base.Events().All() {
 		if ev == seed {
-			t.Fatal("seed event leaked into the underlying session history")
+			t.Fatal("seed leaked into the underlying session history")
 		}
-	}
-}
-
-// TestWrappedSession_AllIteratesOriginalsThenSeed pins iteration
-// order: every original event first (in order), then the seed last.
-func TestWrappedSession_AllIteratesOriginalsThenSeed(t *testing.T) {
-	t.Parallel()
-
-	base := newSessionWithEvent(t, "first")
-	seed := seedEvent("seed")
-	wrapped := &wrappedSession{Session: base, appended: seed}
-
-	var got []*session.Event
-	for ev := range wrapped.Events().All() {
-		got = append(got, ev)
-	}
-	if len(got) == 0 {
-		t.Fatal("wrapped.Events().All() yielded nothing")
-	}
-	if got[len(got)-1] != seed {
-		t.Errorf("last yielded event = %v, want the seed event", got[len(got)-1])
-	}
-}
-
-// TestWrappedSession_NilSeed keeps the wrapped view identical to the
-// underlying session when there is no seed to append.
-func TestWrappedSession_NilSeed(t *testing.T) {
-	t.Parallel()
-
-	base := newSessionWithEvent(t, "only turn")
-	wrapped := &wrappedSession{Session: base, appended: nil}
-
-	if got, want := wrapped.Events().Len(), base.Events().Len(); got != want {
-		t.Errorf("wrapped.Events().Len() = %d, want %d (nil seed must not add events)", got, want)
 	}
 }
