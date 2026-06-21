@@ -348,3 +348,65 @@ func TestCreateAiplatformpbMetadata(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateAiplatformpbEventActionsIncludesArtifactDelta(t *testing.T) {
+	event := &session.Event{
+		Actions: session.EventActions{
+			StateDelta:    map[string]any{"user:theme": "dark"},
+			ArtifactDelta: map[string]int64{"chart.html": 3, "table.csv": 7},
+		},
+	}
+
+	actions, err := createAiplatformpbEventActions(event)
+	if err != nil {
+		t.Fatalf("createAiplatformpbEventActions() failed: %v", err)
+	}
+	if actions == nil {
+		t.Fatal("createAiplatformpbEventActions() returned nil")
+	}
+	if actions.StateDelta == nil {
+		t.Fatal("actions.StateDelta is nil")
+	}
+	if got, want := actions.StateDelta.AsMap()["user:theme"], "dark"; got != want {
+		t.Errorf("actions.StateDelta[user:theme] = %v, want %v", got, want)
+	}
+	if got, want := actions.ArtifactDelta["chart.html"], int32(3); got != want {
+		t.Errorf("actions.ArtifactDelta[chart.html] = %d, want %d", got, want)
+	}
+	if got, want := actions.ArtifactDelta["table.csv"], int32(7); got != want {
+		t.Errorf("actions.ArtifactDelta[table.csv] = %d, want %d", got, want)
+	}
+}
+
+func TestAiplatformToSessionEventActionsIncludesArtifactDelta(t *testing.T) {
+	stateDelta, err := structpb.NewStruct(map[string]any{"user:theme": "dark"})
+	if err != nil {
+		t.Fatalf("structpb.NewStruct() failed: %v", err)
+	}
+
+	actions := aiplatformToSessionEventActions(&aiplatformpb.EventActions{
+		StateDelta:    stateDelta,
+		ArtifactDelta: map[string]int32{"chart.html": 3, "table.csv": 7},
+	})
+
+	if got, want := actions.StateDelta["user:theme"], "dark"; got != want {
+		t.Errorf("actions.StateDelta[user:theme] = %v, want %v", got, want)
+	}
+	if got, want := actions.ArtifactDelta["chart.html"], int64(3); got != want {
+		t.Errorf("actions.ArtifactDelta[chart.html] = %d, want %d", got, want)
+	}
+	if got, want := actions.ArtifactDelta["table.csv"], int64(7); got != want {
+		t.Errorf("actions.ArtifactDelta[table.csv] = %d, want %d", got, want)
+	}
+}
+
+func TestAiplatformToSessionEventActionsHandlesNil(t *testing.T) {
+	actions := aiplatformToSessionEventActions(nil)
+
+	if actions.StateDelta != nil {
+		t.Errorf("actions.StateDelta = %v, want nil", actions.StateDelta)
+	}
+	if actions.ArtifactDelta != nil {
+		t.Errorf("actions.ArtifactDelta = %v, want nil", actions.ArtifactDelta)
+	}
+}
