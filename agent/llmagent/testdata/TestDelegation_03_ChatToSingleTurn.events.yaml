@@ -7,24 +7,19 @@
   parts:
     - function_call:
         name: translator
-        id: 0kktp956
+        id: 8oyvnqk0
         args:
             request: Translate 'hello' to Spanish
   node_info:
     path: coordinator
-- author: user
-  role: user
-  parts:
-    - text: '{"request":"Translate ''hello'' to Spanish"}'
-  node_info:
-    path: coordinator/translator@1
 - author: translator
   branch: translator@1
   role: model
   parts:
-    - text: "{\n  \"translation\": \"hola\"\n} "
-  output:
-    translation: hola
+    - text: |-
+        {
+          "translation": "hola"
+        }
   node_info:
     path: coordinator/translator@1
     message_as_output: true
@@ -35,7 +30,7 @@
   parts:
     - function_response:
         name: translator
-        id: 0kktp956
+        id: 8oyvnqk0
         response:
             result:
                 translation: hola
@@ -44,7 +39,7 @@
 - author: coordinator
   role: model
   parts:
-    - text: The translation of "hello" in Spanish is "hola".
+    - text: The translation of "hello" into Spanish is "hola".
   node_info:
     path: coordinator
 - author: user
@@ -56,24 +51,16 @@
   parts:
     - function_call:
         name: translator
-        id: tnxrx776
+        id: vplqmufs
         args:
             request: Translate 'hello' to French
   node_info:
     path: coordinator
-- author: user
-  role: user
-  parts:
-    - text: '{"request":"Translate ''hello'' to French"}'
-  node_info:
-    path: coordinator/translator@1
 - author: translator
   branch: translator@1
   role: model
   parts:
     - text: "{\n  \"translation\": \"bonjour\"\n} "
-  output:
-    translation: bonjour
   node_info:
     path: coordinator/translator@1
     message_as_output: true
@@ -84,7 +71,7 @@
   parts:
     - function_response:
         name: translator
-        id: tnxrx776
+        id: vplqmufs
         response:
             result:
                 translation: bonjour
@@ -93,6 +80,6 @@
 - author: coordinator
   role: model
   parts:
-    - text: The translation of "hello" in French is "bonjour".
+    - text: The translation of "hello" into French is "bonjour".
   node_info:
     path: coordinator

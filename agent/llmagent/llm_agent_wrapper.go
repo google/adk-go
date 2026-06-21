@@ -92,12 +92,6 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			ctx = ctx.WithAgentContext(agent.WithSubScheduler(ctx, sub))
 		}
 
-		if seed := PrepareLLMAgentInput(a, ctx, nodeInput); seed != nil {
-			if !yield(seed, nil) {
-				return
-			}
-		}
-
 		// Task/single_turn modes build a per-agent InvocationContext that:
 		//   - rebinds Agent to a (matching adk-python's ic.agent=agent),
 		//   - threads isolation_scope so the content processor
@@ -117,10 +111,14 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			if nodeInput != nil {
 				userContent = nodeInputToContent(nodeInput)
 			}
+			sess := ctx.Session()
+			if seed := PrepareLLMAgentInput(a, ctx, nodeInput); seed != nil {
+				sess = &wrappedSession{Session: sess, appended: seed}
+			}
 			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 				Artifacts:      ctx.Artifacts(),
 				Memory:         ctx.Memory(),
-				Session:        ctx.Session(),
+				Session:        sess,
 				Branch:         ctx.Branch(),
 				IsolationScope: ctx.IsolationScope(),
 				Agent:          a,
@@ -647,4 +645,80 @@ func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Even
 			return
 		}
 	}
+}
+
+// TODO: The current approach of using wrappedSession to inject the user input
+// for single_turn workflow nodes has architectural flaws and should be replaced.
+//
+// Flaws in current approach:
+//  1. Session Pollution: We specifically do NOT want transient workflow node inputs to be
+//     stored as permanent events in the conversation session. However, wrapping the Session
+//     pollutes the session.Session abstraction: any tool, plugin, callback, or telemetry
+//     inspecting ctx.Session() during execution sees synthetic events that do not actually
+//     exist in the underlying session history.
+//  2. Unnecessary Coupling: Faking a session event just to feed a prompt to the LLM couples
+//     node orchestration to session state manipulation.
+//
+// Proper fix:
+// Eliminate wrappedSession and PrepareLLMAgentInput entirely. Since we don't want the node
+// input stored in the session, we should simply rely on InvocationContext.UserContent() (which
+// already carries the rendered node input). The LLM request processing layer
+// (internal/llminternal/contents_processor.go) should directly read ctx.UserContent() and prepend
+// it to the LLMRequest.Contents list for single_turn agents. This keeps the session history
+// pure and correctly decouples workflow node inputs from session state.
+type wrappedSession struct {
+	session.Session
+	appended *session.Event
+}
+
+func (w *wrappedSession) Events() session.Events {
+	if w.Session == nil {
+		return &wrappedEvents{app: w.appended}
+	}
+	return &wrappedEvents{
+		orig: w.Session.Events(),
+		app:  w.appended,
+	}
+}
+
+type wrappedEvents struct {
+	orig session.Events
+	app  *session.Event
+}
+
+func (w *wrappedEvents) All() iter.Seq[*session.Event] {
+	return func(yield func(*session.Event) bool) {
+		if w.orig != nil {
+			for e := range w.orig.All() {
+				if !yield(e) {
+					return
+				}
+			}
+		}
+		if w.app != nil {
+			yield(w.app)
+		}
+	}
+}
+
+func (w *wrappedEvents) Len() int {
+	n := 0
+	if w.orig != nil {
+		n = w.orig.Len()
+	}
+	if w.app != nil {
+		n++
+	}
+	return n
+}
+
+func (w *wrappedEvents) At(i int) *session.Event {
+	n := 0
+	if w.orig != nil {
+		n = w.orig.Len()
+	}
+	if i < n {
+		return w.orig.At(i)
+	}
+	return w.app
 }

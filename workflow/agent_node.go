@@ -50,6 +50,13 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
 	}
 
+	if llmA, ok := a.(llminternal.Agent); ok {
+		state := llminternal.Reveal(llmA)
+		if state.Mode == llminternal.ModeUnset {
+			state.Mode = llminternal.ModeSingleTurn
+		}
+	}
+
 	return &AgentNode{
 		BaseNode: NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
 		agent:    a,
