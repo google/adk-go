@@ -235,8 +235,7 @@ func validateChatModeWiring(edges []Edge) error {
 }
 
 // agentNodeMode returns the LlmAgent mode of node, or ok=false when node
-// is not an AgentNode wrapping an LlmAgent (in which case mode validators
-// skip it).
+// is not an AgentNode wrapping an LlmAgent.
 func agentNodeMode(node Node) (llminternal.Mode, bool) {
 	agentNode, ok := node.(*AgentNode)
 	if !ok {
