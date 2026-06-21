@@ -78,6 +78,9 @@ func validateNodes(edges []Edge) error {
 	if err := validateNoTaskModeGraphNodes(edges); err != nil {
 		return err
 	}
+	if err := validateChatModeWiring(edges); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -199,16 +202,7 @@ func validateNoTaskModeGraphNodes(edges []Edge) error {
 	}
 
 	for node := range allNodes {
-		agentNode, ok := node.(*AgentNode)
-		if !ok {
-			continue
-		}
-		llmA, ok := agentNode.agent.(llminternal.Agent)
-		if !ok || llmA == nil {
-			continue
-		}
-
-		if llminternal.Reveal(llmA).Mode == llminternal.ModeTask {
+		if mode, ok := agentNodeMode(node); ok && mode == llminternal.ModeTask {
 			return fmt.Errorf(
 				"Agent %q has mode='task' and cannot be used as a workflow graph node. Use a chat coordinator with task sub-agents, or "+
 					"dispatch dynamically via RunNode from a function node",
@@ -218,6 +212,41 @@ func validateNoTaskModeGraphNodes(edges []Edge) error {
 	}
 
 	return nil
+}
+
+// validateChatModeWiring rejects a chat-mode LlmAgent that is reached from
+// any node other than Start. A chat agent builds its prompt from the
+// conversation history (session events) and ignores the node input handed
+// down an edge, so feeding it from a predecessor silently drops that
+// predecessor's output. Mirrors adk-python's _validate_chat_agent_wiring.
+func validateChatModeWiring(edges []Edge) error {
+	for _, e := range edges {
+		if e.From == Start {
+			continue
+		}
+		if mode, ok := agentNodeMode(e.To); ok && mode == llminternal.ModeChat {
+			return fmt.Errorf(
+				"Agent %q has mode='chat' and cannot follow node %q: chat agents rely on conversation history and cannot consume a predecessor's node input. Use mode='single_turn', or wire the agent directly from Start",
+				e.To.Name(), e.From.Name(),
+			)
+		}
+	}
+	return nil
+}
+
+// agentNodeMode returns the LlmAgent mode of node, or ok=false when node
+// is not an AgentNode wrapping an LlmAgent (in which case mode validators
+// skip it).
+func agentNodeMode(node Node) (llminternal.Mode, bool) {
+	agentNode, ok := node.(*AgentNode)
+	if !ok {
+		return llminternal.ModeUnset, false
+	}
+	llmA, ok := agentNode.agent.(llminternal.Agent)
+	if !ok || llmA == nil {
+		return llminternal.ModeUnset, false
+	}
+	return llminternal.Reveal(llmA).Mode, true
 }
 
 // validateUniqueEdges checks that there are no duplicate edges in the workflow.
