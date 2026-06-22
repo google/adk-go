@@ -29,7 +29,7 @@ import (
 // original signature and use the wall clock and a random UUID.
 func TestNewEventDefaults(t *testing.T) {
 	before := time.Now()
-	ev := session.NewEvent("inv-1")
+	ev := session.NewEvent(t.Context(), "inv-1")
 	after := time.Now()
 
 	if ev.InvocationID != "inv-1" {
@@ -48,7 +48,7 @@ func TestNewEventUsesProviders(t *testing.T) {
 	ctx := platform.WithTimeProvider(context.Background(), func() time.Time { return fixedTime })
 	ctx = platform.WithUUIDProvider(ctx, func() string { return "fixed-event-id" })
 
-	ev := session.NewEventWithContext(ctx, "inv-1")
+	ev := session.NewEvent(ctx, "inv-1")
 
 	if ev.ID != "fixed-event-id" {
 		t.Errorf("ID = %q, want %q", ev.ID, "fixed-event-id")
@@ -80,8 +80,8 @@ func TestNewEventDeterministicReplay(t *testing.T) {
 
 	run := func(ctx context.Context) []*session.Event {
 		return []*session.Event{
-			session.NewEventWithContext(ctx, "inv"),
-			session.NewEventWithContext(ctx, "inv"),
+			session.NewEvent(ctx, "inv"),
+			session.NewEvent(ctx, "inv"),
 		}
 	}
 

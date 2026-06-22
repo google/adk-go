@@ -63,7 +63,7 @@ func routeByClassification(ctx agent.Context, input any, emit func(*session.Even
 	if category != "question" && category != "exclamation" && category != "statement" {
 		category = "statement"
 	}
-	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
+	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.Routes = []string{category}
 	if err := emit(ev); err != nil {
 		return nil, err
