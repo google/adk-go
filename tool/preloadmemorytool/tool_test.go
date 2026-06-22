@@ -23,12 +23,11 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/agent"
 	icontext "google.golang.org/adk/internal/context"
-	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/preloadmemorytool"
 )
 
@@ -207,7 +206,7 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 	}
 }
 
-func createToolContext(t *testing.T, mem *mockMemory, userContent *genai.Content) tool.Context {
+func createToolContext(t *testing.T, mem *mockMemory, userContent *genai.Content) agent.ToolContext {
 	t.Helper()
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
@@ -215,5 +214,5 @@ func createToolContext(t *testing.T, mem *mockMemory, userContent *genai.Content
 		UserContent: userContent,
 	})
 
-	return toolinternal.NewToolContext(ctx, "", nil, nil)
+	return agent.NewToolContext(ctx, "", nil, nil)
 }

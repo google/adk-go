@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -116,7 +117,7 @@ func testAgent(results []testAgentResult) func(ctx agent.InvocationContext) iter
 }
 
 func makeEvent(id, author, text string) *session.Event {
-	e := session.NewEvent(id)
+	e := session.NewEventWithContext(context.Background(), id)
 	e.Author = author
 	e.LLMResponse.Content = &genai.Content{
 		Parts: []*genai.Part{{Text: text}},

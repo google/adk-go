@@ -228,6 +228,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 				cmpopts.IgnoreUnexported(log.Value{}),
 				cmpopts.IgnoreFields(DebugSpan{}, "StartTime", "EndTime", "TraceID", "SpanID", "ParentSpanID"),
 				cmpopts.IgnoreFields(DebugLog{}, "ObservedTimestamp", "TraceID", "SpanID"),
+				cmpopts.SortSlices(compareDebugSpans),
 				cmpopts.EquateEmpty(),
 			}
 
@@ -365,6 +366,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 				cmpopts.IgnoreUnexported(log.Value{}),
 				cmpopts.IgnoreFields(DebugSpan{}, "StartTime", "EndTime", "ParentSpanID", "TraceID", "SpanID"),
 				cmpopts.IgnoreFields(DebugLog{}, "ObservedTimestamp", "TraceID", "SpanID"),
+				cmpopts.SortSlices(compareDebugSpans),
 				cmpopts.EquateEmpty(),
 			}
 
@@ -471,4 +473,20 @@ func setupWithConfig(t *testing.T, cfg *DebugTelemetryConfig) (*DebugTelemetry, 
 
 func setup(t *testing.T) (*DebugTelemetry, *sdktrace.TracerProvider, *sdklog.LoggerProvider) {
 	return setupWithConfig(t, nil)
+}
+
+func compareDebugSpans(a, b DebugSpan) bool {
+	if a.Name != b.Name {
+		return a.Name < b.Name
+	}
+	if a.ParentSpanID != b.ParentSpanID {
+		return a.ParentSpanID < b.ParentSpanID
+	}
+	if a.Attributes[string(semconv.GenAIConversationIDKey)] != b.Attributes[string(semconv.GenAIConversationIDKey)] {
+		return a.Attributes[string(semconv.GenAIConversationIDKey)] < b.Attributes[string(semconv.GenAIConversationIDKey)]
+	}
+	if a.Attributes[eventIDKey] != b.Attributes[eventIDKey] {
+		return a.Attributes[eventIDKey] < b.Attributes[eventIDKey]
+	}
+	return a.Attributes["genai.operation.name"] < b.Attributes["genai.operation.name"]
 }

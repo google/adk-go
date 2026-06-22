@@ -82,6 +82,16 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 		return nil, err
 	}
 
+	event, err = p.inputRequiredProcessor.process(ctx, event)
+	if err != nil {
+		return nil, fmt.Errorf("input required processing failed: %w", err)
+	}
+
+	parts, err := p.convertParts(ctx, event)
+	if err != nil {
+		return nil, err
+	}
+
 	resp := event.LLMResponse
 	if resp.ErrorCode != "" || resp.ErrorMessage != "" {
 		newErr := errorFromResponse(&resp)
@@ -93,24 +103,18 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 			}
 		}
 
+		// terminal event might add additional keys to its metadata when it's dispatched and these changes should
+		// not be reflected in this event's metadata
 		terminalEventMeta := maps.Clone(eventMeta)
 		terminalEventMeta["error"] = mergedErr.Error()
+
 		p.failedEvent = toTaskFailedUpdateEvent(p.reqCtx, mergedErr, terminalEventMeta)
+		p.failedEvent.Status.Message.Parts = append(p.failedEvent.Status.Message.Parts, parts...)
 	}
 
-	event, err = p.inputRequiredProcessor.process(ctx, event)
-	if err != nil {
-		return nil, fmt.Errorf("input required processing failed: %w", err)
-	}
-
-	parts, err := p.convertParts(ctx, event)
-	if err != nil {
-		return nil, err
-	}
 	if len(parts) == 0 {
 		return nil, nil
 	}
-
 	result, err := p.eventToArtifact.transform(event, parts, eventMeta)
 	if err != nil {
 		return nil, err
@@ -181,12 +185,17 @@ func (p *eventProcessor) convertParts(ctx context.Context, event *session.Event)
 }
 
 func toTaskFailedUpdateEvent(task a2a.TaskInfoProvider, cause error, meta map[string]any) *a2a.TaskStatusUpdateEvent {
-	msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.NewTextPart(cause.Error()))
+	msgPart := a2a.NewTextPart(cause.Error())
+	msgPart.Metadata = map[string]any{metadataIsErrMessageKey: true}
+	msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, task, msgPart)
 	ev := a2a.NewStatusUpdateEvent(task, a2a.TaskStateFailed, msg)
 	ev.Metadata = meta
 	return ev
 }
 
 func errorFromResponse(resp *model.LLMResponse) error {
-	return fmt.Errorf("llm error response: %q", resp.ErrorMessage)
+	if resp.ErrorCode == "" {
+		return fmt.Errorf("llm error response: %q", resp.ErrorMessage)
+	}
+	return fmt.Errorf("llm error response (code %s): %q", resp.ErrorCode, resp.ErrorMessage)
 }
