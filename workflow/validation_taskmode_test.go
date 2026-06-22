@@ -97,3 +97,72 @@ func TestValidateNoTaskModeGraphNodes(t *testing.T) {
 		}
 	})
 }
+
+// A chat-mode agent builds its prompt from conversation history and ignores
+// node input, so adk-python only allows it directly after Start. These tests
+// pin that same wiring rule for Go.
+func TestValidateChatModeWiring(t *testing.T) {
+	t.Parallel()
+
+	newNode := func(t *testing.T, name string, mode llmagent.Mode) workflow.Node {
+		t.Helper()
+		a, err := llmagent.New(llmagent.Config{Name: name, Mode: mode})
+		if err != nil {
+			t.Fatalf("llmagent.New(%q, %q): %v", name, mode, err)
+		}
+		n, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode(%q): %v", name, err)
+		}
+		return n
+	}
+
+	t.Run("rejects chat-mode agent following a non-Start node", func(t *testing.T) {
+		t.Parallel()
+		responder := newNode(t, "responder", llmagent.ModeSingleTurn)
+		coordinator := newNode(t, "coordinator", llmagent.ModeChat)
+		_, err := workflow.New("wf-chat-midgraph", []workflow.Edge{
+			{From: workflow.Start, To: responder},
+			{From: responder, To: coordinator},
+		})
+		if err == nil {
+			t.Fatal("expected error rejecting chat-mode node with a non-Start predecessor, got nil")
+		}
+	})
+
+	t.Run("rejects chat-mode agent with a Start edge plus a non-Start edge", func(t *testing.T) {
+		t.Parallel()
+		responder := newNode(t, "responder", llmagent.ModeSingleTurn)
+		coordinator := newNode(t, "coordinator", llmagent.ModeChat)
+		_, err := workflow.New("wf-chat-mixed-edges", []workflow.Edge{
+			{From: workflow.Start, To: coordinator},
+			{From: workflow.Start, To: responder},
+			{From: responder, To: coordinator},
+		})
+		if err == nil {
+			t.Fatal("expected error: a non-Start edge into a chat node is rejected even when a Start edge also exists, got nil")
+		}
+	})
+
+	t.Run("accepts chat-mode agent directly after Start", func(t *testing.T) {
+		t.Parallel()
+		coordinator := newNode(t, "coordinator", llmagent.ModeChat)
+		if _, err := workflow.New("wf-chat-root", []workflow.Edge{
+			{From: workflow.Start, To: coordinator},
+		}); err != nil {
+			t.Errorf("chat-mode agent after Start should be accepted; got %v", err)
+		}
+	})
+
+	t.Run("allows single_turn agent following a non-Start node", func(t *testing.T) {
+		t.Parallel()
+		first := newNode(t, "first", llmagent.ModeSingleTurn)
+		second := newNode(t, "second", llmagent.ModeSingleTurn)
+		if _, err := workflow.New("wf-single-turn-chain", []workflow.Edge{
+			{From: workflow.Start, To: first},
+			{From: first, To: second},
+		}); err != nil {
+			t.Errorf("single_turn agent mid-graph should be accepted; got %v", err)
+		}
+	})
+}
