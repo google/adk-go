@@ -18,11 +18,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
+	"log"
 	"maps"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/genai"
@@ -123,6 +126,405 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 	}
 }
 
+type activeTask struct {
+	callID string
+	cancel context.CancelFunc
+}
+
+type liveSessionImpl struct {
+	inputCh     chan agent.LiveRequest
+	outputCh    chan eventOrError
+	done        chan struct{}
+	closeOnce   sync.Once
+	audioMgr    *AudioCacheManager
+	mu          sync.Mutex
+	activeTools map[string][]activeTask
+}
+
+func (s *liveSessionImpl) RegisterStreamingTool(toolName, callID string, cancel context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activeTools == nil {
+		s.activeTools = make(map[string][]activeTask)
+	}
+	s.activeTools[toolName] = append(s.activeTools[toolName], activeTask{
+		callID: callID,
+		cancel: cancel,
+	})
+}
+
+func (s *liveSessionImpl) UnregisterStreamingTool(toolName, callID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tasks, exists := s.activeTools[toolName]
+	if !exists {
+		return
+	}
+	for i, task := range tasks {
+		if task.callID == callID {
+			s.activeTools[toolName] = append(tasks[:i], tasks[i+1:]...)
+			break
+		}
+	}
+	if len(s.activeTools[toolName]) == 0 {
+		delete(s.activeTools, toolName)
+	}
+}
+
+func (s *liveSessionImpl) CancelAllStreamingTools(toolName string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tasks, exists := s.activeTools[toolName]
+	if !exists || len(tasks) == 0 {
+		return false
+	}
+	for _, task := range tasks {
+		task.cancel()
+	}
+	delete(s.activeTools, toolName)
+	return true
+}
+
+type eventOrError struct {
+	event *session.Event
+	err   error
+}
+
+func newLiveSessionImpl() *liveSessionImpl {
+	return &liveSessionImpl{
+		inputCh:  make(chan agent.LiveRequest),
+		outputCh: make(chan eventOrError),
+		done:     make(chan struct{}),
+		audioMgr: NewAudioCacheManager(),
+	}
+}
+
+func (s *liveSessionImpl) Send(req agent.LiveRequest) error {
+	select {
+	case s.inputCh <- req:
+		return nil
+	case <-s.done:
+		return io.EOF
+	}
+}
+
+func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		for {
+			select {
+			case res := <-s.outputCh:
+				if !yield(res.event, res.err) {
+					return
+				}
+			case <-s.done:
+				return
+			}
+		}
+	}
+}
+
+func (s *liveSessionImpl) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.done)
+	})
+	return nil
+}
+
+func (s *liveSessionImpl) pushEvent(ev *session.Event) bool {
+	select {
+	case s.outputCh <- eventOrError{event: ev}:
+		return true
+	case <-s.done:
+		return false
+	}
+}
+
+func (s *liveSessionImpl) pushError(err error) bool {
+	select {
+	case s.outputCh <- eventOrError{err: err}:
+		return true
+	case <-s.done:
+		return false
+	}
+}
+
+func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	clientProvider, ok := f.Model.(interface {
+		Client() *genai.Client
+	})
+	if !ok {
+		return nil, nil, fmt.Errorf("model does not support live connection")
+	}
+	client := clientProvider.Client()
+
+	runCfg := runconfig.FromContext(ctx)
+	if runCfg == nil || runCfg.Live == nil {
+		return nil, nil, fmt.Errorf("live run config not found")
+	}
+
+	sess := newLiveSessionImpl()
+
+	go func() {
+		defer func() {
+			_ = sess.Close()
+		}()
+
+		nreq := &model.LLMRequest{
+			Model: f.Model.Name(),
+		}
+		for ev, err := range f.preprocess(ctx, nreq) {
+			if err != nil {
+				sess.pushError(err)
+				return
+			}
+			if ev != nil {
+				if !sess.pushEvent(ev) {
+					return
+				}
+			}
+		}
+
+		liveConnectConfig := &genai.LiveConnectConfig{
+			ResponseModalities:       runCfg.Live.ResponseModalities,
+			SpeechConfig:             runCfg.Live.SpeechConfig,
+			SystemInstruction:        nreq.Config.SystemInstruction,
+			Tools:                    nreq.Config.Tools,
+			SessionResumption:        runCfg.Live.SessionResumption,
+			InputAudioTranscription:  runCfg.Live.InputAudioTranscription,
+			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
+		}
+
+		isResumable := func(err error) bool {
+			if err == nil {
+				return false
+			}
+			if err == io.EOF {
+				return true
+			}
+			errStr := err.Error()
+			return strings.Contains(errStr, "broken pipe") ||
+				strings.Contains(errStr, "connection reset") ||
+				strings.Contains(errStr, "EOF") ||
+				strings.Contains(errStr, "1008") ||
+				strings.Contains(errStr, "GoAway")
+		}
+
+		iCtx, isIContext := ctx.(*icontext.InvocationContext)
+
+		for {
+			if isIContext {
+				handle := iCtx.LiveSessionResumptionHandle()
+				if handle != "" {
+					if liveConnectConfig.SessionResumption == nil {
+						liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
+					}
+					liveConnectConfig.SessionResumption.Handle = handle
+					if googlellm.GetGoogleLLMVariant(f.Model) == genai.BackendVertexAI {
+						liveConnectConfig.SessionResumption.Transparent = true
+					}
+				}
+			}
+
+			connCtx, cancelConn := context.WithCancel(ctx)
+
+			if liveConnectConfig.SessionResumption != nil {
+				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle)
+			}
+			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
+			if err != nil {
+				cancelConn()
+				log.Printf("failed to connect live session: %v\n", err)
+				sess.pushError(fmt.Errorf("failed to connect live session: %w", err))
+				return
+			}
+
+			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name(), googlellm.GetGoogleLLMVariant(f.Model))
+
+			cleanup := func() {
+				cancelConn()
+				_ = liveConn.Close()
+			}
+
+			eventsChan := make(chan *session.Event)
+			errChan := make(chan error)
+
+			// Send preprocessed content directly to model if any exists after early preprocessing
+			if len(nreq.Contents) > 0 {
+				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
+					log.Printf("failed to send history: %v\n", err)
+					sess.pushError(err)
+					return
+				}
+			}
+
+			// Reading from model loop
+			go func() {
+				for {
+					resp, err := liveConn.Recv(connCtx)
+					if err != nil {
+						errChan <- err
+						return
+					}
+					if resp != nil {
+						if resp.SessionResumptionHandle != "" {
+							if isIContext {
+								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
+								iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
+							}
+						}
+						if runCfg.Live.SaveLiveBlob && resp.Content != nil {
+							for _, part := range resp.Content.Parts {
+								if part.InlineData != nil {
+									sess.audioMgr.CacheOutput(part.InlineData.Data, part.InlineData.MIMEType)
+								}
+							}
+						}
+						ev := session.NewEvent(ctx.InvocationID())
+						ev.Author = ctx.Agent().Name()
+						ev.LLMResponse = *resp
+						select {
+						case eventsChan <- ev:
+						case <-connCtx.Done():
+							return
+						}
+					}
+				}
+			}()
+
+			// Sending to model loop
+			go func() {
+				for {
+					select {
+					case <-connCtx.Done():
+						return
+					case req, ok := <-sess.inputCh:
+						if !ok {
+							return
+						}
+						if req.Content != nil {
+							if err := liveConn.SendContent(connCtx, req.Content); err != nil {
+								errChan <- err
+								return
+							}
+						}
+						if req.RealtimeInput != nil {
+							if blob, ok := req.RealtimeInput.(*genai.Blob); ok {
+								sess.audioMgr.CacheInput(blob.Data, blob.MIMEType)
+							}
+							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
+								errChan <- err
+								return
+							}
+						}
+					}
+				}
+			}()
+
+			reconnect := false
+			for !reconnect {
+				select {
+				case ev := <-eventsChan:
+					if !sess.pushEvent(ev) {
+						cleanup()
+						return
+					}
+					// Flush caches if needed
+					if runCfg.Live.SaveLiveBlob {
+						var flushUser, flushModel bool
+						if ev.LLMResponse.Interrupted {
+							flushModel = true
+						}
+						if ev.LLMResponse.TurnComplete {
+							flushUser = true
+							flushModel = true
+						}
+						if flushUser || flushModel {
+							flushedEvents, err := sess.audioMgr.FlushCaches(ctx, flushUser, flushModel)
+							if err != nil {
+								sess.pushError(err)
+								cleanup()
+								return
+							}
+							for _, fev := range flushedEvents {
+								if !sess.pushEvent(fev) {
+									cleanup()
+									return
+								}
+							}
+						}
+					}
+					// Handle function calls if present in the event
+					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
+					if len(fnCalls) > 0 {
+						tools := make(map[string]tool.Tool)
+						for _, t := range f.Tools {
+							tools[t.Name()] = t
+						}
+						respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil, sess)
+						if err != nil {
+							sess.pushError(err)
+							cleanup()
+							return
+						}
+						if respEv != nil {
+							if !sess.pushEvent(respEv) {
+								cleanup()
+								return
+							}
+							// Check if task_completed was invoked.
+							var isTaskCompleted bool
+							if respEv.LLMResponse.Content != nil {
+								for _, part := range respEv.LLMResponse.Content.Parts {
+									if part.FunctionResponse != nil && part.FunctionResponse.Name == "task_completed" {
+										isTaskCompleted = true
+										break
+									}
+								}
+							}
+							if isTaskCompleted {
+								time.Sleep(100 * time.Millisecond)
+								cleanup()
+								return
+							}
+							// Send function response back to model
+							if err := liveConn.SendContent(connCtx, respEv.LLMResponse.Content); err != nil {
+								sess.pushError(err)
+								cleanup()
+								return
+							}
+						}
+					}
+				case err := <-errChan:
+					if isResumable(err) {
+						log.Printf("Connection error, attempting to resume: %v\n", err)
+						reconnect = true
+						break // Break the select
+					}
+					sess.pushError(err)
+					cleanup()
+					return
+				case <-ctx.Done():
+					sess.pushError(ctx.Err())
+					cleanup()
+					return
+				}
+				if reconnect {
+					break // Break the for loop
+				}
+			}
+
+			// Cleanup before reconnecting
+			cleanup()
+
+			if !reconnect {
+				break
+			}
+		}
+	}()
+
+	return sess, sess.recvIter(), nil
+}
+
 func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if f.Model == nil {
@@ -177,6 +579,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 					if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
 						return
 					}
+					continue
 				}
 				tools[k] = tool
 			}
@@ -193,7 +596,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 			// Handle function calls.
 
-			ev, err := f.handleFunctionCalls(ctx, tools, resp.LLMResponse, nil)
+			ev, err := f.handleFunctionCalls(ctx, tools, resp.LLMResponse, nil, nil)
 			if err != nil {
 				yield(nil, err)
 				return
@@ -578,11 +981,32 @@ Suggested fixes:
   - Check for typos in function name`, toolName, joinedTools)
 }
 
+type cancelledToolContext struct {
+	tool.Context
+	cancelCtx context.Context
+}
+
+func (c *cancelledToolContext) Done() <-chan struct{} {
+	return c.cancelCtx.Done()
+}
+
+func (c *cancelledToolContext) Err() error {
+	return c.cancelCtx.Err()
+}
+
+func (c *cancelledToolContext) Deadline() (deadline time.Time, ok bool) {
+	return c.cancelCtx.Deadline()
+}
+
+func (c *cancelledToolContext) Value(key any) any {
+	return c.cancelCtx.Value(key)
+}
+
 // handleFunctionCalls calls the functions and returns the function response event.
 //
 // TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
-func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation) (mergedEvent *session.Event, err error) {
+func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation, liveSess agent.LiveSession) (mergedEvent *session.Event, err error) {
 	fnCalls := utils.FunctionCalls(resp.Content)
 	toolNames := slices.Collect(maps.Keys(toolsDict))
 
@@ -617,21 +1041,89 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			toolCtx := toolinternal.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
 
 			var result map[string]any
-			curTool, found := toolsDict[fnCall.Name]
-			if !found {
-				err := newToolNotFoundError(fnCall.Name, toolNames)
-				result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
-				if err != nil {
-					result = map[string]any{"error": err.Error()}
+			var curTool tool.Tool
+			if fnCall.Name == "stop_streaming" {
+				funcToStop, _ := fnCall.Args["function_name"].(string)
+				var status string
+				if impl, ok := liveSess.(*liveSessionImpl); ok && impl.CancelAllStreamingTools(funcToStop) {
+					status = fmt.Sprintf("Successfully stopped all running instances of %s", funcToStop)
+				} else {
+					status = fmt.Sprintf("No active streaming function named %s found", funcToStop)
 				}
-			} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
-				err := newToolNotFoundError(fnCall.Name, toolNames)
-				result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
-				if err != nil {
-					result = map[string]any{"error": err.Error()}
-				}
+				result = map[string]any{"status": status}
 			} else {
-				result = f.callTool(toolCtx, funcTool, fnCall.Args)
+				var found bool
+				curTool, found = toolsDict[fnCall.Name]
+				if !found {
+					err := newToolNotFoundError(fnCall.Name, toolNames)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+					if err != nil {
+						result = map[string]any{"error": err.Error()}
+					}
+				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
+					if liveSess != nil {
+						result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
+						cancelCtx, cancel := context.WithCancel(toolCtx)
+						cancelToolCtx := &cancelledToolContext{
+							Context:   toolCtx,
+							cancelCtx: cancelCtx,
+						}
+						if impl, ok := liveSess.(*liveSessionImpl); ok {
+							impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
+						}
+						go func() {
+							defer func() {
+								if impl, ok := liveSess.(*liveSessionImpl); ok {
+									impl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
+								}
+								cancel()
+							}()
+							for chunk, err := range streamTool.RunStream(cancelToolCtx, fnCall.Args) {
+								select {
+								case <-cancelCtx.Done():
+									return
+								default:
+								}
+								if err != nil {
+									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err)
+									return
+								}
+								updatedContent := &genai.Content{
+									Role: "user",
+									Parts: []*genai.Part{
+										{
+											Text: fmt.Sprintf("Function %s returned: %s", streamTool.Name(), chunk),
+										},
+									},
+								}
+								if err := liveSess.Send(agent.LiveRequest{Content: updatedContent}); err != nil {
+									fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err)
+									return
+								}
+							}
+						}()
+					} else {
+						var sb strings.Builder
+						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
+							if err != nil {
+								result = map[string]any{"error": err.Error()}
+								break
+							}
+							sb.WriteString(chunk)
+						}
+						if result == nil {
+							result = map[string]any{"result": sb.String()}
+						}
+					}
+				} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
+					err := newToolNotFoundError(fnCall.Name, toolNames)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+					if err != nil {
+						result = map[string]any{"error": err.Error()}
+					}
+				} else {
+					result = f.callTool(toolCtx, funcTool, fnCall.Args)
+				}
 			}
 
 			// TODO: handle long-running tool.

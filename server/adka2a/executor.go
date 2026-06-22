@@ -33,6 +33,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/runner"
 	v2 "google.golang.org/adk/server/adka2a/v2"
 	"google.golang.org/adk/session"
@@ -69,7 +70,7 @@ type Runner = v2.Runner
 
 // RunnerProvider is a [Runner] factory function. The provided plugin must be installed in the returned [Runner] for
 // callbacks taking [ExecutorContext] to work correctly.
-type RunnerProvider = v2.RunnerProvider
+type RunnerProvider func(ctx context.Context, reqCtx *a2asrv.RequestContext, plugin *plugin.Plugin) (RunnerConfig, Runner, error)
 
 const (
 	// OutputArtifactPerRun produces a single artifact per [runner.Runner.Run].
@@ -83,14 +84,7 @@ const (
 
 // RunnerConfig is part of the runner configuration executor code depends on.
 // Custom [RunnerProvider] needs to return it back to callers.
-type RunnerConfig struct {
-	// AppName is the name of the application used in [session.Service] keys and A2A event metadata.
-	AppName string
-	// Agent is the root agent.
-	Agent agent.Agent
-	// SessionService is the session service to use.
-	SessionService session.Service
-}
+type RunnerConfig = v2.RunnerConfig
 
 // ExecutorConfig allows to configure Executor.
 type ExecutorConfig struct {
@@ -146,10 +140,15 @@ type Executor struct {
 // NewExecutor creates an initialized [Executor] instance.
 func NewExecutor(config ExecutorConfig) *Executor {
 	v1Config := v2.ExecutorConfig{
-		RunnerConfig:   config.RunnerConfig,
-		RunnerProvider: config.RunnerProvider,
-		RunConfig:      config.RunConfig,
-		OutputMode:     v2.OutputMode(config.OutputMode),
+		RunnerConfig: config.RunnerConfig,
+		RunConfig:    config.RunConfig,
+		OutputMode:   v2.OutputMode(config.OutputMode),
+	}
+
+	if config.RunnerProvider != nil {
+		v1Config.RunnerProvider = func(ctx context.Context, execCtx *a2asrvv2.ExecutorContext, plugin *plugin.Plugin) (RunnerConfig, Runner, error) {
+			return config.RunnerProvider(ctx, toRequestContext(execCtx), plugin)
+		}
 	}
 
 	if config.BeforeExecuteCallback != nil {
@@ -254,6 +253,11 @@ func (e *Executor) Execute(ctx context.Context, reqCtx *a2asrv.RequestContext, q
 		return err
 	}
 
+	ctx, callCtx := a2asrvv2.NewCallContext(ctx, execCtx.ServiceParams)
+	if execCtx.User.Authenticated {
+		callCtx.User = a2asrvv2.NewAuthenticatedUser(execCtx.User.Name, execCtx.User.Attributes)
+	}
+
 	for event, err := range e.impl.Execute(ctx, execCtx) {
 		if err != nil {
 			return err
@@ -340,7 +344,7 @@ func toRequestContext(ctx *a2asrvv2.ExecutorContext) *a2asrv.RequestContext {
 }
 
 func toExecutorContext(ctx context.Context, reqCtx *a2asrv.RequestContext) (*a2asrvv2.ExecutorContext, error) {
-	var user *a2asrvv2.User
+	user := &a2asrvv2.User{Authenticated: false}
 	reqMeta := make(map[string][]string)
 	if callCtx, ok := a2asrv.CallContextFrom(ctx); ok {
 		user = &a2asrvv2.User{Name: callCtx.User.Name(), Authenticated: callCtx.User.Authenticated()}
