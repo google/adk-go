@@ -32,8 +32,8 @@ import (
 	"google.golang.org/adk/server/adka2a/v2"
 )
 
-// compatApiPath is a suffix used to build an A2A invocation URL for 0.3
-const compatApiPath = "/a2a/invoke"
+// compatAPIPath is a suffix used to build an A2A invocation URL for 0.3
+const compatAPIPath = "/a2a/invoke"
 
 // apiPath is a suffix used to build an A2A invocation URL for 1.0
 const apiPath = "/a2a/v1/invoke"
@@ -83,7 +83,7 @@ func (a *a2aLauncher) Parse(args []string) ([]string, error) {
 
 // SetupSubrouters implements the web.Sublauncher interface. It adds A2A paths to the main router.
 func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Config) error {
-	publicCompatURL, err := url.JoinPath(a.config.agentURL, compatApiPath)
+	publicCompatURL, err := url.JoinPath(a.config.agentURL, compatAPIPath)
 	if err != nil {
 		return err
 	}
@@ -132,7 +132,7 @@ func (a *a2aLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 	reqHandler := a2asrv.NewHandler(executor, config.A2AOptions...)
 
 	router.Handle(apiPath, a2asrv.NewJSONRPCHandler(reqHandler))
-	router.Handle(compatApiPath, a2av0.NewJSONRPCHandler(reqHandler))
+	router.Handle(compatAPIPath, a2av0.NewJSONRPCHandler(reqHandler))
 
 	return nil
 }

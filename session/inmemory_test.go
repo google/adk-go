@@ -23,7 +23,7 @@ import (
 
 	"google.golang.org/adk/platform"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/session/session_test"
+	"google.golang.org/adk/session/sessiontestsuite"
 )
 
 func Test_inMemoryService_CreateUsesProviders(t *testing.T) {
@@ -45,8 +45,8 @@ func Test_inMemoryService_CreateUsesProviders(t *testing.T) {
 }
 
 func Test_inMemoryService(t *testing.T) {
-	opts := session_test.SuiteOptions{SupportsUserProvidedSessionID: true} // InMemory supports custom IDs
-	session_test.RunServiceTests(t, opts, func(t *testing.T) session.Service {
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true} // InMemory supports custom IDs
+	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return session.InMemoryService()
 	})
 }

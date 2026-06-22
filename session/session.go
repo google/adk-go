@@ -20,6 +20,8 @@ import (
 	"iter"
 	"time"
 
+	"github.com/google/uuid"
+
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/platform"
 	"google.golang.org/adk/tool/toolconfirmation"
@@ -136,7 +138,12 @@ func (e *Event) IsFinalResponse() bool {
 // [platform.WithUUIDProvider]) are honored. NewEvent always uses the wall clock
 // and a random UUID.
 func NewEvent(invocationID string) *Event {
-	return NewEventWithContext(context.Background(), invocationID)
+	return &Event{
+		ID:           uuid.NewString(),
+		InvocationID: invocationID,
+		Timestamp:    time.Now(),
+		Actions:      EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
+	}
 }
 
 // NewEventWithContext creates a new event defining now as the timestamp.
