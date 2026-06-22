@@ -561,27 +561,6 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		return ev
 	}
 
-	// For nested workflow terminal node outputs (MessageAsOutput=true), bypass synthetic "For context:"
-	// attribution preambles when the event author matches the node name. This promotes sub-workflow
-	// results directly to clean user turns, maintaining parity with Python reference recordings.
-	if ev.NodeInfo != nil && ev.NodeInfo.MessageAsOutput && len(ev.NodeInfo.OutputFor) > 0 {
-		segs := strings.Split(ev.NodeInfo.Path, "/")
-		leaf := segs[len(segs)-1]
-		if idx := strings.IndexByte(leaf, '@'); idx >= 0 {
-			leaf = leaf[:idx]
-		}
-		if ev.Author == "" || ev.Author == leaf {
-			converted := clone(content)
-			converted.Role = "user"
-			return &session.Event{
-				Timestamp:   ev.Timestamp,
-				Author:      "user",
-				LLMResponse: model.LLMResponse{Content: converted},
-				Branch:      ev.Branch,
-			}
-		}
-	}
-
 	converted := &genai.Content{
 		Role:  "user",
 		Parts: []*genai.Part{{Text: "For context:"}},
