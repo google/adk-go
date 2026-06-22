@@ -46,7 +46,13 @@ type dynamicSubScheduler struct {
 	// childPath ("<parentPath>/<name>@<runID>"). Failures and HITL
 	// interrupts are not cached.
 	resultByPath map[string]any
-	delegation   outputDelegation
+	// inflightByPath tracks childPaths whose child is currently
+	// executing, so concurrent callers with the same WithRunID wait
+	// for the leader instead of double-executing (single-flight). The
+	// channel is closed when the leader finishes (success, failure, or
+	// interrupt); waiters then re-check the cache.
+	inflightByPath map[string]chan struct{}
+	delegation     outputDelegation
 }
 
 // ResolveByRunID implements [agent.DynamicSubScheduler].
@@ -139,6 +145,7 @@ func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func
 		outputForAncestors: ancestors,
 		runCountByChild:    map[string]int{},
 		resultByPath:       map[string]any{},
+		inflightByPath:     map[string]chan struct{}{},
 	}
 	s.rehydrateCache()
 	return s
@@ -286,12 +293,18 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		return nil, err
 	}
 
-	// Cached (WithRunID replay): the child already ran, so publish its
-	// output for the delegation immediately.
-	if cached, ok := s.lookupCachedOutput(childPath); ok {
+	// Single-flight: return the cached output if the child already ran
+	// (WithRunID replay), otherwise become the leader for this childPath.
+	// acquireRunSlot blocks while another caller holds the slot, so on
+	// return we either have a cache hit or own the slot.
+	if cached, ok := s.acquireRunSlot(childPath); ok {
 		s.commitDelegation(childPath, cached)
 		return cached, nil
 	}
+	// We own the slot: signal waiters when this activation ends, on every
+	// exit path. Success caches the output first; failure/interrupt does
+	// not, so a waiter then re-runs the child itself.
+	defer s.releaseRunSlot(childPath)
 
 	childBranch := deriveChildBranch(s.parentCtx.Branch(), name, runID, opts.useSubBranch, opts.overrideBranch)
 	// A delegating child extends the chain: its own delegating children
@@ -481,6 +494,44 @@ func (s *dynamicSubScheduler) pause(name, childPath, runID string, cause error) 
 func waitsForOutput(node Node) bool {
 	w := node.Config().WaitForOutput
 	return w != nil && *w
+}
+
+// acquireRunSlot is the single-flight gate for childPath. It returns a
+// cached output (hit == true) if one exists, otherwise it claims the
+// in-flight slot and returns (nil, false); the caller then runs the child
+// and must call releaseRunSlot. If another caller already holds the slot,
+// it blocks until that leader releases it, then re-checks — so on return
+// the caller either has a cache hit or owns the slot.
+func (s *dynamicSubScheduler) acquireRunSlot(childPath string) (any, bool) {
+	for {
+		s.mu.Lock()
+		if out, ok := s.resultByPath[childPath]; ok {
+			s.mu.Unlock()
+			return out, true
+		}
+		if done, inflight := s.inflightByPath[childPath]; inflight {
+			s.mu.Unlock()
+			<-done // wait for the leader, then re-check the cache
+			continue
+		}
+		s.inflightByPath[childPath] = make(chan struct{})
+		s.mu.Unlock()
+		return nil, false
+	}
+}
+
+// releaseRunSlot clears the in-flight slot for childPath and wakes any
+// waiters. Waiters re-check the cache: a success cached the output (they
+// reuse it); a failure/interrupt did not (one of them becomes the next
+// leader and re-runs the child).
+func (s *dynamicSubScheduler) releaseRunSlot(childPath string) {
+	s.mu.Lock()
+	done := s.inflightByPath[childPath]
+	delete(s.inflightByPath, childPath)
+	s.mu.Unlock()
+	if done != nil {
+		close(done)
+	}
 }
 
 func (s *dynamicSubScheduler) lookupCachedOutput(childPath string) (any, bool) {

@@ -21,7 +21,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
@@ -396,6 +398,61 @@ func TestRunNode_WithRunID_IdempotentReplay(t *testing.T) {
 	}
 	if got := child.runCount(); got != 1 {
 		t.Errorf("child.Run invocations = %d, want 1", got)
+	}
+}
+
+// concurrentRunCountNode counts Run invocations and briefly waits so two
+// concurrent callers are guaranteed to overlap inside Run — widening the
+// check-then-act window. The wait is bounded so a correct single execution
+// never hangs.
+type concurrentRunCountNode struct {
+	BaseNode
+	runs atomic.Int64
+}
+
+func (n *concurrentRunCountNode) Run(_ agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		n.runs.Add(1)
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for n.runs.Load() < 2 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		// Emit nothing: keeps the parent yield single-use so this isolates
+		// the cache single-flight from the concurrent-yield issue.
+	}
+}
+
+// TestRunNode_WithRunID_ConcurrentSingleFlight guards M1: two concurrent
+// RunNode calls sharing one WithRunID resolve the same childPath and must
+// execute the child exactly once. Pre-fix, both miss the cache and run it.
+func TestRunNode_WithRunID_ConcurrentSingleFlight(t *testing.T) {
+	child := &concurrentRunCountNode{BaseNode: NewBaseNode("dupchild", "", NodeConfig{})}
+
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(2)
+			for i := 0; i < 2; i++ {
+				go func() {
+					defer wg.Done()
+					<-start
+					_, _ = RunNode[string](ctx, child, "x", WithRunID("dup"))
+				}()
+			}
+			close(start)
+			wg.Wait()
+			return "", nil
+		},
+		NodeConfig{},
+	)
+
+	if _, err := drainDynamicWithErr(t, n, ""); err != nil {
+		t.Fatalf("unexpected Run error: %v", err)
+	}
+	if got := child.runs.Load(); got != 1 {
+		t.Errorf("child ran %d times, want exactly 1 (concurrent same WithRunID must single-flight)", got)
 	}
 }
 
