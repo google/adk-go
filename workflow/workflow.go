@@ -105,8 +105,8 @@ func (r MultiRoute[T]) Matches(event *session.Event) bool {
 	return false
 }
 
-// DefaultRoute is a special route that matches when no other concrete routes match.
-var Default = &defaultRoute{}
+// Default is a special route that matches when no other concrete routes match.
+var Default Route = &defaultRoute{}
 
 type defaultRoute struct{}
 
