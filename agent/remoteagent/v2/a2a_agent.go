@@ -295,9 +295,31 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return
 		}
 
-		for a2aEvent, a2aErr := range sender.SendStreamingMessage(ctx, req) {
+		// Use a separate context for reading the stream so we can continue reading
+		// briefly after parent context cancellation to learn the remote task ID.
+		streamCtx, cancelStream := context.WithCancel(context.WithoutCancel(ctx))
+		defer cancelStream()
+
+		// Monitor parent context cancellation
+		gracePeriodDone := make(chan struct{})
+		go func() {
+			<-ctx.Done()
+			// Give the stream a brief grace period to deliver the first event containing the task ID
+			time.Sleep(100 * time.Millisecond)
+			close(gracePeriodDone)
+			cancelStream()
+		}()
+
+		for a2aEvent, a2aErr := range sender.SendStreamingMessage(streamCtx, req) {
 			if !processEvent(a2aEvent, a2aErr) {
+				cancelStream()
 				return
+			}
+			// If parent context was cancelled and we got the first event, we can stop
+			select {
+			case <-gracePeriodDone:
+				return
+			default:
 			}
 		}
 	}
