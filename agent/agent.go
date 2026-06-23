@@ -171,6 +171,10 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
 
+		// create NodeContext based on spanCtx and ctx
+		// case 1: ctx is Context
+		// case 2: ctx is InvocationContext and is not Context
+
 		ic := &invocationContext{
 			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
@@ -185,7 +189,14 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			runConfig:      ctx.RunConfig(),
 			endInvocation:  ctx.Ended(),
 		}
-		nodeCtx := NewNodeContext(ic, nil)
+
+		var nodeCtx Context
+		if parentCC, ok := ctx.(Context); ok {
+			nc := NewNodeContext(ic, nil)
+			nodeCtx = NewDynamicNodeContext(nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
+		} else {
+			nodeCtx = NewNodeContext(ic, nil)
+		}
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
 		if event != nil || err != nil {
@@ -194,24 +205,24 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			}
 		}
 
-		if ic.Ended() {
+		if nodeCtx.Ended() {
 			return
 		}
 
 		for event, err := range a.run(nodeCtx) {
 			if event != nil && event.Author == "" {
-				event.Author = getAuthorForEvent(ic, event)
+				event.Author = getAuthorForEvent(nodeCtx, event)
 			}
 			if !yield(event, err) {
 				return
 			}
 		}
 
-		if ic.Ended() {
+		if nodeCtx.Ended() {
 			return
 		}
 
-		event, err = runAfterAgentCallbacks(ic)
+		event, err = runAfterAgentCallbacks(nodeCtx)
 		if event != nil || err != nil {
 			yield(event, err)
 		}
@@ -238,7 +249,7 @@ func (a *agent) FindSubAgent(name string) Agent {
 	return nil
 }
 
-func getAuthorForEvent(ctx InvocationContext, event *session.Event) string {
+func getAuthorForEvent(ctx Context, event *session.Event) string {
 	if event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
 		return genai.RoleUser
 	}

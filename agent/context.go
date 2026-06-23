@@ -232,15 +232,21 @@ type Context interface {
 	// resumeInputs, embedded InvocationContext) are preserved.
 	WithBranch(branch string) Context
 
+	// SubScheduler is non-nil only when this context belongs to a
+	// dynamic-node activation; RunNode uses it to schedule children.
 	SubScheduler() DynamicSubScheduler
 
-	InvocationContext() InvocationContext
-
-	SetInvocationContext(InvocationContext)
-
+	// WithAgentContext creates a new context as a shallow copy setting the internal contexts to ctx.
 	WithAgentContext(ctx context.Context) Context
+
+	// WithAgentTimeout creates a new context as a shallow copy, adding timeout to the top of the underlying context.Context.
 	WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc)
+
+	// WithAgentCancel creates a new context as a shallow copy, adding cancellation to the top of the underlying context.Context.
 	WithAgentCancel() (Context, context.CancelFunc)
 
+	// OutputForAncestors are the delegating-ancestor paths carried
+	// into this activation when it runs as a WithUseAsOutput child;
+	// its dynamic sub-scheduler reads them to stamp OutputFor.
 	OutputForAncestors() []string
 }

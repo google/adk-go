@@ -195,7 +195,7 @@ func answeredOpenInterrupts(sess session.Session) map[string]bool {
 // value chain — letting a tool inside the agent (e.g. SingleTurnTool)
 // recover it via RunNode.
 func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Content) agent.InvocationContext {
-	agentCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:          ctx.Artifacts(),
 		Memory:             ctx.Memory(),
 		Session:            ctx.Session(),
@@ -208,10 +208,10 @@ func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Conten
 		Path:               ctx.Path(),
 		OutputForAncestors: ctx.OutputForAncestors(),
 	})
-	if sub := ctx.SubScheduler(); sub != nil {
-		agentCtx = agentCtx.WithContext(agent.WithSubScheduler(agentCtx, sub))
-	}
-	return agentCtx
+	// TODO(kdroste): copy original SubScheduler??
+	nc := agent.NewNodeContext(ic, nil)
+	dnc := agent.NewDynamicNodeContext(nc, "", "", ctx.SubScheduler(), nil)
+	return dnc
 }
 
 // inputToUserContent converts a node input value into a user Content for

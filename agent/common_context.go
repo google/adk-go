@@ -46,7 +46,34 @@ func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Conte
 	return c
 }
 
+func NewContextForAgent(ctx, ic InvocationContext) InvocationContext {
+	if ac, ok := ctx.(Context); ok {
+		// copy all, including SubSchedulers etc
+		return &commonContext{
+			Context:            ac,
+			invocationContext:  ic,
+			path:               ac.Path(),
+			runID:              ac.RunID(),
+			subScheduler:       ac.SubScheduler(),
+			outputForAncestors: ac.OutputForAncestors(),
+			actions:            ac.Actions(),
+			artifacts:          ac.Artifacts(),
+			functionCallID:     ac.FunctionCallID(),
+			toolConfirmation:   ac.ToolConfirmation(),
+		}
+	}
+	return ic
+}
+
 func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubScheduler, outputForAncestors []string) Context {
+	// NewDynamicNodeContext wraps parent for either a dynamic-node
+	// activation or one of its children, attaching path, runID, and the
+	// sub-scheduler RunNode reaches from the orchestrator body. Children
+	// pass the sub-scheduler's counter (or WithRunID) value as runID; a
+	// dynamic node's own activation passes runID="" — it is not itself a
+	// sub-scheduler child. Child inherits resumeInputs so HITL responses
+	// reach dynamic children.
+
 	var inherited map[string]any
 	if p, ok := parent.(*commonContext); ok {
 		inherited = p.resumeInputs
@@ -129,7 +156,20 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 	res.toolConfirmation = confirmation
 	res.artifacts = &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions}
 
-	return &res
+	wrapper := &toolContextWrapper{
+		context: &res,
+	}
+
+	return wrapper
+}
+
+func NewCleanToolContext(ctx Context, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) (Context, error) {
+	c, ok := ctx.(*commonContext)
+	if !ok {
+		return nil, fmt.Errorf("Context is not commonContext, but %T", ctx)
+	}
+	res := c.newCleanToolContext(functionCallID, actions, confirmation)
+	return res, nil
 }
 
 func prepareEventActions(actions *session.EventActions) *session.EventActions {
@@ -146,11 +186,8 @@ func prepareEventActions(actions *session.EventActions) *session.EventActions {
 	return actions
 }
 
-// commonContext is the single concrete implementation of CallbackContext
-// (and, when constructed via NewToolContext, of ToolContext as well). The
-// tool-specific methods (FunctionCallID, Actions, SearchMemory,
-// ToolConfirmation, RequestConfirmation) are always present on the concrete
-// type; they are only meaningful when the context is used as a ToolContext.
+// commonContext is the single concrete implementation of Context for static and dynamic Nodes
+// Callbacks and Tools
 type commonContext struct {
 	context.Context
 	invocationContext InvocationContext
@@ -181,19 +218,6 @@ type commonContext struct {
 	outputForAncestors []string
 }
 
-// subSchedulerKey keys the sub-scheduler in the embedded context value
-// chain, so it survives re-wrapping that drops the struct field.
-type subSchedulerKey struct{}
-
-// WithSubScheduler stashes sub in ctx's value chain for SubScheduler()
-// to recover after re-wrapping. Returns ctx unchanged if sub is nil.
-func WithSubScheduler(ctx context.Context, sub DynamicSubScheduler) context.Context {
-	if sub == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, subSchedulerKey{}, sub)
-}
-
 // SubScheduler returns the sub-scheduler RunNode uses to schedule
 // children, or nil outside a dynamic-node activation. The struct field
 // is the fast path for a freshly built dynamic-node context (and takes
@@ -203,10 +227,25 @@ func (c *commonContext) SubScheduler() DynamicSubScheduler {
 	if c.subScheduler != nil {
 		return c.subScheduler
 	}
-	if sub, ok := c.Value(subSchedulerKey{}).(DynamicSubScheduler); ok {
-		return sub
+	if cc, ok := c.Context.(interface{ SubScheduler() DynamicSubScheduler }); ok {
+		return cc.SubScheduler()
 	}
 	return nil
+}
+
+func (c *commonContext) newCleanToolContext(functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
+	ic := &invocationContext{
+		session:      c.Session(),
+		invocationID: c.InvocationID(),
+	}
+	res := &commonContext{
+		invocationContext: ic,
+		actions:           actions,
+		functionCallID:    functionCallID,
+		toolConfirmation:  confirmation,
+		subScheduler:      c.subScheduler,
+	}
+	return res
 }
 
 // Path implements [Context].
@@ -322,18 +361,9 @@ func (c *commonContext) Session() session.Session {
 // WithContext implements [InvocationContext].
 func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
 	return c.WithAgentContext(ctx)
-	// //panic("Should not be used")
-	// newCtx := c.invocationContext.WithContext(ctx)
-	// return &commonContext{
-	// 	Context:           newCtx,
-	// 	invocationContext: newCtx,
-	// 	artifacts:         c.artifacts,
-	// 	actions:           c.actions,
-	// 	functionCallID:    c.functionCallID,
-	// 	toolConfirmation:  c.toolConfirmation,
-	// }
 }
 
+// WithAgentTimeout creates a new context as a shallow copy, adding timeout to the top of the underlying context.Context.
 func (c *commonContext) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
 	// copy & modify
 	res := *c
@@ -342,6 +372,7 @@ func (c *commonContext) WithAgentTimeout(timeout time.Duration) (Context, contex
 	return &res, cancelFunc
 }
 
+// WithAgentCancel creates a new context as a shallow copy, adding cancellation to the top of the underlying context.Context.
 func (c *commonContext) WithAgentCancel() (Context, context.CancelFunc) {
 	// copy & modify
 	res := *c
@@ -350,6 +381,8 @@ func (c *commonContext) WithAgentCancel() (Context, context.CancelFunc) {
 	return &res, cancelFunc
 }
 
+// WithAgentContext creates a new context as a shallow copy setting the internal contexts to ctx.
+// If the ctx is InvocationContext, the underlying invocationContext is set to ctx.
 func (c *commonContext) WithAgentContext(ctx context.Context) Context {
 	res := *c
 	if c, ok := ctx.(InvocationContext); ok {
@@ -359,22 +392,6 @@ func (c *commonContext) WithAgentContext(ctx context.Context) Context {
 		res.Context = ctx
 	}
 	return &res
-
-	// //TODO: other fields???
-	// // newCtx := agent.NewNodeContext(ctx, nil)
-	// return &commonContext{
-	// 	Context:            ic,
-	// 	invocationContext:  ic,
-	// 	artifacts:          c.artifacts,
-	// 	actions:            c.actions,
-	// 	functionCallID:     c.functionCallID,
-	// 	toolConfirmation:   c.toolConfirmation,
-	// 	resumeInputs:       c.resumeInputs,
-	// 	path:               c.path,
-	// 	runID:              c.runID,
-	// 	subScheduler:       c.subScheduler,
-	// 	outputForAncestors: c.outputForAncestors,
-	// }
 }
 
 // OutputForAncestors implements [Context].
@@ -497,11 +514,6 @@ func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 	// false (hasFunctionResponses == true), causing the loop to continue.
 	c.actions.SkipSummarization = true
 	return nil
-}
-
-func (c *commonContext) SetInvocationContext(ic InvocationContext) {
-	c.invocationContext = ic
-	c.Context = ic
 }
 
 func (c *commonContext) InvocationContext() InvocationContext {
