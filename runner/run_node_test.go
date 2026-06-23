@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/agent/workflowagent"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
@@ -326,4 +327,67 @@ func hasWaitingInterrupt(state *workflow.RunState, id string) bool {
 		}
 	}
 	return false
+}
+
+// TestRunner_MessageAsOutput_ClearsOutput asserts that for a
+// NodeInfo.MessageAsOutput event (Content holds the model text), the
+// runner yields it with Output cleared and Content kept, so renderers
+// don't surface the text twice. Mirrors adk-python runners.py, which
+// clears output when node_info.message_as_output.
+func TestRunner_MessageAsOutput_ClearsOutput(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+
+	m := &scriptedModel{responses: []*genai.Content{
+		genai.NewContentFromText("the only answer", "model"),
+	}}
+	inner, err := llmagent.New(llmagent.Config{Name: "greeter", Model: m})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	node, err := workflow.NewAgentNode(inner, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode() error = %v", err)
+	}
+	wfAgent, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf",
+		Edges: workflow.Chain(workflow.Start, node),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New() error = %v", err)
+	}
+
+	r, err := runner.New(runner.Config{
+		AppName:        nodeTestApp,
+		Agent:          wfAgent,
+		SessionService: svc,
+	})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+
+	var sawMessageAsOutput bool
+	for ev, err := range r.Run(ctx, nodeTestUser, nodeTestSession, userText("hi"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if ev == nil || ev.LLMResponse.Partial {
+			continue
+		}
+		if ev.NodeInfo == nil || !ev.NodeInfo.MessageAsOutput || ev.LLMResponse.Content == nil {
+			continue
+		}
+		sawMessageAsOutput = true
+
+		if ev.Output != nil {
+			t.Errorf("MessageAsOutput event Output = %v, want nil; must be cleared to avoid double-rendering the model text", ev.Output)
+		}
+		if len(ev.LLMResponse.Content.Parts) == 0 {
+			t.Error("MessageAsOutput event lost its Content after Output was cleared")
+		}
+	}
+	if !sawMessageAsOutput {
+		t.Fatal("expected a non-partial event stamped with NodeInfo.MessageAsOutput")
+	}
 }
