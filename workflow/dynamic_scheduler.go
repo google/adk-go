@@ -179,7 +179,6 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 		// Last write wins, matching live execution order.
 		s.resultByPath[ev.NodeInfo.Path] = ev.Output
 	}
-	s.rehydrateCache()
 }
 
 // runNode executes child once and classifies the outcome: HITL →
