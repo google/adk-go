@@ -170,6 +170,11 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		})
 		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
+
+		// create NodeContext based on spanCtx and ctx
+		// case 1: ctx is Context
+		// case 2: ctx is InvocationContext and is not Context
+
 		ic := &invocationContext{
 			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
@@ -184,7 +189,14 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			runConfig:      ctx.RunConfig(),
 			endInvocation:  ctx.Ended(),
 		}
-		nodeCtx := NewNodeContext(ic, nil)
+
+		var nodeCtx Context
+		if parentCC, ok := ctx.(Context); ok {
+			nc := NewNodeContext(ic, nil)
+			nodeCtx = NewDynamicNodeContext(nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
+		} else {
+			nodeCtx = NewNodeContext(ic, nil)
+		}
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
 		if event != nil || err != nil {

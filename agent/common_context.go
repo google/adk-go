@@ -46,6 +46,25 @@ func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Conte
 	return c
 }
 
+func NewContextForAgent(ctx, ic InvocationContext) InvocationContext {
+	if ac, ok := ctx.(Context); ok {
+		// copy all, including SubSchedulers etc
+		return &commonContext{
+			Context:            ac,
+			invocationContext:  ic,
+			path:               ac.Path(),
+			runID:              ac.RunID(),
+			subScheduler:       ac.SubScheduler(),
+			outputForAncestors: ac.OutputForAncestors(),
+			actions:            ac.Actions(),
+			artifacts:          ac.Artifacts(),
+			functionCallID:     ac.FunctionCallID(),
+			toolConfirmation:   ac.ToolConfirmation(),
+		}
+	}
+	return ic
+}
+
 func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubScheduler, outputForAncestors []string) Context {
 	// NewDynamicNodeContext wraps parent for either a dynamic-node
 	// activation or one of its children, attaching path, runID, and the
@@ -208,7 +227,7 @@ func (c *commonContext) SubScheduler() DynamicSubScheduler {
 	if c.subScheduler != nil {
 		return c.subScheduler
 	}
-	if cc, ok := c.Context.(*commonContext); ok {
+	if cc, ok := c.Context.(interface{ SubScheduler() DynamicSubScheduler }); ok {
 		return cc.SubScheduler()
 	}
 	return nil
