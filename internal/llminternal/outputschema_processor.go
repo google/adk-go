@@ -66,7 +66,7 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 // createFinalModelResponseEvent creates a final model response event from set_model_response JSON.
 func createFinalModelResponseEvent(invocationContext agent.InvocationContext, response string) *session.Event {
 	// Create a proper model response event
-	finalEvent := session.NewEvent(invocationContext.InvocationID())
+	finalEvent := session.NewEventWithContext(invocationContext, invocationContext.InvocationID())
 	finalEvent.Author = invocationContext.Agent().Name()
 	finalEvent.Branch = invocationContext.Branch()
 	finalEvent.Content = &genai.Content{

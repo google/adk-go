@@ -126,7 +126,7 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 }
 
 func presentAsUserMessage(ctx agent.InvocationContext, agentEvent *session.Event) *session.Event {
-	event := session.NewEvent(ctx.InvocationID())
+	event := session.NewEventWithContext(ctx, ctx.InvocationID())
 	event.Author = "user"
 
 	if agentEvent.Content == nil {

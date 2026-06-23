@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -387,6 +388,11 @@ func (m *mockInvocationContext) Context() context.Context {
 	return m.ctx
 }
 
+func (m *mockInvocationContext) Deadline() (time.Time, bool) { return m.ctx.Deadline() }
+func (m *mockInvocationContext) Done() <-chan struct{}       { return m.ctx.Done() }
+func (m *mockInvocationContext) Err() error                  { return m.ctx.Err() }
+func (m *mockInvocationContext) Value(key any) any           { return m.ctx.Value(key) }
+
 func TestSequentialAgent_RunLive_Injection(t *testing.T) {
 	subAgent1 := newCustomAgent(t, 1)
 	subAgent2 := newCustomAgent(t, 2)
@@ -459,7 +465,7 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 		Agent: agent1,
 		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			iterFn := func(yield func(*session.Event, error) bool) {
-				ev := session.NewEvent(ctx.InvocationID())
+				ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 				ev.Author = "sub_agent_1"
 				yield(ev, nil)
 			}
@@ -472,7 +478,7 @@ func TestSequentialAgent_RunLive_SequentialOrchestration(t *testing.T) {
 		Agent: agent2,
 		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 			iterFn := func(yield func(*session.Event, error) bool) {
-				ev := session.NewEvent(ctx.InvocationID())
+				ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 				ev.Author = "sub_agent_2"
 				yield(ev, nil)
 			}
