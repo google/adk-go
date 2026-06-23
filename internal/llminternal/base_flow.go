@@ -1381,7 +1381,6 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.ArtifactDelta != nil {
 		base.ArtifactDelta = mergeArtifactDeltas(base.ArtifactDelta, other.ArtifactDelta)
 	}
-	// TODO add similar logic for state
 	if other.RequestedToolConfirmations != nil {
 		if base.RequestedToolConfirmations == nil {
 			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
@@ -1391,7 +1390,8 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	return base
 }
 
-// mergeArtifactDeltas merges artifact deltas, preferring higher versions
+// mergeArtifactDeltas merges artifact deltas, preferring higher versions.
+// This is a deliberate divergance from adk-python which uses last-write-wins.
 func mergeArtifactDeltas(dst, src map[string]int64) map[string]int64 {
 	if dst == nil {
 		return maps.Clone(src)
