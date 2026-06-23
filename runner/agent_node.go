@@ -208,7 +208,7 @@ func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Conten
 		Path:               ctx.Path(),
 		OutputForAncestors: ctx.OutputForAncestors(),
 	})
-	//TODO(kdroste): copy original SubScheduler??
+	// TODO(kdroste): copy original SubScheduler??
 	nc := agent.NewNodeContext(ic, nil)
 	dnc := agent.NewDynamicNodeContext(nc, "", "", ctx.SubScheduler(), nil)
 	return dnc
