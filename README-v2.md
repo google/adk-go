@@ -25,3 +25,36 @@ func (m *MockCallbackContext) SearchMemory(ctx context.Context, query string) (*
 
 var _ agent.CallbackContext = (*MockCallbackContext)(nil)
 ```
+
+#### Alternative: embed `agent.StrictContextMock`
+
+Adding each missing method by hand is reactive: every time the context surface
+grows, your mocks break again and you have to patch them. Instead, you can embed
+`agent.StrictContextMock` in your test fake and override only the methods your
+test actually uses. Because it implements the whole unified context surface,
+embedders keep compiling as the interface grows — no further edits needed when
+methods are added.
+
+Un-overridden methods panic with "not implemented", so an unexpected call fails
+the test loudly instead of silently returning a zero value. The standard
+`context.Context` methods (`Deadline`, `Done`, `Err`, `Value`) read from the
+supplied `Ctx` rather than panicking.
+
+Assert against the unified `agent.Context` directly. `CallbackContext` and
+`ToolContext` are only transitional aliases during the migration — don't rely on
+them; migrate straight to `agent.Context`.
+
+```go
+// Embed StrictContextMock and override only what the test needs.
+type fakeContext struct {
+	agent.StrictContextMock
+}
+
+var _ agent.Context = (*fakeContext)(nil)
+
+func TestSomething(t *testing.T) {
+	cc := &fakeContext{agent.StrictContextMock{Ctx: context.Background()}}
+	// Override methods as needed, e.g. by adding them on fakeContext.
+	// ...
+}
+```
