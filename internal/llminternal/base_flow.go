@@ -1078,7 +1078,6 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					if liveSess != nil {
 						result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
 						cancelCtx, cancel := toolCtx.WithAgentCancel()
-						// cancelCtx, cancel := context.WithCancel(toolCtx)
 						cancelToolCtx := &cancelledToolContext{
 							Context:   toolCtx,
 							cancelCtx: cancelCtx,

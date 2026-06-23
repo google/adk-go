@@ -69,7 +69,6 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 // Intermediate non-output events emitted by the wrapped node are suppressed.
 func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		// cancelCtx, cancelFunc := context.WithCancel(ctx)
 		cancelCtx, cancelFunc := ctx.WithAgentCancel()
 		defer cancelFunc()
 		workerCtx := ctx.WithAgentContext(cancelCtx)
@@ -121,7 +120,6 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 
 			itemBranch := deriveSubBranch(parentBranch, wrappedName+"@"+strconv.Itoa(i+1))
 			itemCtx := workerCtx.WithBranch(itemBranch)
-			// itemCtx := withBranch(workerCtx, itemBranch)
 			go n.runWorker(itemCtx, i, item, sem, resCh, &wg)
 		}
 
