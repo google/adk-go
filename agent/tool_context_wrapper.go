@@ -86,8 +86,7 @@ func (c *toolContextWrapper) Memory() Memory {
 
 // Path implements [Context].
 func (c *toolContextWrapper) Path() string {
-	log.Print("Path() is not supported for ToolContext")
-	return ""
+	return c.context.Path()
 }
 
 // ResumedInput implements [Context].
@@ -162,8 +161,7 @@ func (c *toolContextWrapper) ToolConfirmation() *toolconfirmation.ToolConfirmati
 // NodeContext
 
 func (c *toolContextWrapper) OutputForAncestors() []string {
-	log.Print("OutputForAncestors() is not supported for ToolContext")
-	return nil
+	return c.context.OutputForAncestors()
 }
 
 // AgentName implements [Context].
