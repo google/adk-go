@@ -46,9 +46,3 @@ type RequestProcessor interface {
 type ResponseDeferrer interface {
 	DefersResponse() bool
 }
-
-// ResponseDeferrer allows to skip generation of the FR by the tool.
-// Used in the cases when FR is generated externally (e.g. TaskAgentTool)
-type ResponseDeferrer interface {
-	DefersResponse() bool
-}

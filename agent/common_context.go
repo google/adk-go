@@ -199,10 +199,6 @@ type commonContext struct {
 	outputForAncestors []string
 }
 
-// subSchedulerKey keys the sub-scheduler in the embedded context value
-// chain, so it survives re-wrapping that drops the struct field.
-type subSchedulerKey struct{}
-
 // SubScheduler returns the sub-scheduler RunNode uses to schedule
 // children, or nil outside a dynamic-node activation. The struct field
 // is the fast path for a freshly built dynamic-node context (and takes

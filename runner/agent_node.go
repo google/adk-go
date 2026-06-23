@@ -195,7 +195,7 @@ func answeredOpenInterrupts(sess session.Session) map[string]bool {
 // value chain — letting a tool inside the agent (e.g. SingleTurnTool)
 // recover it via RunNode.
 func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Content) agent.InvocationContext {
-	agentCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:          ctx.Artifacts(),
 		Memory:             ctx.Memory(),
 		Session:            ctx.Session(),

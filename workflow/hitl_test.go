@@ -257,7 +257,7 @@ func TestScheduler_HitlNode_ConcurrentBranches_PausesOnlyWhenAllNonRunning(t *te
 
 func TestResumeOrRequestInput(t *testing.T) {
 	t.Run("first pass emits request and pauses", func(t *testing.T) {
-		ctx := newNodeContext(newMockCtx(t), nil)
+		ctx := agent.NewNodeContext(newMockCtx(t), nil)
 
 		var emitted []*session.Event
 		emit := func(ev *session.Event) error {
@@ -284,7 +284,7 @@ func TestResumeOrRequestInput(t *testing.T) {
 	})
 
 	t.Run("resume returns reply without emitting", func(t *testing.T) {
-		ctx := newNodeContext(newMockCtx(t), map[string]any{"ask_name": "Alice"})
+		ctx := agent.NewNodeContext(newMockCtx(t), map[string]any{"ask_name": "Alice"})
 
 		emitted := false
 		emit := func(*session.Event) error {
@@ -305,7 +305,7 @@ func TestResumeOrRequestInput(t *testing.T) {
 	})
 
 	t.Run("emit failure is returned instead of ErrNodeInterrupted", func(t *testing.T) {
-		ctx := newNodeContext(newMockCtx(t), nil)
+		ctx := agent.NewNodeContext(newMockCtx(t), nil)
 
 		wantErr := errors.New("emit failed")
 		emit := func(*session.Event) error { return wantErr }

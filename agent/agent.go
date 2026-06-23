@@ -433,11 +433,6 @@ func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
 // override this method.
 func (c *invocationContext) ResumedInput(string) (any, bool) { return nil, false }
 
-// ResumedInput always returns (nil, false) for the base
-// invocation context. Implementations that carry a resume payload
-// override this method.
-func (c *invocationContext) ResumedInput(string) (any, bool) { return nil, false }
-
 func pluginManagerFromContext(ctx context.Context) pluginManager {
 	a := ctx.Value(plugincontext.PluginManagerCtxKey)
 	m, ok := a.(pluginManager)
