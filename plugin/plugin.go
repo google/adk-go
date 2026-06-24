@@ -36,6 +36,8 @@ type Config struct {
 	BeforeAgentCallback agent.BeforeAgentCallback
 	AfterAgentCallback  agent.AfterAgentCallback
 
+       OnAgentErrorCallback OnAgentErrorCallback
+
 	BeforeModelCallback  llmagent.BeforeModelCallback
 	AfterModelCallback   llmagent.AfterModelCallback
 	OnModelErrorCallback llmagent.OnModelErrorCallback
@@ -56,6 +58,7 @@ func New(cfg Config) (*Plugin, error) {
 		afterRunCallback:      cfg.AfterRunCallback,
 		beforeAgentCallback:   cfg.BeforeAgentCallback,
 		afterAgentCallback:    cfg.AfterAgentCallback,
+               onAgentErrorCallback:  cfg.OnAgentErrorCallback,
 		beforeModelCallback:   cfg.BeforeModelCallback,
 		afterModelCallback:    cfg.AfterModelCallback,
 		onModelErrorCallback:  cfg.OnModelErrorCallback,
@@ -86,6 +89,8 @@ type Plugin struct {
 
 	beforeAgentCallback agent.BeforeAgentCallback
 	afterAgentCallback  agent.AfterAgentCallback
+
+       onAgentErrorCallback OnAgentErrorCallback
 
 	beforeModelCallback  llmagent.BeforeModelCallback
 	afterModelCallback   llmagent.AfterModelCallback
@@ -134,6 +139,10 @@ func (p *Plugin) AfterAgentCallback() agent.AfterAgentCallback {
 	return p.afterAgentCallback
 }
 
+func (p *Plugin) OnAgentErrorCallback() OnAgentErrorCallback {
+       return p.onAgentErrorCallback
+}
+
 func (p *Plugin) BeforeModelCallback() llmagent.BeforeModelCallback {
 	return p.beforeModelCallback
 }
@@ -165,3 +174,5 @@ type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 type AfterRunCallback func(agent.InvocationContext)
 
 type OnEventCallback func(agent.InvocationContext, *session.Event) (*session.Event, error)
+
+type OnAgentErrorCallback func(agent.CallbackContext, error) (*genai.Content, error)
