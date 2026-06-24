@@ -44,6 +44,8 @@ type Config struct {
 	AfterToolCallback   llmagent.AfterToolCallback
 	OnToolErrorCallback llmagent.OnToolErrorCallback
 
+	OnPipelineErrorCallback OnPipelineErrorCallback
+
 	CloseFunc func() error
 }
 
@@ -62,6 +64,7 @@ func New(cfg Config) (*Plugin, error) {
 		beforeToolCallback:    cfg.BeforeToolCallback,
 		afterToolCallback:     cfg.AfterToolCallback,
 		onToolErrorCallback:   cfg.OnToolErrorCallback,
+		onPipelineErrorCallback: cfg.OnPipelineErrorCallback,
 		closeFunc:             cfg.CloseFunc,
 	}
 
@@ -94,6 +97,8 @@ type Plugin struct {
 	beforeToolCallback  llmagent.BeforeToolCallback
 	afterToolCallback   llmagent.AfterToolCallback
 	onToolErrorCallback llmagent.OnToolErrorCallback
+
+	onPipelineErrorCallback OnPipelineErrorCallback
 
 	closeFunc func() error
 }
@@ -158,6 +163,10 @@ func (p *Plugin) OnToolErrorCallback() llmagent.OnToolErrorCallback {
 	return p.onToolErrorCallback
 }
 
+func (p *Plugin) OnPipelineErrorCallback() OnPipelineErrorCallback {
+	return p.onPipelineErrorCallback
+}
+
 type OnUserMessageCallback func(agent.InvocationContext, *genai.Content) (*genai.Content, error)
 
 type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
@@ -165,3 +174,5 @@ type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 type AfterRunCallback func(agent.InvocationContext)
 
 type OnEventCallback func(agent.InvocationContext, *session.Event) (*session.Event, error)
+
+type OnPipelineErrorCallback func(agent.InvocationContext, error) error
