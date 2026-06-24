@@ -40,7 +40,10 @@ import (
 	"google.golang.org/adk/workflow"
 )
 
-const modelName = "gemini-2.5-flash"
+const (
+	modelName = "gemini-2.5-flash"
+	message   = "Handle the requests as specified in the System Instruction."
+)
 
 //go:generate go test -httprecord=Test
 
@@ -78,7 +81,7 @@ func TestLLMAgent(t *testing.T) {
 			}
 			// TODO: set tools, planner.
 			runner := testutil.NewTestAgentRunner(t, a)
-			stream := runner.Run(t, "test_session", "")
+			stream := runner.Run(t, "test_session", message)
 			texts, err := testutil.CollectTextParts(stream)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 				t.Fatalf("stream = (%q, %v), want (_, %v)", texts, err, tc.wantErr)

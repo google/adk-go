@@ -161,12 +161,12 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 
 // maybeAppendUserContent appends a user content, so that model can continue to output.
 func (m *geminiModel) maybeAppendUserContent(req *model.LLMRequest) {
-	if len(req.Contents) == 0 {
-		req.Contents = append(req.Contents, genai.NewContentFromText("Handle the requests as specified in the System Instruction.", "user"))
-	}
-
-	if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != "user" {
-		req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
+	// Ensure turn alternation if the request history ends on a non-user turn.
+	// Note: We omit placeholder user prompts when req.Contents is empty to match Python ADK behavior.
+	if len(req.Contents) > 0 {
+		if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != "user" {
+			req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
+		}
 	}
 }
 

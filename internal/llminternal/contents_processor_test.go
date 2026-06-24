@@ -15,6 +15,7 @@
 package llminternal_test
 
 import (
+	"context"
 	"encoding/json"
 	"iter"
 	"slices"
@@ -241,7 +242,7 @@ func TestContentsRequestProcessor_IncludeContents(t *testing.T) {
 				}
 			}
 			got := req.Contents
-			if diff := cmp.Diff(tc.want, got); diff != "" {
+			if diff := cmp.Diff(wantWithContinuation(tc.want), got); diff != "" {
 				t.Errorf("LLMRequest after contentsRequestProcessor mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -290,7 +291,7 @@ func TestContentsRequestProcessor_IncludeContentsNone_IsolationScopePivot(t *tes
 		}
 	}
 	want := []*genai.Content{genai.NewContentFromText("unscoped turn", "user")}
-	if diff := cmp.Diff(want, req.Contents); diff != "" {
+	if diff := cmp.Diff(wantWithContinuation(want), req.Contents); diff != "" {
 		t.Errorf("contents mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -336,7 +337,7 @@ func TestContentsRequestProcessor_StrictIsolationFilterExcludesForeignScope(t *t
 		}
 	}
 	want := []*genai.Content{genai.NewContentFromText("my task brief", "user")}
-	if diff := cmp.Diff(want, req.Contents); diff != "" {
+	if diff := cmp.Diff(wantWithContinuation(want), req.Contents); diff != "" {
 		t.Errorf("contents mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -394,7 +395,7 @@ func TestContentsRequestProcessor_TaskInputFromOriginatingFC(t *testing.T) {
 			{Role: genai.RoleUser, Parts: []*genai.Part{{Text: string(argsJSON)}}},
 			genai.NewContentFromText("working on it", "model"),
 		}
-		if diff := cmp.Diff(want, req.Contents); diff != "" {
+		if diff := cmp.Diff(wantWithContinuation(want), req.Contents); diff != "" {
 			t.Errorf("contents mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -471,7 +472,7 @@ func TestContentsRequestProcessor_TaskInputFromUserContentFallback(t *testing.T)
 		{Role: genai.RoleUser, Parts: userInput.Parts},
 		genai.NewContentFromText("ack", "model"),
 	}
-	if diff := cmp.Diff(want, req.Contents); diff != "" {
+	if diff := cmp.Diff(wantWithContinuation(want), req.Contents); diff != "" {
 		t.Errorf("contents mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -771,7 +772,7 @@ func TestContentsRequestProcessor(t *testing.T) {
 				}
 			}
 			got := req.Contents
-			if diff := cmp.Diff(tc.want, got); diff != "" {
+			if diff := cmp.Diff(wantWithContinuation(tc.want), got); diff != "" {
 				t.Errorf("LLMRequest after contentRequestProcessor mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -1382,7 +1383,7 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			}
 
 			got := req.Contents
-			if diff := cmp.Diff(tc.want, got); diff != "" {
+			if diff := cmp.Diff(wantWithContinuation(tc.want), got); diff != "" {
 				t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -1415,32 +1416,40 @@ func (s *fakeSession) State() session.State {
 	return nil
 }
 
-func (s *fakeSession) Events() session.Events {
-	return s
-}
-
 func (s *fakeSession) ID() string {
-	return ""
-}
-
-func (s *fakeSession) AppName() string {
-	return ""
+	return "test_session"
 }
 
 func (s *fakeSession) UserID() string {
-	return ""
+	return "test_user"
+}
+
+func (s *fakeSession) AppName() string {
+	return "test_app"
 }
 
 func (s *fakeSession) LastUpdateTime() time.Time {
 	return time.Time{}
 }
 
-func (s *fakeSession) All() iter.Seq[*session.Event] {
-	return slices.Values(s.events)
+func (s *fakeSession) Events() session.Events {
+	return s
 }
 
 func (s *fakeSession) Len() int {
 	return len(s.events)
+}
+
+func (s *fakeSession) All() iter.Seq[*session.Event] {
+	return slices.Values(s.events)
+}
+
+func (s *fakeSession) AllBackward() iter.Seq[*session.Event] {
+	return nil
+}
+
+func (s *fakeSession) Append(ctx context.Context, e ...*session.Event) error {
+	return nil
 }
 
 func (s *fakeSession) At(i int) *session.Event {
@@ -1451,3 +1460,15 @@ var (
 	_ session.Session = (*fakeSession)(nil)
 	_ session.Events  = (*fakeSession)(nil)
 )
+
+func wantWithContinuation(want []*genai.Content) []*genai.Content {
+	if len(want) > 0 {
+		if last := want[len(want)-1]; last != nil && last.Role != "user" {
+			res := make([]*genai.Content, len(want), len(want)+1)
+			copy(res, want)
+			res = append(res, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
+			return res
+		}
+	}
+	return want
+}

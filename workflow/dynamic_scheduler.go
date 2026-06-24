@@ -181,86 +181,6 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 	}
 }
 
-// func logContext(o any, msg string, lvl int) {
-// 	emit := func(f string, args ...any) {
-// 		prefix := "  >>> " + strings.Repeat("   ", lvl) + msg + ": "
-// 		log.Printf("%s%s", prefix, fmt.Sprintf(f, args...))
-// 	}
-
-// 	ov := reflect.ValueOf(o)
-// 	ot := ov.Type()
-// 	if ot.String() == "context.backgroundCtx" {
-// 		emit("context.Background")
-// 		return
-// 	}
-// 	if ot.Kind() != reflect.Ptr {
-// 		emit("%T %v %v", o, ov, ot)
-// 	}
-
-// 	switch ot.Kind() {
-// 	case reflect.Ptr:
-
-// 		logContext(ov.Elem().Interface(), msg, lvl+1)
-// 		var c agent.Context
-// 		if ot.String() == "*agent.commonContext" {
-// 			c = o.(agent.Context)
-// 		}
-// 		if c != nil {
-// 			logContext(c.InvocationContext(), ".InvocationContext()", lvl+2)
-// 		}
-
-// 	case reflect.Struct:
-// 		// emit("reflect.Struct")
-// 		for i := 0; i < ot.NumField(); i++ {
-// 			fn := ot.Field(i).Name
-// 			if !ot.Field(i).IsExported() {
-// 				// emit("skipping unexported field %d %v", i, fn)
-// 				continue
-// 			}
-// 			if fn == "Context" || fn == "invocationContext" {
-// 				logContext(ov.Field(i).Interface(), "."+fn, lvl+1)
-// 				continue
-// 			}
-// 			//logContext(ov.Field(i).Interface(), ot.Field(i).Name, lvl+1)
-// 		}
-// 	case reflect.Map:
-// 		emit("reflect.Map")
-// 	case reflect.Slice:
-// 		emit("reflect.Slice")
-// 	case reflect.Array:
-// 		emit("reflect.Array")
-// 	case reflect.Chan:
-// 		emit("reflect.Chan")
-// 	case reflect.Func:
-// 		emit("reflect.Func")
-// 	case reflect.Interface:
-// 		emit("reflect.Interface")
-// 	case reflect.Invalid:
-// 		emit("reflect.Invalid")
-// 	default:
-// 		emit("unknown %T", o)
-// 	}
-
-// 	// emit("%v", ot.String())
-// 	// switch o.Kind() {
-
-// }
-
-// func logContext(ctx context.Context, msg string, lvl int) {
-// 	prefix := strings.Repeat("  ", lvl) + msg + ": "
-// 	switch v := ctx.(type) {
-// 	case agent.Context:
-// 		log.Printf("%sagent.Context: %+v", prefix, v)
-// 		logContext(v.InvocationContext(), "InvocationContext", lvl+1)
-// 	case agent.InvocationContext:
-// 		log.Printf("%sagent.InvocationContext: %T: %+v", prefix, v, v)
-// 	case agent.ReadonlyContext:
-// 		log.Printf("%sagent.ReadonlyContext: %T: %+v", prefix, v, v)
-// 	default:
-// 		log.Printf("%scustom: %T", prefix, ctx)
-// 	}
-// }
-
 // runNode executes child once and classifies the outcome: HITL →
 // ErrNodeInterrupted, runtime failure → ErrNodeFailed. A child that
 // fails after requesting input surfaces as ErrNodeFailed. A repeated
@@ -300,7 +220,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	if opts.useAsOutput {
 		childAncestors = append([]string{s.parentPath}, s.outputForAncestors...)
 	}
-	childCtx := newDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
+	childCtx := agent.NewDynamicNodeContext(s.parentCtx.WithBranch(childBranch), childPath, runID, s, childAncestors)
 	// logContext(childCtx, "childCtx after newDynamicNodeContext", 0)
 
 	// Explicit scope wins over the node-path default; absent both,

@@ -276,15 +276,12 @@ func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 	const interruptID = "ask_name_dyn"
 
 	asker := newHitlNode("ask_name", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
-		// nc, ok := ctx.(workflow.NodeContext)
-		// if ok {
 		if resp, ok := ctx.ResumedInput(interruptID); ok {
 			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 			ev.Output = resp
 			yield(ev, nil)
 			return
 		}
-		// }
 		yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
 			InterruptID: interruptID,
 			Message:     "What's your name?",

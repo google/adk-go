@@ -17,6 +17,7 @@ package workflowinternal_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"slices"
 	"strings"
@@ -27,7 +28,6 @@ import (
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
-	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/internal/workflowinternal"
 	"google.golang.org/adk/model"
@@ -226,7 +226,6 @@ func TestSingleTurnTool_Run_HappyPath(t *testing.T) {
 	)
 	orchestrator := workflow.NewDynamicNode("orchestrator",
 		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
-			// ic := ctx.WithContext(workflow.WithNodeContext(ctx, ctx))
 			toolCtx := agent.NewToolContext(ctx, "fc-id", &session.EventActions{}, nil)
 			gotResult, gotErr = st.Run(toolCtx, map[string]any{"request": "hello"})
 			return nil, gotErr
@@ -294,14 +293,10 @@ func TestSingleTurnTool_Run_SurvivesContextRewrap(t *testing.T) {
 	// the sub-scheduler in the value chain before building the tool context.
 	orchestrator := workflow.NewDynamicNode("orchestrator",
 		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
-			agentCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-				Session:      ctx.Session(),
-				InvocationID: ctx.InvocationID(),
-			})
-			if s := ctx.SubScheduler(); s != nil {
-				agentCtx = agentCtx.WithContext(agent.WithSubScheduler(agentCtx, s))
+			toolCtx, err := agent.NewCleanToolContext(ctx, "fc-id", &session.EventActions{}, nil)
+			if err != nil {
+				return nil, fmt.Errorf("cannot agent.NewCleanToolContext: %w", err)
 			}
-			toolCtx := agent.NewToolContext(agentCtx, "fc-id", &session.EventActions{}, nil)
 			gotResult, gotErr = st.Run(toolCtx, map[string]any{"request": "hello"})
 			return nil, gotErr
 		},
