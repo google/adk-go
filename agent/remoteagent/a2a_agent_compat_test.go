@@ -181,7 +181,7 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.Converter = func(ctx agent.InvocationContext, req *legacyA2A.MessageSendParams, event legacyA2A.Event, err error) (*session.Event, error) {
-					ev := session.NewEvent("custom")
+					ev := session.NewEventWithContext(ctx, "custom")
 					ev.Author = ctx.Agent().Name()
 					ev.LLMResponse = model.LLMResponse{
 						Content:      genai.NewContentFromText("converted", genai.RoleModel),
@@ -563,7 +563,7 @@ func newInvocationContext(t *testing.T, events []*session.Event) agent.Invocatio
 }
 
 func newUserHello() *session.Event {
-	event := session.NewEvent("invocation")
+	event := session.NewEventWithContext(context.Background(), "invocation")
 	event.Author = "user"
 	event.LLMResponse = model.LLMResponse{
 		Content: genai.NewContentFromText("hello", genai.RoleUser),

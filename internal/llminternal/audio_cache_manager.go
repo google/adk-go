@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/platform"
 	"google.golang.org/adk/session"
 )
 
@@ -47,14 +49,14 @@ func NewAudioCacheManager() *AudioCacheManager {
 }
 
 // CacheInput caches incoming user audio data.
-func (m *AudioCacheManager) CacheInput(data []byte, mimeType string) {
+func (m *AudioCacheManager) CacheInput(ctx context.Context, data []byte, mimeType string) {
 	if mimeType != "" && !strings.HasPrefix(mimeType, "audio/") {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.inputCache) == 0 {
-		m.inputStartTime = time.Now()
+		m.inputStartTime = platform.Now(ctx)
 		if mimeType != "" {
 			m.inputMimeType = mimeType
 		}
@@ -63,14 +65,14 @@ func (m *AudioCacheManager) CacheInput(data []byte, mimeType string) {
 }
 
 // CacheOutput caches outgoing model audio data.
-func (m *AudioCacheManager) CacheOutput(data []byte, mimeType string) {
+func (m *AudioCacheManager) CacheOutput(ctx context.Context, data []byte, mimeType string) {
 	if mimeType != "" && !strings.HasPrefix(mimeType, "audio/") {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.outputCache) == 0 {
-		m.outputStartTime = time.Now()
+		m.outputStartTime = platform.Now(ctx)
 		if mimeType != "" {
 			m.outputMimeType = mimeType
 		}
@@ -150,7 +152,7 @@ func (m *AudioCacheManager) flushCache(ctx agent.InvocationContext, cache [][]by
 		role = "user"
 	}
 
-	ev := session.NewEvent(ctx.InvocationID())
+	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 	ev.Author = author
 	ev.Timestamp = startTime
 	ev.Content = &genai.Content{

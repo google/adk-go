@@ -27,7 +27,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -40,25 +39,48 @@ import (
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/platform"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+// ErrModelNotConfigured is returned when the model is not configured.
 var ErrModelNotConfigured = errors.New("model not configured; ensure Model is set in llmagent.Config")
 
+// BeforeModelCallback is called before sending a request to the model.
+//
+// If it returns non-nil result or error, the actual call is skipped and the returned value is used
+// as the model invocation result.
 type BeforeModelCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 
+// AfterModelCallback is called after receiving a response from the model.
+//
+// If it returns non-nil result or error, the returned value is used as the model invocation result.
 type AfterModelCallback func(ctx agent.CallbackContext, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
+// OnModelErrorCallback is called when the model returns an error.
+//
+// If it returns non-nil result or error, the returned value is used as the model invocation result.
 type OnModelErrorCallback func(ctx agent.CallbackContext, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
 
+// BeforeToolCallback is called before executing a tool call.
+//
+// If it returns non-nil result or error, the actual tool call is skipped and the returned value is
+// used as the tool invocation result.
 type BeforeToolCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any) (map[string]any, error)
 
+// AfterToolCallback is called after executing a tool call.
+//
+// If it returns non-nil result or error, the returned value is used as the tool invocation result.
 type AfterToolCallback func(ctx agent.ToolContext, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error)
 
+// OnToolErrorCallback is called when the tool returns an error.
+//
+// If it returns non-nil result or error, the returned value is used as the tool invocation result.
 type OnToolErrorCallback func(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
 
+// Flow is a base implementation of the agent flow.
 type Flow struct {
 	Model model.LLM
 
@@ -375,11 +397,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						if runCfg.Live.SaveLiveBlob && resp.Content != nil {
 							for _, part := range resp.Content.Parts {
 								if part.InlineData != nil {
-									sess.audioMgr.CacheOutput(part.InlineData.Data, part.InlineData.MIMEType)
+									sess.audioMgr.CacheOutput(ctx, part.InlineData.Data, part.InlineData.MIMEType)
 								}
 							}
 						}
-						ev := session.NewEvent(ctx.InvocationID())
+						ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
 						ev.LLMResponse = *resp
 						select {
@@ -409,7 +431,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						}
 						if req.RealtimeInput != nil {
 							if blob, ok := req.RealtimeInput.(*genai.Blob); ok {
-								sess.audioMgr.CacheInput(blob.Data, blob.MIMEType)
+								sess.audioMgr.CacheInput(ctx, blob.Data, blob.MIMEType)
 							}
 							if err := liveConn.SendRealtime(connCtx, req.RealtimeInput); err != nil {
 								errChan <- err
@@ -715,8 +737,8 @@ func toolsetPreprocess(ctx agent.InvocationContext, req *model.LLMRequest) error
 	return nil
 }
 
-func newResponseWithEventID(resp *model.LLMResponse) *responseWithEventID {
-	return &responseWithEventID{resp, uuid.New().String()}
+func newResponseWithEventID(ctx context.Context, resp *model.LLMResponse) *responseWithEventID {
+	return &responseWithEventID{resp, platform.NewUUID(ctx)}
 }
 
 func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, stateDelta map[string]any, artifactDelta map[string]int64) iter.Seq2[*responseWithEventID, error] {
@@ -726,7 +748,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 			callbackResponse, callbackErr := pluginManager.RunBeforeModelCallback(cctx, req)
 			if callbackResponse != nil || callbackErr != nil {
-				yield(newResponseWithEventID(callbackResponse), callbackErr)
+				yield(newResponseWithEventID(ctx, callbackResponse), callbackErr)
 				return
 			}
 		}
@@ -736,7 +758,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			callbackResponse, callbackErr := callback(cctx, req)
 
 			if callbackResponse != nil || callbackErr != nil {
-				yield(newResponseWithEventID(callbackResponse), callbackErr)
+				yield(newResponseWithEventID(ctx, callbackResponse), callbackErr)
 				return
 			}
 		}
@@ -766,7 +788,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 			// Function call ID is optional in genai API and some models do not use the field.
 			// Set it in case after model callbacks use it.
-			utils.PopulateClientFunctionCallID(resp.Content)
+			utils.PopulateClientFunctionCallID(ctx, resp.Content)
 
 			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp.LLMResponse, stateDelta, artifactDelta, err)
 			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
@@ -836,7 +858,7 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
 		defer endSpanAndTrackResult()
 		for resp, err := range m.GenerateContent(ctx, req, useStream) {
-			response := newResponseWithEventID(resp)
+			response := newResponseWithEventID(ctx, resp)
 			lastResponse = *response
 			lastErr = err
 			// Complete the span immediately to avoid capturing the upstream yield processing time.
@@ -926,9 +948,9 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *res
 	// FunctionCall & FunctionResponse matching algorithm assumes non-empty function call IDs
 	// but function call ID is optional in genai API and some models do not use the field.
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
-	utils.PopulateClientFunctionCallID(resp.Content)
+	utils.PopulateClientFunctionCallID(ctx, resp.Content)
 
-	ev := session.NewEvent(ctx.InvocationID())
+	ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 	ev.ID = resp.eventID // TODO change NewEvent to accept event id
 	ev.Author = ctx.Agent().Name()
 	ev.Branch = ctx.Branch()
@@ -1130,7 +1152,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			}
 
 			// TODO: handle long-running tool.
-			ev := session.NewEvent(ctx.InvocationID())
+			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 			ev.LLMResponse = model.LLMResponse{
 				Content: &genai.Content{
 					Role: "user",

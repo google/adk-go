@@ -15,6 +15,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/google/uuid"
 
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/platform"
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
@@ -130,11 +132,31 @@ func (e *Event) IsFinalResponse() bool {
 }
 
 // NewEvent creates a new event defining now as the timestamp.
+//
+// Deprecated: Use [NewEventWithContext] instead so that platform-installed time
+// and UUID providers (see [platform.WithTimeProvider] and
+// [platform.WithUUIDProvider]) are honored. NewEvent always uses the wall clock
+// and a random UUID.
 func NewEvent(invocationID string) *Event {
 	return &Event{
 		ID:           uuid.NewString(),
 		InvocationID: invocationID,
 		Timestamp:    time.Now(),
+		Actions:      EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
+	}
+}
+
+// NewEventWithContext creates a new event defining now as the timestamp.
+//
+// The event ID and timestamp are obtained through the platform package, so a
+// time or UUID provider installed on ctx (see [platform.WithTimeProvider] and
+// [platform.WithUUIDProvider]) controls them. This lets callers such as
+// workflow engines produce deterministic, replay-safe events.
+func NewEventWithContext(ctx context.Context, invocationID string) *Event {
+	return &Event{
+		ID:           platform.NewUUID(ctx),
+		InvocationID: invocationID,
+		Timestamp:    platform.Now(ctx),
 		Actions:      EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)},
 	}
 }
