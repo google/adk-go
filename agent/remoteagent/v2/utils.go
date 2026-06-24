@@ -109,7 +109,10 @@ func toMissingRemoteSessionParts(ctx agent.InvocationContext, events session.Eve
 	result := make([]*a2a.Part, 0, partCount)
 	for i := lastRemoteResponseIndex + 1; i < events.Len(); i++ {
 		event := events.At(i)
-		if event.Author != "user" && event.Author != ctx.Agent().Name() {
+		// Only wrap foreign agent events as user messages when the current agent has an explicit name.
+		// If Agent().Name() is empty (e.g., in anonymous wrappers or conformance harnesses), event.Author != ""
+		// would falsely match and attribute events as foreign turns.
+		if ctx.Agent().Name() != "" && event.Author != "user" && event.Author != ctx.Agent().Name() {
 			event = presentAsUserMessage(ctx, event)
 		}
 		if event.Content == nil || len(event.Content.Parts) == 0 {

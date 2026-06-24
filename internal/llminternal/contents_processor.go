@@ -61,6 +61,13 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			return
 		}
 		req.Contents = append(req.Contents, contents...)
+		// Gemini API requires role alternation (model turns cannot be consecutive).
+		// If the conversation history concludes on a model turn, inject a synthetic user continuation turn.
+		if len(req.Contents) > 0 {
+			if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != "user" {
+				req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
+			}
+		}
 	}
 }
 
