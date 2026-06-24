@@ -1838,6 +1838,212 @@ func TestDelegation_10_TaskAgentRejectedAsStaticGraphNode(t *testing.T) {
 }
 
 // =============================================================================
+// Scenario 11: chat coordinator → single_turn sub-agent that chains 2 tools.
+// =============================================================================
+
+// TestDelegation_11_ChatToSingleTurnChainedTools covers a single_turn
+// sub-agent that chains two tools where the second tool's argument
+// depends on the first tool's result. The chat coordinator delegates
+// once; the sub-agent calls tool_one, sees its FR, then calls
+// tool_two with the token tool_one returned, and emits a final
+// structured reply.
+//
+// Pins:
+//  1. The sub-agent's own tool history (its FC/FR events) is visible
+//     to its model on subsequent LLM rounds — captured directly via
+//     a BeforeModelCallback.
+//  2. The sub-agent emits FCs for BOTH tool_one and tool_two.
+//  3. The sub-agent's model is called a bounded number of times.
+func TestDelegation_11_ChatToSingleTurnChainedTools(t *testing.T) {
+	type token struct {
+		Token string `json:"token"`
+	}
+	type echo struct {
+		Result string `json:"result"`
+	}
+
+	// tool_one returns a fixed token; tool_two needs that exact
+	// token. The model can only call tool_two correctly after
+	// seeing tool_one's FR, so the single_turn agent's own tool
+	// history must survive across rounds.
+	t1, err := functiontool.New(functiontool.Config{
+		Name:        "tool_one",
+		Description: "Returns a fixed token string. Call this first.",
+	}, func(_ agent.Context, _ struct{}) (token, error) {
+		return token{Token: "alpha-42"}, nil
+	})
+	if err != nil {
+		t.Fatalf("tool_one: %v", err)
+	}
+	t2, err := functiontool.New(functiontool.Config{
+		Name:        "tool_two",
+		Description: "Echoes the token returned by tool_one.",
+	}, func(_ agent.Context, in token) (echo, error) {
+		return echo{Result: "got " + in.Token}, nil
+	})
+	if err != nil {
+		t.Fatalf("tool_two: %v", err)
+	}
+
+	// Capture the contents the sub-agent's model sees on each round.
+	// BeforeModelCallback runs after all request processors, so the
+	// snapshot is exactly what the model receives.
+	var (
+		mu       sync.Mutex
+		requests [][]*genai.Content
+	)
+	capture := func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		snap := make([]*genai.Content, len(req.Contents))
+		copy(snap, req.Contents)
+		requests = append(requests, snap)
+		return nil, nil
+	}
+
+	sub, err := llmagent.New(llmagent.Config{
+		Name:        "sub",
+		Description: "Chains tool_one then tool_two.",
+		Model:       newDelegationModel(t),
+		Mode:        llmagent.ModeSingleTurn,
+		Tools:       []tool.Tool{t1, t2},
+		Instruction: `Call tool_one to obtain a token, then call tool_two with
+that exact token, then report the result string. Call each tool at most once.`,
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{capture},
+	})
+	if err != nil {
+		t.Fatalf("sub: %v", err)
+	}
+
+	coordinator, err := llmagent.New(llmagent.Config{
+		Name:        "coordinator",
+		Description: "Delegates to sub and reports the answer.",
+		Model:       newDelegationModel(t),
+		Mode:        llmagent.ModeChat,
+		SubAgents:   []agent.Agent{sub},
+		Instruction: `Call the sub agent exactly once with a brief description
+of what to do, then report its answer in one sentence.`,
+	})
+	if err != nil {
+		t.Fatalf("coordinator: %v", err)
+	}
+
+	events := newDelegationRunner(t, coordinator).turn("Run the chained tools.")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// (1) Bounded rounds: ~3 in the healthy path (tool_one, tool_two,
+	// final reply).
+	if n := len(requests); n == 0 || n > 8 {
+		t.Fatalf("sub-agent model rounds = %d (want 1..8); requests: %s",
+			n, summarizeAllRounds(requests))
+	}
+
+	// (2) Both tools were called; tool_one at most a few times.
+	if n := len(collectFCsByName(events, "tool_one")); n == 0 || n > 3 {
+		t.Errorf("tool_one FCs = %d, want 1..3", n)
+	}
+	if len(collectFCsByName(events, "tool_two")) == 0 {
+		t.Errorf("tool_two never called; model could not proceed past tool_one")
+	}
+
+	// (3) Some round's contents must contain BOTH tool_one's FC and
+	// FR — direct evidence the agent's own tool history survived
+	// between LLM rounds.
+	var historySurvived bool
+	for _, c := range requests {
+		if hasFunctionCall(c, "tool_one") && hasFunctionResponse(c, "tool_one") {
+			historySurvived = true
+			break
+		}
+	}
+	if !historySurvived {
+		t.Errorf("no captured round contained both tool_one FC and FR; tool history did not survive across rounds. requests: %s",
+			summarizeAllRounds(requests))
+	}
+}
+
+// hasFunctionCall reports whether any content part across the slice
+// is a FunctionCall with the given name. Used by chained-tool tests
+// to assert prior-round tool history survives across LLM rounds.
+func hasFunctionCall(contents []*genai.Content, name string) bool {
+	for _, c := range contents {
+		if c == nil {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p != nil && p.FunctionCall != nil && p.FunctionCall.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasFunctionResponse reports whether any content part across the
+// slice is a FunctionResponse with the given name.
+func hasFunctionResponse(contents []*genai.Content, name string) bool {
+	for _, c := range contents {
+		if c == nil {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p != nil && p.FunctionResponse != nil && p.FunctionResponse.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// summarizeContents returns a compact one-line description of an
+// LLMRequest.Contents slice for use in t.Logf / t.Errorf diagnostics.
+func summarizeContents(contents []*genai.Content) string {
+	var b strings.Builder
+	for i, c := range contents {
+		if i > 0 {
+			b.WriteString(" / ")
+		}
+		if c == nil {
+			b.WriteString("<nil>")
+			continue
+		}
+		b.WriteString(c.Role)
+		b.WriteString(":[")
+		for j, p := range c.Parts {
+			if j > 0 {
+				b.WriteString(",")
+			}
+			switch {
+			case p == nil:
+				b.WriteString("<nil>")
+			case p.FunctionCall != nil:
+				b.WriteString("FC(" + p.FunctionCall.Name + ")")
+			case p.FunctionResponse != nil:
+				b.WriteString("FR(" + p.FunctionResponse.Name + ")")
+			case p.Text != "":
+				b.WriteString("text")
+			default:
+				b.WriteString("?")
+			}
+		}
+		b.WriteString("]")
+	}
+	return b.String()
+}
+
+// summarizeAllRounds formats every captured round's contents on a
+// single labelled line for use in failure diagnostics.
+func summarizeAllRounds(rounds [][]*genai.Content) string {
+	parts := make([]string, len(rounds))
+	for i, c := range rounds {
+		parts[i] = fmt.Sprintf("round %d: %s", i+1, summarizeContents(c))
+	}
+	return strings.Join(parts, " | ")
+}
+
+// =============================================================================
 // Diagnostic helpers
 // =============================================================================
 

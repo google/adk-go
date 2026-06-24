@@ -185,7 +185,7 @@ func TestWrappedSession_SeedNotPersisted(t *testing.T) {
 	base := newSessionWithEvent(t, "existing turn")
 	baseLen := base.Events().Len()
 	seed := seedEvent("transient node input")
-	wrapped := &wrappedSession{Session: base, appended: seed}
+	wrapped := newWrappedSession(base, seed)
 
 	if got, want := wrapped.Events().Len(), baseLen+1; got != want {
 		t.Errorf("wrapped.Events().Len() = %d, want %d", got, want)

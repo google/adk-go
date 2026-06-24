@@ -105,7 +105,7 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 			}
 			sess := ctx.Session()
 			if seed := PrepareLLMAgentInput(a, ctx, nodeInput); seed != nil {
-				sess = &wrappedSession{Session: sess, appended: seed}
+				sess = newWrappedSession(sess, seed)
 			}
 			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 				Artifacts:      ctx.Artifacts(),
@@ -661,33 +661,66 @@ func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Even
 type wrappedSession struct {
 	session.Session
 	appended *session.Event
+	// insertAt is the index in the underlying session events at which
+	// the synthetic ``appended`` event must appear. It is snapshotted at
+	// wrappedSession-creation time so the seed always sits BETWEEN the
+	// events that already existed in the session (the parent's
+	// invocation that produced the delegation FC) and any events the
+	// agent appends to the underlying session during its own run (its
+	// FC/FR rounds). Putting the seed at the tail instead would let the
+	// backward-scan in buildContentsCurrentTurnContextOnly pivot on the
+	// seed and drop the agent's own tool history between rounds; see
+	// adk-python's behaviour (which appends to session.events before
+	// run_async, achieving the same ordering for free).
+	insertAt int
+}
+
+func newWrappedSession(orig session.Session, seed *session.Event) *wrappedSession {
+	w := &wrappedSession{Session: orig, appended: seed}
+	if orig != nil {
+		if ev := orig.Events(); ev != nil {
+			w.insertAt = ev.Len()
+		}
+	}
+	return w
 }
 
 func (w *wrappedSession) Events() session.Events {
 	if w.Session == nil {
-		return &wrappedEvents{app: w.appended}
+		return &wrappedEvents{app: w.appended, insertAt: 0}
 	}
 	return &wrappedEvents{
-		orig: w.Session.Events(),
-		app:  w.appended,
+		orig:     w.Session.Events(),
+		app:      w.appended,
+		insertAt: w.insertAt,
 	}
 }
 
 type wrappedEvents struct {
-	orig session.Events
-	app  *session.Event
+	orig     session.Events
+	app      *session.Event
+	insertAt int
 }
 
 func (w *wrappedEvents) All() iter.Seq[*session.Event] {
 	return func(yield func(*session.Event) bool) {
+		i := 0
 		if w.orig != nil {
 			for e := range w.orig.All() {
+				if i == w.insertAt && w.app != nil {
+					if !yield(w.app) {
+						return
+					}
+				}
 				if !yield(e) {
 					return
 				}
+				i++
 			}
 		}
-		if w.app != nil {
+		// Seed at very end of underlying events (or when there are no
+		// orig events at all).
+		if w.app != nil && i <= w.insertAt {
 			yield(w.app)
 		}
 	}
@@ -709,8 +742,17 @@ func (w *wrappedEvents) At(i int) *session.Event {
 	if w.orig != nil {
 		n = w.orig.Len()
 	}
-	if i < n {
+	if w.app == nil {
 		return w.orig.At(i)
 	}
-	return w.app
+	switch {
+	case i < w.insertAt:
+		return w.orig.At(i)
+	case i == w.insertAt:
+		return w.app
+	case i <= n: // i > insertAt, still within orig range (orig has grown since snapshot)
+		return w.orig.At(i - 1)
+	default:
+		return nil
+	}
 }
