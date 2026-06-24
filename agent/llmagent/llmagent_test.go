@@ -1303,3 +1303,43 @@ func (m *mockInvocationContext) WithContext(ctx context.Context) agent.Invocatio
 	cp.Context = ctx
 	return &cp
 }
+
+// TestThoughtOnlyTurnDoesNotEndInvocation guards against a thought-only model
+// turn ending the run before the answer is produced. Such a turn has no
+// function call/response and is not partial, so IsFinalResponse() reports it as
+// final; the flow must instead call the model again. adk-python parity.
+func TestThoughtOnlyTurnDoesNotEndInvocation(t *testing.T) {
+	m := &testutil.MockModel{Responses: []*genai.Content{
+		// Turn 1: the model is "thinking" — a thought-only part, no answer.
+		{Role: "model", Parts: []*genai.Part{{Thought: true, Text: "let me think"}}},
+		// Turn 2: the real answer.
+		genai.NewContentFromText("the answer", genai.RoleModel),
+	}}
+
+	a, err := llmagent.New(llmagent.Config{Name: "thinker", Model: m})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	runner := testutil.NewTestAgentRunner(t, a)
+
+	var got strings.Builder
+	for ev, err := range runner.Run(t, "session_id", "hi") {
+		if err != nil {
+			t.Fatalf("run error: %v", err)
+		}
+		if ev.LLMResponse.Content != nil {
+			for _, p := range ev.LLMResponse.Content.Parts {
+				if !p.Thought {
+					got.WriteString(p.Text)
+				}
+			}
+		}
+	}
+
+	if n := len(m.Requests); n != 2 {
+		t.Errorf("model called %d time(s), want 2: a thought-only turn ended the invocation early", n)
+	}
+	if !strings.Contains(got.String(), "the answer") {
+		t.Errorf("surfaced text = %q, want it to contain %q", got.String(), "the answer")
+	}
+}
