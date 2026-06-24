@@ -22,6 +22,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
+	"google.golang.org/adk/codeexecution"
 	agentinternal "google.golang.org/adk/internal/agent"
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/llminternal"
@@ -90,6 +91,7 @@ func New(cfg Config) (agent.Agent, error) {
 			GlobalInstruction:         cfg.GlobalInstruction,
 			GlobalInstructionProvider: llminternal.InstructionProvider(cfg.GlobalInstructionProvider),
 			OutputKey:                 cfg.OutputKey,
+			CodeExecutor:              cfg.CodeExecutor,
 		},
 	}
 
@@ -280,6 +282,9 @@ type Config struct {
 	// - Extracts agent reply for later use, such as in tools, callbacks, etc.
 	// - Connects agents to coordinate with each other.
 	OutputKey string
+
+	// Allow agent to execute code blocks from model responses using the provided CodeExecutor.
+	CodeExecutor codeexecution.CodeExecutor
 }
 
 // BeforeModelCallback that is called before sending a request to the model.
