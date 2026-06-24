@@ -57,6 +57,12 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 		}
 	}
 
+	// The wrapped agent's Run already emits an invoke_agent span, so
+	// the scheduler must not add a redundant invoke_node wrapper —
+	// whether this node is activated by a static edge or delegated to
+	// via RunNode. Mirrors runner.newAgentNode.
+	cfg.EmitsOwnSpan = true
+
 	return &AgentNode{
 		BaseNode: NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
 		agent:    a,
