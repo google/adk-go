@@ -88,7 +88,9 @@ func TestTelemetrySchema_AgentWithTool(t *testing.T) {
 			))
 
 			rootAgent := newAgentWithToolScenario(t)
-			telemetrytest.RunScenario(t, rootAgent, "hello")
+			if err := telemetrytest.RunScenario(t, rootAgent, "hello"); err != nil {
+				t.Fatalf("RunScenario: %v", err)
+			}
 
 			got := telemetrytest.BuildDigests(t, spanExp.GetSpans(), logExp.Records())
 			if diff := cmp.Diff(tc.want, got); diff != "" {
