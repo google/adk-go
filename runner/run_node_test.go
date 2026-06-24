@@ -391,3 +391,54 @@ func TestRunner_MessageAsOutput_ClearsOutput(t *testing.T) {
 		t.Fatal("expected a non-partial event stamped with NodeInfo.MessageAsOutput")
 	}
 }
+
+// OutputKey + OutputSchema agent run through the Runner must yield one
+// output-carrying event, else the scheduler raises ErrMultipleOutputs.
+func TestRunner_LlmAgent_OutputKeySchema_SingleOutput(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+
+	const jsonResp = `{"text":"ok"}`
+	m := &scriptedModel{responses: []*genai.Content{
+		genai.NewContentFromText(jsonResp, "model"),
+	}}
+	a, err := llmagent.New(llmagent.Config{
+		Name:      "structured",
+		Model:     m,
+		OutputKey: "resp",
+		OutputSchema: &genai.Schema{
+			Type:       genai.TypeObject,
+			Properties: map[string]*genai.Schema{"text": {Type: genai.TypeString}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	r := newNodeTestRunner(t, a, svc)
+
+	events := 0
+	for ev, err := range r.Run(ctx, nodeTestUser, nodeTestSession, userText("hi"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if ev != nil {
+			events++
+		}
+	}
+	if events != 1 {
+		t.Fatalf("yielded %d events, want 1", events)
+	}
+
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: nodeTestApp, UserID: nodeTestUser, SessionID: nodeTestSession})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	saved, err := got.Session.State().Get("resp")
+	if err != nil {
+		t.Fatalf("State().Get(resp) error = %v", err)
+	}
+	if saved != jsonResp {
+		t.Errorf("state[resp] = %v, want %q", saved, jsonResp)
+	}
+}

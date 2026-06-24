@@ -1260,6 +1260,75 @@ func TestLLMAgent_WorkflowIntegration_OutputPropagatesToSuccessor(t *testing.T) 
 	}
 }
 
+// An OutputKey agent whose model emits a function-call turn then a text
+// turn yields two output-eligible events; only one may carry the node
+// output, else the scheduler raises ErrMultipleOutputs.
+func TestLLMAgent_WorkflowIntegration_OutputKeyDoesNotDuplicateOutput(t *testing.T) {
+	noopTool, err := functiontool.New(functiontool.Config{
+		Name:        "noop",
+		Description: "does nothing",
+	}, func(_ agent.Context, _ struct{}) (struct{}, error) {
+		return struct{}{}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+
+	// Turn 1: a function call (no text). Turn 2: the final text.
+	testLLM := &testutil.MockModel{
+		Responses: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "noop", Args: map[string]any{}},
+			}}},
+			genai.NewContentFromText("hello world", genai.RoleModel),
+		},
+	}
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:                     "llm_agent",
+		Model:                    testLLM,
+		OutputKey:                "result",
+		Tools:                    []tool.Tool{noopTool},
+		DisallowTransferToParent: true,
+		DisallowTransferToPeers:  true,
+	})
+	if err != nil {
+		t.Fatalf("failed to create llm agent: %v", err)
+	}
+
+	agentNode, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("failed to create agent node: %v", err)
+	}
+
+	var gotInput any
+	fnNode := workflow.NewFunctionNode("receiver", func(_ agent.Context, in any) (any, error) {
+		gotInput = in
+		return nil, nil
+	}, workflow.NodeConfig{})
+
+	w, err := workflow.New("test_workflow", workflow.Chain(workflow.Start, agentNode, fnNode))
+	if err != nil {
+		t.Fatalf("failed to create workflow: %v", err)
+	}
+
+	runCtx := runconfig.ToContext(t.Context(), &runconfig.RunConfig{})
+	exCtx := agent.NewNodeContext(&mockInvocationContext{
+		Context: runCtx,
+		sess:    &mockSession{id: "test-session-id"},
+	}, nil)
+
+	for _, err := range w.Run(exCtx) {
+		if err != nil {
+			t.Fatalf("workflow run failed: %v", err)
+		}
+	}
+
+	if diff := cmp.Diff("hello world", gotInput); diff != "" {
+		t.Errorf("successor node got unexpected input (-want +got):\n%s", diff)
+	}
+}
+
 type mockEvents struct{}
 
 func (m mockEvents) All() iter.Seq[*session.Event] {
