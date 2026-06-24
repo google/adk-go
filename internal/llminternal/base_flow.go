@@ -864,6 +864,9 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 			// Complete the span immediately to avoid capturing the upstream yield processing time.
 			if err != nil {
 				endSpanAndTrackResult()
+			} else if resp == nil {
+				// Skip nil responses to prevent nil pointer dereference.
+				continue
 			} else if !resp.Partial {
 				// Log only final responses.
 				telemetry.LogResponse(ctx, resp, backend)
