@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/artifact"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/session"
 )
 
@@ -446,4 +447,207 @@ func TestRunner_AutoCreateSession(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunner_OnPipelineErrorCallback(t *testing.T) {
+	appName := "testApp"
+	userID := "testUser"
+	sessionID := "testSession"
+
+	t.Run("BeforeRunCallback error triggers OnPipelineErrorCallback and is propagated", func(t *testing.T) {
+		ctx := t.Context()
+		sessionService := session.InMemoryService()
+		_, err := sessionService.Create(ctx, &session.CreateRequest{
+			AppName:   appName,
+			UserID:    userID,
+			SessionID: sessionID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		originalErr := fmt.Errorf("before run error")
+		interceptedErr := fmt.Errorf("intercepted before run error")
+
+		var callbackCalled bool
+		var receivedErr error
+
+		p, err := plugin.New(plugin.Config{
+			Name: "test_plugin",
+			BeforeRunCallback: func(ctx agent.InvocationContext) (*genai.Content, error) {
+				return nil, originalErr
+			},
+			OnPipelineErrorCallback: func(ctx agent.InvocationContext, err error) error {
+				callbackCalled = true
+				receivedErr = err
+				return interceptedErr
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		testAgent := must(agent.New(agent.Config{Name: "test_agent"}))
+		r, err := New(Config{
+			AppName:        appName,
+			Agent:          testAgent,
+			SessionService: sessionService,
+			PluginConfig: PluginConfig{
+				Plugins: []*plugin.Plugin{p},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var runErr error
+		for _, err := range r.Run(ctx, userID, sessionID, &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}, agent.RunConfig{}) {
+			if err != nil {
+				runErr = err
+			}
+		}
+
+		if !callbackCalled {
+			t.Error("OnPipelineErrorCallback was not called")
+		}
+		if receivedErr != originalErr {
+			t.Errorf("expected received error %v, got %v", originalErr, receivedErr)
+		}
+		if runErr != interceptedErr {
+			t.Errorf("expected run error %v, got %v", interceptedErr, runErr)
+		}
+	})
+
+	t.Run("OnUserMessageCallback error triggers OnPipelineErrorCallback and is propagated", func(t *testing.T) {
+		ctx := t.Context()
+		sessionService := session.InMemoryService()
+		_, err := sessionService.Create(ctx, &session.CreateRequest{
+			AppName:   appName,
+			UserID:    userID,
+			SessionID: sessionID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		originalErr := fmt.Errorf("user message error")
+		interceptedErr := fmt.Errorf("intercepted user message error")
+
+		var callbackCalled bool
+		var receivedErr error
+
+		p, err := plugin.New(plugin.Config{
+			Name: "test_plugin",
+			OnUserMessageCallback: func(ctx agent.InvocationContext, msg *genai.Content) (*genai.Content, error) {
+				return nil, originalErr
+			},
+			OnPipelineErrorCallback: func(ctx agent.InvocationContext, err error) error {
+				callbackCalled = true
+				receivedErr = err
+				return interceptedErr
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		testAgent := must(agent.New(agent.Config{Name: "test_agent"}))
+		r, err := New(Config{
+			AppName:        appName,
+			Agent:          testAgent,
+			SessionService: sessionService,
+			PluginConfig: PluginConfig{
+				Plugins: []*plugin.Plugin{p},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var runErr error
+		for _, err := range r.Run(ctx, userID, sessionID, &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}, agent.RunConfig{}) {
+			if err != nil {
+				runErr = err
+			}
+		}
+
+		if !callbackCalled {
+			t.Error("OnPipelineErrorCallback was not called")
+		}
+		if receivedErr == nil || !strings.Contains(receivedErr.Error(), originalErr.Error()) {
+			t.Errorf("expected received error to contain %v, got %v", originalErr, receivedErr)
+		}
+		if runErr != interceptedErr {
+			t.Errorf("expected run error %v, got %v", interceptedErr, runErr)
+		}
+	})
+
+	t.Run("Agent execution loop error triggers OnPipelineErrorCallback and is propagated", func(t *testing.T) {
+		ctx := t.Context()
+		sessionService := session.InMemoryService()
+		_, err := sessionService.Create(ctx, &session.CreateRequest{
+			AppName:   appName,
+			UserID:    userID,
+			SessionID: sessionID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		originalErr := fmt.Errorf("agent run error")
+		interceptedErr := fmt.Errorf("intercepted agent run error")
+
+		var callbackCalled bool
+		var receivedErr error
+
+		p, err := plugin.New(plugin.Config{
+			Name: "test_plugin",
+			OnPipelineErrorCallback: func(ctx agent.InvocationContext, err error) error {
+				callbackCalled = true
+				receivedErr = err
+				return interceptedErr
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		testAgent := must(agent.New(agent.Config{
+			Name: "test_agent",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(nil, originalErr)
+				}
+			},
+		}))
+
+		r, err := New(Config{
+			AppName:        appName,
+			Agent:          testAgent,
+			SessionService: sessionService,
+			PluginConfig: PluginConfig{
+				Plugins: []*plugin.Plugin{p},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var runErr error
+		for _, err := range r.Run(ctx, userID, sessionID, &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}, agent.RunConfig{}) {
+			if err != nil {
+				runErr = err
+			}
+		}
+
+		if !callbackCalled {
+			t.Error("OnPipelineErrorCallback was not called")
+		}
+		if receivedErr != originalErr {
+			t.Errorf("expected received error %v, got %v", originalErr, receivedErr)
+		}
+		if runErr != interceptedErr {
+			t.Errorf("expected run error %v, got %v", interceptedErr, runErr)
+		}
+	})
 }
