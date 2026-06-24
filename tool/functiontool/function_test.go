@@ -1125,3 +1125,59 @@ func TestFunctionTool_PanicRecovery(t *testing.T) {
 		}
 	}
 }
+
+// TestFunctionTool_SanitizesAnyOfForVertex verifies that a tool parameter
+// schema carrying an `anyOf` block alongside sibling keywords (the shape
+// pydantic/MCP servers emit for optional/union fields) is normalized before it
+// reaches the model. Vertex rejects anyOf-with-siblings ("when using any_of, it
+// must be the only field set"). adk-python parity.
+func TestFunctionTool_SanitizesAnyOfForVertex(t *testing.T) {
+	type Args struct {
+		Field string `json:"field"`
+	}
+	ischema := &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"field": {
+				Description: "an optional value",
+				AnyOf:       []*jsonschema.Schema{{Type: "string"}, {Type: "null"}},
+			},
+		},
+	}
+
+	tl, err := functiontool.New(functiontool.Config{
+		Name:        "anyof_tool",
+		Description: "tool with a pydantic/MCP-style anyOf parameter",
+		InputSchema: ischema,
+	}, func(_ agent.Context, _ Args) (any, error) { return nil, nil })
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+
+	requestProcessor, ok := tl.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("tool does not implement toolinternal.RequestProcessor")
+	}
+	var req model.LLMRequest
+	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+		t.Fatalf("ProcessRequest: %v", err)
+	}
+	decl := toolDeclaration(req.Config)
+	if decl == nil {
+		t.Fatal("ProcessRequest did not configure a function declaration")
+	}
+
+	schema, ok := decl.ParametersJsonSchema.(*jsonschema.Schema)
+	if !ok {
+		t.Fatalf("ParametersJsonSchema is %T, want *jsonschema.Schema", decl.ParametersJsonSchema)
+	}
+	field := schema.Properties["field"]
+	if field == nil {
+		t.Fatalf("field property missing: %+v", schema)
+	}
+	hasSiblings := field.Description != "" || field.Type != "" || len(field.Types) > 0 || len(field.Properties) > 0
+	if len(field.AnyOf) > 0 && hasSiblings {
+		t.Errorf("parameter schema still has anyOf alongside sibling keys (description=%q, type=%q); "+
+			"Vertex rejects this", field.Description, field.Type)
+	}
+}

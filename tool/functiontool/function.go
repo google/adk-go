@@ -163,10 +163,10 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 		Description: f.Description(),
 	}
 	if f.inputSchema != nil {
-		decl.ParametersJsonSchema = f.inputSchema.Schema()
+		decl.ParametersJsonSchema = toolutils.SanitizeSchemaForVertex(f.inputSchema.Schema())
 	}
 	if f.outputSchema != nil {
-		decl.ResponseJsonSchema = f.outputSchema.Schema()
+		decl.ResponseJsonSchema = toolutils.SanitizeSchemaForVertex(f.outputSchema.Schema())
 	}
 
 	if f.cfg.IsLongRunning {
