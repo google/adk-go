@@ -21,15 +21,17 @@ import (
 
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 // EventActions represent a data model for session.EventActions
 type EventActions struct {
-	StateDelta        map[string]any   `json:"stateDelta"`
-	ArtifactDelta     map[string]int64 `json:"artifactDelta"`
-	Escalate          bool             `json:"escalate,omitempty"`
-	SkipSummarization bool             `json:"skipSummarization,omitempty"`
-	TransferToAgent   string           `json:"transferToAgent,omitempty"`
+	StateDelta                 map[string]any                               `json:"stateDelta"`
+	ArtifactDelta              map[string]int64                             `json:"artifactDelta"`
+	Escalate                   bool                                         `json:"escalate,omitempty"`
+	SkipSummarization          bool                                         `json:"skipSummarization,omitempty"`
+	TransferToAgent            string                                       `json:"transferToAgent,omitempty"`
+	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
 }
 
 // Event represents a single event in a session.
@@ -55,6 +57,9 @@ type Event struct {
 	Actions             EventActions                                `json:"actions"`
 	Output              any                                         `json:"output,omitempty"`
 	NodeInfo            *session.NodeInfo                           `json:"nodeInfo,omitempty"`
+	IsolationScope      string                                      `json:"isolationScope,omitempty"`
+	Routes              []string                                    `json:"routes,omitempty"`
+	RequestedInput      *session.RequestInput                       `json:"requestedInput,omitempty"`
 }
 
 // ToSessionEvent maps Event data struct to session.Event
@@ -67,6 +72,9 @@ func ToSessionEvent(event Event) *session.Event {
 		LongRunningToolIDs: event.LongRunningToolIDs,
 		Output:             event.Output,
 		NodeInfo:           event.NodeInfo,
+		IsolationScope:     event.IsolationScope,
+		Routes:             event.Routes,
+		RequestedInput:     event.RequestedInput,
 		LLMResponse: model.LLMResponse{
 			AvgLogprobs:         event.AvgLogprobs,
 			Content:             event.Content,
@@ -83,11 +91,12 @@ func ToSessionEvent(event Event) *session.Event {
 			OutputTranscription: event.OutputTranscription,
 		},
 		Actions: session.EventActions{
-			StateDelta:        event.Actions.StateDelta,
-			ArtifactDelta:     event.Actions.ArtifactDelta,
-			Escalate:          event.Actions.Escalate,
-			SkipSummarization: event.Actions.SkipSummarization,
-			TransferToAgent:   event.Actions.TransferToAgent,
+			StateDelta:                 event.Actions.StateDelta,
+			ArtifactDelta:              event.Actions.ArtifactDelta,
+			Escalate:                   event.Actions.Escalate,
+			SkipSummarization:          event.Actions.SkipSummarization,
+			TransferToAgent:            event.Actions.TransferToAgent,
+			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
 		},
 	}
 }
@@ -103,6 +112,9 @@ func FromSessionEvent(event session.Event) Event {
 		LongRunningToolIDs:  event.LongRunningToolIDs,
 		Output:              event.Output,
 		NodeInfo:            event.NodeInfo,
+		IsolationScope:      event.IsolationScope,
+		Routes:              event.Routes,
+		RequestedInput:      event.RequestedInput,
 		AvgLogprobs:         event.LLMResponse.AvgLogprobs,
 		Content:             event.LLMResponse.Content,
 		GroundingMetadata:   event.LLMResponse.GroundingMetadata,
@@ -116,11 +128,12 @@ func FromSessionEvent(event session.Event) Event {
 		InputTranscription:  event.LLMResponse.InputTranscription,
 		OutputTranscription: event.LLMResponse.OutputTranscription,
 		Actions: EventActions{
-			StateDelta:        event.Actions.StateDelta,
-			ArtifactDelta:     event.Actions.ArtifactDelta,
-			Escalate:          event.Actions.Escalate,
-			SkipSummarization: event.Actions.SkipSummarization,
-			TransferToAgent:   event.Actions.TransferToAgent,
+			StateDelta:                 event.Actions.StateDelta,
+			ArtifactDelta:              event.Actions.ArtifactDelta,
+			Escalate:                   event.Actions.Escalate,
+			SkipSummarization:          event.Actions.SkipSummarization,
+			TransferToAgent:            event.Actions.TransferToAgent,
+			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
 		},
 	}
 }
