@@ -468,13 +468,10 @@ This tool hands off control to another agent when it's more suitable to answer t
 	// Compare!
 	// cmp.Diff returns an empty string if they are equal, otherwise a human-readable diff.
 	if diff := cmp.Diff(expectedLLMRequest, actualLLMRequest, opts...); diff != "" {
-		for _, content := range expectedLLMRequest.Contents {
-			for _, part := range content.Parts {
-				if part.Text != "" {
-					part.Text = modifyString(part.Text)
-				}
-			}
-		}
+		// If initial comparison fails due to string formatting (e.g., Python vs Go JSON whitespace or quote styles),
+		// normalize embedded JSON structures across both expected and actual requests before re-comparing.
+		canonicalizeRequestContents(expectedLLMRequest)
+		canonicalizeRequestContents(actualLLMRequest)
 
 		if diff := cmp.Diff(expectedLLMRequest, actualLLMRequest, opts...); diff != "" {
 			return fmt.Errorf("LLM request mismatch for agent '%s' (index %d):\n%s",
@@ -485,9 +482,35 @@ This tool hands off control to another agent when it's more suitable to answer t
 	return nil
 }
 
+// canonicalizeRequestContents normalizes all JSON-like strings within the request's contents and system instructions.
+func canonicalizeRequestContents(req *model.LLMRequest) {
+	if req == nil {
+		return
+	}
+	for _, content := range req.Contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part != nil && part.Text != "" {
+				part.Text = canonicalizeJSONSubstrings(part.Text)
+			}
+		}
+	}
+	if req.Config != nil && req.Config.SystemInstruction != nil {
+		for _, part := range req.Config.SystemInstruction.Parts {
+			if part != nil && part.Text != "" {
+				part.Text = canonicalizeJSONSubstrings(part.Text)
+			}
+		}
+	}
+}
+
 var (
 	// Matches either "parameters: " or "result: " followed by a JSON-like object/array
 	dataBlockRegex = regexp.MustCompile(`(?i)(parameters|result):\s*([\{\[].*[\}\]])`)
+	// Matches any standalone or embedded JSON-like object/array
+	jsonCandidateRegex = regexp.MustCompile(`([\{\[].*[\}\]])`)
 	// Matches 'key' or 'value' but ignores apostrophes inside words like O'Malley
 	quoteRegex = regexp.MustCompile(`'([^']*)'`)
 	// Matches Python/Pseudo-JSON constants specifically as values
@@ -531,6 +554,29 @@ func modifyString(input string) string {
 		}
 
 		return fmt.Sprintf("%s: %s", label, string(fixedJSON))
+	})
+}
+
+// canonicalizeJSONSubstrings searches for standalone or embedded JSON candidates within a string and re-marshals
+// them canonically to eliminate key-ordering, whitespace, and quote differences between Python and Go serializers.
+func canonicalizeJSONSubstrings(input string) string {
+	s := modifyString(input)
+	return jsonCandidateRegex.ReplaceAllStringFunc(s, func(rawData string) string {
+		normalized := quoteRegex.ReplaceAllString(rawData, `"$1"`)
+		normalized = nullRegex.ReplaceAllString(normalized, "null")
+		normalized = boolRegex.ReplaceAllStringFunc(normalized, func(m string) string {
+			return strings.ToLower(m)
+		})
+
+		var parsed any
+		if err := json.Unmarshal([]byte(normalized), &parsed); err != nil {
+			return rawData
+		}
+		fixedJSON, err := json.Marshal(parsed)
+		if err != nil {
+			return rawData
+		}
+		return string(fixedJSON)
 	})
 }
 
