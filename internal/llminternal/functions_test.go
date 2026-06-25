@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -181,7 +182,7 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := generateRequestConfirmationEvent(tt.invocationContext, tt.functionCallEvent, tt.functionResponseEvent)
+			got := generateRequestConfirmationEvent(context.Background(), tt.invocationContext, tt.functionCallEvent, tt.functionResponseEvent)
 
 			if diff := cmp.Diff(tt.wantEvent, got,
 				cmpopts.IgnoreFields(session.Event{}, "Timestamp", "LongRunningToolIDs", "ID"),
@@ -246,7 +247,7 @@ func TestGenerateRequestConfirmationEventHasID(t *testing.T) {
 		},
 	}
 
-	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	got := generateRequestConfirmationEvent(context.Background(), ctx, functionCallEvent, functionResponseEvent)
 	if got == nil {
 		t.Fatal("expected non-nil event")
 	}
@@ -290,7 +291,7 @@ func TestGenerateRequestConfirmationEventPreservesThoughtSignature(t *testing.T)
 		},
 	}
 
-	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	got := generateRequestConfirmationEvent(context.Background(), ctx, functionCallEvent, functionResponseEvent)
 	if got == nil || got.Content == nil || len(got.Content.Parts) != 1 {
 		t.Fatalf("expected one confirmation part, got %#v", got)
 	}
@@ -327,7 +328,7 @@ func TestGenerateRequestConfirmationEventNoThoughtSignature(t *testing.T) {
 		},
 	}
 
-	got := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
+	got := generateRequestConfirmationEvent(context.Background(), ctx, functionCallEvent, functionResponseEvent)
 	if got == nil || got.Content == nil || len(got.Content.Parts) != 1 {
 		t.Fatalf("expected one confirmation part, got %#v", got)
 	}

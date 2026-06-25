@@ -15,6 +15,7 @@
 package functiontool_test
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -40,7 +41,7 @@ func TestNewLongRunningFunctionTool(t *testing.T) {
 		Result string `json:"result"` // the operation result
 	}
 
-	handler := func(ctx agent.Context, input SumArgs) (SumResult, error) {
+	handler := func(_ context.Context, _ agent.Context, input SumArgs) (SumResult, error) {
 		return SumResult{Result: "Processing sum"}, nil
 	}
 	sumTool, err := functiontool.New(functiontool.Config{
@@ -81,7 +82,7 @@ type IncArgs struct{}
 
 func TestLongRunningFunctionFlow(t *testing.T) {
 	functionCalled := 0
-	increaseByOne := func(ctx agent.Context, x IncArgs) (map[string]string, error) {
+	increaseByOne := func(_ context.Context, _ agent.Context, x IncArgs) (map[string]string, error) {
 		functionCalled++
 		return map[string]string{"status": "pending"}, nil
 	}
@@ -90,7 +91,7 @@ func TestLongRunningFunctionFlow(t *testing.T) {
 
 func TestLongRunningStringFunctionFlow(t *testing.T) {
 	functionCalled := 0
-	increaseByOne := func(ctx agent.Context, x IncArgs) (string, error) {
+	increaseByOne := func(_ context.Context, _ agent.Context, x IncArgs) (string, error) {
 		functionCalled++
 		return "pending", nil
 	}
@@ -98,7 +99,7 @@ func TestLongRunningStringFunctionFlow(t *testing.T) {
 }
 
 // --- Test Suite ---
-func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx agent.Context, x IncArgs) (Out, error), resultKey string, callCount *int) {
+func testLongRunningFunctionFlow[Out any](t *testing.T, increaseByOne func(ctx context.Context, invCleanCtx agent.Context, x IncArgs) (Out, error), resultKey string, callCount *int) {
 	// 1. Setup
 	responses := []*genai.Content{
 		genai.NewContentFromFunctionCall("increaseByOne", map[string]any{}, "model"),
@@ -267,7 +268,7 @@ func TestLongRunningToolIDsAreSet(t *testing.T) {
 
 	type IncArgs struct{}
 
-	increaseByOne := func(ctx agent.Context, x IncArgs) (map[string]string, error) {
+	increaseByOne := func(_ context.Context, _ agent.Context, x IncArgs) (map[string]string, error) {
 		functionCalled++
 		return map[string]string{"status": "pending"}, nil
 	}

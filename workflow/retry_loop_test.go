@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"sync/atomic"
@@ -33,7 +34,7 @@ type retryLoopTestNode struct {
 	calls atomic.Int32
 }
 
-func (n *retryLoopTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *retryLoopTestNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		calls := n.calls.Add(1)
 
@@ -85,7 +86,7 @@ func TestScheduler_RetryLoop(t *testing.T) {
 	// in subsequent executions in a loop.
 
 	var events []*session.Event
-	for ev, err := range w.Run(mockCtx) {
+	for ev, err := range w.Run(t.Context(), mockCtx) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

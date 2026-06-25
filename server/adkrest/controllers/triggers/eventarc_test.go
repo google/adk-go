@@ -16,6 +16,7 @@ package triggers_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"iter"
 	"net/http"
@@ -150,10 +151,10 @@ func TestEventarcTriggerHandler(t *testing.T) {
 			var receivedContent string
 			testAgent, err := agent.New(agent.Config{
 				Name: "test-agent",
-				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				Run: func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 					return func(yield func(*session.Event, error) bool) {
 						mockAgentRunCount++
-						userContent := ctx.UserContent()
+						userContent := invCleanCtx.UserContent()
 						if userContent != nil && len(userContent.Parts) > 0 {
 							receivedContent = userContent.Parts[0].Text
 						}

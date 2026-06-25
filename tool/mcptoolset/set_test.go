@@ -235,7 +235,8 @@ func TestToolFilter(t *testing.T) {
 		t.Fatalf("Failed to create MCP tool set: %v", err)
 	}
 
-	tools, err := ts.Tools(icontext.NewReadonlyContext(
+	tools, err := ts.Tools(t.Context(), icontext.NewReadonlyContext(
+		t.Context(),
 		icontext.NewInvocationContext(
 			t.Context(),
 			icontext.InvocationContextParams{},
@@ -270,10 +271,10 @@ func TestListToolsReconnection(t *testing.T) {
 		t.Fatalf("Failed to create MCP tool set: %v", err)
 	}
 
-	ctx := icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}))
+	ctx := icontext.NewReadonlyContext(t.Context(), icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}))
 
 	// First call to Tools should create a session.
-	_, err = ts.Tools(ctx)
+	_, err = ts.Tools(t.Context(), ctx)
 	if err != nil {
 		t.Fatalf("First Tools call failed: %v", err)
 	}
@@ -284,7 +285,7 @@ func TestListToolsReconnection(t *testing.T) {
 	}
 
 	// Second call should detect the closed connection and reconnect.
-	_, err = ts.Tools(ctx)
+	_, err = ts.Tools(t.Context(), ctx)
 	if err != nil {
 		t.Fatalf("Second Tools call failed: %v", err)
 	}
@@ -310,11 +311,11 @@ func TestCallToolReconnection(t *testing.T) {
 	}
 
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	ctx := icontext.NewReadonlyContext(invCtx)
-	toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
+	ctx := icontext.NewReadonlyContext(t.Context(), invCtx)
+	toolCtx := agent.NewToolContext(t.Context(), invCtx, "", nil, nil)
 
 	// Get tools first to establish a session.
-	tools, err := ts.Tools(ctx)
+	tools, err := ts.Tools(t.Context(), ctx)
 	if err != nil {
 		t.Fatalf("Tools call failed: %v", err)
 	}
@@ -326,7 +327,7 @@ func TestCallToolReconnection(t *testing.T) {
 
 	// Call the tool - should reconnect and succeed.
 	fnTool := tools[0].(toolinternal.FunctionTool)
-	result, err := fnTool.Run(toolCtx, map[string]any{"city": "Paris"})
+	result, err := fnTool.Run(t.Context(), toolCtx, map[string]any{"city": "Paris"})
 	if err != nil {
 		t.Fatalf("Tool call after reconnect failed: %v", err)
 	}

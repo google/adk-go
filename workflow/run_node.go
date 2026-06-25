@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 
 	"google.golang.org/adk/agent"
@@ -122,10 +123,10 @@ func WithRaiseOnWait() RunNodeOption {
 //     errors.As recovers *NodeRunError with diagnostics.
 //   - ErrInvalidRunNodeContext, ErrInvalidRunID: misuse.
 //   - ctx.Err(): parent cancellation.
-func RunNode[OUT any](ctx agent.Context, child Node, input any, opts ...RunNodeOption) (OUT, error) {
+func RunNode[OUT any](ctx context.Context, invCleanCtx agent.Context, child Node, input any, opts ...RunNodeOption) (OUT, error) {
 	var zero OUT
 
-	ss := ctx.SubScheduler()
+	ss := invCleanCtx.SubScheduler()
 	if ss == nil {
 		return zero, ErrInvalidRunNodeContext
 	}

@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"testing"
@@ -24,7 +25,7 @@ import (
 )
 
 func TestNewDynamicNode_DefaultsRerunOnResume(t *testing.T) {
-	fn := func(NodeContext, string, func(*session.Event) error) (string, error) {
+	fn := func(context.Context, NodeContext, string, func(*session.Event) error) (string, error) {
 		return "", nil
 	}
 	n := NewDynamicNode[string, string]("d", fn, NodeConfig{})
@@ -36,7 +37,7 @@ func TestNewDynamicNode_DefaultsRerunOnResume(t *testing.T) {
 
 func TestNewDynamicNode_RespectsExplicitFalse(t *testing.T) {
 	f := false
-	fn := func(NodeContext, string, func(*session.Event) error) (string, error) {
+	fn := func(context.Context, NodeContext, string, func(*session.Event) error) (string, error) {
 		return "", nil
 	}
 	n := NewDynamicNode[string, string]("d", fn, NodeConfig{RerunOnResume: &f})
@@ -50,12 +51,12 @@ func TestDynamicNode_Sequential_RunNodeChain(t *testing.T) {
 	stepB := newStubNode("stepB", "from B")
 
 	orchestrator := NewDynamicNode[string, string]("orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
-			outA, err := RunNode[string](ctx, stepA, "ignored")
+		func(ctx context.Context, invCleanCtx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			outA, err := RunNode[string](ctx, invCleanCtx, stepA, "ignored")
 			if err != nil {
 				return "", err
 			}
-			outB, err := RunNode[string](ctx, stepB, outA)
+			outB, err := RunNode[string](ctx, invCleanCtx, stepB, outA)
 			if err != nil {
 				return "", err
 			}
@@ -76,7 +77,7 @@ func TestDynamicNode_TypedInput(t *testing.T) {
 
 	var observed Req
 	orchestrator := NewDynamicNode[Req, string]("orch",
-		func(_ NodeContext, in Req, _ func(*session.Event) error) (string, error) {
+		func(_ context.Context, _ NodeContext, in Req, _ func(*session.Event) error) (string, error) {
 			observed = in
 			return "ok", nil
 		},
@@ -99,7 +100,7 @@ func TestDynamicNode_TypedInput_JSONFallback(t *testing.T) {
 
 	var observed Req
 	orchestrator := NewDynamicNode[Req, string]("orch",
-		func(_ NodeContext, in Req, _ func(*session.Event) error) (string, error) {
+		func(_ context.Context, _ NodeContext, in Req, _ func(*session.Event) error) (string, error) {
 			observed = in
 			return "ok", nil
 		},
@@ -114,7 +115,7 @@ func TestDynamicNode_TypedInput_JSONFallback(t *testing.T) {
 
 func TestDynamicNode_EmitMidBody(t *testing.T) {
 	orchestrator := NewDynamicNode[string, string]("orch",
-		func(_ NodeContext, _ string, emit func(*session.Event) error) (string, error) {
+		func(_ context.Context, _ NodeContext, _ string, emit func(*session.Event) error) (string, error) {
 			if err := emit(&session.Event{Actions: session.EventActions{
 				StateDelta: map[string]any{"progress": "halfway"},
 			}}); err != nil {
@@ -142,8 +143,8 @@ func TestDynamicNode_HITL_SwallowsInterrupt(t *testing.T) {
 	// RequestedInput event; Run must not also yield the sentinel.
 	asker := newRequestInputNode("asker", "approve?")
 	orchestrator := NewDynamicNode[string, string]("orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
-			_, err := RunNode[string](ctx, asker, nil)
+		func(ctx context.Context, invCleanCtx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			_, err := RunNode[string](ctx, invCleanCtx, asker, nil)
 			return "", err
 		},
 		NodeConfig{},
@@ -161,8 +162,8 @@ func TestDynamicNode_HITL_SwallowsInterrupt(t *testing.T) {
 func TestDynamicNode_ChildFailure_PropagatesError(t *testing.T) {
 	failer := newFailingNode("failer", errors.New("boom"))
 	orchestrator := NewDynamicNode[string, string]("orch",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
-			_, err := RunNode[string](ctx, failer, nil)
+		func(ctx context.Context, invCleanCtx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			_, err := RunNode[string](ctx, invCleanCtx, failer, nil)
 			return "", err
 		},
 		NodeConfig{},
@@ -176,7 +177,7 @@ func TestDynamicNode_ChildFailure_PropagatesError(t *testing.T) {
 
 func TestDynamicNode_TerminalOutputEvent(t *testing.T) {
 	orchestrator := NewDynamicNode[string, int]("orch",
-		func(NodeContext, string, func(*session.Event) error) (int, error) {
+		func(context.Context, NodeContext, string, func(*session.Event) error) (int, error) {
 			return 42, nil
 		},
 		NodeConfig{},
@@ -195,14 +196,14 @@ func TestDynamicNode_TerminalOutputEvent(t *testing.T) {
 // the pair as "multiple outputs per activation".
 func TestDynamicNode_Integration_ChildAndParentOutputs(t *testing.T) {
 	helloNode := NewFunctionNode("hello_node",
-		func(_ agent.Context, _ string) (string, error) {
+		func(_ context.Context, _ agent.Context, _ string) (string, error) {
 			return "Hello World", nil
 		},
 		NodeConfig{},
 	)
 	orch := NewDynamicNode[string, string]("my_workflow",
-		func(ctx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
-			return RunNode[string](ctx, helloNode, "hello")
+		func(ctx context.Context, invCleanCtx NodeContext, _ string, _ func(*session.Event) error) (string, error) {
+			return RunNode[string](ctx, invCleanCtx, helloNode, "hello")
 		},
 		NodeConfig{},
 	)
@@ -213,7 +214,7 @@ func TestDynamicNode_Integration_ChildAndParentOutputs(t *testing.T) {
 	}
 
 	var outputs []any
-	for ev, err := range w.Run(newMockCtx(t)) {
+	for ev, err := range w.Run(t.Context(), newMockCtx(t)) {
 		if err != nil {
 			t.Fatalf("workflow.Run error: %v", err)
 		}
@@ -232,7 +233,7 @@ func TestDynamicNode_Integration_ChildAndParentOutputs(t *testing.T) {
 }
 
 func TestNewDynamicNodeWithSchema_NilSchemasOK(t *testing.T) {
-	fn := func(NodeContext, string, func(*session.Event) error) (string, error) { return "", nil }
+	fn := func(context.Context, NodeContext, string, func(*session.Event) error) (string, error) { return "", nil }
 	if _, err := NewDynamicNodeWithSchema[string, string]("d", fn, nil, nil, NodeConfig{}); err != nil {
 		t.Errorf("nil schemas should construct cleanly, got %v", err)
 	}
@@ -251,9 +252,9 @@ func drainDynamic(t *testing.T, n Node, input any) []*session.Event {
 
 func drainDynamicWithErr(t *testing.T, n Node, input any) ([]*session.Event, error) {
 	t.Helper()
-	parent := agent.NewNodeContext(newMockCtx(t), nil)
+	parent := agent.NewNodeContext(t.Context(), newMockCtx(t), nil)
 	var events []*session.Event
-	for ev, err := range n.Run(parent, input) {
+	for ev, err := range n.Run(t.Context(), parent, input) {
 		if err != nil {
 			return events, err
 		}
@@ -285,7 +286,7 @@ func newFailingNode(name string, err error) *failingNode {
 	}
 }
 
-func (n *failingNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+func (n *failingNode) Run(context.Context, agent.Context, any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(nil, n.err)
 	}

@@ -292,7 +292,7 @@ type customAgent struct {
 	callCounter int
 }
 
-func (a *customAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *customAgent) Run(context.Context, agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		a.callCounter++
 
@@ -306,13 +306,13 @@ func (a *customAgent) Run(agent.InvocationContext) iter.Seq2[*session.Event, err
 
 type EmptyArgs struct{}
 
-func exampleFunctionThatEscalates(ctx agent.Context, myArgs EmptyArgs) (map[string]string, error) {
+func exampleFunctionThatEscalates(_ context.Context, ctx agent.Context, myArgs EmptyArgs) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = false
 	return map[string]string{}, nil
 }
 
-func exampleFunctionThatEscalatesAndSkips(ctx agent.Context, myArgs EmptyArgs) (map[string]string, error) {
+func exampleFunctionThatEscalatesAndSkips(_ context.Context, ctx agent.Context, myArgs EmptyArgs) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = true
 	return map[string]string{}, nil

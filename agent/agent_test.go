@@ -40,7 +40,7 @@ func TestAgentCallbacks(t *testing.T) {
 		{
 			name: "before agent callback runs, no llm calls",
 			beforeAgent: []BeforeAgentCallback{
-				func(ctx Context) (*genai.Content, error) {
+				func(_ context.Context, _ Context) (*genai.Content, error) {
 					return genai.NewContentFromText("hello from before_agent_callback", genai.RoleModel), nil
 				},
 			},
@@ -60,12 +60,12 @@ func TestAgentCallbacks(t *testing.T) {
 		{
 			name: "no callback effect if callbacks return nil",
 			beforeAgent: []BeforeAgentCallback{
-				func(ctx Context) (*genai.Content, error) {
+				func(_ context.Context, _ Context) (*genai.Content, error) {
 					return nil, nil
 				},
 			},
 			afterAgent: []AfterAgentCallback{
-				func(Context) (*genai.Content, error) {
+				func(_ context.Context, _ Context) (*genai.Content, error) {
 					return nil, nil
 				},
 			},
@@ -82,7 +82,7 @@ func TestAgentCallbacks(t *testing.T) {
 		{
 			name: "after agent callback create a new event with new content",
 			afterAgent: []AfterAgentCallback{
-				func(Context) (*genai.Content, error) {
+				func(_ context.Context, _ Context) (*genai.Content, error) {
 					return genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel), nil
 				},
 			},
@@ -122,12 +122,11 @@ func TestAgentCallbacks(t *testing.T) {
 			}
 
 			ctx := &invocationContext{
-				Context: t.Context(),
 				agent:   testAgent,
 				session: &mockSession{sessionID: "test-session"},
 			}
 			var gotEvents []*session.Event
-			for event, err := range testAgent.Run(ctx) {
+			for event, err := range testAgent.Run(t.Context(), ctx) {
 				if err != nil {
 					t.Fatalf("unexpected error from the agent: %v", err)
 				}
@@ -158,7 +157,7 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 	testAgent, err := New(Config{
 		Name: "test",
 		BeforeAgentCallbacks: []BeforeAgentCallback{
-			func(ctx Context) (*genai.Content, error) {
+			func(_ context.Context, _ Context) (*genai.Content, error) {
 				return nil, nil
 			},
 		},
@@ -169,12 +168,11 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 	}
 
 	ctx := &invocationContext{
-		Context:       t.Context(),
 		agent:         testAgent,
 		endInvocation: true,
 		session:       &mockSession{sessionID: "test-session"},
 	}
-	for _, err := range testAgent.Run(ctx) {
+	for _, err := range testAgent.Run(t.Context(), ctx) {
 		if err != nil {
 			t.Fatalf("unexpected error from the agent: %v", err)
 		}
@@ -193,7 +191,7 @@ func TestEndInvocation_EndsAfterMainCall(t *testing.T) {
 	testAgent, err := New(Config{
 		Name: "test",
 		AfterAgentCallbacks: []AfterAgentCallback{
-			func(Context) (*genai.Content, error) {
+			func(_ context.Context, _ Context) (*genai.Content, error) {
 				return genai.NewContentFromText("hello from after_agent_callback", genai.RoleModel), nil
 			},
 		},
@@ -204,12 +202,11 @@ func TestEndInvocation_EndsAfterMainCall(t *testing.T) {
 	}
 
 	ctx := &invocationContext{
-		Context: t.Context(),
 		agent:   testAgent,
 		session: &mockSession{sessionID: "test-session"},
 	}
 	var gotEvents []*session.Event
-	for event, err := range testAgent.Run(ctx) {
+	for event, err := range testAgent.Run(t.Context(), ctx) {
 		if err != nil {
 			t.Fatalf("unexpected error from the agent: %v", err)
 		}
@@ -241,12 +238,12 @@ type customAgent struct {
 	endInvocation bool
 }
 
-func (a *customAgent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *customAgent) Run(ctx context.Context, invCleanCtx InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		a.callCounter++
 
 		if a.endInvocation {
-			ctx.EndInvocation()
+			invCleanCtx.EndInvocation()
 		}
 
 		yield(&session.Event{
@@ -254,28 +251,6 @@ func (a *customAgent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error
 				Content: genai.NewContentFromText("hello", genai.RoleModel),
 			},
 		}, nil)
-	}
-}
-
-type testKey struct{}
-
-func TestWithContext(t *testing.T) {
-	baseCtx := t.Context()
-	inv := &invocationContext{
-		Context:      baseCtx,
-		invocationID: "test",
-		branch:       "branch",
-	}
-
-	key := testKey{}
-	val := "val"
-	got := inv.WithContext(context.WithValue(baseCtx, key, val))
-
-	if got.Value(key) != val {
-		t.Errorf("WithContext() did not update context")
-	}
-	if diff := cmp.Diff(inv, got, cmp.AllowUnexported(invocationContext{}), cmpopts.IgnoreFields(invocationContext{}, "Context")); diff != "" {
-		t.Errorf("WithContext() params mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -289,7 +264,7 @@ func (m *mockSession) ID() string { return m.sessionID }
 func TestFindAgent(t *testing.T) {
 	t.Parallel()
 
-	noOpRun := func(InvocationContext) iter.Seq2[*session.Event, error] {
+	noOpRun := func(context.Context, InvocationContext) iter.Seq2[*session.Event, error] {
 		return func(func(*session.Event, error) bool) {}
 	}
 

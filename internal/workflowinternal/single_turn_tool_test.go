@@ -164,7 +164,7 @@ func TestSingleTurnTool_Run_Failures(t *testing.T) {
 			a := newLLMAgent(t, agentName, agentDesc, tc.inputSchema)
 			st := newSingleTurnTool(t, a)
 
-			got, err := st.Run(nil, tc.args)
+			got, err := st.Run(context.Background(), nil, tc.args)
 			if err == nil {
 				t.Fatalf("Run(%v) err = nil, want non-nil", tc.args)
 			}
@@ -184,7 +184,7 @@ func TestSingleTurnTool_ProcessRequest_RegistersTool(t *testing.T) {
 	st := newSingleTurnTool(t, newLLMAgent(t, agentName, agentDesc, nil))
 
 	req := &model.LLMRequest{}
-	if err := st.ProcessRequest(nil, req); err != nil {
+	if err := st.ProcessRequest(context.Background(), nil, req); err != nil {
 		t.Fatalf("ProcessRequest() err = %v", err)
 	}
 
@@ -209,7 +209,7 @@ func TestSingleTurnTool_Run_HappyPath(t *testing.T) {
 	a, err := agent.New(agent.Config{
 		Name:        "echo_agent",
 		Description: "Yields a single fixed-output event.",
-		Run: func(_ agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(context.Context, agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				yield(&session.Event{Output: wantOutput}, nil)
 			}
@@ -225,9 +225,9 @@ func TestSingleTurnTool_Run_HappyPath(t *testing.T) {
 		gotErr    error
 	)
 	orchestrator := workflow.NewDynamicNode("orchestrator",
-		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
-			toolCtx := agent.NewToolContext(ctx, "fc-id", &session.EventActions{}, nil)
-			gotResult, gotErr = st.Run(toolCtx, map[string]any{"request": "hello"})
+		func(ctx context.Context, invCleanCtx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
+			toolCtx := agent.NewToolContext(ctx, invCleanCtx, "fc-id", &session.EventActions{}, nil)
+			gotResult, gotErr = st.Run(ctx, toolCtx, map[string]any{"request": "hello"})
 			return nil, gotErr
 		},
 		workflow.NodeConfig{},
@@ -248,7 +248,7 @@ func TestSingleTurnTool_Run_HappyPath(t *testing.T) {
 	}
 
 	ic := &fakeInvocationContext{Context: t.Context(), sess: sessResp.Session}
-	for _, err := range w.Run(ic) {
+	for _, err := range w.Run(t.Context(), ic) {
 		if err != nil {
 			t.Fatalf("workflow.Run error: %v", err)
 		}
@@ -274,7 +274,7 @@ func TestSingleTurnTool_Run_SurvivesContextRewrap(t *testing.T) {
 	sub, err := agent.New(agent.Config{
 		Name:        "echo_agent",
 		Description: "Yields a single fixed-output event.",
-		Run: func(_ agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(context.Context, agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				yield(&session.Event{Output: wantOutput}, nil)
 			}
@@ -292,12 +292,12 @@ func TestSingleTurnTool_Run_SurvivesContextRewrap(t *testing.T) {
 	// Body mirrors runner.runAgentNodeBody: re-wrap ctx, then re-stash
 	// the sub-scheduler in the value chain before building the tool context.
 	orchestrator := workflow.NewDynamicNode("orchestrator",
-		func(ctx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
-			toolCtx, err := agent.NewCleanToolContext(ctx, "fc-id", &session.EventActions{}, nil)
+		func(ctx context.Context, invCleanCtx workflow.NodeContext, _ string, _ func(*session.Event) error) (any, error) {
+			toolCtx, err := agent.NewCleanToolContext(ctx, invCleanCtx, "fc-id", &session.EventActions{}, nil)
 			if err != nil {
 				return nil, fmt.Errorf("cannot agent.NewCleanToolContext: %w", err)
 			}
-			gotResult, gotErr = st.Run(toolCtx, map[string]any{"request": "hello"})
+			gotResult, gotErr = st.Run(ctx, toolCtx, map[string]any{"request": "hello"})
 			return nil, gotErr
 		},
 		workflow.NodeConfig{},
@@ -319,7 +319,7 @@ func TestSingleTurnTool_Run_SurvivesContextRewrap(t *testing.T) {
 
 	ic := &fakeInvocationContext{Context: t.Context(), sess: sessResp.Session}
 	var sawSubOutput bool
-	for ev, err := range w.Run(ic) {
+	for ev, err := range w.Run(t.Context(), ic) {
 		if err != nil {
 			t.Fatalf("workflow.Run error: %v", err)
 		}
@@ -372,7 +372,7 @@ func newCompositeAgent(t *testing.T, name, description string, subAgents ...agen
 		Name:        name,
 		Description: description,
 		SubAgents:   subAgents,
-		Run: func(_ agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(context.Context, agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				yield(nil, errors.New("custom agent Run should not be invoked in unit tests"))
 			}

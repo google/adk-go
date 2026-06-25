@@ -15,6 +15,7 @@
 package workflowinternal
 
 import (
+	"context"
 	"fmt"
 
 	"google.golang.org/genai"
@@ -54,7 +55,7 @@ func (t *SingleTurnTool) IsLongRunning() bool {
 	return false
 }
 
-func (t *SingleTurnTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
+func (t *SingleTurnTool) Run(ctx context.Context, toolCtx agent.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("single turn tool expects map[string]any arguments, got %T", args)
@@ -76,7 +77,7 @@ func (t *SingleTurnTool) Run(toolCtx agent.Context, args any) (map[string]any, e
 		return nil, fmt.Errorf("failed to create agent node: %w", err)
 	}
 
-	result, err := workflow.RunNode[any](toolCtx, node, nodeInput, workflow.WithUseSubBranch())
+	result, err := workflow.RunNode[any](ctx, toolCtx, node, nodeInput, workflow.WithUseSubBranch())
 	if err != nil {
 		return nil, fmt.Errorf("failed to run agent node: %w", err)
 	}
@@ -92,7 +93,7 @@ func (t *SingleTurnTool) Declaration() *genai.FunctionDeclaration {
 	return t.funcDeclaration
 }
 
-func (t *SingleTurnTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (t *SingleTurnTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 

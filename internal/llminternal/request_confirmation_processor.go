@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -34,9 +35,9 @@ type confirmedCall struct {
 	call         genai.FunctionCall
 }
 
-func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+func RequestConfirmationRequestProcessor(ctx context.Context, invCleanCtx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		llmAgent := asLLMAgent(ctx.Agent())
+		llmAgent := asLLMAgent(invCleanCtx.Agent())
 		if llmAgent == nil {
 			return // In python, no error is yielded.
 		}
@@ -47,8 +48,8 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 		}
 
 		var events []*session.Event
-		if ctx.Session() != nil {
-			for e := range ctx.Session().Events().All() {
+		if invCleanCtx.Session() != nil {
+			for e := range invCleanCtx.Session().Events().All() {
 				events = append(events, e)
 			}
 		}
@@ -161,7 +162,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				toolsToResumeConfirmation[callID] = cc.confirmation
 			}
 
-			ev, err := f.handleFunctionCalls(ctx, toolsmap, &model.LLMResponse{
+			ev, err := f.handleFunctionCalls(ctx, invCleanCtx, toolsmap, &model.LLMResponse{
 				Content: &genai.Content{Parts: parts, Role: genai.RoleUser},
 			}, toolsToResumeConfirmation, nil)
 			if !yield(ev, err) {

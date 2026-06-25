@@ -15,6 +15,7 @@
 package skilltool
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -46,13 +47,13 @@ func LoadSkillResource(source skill.Source) (tool.Tool, error) {
 			Name:        "load_skill_resource",
 			Description: "Loads a resource file (e.g., from references/ or assets/) associated with the specified skill.",
 		},
-		func(ctx agent.Context, args LoadSkillResourceArgs) (*LoadSkillResourceResult, error) {
-			return loadSkillResource(ctx, args, source)
+		func(ctx context.Context, invCleanCtx agent.Context, args LoadSkillResourceArgs) (*LoadSkillResourceResult, error) {
+			return loadSkillResource(ctx, invCleanCtx, args, source)
 		},
 	)
 }
 
-func loadSkillResource(ctx agent.Context, args LoadSkillResourceArgs, source skill.Source) (*LoadSkillResourceResult, error) {
+func loadSkillResource(ctx context.Context, invCleanCtx agent.Context, args LoadSkillResourceArgs, source skill.Source) (*LoadSkillResourceResult, error) {
 	if args.SkillName == "" {
 		return nil, fmt.Errorf("skill name is required to load a resource")
 	}

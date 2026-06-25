@@ -15,6 +15,7 @@
 package agenttool_test
 
 import (
+	"context"
 	"log"
 	"testing"
 
@@ -129,7 +130,7 @@ func TestAgentTool_Run_InputValidation(t *testing.T) {
 				t.Fatal("agentTool does not implement FunctionTool")
 			}
 
-			_, err := toolImpl.Run(toolCtx, tt.args)
+			_, err := toolImpl.Run(context.Background(), toolCtx, tt.args)
 			if err == nil {
 				t.Fatalf("Run(%v) succeeded unexpectedly, wanted error", tt.args)
 			}
@@ -161,7 +162,7 @@ func TestAgentTool_Run_OutputValidation(t *testing.T) {
 		t.Fatal("agentTool does not implement FunctionTool")
 	}
 
-	_, err := toolImpl.Run(toolCtx, map[string]any{"request": "test"})
+	_, err := toolImpl.Run(context.Background(), toolCtx, map[string]any{"request": "test"})
 	if err == nil {
 		t.Fatalf("Run() succeeded unexpectedly, want error")
 	}
@@ -196,7 +197,7 @@ func TestAgentTool_Run_Successful(t *testing.T) {
 		t.Fatal("agentTool does not implement FunctionTool")
 	}
 
-	result, err := toolImpl.Run(toolCtx, map[string]any{"is_magic": true})
+	result, err := toolImpl.Run(context.Background(), toolCtx, map[string]any{"is_magic": true})
 	if err != nil {
 		t.Fatalf("Run() failed unexpectedly: %v", err)
 	}
@@ -228,7 +229,7 @@ func TestAgentTool_Run_WithoutSchema(t *testing.T) {
 		t.Fatal("agentTool does not implement FunctionTool")
 	}
 
-	result, err := toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
+	result, err := toolImpl.Run(context.Background(), toolCtx, map[string]any{"request": "magic"})
 	if err != nil {
 		t.Fatalf("Run() failed unexpectedly: %v", err)
 	}
@@ -252,7 +253,7 @@ func TestAgentTool_Run_EmptyModelResponse(t *testing.T) {
 		t.Fatal("agentTool does not implement FunctionTool")
 	}
 
-	result, err := toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
+	result, err := toolImpl.Run(context.Background(), toolCtx, map[string]any{"request": "magic"})
 	if err != nil {
 		t.Fatalf("Run() failed unexpectedly: %v", err)
 	}
@@ -278,7 +279,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 	if !ok {
 		t.Fatal("agentToolSkip does not implement FunctionTool")
 	}
-	_, err := toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
+	_, err := toolImpl.Run(context.Background(), toolCtx, map[string]any{"request": "magic"})
 	if err != nil {
 		t.Fatalf("Run() with skipSummarization=true failed unexpectedly: %v", err)
 	}
@@ -298,7 +299,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 		genai.NewContentFromText("test response", genai.RoleModel),
 	}
 	testLLM.Requests = nil
-	_, err = toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
+	_, err = toolImpl.Run(context.Background(), toolCtx, map[string]any{"request": "magic"})
 	if err != nil {
 		t.Fatalf("Run() with skipSummarization=false failed unexpectedly: %v", err)
 	}
@@ -363,5 +364,5 @@ func createToolContext(t *testing.T, testAgent agent.Agent) agent.Context {
 		Session: createResponse.Session,
 	})
 
-	return agent.NewToolContext(ctx, "", &session.EventActions{}, nil)
+	return agent.NewToolContext(t.Context(), ctx, "", &session.EventActions{}, nil)
 }

@@ -272,7 +272,7 @@ func TestAudioCacheManager(t *testing.T) {
 				agentObj:     mockAg,
 			}
 
-			events, err := mgr.FlushCaches(mockCtx, tt.flushUser, tt.flushModel)
+			events, err := mgr.FlushCaches(context.Background(), mockCtx, tt.flushUser, tt.flushModel)
 			if err != nil {
 				t.Fatalf("FlushCaches failed: %v", err)
 			}

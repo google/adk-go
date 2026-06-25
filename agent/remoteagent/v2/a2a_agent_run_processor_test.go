@@ -302,7 +302,7 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 
 			for _, event := range tc.events {
 
-				adkEvent, err := adka2a.ToSessionEvent(ctx, event)
+				adkEvent, err := adka2a.ToSessionEvent(t.Context(), ctx, event)
 				if err != nil {
 					t.Fatalf("ToSessionEvent failed: %v", err)
 				}
@@ -310,12 +310,12 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 				if adkEvent == nil {
 					// Handle Task snapshot resetting aggregation even if it doesn't produce an event
 					if _, ok := event.(*a2a.Task); ok {
-						p.aggregatePartial(ctx, event, nil)
+						p.aggregatePartial(t.Context(), ctx, event, nil)
 					}
 					continue
 				}
 
-				gotEvents = append(gotEvents, p.aggregatePartial(ctx, event, adkEvent)...)
+				gotEvents = append(gotEvents, p.aggregatePartial(t.Context(), ctx, event, adkEvent)...)
 			}
 			opts := []cmp.Option{
 				cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "InvocationID", "Author", "Branch", "CustomMetadata", "Actions"),

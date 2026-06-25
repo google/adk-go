@@ -43,7 +43,7 @@ import (
 type Agent interface {
 	Name() string
 	Description() string
-	Run(InvocationContext) iter.Seq2[*session.Event, error]
+	Run(context.Context, InvocationContext) iter.Seq2[*session.Event, error]
 	SubAgents() []Agent
 	FindAgent(name string) Agent
 	FindSubAgent(name string) Agent
@@ -96,7 +96,7 @@ type Config struct {
 	// from the content or error of that callback.
 	BeforeAgentCallbacks []BeforeAgentCallback
 	// Run is the function that defines the agent's behavior.
-	Run func(InvocationContext) iter.Seq2[*session.Event, error]
+	Run func(context.Context, InvocationContext) iter.Seq2[*session.Event, error]
 	// AfterAgentCallbacks is a list of callbacks that are called sequentially
 	// after the agent has completed its run.
 	//
@@ -126,7 +126,7 @@ type Memory interface {
 // its run.
 // If it returns non-nil content or error, the agent run will be skipped and a
 // new event will be created.
-type BeforeAgentCallback func(Context) (*genai.Content, error)
+type BeforeAgentCallback func(context.Context, Context) (*genai.Content, error)
 
 // AfterAgentCallback is a function that is called after the agent has completed
 // its run.
@@ -134,7 +134,7 @@ type BeforeAgentCallback func(Context) (*genai.Content, error)
 //
 // The callback will be skipped also if EndInvocation was called before or
 // BeforeAgentCallbacks returned non-nil results.
-type AfterAgentCallback func(Context) (*genai.Content, error)
+type AfterAgentCallback func(context.Context, Context) (*genai.Content, error)
 
 type agent struct {
 	agentinternal.State
@@ -143,7 +143,7 @@ type agent struct {
 	subAgents         []Agent
 
 	beforeAgentCallbacks []BeforeAgentCallback
-	run                  func(InvocationContext) iter.Seq2[*session.Event, error]
+	run                  func(context.Context, InvocationContext) iter.Seq2[*session.Event, error]
 	afterAgentCallbacks  []AfterAgentCallback
 }
 
@@ -159,9 +159,9 @@ func (a *agent) SubAgents() []Agent {
 	return a.subAgents
 }
 
-func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *agent) Run(ctx context.Context, invCleanCtx InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationAgent{Agent: a})
+		spanCtx, span := telemetry.StartNodeSpan(ctx, invCleanCtx, telemetry.OperationAgent{Agent: a})
 		yield, endSpan := telemetry.WrapYield(span, yield, func(span trace.Span, event *session.Event, err error) {
 			telemetry.TraceAgentResult(span, telemetry.TraceAgentResultParams{
 				ResponseEvent: event,
@@ -171,34 +171,33 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		defer endSpan()
 		// TODO: verify&update the setup here. Should we branch etc.
 
-		// create NodeContext based on spanCtx and ctx
-		// case 1: ctx is Context
-		// case 2: ctx is InvocationContext and is not Context
+		// create NodeContext based on invCleanCtx
+		// case 1: invCleanCtx is Context
+		// case 2: invCleanCtx is InvocationContext and is not Context
 
 		ic := &invocationContext{
-			Context:   ctx.WithContext(spanCtx),
 			agent:     a,
-			artifacts: ctx.Artifacts(),
-			memory:    ctx.Memory(),
-			session:   ctx.Session(),
+			artifacts: invCleanCtx.Artifacts(),
+			memory:    invCleanCtx.Memory(),
+			session:   invCleanCtx.Session(),
 
-			invocationID:   ctx.InvocationID(),
-			branch:         ctx.Branch(),
-			isolationScope: ctx.IsolationScope(),
-			userContent:    ctx.UserContent(),
-			runConfig:      ctx.RunConfig(),
-			endInvocation:  ctx.Ended(),
+			invocationID:   invCleanCtx.InvocationID(),
+			branch:         invCleanCtx.Branch(),
+			isolationScope: invCleanCtx.IsolationScope(),
+			userContent:    invCleanCtx.UserContent(),
+			runConfig:      invCleanCtx.RunConfig(),
+			endInvocation:  invCleanCtx.Ended(),
 		}
 
 		var nodeCtx Context
-		if parentCC, ok := ctx.(Context); ok {
-			nc := NewNodeContext(ic, nil)
-			nodeCtx = NewDynamicNodeContext(nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
+		if parentCC, ok := invCleanCtx.(Context); ok {
+			nc := NewNodeContext(spanCtx, ic, nil)
+			nodeCtx = NewDynamicNodeContext(spanCtx, nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
 		} else {
-			nodeCtx = NewNodeContext(ic, nil)
+			nodeCtx = NewNodeContext(spanCtx, ic, nil)
 		}
 
-		event, err := runBeforeAgentCallbacks(nodeCtx)
+		event, err := runBeforeAgentCallbacks(spanCtx, nodeCtx)
 		if event != nil || err != nil {
 			if !yield(event, err) {
 				return
@@ -209,9 +208,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			return
 		}
 
-		for event, err := range a.run(nodeCtx) {
+		for event, err := range a.run(spanCtx, nodeCtx) {
 			if event != nil && event.Author == "" {
-				event.Author = getAuthorForEvent(nodeCtx, event)
+				event.Author = getAuthorForEvent(spanCtx, nodeCtx, event)
 			}
 			if !yield(event, err) {
 				return
@@ -222,7 +221,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			return
 		}
 
-		event, err = runAfterAgentCallbacks(nodeCtx)
+		event, err = runAfterAgentCallbacks(spanCtx, nodeCtx)
 		if event != nil || err != nil {
 			yield(event, err)
 		}
@@ -249,43 +248,43 @@ func (a *agent) FindSubAgent(name string) Agent {
 	return nil
 }
 
-func getAuthorForEvent(ctx Context, event *session.Event) string {
+func getAuthorForEvent(ctx context.Context, invCleanCtx Context, event *session.Event) string {
 	if event.LLMResponse.Content != nil && event.LLMResponse.Content.Role == genai.RoleUser {
 		return genai.RoleUser
 	}
 
-	return ctx.Agent().Name()
+	return invCleanCtx.Agent().Name()
 }
 
 // runBeforeAgentCallbacks checks if any beforeAgentCallback returns non-nil content
 // then it skips agent run and returns callback result.
-func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
-	agent := ctx.Agent()
+func runBeforeAgentCallbacks(ctx context.Context, invCleanCtx InvocationContext) (*session.Event, error) {
+	agent := invCleanCtx.Agent()
 	pluginManager := pluginManagerFromContext(ctx)
 
 	actions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	callbackCtx := NewCallbackContext(ctx, actions)
+	callbackCtx := NewCallbackContext(ctx, invCleanCtx, actions)
 
 	if pluginManager != nil {
-		content, err := pluginManager.RunBeforeAgentCallback(callbackCtx)
+		content, err := pluginManager.RunBeforeAgentCallback(ctx, callbackCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run plugin before agent callback: %w", err)
 		}
 		if content != nil {
-			event := session.NewEventWithContext(ctx, ctx.InvocationID())
+			event := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 			event.LLMResponse = model.LLMResponse{
 				Content: content,
 			}
 			event.Author = agent.Name()
-			event.Branch = ctx.Branch()
+			event.Branch = invCleanCtx.Branch()
 			event.Actions = *actions
-			ctx.EndInvocation()
+			invCleanCtx.EndInvocation()
 			return event, nil
 		}
 	}
 
-	for _, callback := range ctx.Agent().internal().beforeAgentCallbacks {
-		content, err := callback(callbackCtx)
+	for _, callback := range invCleanCtx.Agent().internal().beforeAgentCallbacks {
+		content, err := callback(ctx, callbackCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run before agent callback: %w", err)
 		}
@@ -293,22 +292,22 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			continue
 		}
 
-		event := session.NewEventWithContext(ctx, ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 		event.LLMResponse = model.LLMResponse{
 			Content: content,
 		}
 		event.Author = agent.Name()
-		event.Branch = ctx.Branch()
+		event.Branch = invCleanCtx.Branch()
 		event.Actions = *actions
-		ctx.EndInvocation()
+		invCleanCtx.EndInvocation()
 		return event, nil
 	}
 
 	// check if has delta create event with it
 	if len(actions.StateDelta) > 0 {
-		event := session.NewEventWithContext(ctx, ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 		event.Author = agent.Name()
-		event.Branch = ctx.Branch()
+		event.Branch = invCleanCtx.Branch()
 		event.Actions = *actions
 		return event, nil
 	}
@@ -318,32 +317,32 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 
 // runAfterAgentCallbacks checks if any afterAgentCallback returns non-nil content or a state modification
 // then it create a new event with the new content and state delta.
-func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
-	agent := ctx.Agent()
+func runAfterAgentCallbacks(ctx context.Context, invCleanCtx InvocationContext) (*session.Event, error) {
+	agent := invCleanCtx.Agent()
 	pluginManager := pluginManagerFromContext(ctx)
 
 	actions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	callbackCtx := NewCallbackContext(ctx, actions)
+	callbackCtx := NewCallbackContext(ctx, invCleanCtx, actions)
 
 	if pluginManager != nil {
-		content, err := pluginManager.RunAfterAgentCallback(callbackCtx)
+		content, err := pluginManager.RunAfterAgentCallback(ctx, callbackCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run plugin after agent callback: %w", err)
 		}
 		if content != nil {
-			event := session.NewEventWithContext(ctx, ctx.InvocationID())
+			event := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 			event.LLMResponse = model.LLMResponse{
 				Content: content,
 			}
 			event.Author = agent.Name()
-			event.Branch = ctx.Branch()
+			event.Branch = invCleanCtx.Branch()
 			event.Actions = *actions
 			return event, nil
 		}
 	}
 
 	for _, callback := range agent.internal().afterAgentCallbacks {
-		newContent, err := callback(callbackCtx)
+		newContent, err := callback(ctx, callbackCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to run after agent callback: %w", err)
 		}
@@ -351,23 +350,23 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 			continue
 		}
 
-		event := session.NewEventWithContext(ctx, ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 		event.LLMResponse = model.LLMResponse{
 			Content: newContent,
 		}
 		event.Author = agent.Name()
-		event.Branch = ctx.Branch()
+		event.Branch = invCleanCtx.Branch()
 		event.Actions = *actions
 		// TODO set context invocation ended
-		// ctx.invocationEnded = true
+		// invCleanCtx.invocationEnded = true
 		return event, nil
 	}
 
 	// check if has delta create event with it
 	if len(actions.StateDelta) > 0 {
-		event := session.NewEventWithContext(ctx, ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
 		event.Author = agent.Name()
-		event.Branch = ctx.Branch()
+		event.Branch = invCleanCtx.Branch()
 		event.Actions = *actions
 		return event, nil
 	}
@@ -375,8 +374,6 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 }
 
 type invocationContext struct {
-	context.Context
-
 	agent     Agent
 	artifacts Artifacts
 	memory    Memory
@@ -434,12 +431,6 @@ func (c *invocationContext) Ended() bool {
 	return c.endInvocation
 }
 
-func (c *invocationContext) WithContext(ctx context.Context) InvocationContext {
-	newCtx := *c
-	newCtx.Context = ctx
-	return &newCtx
-}
-
 // ResumedInput always returns (nil, false) for the base
 // invocation context. Implementations that carry a resume payload
 // override this method.
@@ -455,8 +446,8 @@ func pluginManagerFromContext(ctx context.Context) pluginManager {
 }
 
 type pluginManager interface {
-	RunBeforeAgentCallback(cctx Context) (*genai.Content, error)
-	RunAfterAgentCallback(cctx Context) (*genai.Content, error)
+	RunBeforeAgentCallback(ctx context.Context, cctx Context) (*genai.Content, error)
+	RunAfterAgentCallback(ctx context.Context, cctx Context) (*genai.Content, error)
 }
 
 var _ InvocationContext = (*invocationContext)(nil)

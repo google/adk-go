@@ -15,6 +15,7 @@
 package functionaltest_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -132,7 +133,7 @@ func newAgentWithToolScenario(t *testing.T) agent.Agent {
 	sampleTool, err := functiontool.New(functiontool.Config{
 		Name:        "some_tool",
 		Description: "A sample tool.",
-	}, func(_ agent.Context, in Args) (string, error) {
+	}, func(_ context.Context, _ agent.Context, in Args) (string, error) {
 		return "processed " + in.Arg1, nil
 	})
 	if err != nil {

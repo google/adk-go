@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"iter"
 	"testing"
 
@@ -177,6 +178,6 @@ type testNode struct {
 	BaseNode
 }
 
-func (n *testNode) Run(_ agent.Context, _ any) iter.Seq2[*session.Event, error] {
+func (n *testNode) Run(_ context.Context, _ agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {}
 }

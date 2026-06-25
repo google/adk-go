@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -26,7 +27,7 @@ import (
 // name.
 func branchRecorder(name string, mu *sync.Mutex, seen *map[string]string) *FunctionNode {
 	return NewFunctionNode(name,
-		func(ctx agent.Context, input any) (string, error) {
+		func(_ context.Context, ctx agent.Context, input any) (string, error) {
 			mu.Lock()
 			(*seen)[name] = ctx.Branch()
 			mu.Unlock()
@@ -53,7 +54,7 @@ func TestScheduler_SingleSuccessorChain_InheritsRootBranch(t *testing.T) {
 		{From: b, To: c},
 	})
 
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	for _, name := range []string{"a", "b", "c"} {
 		if got := seen[name]; got != "" {
@@ -84,7 +85,7 @@ func TestScheduler_MultipleSuccessors_AssignsSubBranches(t *testing.T) {
 		{From: c, To: join},
 	})
 
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	want := map[string]string{
 		"a": "a@1",
@@ -121,7 +122,7 @@ func TestScheduler_FanOutChainedDeeperBranches(t *testing.T) {
 		{From: b2, To: join},
 	})
 
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	if got, want := seen["a"], ""; got != want {
 		t.Errorf("seen[a] = %q, want %q (root, since START's only successor is a)", got, want)
@@ -156,7 +157,7 @@ func TestScheduler_JoinNode_UsesCommonPrefix(t *testing.T) {
 		{From: join, To: handler}, // single successor; handler inherits join's branch
 	})
 
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	// Predecessors are on their own sub-branches.
 	if got, want := seen["branchA"], "branchA@1"; got != want {
@@ -200,7 +201,7 @@ func TestScheduler_JoinNode_NestedFanOut(t *testing.T) {
 		{From: join, To: handler},
 	})
 
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	if got, want := seen["outer"], ""; got != want {
 		t.Errorf("seen[outer] = %q, want %q", got, want)
@@ -239,7 +240,7 @@ func TestScheduler_EventsAreBranchStamped(t *testing.T) {
 		{From: b, To: join},
 	})
 
-	events := drain(t, w.Run(mockCtx))
+	events := drain(t, w.Run(t.Context(), mockCtx))
 
 	gotByAuthor := map[string][]string{}
 	for _, ev := range events {

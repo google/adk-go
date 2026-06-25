@@ -15,6 +15,7 @@
 package plugin
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -24,7 +25,9 @@ import (
 )
 
 func TestNew(t *testing.T) {
-	mockOnUserMsg := func(agent.InvocationContext, *genai.Content) (*genai.Content, error) { return nil, nil }
+	mockOnUserMsg := func(context.Context, agent.InvocationContext, *genai.Content) (*genai.Content, error) {
+		return nil, nil
+	}
 	mockCloseErr := errors.New("close error")
 
 	tests := []struct {

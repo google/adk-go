@@ -35,8 +35,8 @@ import (
 
 // classifyAndRoute emits a routing event keyed on the message
 // category; returning nil suppresses the default terminal event.
-func classifyAndRoute(ctx agent.Context, msg string, emit func(*session.Event) error) (any, error) {
-	ev := session.NewEvent(ctx.InvocationID())
+func classifyAndRoute(ctx context.Context, invCleanCtx agent.Context, msg string, emit func(*session.Event) error) (any, error) {
+	ev := session.NewEvent(invCleanCtx.InvocationID())
 	ev.Routes = []string{classify(msg)}
 	ev.Output = msg // feeds the successor's typed input
 	if err := emit(ev); err != nil {
@@ -58,15 +58,15 @@ func classify(msg string) string {
 	}
 }
 
-func answerQuestion(_ agent.Context, msg string) (string, error) {
+func answerQuestion(_ context.Context, _ agent.Context, msg string) (string, error) {
 	return "answering question: " + msg, nil
 }
 
-func commentOnStatement(_ agent.Context, msg string) (string, error) {
+func commentOnStatement(_ context.Context, _ agent.Context, msg string) (string, error) {
 	return "commenting on statement: " + msg, nil
 }
 
-func reactToExclamation(_ agent.Context, msg string) (string, error) {
+func reactToExclamation(_ context.Context, _ agent.Context, msg string) (string, error) {
 	return "reacting to exclamation: " + msg, nil
 }
 

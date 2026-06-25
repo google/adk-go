@@ -18,6 +18,7 @@
 package loadmemorytool
 
 import (
+	"context"
 	"fmt"
 
 	"google.golang.org/genai"
@@ -80,7 +81,7 @@ func (t *loadMemoryTool) Declaration() *genai.FunctionDeclaration {
 }
 
 // Run executes the tool with the provided context and arguments.
-func (t *loadMemoryTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
+func (t *loadMemoryTool) Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
@@ -96,7 +97,7 @@ func (t *loadMemoryTool) Run(toolCtx agent.Context, args any) (map[string]any, e
 		return nil, fmt.Errorf("query must be a string, got: %T", queryRaw)
 	}
 
-	searchResponse, err := toolCtx.SearchMemory(toolCtx, query)
+	searchResponse, err := invCleanCtx.SearchMemory(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search memory: %w", err)
 	}
@@ -109,7 +110,7 @@ func (t *loadMemoryTool) Run(toolCtx agent.Context, args any) (map[string]any, e
 
 // ProcessRequest processes the LLM request by packing the tool and appending
 // memory-related instructions.
-func (t *loadMemoryTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (t *loadMemoryTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}

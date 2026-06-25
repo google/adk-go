@@ -39,17 +39,17 @@ import (
 //
 // If it returns non-nil result or error, the actual call is skipped and the returned value is used
 // as the agent invocation result.
-type BeforeA2ARequestCallback func(ctx agent.Context, req *a2a.SendMessageRequest) (*session.Event, error)
+type BeforeA2ARequestCallback func(ctx context.Context, invCleanCtx agent.Context, req *a2a.SendMessageRequest) (*session.Event, error)
 
 // A2AEventConverter can be used to provide a custom implementation of A2A event transformation logic.
-type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.SendMessageRequest, event a2a.Event, err error) (*session.Event, error)
+type A2AEventConverter func(ctx context.Context, invCleanCtx agent.InvocationContext, req *a2a.SendMessageRequest, event a2a.Event, err error) (*session.Event, error)
 
 // AfterA2ARequestCallback is called after receiving a response from the remote agent and converting it to a session.Event.
 // In streaming responses the callback is invoked for every request. Session event parameter might be nil if conversion logic
 // decides to not emit an A2A event.
 //
 // If it returns non-nil result or error, it gets emitted instead of the original result.
-type AfterA2ARequestCallback func(ctx agent.Context, req *a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error)
+type AfterA2ARequestCallback func(ctx context.Context, invCleanCtx agent.Context, req *a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error)
 
 // A2ARemoteTaskCleanupCallback is called if Run exited before a terminal event was received from the remote A2A server.
 type A2ARemoteTaskCleanupCallback func(ctx context.Context, card *a2a.AgentCard, client A2AClient, taskInfo a2a.TaskInfo, cause error)
@@ -173,8 +173,8 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 		Description:          cfg.Description,
 		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
-		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return remoteAgent.run(ic, cfg)
+		Run: func(ctx context.Context, ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return remoteAgent.run(ctx, ic, cfg)
 		},
 	})
 	if err != nil {
@@ -196,32 +196,32 @@ type a2aAgent struct {
 	serverConfig *iremoteagent.A2AServerConfig
 }
 
-func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*session.Event, error] {
+func (a *a2aAgent) run(ctx context.Context, invCleanCtx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		card, err := iremoteagent.ResolveAgentCard(ctx, a.serverConfig)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("agent card resolution failed: %w", err)), nil)
+			yield(toErrorEvent(ctx, invCleanCtx, fmt.Errorf("agent card resolution failed: %w", err)), nil)
 			return
 		}
 
 		sender, err := cfg.ClientProvider(ctx, card)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("sender creation failed: %w", err)), nil)
+			yield(toErrorEvent(ctx, invCleanCtx, fmt.Errorf("sender creation failed: %w", err)), nil)
 			return
 		}
 		defer destroy(ctx, sender)
 
-		msg, err := newMessage(ctx, cfg)
+		msg, err := newMessage(ctx, invCleanCtx, cfg)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("message creation failed: %w", err)), nil)
+			yield(toErrorEvent(ctx, invCleanCtx, fmt.Errorf("message creation failed: %w", err)), nil)
 			return
 		}
 
 		req := &a2a.SendMessageRequest{Message: msg, Config: cfg.MessageSendConfig}
 		processor := newRunProcessor(cfg, req)
 
-		if bcbResp, bcbErr := processor.runBeforeA2ARequestCallbacks(ctx); bcbResp != nil || bcbErr != nil {
-			if acbResp, acbErr := processor.runAfterA2ARequestCallbacks(ctx, bcbResp, bcbErr); acbResp != nil || acbErr != nil {
+		if bcbResp, bcbErr := processor.runBeforeA2ARequestCallbacks(ctx, invCleanCtx); bcbResp != nil || bcbErr != nil {
+			if acbResp, acbErr := processor.runAfterA2ARequestCallbacks(ctx, invCleanCtx, bcbResp, bcbErr); acbResp != nil || acbErr != nil {
 				yield(acbResp, acbErr)
 			} else {
 				yield(bcbResp, bcbErr)
@@ -230,8 +230,8 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		}
 
 		if len(msg.Parts) == 0 {
-			resp := adka2a.NewRemoteAgentEvent(ctx)
-			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, resp, err); cbResp != nil || cbErr != nil {
+			resp := adka2a.NewRemoteAgentEvent(ctx, invCleanCtx)
+			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, invCleanCtx, resp, err); cbResp != nil || cbErr != nil {
 				yield(cbResp, cbErr)
 			} else {
 				yield(resp, nil)
@@ -262,12 +262,12 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			var err error
 			var event *session.Event
 			if cfg.Converter != nil {
-				event, err = cfg.Converter(ctx, req, a2aEvent, a2aErr)
+				event, err = cfg.Converter(ctx, invCleanCtx, req, a2aEvent, a2aErr)
 			} else {
-				event, err = processor.convertToSessionEvent(ctx, a2aEvent, a2aErr)
+				event, err = processor.convertToSessionEvent(ctx, invCleanCtx, a2aEvent, a2aErr)
 			}
 
-			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, event, err); cbResp != nil || cbErr != nil {
+			if cbResp, cbErr := processor.runAfterA2ARequestCallbacks(ctx, invCleanCtx, event, err); cbResp != nil || cbErr != nil {
 				if cbErr != nil {
 					return yieldErr(cbErr)
 				}
@@ -280,7 +280,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			}
 
 			if event != nil { // an event might be skipped
-				for _, toEmit := range processor.aggregatePartial(ctx, a2aEvent, event) {
+				for _, toEmit := range processor.aggregatePartial(ctx, invCleanCtx, a2aEvent, event) {
 					if !yield(toEmit, nil) {
 						return false
 					}
@@ -289,7 +289,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			return true
 		}
 
-		if ctx.RunConfig().StreamingMode == agent.StreamingModeNone {
+		if invCleanCtx.RunConfig().StreamingMode == agent.StreamingModeNone {
 			a2aEvent, a2aErr := sender.SendMessage(ctx, req)
 			processEvent(a2aEvent, a2aErr)
 			return
@@ -343,11 +343,11 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 	}
 }
 
-func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error) {
-	events := ctx.Session().Events()
+func newMessage(ctx context.Context, invCleanCtx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error) {
+	events := invCleanCtx.Session().Events()
 	if userFnCall := getUserFunctionCallAt(events, events.Len()-1); userFnCall != nil {
 		event := userFnCall.response
-		parts, err := convertParts(ctx, cfg, event)
+		parts, err := convertParts(ctx, invCleanCtx, cfg, event)
 		if err != nil {
 			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}
@@ -357,14 +357,14 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 		return msg, nil
 	}
 
-	parts, contextID := toMissingRemoteSessionParts(ctx, events, cfg)
+	parts, contextID := toMissingRemoteSessionParts(ctx, invCleanCtx, events, cfg)
 	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
 	msg.ContextID = contextID
 	return msg, nil
 }
 
-func toErrorEvent(ctx agent.InvocationContext, err error) *session.Event {
-	event := adka2a.NewRemoteAgentEvent(ctx)
+func toErrorEvent(ctx context.Context, invCleanCtx agent.InvocationContext, err error) *session.Event {
+	event := adka2a.NewRemoteAgentEvent(ctx, invCleanCtx)
 	event.ErrorMessage = err.Error()
 	event.CustomMetadata = map[string]any{adka2a.ToADKMetaKey("error"): err.Error()}
 	event.TurnComplete = true

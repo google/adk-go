@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -34,10 +35,10 @@ import (
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
 // the InvocationContext that includes the previous events.
-func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+func ContentsRequestProcessor(ctx context.Context, invCleanCtx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
-		llmAgent := asLLMAgent(ctx.Agent())
+		llmAgent := asLLMAgent(invCleanCtx.Agent())
 		if llmAgent == nil {
 			// Do nothing.
 			return // In python, no error is yielded.
@@ -49,13 +50,13 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			fn = buildContentsCurrentTurnContextOnly
 		}
 		var events []*session.Event
-		if ctx.Session() != nil {
-			for e := range ctx.Session().Events().All() {
+		if invCleanCtx.Session() != nil {
+			for e := range invCleanCtx.Session().Events().All() {
 				events = append(events, e)
 			}
 		}
 		isSingleTurn := state.Mode == ModeSingleTurn
-		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), ctx.IsolationScope(), events, isSingleTurn, ctx.UserContent())
+		contents, err := fn(invCleanCtx.Agent().Name(), invCleanCtx.Branch(), invCleanCtx.IsolationScope(), events, isSingleTurn, invCleanCtx.UserContent())
 		if err != nil {
 			yield(nil, err)
 			return

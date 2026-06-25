@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"slices"
 	"testing"
 
@@ -51,7 +52,7 @@ func TestWorkflow_PathingParity(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Given a workflow configured with specific options and a terminal leaf node
-			leafFn := func(ctx agent.Context, input string) (string, error) {
+			leafFn := func(_ context.Context, _ agent.Context, input string) (string, error) {
 				return "result", nil
 			}
 			node := NewFunctionNode("leaf", leafFn, defaultNodeConfig)
@@ -64,7 +65,7 @@ func TestWorkflow_PathingParity(t *testing.T) {
 			mockCtx := newSeededMockCtx(t)
 			var gotPath string
 			var gotOutputFor []string
-			for ev, err := range wf.Run(mockCtx) {
+			for ev, err := range wf.Run(t.Context(), mockCtx) {
 				if err != nil {
 					t.Fatalf("Run() unexpected error = %v", err)
 				}
@@ -111,7 +112,7 @@ func TestWorkflowNode_TerminalOutputCapture(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Given an outer workflow embedding a nested sub-workflow
-			leafFn := func(ctx agent.Context, input string) (string, error) {
+			leafFn := func(_ context.Context, _ agent.Context, input string) (string, error) {
 				return tc.wantOutput.(string), nil
 			}
 			childNode := NewFunctionNode(tc.subNode, leafFn, defaultNodeConfig)
@@ -128,7 +129,7 @@ func TestWorkflowNode_TerminalOutputCapture(t *testing.T) {
 			// When the outer workflow runs
 			mockCtx := newSeededMockCtx(t)
 			var gotOutput any
-			for ev, err := range outerWf.Run(mockCtx) {
+			for ev, err := range outerWf.Run(t.Context(), mockCtx) {
 				if err != nil {
 					t.Fatalf("Run() unexpected error = %v", err)
 				}
@@ -151,7 +152,7 @@ func TestToolNode_ExplicitNaming(t *testing.T) {
 	dummyTool, err := functiontool.New(functiontool.Config{
 		Name:        "default_tool_name",
 		Description: "dummy description",
-	}, func(ctx agent.Context, in struct{}) (string, error) {
+	}, func(_ context.Context, _ agent.Context, in struct{}) (string, error) {
 		return "ok", nil
 	})
 	if err != nil {

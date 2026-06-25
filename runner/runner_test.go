@@ -180,7 +180,7 @@ func TestRunner_SaveInputBlobsAsArtifacts(t *testing.T) {
 
 	testAgent := must(agent.New(agent.Config{
 		Name: "test_agent",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				// no-op, we are testing logic before agent run.
 			}
@@ -302,19 +302,19 @@ func TestRunner_PluginModifiesUserMessage(t *testing.T) {
 	var gotMessage *genai.Content
 	testAgent := must(agent.New(agent.Config{
 		Name: "test_agent",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				// Accessors that nil-deref on a callback-only context.
-				_ = ctx.Agent().Name()
-				_ = ctx.Session().ID()
-				gotMessage = ctx.UserContent()
+				_ = invCleanCtx.Agent().Name()
+				_ = invCleanCtx.Session().ID()
+				gotMessage = invCleanCtx.UserContent()
 			}
 		},
 	}))
 
 	modifierPlugin, err := plugin.New(plugin.Config{
 		Name: "message_modifier",
-		OnUserMessageCallback: func(_ agent.InvocationContext, _ *genai.Content) (*genai.Content, error) {
+		OnUserMessageCallback: func(_ context.Context, _ agent.InvocationContext, _ *genai.Content) (*genai.Content, error) {
 			return &genai.Content{
 				Role:  genai.RoleUser,
 				Parts: []*genai.Part{genai.NewPartFromText("modified")},
@@ -398,7 +398,7 @@ func must[T agent.Agent](a T, err error) T {
 func TestBuildRunnerNode_AllAgentKinds(t *testing.T) {
 	t.Parallel()
 
-	noop := func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	noop := func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		return func(yield func(*session.Event, error) bool) {}
 	}
 
@@ -494,7 +494,7 @@ func TestRunner_AutoCreateSession(t *testing.T) {
 
 	testAgent := must(agent.New(agent.Config{
 		Name: "test_agent",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				// no-op, we are testing logic before agent run.
 			}

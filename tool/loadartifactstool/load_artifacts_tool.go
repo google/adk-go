@@ -85,7 +85,7 @@ func (t *artifactsTool) Declaration() *genai.FunctionDeclaration {
 }
 
 // Run implements tool.Tool.
-func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+func (t *artifactsTool) Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
@@ -117,18 +117,18 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 
 // ProcessRequest processes the LLM request. It packs the tool, appends initial
 // instructions, and processes any load artifacts function calls.
-func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (t *artifactsTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}
-	if err := t.appendInitialInstructions(ctx, req); err != nil {
+	if err := t.appendInitialInstructions(ctx, invCleanCtx, req); err != nil {
 		return err
 	}
-	return t.processLoadArtifactsFunctionCall(ctx, req)
+	return t.processLoadArtifactsFunctionCall(ctx, invCleanCtx, req)
 }
 
-func (t *artifactsTool) appendInitialInstructions(ctx agent.Context, req *model.LLMRequest) error {
-	resp, err := ctx.Artifacts().List(ctx)
+func (t *artifactsTool) appendInitialInstructions(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
+	resp, err := invCleanCtx.Artifacts().List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", err)
 	}
@@ -151,7 +151,7 @@ func (t *artifactsTool) appendInitialInstructions(ctx agent.Context, req *model.
 	return nil
 }
 
-func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req *model.LLMRequest) error {
+func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	if len(req.Contents) == 0 {
 		return nil
 	}
@@ -183,7 +183,7 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 
 	results := make([]*genai.Content, len(artifactNames))
 	group, childCtx := errgroup.WithContext(ctx)
-	artifactsService := ctx.Artifacts()
+	artifactsService := invCleanCtx.Artifacts()
 
 	for i, artifactName := range artifactNames {
 		group.Go(func() error {

@@ -20,6 +20,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 
 	"google.golang.org/genai"
@@ -65,17 +66,17 @@ func newAgentNode(a agent.Agent) workflow.Node {
 // For any other agent kind, events are forwarded verbatim and HITL rides
 // on LongRunningToolIDs.
 func runAgentNodeBody(a agent.Agent) workflow.DynamicFn[any, any] {
-	return func(ctx workflow.NodeContext, input any, emit func(*session.Event) error) (any, error) {
+	return func(ctx context.Context, invCleanCtx workflow.NodeContext, input any, emit func(*session.Event) error) (any, error) {
 		// On resume, input is the ORIGINAL user text; re-feeding it would
 		// loop (model calls the long-running tool again). So pass no
 		// input on resume and let the agent continue from history.
-		resolved := answeredOpenInterrupts(ctx.Session())
+		resolved := answeredOpenInterrupts(invCleanCtx.Session())
 		isResume := len(resolved) > 0
 
 		if isLlmAgent(a) {
-			return runLlmAgentBody(a, ctx, input, isResume, emit)
+			return runLlmAgentBody(ctx, a, invCleanCtx, input, isResume, emit)
 		}
-		return runGenericAgentBody(a, ctx, input, isResume, emit)
+		return runGenericAgentBody(ctx, a, invCleanCtx, input, isResume, emit)
 	}
 }
 
@@ -85,8 +86,9 @@ func runAgentNodeBody(a agent.Agent) workflow.DynamicFn[any, any] {
 // events verbatim from the agent); on pause the body returns
 // ErrNodeInterrupted so the node parks in NodeWaiting.
 func runLlmAgentBody(
+	ctx context.Context,
 	a agent.Agent,
-	ctx workflow.NodeContext,
+	invCleanCtx workflow.NodeContext,
 	input any,
 	isResume bool,
 	emit func(*session.Event) error,
@@ -102,7 +104,7 @@ func runLlmAgentBody(
 	// root chat coordinator sets no Output.
 	paused := false
 	var lastOutput any
-	for event, err := range llmagent.RunLLMAgentAsNode(a, ctx, nodeInput) {
+	for event, err := range llmagent.RunLLMAgentAsNode(ctx, a, invCleanCtx, nodeInput) {
 		if err != nil {
 			// The wrapper bubbles ErrNodeInterrupted up from a task
 			// delegation's RunNode call when a sub-agent paused. The
@@ -132,8 +134,9 @@ func runLlmAgentBody(
 // runGenericAgentBody is the pre-existing agent-agnostic loop: forward
 // events verbatim, park on LongRunningToolIDs, no output.
 func runGenericAgentBody(
+	ctx context.Context,
 	a agent.Agent,
-	ctx workflow.NodeContext,
+	invCleanCtx workflow.NodeContext,
 	input any,
 	isResume bool,
 	emit func(*session.Event) error,
@@ -142,10 +145,10 @@ func runGenericAgentBody(
 	if !isResume {
 		userContent = inputToUserContent(input) // fresh turn
 	}
-	agentCtx := newAgentContext(ctx, a, userContent)
+	agentCtx := newAgentContext(ctx, invCleanCtx, a, userContent)
 
 	paused := false
-	for event, err := range a.Run(agentCtx) {
+	for event, err := range a.Run(ctx, agentCtx) {
 		if err != nil {
 			return nil, err
 		}
@@ -194,23 +197,23 @@ func answeredOpenInterrupts(sess session.Session) map[string]bool {
 // context drops the node's sub-scheduler, so it is re-stashed in the
 // value chain — letting a tool inside the agent (e.g. SingleTurnTool)
 // recover it via RunNode.
-func newAgentContext(ctx agent.Context, a agent.Agent, userContent *genai.Content) agent.InvocationContext {
+func newAgentContext(ctx context.Context, invCleanCtx agent.Context, a agent.Agent, userContent *genai.Content) agent.InvocationContext {
 	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Artifacts:          ctx.Artifacts(),
-		Memory:             ctx.Memory(),
-		Session:            ctx.Session(),
-		Branch:             ctx.Branch(),
+		Artifacts:          invCleanCtx.Artifacts(),
+		Memory:             invCleanCtx.Memory(),
+		Session:            invCleanCtx.Session(),
+		Branch:             invCleanCtx.Branch(),
 		Agent:              a,
 		UserContent:        userContent,
-		RunConfig:          ctx.RunConfig(),
-		EndInvocation:      ctx.Ended(),
-		InvocationID:       ctx.InvocationID(),
-		Path:               ctx.Path(),
-		OutputForAncestors: ctx.OutputForAncestors(),
+		RunConfig:          invCleanCtx.RunConfig(),
+		EndInvocation:      invCleanCtx.Ended(),
+		InvocationID:       invCleanCtx.InvocationID(),
+		Path:               invCleanCtx.Path(),
+		OutputForAncestors: invCleanCtx.OutputForAncestors(),
 	})
 	// TODO(kdroste): copy original SubScheduler??
-	nc := agent.NewNodeContext(ic, nil)
-	dnc := agent.NewDynamicNodeContext(nc, "", "", ctx.SubScheduler(), nil)
+	nc := agent.NewNodeContext(ctx, ic, nil)
+	dnc := agent.NewDynamicNodeContext(ctx, nc, "", "", invCleanCtx.SubScheduler(), nil)
 	return dnc
 }
 

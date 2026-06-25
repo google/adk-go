@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"context"
 	"fmt"
 	"iter"
 
@@ -26,19 +27,19 @@ import (
 
 // ContentRequestProcessor populates the LLMRequest's Contents based on
 // the InvocationContext that includes the previous events.
-func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+func toolProcessor(ctx context.Context, invCleanCtx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if f.Tools != nil {
 			return
 		}
-		llmAgent, ok := ctx.Agent().(Agent)
+		llmAgent, ok := invCleanCtx.Agent().(Agent)
 		if !ok {
-			yield(nil, fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name()))
+			yield(nil, fmt.Errorf("agent %v is not an LLMAgent", invCleanCtx.Agent().Name()))
 			return
 		}
 		tools := Reveal(llmAgent).Tools
 		for _, toolSet := range Reveal(llmAgent).Toolsets {
-			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
+			tsTools, err := toolSet.Tools(ctx, icontext.NewReadonlyContext(ctx, invCleanCtx))
 			if err != nil {
 				yield(nil, fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err))
 				return

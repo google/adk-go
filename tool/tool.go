@@ -18,6 +18,7 @@
 package tool
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -60,11 +61,11 @@ type Toolset interface {
 	// Tools returns a list of tools in the toolset. The provided
 	// ReadonlyContext can be used to dynamically determine which tools
 	// to return based on the current invocation state.
-	Tools(ctx agent.ReadonlyContext) ([]Tool, error)
+	Tools(ctx context.Context, invCleanCtx agent.ReadonlyContext) ([]Tool, error)
 }
 
 // Predicate is a function which decides whether a tool should be exposed to LLM.
-type Predicate func(ctx agent.ReadonlyContext, tool Tool) bool
+type Predicate func(ctx context.Context, invCleanCtx agent.ReadonlyContext, tool Tool) bool
 
 // StringPredicate is a helper that creates a Predicate from a string slice.
 // Deprecated: use AllowedToolsPredicate instead.
@@ -79,7 +80,7 @@ func AllowedToolsPredicate(allowedTools []string) Predicate {
 		m[t] = true
 	}
 
-	return func(ctx agent.ReadonlyContext, tool Tool) bool {
+	return func(ctx context.Context, invCleanCtx agent.ReadonlyContext, tool Tool) bool {
 		return m[tool.Name()]
 	}
 }
@@ -109,14 +110,14 @@ func (f *filteredToolset) Name() string {
 	return f.toolset.Name()
 }
 
-func (f *filteredToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
-	tools, err := f.toolset.Tools(ctx)
+func (f *filteredToolset) Tools(ctx context.Context, invCleanCtx agent.ReadonlyContext) ([]Tool, error) {
+	tools, err := f.toolset.Tools(ctx, invCleanCtx)
 	if err != nil {
 		return nil, err
 	}
 	var filtered []Tool
 	for _, tool := range tools {
-		if f.predicate(ctx, tool) {
+		if f.predicate(ctx, invCleanCtx, tool) {
 			filtered = append(filtered, tool)
 		}
 	}
@@ -156,8 +157,8 @@ type confirmationToolset struct {
 
 func (c *confirmationToolset) Name() string { return c.toolset.Name() }
 
-func (c *confirmationToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
-	tools, err := c.toolset.Tools(ctx)
+func (c *confirmationToolset) Tools(ctx context.Context, invCleanCtx agent.ReadonlyContext) ([]Tool, error) {
+	tools, err := c.toolset.Tools(ctx, invCleanCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -189,22 +190,22 @@ type confirmationTool struct {
 type runnableTool interface {
 	Tool
 	Declaration() *genai.FunctionDeclaration
-	Run(ctx agent.Context, args any) (result map[string]any, err error)
+	Run(ctx context.Context, invCleanCtx agent.Context, args any) (result map[string]any, err error)
 }
 
 func (t *confirmationTool) Declaration() *genai.FunctionDeclaration {
 	return t.runnableTool.Declaration()
 }
 
-func (t *confirmationTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+func (t *confirmationTool) ProcessRequest(ctx context.Context, invCleanCtx agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, t)
 }
 
-func (t *confirmationTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+func (t *confirmationTool) Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error) {
 	ft := t.runnableTool
 
 	// Check for Human-in-the-Loop confirmation.
-	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
+	if confirmation := invCleanCtx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
 			return nil, fmt.Errorf("error tool %q %w", t.runnableTool.Name(), ErrConfirmationRejected)
 		}
@@ -215,16 +216,16 @@ func (t *confirmationTool) Run(ctx agent.Context, args any) (map[string]any, err
 		}
 
 		if requireConfirmation {
-			err := ctx.RequestConfirmation(
+			err := invCleanCtx.RequestConfirmation(
 				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					t.Name()), nil)
 			if err != nil {
 				return nil, err
 			}
-			ctx.Actions().SkipSummarization = true
+			invCleanCtx.Actions().SkipSummarization = true
 			return nil, fmt.Errorf("error tool %q %w", t.Name(), ErrConfirmationRequired)
 		}
 	}
 
-	return ft.Run(ctx, args)
+	return ft.Run(ctx, invCleanCtx, args)
 }

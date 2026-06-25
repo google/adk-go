@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"sync"
@@ -49,7 +50,7 @@ func TestHandleFunctionCalls_Streaming(t *testing.T) {
 		Count int `json:"count"`
 	}
 
-	handler := func(ctx agent.Context, args Args) iter.Seq2[string, error] {
+	handler := func(_ context.Context, _ agent.Context, args Args) iter.Seq2[string, error] {
 		return func(yield func(string, error) bool) {
 			for i := 0; i < args.Count; i++ {
 				if !yield(fmt.Sprintf("chunk %d", i), nil) {
@@ -113,7 +114,7 @@ func TestHandleFunctionCalls_Streaming(t *testing.T) {
 			Tools: []tool.Tool{streamTool},
 		}
 
-		mergedEvent, err := flow.handleFunctionCalls(invCtx, toolsDict, resp, nil, mockSess)
+		mergedEvent, err := flow.handleFunctionCalls(t.Context(), invCtx, toolsDict, resp, nil, mockSess)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -157,7 +158,7 @@ func TestHandleFunctionCalls_Streaming(t *testing.T) {
 			Tools: []tool.Tool{streamTool},
 		}
 
-		mergedEvent, err := flow.handleFunctionCalls(invCtx, toolsDict, resp, nil, nil)
+		mergedEvent, err := flow.handleFunctionCalls(t.Context(), invCtx, toolsDict, resp, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -187,7 +188,7 @@ func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
 	var cancelCount int
 	var cancelMu sync.Mutex
 
-	handler := func(ctx agent.Context, args Args) iter.Seq2[string, error] {
+	handler := func(ctx context.Context, _ agent.Context, args Args) iter.Seq2[string, error] {
 		return func(yield func(string, error) bool) {
 			for i := 0; ; i++ {
 				time.Sleep(time.Millisecond)
@@ -260,7 +261,7 @@ func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
 		}
 	}()
 
-	_, err = flow.handleFunctionCalls(invCtx, toolsDict, respStart, nil, liveSess)
+	_, err = flow.handleFunctionCalls(t.Context(), invCtx, toolsDict, respStart, nil, liveSess)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +288,7 @@ func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
 		},
 	}
 
-	mergedStopEvent, err := flow.handleFunctionCalls(invCtx, toolsDict, respStop, nil, liveSess)
+	mergedStopEvent, err := flow.handleFunctionCalls(t.Context(), invCtx, toolsDict, respStop, nil, liveSess)
 	if err != nil {
 		t.Fatal(err)
 	}

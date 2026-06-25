@@ -204,7 +204,7 @@ func newStubNodeContext(t *testing.T, a agent.Agent, isolationScope string) agen
 		IsolationScope: isolationScope,
 		InvocationID:   "inv-test",
 	})
-	return agent.NewNodeContext(ic, nil)
+	return agent.NewNodeContext(t.Context(), ic, nil)
 }
 
 func makeLLMAgent(t *testing.T, name string, opts ...func(*llmagent.Config)) agent.Agent {
@@ -250,7 +250,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		t.Parallel()
 		a := makeLLMAgent(t, "x", withMode(llmagent.ModeSingleTurn))
 		ctx := newStubNodeContext(t, a, "")
-		if got := llmagent.PrepareLLMAgentInput(a, ctx, nil); got != nil {
+		if got := llmagent.PrepareLLMAgentInput(t.Context(), a, ctx, nil); got != nil {
 			t.Errorf("llmagent.PrepareLLMAgentInput(nil) = %v, want nil", got)
 		}
 	})
@@ -262,7 +262,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx := newStubNodeContext(t, a, "")
-		if got := llmagent.PrepareLLMAgentInput(a, ctx, "ignored"); got != nil {
+		if got := llmagent.PrepareLLMAgentInput(t.Context(), a, ctx, "ignored"); got != nil {
 			t.Errorf("llmagent.PrepareLLMAgentInput on non-LlmAgent = %v, want nil", got)
 		}
 	})
@@ -271,7 +271,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		t.Parallel()
 		a := makeLLMAgent(t, "chat", withMode(llmagent.ModeChat))
 		ctx := newStubNodeContext(t, a, "")
-		if got := llmagent.PrepareLLMAgentInput(a, ctx, "input"); got != nil {
+		if got := llmagent.PrepareLLMAgentInput(t.Context(), a, ctx, "input"); got != nil {
 			t.Errorf("llmagent.PrepareLLMAgentInput on chat-mode = %v, want nil", got)
 		}
 	})
@@ -280,7 +280,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		t.Parallel()
 		a := makeLLMAgent(t, "task", withMode(llmagent.ModeTask))
 		ctx := newStubNodeContext(t, a, "")
-		if got := llmagent.PrepareLLMAgentInput(a, ctx, "input"); got != nil {
+		if got := llmagent.PrepareLLMAgentInput(t.Context(), a, ctx, "input"); got != nil {
 			t.Errorf("llmagent.PrepareLLMAgentInput on task-mode = %v, want nil", got)
 		}
 	})
@@ -289,7 +289,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		t.Parallel()
 		a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
 		ctx := newStubNodeContext(t, a, "")
-		got := llmagent.PrepareLLMAgentInput(a, ctx, "hello there")
+		got := llmagent.PrepareLLMAgentInput(t.Context(), a, ctx, "hello there")
 		if got == nil {
 			t.Fatal("llmagent.PrepareLLMAgentInput returned nil; want non-nil event")
 		}
@@ -312,7 +312,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 			Role:  "model", // deliberately wrong; must be forced to user
 			Parts: []*genai.Part{{Text: "part one"}, {Text: "part two"}},
 		}
-		got := llmagent.PrepareLLMAgentInput(a, ctx, input)
+		got := llmagent.PrepareLLMAgentInput(t.Context(), a, ctx, input)
 		if got == nil {
 			t.Fatal("expected non-nil event")
 		}
@@ -329,7 +329,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
 		ctx := newStubNodeContext(t, a, "")
 		input := map[string]any{"task": "summarize", "limit": 5}
-		got := llmagent.PrepareLLMAgentInput(a, ctx, input)
+		got := llmagent.PrepareLLMAgentInput(t.Context(), a, ctx, input)
 		if got == nil {
 			t.Fatal("expected non-nil event")
 		}
@@ -349,7 +349,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
 		const scope = "iso-scope-xyz"
 		ctx := newStubNodeContext(t, a, scope)
-		got := llmagent.PrepareLLMAgentInput(a, ctx, "hello")
+		got := llmagent.PrepareLLMAgentInput(t.Context(), a, ctx, "hello")
 		if got == nil {
 			t.Fatal("expected non-nil event")
 		}
@@ -362,7 +362,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		t.Parallel()
 		a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
 		ctx := newStubNodeContext(t, a, "")
-		got := llmagent.PrepareLLMAgentInput(a, ctx, "hello")
+		got := llmagent.PrepareLLMAgentInput(t.Context(), a, ctx, "hello")
 		if got == nil {
 			t.Fatal("expected non-nil event")
 		}
@@ -637,7 +637,7 @@ func TestRunLLMAgentAsNode_NonLLMAgent_Errors(t *testing.T) {
 
 	var gotErr error
 	var gotEvents int
-	for ev, err := range llmagent.RunLLMAgentAsNode(a, ctx, nil) {
+	for ev, err := range llmagent.RunLLMAgentAsNode(t.Context(), a, ctx, nil) {
 		if err != nil {
 			gotErr = err
 		}
@@ -663,7 +663,7 @@ func TestRunLLMAgentAsNode_UnsupportedMode_Errors(t *testing.T) {
 	ctx := newStubNodeContext(t, a, "")
 
 	var gotErr error
-	for _, err := range llmagent.RunLLMAgentAsNode(a, ctx, nil) {
+	for _, err := range llmagent.RunLLMAgentAsNode(t.Context(), a, ctx, nil) {
 		if err != nil {
 			gotErr = err
 		}

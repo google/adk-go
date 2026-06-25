@@ -44,7 +44,7 @@ func TestCompat_OldExecutor_Direct(t *testing.T) {
 	agentName := "test-agent"
 	agentObj := utils.Must(agent.New(agent.Config{
 		Name: agentName,
-		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(ctx context.Context, ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				yield(&session.Event{
 					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)},
@@ -117,7 +117,7 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.AfterRequestCallbacks = []AfterA2ARequestCallback{
-					func(ctx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
+					func(ctx context.Context, invCleanCtx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
 						if resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0 {
 							resp.Content.Parts[0].Text = "modified-by-agent-callback"
 						}
@@ -142,7 +142,7 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.BeforeRequestCallbacks = []BeforeA2ARequestCallback{
-					func(ctx agent.Context, req *legacyA2A.MessageSendParams) (*session.Event, error) {
+					func(ctx context.Context, invCleanCtx agent.Context, req *legacyA2A.MessageSendParams) (*session.Event, error) {
 						req.Message = legacyA2A.NewMessage(legacyA2A.MessageRoleUser, legacyA2A.TextPart{Text: "42"})
 						return nil, nil
 					},
@@ -161,7 +161,7 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.BeforeRequestCallbacks = []BeforeA2ARequestCallback{
-					func(ctx agent.Context, req *legacyA2A.MessageSendParams) (*session.Event, error) {
+					func(ctx context.Context, invCleanCtx agent.Context, req *legacyA2A.MessageSendParams) (*session.Event, error) {
 						return &session.Event{
 							LLMResponse: model.LLMResponse{
 								Content: genai.NewContentFromText("cached-response", genai.RoleModel),
@@ -180,9 +180,9 @@ func TestCompat_RemoteAgent(t *testing.T) {
 				},
 			},
 			updateConfig: func(config *A2AConfig) {
-				config.Converter = func(ctx agent.InvocationContext, req *legacyA2A.MessageSendParams, event legacyA2A.Event, err error) (*session.Event, error) {
+				config.Converter = func(ctx context.Context, invCleanCtx agent.InvocationContext, req *legacyA2A.MessageSendParams, event legacyA2A.Event, err error) (*session.Event, error) {
 					ev := session.NewEventWithContext(ctx, "custom")
-					ev.Author = ctx.Agent().Name()
+					ev.Author = invCleanCtx.Agent().Name()
 					ev.LLMResponse = model.LLMResponse{
 						Content:      genai.NewContentFromText("converted", genai.RoleModel),
 						TurnComplete: true,
@@ -246,13 +246,13 @@ func TestCompat_RemoteAgent(t *testing.T) {
 			},
 			updateConfig: func(config *A2AConfig) {
 				config.AfterRequestCallbacks = []AfterA2ARequestCallback{
-					func(ctx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
+					func(ctx context.Context, invCleanCtx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
 						if resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0 {
 							resp.Content.Parts[0].Text += "-first"
 						}
 						return nil, nil
 					},
-					func(ctx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
+					func(ctx context.Context, invCleanCtx agent.Context, req *legacyA2A.MessageSendParams, resp *session.Event, err error) (*session.Event, error) {
 						if resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0 {
 							resp.Content.Parts[0].Text += "-second"
 						}
@@ -357,7 +357,7 @@ func TestCompat_RemoteTaskCleanupCallback(t *testing.T) {
 
 	// Break out of the run after receiving a couple events to trigger cleanup.
 	count := 0
-	for _, err := range oldAgent.Run(ic) {
+	for _, err := range oldAgent.Run(ctx, ic) {
 		if err != nil {
 			break
 		}
@@ -380,7 +380,7 @@ func TestCompat_ContextPropagation(t *testing.T) {
 	sessionService := session.InMemoryService()
 	agnt := utils.Must(agent.New(agent.Config{
 		Name: appName,
-		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(ctx context.Context, ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				yield(&session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Yes", genai.RoleModel)}}, nil)
 			}
@@ -573,7 +573,7 @@ func newUserHello() *session.Event {
 
 func runAndCollect(ic agent.InvocationContext, agnt agent.Agent) ([]*session.Event, error) {
 	var collected []*session.Event
-	for ev, err := range agnt.Run(ic) {
+	for ev, err := range agnt.Run(context.Background(), ic) {
 		if err != nil {
 			return collected, err
 		}

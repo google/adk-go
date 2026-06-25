@@ -90,11 +90,14 @@ func (r *Runner) runNode(
 	}
 
 	// UserContent is read by Workflow.Run as the workflow's seed input.
-	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg)
+	// The returned ctx is enriched with run-scoped values (run config,
+	// parent map, plugin manager) and MUST be used for the rest of this run
+	// so the workflow scheduler threads them to nodes via the go context.
+	ctx, ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg)
 
 	// Append the user message to history (also runs the on_user_message
 	// plugin callback), same as the agent path.
-	ictx, userEvent, err := r.appendMessageToSession(ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, opts.stateDelta)
+	ictx, userEvent, err := r.appendMessageToSession(ctx, ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, opts.stateDelta)
 	if err != nil {
 		yield(nil, err)
 		return
@@ -108,16 +111,16 @@ func (r *Runner) runNode(
 	// Plugin lifecycle: defer after_run, run before_run, honor early exit.
 	pluginManager := r.pluginManager
 	if pluginManager != nil {
-		defer pluginManager.RunAfterRunCallback(ictx)
+		defer pluginManager.RunAfterRunCallback(ctx, ictx)
 
-		earlyExitResult, err := pluginManager.RunBeforeRunCallback(ictx)
+		earlyExitResult, err := pluginManager.RunBeforeRunCallback(ctx, ictx)
 		if earlyExitResult != nil || err != nil {
 			earlyExitEvent := session.NewEvent(ictx.InvocationID())
 			earlyExitEvent.Author = "user"
 			earlyExitEvent.LLMResponse = model.LLMResponse{
 				Content: msg,
 			}
-			if appendErr := r.sessionService.AppendEvent(ictx, storedSession, earlyExitEvent); appendErr != nil {
+			if appendErr := r.sessionService.AppendEvent(ctx, storedSession, earlyExitEvent); appendErr != nil {
 				yield(nil, fmt.Errorf("failed to add event to session: %w", appendErr))
 				return
 			}
@@ -138,9 +141,9 @@ func (r *Runner) runNode(
 	var events iter.Seq2[*session.Event, error]
 	responses := buildResumeResponses(msg, state, storedSession)
 	if len(responses) > 0 {
-		events = wf.Resume(ictx, state, responses)
+		events = wf.Resume(ctx, ictx, state, responses)
 	} else {
-		events = wf.Run(ictx)
+		events = wf.Run(ctx, ictx)
 	}
 
 	// Consume the workflow's event stream, same loop as the agent path:
@@ -169,7 +172,7 @@ func (r *Runner) runNode(
 		}
 
 		if pluginManager != nil {
-			modifiedEvent, perr := pluginManager.RunOnEventCallback(ictx, event)
+			modifiedEvent, perr := pluginManager.RunOnEventCallback(ctx, ictx, event)
 			if perr != nil {
 				if !yield(nil, perr) {
 					return
@@ -182,7 +185,7 @@ func (r *Runner) runNode(
 		}
 
 		if !event.LLMResponse.Partial {
-			if err := r.sessionService.AppendEvent(ictx, storedSession, event); err != nil {
+			if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 				yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 				return
 			}
@@ -204,13 +207,18 @@ func rootWorkflowName(appName string, a agent.Agent) string {
 // newNodeInvocationContext builds the node path's InvocationContext,
 // mirroring the agent path's wiring (parent map for transfer/tool
 // resolution, resolved agent for the flow).
+// newNodeInvocationContext returns the go context enriched with the
+// run-scoped values (parent map, run config, plugin manager) alongside the
+// node InvocationContext. The enriched ctx MUST be threaded into the
+// workflow run so downstream consumers (e.g. runconfig.FromContext,
+// pluginManagerFromContext) can recover those values from the go context.
 func (r *Runner) newNodeInvocationContext(
 	ctx context.Context,
 	storedSession session.Session,
 	agentToRun agent.Agent,
 	msg *genai.Content,
 	cfg agent.RunConfig,
-) agent.Context {
+) (context.Context, agent.Context) {
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 		StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
@@ -245,8 +253,8 @@ func (r *Runner) newNodeInvocationContext(
 		UserContent: msg,
 		RunConfig:   &cfg,
 	})
-	resCtx := agent.NewNodeContext(ic, nil)
-	return resCtx
+	resCtx := agent.NewNodeContext(ctx, ic, nil)
+	return ctx, resCtx
 }
 
 // buildResumeResponses maps msg's function responses to interruptID ->

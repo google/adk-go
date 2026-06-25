@@ -93,7 +93,7 @@ func (m *MockInvocationContext) WithContext(ctx context.Context) agent.Invocatio
 }
 
 func TestFunctionNode(t *testing.T) {
-	upperFn := func(ctx agent.Context, input string) (string, error) {
+	upperFn := func(_ context.Context, _ agent.Context, input string) (string, error) {
 		return strings.ToUpper(input), nil
 	}
 
@@ -101,10 +101,10 @@ func TestFunctionNode(t *testing.T) {
 
 	// Create a mock context
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
 
 	// Run the node
-	events := node.Run(exCtx, "hello")
+	events := node.Run(t.Context(), exCtx, "hello")
 
 	count := 0
 	for ev, err := range events {
@@ -124,7 +124,7 @@ func TestFunctionNode(t *testing.T) {
 }
 
 func TestSequentialWorkflow(t *testing.T) {
-	upperFn := func(ctx agent.Context, input any) (string, error) {
+	upperFn := func(_ context.Context, _ agent.Context, input any) (string, error) {
 		s, ok := input.(string)
 		if !ok {
 			return "", fmt.Errorf("expected string input")
@@ -132,7 +132,7 @@ func TestSequentialWorkflow(t *testing.T) {
 		return strings.ToUpper(s), nil
 	}
 
-	suffixFn := func(ctx agent.Context, input string) (string, error) {
+	suffixFn := func(_ context.Context, _ agent.Context, input string) (string, error) {
 		return input + " done", nil
 	}
 
@@ -148,7 +148,7 @@ func TestSequentialWorkflow(t *testing.T) {
 		Parts: []*genai.Part{{Text: "hello"}},
 	}
 
-	events := w.Run(mockCtx)
+	events := w.Run(t.Context(), mockCtx)
 
 	var lastOutput any
 	count := 0
@@ -247,7 +247,7 @@ type CustomRouteNode struct {
 	onRun func()
 }
 
-func (n *CustomRouteNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *CustomRouteNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	if n.onRun != nil {
 		n.onRun()
 	}
@@ -450,7 +450,7 @@ func TestWorkflowRouting(t *testing.T) {
 			mockCtx := newMockCtx(t)
 
 			var err error
-			for _, testErr := range w.Run(mockCtx) {
+			for _, testErr := range w.Run(t.Context(), mockCtx) {
 				if testErr != nil {
 					err = testErr
 					break
@@ -548,11 +548,11 @@ type invalidParams struct {
 	Foo string `state:"foo"` // Typo: case mismatch
 }
 
-func dummyFnValid(ctx agent.InvocationContext, p validParams) (string, error) {
+func dummyFnValid(_ context.Context, _ agent.InvocationContext, p validParams) (string, error) {
 	return "ok", nil
 }
 
-func dummyFnInvalid(ctx agent.InvocationContext, p invalidParams) (string, error) {
+func dummyFnInvalid(_ context.Context, _ agent.InvocationContext, p invalidParams) (string, error) {
 	return "ok", nil
 }
 
@@ -565,7 +565,7 @@ func TestEndToEndInputValidationFlow(t *testing.T) {
 	}
 
 	schemaRaw, _ := jsonschema.For[InitInput](nil)
-	fnNode, _ := NewFunctionNodeWithSchema("parser", func(ctx agent.Context, input InitInput) (ParsedQuery, error) {
+	fnNode, _ := NewFunctionNodeWithSchema("parser", func(_ context.Context, _ agent.Context, input InitInput) (ParsedQuery, error) {
 		return ParsedQuery{Intent: input.UserQuery + "_intent"}, nil
 	}, schemaRaw, nil, defaultNodeConfig)
 
@@ -582,7 +582,7 @@ func TestEndToEndInputValidationFlow(t *testing.T) {
 	var receivedInput string
 	dummyAgent, _ := agent.New(agent.Config{
 		Name: "e2e_agent",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		Run: func(_ context.Context, ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				if ctx.UserContent() != nil && len(ctx.UserContent().Parts) > 0 {
 					receivedInput = ctx.UserContent().Parts[0].Text
@@ -608,7 +608,7 @@ func TestEndToEndInputValidationFlow(t *testing.T) {
 		Parts: []*genai.Part{{Text: `{"user_query": "hello"}`}},
 	}
 
-	for ev, err := range wf.Run(mockCtx) {
+	for ev, err := range wf.Run(t.Context(), mockCtx) {
 		if err != nil {
 			t.Fatalf("expected successful end-to-end run, got error: %v", err)
 		}

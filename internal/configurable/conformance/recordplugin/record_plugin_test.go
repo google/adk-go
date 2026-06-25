@@ -63,7 +63,7 @@ func TestRecordPlugin(t *testing.T) {
 		}
 
 		// 1. beforeRun
-		_, err = p.BeforeRunCallback()(invContext)
+		_, err = p.BeforeRunCallback()(context.Background(), invContext)
 		if err != nil {
 			t.Fatalf("beforeRun failed: %v", err)
 		}
@@ -93,7 +93,7 @@ func TestRecordPlugin(t *testing.T) {
 				"test_tool": "dummy_val",
 			},
 		}
-		_, err = p.BeforeModelCallback()(cbContext, req)
+		_, err = p.BeforeModelCallback()(context.Background(), cbContext, req)
 		if err != nil {
 			t.Fatalf("beforeModel failed: %v", err)
 		}
@@ -107,7 +107,7 @@ func TestRecordPlugin(t *testing.T) {
 			ModelVersion: "gemini-2.0-flash",
 			Partial:      false,
 		}
-		_, err = p.AfterModelCallback()(cbContext, resp, nil)
+		_, err = p.AfterModelCallback()(context.Background(), cbContext, resp, nil)
 		if err != nil {
 			t.Fatalf("afterModel failed: %v", err)
 		}
@@ -121,20 +121,20 @@ func TestRecordPlugin(t *testing.T) {
 		}
 		mockTool := &MockTool{NameVal: "test_tool"}
 		toolArgs := map[string]any{"param": "test"}
-		_, err = p.BeforeToolCallback()(toolContext, mockTool, toolArgs)
+		_, err = p.BeforeToolCallback()(context.Background(), toolContext, mockTool, toolArgs)
 		if err != nil {
 			t.Fatalf("beforeTool failed: %v", err)
 		}
 
 		// 5. afterTool
 		toolResult := map[string]any{"result": "test_success"}
-		_, err = p.AfterToolCallback()(toolContext, mockTool, toolArgs, toolResult, nil)
+		_, err = p.AfterToolCallback()(context.Background(), toolContext, mockTool, toolArgs, toolResult, nil)
 		if err != nil {
 			t.Fatalf("afterTool failed: %v", err)
 		}
 
 		// 6. afterRun
-		p.AfterRunCallback()(invContext)
+		p.AfterRunCallback()(context.Background(), invContext)
 
 		// Verify created YAML content
 		filePath := filepath.Join(tempDir, "generated-recordings.yaml")
@@ -243,7 +243,7 @@ func TestRecordPlugin(t *testing.T) {
 					invocationID: "test-invocation-" + tt.name,
 				}
 
-				_, err = p.BeforeRunCallback()(invContext)
+				_, err = p.BeforeRunCallback()(context.Background(), invContext)
 				if tt.expectError {
 					if err == nil {
 						t.Errorf("expected path error for %q, got nil", tt.dir)
@@ -271,12 +271,12 @@ func TestRecordPlugin(t *testing.T) {
 		}
 
 		invContext1 := &MockInvocationContext{session: mockSession, invocationID: "inv-0"}
-		_, _ = p.BeforeRunCallback()(invContext1)
+		_, _ = p.BeforeRunCallback()(context.Background(), invContext1)
 
 		cbContext1 := &MockCallbackContext{state: mockSession.State(), invocationID: "inv-0", agentName: "test_agent"}
-		_, _ = p.BeforeModelCallback()(cbContext1, &model.LLMRequest{Model: "model-0"})
-		_, _ = p.AfterModelCallback()(cbContext1, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Response 0"}}}, Partial: false}, nil)
-		p.AfterRunCallback()(invContext1)
+		_, _ = p.BeforeModelCallback()(context.Background(), cbContext1, &model.LLMRequest{Model: "model-0"})
+		_, _ = p.AfterModelCallback()(context.Background(), cbContext1, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Response 0"}}}, Partial: false}, nil)
+		p.AfterRunCallback()(context.Background(), invContext1)
 
 		// --- Turn 1 Append ---
 		err = mockSession.State().Set("_adk_recordings_config", map[string]any{
@@ -288,12 +288,12 @@ func TestRecordPlugin(t *testing.T) {
 		}
 
 		invContext2 := &MockInvocationContext{session: mockSession, invocationID: "inv-1"}
-		_, _ = p.BeforeRunCallback()(invContext2)
+		_, _ = p.BeforeRunCallback()(context.Background(), invContext2)
 
 		cbContext2 := &MockCallbackContext{state: mockSession.State(), invocationID: "inv-1", agentName: "test_agent"}
-		_, _ = p.BeforeModelCallback()(cbContext2, &model.LLMRequest{Model: "model-1"})
-		_, _ = p.AfterModelCallback()(cbContext2, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Response 1"}}}, Partial: false}, nil)
-		p.AfterRunCallback()(invContext2)
+		_, _ = p.BeforeModelCallback()(context.Background(), cbContext2, &model.LLMRequest{Model: "model-1"})
+		_, _ = p.AfterModelCallback()(context.Background(), cbContext2, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Response 1"}}}, Partial: false}, nil)
+		p.AfterRunCallback()(context.Background(), invContext2)
 
 		// Read and verify both turns are recorded
 		filePath := filepath.Join(tempDir, "generated-recordings.yaml")
@@ -321,12 +321,12 @@ func TestRecordPlugin(t *testing.T) {
 		}
 
 		invContext3 := &MockInvocationContext{session: mockSession, invocationID: "inv-0-new"}
-		_, _ = p.BeforeRunCallback()(invContext3)
+		_, _ = p.BeforeRunCallback()(context.Background(), invContext3)
 
 		cbContext3 := &MockCallbackContext{state: mockSession.State(), invocationID: "inv-0-new", agentName: "test_agent"}
-		_, _ = p.BeforeModelCallback()(cbContext3, &model.LLMRequest{Model: "model-0"})
-		_, _ = p.AfterModelCallback()(cbContext3, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Response 0 Updated"}}}, Partial: false}, nil)
-		p.AfterRunCallback()(invContext3)
+		_, _ = p.BeforeModelCallback()(context.Background(), cbContext3, &model.LLMRequest{Model: "model-0"})
+		_, _ = p.AfterModelCallback()(context.Background(), cbContext3, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Response 0 Updated"}}}, Partial: false}, nil)
+		p.AfterRunCallback()(context.Background(), invContext3)
 
 		data, _ = os.ReadFile(filePath)
 		_ = yaml.Unmarshal(data, &recs)
@@ -363,19 +363,19 @@ func TestRecordPlugin(t *testing.T) {
 		}
 
 		invContext := &MockInvocationContext{session: mockSession, invocationID: "inv-stream"}
-		_, _ = p.BeforeRunCallback()(invContext)
+		_, _ = p.BeforeRunCallback()(context.Background(), invContext)
 
 		cbContext := &MockCallbackContext{state: mockSession.State(), invocationID: "inv-stream", agentName: "test_agent"}
-		_, _ = p.BeforeModelCallback()(cbContext, &model.LLMRequest{Model: "model-stream"})
+		_, _ = p.BeforeModelCallback()(context.Background(), cbContext, &model.LLMRequest{Model: "model-stream"})
 
 		// 3 Partial responses
-		_, _ = p.AfterModelCallback()(cbContext, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Chunk 1"}}}, Partial: true}, nil)
-		_, _ = p.AfterModelCallback()(cbContext, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Chunk 2"}}}, Partial: true}, nil)
-		_, _ = p.AfterModelCallback()(cbContext, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Chunk 3"}}}, Partial: true}, nil)
+		_, _ = p.AfterModelCallback()(context.Background(), cbContext, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Chunk 1"}}}, Partial: true}, nil)
+		_, _ = p.AfterModelCallback()(context.Background(), cbContext, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Chunk 2"}}}, Partial: true}, nil)
+		_, _ = p.AfterModelCallback()(context.Background(), cbContext, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Chunk 3"}}}, Partial: true}, nil)
 
 		// 1 Final non-partial response
-		_, _ = p.AfterModelCallback()(cbContext, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Final Chunk"}}}, Partial: false}, nil)
-		p.AfterRunCallback()(invContext)
+		_, _ = p.AfterModelCallback()(context.Background(), cbContext, &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "Final Chunk"}}}, Partial: false}, nil)
+		p.AfterRunCallback()(context.Background(), invContext)
 
 		filePath := filepath.Join(tempDir, "generated-recordings.yaml")
 		data, _ := os.ReadFile(filePath)
@@ -401,18 +401,18 @@ func TestRecordPlugin(t *testing.T) {
 		// We don't set any recording configs in mockSession state
 
 		invContext := &MockInvocationContext{session: mockSession, invocationID: "inv-bypass"}
-		_, err := p.BeforeRunCallback()(invContext)
+		_, err := p.BeforeRunCallback()(context.Background(), invContext)
 		if err != nil {
 			t.Fatalf("beforeRun should not error on empty config, got: %v", err)
 		}
 
 		cbContext := &MockCallbackContext{state: mockSession.State(), invocationID: "inv-bypass", agentName: "test_agent"}
-		_, err = p.BeforeModelCallback()(cbContext, &model.LLMRequest{Model: "model-bypass"})
+		_, err = p.BeforeModelCallback()(context.Background(), cbContext, &model.LLMRequest{Model: "model-bypass"})
 		if err != nil {
 			t.Fatalf("beforeModel should not error on empty config, got: %v", err)
 		}
 
-		p.AfterRunCallback()(invContext)
+		p.AfterRunCallback()(context.Background(), invContext)
 
 		filePath := filepath.Join(tempDir, "generated-recordings.yaml")
 		if _, err := os.Stat(filePath); err == nil {

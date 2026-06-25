@@ -554,7 +554,7 @@ questions; the request always describes the items you should return.`,
 	storeReport, err := functiontool.New(functiontool.Config{
 		Name:        "store_report",
 		Description: "Stores the final list of items.",
-	}, func(_ agent.Context, in StoreReportArgs) (StoreReportResult, error) {
+	}, func(_ context.Context, _ agent.Context, in StoreReportArgs) (StoreReportResult, error) {
 		storeCalls++
 		storedItems = in.Items
 		return StoreReportResult{Stored: len(in.Items)}, nil
@@ -1258,7 +1258,7 @@ func TestDelegation_06_ChatToTaskHITLResume(t *testing.T) {
 		Name:                "confirm",
 		Description:         "Confirms the user wants to proceed with the irreversible action.",
 		RequireConfirmation: true,
-	}, func(_ agent.Context, _ ConfirmInput) (ConfirmOutput, error) {
+	}, func(_ context.Context, _ agent.Context, _ ConfirmInput) (ConfirmOutput, error) {
 		confirmCalls++
 		return ConfirmOutput{Result: "Approved. Proceeding."}, nil
 	})
@@ -1545,7 +1545,7 @@ immediately call ` + "`finish_task`" + ` with {"items":[...]}.`,
 	summarize, err := functiontool.New(functiontool.Config{
 		Name:        "summarize",
 		Description: "Summarises a list of items into a one-line string.",
-	}, func(_ agent.Context, in SummarizeArgs) (SummarizeResult, error) {
+	}, func(_ context.Context, _ agent.Context, in SummarizeArgs) (SummarizeResult, error) {
 		summarizeCalls++
 		return SummarizeResult{Summary: "items: " + strings.Join(in.Items, ", ")}, nil
 	})
@@ -1869,7 +1869,7 @@ func TestDelegation_11_ChatToSingleTurnChainedTools(t *testing.T) {
 	t1, err := functiontool.New(functiontool.Config{
 		Name:        "tool_one",
 		Description: "Returns a fixed token string. Call this first.",
-	}, func(_ agent.Context, _ struct{}) (token, error) {
+	}, func(_ context.Context, _ agent.Context, _ struct{}) (token, error) {
 		return token{Token: "alpha-42"}, nil
 	})
 	if err != nil {
@@ -1878,7 +1878,7 @@ func TestDelegation_11_ChatToSingleTurnChainedTools(t *testing.T) {
 	t2, err := functiontool.New(functiontool.Config{
 		Name:        "tool_two",
 		Description: "Echoes the token returned by tool_one.",
-	}, func(_ agent.Context, in token) (echo, error) {
+	}, func(_ context.Context, _ agent.Context, in token) (echo, error) {
 		return echo{Result: "got " + in.Token}, nil
 	})
 	if err != nil {
@@ -1892,7 +1892,7 @@ func TestDelegation_11_ChatToSingleTurnChainedTools(t *testing.T) {
 		mu       sync.Mutex
 		requests [][]*genai.Content
 	)
-	capture := func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+	capture := func(_ context.Context, _ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		snap := make([]*genai.Content, len(req.Contents))

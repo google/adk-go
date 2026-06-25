@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"strconv"
@@ -59,7 +60,7 @@ func TestValidateCustomRunID(t *testing.T) {
 }
 
 func TestSubScheduler_Counter_AutoIncrementsPerChildName(t *testing.T) {
-	sub := newDynamicSubScheduler(newTopLevelCtx(t), "parent", noopEmit)
+	sub := newDynamicSubScheduler(t.Context(), newTopLevelCtx(t), "parent", noopEmit)
 
 	for i := 1; i <= 3; i++ {
 		got, err := sub.ResolveByRunID("childA", "")
@@ -78,7 +79,7 @@ func TestSubScheduler_Counter_AutoIncrementsPerChildName(t *testing.T) {
 }
 
 func TestSubScheduler_Counter_ConcurrentSafe(t *testing.T) {
-	sub := newDynamicSubScheduler(newTopLevelCtx(t), "parent", noopEmit)
+	sub := newDynamicSubScheduler(t.Context(), newTopLevelCtx(t), "parent", noopEmit)
 	const goroutines = 64
 
 	var wg sync.WaitGroup
@@ -101,7 +102,7 @@ func TestSubScheduler_Counter_ConcurrentSafe(t *testing.T) {
 }
 
 func TestSubScheduler_Counter_CustomIDDoesNotIncrement(t *testing.T) {
-	sub := newDynamicSubScheduler(newTopLevelCtx(t), "parent", noopEmit)
+	sub := newDynamicSubScheduler(t.Context(), newTopLevelCtx(t), "parent", noopEmit)
 
 	if _, err := sub.ResolveByRunID("c", "order-1"); err != nil {
 		t.Fatalf("custom id: %v", err)
@@ -115,7 +116,7 @@ func TestSubScheduler_Counter_CustomIDDoesNotIncrement(t *testing.T) {
 func TestSubScheduler_RunNode_FreshExecution(t *testing.T) {
 	child := newStubNode("greeter", "hello")
 	var forwarded []*session.Event
-	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", func(ev *session.Event) error {
+	sub := newDynamicSubScheduler(t.Context(), newTopLevelCtx(t), "wf", func(ev *session.Event) error {
 		forwarded = append(forwarded, ev)
 		return nil
 	})
@@ -137,7 +138,7 @@ func TestSubScheduler_RunNode_FreshExecution(t *testing.T) {
 
 func TestSubScheduler_RunNode_CustomIDInPath(t *testing.T) {
 	child := newStubNode("processor", nil)
-	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+	sub := newDynamicSubScheduler(t.Context(), newTopLevelCtx(t), "wf", noopEmit)
 
 	if _, err := sub.RunNode(child, nil, runNodeOptions{customRunID: "order-42"}); err != nil {
 		t.Fatalf("runNode: %v", err)
@@ -152,7 +153,7 @@ func TestSubScheduler_RunNode_CustomIDInPath(t *testing.T) {
 func TestSubScheduler_RunNode_HITLReturnsInterrupted(t *testing.T) {
 	child := newRequestInputNode("asker", "approve?")
 	var forwarded []*session.Event
-	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", func(ev *session.Event) error {
+	sub := newDynamicSubScheduler(t.Context(), newTopLevelCtx(t), "wf", func(ev *session.Event) error {
 		forwarded = append(forwarded, ev)
 		return nil
 	})
@@ -175,7 +176,7 @@ func TestSubScheduler_RunNode_HITLReturnsInterrupted(t *testing.T) {
 
 func TestSubScheduler_RunNode_ErrorWinsOverInterrupt(t *testing.T) {
 	child := newInterruptThenFailNode("flaky")
-	sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+	sub := newDynamicSubScheduler(t.Context(), newTopLevelCtx(t), "wf", noopEmit)
 
 	_, err := sub.RunNode(child, nil, runNodeOptions{})
 	if !errors.Is(err, ErrNodeFailed) {
@@ -229,7 +230,7 @@ func TestSubScheduler_RehydrateCache_InvocationScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := newMockCtx(t)
 			ctx.sess = &eventsSession{events: tc.events}
-			sub := newDynamicSubScheduler(agent.NewNodeContext(ctx, nil), "wf", noopEmit).(*dynamicSubScheduler)
+			sub := newDynamicSubScheduler(t.Context(), agent.NewNodeContext(t.Context(), ctx, nil), "wf", noopEmit).(*dynamicSubScheduler)
 
 			out, ok := sub.lookupCachedOutput(childPath)
 			if ok != tc.wantHit {
@@ -263,7 +264,7 @@ func (s *eventsSession) LastUpdateTime() time.Time { return time.Time{} }
 
 func newTopLevelCtx(t *testing.T) agent.Context {
 	t.Helper()
-	return agent.NewNodeContext(newMockCtx(t), nil)
+	return agent.NewNodeContext(t.Context(), newMockCtx(t), nil)
 }
 
 // stubNode emits one Event{Output: out} and exits.
@@ -282,7 +283,7 @@ func newStubNode(name string, out any) *stubNode {
 	}
 }
 
-func (n *stubNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+func (n *stubNode) Run(_ context.Context, ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	n.lastPath = ctx.Path()
 	n.lastBranch = ctx.Branch()
 	n.lastScope = ctx.IsolationScope()
@@ -306,7 +307,7 @@ func TestSubScheduler_RunNode_ValidatesOutput(t *testing.T) {
 
 	t.Run("valid_passes", func(t *testing.T) {
 		child := newSchemaStubNode("ok", schema, map[string]any{"value": "hi"})
-		sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+		sub := newDynamicSubScheduler(t.Context(), newTopLevelCtx(t), "wf", noopEmit)
 
 		out, err := sub.RunNode(child, nil, runNodeOptions{})
 		if err != nil {
@@ -320,7 +321,7 @@ func TestSubScheduler_RunNode_ValidatesOutput(t *testing.T) {
 
 	t.Run("invalid_fails", func(t *testing.T) {
 		child := newSchemaStubNode("bad", schema, map[string]any{"value": 123})
-		sub := newDynamicSubScheduler(newTopLevelCtx(t), "wf", noopEmit)
+		sub := newDynamicSubScheduler(t.Context(), newTopLevelCtx(t), "wf", noopEmit)
 
 		_, err := sub.RunNode(child, nil, runNodeOptions{})
 		if !errors.Is(err, ErrNodeFailed) {
@@ -347,7 +348,7 @@ func newMessageAsOutputNode(name, text string) *messageAsOutputNode {
 	}
 }
 
-func (n *messageAsOutputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+func (n *messageAsOutputNode) Run(context.Context, agent.Context, any) iter.Seq2[*session.Event, error] {
 	text := n.text
 	return func(yield func(*session.Event, error) bool) {
 		ev := &session.Event{NodeInfo: &session.NodeInfo{MessageAsOutput: true}}
@@ -372,7 +373,7 @@ func newRequestInputNode(name, msg string) *requestInputNode {
 	}
 }
 
-func (n *requestInputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+func (n *requestInputNode) Run(context.Context, agent.Context, any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(&session.Event{
 			RequestedInput: &session.RequestInput{
@@ -390,7 +391,7 @@ func newInterruptThenFailNode(name string) *interruptThenFailNode {
 	return &interruptThenFailNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
 
-func (n *interruptThenFailNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+func (n *interruptThenFailNode) Run(context.Context, agent.Context, any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if !yield(&session.Event{
 			RequestedInput: &session.RequestInput{InterruptID: "iid", Message: "ask"},

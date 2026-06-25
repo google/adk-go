@@ -49,8 +49,8 @@ func main() {
 	ctx := context.Background()
 
 	ask := workflow.NewEmittingFunctionNode[any, any]("ask_name",
-		func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
-			if err := emit(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+		func(ctx context.Context, invCleanCtx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+			if err := emit(workflow.NewRequestInputEvent(invCleanCtx, session.RequestInput{
 				InterruptID: "ask_name",
 				Message:     "What's your name?",
 			})); err != nil {
@@ -65,7 +65,7 @@ func main() {
 	// greeting. The classic NewFunctionNode is enough — no events
 	// to emit beyond the terminal output.
 	greet := workflow.NewFunctionNode("greet",
-		func(_ agent.Context, name string) (string, error) {
+		func(_ context.Context, _ agent.Context, name string) (string, error) {
 			if name == "" {
 				name = "stranger"
 			}

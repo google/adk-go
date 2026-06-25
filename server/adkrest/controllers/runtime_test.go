@@ -104,8 +104,8 @@ type testAgentResult struct {
 	err   error
 }
 
-func testAgent(results []testAgentResult) func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	return func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+func testAgent(results []testAgentResult) func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		return func(yield func(*session.Event, error) bool) {
 			for _, res := range results {
 				if !yield(res.event, res.err) {

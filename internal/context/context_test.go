@@ -15,12 +15,9 @@
 package context
 
 import (
-	"context"
 	"strings"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
 
 	"google.golang.org/adk/agent"
@@ -29,7 +26,7 @@ import (
 
 func TestReadonlyContext(t *testing.T) {
 	inv := NewInvocationContext(t.Context(), InvocationContextParams{})
-	readonly := NewReadonlyContext(inv)
+	readonly := NewReadonlyContext(t.Context(), inv)
 
 	if got, ok := readonly.(agent.InvocationContext); ok {
 		t.Errorf("ReadonlyContext(%+T) is unexpectedly an InvocationContext", got)
@@ -38,30 +35,10 @@ func TestReadonlyContext(t *testing.T) {
 
 func TestCallbackContext(t *testing.T) {
 	inv := NewInvocationContext(t.Context(), InvocationContextParams{})
-	callback := NewCallbackContext(inv)
+	callback := NewCallbackContext(t.Context(), inv)
 
 	if _, ok := callback.(agent.ReadonlyContext); !ok {
 		t.Errorf("CallbackContext(%+T) is unexpectedly not a ReadonlyContext", callback)
-	}
-}
-
-type testKey struct{}
-
-func TestWithContext(t *testing.T) {
-	baseCtx := t.Context()
-	inv := NewInvocationContext(baseCtx, InvocationContextParams{
-		Branch: "test-branch",
-	})
-
-	key := testKey{}
-	val := "val"
-	got := inv.WithContext(context.WithValue(baseCtx, key, val))
-
-	if got.Value(key) != val {
-		t.Errorf("WithContext() did not update context")
-	}
-	if diff := cmp.Diff(inv, got, cmp.AllowUnexported(InvocationContext{}), cmpopts.IgnoreFields(InvocationContext{}, "Context")); diff != "" {
-		t.Errorf("WithContext() mismatch (-want +got):\n%s", diff)
 	}
 }
 

@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"strings"
@@ -50,7 +51,7 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 // this node's output; more than one is a graph-design error
 // (ErrMultipleOutputs); zero means the node produces no output.
 // Mirrors adk-python's _set_ctx_output_or_interrupts.
-func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *WorkflowNode) Run(ctx context.Context, invCleanCtx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	terminals := n.subWorkflow.graph.terminalNodeNames()
 	return func(yield func(*session.Event, error) bool) {
 		// terminalOutputs is keyed by terminal node name (last write
@@ -64,11 +65,11 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 		consumerGone := false
 
 		// Create a cancellable context to signal the sub-workflow to stop on error or break.
-		subCtx, cancel := ctx.WithAgentCancel()
+		subCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
-		ctx = ctx.WithAgentContext(subCtx)
+		ctx = subCtx
 
-		for ev, err := range n.subWorkflow.RunNode(ctx, input) {
+		for ev, err := range n.subWorkflow.RunNode(ctx, invCleanCtx, input) {
 			if err != nil {
 				pendingErr = err
 				// Signal the sub-workflow to stop execution. We use 'continue' instead of 'break'
@@ -135,7 +136,7 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 
 		// Yield the terminal output at the end if one was produced.
 		for _, out := range terminalOutputs {
-			event := session.NewEvent(ctx.InvocationID())
+			event := session.NewEvent(invCleanCtx.InvocationID())
 			event.Output = out
 			if !yield(event, nil) {
 				return

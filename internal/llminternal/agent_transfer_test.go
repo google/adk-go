@@ -15,6 +15,7 @@
 package llminternal_test
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -56,11 +57,12 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		ctx := icontext.NewInvocationContext(parentmap.ToContext(t.Context(), parents), icontext.InvocationContextParams{
+		goCtx := parentmap.ToContext(t.Context(), parents)
+		ctx := icontext.NewInvocationContext(goCtx, icontext.InvocationContextParams{
 			Agent: curAgent,
 		})
 
-		for ev, err := range llminternal.AgentTransferRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		for ev, err := range llminternal.AgentTransferRequestProcessor(goCtx, ctx, req, &llminternal.Flow{}) {
 			if ev != nil {
 				t.Fatal("AgentTransferRequestProcessor generated an unexpected event")
 			}
@@ -519,7 +521,7 @@ func TestAgentTransferRequestProcessor_TaskSingleTurnCurrentAgent(t *testing.T) 
 				icontext.InvocationContextParams{Agent: cur},
 			)
 
-			for ev, err := range llminternal.AgentTransferRequestProcessor(ctx, req, &llminternal.Flow{}) {
+			for ev, err := range llminternal.AgentTransferRequestProcessor(t.Context(), ctx, req, &llminternal.Flow{}) {
 				if ev != nil {
 					t.Fatal("AgentTransferRequestProcessor generated an unexpected event")
 				}
@@ -552,7 +554,7 @@ func TestAgentTransfer_ProcessRequest(t *testing.T) {
 		x int
 	}
 	var req model.LLMRequest
-	handler := func(ctx agent.Context, input Input) (int, error) {
+	handler := func(_ context.Context, _ agent.Context, input Input) (int, error) {
 		return input.x, nil
 	}
 	identityTool, err := functiontool.New(functiontool.Config{
@@ -566,12 +568,12 @@ func TestAgentTransfer_ProcessRequest(t *testing.T) {
 	if !ok {
 		t.Fatal("identityTool does not implement itype.RequestProcessor")
 	}
-	if err := requestProcessor.ProcessRequest(nil, &req); err != nil {
+	if err := requestProcessor.ProcessRequest(t.Context(), nil, &req); err != nil {
 		t.Fatalf("identityTool.ProcessRequest failed: %v", err)
 	}
 	// Second tool
 	transferToAgentTool := &llminternal.TransferToAgentTool{}
-	if err := transferToAgentTool.ProcessRequest(nil, &req); err != nil {
+	if err := transferToAgentTool.ProcessRequest(t.Context(), nil, &req); err != nil {
 		t.Fatalf("transferToAgentTool.ProcessRequest failed: %v", err)
 	}
 
@@ -588,11 +590,11 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		curTool := &llminternal.TransferToAgentTool{}
 
 		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-		ctx := agent.NewToolContext(invCtx, "", &session.EventActions{}, nil)
+		ctx := agent.NewToolContext(t.Context(), invCtx, "", &session.EventActions{}, nil)
 
 		wantAgentName := "TestAgent"
 		args := map[string]any{"agent_name": wantAgentName}
-		if _, err := curTool.Run(ctx, args); err != nil {
+		if _, err := curTool.Run(t.Context(), ctx, args); err != nil {
 			t.Fatalf("Run(%v) failed: %v", args, err)
 		}
 		if got, want := ctx.Actions().TransferToAgent, wantAgentName; got != want {
@@ -614,8 +616,8 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				curTool := &llminternal.TransferToAgentTool{}
-				ctx := agent.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil, nil)
-				if got, err := curTool.Run(ctx, tc.args); err == nil {
+				ctx := agent.NewToolContext(t.Context(), icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil, nil)
+				if got, err := curTool.Run(t.Context(), ctx, tc.args); err == nil {
 					t.Fatalf("Run(%v) = (%v, %v), want error", tc.args, got, err)
 				}
 			})

@@ -53,7 +53,7 @@ func TestTypes(t *testing.T) {
 		{
 			name: "FunctionTool",
 			constructor: func() (tool.Tool, error) {
-				return functiontool.New(functiontool.Config{}, func(_ agent.Context, input intInput) (intOutput, error) {
+				return functiontool.New(functiontool.Config{}, func(_ context.Context, _ agent.Context, input intInput) (intOutput, error) {
 					return intOutput(input), nil
 				})
 			},
@@ -173,13 +173,13 @@ type testToolset struct {
 }
 
 func (tts *testToolset) Name() string { return "testToolset" }
-func (tts *testToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
+func (tts *testToolset) Tools(context.Context, agent.ReadonlyContext) ([]tool.Tool, error) {
 	return tts.tools, nil
 }
 
 func TestWithConfirmation(t *testing.T) {
 	toolRan := false
-	noOpTool, err := functiontool.New(functiontool.Config{Name: "noOpTool"}, func(ctx agent.Context, input struct{}) (struct{}, error) {
+	noOpTool, err := functiontool.New(functiontool.Config{Name: "noOpTool"}, func(_ context.Context, _ agent.Context, input struct{}) (struct{}, error) {
 		toolRan = true
 		return struct{}{}, nil
 	})
@@ -264,7 +264,7 @@ func TestWithConfirmation(t *testing.T) {
 			ctx := &testContext{Context: context.Background(), toolConfirmationResult: tt.toolConfirmation}
 
 			cts := tool.WithConfirmation(ts, tt.requireConfirmation, tt.provider)
-			tools, err := cts.Tools(nil)
+			tools, err := cts.Tools(context.Background(), nil)
 			if err != nil {
 				t.Fatalf("cts.Tools() failed: %v", err)
 			}
@@ -276,7 +276,7 @@ func TestWithConfirmation(t *testing.T) {
 				t.Fatalf("tools[0] is not a FunctionTool")
 			}
 
-			_, err = confirmedTool.Run(ctx, map[string]any{})
+			_, err = confirmedTool.Run(context.Background(), ctx, map[string]any{})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Run() error = %v, wantErr %v", err, tt.wantErr)
 			}

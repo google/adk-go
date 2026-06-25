@@ -82,7 +82,7 @@ recordings:
 			session:      mockSession,
 			invocationID: "test-invocation",
 		}
-		_, err = plugin.BeforeRunCallback()(invContext)
+		_, err = plugin.BeforeRunCallback()(context.Background(), invContext)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -104,7 +104,7 @@ recordings:
 			},
 		}
 
-		result, err := plugin.BeforeModelCallback()(cbContext, request)
+		result, err := plugin.BeforeModelCallback()(context.Background(), cbContext, request)
 		// 5. Verify
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -159,7 +159,7 @@ recordings:
 			session:      mockSession,
 			invocationID: "test-invocation",
 		}
-		_, err = plugin.BeforeRunCallback()(invContext)
+		_, err = plugin.BeforeRunCallback()(context.Background(), invContext)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -181,7 +181,7 @@ recordings:
 			},
 		}
 
-		result, err := plugin.BeforeModelCallback()(cbContext, request)
+		result, err := plugin.BeforeModelCallback()(context.Background(), cbContext, request)
 		// 5. Verify
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -231,7 +231,7 @@ recordings:
 			session:      mockSession,
 			invocationID: "test-invocation",
 		}
-		_, err = plugin.BeforeRunCallback()(invContext)
+		_, err = plugin.BeforeRunCallback()(context.Background(), invContext)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -253,7 +253,7 @@ recordings:
 			},
 		}
 
-		result, err := plugin.BeforeModelCallback()(cbContext, request)
+		result, err := plugin.BeforeModelCallback()(context.Background(), cbContext, request)
 		// 5. Verify result is nil (empty) and error is returned
 		if err == nil {
 			t.Fatal("expected error due to mismatch")
@@ -300,7 +300,7 @@ recordings:
 			session:      mockSession,
 			invocationID: "test-invocation",
 		}
-		_, err = plugin.BeforeRunCallback()(invContext)
+		_, err = plugin.BeforeRunCallback()(context.Background(), invContext)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -314,7 +314,7 @@ recordings:
 		}
 		toolArgs := map[string]any{"param1": "value1", "param2": 42}
 
-		result, err := plugin.BeforeToolCallback()(toolContext, mockTool, toolArgs)
+		result, err := plugin.BeforeToolCallback()(context.Background(), toolContext, mockTool, toolArgs)
 		// 5. Verify
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -355,7 +355,7 @@ recordings:
 			t.Fatalf("unexpected error: %v", err)
 		}
 		invContext := &MockInvocationContext{session: mockSession, invocationID: "test-invocation"}
-		_, err = plugin.BeforeRunCallback()(invContext)
+		_, err = plugin.BeforeRunCallback()(context.Background(), invContext)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -368,7 +368,7 @@ recordings:
 			agentName:    "test_agent",
 		}
 
-		result, err := plugin.BeforeToolCallback()(toolContext, mockTool, map[string]any{"param": "value"})
+		result, err := plugin.BeforeToolCallback()(context.Background(), toolContext, mockTool, map[string]any{"param": "value"})
 		// 3. Verify nil result and error
 		if err == nil {
 			t.Fatal("expected error due to tool name mismatch")
@@ -403,7 +403,7 @@ recordings:
 			t.Fatalf("unexpected error: %v", err)
 		}
 		invContext := &MockInvocationContext{session: mockSession, invocationID: "test-invocation"}
-		_, err = plugin.BeforeRunCallback()(invContext)
+		_, err = plugin.BeforeRunCallback()(context.Background(), invContext)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -416,7 +416,7 @@ recordings:
 			agentName:    "test_agent",
 		}
 
-		result, err := plugin.BeforeToolCallback()(toolContext, mockTool, map[string]any{"param": "actual_value"})
+		result, err := plugin.BeforeToolCallback()(context.Background(), toolContext, mockTool, map[string]any{"param": "actual_value"})
 		// 3. Verify nil result and error
 		if err == nil {
 			t.Fatal("expected error due to tool args mismatch")
@@ -616,7 +616,7 @@ func TestReplayPlugin_PathValidation(t *testing.T) {
 			}
 
 			// Run BeforeRunCallback
-			_, err = plugin.BeforeRunCallback()(invContext)
+			_, err = plugin.BeforeRunCallback()(context.Background(), invContext)
 
 			if tt.expectError {
 				if err == nil {

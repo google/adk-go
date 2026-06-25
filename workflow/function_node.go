@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,7 +40,7 @@ import (
 // (zero, ErrNodeInterrupted); the engine parks the node and routes the
 // resume payload per NodeConfig.RerunOnResume.
 type EmittingFunctionFn[IN, OUT any] = func(
-	ctx agent.Context, input IN, emit func(*session.Event) error,
+	ctx context.Context, invCleanCtx agent.Context, input IN, emit func(*session.Event) error,
 ) (OUT, error)
 
 // FunctionNode wraps a custom function.
@@ -47,8 +48,8 @@ type EmittingFunctionFn[IN, OUT any] = func(
 // Exactly one of fn or emittingFn is set per node.
 type FunctionNode struct {
 	BaseNode
-	fn              func(ctx agent.Context, input any) (any, error)
-	emittingFn      func(ctx agent.Context, input any, emit func(*session.Event) error) (any, error)
+	fn              func(ctx context.Context, invCleanCtx agent.Context, input any) (any, error)
+	emittingFn      func(ctx context.Context, invCleanCtx agent.Context, input any, emit func(*session.Event) error) (any, error)
 	stateFieldNames []string
 }
 
@@ -58,12 +59,12 @@ func (n *FunctionNode) StateFieldNames() []string {
 }
 
 // NewFunctionNode creates a new node wrapping a custom function using generics to automatically infer input and output types.
-func NewFunctionNode[IN, OUT any](name string, fn func(ctx agent.Context, input IN) (OUT, error), cfg NodeConfig) *FunctionNode {
+func NewFunctionNode[IN, OUT any](name string, fn func(ctx context.Context, invCleanCtx agent.Context, input IN) (OUT, error), cfg NodeConfig) *FunctionNode {
 	return newFunctionNodeWithResolvedSchemas[IN, OUT](name, fn, nil, nil, cfg)
 }
 
 // NewFunctionNodeWithSchema creates a new node wrapping a custom function using generics to automatically infer input and output types.
-func NewFunctionNodeWithSchema[IN, OUT any](name string, fn func(ctx agent.Context, input IN) (OUT, error), inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*FunctionNode, error) {
+func NewFunctionNodeWithSchema[IN, OUT any](name string, fn func(ctx context.Context, invCleanCtx agent.Context, input IN) (OUT, error), inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*FunctionNode, error) {
 	var ischema *jsonschema.Resolved
 	var err error
 	if inputSchema != nil {
@@ -123,7 +124,7 @@ func NewEmittingFunctionNodeWithSchema[IN, OUT any](name string, fn EmittingFunc
 // Params must be a struct type.
 func NewFunctionNodeFromState[Params, OUT any](
 	name string,
-	fn func(ctx agent.InvocationContext, p Params) (OUT, error),
+	fn func(ctx context.Context, invCleanCtx agent.InvocationContext, p Params) (OUT, error),
 	cfg NodeConfig,
 ) (*FunctionNode, error) {
 	paramType := reflect.TypeOf(*new(Params))
@@ -196,8 +197,8 @@ func NewFunctionNodeFromState[Params, OUT any](
 		return nil, fmt.Errorf("resolving output schema: %w", err)
 	}
 
-	wrappedFn := func(ctx agent.Context, input any) (any, error) {
-		sessionState := ctx.Session().State()
+	wrappedFn := func(ctx context.Context, invCleanCtx agent.Context, input any) (any, error) {
+		sessionState := invCleanCtx.Session().State()
 		stateMap := make(map[string]any)
 
 		for _, b := range bindings {
@@ -226,7 +227,7 @@ func NewFunctionNodeFromState[Params, OUT any](
 			return nil, fmt.Errorf("failed to convert state to Params: %w", err)
 		}
 
-		output, err := fn(ctx, p)
+		output, err := fn(ctx, invCleanCtx, p)
 		if err != nil {
 			return output, err
 		}
@@ -241,13 +242,13 @@ func NewFunctionNodeFromState[Params, OUT any](
 }
 
 // newFunctionNodeWithResolvedSchemas is an internal constructor that consumes already resolved schemas.
-func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx agent.Context, input IN) (OUT, error), inputSchema, outputSchema *jsonschema.Resolved, cfg NodeConfig) *FunctionNode {
-	wrappedFn := func(ctx agent.Context, input any) (any, error) {
+func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx context.Context, invCleanCtx agent.Context, input IN) (OUT, error), inputSchema, outputSchema *jsonschema.Resolved, cfg NodeConfig) *FunctionNode {
+	wrappedFn := func(ctx context.Context, invCleanCtx agent.Context, input any) (any, error) {
 		var output OUT
 		var err error
 		if input == nil {
 			var zero IN
-			output, err = fn(ctx, zero)
+			output, err = fn(ctx, invCleanCtx, zero)
 		} else {
 			typedInput, ok := input.(IN)
 			if !ok {
@@ -264,7 +265,7 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 					return nil, fmt.Errorf("function node %s: validation failed for input %T: %w", name, new(IN), err)
 				}
 			}
-			output, err = fn(ctx, typedInput)
+			output, err = fn(ctx, invCleanCtx, typedInput)
 		}
 
 		if err != nil {
@@ -283,7 +284,7 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 // newEmittingFunctionNodeWithResolvedSchemas is the internal
 // constructor for the streaming variant.
 func newEmittingFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn EmittingFunctionFn[IN, OUT], inputSchema, outputSchema *jsonschema.Resolved, cfg NodeConfig) *FunctionNode {
-	wrappedFn := func(ctx agent.Context, input any, emit func(*session.Event) error) (any, error) {
+	wrappedFn := func(ctx context.Context, invCleanCtx agent.Context, input any, emit func(*session.Event) error) (any, error) {
 		var typedInput IN
 		if input != nil {
 			t, ok := input.(IN)
@@ -305,7 +306,7 @@ func newEmittingFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn Emi
 			typedInput = t
 		}
 
-		output, err := fn(ctx, typedInput, emit)
+		output, err := fn(ctx, invCleanCtx, typedInput, emit)
 		if err != nil {
 			return nil, err
 		}
@@ -319,13 +320,13 @@ func newEmittingFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn Emi
 }
 
 // Run executes the function node with the given input and returns an iterator over events.
-func (n *FunctionNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *FunctionNode) Run(ctx context.Context, invCleanCtx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if n.emittingFn != nil {
-			n.runEmitting(ctx, input, yield)
+			n.runEmitting(ctx, invCleanCtx, input, yield)
 			return
 		}
-		output, err := n.fn(ctx, input)
+		output, err := n.fn(ctx, invCleanCtx, input)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -336,13 +337,13 @@ func (n *FunctionNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 		// (via event.Routes) to select conditional successors.
 		if ev, ok := output.(*session.Event); ok {
 			if ev.InvocationID == "" {
-				ev.InvocationID = ctx.InvocationID()
+				ev.InvocationID = invCleanCtx.InvocationID()
 			}
 			yield(ev, nil)
 			return
 		}
 
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEvent(invCleanCtx.InvocationID())
 		if c, ok := output.(*genai.Content); ok {
 			event.Content = c
 		} else if c, ok := output.(genai.Content); ok {
@@ -358,9 +359,9 @@ func (n *FunctionNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 // dynamicNode.Run: ErrNodeInterrupted swallows the result (the pause
 // event was already emitted), any other error fails the node, and a
 // nil output suppresses the terminal event.
-func (n *FunctionNode) runEmitting(ctx agent.Context, input any, yield func(*session.Event, error) bool) {
+func (n *FunctionNode) runEmitting(ctx context.Context, invCleanCtx agent.Context, input any, yield func(*session.Event, error) bool) {
 	emit := makeEmit(yield, ctx)
-	output, err := n.emittingFn(ctx, input, emit)
+	output, err := n.emittingFn(ctx, invCleanCtx, input, emit)
 	if err != nil {
 		if errors.Is(err, ErrNodeInterrupted) {
 			return
@@ -371,7 +372,7 @@ func (n *FunctionNode) runEmitting(ctx agent.Context, input any, yield func(*ses
 	if output == nil {
 		return
 	}
-	event := session.NewEvent(ctx.InvocationID())
+	event := session.NewEvent(invCleanCtx.InvocationID())
 	event.Output = output
 	if s, ok := output.(string); ok {
 		event.Content = &genai.Content{

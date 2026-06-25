@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"sync/atomic"
@@ -40,7 +41,7 @@ func newHitlNode(name string, run func(ctx agent.Context, input any, yield func(
 	}
 }
 
-func (n *hitlNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *hitlNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.run(ctx, input, yield)
 	}
@@ -87,7 +88,7 @@ func TestScheduler_HitlNode_PausesAndForwardsRequest(t *testing.T) {
 		{From: asker, To: downstream},
 	})
 
-	events := drain(t, w.Run(mockCtx))
+	events := drain(t, w.Run(t.Context(), mockCtx))
 
 	if downstreamRan.Load() {
 		t.Error("downstream node ran; HITL pause must suppress successor scheduling")
@@ -123,7 +124,7 @@ func TestScheduler_HitlNode_AutoGeneratesInterruptID(t *testing.T) {
 	})
 	w := mustNew(t, []Edge{{From: Start, To: asker}})
 
-	events := drain(t, w.Run(mockCtx))
+	events := drain(t, w.Run(t.Context(), mockCtx))
 	req, count := findRequestedInputEvent(events)
 	if count != 1 {
 		t.Fatalf("expected exactly 1 RequestedInput event, got %d", count)
@@ -147,7 +148,7 @@ func TestScheduler_HitlNode_PreservesExplicitInterruptID(t *testing.T) {
 	})
 	w := mustNew(t, []Edge{{From: Start, To: asker}})
 
-	events := drain(t, w.Run(mockCtx))
+	events := drain(t, w.Run(t.Context(), mockCtx))
 	req, _ := findRequestedInputEvent(events)
 	if req == nil {
 		t.Fatal("no RequestedInput event found")
@@ -175,7 +176,7 @@ func TestScheduler_HitlNode_MultipleRequestsPark(t *testing.T) {
 	// park cleanly rather than surface an error. Both pause events
 	// carry their interrupt on LongRunningToolIDs — the signal the
 	// scheduler accumulates and history rehydration reads back.
-	events := drain(t, w.Run(mockCtx))
+	events := drain(t, w.Run(t.Context(), mockCtx))
 	got := map[string]bool{}
 	for _, ev := range events {
 		for _, id := range ev.LongRunningToolIDs {
@@ -202,7 +203,7 @@ func TestScheduler_HitlNode_ErrorAfterRequestFails(t *testing.T) {
 	})
 	w := mustNew(t, []Edge{{From: Start, To: asker}})
 
-	gotErr := drainErr(t, w.Run(mockCtx))
+	gotErr := drainErr(t, w.Run(t.Context(), mockCtx))
 	if !errors.Is(gotErr, wantErr) {
 		t.Errorf("Run error = %v, want %v (failure must take precedence over the recorded request)", gotErr, wantErr)
 	}
@@ -242,7 +243,7 @@ func TestScheduler_HitlNode_ConcurrentBranches_PausesOnlyWhenAllNonRunning(t *te
 		{From: plainNode, To: plainDownstream},
 	})
 
-	events := drain(t, w.Run(mockCtx))
+	events := drain(t, w.Run(t.Context(), mockCtx))
 
 	if hitlDownstreamRan.Load() {
 		t.Error("hitl_downstream ran; HITL branch must not schedule successors before resume")
@@ -257,7 +258,7 @@ func TestScheduler_HitlNode_ConcurrentBranches_PausesOnlyWhenAllNonRunning(t *te
 
 func TestResumeOrRequestInput(t *testing.T) {
 	t.Run("first pass emits request and pauses", func(t *testing.T) {
-		ctx := agent.NewNodeContext(newMockCtx(t), nil)
+		ctx := agent.NewNodeContext(t.Context(), newMockCtx(t), nil)
 
 		var emitted []*session.Event
 		emit := func(ev *session.Event) error {
@@ -284,7 +285,7 @@ func TestResumeOrRequestInput(t *testing.T) {
 	})
 
 	t.Run("resume returns reply without emitting", func(t *testing.T) {
-		ctx := agent.NewNodeContext(newMockCtx(t), map[string]any{"ask_name": "Alice"})
+		ctx := agent.NewNodeContext(t.Context(), newMockCtx(t), map[string]any{"ask_name": "Alice"})
 
 		emitted := false
 		emit := func(*session.Event) error {
@@ -305,7 +306,7 @@ func TestResumeOrRequestInput(t *testing.T) {
 	})
 
 	t.Run("emit failure is returned instead of ErrNodeInterrupted", func(t *testing.T) {
-		ctx := agent.NewNodeContext(newMockCtx(t), nil)
+		ctx := agent.NewNodeContext(t.Context(), newMockCtx(t), nil)
 
 		wantErr := errors.New("emit failed")
 		emit := func(*session.Event) error { return wantErr }
@@ -331,8 +332,8 @@ func TestScheduler_WaitForOutputPause_SuspendsWorkflow(t *testing.T) {
 	child := newWaitForOutputNode("waiter")
 	orch := NewDynamicNode[any, any](
 		"orch",
-		func(ctx NodeContext, _ any, _ func(*session.Event) error) (any, error) {
-			return RunNode[any](ctx, child, nil)
+		func(ctx context.Context, invCleanCtx NodeContext, _ any, _ func(*session.Event) error) (any, error) {
+			return RunNode[any](ctx, invCleanCtx, child, nil)
 		},
 		NodeConfig{},
 	)
@@ -346,7 +347,7 @@ func TestScheduler_WaitForOutputPause_SuspendsWorkflow(t *testing.T) {
 		{From: orch, To: downstream},
 	})
 
-	drain(t, w.Run(mockCtx))
+	drain(t, w.Run(t.Context(), mockCtx))
 
 	if downstreamRan.Load() {
 		t.Error("downstream ran; a WaitForOutput pause must suspend the workflow, not complete the parent")

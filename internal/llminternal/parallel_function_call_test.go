@@ -15,6 +15,7 @@
 package llminternal_test
 
 import (
+	"context"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -44,7 +45,7 @@ type SumResult struct {
 	Sum int `json:"sum"` // the sum of two integers
 }
 
-func sumFunc(ctx agent.Context, input SumArgs) (SumResult, error) {
+func sumFunc(_ context.Context, _ agent.Context, input SumArgs) (SumResult, error) {
 	return SumResult{Sum: input.A + input.B}, nil
 }
 

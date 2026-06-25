@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"iter"
 
@@ -57,9 +58,9 @@ func NewJoinNodeWithSchema(name string, schema *jsonschema.Resolved) *JoinNode {
 
 // Run satisfies the Node interface. See JoinNode for the
 // aggregation contract.
-func (n *JoinNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *JoinNode) Run(ctx context.Context, invCleanCtx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEvent(invCleanCtx.InvocationID())
 		event.Output = input
 		yield(event, nil)
 	}

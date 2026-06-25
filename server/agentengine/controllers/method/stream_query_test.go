@@ -15,6 +15,7 @@
 package method
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -43,7 +44,7 @@ func TestSimpleText(t *testing.T) {
 	a, err := llmagent.New(llmagent.Config{
 		Name: "Echo",
 		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
-			func(cc agent.Context) (*genai.Content, error) {
+			func(ctx context.Context, cc agent.Context) (*genai.Content, error) {
 				return cc.UserContent(), nil
 			},
 		},

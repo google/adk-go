@@ -76,7 +76,7 @@ func (m *mockSource) LoadResource(ctx context.Context, name, resourcePath string
 
 func createToolContext(t *testing.T) agent.Context {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	return agent.NewToolContext(invCtx, "", nil, nil)
+	return agent.NewToolContext(t.Context(), invCtx, "", nil, nil)
 }
 
 func TestListSkills(t *testing.T) {
@@ -97,7 +97,7 @@ func TestListSkills(t *testing.T) {
 		t.Fatal("tool does not implement toolinternal.FunctionTool")
 	}
 
-	result, err := funcTool.Run(createToolContext(t), map[string]any{})
+	result, err := funcTool.Run(context.Background(), createToolContext(t), map[string]any{})
 	if err != nil {
 		t.Fatalf("tool.Run failed: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestLoadSkill(t *testing.T) {
 		t.Fatal("LoadSkill tool does not implement toolinternal.FunctionTool")
 	}
 
-	got, err := functionTool.Run(createToolContext(t), map[string]any{"name": "skill1"})
+	got, err := functionTool.Run(context.Background(), createToolContext(t), map[string]any{"name": "skill1"})
 	if err != nil {
 		t.Fatalf("LoadSkill tool.Run failed: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestLoadSkillResource(t *testing.T) {
 	if !ok {
 		t.Fatalf("LoadSkillResource: tool does not implement toolinternal.FunctionTool")
 	}
-	result, err := functionTool.Run(createToolContext(t), map[string]any{
+	result, err := functionTool.Run(context.Background(), createToolContext(t), map[string]any{
 		"skill_name":    "skill1",
 		"resource_path": "assets/data.txt",
 	})

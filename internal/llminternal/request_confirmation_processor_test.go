@@ -51,8 +51,8 @@ func (m *mockTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{Name: m.name}
 }
 
-func (m *mockTool) Run(ctx agent.Context, args any) (map[string]any, error) {
-	if ctx.ToolConfirmation() == nil || !ctx.ToolConfirmation().Confirmed {
+func (m *mockTool) Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error) {
+	if invCleanCtx.ToolConfirmation() == nil || !invCleanCtx.ToolConfirmation().Confirmed {
 		return map[string]any{"error": string("Tool execution not confirmed")}, nil
 	}
 	return map[string]any{"result": "Mock tool result with test"}, nil
@@ -249,7 +249,7 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 			})
 			llmRequest := &model.LLMRequest{}
 
-			iter := llminternal.RequestConfirmationRequestProcessor(invocationContext, llmRequest, &llminternal.Flow{Tools: tools})
+			iter := llminternal.RequestConfirmationRequestProcessor(t.Context(), invocationContext, llmRequest, &llminternal.Flow{Tools: tools})
 
 			var gotEvents []*session.Event
 			for event, err := range iter {

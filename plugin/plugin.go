@@ -16,6 +16,8 @@
 package plugin
 
 import (
+	"context"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -158,10 +160,10 @@ func (p *Plugin) OnToolErrorCallback() llmagent.OnToolErrorCallback {
 	return p.onToolErrorCallback
 }
 
-type OnUserMessageCallback func(agent.InvocationContext, *genai.Content) (*genai.Content, error)
+type OnUserMessageCallback func(context.Context, agent.InvocationContext, *genai.Content) (*genai.Content, error)
 
-type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
+type BeforeRunCallback func(context.Context, agent.InvocationContext) (*genai.Content, error)
 
-type AfterRunCallback func(agent.InvocationContext)
+type AfterRunCallback func(context.Context, agent.InvocationContext)
 
-type OnEventCallback func(agent.InvocationContext, *session.Event) (*session.Event, error)
+type OnEventCallback func(context.Context, agent.InvocationContext, *session.Event) (*session.Event, error)

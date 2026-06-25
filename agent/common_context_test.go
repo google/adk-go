@@ -31,16 +31,14 @@ type customContextDecorator struct {
 func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 	t.Parallel()
 
-	baseIC := &invocationContext{
-		Context: t.Context(),
-	}
-	baseCtx := NewContext(baseIC)
+	baseIC := &invocationContext{}
+	baseCtx := NewContext(t.Context(), baseIC)
 
 	wantPath := "wf/child@123"
 	wantAncestors := []string{"wf/root", "wf/parent"}
 
 	// Create a dynamic node context that explicitly populates path and outputForAncestors.
-	dynCtx := NewDynamicNodeContext(baseCtx, wantPath, "123", nil, wantAncestors)
+	dynCtx := NewDynamicNodeContext(t.Context(), baseCtx, wantPath, "123", nil, wantAncestors)
 
 	tests := []struct {
 		name         string
@@ -56,21 +54,21 @@ func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 			name: "NewNodeContext wrapping custom decorator (delegates fallback to c.Context)",
 			buildWrapped: func(parent Context) Context {
 				decorator := &customContextDecorator{Context: parent}
-				return NewNodeContext(decorator, nil)
+				return NewNodeContext(t.Context(), decorator, nil)
 			},
 		},
 		{
 			name: "NewContext wrapping custom decorator (delegates fallback to c.Context)",
 			buildWrapped: func(parent Context) Context {
 				decorator := &customContextDecorator{Context: parent}
-				return NewContext(decorator)
+				return NewContext(t.Context(), decorator)
 			},
 		},
 		{
 			name: "NewToolContext wrapping branchOverride adapter (delegates fallback to c.Context)",
 			buildWrapped: func(parent Context) Context {
 				branched := &branchOverride{Context: parent, branch: "parallel-branch"}
-				return NewToolContext(branched, "call-id-1", nil, nil)
+				return NewToolContext(t.Context(), branched, "call-id-1", nil, nil)
 			},
 		},
 	}

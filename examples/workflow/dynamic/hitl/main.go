@@ -51,8 +51,8 @@ func main() {
 	ctx := context.Background()
 
 	ask := workflow.NewEmittingFunctionNode[any, any]("ask_name",
-		func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
-			if err := emit(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+		func(ctx context.Context, invCleanCtx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+			if err := emit(workflow.NewRequestInputEvent(invCleanCtx, session.RequestInput{
 				InterruptID: "ask_name",
 				Message:     "What's your name?",
 			})); err != nil {
@@ -64,7 +64,7 @@ func main() {
 	)
 
 	greeter := workflow.NewDynamicNode[string, string]("hitl_demo",
-		func(nc workflow.NodeContext, _ string, emit func(*session.Event) error) (string, error) {
+		func(ctx context.Context, nc workflow.NodeContext, _ string, emit func(*session.Event) error) (string, error) {
 			// Resume re-entry: the reply is in ResumedInput.
 			if reply, ok := nc.ResumedInput("ask_name"); ok {
 				name, _ := reply.(string)
@@ -81,7 +81,7 @@ func main() {
 				}
 				return greeting, nil
 			}
-			_, err := workflow.RunNode[any](nc, ask, nil)
+			_, err := workflow.RunNode[any](ctx, nc, ask, nil)
 			return "", err
 		},
 		workflow.NodeConfig{},

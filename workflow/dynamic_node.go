@@ -31,7 +31,7 @@ import (
 // DynamicFn is the orchestrator body of a dynamic node. emit publishes
 // mid-body events (state updates, HITL requests, progress); the return
 // value becomes the node's terminal Event.Output.
-type DynamicFn[IN, OUT any] = func(ctx NodeContext, in IN, emit func(*session.Event) error) (OUT, error)
+type DynamicFn[IN, OUT any] = func(ctx context.Context, invCleanCtx NodeContext, in IN, emit func(*session.Event) error) (OUT, error)
 
 type dynamicNode[IN, OUT any] struct {
 	BaseNode
@@ -97,7 +97,7 @@ func applyDynamicDefaults(cfg NodeConfig) NodeConfig {
 	return cfg
 }
 
-func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *dynamicNode[IN, OUT]) Run(ctx context.Context, invCleanCtx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		typedInput, err := n.coerceInput(input)
 		if err != nil {
@@ -106,10 +106,10 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 		}
 
 		emit := makeEmit(yield, ctx)
-		sub := newDynamicSubScheduler(ctx, n.composePath(ctx), emit)
-		orchestratorCtx := agent.NewDynamicNodeContext(ctx, sub.ParentPath(), "", sub, sub.OutputForAncestors())
+		sub := newDynamicSubScheduler(ctx, invCleanCtx, n.composePath(invCleanCtx), emit)
+		orchestratorCtx := agent.NewDynamicNodeContext(ctx, invCleanCtx, sub.ParentPath(), "", sub, sub.OutputForAncestors())
 
-		out, err := n.fn(orchestratorCtx, typedInput, emit)
+		out, err := n.fn(ctx, orchestratorCtx, typedInput, emit)
 		if err != nil {
 			// WaitForOutput park emitted no interrupt event, so surface
 			// the sentinel for the scheduler to park the parent.
@@ -139,7 +139,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 		if any(out) == nil {
 			return
 		}
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEvent(invCleanCtx.InvocationID())
 		ev.Output = out
 		ev.NodeInfo = &session.NodeInfo{Path: sub.ParentPath()}
 		// TODO(wolo): validate ev.Output against n.outputSchema,
@@ -190,7 +190,7 @@ func (n *dynamicNode[IN, OUT]) composePath(parent NodeContext) string {
 // children (see WithUseSubBranch) that all emit through this one
 // callback, and calling the same yield from multiple goroutines panics
 // the iterator and races the parent runNode's completion accumulator.
-func makeEmit(yield func(*session.Event, error) bool, parentCtx NodeContext) func(*session.Event) error {
+func makeEmit(yield func(*session.Event, error) bool, parentCtx context.Context) func(*session.Event) error {
 	var mu sync.Mutex
 	return func(ev *session.Event) error {
 		mu.Lock()

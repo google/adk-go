@@ -30,7 +30,7 @@ import (
 	"google.golang.org/adk/tool/loadartifactstool"
 )
 
-func generateImage(ctx agent.Context, input generateImageInput) (generateImageResult, error) {
+func generateImage(ctx context.Context, invCleanCtx agent.Context, input generateImageInput) (generateImageResult, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
 		Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
@@ -53,7 +53,7 @@ func generateImage(ctx agent.Context, input generateImageInput) (generateImageRe
 		}, nil
 	}
 
-	_, err = ctx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
+	_, err = invCleanCtx.Artifacts().Save(ctx, input.Filename, genai.NewPartFromBytes(response.GeneratedImages[0].Image.ImageBytes, "image/png"))
 	if err != nil {
 		return generateImageResult{
 			Status: "fail",

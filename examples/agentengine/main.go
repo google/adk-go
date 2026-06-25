@@ -54,9 +54,9 @@ const (
 
 // memorySearchToolFunc is the implementation of the memory search tool.
 // This function demonstrates accessing memory via agent.Context.
-func memorySearchToolFunc(tctx agent.Context, args Args) (Result, error) {
+func memorySearchToolFunc(ctx context.Context, invCleanCtx agent.Context, args Args) (Result, error) {
 	// The SearchMemory function is available on the context.
-	searchResults, err := tctx.SearchMemory(tctx, args.Query)
+	searchResults, err := invCleanCtx.SearchMemory(ctx, args.Query)
 	if err != nil {
 		log.Printf("Error searching memory: %v", err)
 		return Result{}, fmt.Errorf("failed memory search: %w", err)
@@ -98,7 +98,7 @@ func main() {
 	type Output struct {
 		Result int `json:"result"`
 	}
-	handler := func(ctx agent.Context, input Input) (Output, error) {
+	handler := func(ctx context.Context, invCleanCtx agent.Context, input Input) (Output, error) {
 		return Output{
 			Result: input.Min + rand.IntN(input.Max-input.Min+1),
 		}, nil
@@ -162,7 +162,7 @@ func main() {
 
 	memPlugin, err := plugin.New(plugin.Config{
 		Name: "Memory generator",
-		BeforeRunCallback: func(ic agent.InvocationContext) (*genai.Content, error) {
+		BeforeRunCallback: func(ctx context.Context, ic agent.InvocationContext) (*genai.Content, error) {
 			state := ic.Session().State()
 			err := state.Set(stateKeySessionLastUpdateTime, ic.Session().LastUpdateTime())
 			if err != nil {
@@ -171,13 +171,13 @@ func main() {
 			}
 			return nil, nil
 		},
-		AfterRunCallback: func(ic agent.InvocationContext) {
+		AfterRunCallback: func(ctx context.Context, ic agent.InvocationContext) {
 			m := ic.Memory()
 			if m == nil {
 				log.Printf("ic.Memory() is nil\n")
 				return
 			}
-			err := m.AddSessionToMemory(ic, ic.Session())
+			err := m.AddSessionToMemory(ctx, ic.Session())
 			if err != nil {
 				log.Printf("ic.Memory().AddSessionToMemory failed: %v\n", err)
 			}

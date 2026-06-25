@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"reflect"
@@ -67,11 +68,11 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 // aggregated into a list, and the final result will be a multi dimensional list.
 //
 // Intermediate non-output events emitted by the wrapped node are suppressed.
-func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *ParallelWorker) Run(ctx context.Context, invCleanCtx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		cancelCtx, cancelFunc := ctx.WithAgentCancel()
+		cancelCtx, cancelFunc := context.WithCancel(ctx)
 		defer cancelFunc()
-		workerCtx := ctx.WithAgentContext(cancelCtx)
+		workerCtx := invCleanCtx
 
 		v := reflect.ValueOf(input)
 		if v.Kind() != reflect.Slice {
@@ -82,7 +83,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 		nItems := v.Len()
 		if nItems == 0 {
 			// Yield an empty list as output
-			event := session.NewEvent(ctx.InvocationID())
+			event := session.NewEvent(invCleanCtx.InvocationID())
 			event.Output = []any{}
 			yield(event, nil)
 			return
@@ -112,7 +113,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 			if sem != nil {
 				select {
 				case sem <- struct{}{}:
-				case <-ctx.Done():
+				case <-cancelCtx.Done():
 					wg.Done()
 					continue
 				}
@@ -120,7 +121,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 
 			itemBranch := deriveSubBranch(parentBranch, wrappedName+"@"+strconv.Itoa(i+1))
 			itemCtx := workerCtx.WithBranch(itemBranch)
-			go n.runWorker(itemCtx, i, item, sem, resCh, &wg)
+			go n.runWorker(cancelCtx, itemCtx, i, item, sem, resCh, &wg)
 		}
 
 		// Goroutine to close channel when all workers are done
@@ -153,7 +154,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 		}
 
 		// Yield the aggregated output
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEvent(invCleanCtx.InvocationID())
 		event.Output = outputs
 		yield(event, nil)
 	}
@@ -165,7 +166,7 @@ type workerResult struct {
 	err   error
 }
 
-func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup) {
+func (n *ParallelWorker) runWorker(ctx context.Context, invCleanCtx agent.Context, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer func() {
 		if sem != nil {
@@ -180,7 +181,7 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 		var workerOutputs []any
 		var runErr error
 
-		for ev, err := range n.wrapped.Run(ctx, item) {
+		for ev, err := range n.wrapped.Run(ctx, invCleanCtx, item) {
 			if err != nil {
 				runErr = err
 				break

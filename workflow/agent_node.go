@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -88,7 +89,7 @@ func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 }
 
 // Run implements the Node interface.
-func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *AgentNode) Run(ctx context.Context, invCleanCtx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		userContent, err := nodeInputToContent(input)
 		if err != nil {
@@ -102,29 +103,29 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		// fan-out, and the LLM flow's history filter scopes events
 		// by branch prefix.
 		params := internalcontext.InvocationContextParams{
-			Artifacts:      ctx.Artifacts(),
-			Memory:         ctx.Memory(),
-			Session:        ctx.Session(),
-			Branch:         ctx.Branch(),
-			IsolationScope: ctx.IsolationScope(),
+			Artifacts:      invCleanCtx.Artifacts(),
+			Memory:         invCleanCtx.Memory(),
+			Session:        invCleanCtx.Session(),
+			Branch:         invCleanCtx.Branch(),
+			IsolationScope: invCleanCtx.IsolationScope(),
 			Agent:          n.agent,
 			UserContent:    userContent,
-			RunConfig:      ctx.RunConfig(),
-			EndInvocation:  ctx.Ended(),
-			InvocationID:   ctx.InvocationID(),
+			RunConfig:      invCleanCtx.RunConfig(),
+			EndInvocation:  invCleanCtx.Ended(),
+			InvocationID:   invCleanCtx.InvocationID(),
 		}
 		agentCtx := internalcontext.NewInvocationContext(ctx, params)
-		exCtx := agent.NewNodeContext(agentCtx, nil)
+		exCtx := agent.NewNodeContext(ctx, agentCtx, nil)
 
 		type NodeRunner interface {
-			RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
+			RunNode(ctx context.Context, invCleanCtx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
 		}
 
 		var events iter.Seq2[*session.Event, error]
 		if runner, ok := n.agent.(NodeRunner); ok {
-			events = runner.RunNode(exCtx, input)
+			events = runner.RunNode(ctx, exCtx, input)
 		} else {
-			events = n.agent.Run(exCtx)
+			events = n.agent.Run(ctx, exCtx)
 		}
 
 		skipSynthesize := false
@@ -147,7 +148,7 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			// Tag the event for scope filtering (mirrors adk-python
 			// NodeRunner._enrich_event). The scheduler stamps delegated
 			// child events; this covers the direct agent-wrapper path.
-			if sc := ctx.IsolationScope(); sc != "" && event.IsolationScope == "" {
+			if sc := invCleanCtx.IsolationScope(); sc != "" && event.IsolationScope == "" {
 				event.IsolationScope = sc
 			}
 

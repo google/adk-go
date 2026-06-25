@@ -60,7 +60,7 @@ func TestProcessRequest(t *testing.T) {
 	}
 	req := &model.LLMRequest{}
 
-	err = ts.ProcessRequest(nil, req)
+	err = ts.ProcessRequest(context.Background(), nil, req)
 	if err != nil {
 		t.Fatalf("ProcessRequest failed: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestProcessRequest_NoSkills(t *testing.T) {
 	}
 	req := &model.LLMRequest{}
 
-	err = ts.ProcessRequest(nil, req)
+	err = ts.ProcessRequest(context.Background(), nil, req)
 	if err != nil {
 		t.Fatalf("ProcessRequest failed: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestTools(t *testing.T) {
 		t.Fatalf("skilltoolset.New failed: %v", err)
 	}
 
-	tools, err := toolset.Tools(nil)
+	tools, err := toolset.Tools(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("Tools failed: %v", err)
 	}

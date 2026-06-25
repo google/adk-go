@@ -150,7 +150,7 @@ func TestRunner_LlmAgent_LongRunningTool_PausesAndResumes(t *testing.T) {
 		Name:          "ask_human",
 		Description:   "asks a human and waits",
 		IsLongRunning: true,
-	}, func(_ agent.Context, _ askArgs) (map[string]string, error) {
+	}, func(_ context.Context, _ agent.Context, _ askArgs) (map[string]string, error) {
 		return map[string]string{"status": "pending"}, nil
 	})
 	if err != nil {

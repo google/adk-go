@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"iter"
@@ -71,7 +72,8 @@ var ErrNothingToResume = errors.New("workflow: no waiting node matched the suppl
 // mistargeted submission. An empty responses map (or nil state)
 // is treated as a clean no-op with no error.
 func (w *Workflow) Resume(
-	ctx agent.Context,
+	ctx context.Context,
+	invCleanCtx agent.Context,
 	state *RunState,
 	responses map[string]any,
 ) iter.Seq2[*session.Event, error] {
@@ -80,7 +82,7 @@ func (w *Workflow) Resume(
 			return
 		}
 
-		s := newScheduler(ctx, w.graph, w.maxConcurrency)
+		s := newScheduler(ctx, invCleanCtx, w.graph, w.maxConcurrency)
 		s.state = state
 
 		// Resume runs in two passes so that when one call

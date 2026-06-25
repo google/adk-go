@@ -15,6 +15,8 @@
 package tool
 
 import (
+	"context"
+
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool/toolconfirmation"
@@ -25,6 +27,6 @@ import (
 // Deprecated: use agent.NewToolContext directly. This wrapper exists only
 // to minimize churn during the migration and will be removed in a future
 // release.
-func NewToolContext(ic agent.InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) agent.Context {
-	return agent.NewToolContext(ic, functionCallID, actions, confirmation)
+func NewToolContext(ctx context.Context, invCleanCtx agent.InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) agent.Context {
+	return agent.NewToolContext(ctx, invCleanCtx, functionCallID, actions, confirmation)
 }

@@ -60,8 +60,8 @@ func GetA2ATaskInfo(event *session.Event) (a2a.TaskID, string) {
 }
 
 // NewRemoteAgentEvent create a new Event authored by the agent running in the provided invocation context.
-func NewRemoteAgentEvent(ctx agent.InvocationContext) *session.Event {
-	return v2.NewRemoteAgentEvent(ctx)
+func NewRemoteAgentEvent(ctx context.Context, invCleanCtx agent.InvocationContext) *session.Event {
+	return v2.NewRemoteAgentEvent(ctx, invCleanCtx)
 }
 
 // EventToMessage converts the provided session event to A2A message.
@@ -74,12 +74,12 @@ func EventToMessage(event *session.Event) (*a2a.Message, error) {
 }
 
 // ToSessionEvent converts the provided a2a event to session event authored by the agent running in the provided invocation context.
-func ToSessionEvent(ctx agent.InvocationContext, event a2a.Event) (*session.Event, error) {
+func ToSessionEvent(ctx context.Context, invCleanCtx agent.InvocationContext, event a2a.Event) (*session.Event, error) {
 	v1Event, err := a2av0.ToV1Event(event)
 	if err != nil {
 		return nil, fmt.Errorf("a2a event conversion failed: %w", err)
 	}
-	return v2.ToSessionEvent(ctx, v1Event)
+	return v2.ToSessionEvent(ctx, invCleanCtx, v1Event)
 }
 
 // IsPartial takes metadata of an A2A object (eg. a2a.Part, a2a.Artifact) and returns true if

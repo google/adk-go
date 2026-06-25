@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -38,9 +39,9 @@ const (
 )
 
 // outputSchemaRequestProcessor adds the set_model_response tool to handle structured output.
-func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+func outputSchemaRequestProcessor(ctx context.Context, invCleanCtx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		llmAgent := asLLMAgent(ctx.Agent())
+		llmAgent := asLLMAgent(invCleanCtx.Agent())
 		if llmAgent == nil {
 			return
 		}
@@ -64,11 +65,11 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 }
 
 // createFinalModelResponseEvent creates a final model response event from set_model_response JSON.
-func createFinalModelResponseEvent(invocationContext agent.InvocationContext, response string) *session.Event {
+func createFinalModelResponseEvent(ctx context.Context, invCleanCtx agent.InvocationContext, response string) *session.Event {
 	// Create a proper model response event
-	finalEvent := session.NewEventWithContext(invocationContext, invocationContext.InvocationID())
-	finalEvent.Author = invocationContext.Agent().Name()
-	finalEvent.Branch = invocationContext.Branch()
+	finalEvent := session.NewEventWithContext(ctx, invCleanCtx.InvocationID())
+	finalEvent.Author = invCleanCtx.Agent().Name()
+	finalEvent.Branch = invCleanCtx.Branch()
 	finalEvent.Content = &genai.Content{
 		Role:  "model",
 		Parts: []*genai.Part{{Text: response}},
@@ -134,7 +135,7 @@ func (t *setModelResponseTool) Declaration() *genai.FunctionDeclaration {
 	}
 }
 
-func (t *setModelResponseTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+func (t *setModelResponseTool) Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error) {
 	m, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type for set_model_response: %T", args)

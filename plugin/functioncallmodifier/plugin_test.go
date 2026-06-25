@@ -41,13 +41,13 @@ type SimpleArgs struct {
 	Num int
 }
 
-func okFunc(_ agent.Context, _ SimpleArgs) (string, error) {
+func okFunc(_ context.Context, _ agent.Context, _ SimpleArgs) (string, error) {
 	return "ok", nil
 }
 
 func TestBeforeModelCallback(t *testing.T) {
 	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	ctx := icontext.NewCallbackContextWithDelta(invCtx, nil, nil)
+	ctx := icontext.NewCallbackContextWithDelta(t.Context(), invCtx, nil, nil)
 
 	transferTool := &llminternal.TransferToAgentTool{}
 	transferToolDecl := transferTool.Declaration()
@@ -133,7 +133,7 @@ func TestBeforeModelCallback(t *testing.T) {
 			currentReq := cloneLLMRequest(t, tc.req)
 
 			beforeModelCallback := plugin.BeforeModelCallback()
-			if _, err := beforeModelCallback(ctx, currentReq); err != nil {
+			if _, err := beforeModelCallback(t.Context(), ctx, currentReq); err != nil {
 				t.Fatalf("BeforeModelCallback failed: %v", err)
 			}
 
@@ -266,10 +266,10 @@ func TestAfterModelCallback(t *testing.T) {
 			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 				Session: sesResp.Session,
 			})
-			ctx := icontext.NewCallbackContextWithDelta(invCtx, nil, nil)
+			ctx := icontext.NewCallbackContextWithDelta(t.Context(), invCtx, nil, nil)
 
 			afterModelCallback := plugin.AfterModelCallback()
-			if _, err := afterModelCallback(ctx, &model.LLMResponse{Content: tc.content}, nil); err != nil {
+			if _, err := afterModelCallback(t.Context(), ctx, &model.LLMResponse{Content: tc.content}, nil); err != nil {
 				t.Fatalf("AfterModelCallback failed: %v", err)
 			}
 

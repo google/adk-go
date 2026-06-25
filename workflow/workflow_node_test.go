@@ -65,7 +65,7 @@ func (m *mockWorkflowSession) LastUpdateTime() time.Time { return time.Now() }
 
 func TestNestedWorkflow(t *testing.T) {
 	// Create inner workflow edges
-	innerFn := func(ctx agent.Context, input string) (string, error) {
+	innerFn := func(_ context.Context, _ agent.Context, input string) (string, error) {
 		return input + "-inner", nil
 	}
 	innerNode := NewFunctionNode("inner_node", innerFn, defaultNodeConfig)
@@ -77,7 +77,7 @@ func TestNestedWorkflow(t *testing.T) {
 		t.Fatalf("failed to create workflow node: %v", err)
 	}
 
-	outerFn := func(ctx agent.Context, input string) (string, error) {
+	outerFn := func(_ context.Context, _ agent.Context, input string) (string, error) {
 		return input + "-outer", nil
 	}
 	outerNode := NewFunctionNode("outer_node", outerFn, defaultNodeConfig)
@@ -91,7 +91,7 @@ func TestNestedWorkflow(t *testing.T) {
 		Parts: []*genai.Part{{Text: "input"}},
 	}
 
-	events := outerWf.Run(mockCtx)
+	events := outerWf.Run(t.Context(), mockCtx)
 
 	var lastOutput any
 	for ev, err := range events {
@@ -110,10 +110,10 @@ func TestNestedWorkflow(t *testing.T) {
 
 func TestNestedWorkflow_MultipleOutputs(t *testing.T) {
 	// Create inner workflow edges with two nodes producing outputs
-	innerFn1 := func(ctx agent.Context, input string) (string, error) {
+	innerFn1 := func(_ context.Context, _ agent.Context, input string) (string, error) {
 		return input + "-inner1", nil
 	}
-	innerFn2 := func(ctx agent.Context, input string) (string, error) {
+	innerFn2 := func(_ context.Context, _ agent.Context, input string) (string, error) {
 		return input + "-inner2", nil
 	}
 	innerNode1 := NewFunctionNode("inner_node1", innerFn1, defaultNodeConfig)
@@ -135,7 +135,7 @@ func TestNestedWorkflow_MultipleOutputs(t *testing.T) {
 		Parts: []*genai.Part{{Text: "input"}},
 	}
 
-	events := outerWf.Run(mockCtx)
+	events := outerWf.Run(t.Context(), mockCtx)
 
 	var lastOutput any
 	for ev, err := range events {
@@ -155,7 +155,7 @@ func TestNestedWorkflow_MultipleOutputs(t *testing.T) {
 // Two terminals producing output is an error, not a nondeterministic
 // pick.
 func TestNestedWorkflow_MultipleTerminals(t *testing.T) {
-	passthrough := func(ctx agent.Context, input string) (string, error) { return input, nil }
+	passthrough := func(_ context.Context, _ agent.Context, input string) (string, error) { return input, nil }
 	a := NewFunctionNode("a", passthrough, defaultNodeConfig)
 	b := NewFunctionNode("b", passthrough, defaultNodeConfig)
 	c := NewFunctionNode("c", passthrough, defaultNodeConfig)
@@ -171,7 +171,7 @@ func TestNestedWorkflow_MultipleTerminals(t *testing.T) {
 	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "input"}}}
 
 	var gotErr error
-	for _, err := range outerWf.Run(mockCtx) {
+	for _, err := range outerWf.Run(t.Context(), mockCtx) {
 		if err != nil {
 			gotErr = err
 		}
@@ -186,9 +186,9 @@ func TestNestedWorkflow_MultipleTerminals(t *testing.T) {
 // A silent terminal (no output) yields no workflow output, even when an
 // earlier node produced one.
 func TestNestedWorkflow_SilentTerminal(t *testing.T) {
-	producer := func(ctx agent.Context, input string) (string, error) { return "intermediate", nil }
+	producer := func(_ context.Context, _ agent.Context, input string) (string, error) { return "intermediate", nil }
 	// Terminal returns a *session.Event with no Output (a side-effect sink).
-	sink := func(ctx agent.Context, input string) (*session.Event, error) {
+	sink := func(_ context.Context, _ agent.Context, input string) (*session.Event, error) {
 		return &session.Event{}, nil
 	}
 	a := NewFunctionNode("producer", producer, defaultNodeConfig)
@@ -204,7 +204,7 @@ func TestNestedWorkflow_SilentTerminal(t *testing.T) {
 	mockCtx := newMockCtx(t)
 	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "input"}}}
 
-	for ev, err := range outerWf.Run(mockCtx) {
+	for ev, err := range outerWf.Run(t.Context(), mockCtx) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -229,7 +229,7 @@ func TestNestedWorkflow_MessageAsOutputTerminal(t *testing.T) {
 	mockCtx.userContent = &genai.Content{Parts: []*genai.Part{{Text: "input"}}}
 
 	var gotOutput any
-	for ev, err := range outerWf.Run(mockCtx) {
+	for ev, err := range outerWf.Run(t.Context(), mockCtx) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -244,7 +244,7 @@ func TestNestedWorkflow_MessageAsOutputTerminal(t *testing.T) {
 
 func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 	// Create inner workflow edges
-	nestedStateUpdater := func(ctx agent.Context, input string) (string, error) {
+	nestedStateUpdater := func(_ context.Context, ctx agent.Context, input string) (string, error) {
 		err := ctx.Session().State().Set("my_key", "my_value")
 		if err != nil {
 			return "", err
@@ -260,7 +260,7 @@ func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 	}
 
 	// Create outer workflow
-	outerStateReader := func(ctx agent.Context, input string) (string, error) {
+	outerStateReader := func(_ context.Context, ctx agent.Context, input string) (string, error) {
 		val, err := ctx.Session().State().Get("my_key")
 		if err != nil {
 			return "", err
@@ -282,7 +282,7 @@ func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 	mSess := &mockWorkflowSession{state: mState}
 	mockCtx.sess = mSess
 
-	events := outerWf.Run(mockCtx)
+	events := outerWf.Run(t.Context(), mockCtx)
 
 	var lastOutput any
 	for ev, err := range events {
@@ -305,7 +305,7 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 	// and the outer workflow that should be cancelled.
 	ch := make(chan struct{})
 	started := make(chan struct{})
-	waitingFn := func(ctx agent.Context, input string) (string, error) {
+	waitingFn := func(ctx context.Context, _ agent.Context, input string) (string, error) {
 		close(started)
 		select {
 		case <-ctx.Done():
@@ -333,7 +333,7 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for _, err := range outerWf.Run(mockCtx) {
+		for _, err := range outerWf.Run(baseCtx, mockCtx) {
 			if err != nil {
 				runErr = err
 			}
@@ -355,7 +355,7 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 
 func TestNestedWorkflow_ErrorPropagation(t *testing.T) {
 	// Create inner workflow with a node that fails
-	failingFn := func(ctx agent.Context, input string) (string, error) {
+	failingFn := func(_ context.Context, _ agent.Context, input string) (string, error) {
 		return "", errors.New("intentional failure")
 	}
 	failingNode := NewFunctionNode("failing_node", failingFn, defaultNodeConfig)
@@ -373,7 +373,7 @@ func TestNestedWorkflow_ErrorPropagation(t *testing.T) {
 	mockCtx := newMockCtx(t)
 
 	var runErr error
-	for _, err := range outerWf.Run(mockCtx) {
+	for _, err := range outerWf.Run(t.Context(), mockCtx) {
 		if err != nil {
 			runErr = err
 		}
@@ -392,10 +392,10 @@ func TestNestedWorkflow_ErrorPropagation(t *testing.T) {
 // calling yield again after that.
 func TestNestedWorkflow_BreakMidStream(t *testing.T) {
 	// Two chained output nodes, so a second event is still pending at break.
-	innerFn1 := func(ctx agent.Context, input string) (string, error) {
+	innerFn1 := func(_ context.Context, _ agent.Context, input string) (string, error) {
 		return input + "-a", nil
 	}
-	innerFn2 := func(ctx agent.Context, input string) (string, error) {
+	innerFn2 := func(_ context.Context, _ agent.Context, input string) (string, error) {
 		return input + "-b", nil
 	}
 	innerNode1 := NewFunctionNode("inner1", innerFn1, defaultNodeConfig)
@@ -408,7 +408,7 @@ func TestNestedWorkflow_BreakMidStream(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewNodeContext(t.Context(), mockCtx, nil)
 
 	// Turn the regression's panic into a readable failure; no-op once fixed.
 	defer func() {
@@ -418,7 +418,7 @@ func TestNestedWorkflow_BreakMidStream(t *testing.T) {
 	}()
 
 	count := 0
-	for _, err := range wfNode.Run(exCtx, "in") {
+	for _, err := range wfNode.Run(t.Context(), exCtx, "in") {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

@@ -48,7 +48,7 @@ func (s *mockState) All() iter.Seq2[string, any] {
 }
 
 // upperFn converts input to uppercase and sets it as a route if it is "ALPHA" or "BETA"
-func upperFn(ctx agent.Context, input any) (any, error) {
+func upperFn(ctx context.Context, invCleanCtx agent.Context, input any) (any, error) {
 	var s string
 	if input != nil {
 		if val, ok := input.(string); ok {
@@ -59,7 +59,7 @@ func upperFn(ctx agent.Context, input any) (any, error) {
 	}
 	val := stringsToUpper(s)
 	if val == "ALPHA" || val == "BETA" {
-		ev := session.NewEvent(ctx.InvocationID())
+		ev := session.NewEvent(invCleanCtx.InvocationID())
 		ev.Output = val
 		ev.Routes = []string{val}
 		return ev, nil
@@ -80,7 +80,7 @@ func stringsToUpper(s string) string {
 }
 
 // suffixFn appends " done" to input
-func suffixFn(ctx agent.Context, input string) (string, error) {
+func suffixFn(ctx context.Context, invCleanCtx agent.Context, input string) (string, error) {
 	return input + " done", nil
 }
 
@@ -147,7 +147,7 @@ edges:
 		},
 	}
 
-	events := ag.Run(mockCtx)
+	events := ag.Run(ctx, mockCtx)
 	var outputs []any
 	for ev, err := range events {
 		if err != nil {
@@ -198,7 +198,7 @@ edges:
 		},
 	}
 
-	events := ag.Run(mockCtx)
+	events := ag.Run(ctx, mockCtx)
 	var outputs []any
 	for ev, err := range events {
 		if err != nil {
@@ -218,11 +218,11 @@ edges:
 	}
 }
 
-func alphaFn(ctx agent.Context, input string) (string, error) {
+func alphaFn(ctx context.Context, invCleanCtx agent.Context, input string) (string, error) {
 	return "alpha: " + input, nil
 }
 
-func betaFn(ctx agent.Context, input string) (string, error) {
+func betaFn(ctx context.Context, invCleanCtx agent.Context, input string) (string, error) {
 	return "beta: " + input, nil
 }
 
@@ -286,7 +286,7 @@ edges:
 			},
 		}
 
-		events := ag.Run(mockCtx)
+		events := ag.Run(ctx, mockCtx)
 		var outputs []any
 		for ev, err := range events {
 			if err != nil {
@@ -321,7 +321,7 @@ edges:
 			},
 		}
 
-		events := ag.Run(mockCtx)
+		events := ag.Run(ctx, mockCtx)
 		var outputs []any
 		for ev, err := range events {
 			if err != nil {
@@ -399,7 +399,7 @@ type testTool struct{}
 func (t *testTool) Name() string        { return "test_tool" }
 func (t *testTool) Description() string { return "A simple test tool" }
 func (t *testTool) IsLongRunning() bool { return false }
-func (t *testTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+func (t *testTool) Run(ctx context.Context, invCleanCtx agent.Context, args any) (map[string]any, error) {
 	return map[string]any{"result": "tool_output"}, nil
 }
 
@@ -460,7 +460,7 @@ edges:
 		},
 	}
 
-	events := ag.Run(mockCtx)
+	events := ag.Run(ctx, mockCtx)
 	var outputs []any
 	for ev, err := range events {
 		if err != nil {
@@ -539,7 +539,7 @@ edges:
 		},
 	}
 
-	events := ag.Run(mockCtx)
+	events := ag.Run(ctx, mockCtx)
 	var outputs []any
 	for ev, err := range events {
 		if err != nil {

@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"time"
 
 	"google.golang.org/genai"
 
@@ -32,25 +31,23 @@ import (
 // NewContext returns a full Context backed by parent, with no callback,
 // tool, or node specializations. Use it wherever a plain run context is
 // needed (e.g. running an agent).
-func NewContext(parent InvocationContext) Context {
+func NewContext(ctx context.Context, invCleanCtx InvocationContext) Context {
 	return &commonContext{
-		Context:           parent,
-		invocationContext: parent,
+		invocationContext: invCleanCtx,
 	}
 }
 
 // NewNodeContext returns a Context carrying per-node resume inputs.
-func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Context {
-	c := NewContext(parent).(*commonContext)
+func NewNodeContext(ctx context.Context, invCleanCtx InvocationContext, resumeInputs map[string]any) Context {
+	c := NewContext(ctx, invCleanCtx).(*commonContext)
 	c.resumeInputs = resumeInputs
 	return c
 }
 
-func NewContextForAgent(ctx, ic InvocationContext) InvocationContext {
-	if ac, ok := ctx.(Context); ok {
+func NewContextForAgent(ctx context.Context, invCleanCtx, ic InvocationContext) InvocationContext {
+	if ac, ok := invCleanCtx.(Context); ok {
 		// copy all, including SubSchedulers etc
 		return &commonContext{
-			Context:            ac,
 			invocationContext:  ic,
 			path:               ac.Path(),
 			runID:              ac.RunID(),
@@ -65,7 +62,7 @@ func NewContextForAgent(ctx, ic InvocationContext) InvocationContext {
 	return ic
 }
 
-func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubScheduler, outputForAncestors []string) Context {
+func NewDynamicNodeContext(ctx context.Context, invCleanCtx Context, path, runID string, sub DynamicSubScheduler, outputForAncestors []string) Context {
 	// NewDynamicNodeContext wraps parent for either a dynamic-node
 	// activation or one of its children, attaching path, runID, and the
 	// sub-scheduler RunNode reaches from the orchestrator body. Children
@@ -75,12 +72,11 @@ func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubSch
 	// reach dynamic children.
 
 	var inherited map[string]any
-	if p, ok := parent.(*commonContext); ok {
+	if p, ok := invCleanCtx.(*commonContext); ok {
 		inherited = p.resumeInputs
 	}
 	return &commonContext{
-		Context:            parent,
-		invocationContext:  parent,
+		invocationContext:  invCleanCtx,
 		resumeInputs:       inherited,
 		path:               path,
 		runID:              runID,
@@ -91,13 +87,12 @@ func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubSch
 
 // NewCallbackContext returns CallbackContext initialized with provided actions.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
-func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Context {
+func NewCallbackContext(ctx context.Context, invCleanCtx InvocationContext, actions *session.EventActions) Context {
 	actions = prepareEventActions(actions)
 	cc := &commonContext{
-		Context:           ic,
-		invocationContext: ic,
+		invocationContext: invCleanCtx,
 		actions:           actions,
-		artifacts:         ic.Artifacts(),
+		artifacts:         invCleanCtx.Artifacts(),
 	}
 	// wrap the callbackContext in order to log information about someone using ToolContext-related methods for CallbackContext
 	wrapper := &callbackContextWrapper{
@@ -110,13 +105,12 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Con
 // the returned context's Artifacts().Save(...) wrapper records each saved artifact's version into the underlying
 // EventActions.ArtifactDelta so the resulting Event reflects the saves.
 // actions may be nil; if so, a new session.EventActions is created with empty StateDelta and ArtifactDelta
-func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *session.EventActions) Context {
+func NewCallbackContextWithArtifactTracking(ctx context.Context, invCleanCtx InvocationContext, actions *session.EventActions) Context {
 	actions = prepareEventActions(actions)
 	cc := &commonContext{
-		Context:           ic,
-		invocationContext: ic,
+		invocationContext: invCleanCtx,
 		actions:           actions,
-		artifacts:         &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions},
+		artifacts:         &trackedArtifacts{Artifacts: invCleanCtx.Artifacts(), actions: actions},
 	}
 	// wrap the callbackContext in order to log information about someone using ToolContext-related methods for CallbackContext
 	wrapper := &callbackContextWrapper{
@@ -133,28 +127,27 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 // backed by the same *callbackContext implementation used for CallbackContext,
 // so all callback-context semantics (state delta tracking, artifact delta
 // tracking, etc.) apply, plus the tool-specific extensions on ToolContext.
-func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
+func NewToolContext(ctx context.Context, invCleanCtx InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
 	var res commonContext
-	ctx, ok := ic.(*commonContext)
+	cc, ok := invCleanCtx.(*commonContext)
 	if ok {
 		// copy fields
-		res = *ctx
+		res = *cc
 	} else {
 		res = commonContext{
-			Context:           ic,
-			invocationContext: ic,
+			invocationContext: invCleanCtx,
 		}
 	}
 
 	if functionCallID == "" {
-		functionCallID = platform.NewUUID(ic)
+		functionCallID = platform.NewUUID(ctx)
 	}
 	actions = prepareEventActions(actions)
 
 	res.actions = actions
 	res.functionCallID = functionCallID
 	res.toolConfirmation = confirmation
-	res.artifacts = &trackedArtifacts{Artifacts: ic.Artifacts(), actions: actions}
+	res.artifacts = &trackedArtifacts{Artifacts: invCleanCtx.Artifacts(), actions: actions}
 
 	wrapper := &toolContextWrapper{
 		context: &res,
@@ -163,10 +156,10 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 	return wrapper
 }
 
-func NewCleanToolContext(ctx Context, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) (Context, error) {
-	c, ok := ctx.(*commonContext)
+func NewCleanToolContext(ctx context.Context, invCleanCtx Context, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) (Context, error) {
+	c, ok := invCleanCtx.(*commonContext)
 	if !ok {
-		return nil, fmt.Errorf("Context is not commonContext, but %T", ctx)
+		return nil, fmt.Errorf("Context is not commonContext, but %T", invCleanCtx)
 	}
 	res := c.newCleanToolContext(functionCallID, actions, confirmation)
 	return res, nil
@@ -189,7 +182,6 @@ func prepareEventActions(actions *session.EventActions) *session.EventActions {
 // commonContext is the single concrete implementation of Context for static and dynamic Nodes
 // Callbacks and Tools
 type commonContext struct {
-	context.Context
 	invocationContext InvocationContext
 	artifacts         Artifacts
 	actions           *session.EventActions
@@ -227,7 +219,7 @@ func (c *commonContext) SubScheduler() DynamicSubScheduler {
 	if c.subScheduler != nil {
 		return c.subScheduler
 	}
-	if cc, ok := c.Context.(interface{ SubScheduler() DynamicSubScheduler }); ok {
+	if cc, ok := c.invocationContext.(interface{ SubScheduler() DynamicSubScheduler }); ok {
 		return cc.SubScheduler()
 	}
 	return nil
@@ -255,9 +247,9 @@ func (c *commonContext) Path() string {
 	}
 	// Fallback: when this commonContext wraps another ADK Context (e.g. via NewToolContext
 	// wrapping a branchOverride), c.path is empty. Asserting against interface{ Path() string }
-	// delegates to c.Context. Without this delegation, reading Path() would fail whenever
+	// delegates to c.invocationContext. Without this delegation, reading Path() would fail whenever
 	// context is wrapped by adapters like branchOverride.
-	if p, ok := c.Context.(interface{ Path() string }); ok {
+	if p, ok := c.invocationContext.(interface{ Path() string }); ok {
 		return p.Path()
 	}
 	return ""
@@ -299,7 +291,6 @@ func (b *branchOverride) Branch() string {
 func (c *commonContext) WithBranch(branch string) Context {
 	ctx := withBranch(c, branch)
 	return &commonContext{
-		Context:            ctx,
 		invocationContext:  ctx,
 		resumeInputs:       c.resumeInputs,
 		path:               c.path,
@@ -358,42 +349,6 @@ func (c *commonContext) Session() session.Session {
 	return c.invocationContext.Session()
 }
 
-// WithContext implements [InvocationContext].
-func (c *commonContext) WithContext(ctx context.Context) InvocationContext {
-	return c.WithAgentContext(ctx)
-}
-
-// WithAgentTimeout creates a new context as a shallow copy, adding timeout to the top of the underlying context.Context.
-func (c *commonContext) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
-	// copy & modify
-	res := *c
-	newC, cancelFunc := context.WithTimeout(res.Context, timeout)
-	res.Context = newC
-	return &res, cancelFunc
-}
-
-// WithAgentCancel creates a new context as a shallow copy, adding cancellation to the top of the underlying context.Context.
-func (c *commonContext) WithAgentCancel() (Context, context.CancelFunc) {
-	// copy & modify
-	res := *c
-	newC, cancelFunc := context.WithCancel(res.Context)
-	res.Context = newC
-	return &res, cancelFunc
-}
-
-// WithAgentContext creates a new context as a shallow copy setting the internal contexts to ctx.
-// If the ctx is InvocationContext, the underlying invocationContext is set to ctx.
-func (c *commonContext) WithAgentContext(ctx context.Context) Context {
-	res := *c
-	if c, ok := ctx.(InvocationContext); ok {
-		res.Context = c
-		res.invocationContext = c
-	} else {
-		res.Context = ctx
-	}
-	return &res
-}
-
 // OutputForAncestors implements [Context].
 func (c *commonContext) OutputForAncestors() []string {
 	if c.outputForAncestors != nil {
@@ -401,9 +356,9 @@ func (c *commonContext) OutputForAncestors() []string {
 	}
 	// Fallback: when this commonContext wraps another ADK Context (e.g. via NewToolContext
 	// wrapping a branchOverride), c.outputForAncestors is nil. Asserting against
-	// interface{ OutputForAncestors() []string } delegates to c.Context. Without this delegation,
+	// interface{ OutputForAncestors() []string } delegates to c.invocationContext. Without this delegation,
 	// reading OutputForAncestors() would fail whenever context is wrapped by adapters like branchOverride.
-	if p, ok := c.Context.(interface{ OutputForAncestors() []string }); ok {
+	if p, ok := c.invocationContext.(interface{ OutputForAncestors() []string }); ok {
 		return p.OutputForAncestors()
 	}
 	return nil

@@ -49,7 +49,7 @@ func TestScheduler_LinearChain(t *testing.T) {
 
 	w := mustNew(t, Chain(Start, a, b, c))
 
-	gotEvents := drain(t, w.Run(mockCtx))
+	gotEvents := drain(t, w.Run(t.Context(), mockCtx))
 
 	// Each recording node yields exactly one event with output =
 	// "<input>:<name>". The chain accumulates: A sees "seed", B sees
@@ -74,7 +74,7 @@ func TestScheduler_MessageAsOutput_FeedsSuccessor(t *testing.T) {
 
 	w := mustNew(t, Chain(Start, a, b))
 
-	gotEvents := drain(t, w.Run(mockCtx))
+	gotEvents := drain(t, w.Run(t.Context(), mockCtx))
 
 	// B echoes "<input>:B"; the input must be A's derived output.
 	got := outputsOf(gotEvents)
@@ -130,7 +130,7 @@ func TestScheduler_FanOutConcurrency(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		drain(t, w.Run(mockCtx))
+		drain(t, w.Run(t.Context(), mockCtx))
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -171,7 +171,7 @@ func TestScheduler_FailedSiblingsCancelled(t *testing.T) {
 	}
 	w := mustNew(t, edges)
 
-	gotErr := drainErr(t, w.Run(mockCtx))
+	gotErr := drainErr(t, w.Run(t.Context(), mockCtx))
 	if !errors.Is(gotErr, failErr) {
 		t.Errorf("Run error = %v, want it to wrap %v", gotErr, failErr)
 	}
@@ -193,14 +193,14 @@ func TestScheduler_CallerBreakStopsScheduling(t *testing.T) {
 
 	var bRan, cRan atomic.Bool
 
-	a := NewFunctionNode("A", func(ctx agent.Context, input any) (string, error) {
+	a := NewFunctionNode("A", func(_ context.Context, _ agent.Context, input any) (string, error) {
 		return "a-out", nil
 	}, defaultNodeConfig)
-	b := NewFunctionNode("B", func(ctx agent.Context, input any) (string, error) {
+	b := NewFunctionNode("B", func(_ context.Context, _ agent.Context, input any) (string, error) {
 		bRan.Store(true)
 		return "b-out", nil
 	}, defaultNodeConfig)
-	c := NewFunctionNode("C", func(ctx agent.Context, input any) (string, error) {
+	c := NewFunctionNode("C", func(_ context.Context, _ agent.Context, input any) (string, error) {
 		cRan.Store(true)
 		return "c-out", nil
 	}, defaultNodeConfig)
@@ -212,7 +212,7 @@ func TestScheduler_CallerBreakStopsScheduling(t *testing.T) {
 	})
 
 	// Caller breaks immediately after the first event.
-	for range w.Run(mockCtx) {
+	for range w.Run(t.Context(), mockCtx) {
 		break
 	}
 
@@ -236,7 +236,7 @@ func TestScheduler_NodeTimeout(t *testing.T) {
 
 	w := mustNew(t, []Edge{{From: Start, To: slow}})
 
-	gotErr := drainErr(t, w.Run(mockCtx))
+	gotErr := drainErr(t, w.Run(t.Context(), mockCtx))
 	if !errors.Is(gotErr, context.DeadlineExceeded) {
 		t.Errorf("Run error = %v, want context.DeadlineExceeded", gotErr)
 	}
@@ -256,7 +256,7 @@ func TestScheduler_MultipleOutputsFailNode(t *testing.T) {
 	bad := newMultiOutputNode("bad", []string{"first", "second"})
 	w := mustNew(t, []Edge{{From: Start, To: bad}})
 
-	gotErr := drainErr(t, w.Run(mockCtx))
+	gotErr := drainErr(t, w.Run(t.Context(), mockCtx))
 	if !errors.Is(gotErr, ErrMultipleOutputs) {
 		t.Errorf("Run error = %v, want it to wrap ErrMultipleOutputs", gotErr)
 	}
@@ -273,7 +273,7 @@ func TestScheduler_ProgressEventsThenSingleOutputSucceed(t *testing.T) {
 	n := newProgressThenOutputNode("n", 3 /*progress events*/, "final")
 	w := mustNew(t, []Edge{{From: Start, To: n}})
 
-	events := drain(t, w.Run(mockCtx))
+	events := drain(t, w.Run(t.Context(), mockCtx))
 
 	// Expect 3 progress events + 1 output event = 4 events total,
 	// and the last one carries the output value.
@@ -348,7 +348,7 @@ func newRecordingNode(name string) *recordingNode {
 
 func (n *recordingNode) release() { close(n.released) }
 
-func (n *recordingNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *recordingNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		<-n.released
 		ev := session.NewEvent(ctx.InvocationID())
@@ -374,7 +374,7 @@ func newBlockingNode(name string, work func()) *blockingNode {
 	}
 }
 
-func (n *blockingNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+func (n *blockingNode) Run(_ context.Context, ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.work()
 		ev := session.NewEvent(ctx.InvocationID())
@@ -396,7 +396,7 @@ func newErroringNode(name string, err error) *erroringNode {
 	}
 }
 
-func (n *erroringNode) Run(_ agent.Context, _ any) iter.Seq2[*session.Event, error] {
+func (n *erroringNode) Run(_ context.Context, _ agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(nil, n.err)
 	}
@@ -414,7 +414,7 @@ func newCancelObservingNode(name string) *cancelObservingNode {
 	return &cancelObservingNode{BaseNode: NewBaseNode(name, "", NodeConfig{})}
 }
 
-func (n *cancelObservingNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+func (n *cancelObservingNode) Run(ctx context.Context, _ agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		<-ctx.Done()
 		n.cancelObserved.Store(true)
@@ -436,7 +436,7 @@ func newMultiOutputNode(name string, outputs []string) *multiOutputNode {
 	}
 }
 
-func (n *multiOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+func (n *multiOutputNode) Run(_ context.Context, ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for _, out := range n.outputs {
 			ev := session.NewEvent(ctx.InvocationID())
@@ -465,7 +465,7 @@ func newProgressThenOutputNode(name string, progressCount int, finalOutput strin
 	}
 }
 
-func (n *progressThenOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+func (n *progressThenOutputNode) Run(_ context.Context, ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for range n.progressCount {
 			ev := session.NewEvent(ctx.InvocationID())
@@ -497,7 +497,7 @@ func TestScheduler_RetryNode(t *testing.T) {
 	n := newRetryTestNode("retryNode", 2, cfg)
 	w := mustNew(t, []Edge{{From: Start, To: n}})
 
-	events := drain(t, w.Run(mockCtx))
+	events := drain(t, w.Run(t.Context(), mockCtx))
 
 	if got := n.calls.Load(); got != 3 {
 		t.Errorf("node calls = %d, want 3", got)
@@ -531,7 +531,7 @@ func TestScheduler_RetryNodeExhausted(t *testing.T) {
 	n := newRetryTestNode("retryNode", 10, cfg)
 	w := mustNew(t, []Edge{{From: Start, To: n}})
 
-	gotErr := drainErr(t, w.Run(mockCtx))
+	gotErr := drainErr(t, w.Run(t.Context(), mockCtx))
 
 	if got := n.calls.Load(); got != 3 {
 		t.Errorf("node calls = %d, want 3", got)
@@ -556,7 +556,7 @@ func newRetryTestNode(name string, failCount int, cfg NodeConfig) *retryTestNode
 	}
 }
 
-func (n *retryTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *retryTestNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		calls := n.calls.Add(1)
 		if int(calls) <= n.failCount {
@@ -594,7 +594,7 @@ func TestScheduler_RetryInChain(t *testing.T) {
 
 	w := mustNew(t, Chain(Start, a, b, c))
 
-	gotEvents := drain(t, w.Run(mockCtx))
+	gotEvents := drain(t, w.Run(t.Context(), mockCtx))
 
 	wantOutputs := []string{"seed:A", "seed:A:B", "seed:A:B:C"}
 	gotOutputs := outputsOf(gotEvents)
@@ -630,7 +630,7 @@ func TestScheduler_RetryCancelled(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		var firstErr error
-		for _, err := range w.Run(mockCtx) {
+		for _, err := range w.Run(ctx, mockCtx) {
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -678,7 +678,7 @@ func TestScheduler_InputValidationSuccess(t *testing.T) {
 		BaseNode: NewBaseNodeWithSchemas("val_node", "", NodeConfig{}, intSchema, nil),
 	}
 	w := mustNew(t, []Edge{{From: Start, To: node}})
-	events := drain(t, w.Run(mockCtx))
+	events := drain(t, w.Run(t.Context(), mockCtx))
 
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(events))
@@ -710,7 +710,7 @@ func TestScheduler_InputValidationFailure(t *testing.T) {
 	w := mustNew(t, []Edge{{From: Start, To: node}})
 
 	var runErr error
-	for _, err := range w.Run(mockCtx) {
+	for _, err := range w.Run(t.Context(), mockCtx) {
 		if err != nil {
 			runErr = err
 			break
@@ -745,7 +745,7 @@ func (n *validationTestNode) ValidateInput(input any) (any, error) {
 	return n.BaseNode.ValidateInput(input)
 }
 
-func (n *validationTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *validationTestNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		n.calls.Add(1)
 		n.runInput = input
@@ -761,7 +761,7 @@ type roleTestNode struct {
 	BaseNode
 }
 
-func (n *roleTestNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *roleTestNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Output = "hi"
@@ -780,7 +780,7 @@ func TestScheduler_ValidateOutput_ValidPasses(t *testing.T) {
 
 	w := mustNew(t, []Edge{{From: Start, To: n}})
 
-	events := drain(t, w.Run(mockCtx))
+	events := drain(t, w.Run(t.Context(), mockCtx))
 	if got, want := len(events), 1; got != want {
 		t.Fatalf("event count = %d, want %d", got, want)
 	}
@@ -803,7 +803,7 @@ func TestScheduler_ValidateOutput_InvalidEndsActivation(t *testing.T) {
 
 	w := mustNew(t, []Edge{{From: Start, To: n}})
 
-	gotErr := drainErr(t, w.Run(mockCtx))
+	gotErr := drainErr(t, w.Run(t.Context(), mockCtx))
 	if gotErr == nil {
 		t.Fatal("expected validation error, got nil")
 	}
@@ -829,7 +829,7 @@ func TestScheduler_ValidateOutput_NoOutputSkipsValidation(t *testing.T) {
 
 	w := mustNew(t, []Edge{{From: Start, To: n}})
 
-	events := drain(t, w.Run(mockCtx))
+	events := drain(t, w.Run(t.Context(), mockCtx))
 	if got, want := len(events), 4; got != want {
 		t.Fatalf("event count = %d, want %d", got, want)
 	}
@@ -858,7 +858,7 @@ func newSchemaValidatedNode(name string, schema *jsonschema.Resolved, output any
 	}
 }
 
-func (n *schemaValidatedNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+func (n *schemaValidatedNode) Run(_ context.Context, ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Output = n.output
@@ -876,7 +876,7 @@ func TestScheduler_StampsContentRole(t *testing.T) {
 	w := mustNew(t, []Edge{{From: Start, To: node}})
 
 	var sawContent bool
-	for _, ev := range drain(t, w.Run(mockCtx)) {
+	for _, ev := range drain(t, w.Run(t.Context(), mockCtx)) {
 		if ev == nil || ev.Content == nil {
 			continue
 		}
@@ -896,7 +896,7 @@ type preRoledNode struct {
 	BaseNode
 }
 
-func (n *preRoledNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *preRoledNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Content = &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "x"}}}
@@ -910,7 +910,7 @@ func TestScheduler_PreservesExplicitContentRole(t *testing.T) {
 	node := &preRoledNode{BaseNode: NewBaseNode("preroled", "", defaultNodeConfig)}
 	w := mustNew(t, []Edge{{From: Start, To: node}})
 
-	for _, ev := range drain(t, w.Run(mockCtx)) {
+	for _, ev := range drain(t, w.Run(t.Context(), mockCtx)) {
 		if ev != nil && ev.Content != nil && ev.Content.Role != "user" {
 			t.Errorf("Content.Role = %q, want it preserved as %q", ev.Content.Role, "user")
 		}
@@ -924,7 +924,7 @@ type funcResponseNode struct {
 	BaseNode
 }
 
-func (n *funcResponseNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+func (n *funcResponseNode) Run(_ context.Context, ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		ev := session.NewEvent(ctx.InvocationID())
 		ev.Content = &genai.Content{Parts: []*genai.Part{{
@@ -944,7 +944,7 @@ func TestScheduler_StampsFunctionResponseRoleUser(t *testing.T) {
 	w := mustNew(t, []Edge{{From: Start, To: node}})
 
 	var sawContent bool
-	for _, ev := range drain(t, w.Run(mockCtx)) {
+	for _, ev := range drain(t, w.Run(t.Context(), mockCtx)) {
 		if ev == nil || ev.Content == nil {
 			continue
 		}
@@ -967,7 +967,7 @@ type progressThenSchemaOutputNode struct {
 	output   any
 }
 
-func (n *progressThenSchemaOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+func (n *progressThenSchemaOutputNode) Run(_ context.Context, ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for i := 0; i < n.progress; i++ {
 			if !yield(session.NewEvent(ctx.InvocationID()), nil) {
@@ -985,7 +985,7 @@ func (n *progressThenSchemaOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*
 // output-producing terminal.
 func outputFnNode(name, out string) *FunctionNode {
 	return NewFunctionNode(name,
-		func(ctx agent.Context, _ any) (string, error) {
+		func(_ context.Context, _ agent.Context, _ any) (string, error) {
 			return out, nil
 		}, defaultNodeConfig)
 }
@@ -996,7 +996,7 @@ type noOutputNode struct {
 	BaseNode
 }
 
-func (n *noOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+func (n *noOutputNode) Run(_ context.Context, ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		yield(session.NewEvent(ctx.InvocationID()), nil)
 	}
@@ -1018,7 +1018,7 @@ func TestScheduler_Finalize_SingleTerminalOutput(t *testing.T) {
 		mockCtx := newMockCtx(t)
 		a := outputFnNode("a", "A")
 		w := mustNew(t, []Edge{{From: Start, To: a}})
-		drain(t, w.Run(mockCtx))
+		drain(t, w.Run(t.Context(), mockCtx))
 	})
 
 	t.Run("multiple terminals but only one produces output succeeds", func(t *testing.T) {
@@ -1032,7 +1032,7 @@ func TestScheduler_Finalize_SingleTerminalOutput(t *testing.T) {
 			{From: Start, To: b},
 			{From: Start, To: c},
 		})
-		drain(t, w.Run(mockCtx))
+		drain(t, w.Run(t.Context(), mockCtx))
 	})
 
 	t.Run("zero terminals producing output succeeds", func(t *testing.T) {
@@ -1043,7 +1043,7 @@ func TestScheduler_Finalize_SingleTerminalOutput(t *testing.T) {
 			{From: Start, To: a},
 			{From: Start, To: b},
 		})
-		drain(t, w.Run(mockCtx))
+		drain(t, w.Run(t.Context(), mockCtx))
 	})
 
 	t.Run("multiple terminals producing output errors", func(t *testing.T) {
@@ -1056,7 +1056,7 @@ func TestScheduler_Finalize_SingleTerminalOutput(t *testing.T) {
 			{From: Start, To: b},
 			{From: Start, To: c},
 		})
-		err := drainErr(t, w.Run(mockCtx))
+		err := drainErr(t, w.Run(t.Context(), mockCtx))
 		if !errors.Is(err, ErrMultipleTerminalOutputs) {
 			t.Fatalf("got error %v, want ErrMultipleTerminalOutputs", err)
 		}
@@ -1085,7 +1085,7 @@ func TestScheduler_Finalize_SingleTerminalOutput(t *testing.T) {
 			{From: router, To: a, Route: StringRoute("branchA")},
 			{From: router, To: b, Route: StringRoute("branchB")},
 		})
-		drain(t, w.Run(mockCtx))
+		drain(t, w.Run(t.Context(), mockCtx))
 	})
 
 	// A terminal that carries Output but is not NodeCompleted (e.g. a

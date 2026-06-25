@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"google.golang.org/genai"
 
@@ -31,18 +30,6 @@ import (
 // related to ToolContext when Context is used as callback context
 type callbackContextWrapper struct {
 	context Context
-}
-
-// WithAgentCancel implements [Context].
-func (c *callbackContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
-	log.Print("WithAgentCancel() is not supported for CallbackContext")
-	return nil, nil
-}
-
-// WithAgentTimeout implements [Context].
-func (c *callbackContextWrapper) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
-	log.Print("WithAgentTimeout() is not supported for CallbackContext")
-	return nil, nil
 }
 
 // InvocationContext implements [Context].
@@ -122,18 +109,6 @@ func (c *callbackContextWrapper) WithBranch(branch string) Context {
 	return nil
 }
 
-// WithContext implements [Context].
-func (c *callbackContextWrapper) WithContext(ctx context.Context) InvocationContext {
-	log.Print("WithContext() is not supported for CallbackContext")
-	return nil
-}
-
-// WithAgentContext implements [Context].
-func (c *callbackContextWrapper) WithAgentContext(ctx context.Context) Context {
-	log.Print("WithAgentContext() is not supported for CallbackContext")
-	return nil
-}
-
 // ToolContext-related: emit logs and return empty data
 
 // Actions implements [Context].
@@ -198,21 +173,6 @@ func (c *callbackContextWrapper) Branch() string {
 	return c.context.Branch()
 }
 
-// Deadline implements [Context].
-func (c *callbackContextWrapper) Deadline() (deadline time.Time, ok bool) {
-	return c.context.Deadline()
-}
-
-// Done implements [Context].
-func (c *callbackContextWrapper) Done() <-chan struct{} {
-	return c.context.Done()
-}
-
-// Err implements [Context].
-func (c *callbackContextWrapper) Err() error {
-	return c.context.Err()
-}
-
 // InvocationID implements [Context].
 func (c *callbackContextWrapper) InvocationID() string {
 	return c.context.InvocationID()
@@ -241,11 +201,6 @@ func (c *callbackContextWrapper) UserContent() *genai.Content {
 // UserID implements [Context].
 func (c *callbackContextWrapper) UserID() string {
 	return c.context.UserID()
-}
-
-// Value implements [Context].
-func (c *callbackContextWrapper) Value(key any) any {
-	return c.context.Value(key)
 }
 
 var _ Context = (*callbackContextWrapper)(nil)

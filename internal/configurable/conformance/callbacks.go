@@ -15,6 +15,7 @@
 package conformance
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -25,13 +26,13 @@ import (
 	"google.golang.org/adk/session"
 )
 
-func beforeAgentCallback1(ctx agent.Context) (*genai.Content, error) {
-	err := ctx.State().Set("before_agent_callback_state_key", "value1")
+func beforeAgentCallback1(ctx context.Context, invCleanCtx agent.Context) (*genai.Content, error) {
+	err := invCleanCtx.State().Set("before_agent_callback_state_key", "value1")
 	return nil, err
 }
 
-func beforeAgentCallback2(ctx agent.Context) (*genai.Content, error) {
-	val, err := ctx.State().Get("before_agent_callback_state_key")
+func beforeAgentCallback2(ctx context.Context, invCleanCtx agent.Context) (*genai.Content, error) {
+	val, err := invCleanCtx.State().Get("before_agent_callback_state_key")
 	if err != nil {
 		return nil, err
 	}
@@ -39,17 +40,17 @@ func beforeAgentCallback2(ctx agent.Context) (*genai.Content, error) {
 	if !ok {
 		return nil, fmt.Errorf("state value for 'before_agent_callback_state_key' is not a string, but %T", val)
 	}
-	err = ctx.State().Set("before_agent_callback_state_key", s+"+value2")
+	err = invCleanCtx.State().Set("before_agent_callback_state_key", s+"+value2")
 	return nil, err
 }
 
-func shortcutAgentExecution(ctx agent.Context) (*genai.Content, error) {
-	val, err := ctx.State().Get("conversation_limit_reached")
+func shortcutAgentExecution(ctx context.Context, invCleanCtx agent.Context) (*genai.Content, error) {
+	val, err := invCleanCtx.State().Get("conversation_limit_reached")
 	if err != nil {
 		if !errors.Is(err, session.ErrStateKeyNotExist) {
 			return nil, err
 		}
-		err = ctx.State().Set("conversation_limit_reached", "True")
+		err = invCleanCtx.State().Set("conversation_limit_reached", "True")
 		return nil, err
 	}
 	if limitReached, ok := val.(string); ok && limitReached == "True" {
@@ -63,13 +64,13 @@ func shortcutAgentExecution(ctx agent.Context) (*genai.Content, error) {
 	return nil, nil
 }
 
-func afterAgentCallback1(ctx agent.Context) (*genai.Content, error) {
-	err := ctx.State().Set("after_agent_callback_state_key", "value1")
+func afterAgentCallback1(ctx context.Context, invCleanCtx agent.Context) (*genai.Content, error) {
+	err := invCleanCtx.State().Set("after_agent_callback_state_key", "value1")
 	return nil, err
 }
 
-func afterAgentCallback2(ctx agent.Context) (*genai.Content, error) {
-	val, err := ctx.State().Get("after_agent_callback_state_key")
+func afterAgentCallback2(ctx context.Context, invCleanCtx agent.Context) (*genai.Content, error) {
+	val, err := invCleanCtx.State().Get("after_agent_callback_state_key")
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +78,7 @@ func afterAgentCallback2(ctx agent.Context) (*genai.Content, error) {
 	if !ok {
 		return nil, fmt.Errorf("state value for 'after_agent_callback_state_key' is not a string, but %T", val)
 	}
-	err = ctx.State().Set("after_agent_callback_state_key", s+"+value2")
+	err = invCleanCtx.State().Set("after_agent_callback_state_key", s+"+value2")
 	return nil, err
 }
 

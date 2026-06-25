@@ -36,12 +36,12 @@ import (
 	"google.golang.org/adk/tool/geminitool"
 )
 
-func saveReportfunc(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+func saveReportfunc(ctx context.Context, invCleanCtx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
 	if llmResponse == nil || llmResponse.Content == nil || llmResponseError != nil {
 		return llmResponse, llmResponseError
 	}
 	for _, part := range llmResponse.Content.Parts {
-		_, err := ctx.Artifacts().Save(ctx, uuid.NewString(), part)
+		_, err := invCleanCtx.Artifacts().Save(ctx, uuid.NewString(), part)
 		if err != nil {
 			return nil, err
 		}

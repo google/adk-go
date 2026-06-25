@@ -16,6 +16,7 @@
 package sequentialagent
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"log"
@@ -37,8 +38,8 @@ type seqAgent struct {
 	impl *sequentialAgent
 }
 
-func (s *seqAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-	return s.impl.RunLive(ctx)
+func (s *seqAgent) RunLive(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	return s.impl.RunLive(ctx, invCleanCtx)
 }
 
 // Use the SequentialAgent when you want the execution to occur in a fixed,
@@ -75,10 +76,10 @@ type Config struct {
 
 type sequentialAgent struct{}
 
-func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *sequentialAgent) Run(ctx context.Context, invCleanCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		for _, subAgent := range ctx.Agent().SubAgents() {
-			for event, err := range subAgent.Run(ctx) {
+		for _, subAgent := range invCleanCtx.Agent().SubAgents() {
+			for event, err := range subAgent.Run(ctx, invCleanCtx) {
 				// TODO: ensure consistency -- if there's an error, return and close iterator, verify everywhere in ADK.
 				if !yield(event, err) {
 					return
@@ -122,8 +123,8 @@ func (s *sequentialLiveSession) setActiveSession(sess agent.LiveSession) {
 	s.activeSess = sess
 }
 
-func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-	subAgents := ctx.Agent().SubAgents()
+func (a *sequentialAgent) RunLive(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	subAgents := invCleanCtx.Agent().SubAgents()
 	if len(subAgents) == 0 {
 		return nil, nil, fmt.Errorf("sequential agent has no sub-agents")
 	}
@@ -137,7 +138,7 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 	taskCompletedTool, err := functiontool.New(functiontool.Config{
 		Name:        "task_completed",
 		Description: "Signals that the agent has successfully completed the user's question or task.",
-	}, func(ctx agent.Context, args taskCompletedArgs) (taskCompletedResults, error) {
+	}, func(ctx context.Context, invCleanCtx agent.Context, args taskCompletedArgs) (taskCompletedResults, error) {
 		return taskCompletedResults{Result: "Task completion signaled."}, nil
 	})
 	if err != nil {
@@ -167,7 +168,7 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 	wrappedIter := func(yield func(*session.Event, error) bool) {
 		for _, subAgent := range subAgents {
 			liveAgent, ok := subAgent.(interface {
-				RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+				RunLive(ctx context.Context, invCleanCtx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 			})
 			if !ok {
 				if !yield(nil, fmt.Errorf("sub-agent %s does not support Live Run", subAgent.Name())) {
@@ -176,7 +177,7 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 				return
 			}
 
-			subSess, innerIter, err := liveAgent.RunLive(ctx)
+			subSess, innerIter, err := liveAgent.RunLive(ctx, invCleanCtx)
 			if err != nil {
 				if !yield(nil, fmt.Errorf("sub-agent %s RunLive failed: %w", subAgent.Name(), err)) {
 					return

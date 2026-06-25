@@ -126,14 +126,14 @@ func main() {
 }
 
 // requestVacationDays simulates the *initiation* of a long-running ticket creation task.
-func requestVacationDays(ctx agent.Context, args RequestVacationArgs) (*RequestVacationResults, error) {
-	log.Printf("TOOL_EXEC: 'requestVacationDays' called with days: %d for user %s (Call ID: %s)\n", args.Days, args.UserID, ctx.FunctionCallID())
+func requestVacationDays(ctx context.Context, invCleanCtx agent.Context, args RequestVacationArgs) (*RequestVacationResults, error) {
+	log.Printf("TOOL_EXEC: 'requestVacationDays' called with days: %d for user %s (Call ID: %s)\n", args.Days, args.UserID, invCleanCtx.FunctionCallID())
 
 	if args.Days <= 0 {
 		return nil, fmt.Errorf("invalid days to request %d", args.Days)
 	}
 
-	confirmation := ctx.ToolConfirmation()
+	confirmation := invCleanCtx.ToolConfirmation()
 	if confirmation == nil {
 		requestID := fmt.Sprintf("req-%d", requestCounter)
 		requestCounter++
@@ -147,9 +147,9 @@ func requestVacationDays(ctx agent.Context, args RequestVacationArgs) (*RequestV
 
 		// Store the pending request
 		requestsByReqID[requestID] = req
-		requestsByCallID[ctx.FunctionCallID()] = req
+		requestsByCallID[invCleanCtx.FunctionCallID()] = req
 
-		err := ctx.RequestConfirmation(
+		err := invCleanCtx.RequestConfirmation(
 			"Please approve or reject the tool call request_time_off() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 			ConfirmationPayload{
 				DaysApproved: 0,
@@ -164,9 +164,9 @@ func requestVacationDays(ctx agent.Context, args RequestVacationArgs) (*RequestV
 	}
 
 	// This part normally wouldn't be reached in the first call
-	req, ok := requestsByCallID[ctx.FunctionCallID()]
+	req, ok := requestsByCallID[invCleanCtx.FunctionCallID()]
 	if !ok {
-		return nil, fmt.Errorf("unable to get request using payload %s and function call id %s", confirmation.Payload, ctx.FunctionCallID())
+		return nil, fmt.Errorf("unable to get request using payload %s and function call id %s", confirmation.Payload, invCleanCtx.FunctionCallID())
 	}
 	req.Confirmation = confirmation
 	if confirmation.Confirmed {

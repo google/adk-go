@@ -24,7 +24,7 @@ func TestNodeContext_ResumedInput(t *testing.T) {
 	parent := newMockCtx(t)
 
 	t.Run("nil resumeInputs returns (nil, false)", func(t *testing.T) {
-		c := agent.NewNodeContext(parent, nil)
+		c := agent.NewNodeContext(t.Context(), parent, nil)
 		v, ok := c.ResumedInput("any_id")
 		if v != nil || ok {
 			t.Errorf("ResumedInput() = (%v, %v), want (nil, false)", v, ok)
@@ -32,7 +32,7 @@ func TestNodeContext_ResumedInput(t *testing.T) {
 	})
 
 	t.Run("populated resumeInputs returns matched payload", func(t *testing.T) {
-		c := agent.NewNodeContext(parent, map[string]any{
+		c := agent.NewNodeContext(t.Context(), parent, map[string]any{
 			"approval": "yes",
 			"comment":  "looks good",
 		})
@@ -42,7 +42,7 @@ func TestNodeContext_ResumedInput(t *testing.T) {
 	})
 
 	t.Run("unmatched InterruptID returns (nil, false)", func(t *testing.T) {
-		c := agent.NewNodeContext(parent, map[string]any{"approval": "yes"})
+		c := agent.NewNodeContext(t.Context(), parent, map[string]any{"approval": "yes"})
 		if v, ok := c.ResumedInput("missing"); v != nil || ok {
 			t.Errorf("ResumedInput(\"missing\") = (%v, %v), want (nil, false)", v, ok)
 		}
@@ -51,7 +51,7 @@ func TestNodeContext_ResumedInput(t *testing.T) {
 
 func TestNodeContext_PathAndRunID(t *testing.T) {
 	t.Run("top-level static returns empty", func(t *testing.T) {
-		c := agent.NewNodeContext(newMockCtx(t), nil)
+		c := agent.NewNodeContext(t.Context(), newMockCtx(t), nil)
 		if got := c.Path(); got != "" {
 			t.Errorf("Path() = %q, want empty", got)
 		}
@@ -61,8 +61,8 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 	})
 
 	t.Run("child populated from constructor", func(t *testing.T) {
-		parent := agent.NewNodeContext(newMockCtx(t), nil)
-		child := agent.NewDynamicNodeContext(parent, "wf/fixer@2", "2", nil, nil)
+		parent := agent.NewNodeContext(t.Context(), newMockCtx(t), nil)
+		child := agent.NewDynamicNodeContext(t.Context(), parent, "wf/fixer@2", "2", nil, nil)
 		if got, want := child.Path(), "wf/fixer@2"; got != want {
 			t.Errorf("Path() = %q, want %q", got, want)
 		}
@@ -72,8 +72,8 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 	})
 
 	t.Run("activation populated with empty runID", func(t *testing.T) {
-		parent := agent.NewNodeContext(newMockCtx(t), nil)
-		act := agent.NewDynamicNodeContext(parent, "city_workflow", "", nil, nil)
+		parent := agent.NewNodeContext(t.Context(), newMockCtx(t), nil)
+		act := agent.NewDynamicNodeContext(t.Context(), parent, "city_workflow", "", nil, nil)
 		if got, want := act.Path(), "city_workflow"; got != want {
 			t.Errorf("Path() = %q, want %q", got, want)
 		}
@@ -84,11 +84,11 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 }
 
 func TestNodeContext_DynamicInheritsResumeInputs(t *testing.T) {
-	parent := agent.NewNodeContext(newMockCtx(t), map[string]any{"approval": "yes"})
-	sub := newDynamicSubScheduler(parent, "", nil)
+	parent := agent.NewNodeContext(t.Context(), newMockCtx(t), map[string]any{"approval": "yes"})
+	sub := newDynamicSubScheduler(t.Context(), parent, "", nil)
 
 	t.Run("child", func(t *testing.T) {
-		child := agent.NewDynamicNodeContext(parent, "wf/asker@1", "1", sub, nil)
+		child := agent.NewDynamicNodeContext(t.Context(), parent, "wf/asker@1", "1", sub, nil)
 		if v, ok := child.ResumedInput("approval"); !ok || v != "yes" {
 			t.Errorf("child.ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
 		}
@@ -98,7 +98,7 @@ func TestNodeContext_DynamicInheritsResumeInputs(t *testing.T) {
 	})
 
 	t.Run("activation", func(t *testing.T) {
-		act := agent.NewDynamicNodeContext(parent, "city_workflow", "", sub, nil)
+		act := agent.NewDynamicNodeContext(t.Context(), parent, "city_workflow", "", sub, nil)
 		if v, ok := act.ResumedInput("approval"); !ok || v != "yes" {
 			t.Errorf("act.ResumedInput(\"approval\") = (%v, %v), want (\"yes\", true)", v, ok)
 		}

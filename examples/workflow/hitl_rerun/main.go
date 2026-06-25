@@ -49,7 +49,7 @@ func main() {
 
 	rerun := true
 	greet := workflow.NewEmittingFunctionNode[any, any]("greet",
-		func(nc workflow.NodeContext, _ any, emit func(*session.Event) error) (any, error) {
+		func(ctx context.Context, nc workflow.NodeContext, _ any, emit func(*session.Event) error) (any, error) {
 			// ResumeOrRequestInput pauses (asks and returns
 			// ErrNodeInterrupted) on the first pass, and returns the
 			// human's reply once the node is re-run after the answer.

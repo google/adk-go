@@ -121,7 +121,7 @@ func TestGenerateContentTracing(t *testing.T) {
 
 	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
 
-	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+	for range generateContent(context.Background(), ctx, modelMock, &model.LLMRequest{}, true) {
 	}
 
 	// Verify that there is only single span.
@@ -180,7 +180,7 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 
 	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
 
-	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+	for range generateContent(context.Background(), ctx, modelMock, &model.LLMRequest{}, true) {
 	}
 
 	// Verify that there is only single span.
@@ -240,7 +240,7 @@ func TestGenerateContentTracingError(t *testing.T) {
 
 	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
 
-	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+	for range generateContent(context.Background(), ctx, modelMock, &model.LLMRequest{}, true) {
 	}
 
 	// Verify that there is only single span.
@@ -340,7 +340,7 @@ func TestLoggingSpanIDPropagation(t *testing.T) {
 	}
 
 	ctx := icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})
-	for range generateContent(ctx, modelMock, req, true) {
+	for range generateContent(context.Background(), ctx, modelMock, req, true) {
 	}
 
 	if len(logExporter.records) != 3 {
