@@ -167,7 +167,7 @@ func (n *ToolNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, e
 			return
 		}
 
-		event := session.NewEvent(ctx.InvocationID())
+		event := session.NewEventWithContext(ctx, ctx.InvocationID())
 		event.Actions = *eventActions
 		event.Output = toolOutput
 

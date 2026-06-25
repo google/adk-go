@@ -210,7 +210,7 @@ func TestGenerateRequestConfirmationEvent(t *testing.T) {
 //	    if not self.id:
 //	        self.id = Event.new_id()   # str(uuid.uuid4())
 //
-// In Go ADK, events must be created with session.NewEvent() to get an ID.
+// In Go ADK, events must be created with session.NewEventWithContext() to get an ID.
 // A raw &session.Event{} literal leaves ID as "" which breaks features
 // that rely on event IDs (e.g. time-travel restart_from_event_id).
 func TestGenerateRequestConfirmationEventHasID(t *testing.T) {

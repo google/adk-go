@@ -567,13 +567,13 @@ func (n *delayedMultiOutputTestNode) Run(ctx agent.Context, input any) iter.Seq2
 			<-ch
 		}
 
-		ev1 := session.NewEvent(ctx.InvocationID())
+		ev1 := session.NewEventWithContext(ctx, ctx.InvocationID())
 		ev1.Output = s
 		if !yield(ev1, nil) {
 			return
 		}
 
-		ev2 := session.NewEvent(ctx.InvocationID())
+		ev2 := session.NewEventWithContext(ctx, ctx.InvocationID())
 		ev2.Output = fmt.Sprintf("%v_2", s)
 		yield(ev2, nil)
 	}

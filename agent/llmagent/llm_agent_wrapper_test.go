@@ -1088,7 +1088,7 @@ func TestChatCoordinator_ResumesUnresolvedTaskFC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pendingFCEvent := session.NewEvent("inv-prior")
+	pendingFCEvent := session.NewEventWithContext(t.Context(), "inv-prior")
 	pendingFCEvent.Author = coordName
 	pendingFCEvent.LLMResponse = model.LLMResponse{
 		Content: fcContent(fcID, taskName, map[string]any{"q": "leftover"}),

@@ -74,7 +74,7 @@ func main() {
 				greeting := fmt.Sprintf("Hello, %s!", name)
 				// Emit Content so the console renders the greeting; the
 				// terminal Output below is for downstream nodes / state.
-				ev := session.NewEvent(nc.InvocationID())
+				ev := session.NewEventWithContext(nc, nc.InvocationID())
 				ev.Content = &genai.Content{Parts: []*genai.Part{{Text: greeting}}}
 				if err := emit(ev); err != nil {
 					return "", err

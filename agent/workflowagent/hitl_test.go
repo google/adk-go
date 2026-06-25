@@ -277,7 +277,7 @@ func TestWorkflowAgent_RunThenResume_DynamicNodeOrchestrator(t *testing.T) {
 
 	asker := newHitlNode("ask_name", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		if resp, ok := ctx.ResumedInput(interruptID); ok {
-			ev := session.NewEvent(ctx.InvocationID())
+			ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 			ev.Output = resp
 			yield(ev, nil)
 			return
@@ -389,7 +389,7 @@ func (s *fakeSession) appendUserMessage(msg *genai.Content) {
 	if msg == nil {
 		return
 	}
-	ev := session.NewEvent("test-invocation-id")
+	ev := session.NewEventWithContext(context.Background(), "test-invocation-id")
 	ev.Author = "user"
 	ev.LLMResponse = model.LLMResponse{Content: msg}
 	s.appendEvent(ev)
