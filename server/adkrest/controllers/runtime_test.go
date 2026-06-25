@@ -91,6 +91,24 @@ func TestNewRuntimeAPIController_PluginsAssignment(t *testing.T) {
 	}
 }
 
+func TestDecodeRequestBodyAcceptsFunctionCallEventID(t *testing.T) {
+	body := []byte(`{
+		"appName": "testApp",
+		"userId": "testUser",
+		"sessionId": "testSession",
+		"newMessage": {
+			"role": "user",
+			"parts": [{"text": "confirmed"}]
+		},
+		"functionCallEventId": "event-123"
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/run_sse", bytes.NewReader(body))
+
+	if _, err := decodeRequestBody(req); err != nil {
+		t.Fatalf("decodeRequestBody rejected functionCallEventId: %v", err)
+	}
+}
+
 type recorderWithDeadline struct {
 	*httptest.ResponseRecorder
 }

@@ -32,6 +32,8 @@ type RunAgentRequest struct {
 	Streaming bool `json:"streaming,omitempty"`
 
 	StateDelta *map[string]any `json:"stateDelta,omitempty"`
+
+	FunctionCallEventId string `json:"functionCallEventId,omitempty"`
 }
 
 // AssertRunAgentRequestRequired checks if the required fields are not zero-ed
