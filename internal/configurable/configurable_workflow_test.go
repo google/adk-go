@@ -94,10 +94,14 @@ type MockInvocationContext struct {
 	sess        session.Session
 	userContent *genai.Content
 	agent       agent.Agent
+	branch      string
 }
 
 // ApplyICDelta implements [agent.InvocationContext].
 func (m *MockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	if d == nil {
+		return m
+	}
 	res := *m
 	if d.UserContent != nil {
 		res.userContent = *d.UserContent
@@ -107,6 +111,9 @@ func (m *MockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) ag
 	}
 	if d.Context != nil {
 		res.Context = *d.Context
+	}
+	if d.Branch != nil {
+		res.branch = *d.Branch
 	}
 
 	return &res

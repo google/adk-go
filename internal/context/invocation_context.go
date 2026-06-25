@@ -129,6 +129,9 @@ func (c *InvocationContext) ResumedInput(string) (any, bool) { return nil, false
 var _ agent.InvocationContext = (*InvocationContext)(nil)
 
 func (c *InvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	if d == nil {
+		return c
+	}
 	res := *c
 	if d.UserContent != nil {
 		res.params.UserContent = *d.UserContent
@@ -138,6 +141,12 @@ func (c *InvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.
 	}
 	if d.Context != nil {
 		res.Context = *d.Context
+	}
+	if d.Branch != nil {
+		res.params.Branch = *d.Branch
+	}
+	if d.IsolationScope != nil {
+		res.params.IsolationScope = *d.IsolationScope
 	}
 
 	return &res

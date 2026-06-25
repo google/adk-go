@@ -21,13 +21,20 @@ import (
 )
 
 type CommonContextDelta struct {
+	ResumeInputs           *map[string]any
 	InvocationContextDelta *InvocationContextDelta
+	Path                   *string
+	RunID                  *string
+	SubScheduler           *DynamicSubScheduler
+	OutputForAncestors     *[]string
 }
 
 type InvocationContextDelta struct {
-	Context     *context.Context
-	UserContent **genai.Content
-	Agent       *Agent
+	Context        *context.Context
+	UserContent    **genai.Content
+	Agent          *Agent
+	Branch         *string
+	IsolationScope *string
 }
 
 func (c *commonContext) Apply(d *CommonContextDelta) Context {
@@ -41,6 +48,21 @@ func (c *commonContext) Apply(d *CommonContextDelta) Context {
 		if d.InvocationContextDelta.Context != nil {
 			res.Context = *d.InvocationContextDelta.Context
 		}
+	}
+	if d.ResumeInputs != nil {
+		res.resumeInputs = *d.ResumeInputs
+	}
+	if d.Path != nil {
+		res.path = *d.Path
+	}
+	if d.RunID != nil {
+		res.runID = *d.RunID
+	}
+	if d.SubScheduler != nil {
+		res.subScheduler = *d.SubScheduler
+	}
+	if d.OutputForAncestors != nil {
+		res.outputForAncestors = *d.OutputForAncestors
 	}
 
 	return &res

@@ -29,10 +29,23 @@ import (
 	"google.golang.org/adk/tool/toolconfirmation"
 )
 
+func PromoteContext(parent InvocationContext) Context {
+	if c, ok := parent.(*commonContext); ok {
+		return c
+	}
+	return &commonContext{
+		Context:           parent,
+		invocationContext: parent,
+	}
+}
+
 // NewContext returns a full Context backed by parent, with no callback,
 // tool, or node specializations. Use it wherever a plain run context is
 // needed (e.g. running an agent).
 func NewContext(parent InvocationContext) Context {
+	if _, ok := parent.(*commonContext); ok {
+		panic("Should not happen")
+	}
 	return &commonContext{
 		Context:           parent,
 		invocationContext: parent,
@@ -41,6 +54,14 @@ func NewContext(parent InvocationContext) Context {
 
 // NewNodeContext returns a Context carrying per-node resume inputs.
 func NewNodeContext(parent InvocationContext, resumeInputs map[string]any) Context {
+	if c, ok := parent.(Context); ok {
+		// apply delta
+		res := c.Apply(&CommonContextDelta{
+			ResumeInputs: &resumeInputs,
+		})
+		return res
+	}
+
 	c := NewContext(parent).(*commonContext)
 	c.resumeInputs = resumeInputs
 	return c
@@ -74,19 +95,28 @@ func NewDynamicNodeContext(parent Context, path, runID string, sub DynamicSubSch
 	// sub-scheduler child. Child inherits resumeInputs so HITL responses
 	// reach dynamic children.
 
-	var inherited map[string]any
-	if p, ok := parent.(*commonContext); ok {
-		inherited = p.resumeInputs
-	}
-	return &commonContext{
-		Context:            parent,
-		invocationContext:  parent,
-		resumeInputs:       inherited,
-		path:               path,
-		runID:              runID,
-		subScheduler:       sub,
-		outputForAncestors: outputForAncestors,
-	}
+	res := parent.Apply(
+		&CommonContextDelta{
+			Path:               &path,
+			RunID:              &runID,
+			SubScheduler:       &sub,
+			OutputForAncestors: &outputForAncestors,
+		})
+	return res
+
+	// var inherited map[string]any
+	// if p, ok := parent.(*commonContext); ok {
+	// 	inherited = p.resumeInputs
+	// }
+	// return &commonContext{
+	// 	Context:            parent,
+	// 	invocationContext:  parent,
+	// 	resumeInputs:       inherited,
+	// 	path:               path,
+	// 	runID:              runID,
+	// 	subScheduler:       sub,
+	// 	outputForAncestors: outputForAncestors,
+	// }
 }
 
 // NewCallbackContext returns a callback context initialized with provided actions.

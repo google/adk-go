@@ -56,7 +56,7 @@ func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 			name: "NewNodeContext wrapping custom decorator (delegates fallback to c.Context)",
 			buildWrapped: func(parent Context) Context {
 				decorator := &customContextDecorator{Context: parent}
-				return NewNodeContext(decorator, nil)
+				return NewContext(decorator)
 			},
 		},
 		{

@@ -289,9 +289,9 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		if ac, ok := ctx.(agent.Context); ok {
 			ancestors = ac.OutputForAncestors()
 		}
-		c = agent.NewDynamicNodeContext(agent.NewNodeContext(ctx, nil), wfPath, "1", nil, ancestors)
+		c = agent.NewDynamicNodeContext(agent.PromoteContext(ctx), wfPath, "1", nil, ancestors)
 	} else {
-		c = agent.NewNodeContext(ctx, nil)
+		c = agent.PromoteContext(ctx)
 	}
 	return w.RunNode(c, userInput(c))
 }

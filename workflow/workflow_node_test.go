@@ -409,7 +409,7 @@ func TestNestedWorkflow_BreakMidStream(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 
 	// Turn the regression's panic into a readable failure; no-op once fixed.
 	defer func() {

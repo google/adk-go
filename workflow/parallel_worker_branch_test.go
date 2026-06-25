@@ -49,7 +49,7 @@ func TestParallelWorker_PerItemSubBranch(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 
 	events := pw.Run(exCtx, []any{"a", "b", "c"})
 	for _, err := range events {
@@ -105,7 +105,7 @@ func TestParallelWorker_SubBranchUnderNonRootParent(t *testing.T) {
 	// Simulate ParallelWorker running under a parent branch
 	// "outer@1" (e.g. one branch of a static fan-out).
 	parentCtx := withBranch(newMockCtx(t), "outer@1")
-	exCtx := agent.NewNodeContext(parentCtx, nil)
+	exCtx := agent.NewContext(parentCtx)
 
 	events := pw.Run(exCtx, []any{"x", "y"})
 	for _, err := range events {
@@ -157,7 +157,7 @@ func TestParallelWorker_RetryKeepsSameBranch(t *testing.T) {
 	}
 
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 
 	var gotErr error
 	for _, runErr := range pw.Run(exCtx, []any{"a"}) {

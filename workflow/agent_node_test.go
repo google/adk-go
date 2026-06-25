@@ -243,7 +243,7 @@ func TestAgentNode_Run(t *testing.T) {
 
 			mockCtx := newMockCtx(t)
 			mockCtx.sess = &mockSession{id: "test-session-id"} // Fix nil panic
-			runCtx := agent.NewNodeContext(mockCtx, nil)
+			runCtx := agent.NewContext(mockCtx)
 			events := node.Run(runCtx, tc.nodeInput)
 
 			var got string
@@ -420,7 +420,7 @@ func TestAgentNode_SynthesizesOutputFromModelText(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session-id"}
-	nc := agent.NewNodeContext(mockCtx, nil)
+	nc := agent.NewContext(mockCtx)
 	var (
 		gotPartial *session.Event
 		gotFinal   *session.Event
@@ -481,7 +481,7 @@ func TestAgentNode_StampsIsolationScopeOnEvents(t *testing.T) {
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session-id"}
 	mockCtx.isolationScope = "scope-x"
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 
 	var events []*session.Event
 	for ev, err := range node.Run(exCtx, "ignored") {
@@ -573,7 +573,7 @@ func TestAgentNode_ValidationAndContentConversion(t *testing.T) {
 				mockCtx.userContent = tc.parentUserContent
 			}
 
-			exCtx := agent.NewNodeContext(mockCtx, nil)
+			exCtx := agent.NewContext(mockCtx)
 			events := node.Run(exCtx, tc.nodeInput)
 			for _, err := range events {
 				if err != nil {
@@ -682,7 +682,7 @@ func TestAgentNode_InputValidation(t *testing.T) {
 			mockCtx := newMockCtx(t)
 			mockCtx.sess = &mockSession{id: "test"}
 
-			exCtx := agent.NewNodeContext(mockCtx, nil)
+			exCtx := agent.NewContext(mockCtx)
 			events := w.RunNode(exCtx, tc.nodeInput)
 			var workflowErr error
 			for _, err := range events {
@@ -756,7 +756,7 @@ func TestAgentNode_StructuredOutputProjectedViaValidation(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session-id"}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 	var gotFinal *session.Event
 	for ev, err := range node.Run(exCtx, "ignored") {
 		if err != nil {
@@ -814,7 +814,7 @@ func TestAgentNode_AutomaticOutputExtraction(t *testing.T) {
 
 	mockCtx := newMockCtx(t)
 	mockCtx.sess = &mockSession{id: "test-session"}
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 	events := node.Run(exCtx, nil)
 
 	var finalOutput any

@@ -174,7 +174,7 @@ func (o *isolationScopeOverride) IsolationScope() string { return o.scope }
 func (o *isolationScopeOverride) WithAgentContext(ctx context.Context) agent.Context {
 	// TODO(kdroste): refactor underlying context
 	ic := o.Context.WithContext(ctx)
-	nc := agent.NewNodeContext(ic, nil)
+	nc := agent.NewContext(ic)
 	return &isolationScopeOverride{
 		Context: nc,
 		scope:   o.scope,

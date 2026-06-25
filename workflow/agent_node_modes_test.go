@@ -167,7 +167,7 @@ func newRunnableNodeContext(t *testing.T, a agent.Agent) agent.Context {
 		Session:      resp.Session,
 		InvocationID: "inv-test",
 	})
-	return agent.NewNodeContext(ic, nil)
+	return agent.NewContext(ic)
 }
 
 // scriptedLLM yields one LLMResponse per GenerateContent call,

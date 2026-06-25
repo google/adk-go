@@ -268,7 +268,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			RunConfig:    &cfg,
 			InvocationID: resolveInvocationID(storedSession, msg),
 		})
-		ctx := agent.NewNodeContext(ic, nil)
+		ctx := agent.NewContext(ic)
 		ctx, _, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
 		if err != nil {
 			yield(nil, err)

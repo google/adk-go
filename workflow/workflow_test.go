@@ -41,10 +41,20 @@ type MockInvocationContext struct {
 	sess           session.Session
 	userContent    *genai.Content
 	isolationScope string
+	branch         string
 }
 
 // ApplyICDelta implements [agent.InvocationContext].
 func (m *MockInvocationContext) ApplyICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	if d == nil {
+		return m
+	}
+	if d.IsolationScope != nil {
+		m.isolationScope = *d.IsolationScope
+	}
+	if d.Branch != nil {
+		m.branch = *d.Branch
+	}
 	return m
 }
 
@@ -85,7 +95,7 @@ func (m *MockInvocationContext) ResumedInput(string) (any, bool) { return nil, f
 func (m *MockInvocationContext) Agent() agent.Agent              { return nil }
 func (m *MockInvocationContext) Artifacts() agent.Artifacts      { return nil }
 func (m *MockInvocationContext) Memory() agent.Memory            { return nil }
-func (m *MockInvocationContext) Branch() string                  { return "" }
+func (m *MockInvocationContext) Branch() string                  { return m.branch }
 func (m *MockInvocationContext) IsolationScope() string          { return m.isolationScope }
 func (m *MockInvocationContext) RunConfig() *agent.RunConfig     { return nil }
 func (m *MockInvocationContext) Ended() bool                     { return false }
