@@ -437,3 +437,25 @@ func TestRenderWorkflowInputPrompt_PayloadFormatting(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"string verbatim", "Hello, Alice!", "Hello, Alice!"},
+		{"empty string", "", ""},
+		{"int", 42, "42"},
+		{"struct as json", struct {
+			Result string `json:"result"`
+		}{Result: "ok"}, `{"result":"ok"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := renderOutput(tc.in); got != tc.want {
+				t.Errorf("renderOutput(%#v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
