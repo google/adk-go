@@ -133,6 +133,12 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			if !reflect.DeepEqual(gotStateDelta, tc.wantStateDelta) {
 				t.Errorf("stateDelta mismatch:\ngot = %v\nwant = %v", gotStateDelta, tc.wantStateDelta)
 			}
+
+			// Output is stamped by the node wrapper, not here (adk-python
+			// __maybe_save_output_to_state parity).
+			if tc.event.Output != nil {
+				t.Errorf("event.Output = %v, want nil (only state_delta may be written here)", tc.event.Output)
+			}
 		})
 	}
 }
