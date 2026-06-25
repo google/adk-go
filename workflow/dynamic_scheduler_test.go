@@ -234,7 +234,7 @@ func TestSubScheduler_RehydrateCache_InvocationScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := newMockCtx(t)
 			ctx.sess = &eventsSession{events: tc.events}
-			sub := newDynamicSubScheduler(agent.NewNodeContext(ctx, nil), "wf", noopEmit).(*dynamicSubScheduler)
+			sub := newDynamicSubScheduler(agent.NewContext(ctx), "wf", noopEmit).(*dynamicSubScheduler)
 
 			out, ok := sub.lookupCachedOutput(childPath)
 			if ok != tc.wantHit {
@@ -268,7 +268,7 @@ func (s *eventsSession) LastUpdateTime() time.Time { return time.Time{} }
 
 func newTopLevelCtx(t *testing.T) agent.Context {
 	t.Helper()
-	return agent.NewNodeContext(newMockCtx(t), nil)
+	return agent.NewContext(newMockCtx(t))
 }
 
 // stubNode emits one Event{Output: out} and exits.

@@ -14,7 +14,11 @@
 
 package agent
 
-import "testing"
+import (
+	"testing"
+
+	"google.golang.org/adk/agent"
+)
 
 // stubSubScheduler is a no-op DynamicSubScheduler used to verify that
 // NewDynamicNodeContext stores and returns the exact scheduler it is given.
@@ -38,7 +42,7 @@ func TestNodeContext_ResumedInput(t *testing.T) {
 	parent := newNodeBaseCtx(t)
 
 	t.Run("nil resumeInputs returns (nil, false)", func(t *testing.T) {
-		c := NewNodeContext(parent, nil)
+		c := agent.NewContext(parent)
 		v, ok := c.ResumedInput("any_id")
 		if v != nil || ok {
 			t.Errorf("ResumedInput() = (%v, %v), want (nil, false)", v, ok)
@@ -65,7 +69,7 @@ func TestNodeContext_ResumedInput(t *testing.T) {
 
 func TestNodeContext_PathAndRunID(t *testing.T) {
 	t.Run("top-level static returns empty", func(t *testing.T) {
-		c := NewNodeContext(newNodeBaseCtx(t), nil)
+		c := agent.NewContext(newMockCtx(t))
 		if got := c.Path(); got != "" {
 			t.Errorf("Path() = %q, want empty", got)
 		}
@@ -75,8 +79,8 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 	})
 
 	t.Run("child populated from constructor", func(t *testing.T) {
-		parent := NewNodeContext(newNodeBaseCtx(t), nil)
-		child := NewDynamicNodeContext(parent, "wf/fixer@2", "2", nil, nil)
+		parent := agent.NewContext(newMockCtx(t))
+		child := agent.NewDynamicNodeContext(parent, "wf/fixer@2", "2", nil, nil)
 		if got, want := child.Path(), "wf/fixer@2"; got != want {
 			t.Errorf("Path() = %q, want %q", got, want)
 		}
@@ -86,8 +90,8 @@ func TestNodeContext_PathAndRunID(t *testing.T) {
 	})
 
 	t.Run("activation populated with empty runID", func(t *testing.T) {
-		parent := NewNodeContext(newNodeBaseCtx(t), nil)
-		act := NewDynamicNodeContext(parent, "city_workflow", "", nil, nil)
+		parent := agent.NewContext(newMockCtx(t))
+		act := agent.NewDynamicNodeContext(parent, "city_workflow", "", nil, nil)
 		if got, want := act.Path(), "city_workflow"; got != want {
 			t.Errorf("Path() = %q, want %q", got, want)
 		}

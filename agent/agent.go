@@ -180,6 +180,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 
 		icDelta := &InvocationContextDelta{Agent: &aa, Context: &newCtx}
 
+		// TODO(kdroste): consider new Promote func converting InvocationContext to Context
 		var nodeCtx Context
 		if parentCC, ok := ctx.(Context); ok {
 			nodeCtx = parentCC.Apply(
@@ -190,7 +191,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			// nodeCtx = NewDynamicNodeContext(nc, parentCC.Path(), parentCC.RunID(), parentCC.SubScheduler(), parentCC.OutputForAncestors())
 		} else {
 			ic := ctx.ApplyICDelta(icDelta)
-			nodeCtx = NewNodeContext(ic, nil)
+			nodeCtx = NewContext(ic)
 		}
 		// ic := &invocationContext{
 		// 	Context:   ctx.WithContext(spanCtx),

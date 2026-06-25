@@ -106,7 +106,7 @@ func TestFunctionNode(t *testing.T) {
 
 	// Create a mock context
 	mockCtx := newMockCtx(t)
-	exCtx := agent.NewNodeContext(mockCtx, nil)
+	exCtx := agent.NewContext(mockCtx)
 
 	// Run the node
 	events := node.Run(exCtx, "hello")
