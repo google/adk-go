@@ -127,11 +127,10 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			events = n.agent.Run(exCtx)
 		}
 
-		skipSynthesize := false
+		// Task-mode LlmAgents set their output via runTask, not model text.
+		synthesizeMode := true
 		if llmA, ok := n.agent.(llminternal.Agent); ok && llmA != nil {
-			if llminternal.Reveal(llmA).Mode == llminternal.ModeTask {
-				skipSynthesize = true
-			}
+			synthesizeMode = llminternal.Reveal(llmA).Mode != llminternal.ModeTask
 		}
 
 		for event, err := range events {
@@ -140,7 +139,11 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 				return
 			}
 
-			if !skipSynthesize {
+			// Synthesize output only from the node agent's own reply. A
+			// composite agent streams one final response per sub-agent
+			// (each a distinct author); synthesizing every one would emit
+			// several node outputs and trip the one-output-per-node rule.
+			if synthesizeMode && isOwnAgentEvent(event, n.agent.Name()) {
 				synthesizeAgentOutput(event)
 			}
 
@@ -198,6 +201,17 @@ func synthesizeAgentOutput(event *session.Event) {
 		}
 		event.NodeInfo.MessageAsOutput = true
 	}
+}
+
+// isOwnAgentEvent reports whether ev came from the node's own agent.
+// Empty author counts as own (agent.Run stamps the node agent's name on
+// its un-authored events); composite sub-agent events carry the
+// sub-agent's name.
+func isOwnAgentEvent(ev *session.Event, nodeAgentName string) bool {
+	if ev == nil {
+		return false
+	}
+	return ev.Author == "" || ev.Author == nodeAgentName
 }
 
 // messageText concatenates the non-thought model text of an event. ok
